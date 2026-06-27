@@ -169,6 +169,10 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::DropSchema { .. }
         | Op::CreateExtension { .. }
         | Op::DropExtension { .. }
+        | Op::CreateEnum { .. }
+        | Op::DropEnum { .. }
+        | Op::CreateDomain { .. }
+        | Op::DropDomain { .. }
         | Op::CreateRole { .. }
         | Op::AlterRole { .. }
         | Op::DropRole { .. }

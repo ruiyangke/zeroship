@@ -34,6 +34,7 @@
 // ---------------------------------------------------------------------------
 
 let __active = null;
+const __deferredUpOps = [];
 
 /** Structured error helper — mirrors the machine-readable envelope. */
 function structuredError(code, message, extra) {
@@ -44,8 +45,12 @@ function structuredError(code, message, extra) {
 }
 
 /** Begin a fresh recording buffer (called by the adapter before a phase). */
-export function __begin() {
-  __active = { ops: [], pending: new Map(), nextSelectorId: 0 };
+export function __begin(phase = "up") {
+  __active = {
+    ops: phase === "up" ? __deferredUpOps.map((op) => structuredClone(op)) : [],
+    pending: new Map(),
+    nextSelectorId: 0,
+  };
 }
 
 /** Drain + return the recorded op list, clearing the active recorder. At DRAIN
@@ -92,6 +97,15 @@ function recorder() {
 
 function push(op) {
   recorder().ops.push(op);
+  return op;
+}
+
+function pushOrDeferUp(op) {
+  if (__active === null) {
+    __deferredUpOps.push(op);
+    return op;
+  }
+  __active.ops.push(op);
   return op;
 }
 
@@ -451,6 +465,16 @@ export const t = {
   int: () => new ColumnDef("int"),
   bigInt: () => new ColumnDef("bigInt"),
   float: () => new ColumnDef("float"),
+  enum: (name) => {
+    const n = typeof name === "string" ? name : name.name;
+    requireString(n, "t.enum(name)");
+    return new ColumnDef({ enum: { name: n } });
+  },
+  domain: (name) => {
+    const n = typeof name === "string" ? name : name.name;
+    requireString(n, "t.domain(name)");
+    return new ColumnDef({ domain: { name: n } });
+  },
   /** An application-level encrypted column wrapping an inner `t.*` type. */
   encrypted: (arg) => {
     const inner = arg && arg.of !== undefined ? arg.of : arg;
@@ -467,6 +491,40 @@ export const t = {
 function colTypeOf(typeArg) {
   if (isColumnDef(typeArg)) return typeArg._type;
   return typeArg;
+}
+
+export function pgEnum(name, values, args = {}) {
+  const enumValues = stringArray(values, "pgEnum(name, values)");
+  recordCreateEnum(name, enumValues, args);
+  const handle = {
+    name,
+    values: enumValues,
+    create(createArgs = {}) {
+      recordCreateEnum(name, enumValues, createArgs);
+      return handle;
+    },
+    drop(dropArgs = {}) {
+      recordDropEnum(name, dropArgs);
+      return handle;
+    },
+  };
+  return handle;
+}
+
+export function pgDomain(name) {
+  requireString(name, "pgDomain(name)");
+  const handle = {
+    name,
+    create(args) {
+      recordCreateDomain(name, args);
+      return handle;
+    },
+    drop(args = {}) {
+      recordDropDomain(name, args);
+      return handle;
+    },
+  };
+  return handle;
 }
 
 // ===========================================================================
@@ -657,6 +715,71 @@ function ifNotExistsGuard(v) {
 }
 function ifExistsGuard(v) {
   return v ? "ifExists" : undefined;
+}
+
+function stringArray(values, what) {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be a string[]`);
+  }
+  for (const v of values) requireString(v, what);
+  return [...values];
+}
+
+function recordCreateEnum(name, values, args = {}) {
+  requireString(name, "pgEnum(name, values)");
+  pushOrDeferUp(
+    compact({
+      op: "createEnum",
+      name,
+      schema: args.schema,
+      values: stringArray(values, "pgEnum(name, values)"),
+    }),
+  );
+}
+
+function recordDropEnum(name, args = {}) {
+  requireString(name, "pgEnum(name, values).drop()");
+  push(
+    compact({
+      op: "dropEnum",
+      name,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+    }),
+  );
+}
+
+function recordCreateDomain(name, args) {
+  requireString(name, "pgDomain(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "pgDomain(name).create({ as, ... }) needs an object");
+  }
+  if (args.notNull !== undefined && typeof args.notNull !== "boolean") {
+    throw structuredError("OP_INVALID", "pgDomain(name).create({ notNull }): notNull must be a boolean");
+  }
+  pushOrDeferUp(
+    compact({
+      op: "createDomain",
+      name,
+      schema: args.schema,
+      as: colTypeOf(args.as),
+      check: resolveExpr(args.check),
+      default: args.default === undefined ? undefined : toIrDefault(args.default),
+      notNull: args.notNull,
+    }),
+  );
+}
+
+function recordDropDomain(name, args = {}) {
+  requireString(name, "pgDomain(name).drop()");
+  push(
+    compact({
+      op: "dropDomain",
+      name,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+    }),
+  );
 }
 
 // ===========================================================================

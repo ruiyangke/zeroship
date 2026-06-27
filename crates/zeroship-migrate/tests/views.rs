@@ -263,6 +263,7 @@ fn fold_records_views_and_drop_removes_them() {
         SchemaSnapshot {
             tables: BTreeMap::new(),
             views: expected_views,
+            ..Default::default()
         }
     );
 

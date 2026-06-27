@@ -26,7 +26,7 @@
 //! translation — it carries NO default/sentinel rendering (that stays in the
 //! shared builder), so the §6.5 single-source guarantee holds.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::declarative::{
     build_table_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
@@ -34,6 +34,7 @@ use crate::declarative::{
 };
 use crate::dialect_renderer::{Capability, DialectSupports};
 use crate::drift::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
+use crate::expr::Expr;
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::ir::{
     ColType, ExistenceGuard, ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex,
@@ -82,6 +83,27 @@ enum LoweredOp {
     /// backfill executor itself before any batch runs (`backfill.rs`). The DML op's
     /// expression AST is gated by the structural validator BEFORE assembly.
     Dml(PlanStep),
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NamedTypeRegistry {
+    enums: BTreeMap<String, EnumDef>,
+    domains: BTreeMap<String, DomainDef>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EnumDef {
+    pub(crate) schema: String,
+    pub(crate) values: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DomainDef {
+    pub(crate) schema: String,
+    pub(crate) as_type: ColType,
+    pub(crate) check: Option<Expr>,
+    pub(crate) default: Option<IrDefault>,
+    pub(crate) not_null: bool,
 }
 
 /// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
@@ -379,6 +401,26 @@ pub enum IrLowerError {
     /// later wave; this Lower phase covers the DDL ops). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only in this wave)")]
     UnsupportedOp(&'static str),
+    /// A column references a named enum/domain that has not been registered by an
+    /// earlier `createEnum` / `createDomain` op in this IR stream.
+    #[error("UNSUPPORTED {{ kind: {kind:?}, reason: \"unreachable use-site\", name: {name:?} }}")]
+    NamedTypeMissing {
+        /// `"enum"` or `"domain"`.
+        kind: &'static str,
+        /// Referenced type name.
+        name: String,
+    },
+    /// A named enum/domain reference appears in a context this renderer cannot
+    /// inline/materialize soundly.
+    #[error("UNSUPPORTED {{ kind: {kind:?}, reason: {reason:?}, name: {name:?} }}")]
+    NamedTypeUnsupported {
+        /// `"enum"` or `"domain"`.
+        kind: &'static str,
+        /// Referenced type name.
+        name: String,
+        /// Why it cannot be rendered.
+        reason: &'static str,
+    },
     /// A DDL op whose body carries a closed-AST [`crate::expr::Expr`] (a `CHECK`
     /// constraint predicate, or an `alterColumnType` `using` cast) that the
     /// Wave-C expression→SQL renderer must materialize. The op family lowers; the
@@ -683,6 +725,145 @@ pub enum IrGuardedLowerError {
         /// The migration whose reassembly diverged.
         name: String,
     },
+}
+
+impl NamedTypeRegistry {
+    pub(crate) fn create_enum(
+        &mut self,
+        name: &str,
+        schema: &str,
+        values: &[String],
+    ) -> Result<(), IrLowerError> {
+        if self.enums.contains_key(name) {
+            return Err(IrLowerError::NamedTypeUnsupported {
+                kind: "enum",
+                name: name.to_string(),
+                reason: "duplicate definition",
+            });
+        }
+        self.enums.insert(name.to_string(), EnumDef {
+            schema: schema.to_string(),
+            values: values.to_vec(),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn drop_enum(&mut self, name: &str) {
+        self.enums.remove(name);
+    }
+
+    pub(crate) fn enum_def(&self, name: &str) -> Result<&EnumDef, IrLowerError> {
+        self.enums.get(name).ok_or_else(|| IrLowerError::NamedTypeMissing {
+            kind: "enum",
+            name: name.to_string(),
+        })
+    }
+
+    pub(crate) fn create_domain(
+        &mut self,
+        name: &str,
+        schema: &str,
+        as_type: &ColType,
+        check: &Option<Expr>,
+        default: &Option<IrDefault>,
+        not_null: bool,
+    ) -> Result<(), IrLowerError> {
+        if self.domains.contains_key(name) {
+            return Err(IrLowerError::NamedTypeUnsupported {
+                kind: "domain",
+                name: name.to_string(),
+                reason: "duplicate definition",
+            });
+        }
+        self.domains.insert(name.to_string(), DomainDef {
+            schema: schema.to_string(),
+            as_type: as_type.clone(),
+            check: check.clone(),
+            default: default.clone(),
+            not_null,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn drop_domain(&mut self, name: &str) {
+        self.domains.remove(name);
+    }
+
+    pub(crate) fn domain_def(&self, name: &str) -> Result<&DomainDef, IrLowerError> {
+        self.domains.get(name).ok_or_else(|| IrLowerError::NamedTypeMissing {
+            kind: "domain",
+            name: name.to_string(),
+        })
+    }
+}
+
+pub(crate) fn render_enum_values(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|v| crate::dml::sql_string_literal(v))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn quote_engine_ident(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
+    crate::dml::quote_ident_checked(ident)
+        .map_err(|e| crate::dml::DmlError::InvalidIdentifier { what, value: e.value })
+        .map_err(IrLowerError::DmlAssemble)
+}
+
+fn pg_type_qname(schema: &str, name: &str) -> Result<String, IrLowerError> {
+    Ok(format!(
+        "{}.{}",
+        quote_engine_ident("schema", schema)?,
+        quote_engine_ident("type", name)?
+    ))
+}
+
+fn pg_type_data_type(schema: &str, name: &str) -> String {
+    format!("{schema}.{name}")
+}
+
+pub(crate) fn mysql_enum_type(values: &[String]) -> String {
+    format!("ENUM({})", render_enum_values(values))
+}
+
+pub(crate) fn enum_inline_check(
+    column: &str,
+    values: &[String],
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    let col = crate::dml::quote_ident_for_dialect("column", column, dialect)
+        .map_err(IrLowerError::DmlAssemble)?;
+    Ok(format!("CHECK ({col} IN ({}))", render_enum_values(values)))
+}
+
+pub(crate) fn render_ir_default(default: &IrDefault, dialect: SqlDialect) -> Result<String, IrLowerError> {
+    match default {
+        IrDefault::Literal { value } => {
+            crate::dml::inline_literal(value).map_err(IrLowerError::DmlAssemble)
+        }
+        IrDefault::Fn { r#fn } => Ok(match r#fn {
+            crate::ir::SynthDefaultFn::Now => crate::dialect_renderer::renderer(dialect).synth_now(),
+            crate::ir::SynthDefaultFn::GenRandomUuid => {
+                crate::dialect_renderer::renderer(dialect).synth_uuid()
+            }
+        }),
+    }
+}
+
+pub(crate) fn render_domain_check(
+    check: &Expr,
+    dialect: SqlDialect,
+    value_sql: &str,
+) -> Result<String, IrLowerError> {
+    crate::dml::render_expr_inline_with_col(check, dialect, &|name| {
+        if name == "VALUE" {
+            Ok(value_sql.to_string())
+        } else {
+            crate::dml::quote_ident_for_dialect("column", name, dialect)
+        }
+    })
+    .map_err(IrLowerError::DmlAssemble)
 }
 
 /// A failure in the loader's IR branch ([`IrAuthor::load_and_lower`]): either the
@@ -1194,13 +1375,14 @@ impl IrAuthor {
     ) -> Result<Vec<PlanStep>, IrLowerError> {
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut named_types = NamedTypeRegistry::default();
         for (op_index, op) in ir.ops.iter().enumerate() {
             // The whole-up step lowering discards the structural statement list (it
             // is the §6.4 parity leg, which only compares the joined `up`); the
             // guarded path ([`lower_guarded`]) consumes the list to guard true
             // statements. `op_index` is the plan position the DML-step version folds
             // in (so two byte-identical DML ops get distinct journal ids).
-            match self.lower_one_op(op_index, op, &mut live_tables, live)? {
+            match self.lower_one_op(op_index, op, &mut live_tables, live, &mut named_types)? {
                 LoweredOp::Ddl(units) => {
                     out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
                 }
@@ -1232,6 +1414,7 @@ impl IrAuthor {
         op: &Op,
         live_tables: &mut BTreeSet<String>,
         live_schema: &LiveSchema,
+        named_types: &mut NamedTypeRegistry,
     ) -> Result<LoweredOp, IrLowerError> {
         let live_unique_indexes = &live_schema.unique_indexes;
         // The DDL arms advance / read the working table set under the short name
@@ -1304,6 +1487,100 @@ impl IrAuthor {
         let guard = op.existence_guard();
         let mut probe: Option<crate::guard_probe::GuardProbe> = None;
         let mut migs: Vec<LoweredUnit> = match op {
+            Op::CreateEnum { name, values, .. } => {
+                named_types.create_enum(name, &eff_schema, values)?;
+                if self.dialect.supports(Capability::MaterializedEnumType) {
+                    let qname = pg_type_qname(&eff_schema, name)?;
+                    let up = format!("CREATE TYPE {qname} AS ENUM ({})", render_enum_values(values));
+                    let down = Some(format!("DROP TYPE {qname}"));
+                    vec![decl.lower_vendor_statement(&format!("create_enum_{name}"), up, down)]
+                } else {
+                    Vec::new()
+                }
+            }
+            Op::DropEnum { name, .. } => {
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::NamedType {
+                        schema: eff_schema.clone(),
+                        name: name.clone(),
+                        kind: "enum".to_string(),
+                        direction: g.into(),
+                    });
+                }
+                named_types.drop_enum(name);
+                if self.dialect.supports(Capability::MaterializedEnumType) {
+                    let qname = pg_type_qname(&eff_schema, name)?;
+                    vec![decl.lower_vendor_statement(
+                        &format!("drop_enum_{name}"),
+                        format!("DROP TYPE {qname}"),
+                        None,
+                    )]
+                } else {
+                    Vec::new()
+                }
+            }
+            Op::CreateDomain {
+                name,
+                as_type,
+                check,
+                default,
+                not_null,
+                ..
+            } => {
+                named_types.create_domain(
+                    name,
+                    &eff_schema,
+                    as_type,
+                    check,
+                    default,
+                    not_null.unwrap_or(false),
+                )?;
+                if self.dialect.supports(Capability::MaterializedDomainType) {
+                    let qname = pg_type_qname(&eff_schema, name)?;
+                    let mut up = format!(
+                        "CREATE DOMAIN {qname} AS {}",
+                        self.render_pg_domain_base_type(as_type, named_types)?
+                    );
+                    if let Some(default) = default {
+                        up.push_str(" DEFAULT ");
+                        up.push_str(&render_ir_default(default, self.dialect)?);
+                    }
+                    if not_null.unwrap_or(false) {
+                        up.push_str(" NOT NULL");
+                    }
+                    if let Some(check) = check {
+                        let expr = render_domain_check(check, self.dialect, "VALUE")?;
+                        up.push_str(" CHECK (");
+                        up.push_str(&expr);
+                        up.push(')');
+                    }
+                    let down = Some(format!("DROP DOMAIN {qname}"));
+                    vec![decl.lower_vendor_statement(&format!("create_domain_{name}"), up, down)]
+                } else {
+                    Vec::new()
+                }
+            }
+            Op::DropDomain { name, .. } => {
+                if let Some(g) = guard {
+                    probe = Some(crate::guard_probe::GuardProbe::NamedType {
+                        schema: eff_schema.clone(),
+                        name: name.clone(),
+                        kind: "domain".to_string(),
+                        direction: g.into(),
+                    });
+                }
+                named_types.drop_domain(name);
+                if self.dialect.supports(Capability::MaterializedDomainType) {
+                    let qname = pg_type_qname(&eff_schema, name)?;
+                    vec![decl.lower_vendor_statement(
+                        &format!("drop_domain_{name}"),
+                        format!("DROP DOMAIN {qname}"),
+                        None,
+                    )]
+                } else {
+                    Vec::new()
+                }
+            }
             Op::CreateTable { name, columns, constraints, indexes, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
                 // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
@@ -1315,6 +1592,7 @@ impl IrAuthor {
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns);
                 let mut snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                self.apply_named_type_metadata(name, columns, &mut snap, named_types)?;
                 // **#174 createTable parity** — keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
                 // injects `<col>_masked` from the descriptor's `mask` facet (including
@@ -1387,7 +1665,7 @@ impl IrAuthor {
                 // SEPARATE physical column the shared builder injects for a masked column —
                 // capture it so the ADD path lowers it too (otherwise the runtime mask
                 // read-pass has no sibling to write to; the bug the PG round-trip caught).
-                let (col, masked_sibling) = self.add_column_snapshot_with_sibling(
+                let (mut col, masked_sibling) = self.add_column_snapshot_with_sibling(
                     table,
                     column,
                     ty,
@@ -1397,6 +1675,24 @@ impl IrAuthor {
                     *mask,
                     generated.as_ref(),
                     *identity,
+                )?;
+                let source_col = IrColumn {
+                    name: column.clone(),
+                    ty: ty.clone(),
+                    nullable: *nullable,
+                    default: default.clone(),
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: *vector_metric,
+                    mask: *mask,
+                    generated: generated.clone(),
+                    identity: *identity,
+                };
+                self.apply_named_type_column_metadata(
+                    table,
+                    &source_col,
+                    &mut col,
+                    named_types,
                 )?;
                 // **PR10 Part B** — addColumn ifNotExists: verify (data_type, nullable)
                 // from the SAME shared-builder column snapshot the ADD renders from.
@@ -1544,8 +1840,50 @@ impl IrAuthor {
                 // Build the desired `ColumnSnapshot` via the SHARED builder (a
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled (§6.5).
-                let col =
+                let mut col =
                     self.add_column_snapshot(table, column, ty, None, None, None, None, None, None)?;
+                if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
+                    match ty {
+                        ColType::Enum { name }
+                            if !self.dialect.supports(Capability::MaterializedEnumType) =>
+                        {
+                            return Err(IrLowerError::NamedTypeUnsupported {
+                                kind: "enum",
+                                name: name.clone(),
+                                reason: "unreachable use-site",
+                            });
+                        }
+                        ColType::Domain { name }
+                            if !self.dialect.supports(Capability::MaterializedDomainType) =>
+                        {
+                            return Err(IrLowerError::NamedTypeUnsupported {
+                                kind: "domain",
+                                name: name.clone(),
+                                reason: "unreachable use-site",
+                            });
+                        }
+                        _ => {
+                            let source_col = IrColumn {
+                                name: column.clone(),
+                                ty: ty.clone(),
+                                nullable: None,
+                                default: None,
+                                unique: None,
+                                id_prefix: None,
+                                vector_metric: None,
+                                mask: None,
+                                generated: None,
+                                identity: None,
+                            };
+                            self.apply_named_type_column_metadata(
+                                table,
+                                &source_col,
+                                &mut col,
+                                named_types,
+                            )?;
+                        }
+                    }
+                }
                 // **PR10 Part B** — alterColumnType ifExists: the SOURCE column must
                 // EXIST (presence-only — an alter intentionally CHANGES the shape, so
                 // there is nothing to shape-verify).
@@ -2088,6 +2426,7 @@ impl IrAuthor {
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut named_types = NamedTypeRegistry::default();
 
         for (op_index, op) in ir.ops.iter().enumerate() {
             let op_kind = op_kind_tag(op);
@@ -2096,7 +2435,13 @@ impl IrAuthor {
             // lower failure aborts before any guarding — nothing applied. Each unit
             // carries its STRUCTURAL per-statement list (the exact statements the
             // renderer built, NOT a textual re-split of `up`).
-            let op_units = match self.lower_one_op(op_index, op, &mut live_tables, live)? {
+            let op_units = match self.lower_one_op(
+                op_index,
+                op,
+                &mut live_tables,
+                live,
+                &mut named_types,
+            )? {
                 LoweredOp::Ddl(units) => units,
                 LoweredOp::Rename(step) => {
                     // §2.6.1 — one online-rename plan step, carried verbatim. NOT
@@ -2471,6 +2816,138 @@ impl IrAuthor {
             .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))?;
         let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
         Ok((main, sibling))
+    }
+
+    fn apply_named_type_metadata(
+        &self,
+        table: &str,
+        columns: &[IrColumn],
+        snap: &mut TableSnapshot,
+        named_types: &NamedTypeRegistry,
+    ) -> Result<(), IrLowerError> {
+        for source in columns {
+            if !matches!(source.ty, ColType::Enum { .. } | ColType::Domain { .. }) {
+                continue;
+            }
+            let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
+                return Err(IrLowerError::UnsupportedOp("named type column folded away"));
+            };
+            self.apply_named_type_column_metadata(table, source, col, named_types)?;
+        }
+        Ok(())
+    }
+
+    fn apply_named_type_column_metadata(
+        &self,
+        table: &str,
+        source: &IrColumn,
+        col: &mut ColumnSnapshot,
+        named_types: &NamedTypeRegistry,
+    ) -> Result<(), IrLowerError> {
+        match &source.ty {
+            ColType::Enum { name } => {
+                let def = named_types.enum_def(name)?;
+                match self.dialect {
+                    SqlDialect::Postgres => {
+                        col.data_type = pg_type_data_type(&def.schema, name);
+                        col.ddl_type_override = Some(pg_type_qname(&def.schema, name)?);
+                    }
+                    SqlDialect::Sqlite => {
+                        col.data_type = "text".to_string();
+                        col.inline_checks.push(enum_inline_check(
+                            &source.name,
+                            &def.values,
+                            self.dialect,
+                        )?);
+                    }
+                    SqlDialect::Mysql => {
+                        let ty = mysql_enum_type(&def.values);
+                        col.data_type = ty.clone();
+                        col.ddl_type_override = Some(ty);
+                    }
+                }
+            }
+            ColType::Domain { name } => {
+                let def = named_types.domain_def(name)?;
+                if matches!(def.as_type, ColType::Enum { .. } | ColType::Domain { .. }) {
+                    return Err(IrLowerError::NamedTypeUnsupported {
+                        kind: "domain",
+                        name: name.clone(),
+                        reason: "nested named base type",
+                    });
+                }
+                let base = self.add_column_snapshot(
+                    table,
+                    &source.name,
+                    &def.as_type,
+                    source.nullable,
+                    source.default.as_ref(),
+                    source.vector_metric,
+                    source.mask,
+                    source.generated.as_ref(),
+                    source.identity,
+                )?;
+                col.data_type = base.data_type;
+                col.ddl_type_override = base.ddl_type_override;
+                if matches!(self.dialect, SqlDialect::Postgres) {
+                    col.data_type = pg_type_data_type(&def.schema, name);
+                    col.ddl_type_override = Some(pg_type_qname(&def.schema, name)?);
+                } else {
+                    if def.not_null {
+                        col.nullable = false;
+                    }
+                    if col.default.is_none() {
+                        if let Some(default) = &def.default {
+                            col.default = Some(render_ir_default(default, self.dialect)?);
+                        }
+                    }
+                    if let Some(check) = &def.check {
+                        let value_sql = crate::dml::quote_ident_for_dialect(
+                            "column",
+                            &source.name,
+                            self.dialect,
+                        )
+                        .map_err(IrLowerError::DmlAssemble)?;
+                        let expr = render_domain_check(check, self.dialect, &value_sql)?;
+                        col.inline_checks.push(format!("CHECK ({expr})"));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn render_pg_domain_base_type(
+        &self,
+        as_type: &ColType,
+        named_types: &NamedTypeRegistry,
+    ) -> Result<String, IrLowerError> {
+        match as_type {
+            ColType::Enum { name } => {
+                let def = named_types.enum_def(name)?;
+                pg_type_qname(&def.schema, name)
+            }
+            ColType::Domain { name } => Err(IrLowerError::NamedTypeUnsupported {
+                kind: "domain",
+                name: name.clone(),
+                reason: "nested named base type",
+            }),
+            _ => {
+                let col = self.add_column_snapshot(
+                    "__domain",
+                    "VALUE",
+                    as_type,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+                Ok(crate::declarative::ddl_type(&col.data_type).to_string())
+            }
+        }
     }
 
     /// **PR2 — lower an online `renameColumn` op (§2.6 / §2.6.1 / §2.6.2).** Map the
@@ -3441,6 +3918,10 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::Backfill { .. } => "backfill",
         Op::CreateView { .. } => "createView",
         Op::DropView { .. } => "dropView",
+        Op::CreateEnum { .. } => "createEnum",
+        Op::DropEnum { .. } => "dropEnum",
+        Op::CreateDomain { .. } => "createDomain",
+        Op::DropDomain { .. } => "dropDomain",
         // VENDOR (`@zeroship/migrate/pg`).
         Op::CreateSchema { .. } => "createSchema",
         Op::DropSchema { .. } => "dropSchema",
@@ -3617,6 +4098,7 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Vector { .. } => ("vector".into(), None),
         ColType::GeoPoint => ("geoPoint".into(), None),
         ColType::Decimal { .. } => ("number".into(), None),
+        ColType::Enum { .. } | ColType::Domain { .. } => ("string".into(), None),
         // An encrypted column wraps an inner type; the descriptor carries it as the
         // inner token with the `encrypted` facet set (the shared builder reads the
         // facet to pick BYTEA + the sentinel). The inner token drives the masked

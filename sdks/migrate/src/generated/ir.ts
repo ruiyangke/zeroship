@@ -96,6 +96,8 @@ export type ColType =
   | { ref: { references: string } }
   | { vector: { vector: number } }
   | { decimal: { precision: number; scale: number } }
+  | { enum: { name: string } }
+  | { domain: { name: string } }
   | { encrypted: { of: ColType } };
 
 /** The CLOSED pgvector distance-metric lexicon (P2a §4) — drives the ivfflat/hnsw
@@ -326,6 +328,10 @@ export type Op =
   | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
   | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }
+  | { op: "createEnum"; name: string; schema?: string | null; values: string[] }
+  | { op: "dropEnum"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "createDomain"; name: string; schema?: string | null; as: ColType; check?: Expr | null; default?: IrDefault | null; notNull?: boolean | null }
+  | { op: "dropDomain"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createTrigger";
       name: string;

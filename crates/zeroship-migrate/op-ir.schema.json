@@ -1072,6 +1072,174 @@
           ]
         },
         {
+          "description": "Create a named enum value set. PostgreSQL materializes it as a schema type;\nSQLite/MySQL register it for column-use-site inlining.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Enum type name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "values": {
+              "description": "Closed value set.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "createEnum"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "values"
+          ]
+        },
+        {
+          "description": "Drop a named enum value set.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Enum type name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here). Lowering stamps\na named-type catalog probe.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropEnum"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "Create a named domain. PostgreSQL materializes it as a schema type;\nSQLite/MySQL register it for column-use-site inlining.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Domain type name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "as": {
+              "description": "Base type.",
+              "$ref": "#/$defs/ColType"
+            },
+            "check": {
+              "description": "Optional domain check. A `ColRef` named `VALUE` refers to the domain\nvalue; inline dialects rewrite it to the use-site column identifier.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "default": {
+              "description": "Optional domain default.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IrDefault"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "notNull": {
+              "description": "Optional domain NOT NULL marker.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createDomain"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "as"
+          ]
+        },
+        {
+          "description": "Drop a named domain.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Domain type name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here). Lowering stamps\na named-type catalog probe.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropDomain"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
           "description": "**VENDOR** — `CREATE SCHEMA [IF NOT EXISTS] <name> [AUTHORIZATION <role>]`.",
           "type": "object",
           "properties": {
@@ -2119,6 +2287,50 @@
           },
           "required": [
             "decimal"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Named enum type reference. Materialized as a Postgres `CREATE TYPE` ref,\ninlined as SQLite `TEXT CHECK (...)`, and inlined as MySQL `ENUM(...)`.",
+          "type": "object",
+          "properties": {
+            "enum": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "description": "The enum type name.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "required": [
+            "enum"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "Named domain type reference. Materialized as a Postgres `CREATE DOMAIN`\nref, and inlined as base type + constraints on SQLite/MySQL.",
+          "type": "object",
+          "properties": {
+            "domain": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "description": "The domain type name.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "required": [
+            "domain"
           ],
           "additionalProperties": false
         },

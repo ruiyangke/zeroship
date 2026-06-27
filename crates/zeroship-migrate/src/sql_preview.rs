@@ -481,6 +481,10 @@ fn op_subject(op: &Op) -> String {
         Op::RenameTable { table, to, .. } => {
             format!("{} → {}", quote_dotted(&[table]), quote_dotted(&[to]))
         }
+        Op::CreateEnum { name, .. }
+        | Op::DropEnum { name, .. }
+        | Op::CreateDomain { name, .. }
+        | Op::DropDomain { name, .. } => quote_dotted(&[name]),
         Op::AddConstraint { table, .. } => quote_dotted(&[table]),
         Op::DropConstraint { table, name, .. } => quote_dotted(&[table, name]),
         Op::Insert { table, .. } | Op::Update { table, .. } | Op::Delete { table, .. } => {
@@ -537,7 +541,7 @@ fn quote_dotted(parts: &[&str]) -> String {
 }
 
 /// The human probe-kind tag for a guarded DDL step with no op context.
-fn probe_kind(p: &crate::guard_probe::GuardProbe) -> &'static str {
+fn probe_kind(p: &crate::guard_probe::GuardProbe) -> &str {
     use crate::guard_probe::GuardProbe;
     match p {
         GuardProbe::Table { .. } => "table",
@@ -545,6 +549,7 @@ fn probe_kind(p: &crate::guard_probe::GuardProbe) -> &'static str {
         GuardProbe::Index { .. } => "index",
         GuardProbe::Constraint { .. } => "constraint",
         GuardProbe::View { .. } => "view",
+        GuardProbe::NamedType { kind, .. } => kind,
         GuardProbe::ColumnPresence { .. } => "column-presence",
     }
 }
@@ -559,6 +564,7 @@ fn guard_dir(m: &crate::migration::Migration) -> ExistenceGuard {
         | Some(GuardProbe::Index { direction, .. })
         | Some(GuardProbe::Constraint { direction, .. })
         | Some(GuardProbe::View { direction, .. })
+        | Some(GuardProbe::NamedType { direction, .. })
         | Some(GuardProbe::ColumnPresence { direction, .. }) => *direction,
         None => GuardDir::IfNotExists,
     };

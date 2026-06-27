@@ -242,7 +242,7 @@ pub fn compare_applied_to_set(
 /// Introspection (`snapshot_schema`) leaves it `None`; only `desired_snapshot`
 /// populates it (for emission). All drift comparison is on `data_type` +
 /// `nullable` only (see `diff_attrs`).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ColumnSnapshot {
     /// Column name.
     pub name: String,
@@ -256,6 +256,16 @@ pub struct ColumnSnapshot {
     /// type-level note). `None` ⇒ no default emitted; always `None` from
     /// introspection.
     pub default: Option<String>,
+    /// Dialect-rendered type spelling to use in DDL instead of deriving from
+    /// `data_type`. This is emission-only for named type references: a Postgres
+    /// enum/domain column needs a schema-qualified type name in the emitted DDL,
+    /// while structural drift still compares the introspectable `data_type`.
+    pub ddl_type_override: Option<String>,
+    /// Column-level CHECK clauses to append at the use-site, e.g. the SQLite
+    /// enum/domain inline forms. Each entry includes the `CHECK (...)` wrapper and
+    /// is rendered only by the DDL emitter. Emission-only: live introspection tracks
+    /// table constraints, not this authoring metadata.
+    pub inline_checks: Vec<String>,
     /// A generated/computed column expression rendered for the target dialect,
     /// plus whether it is STORED or VIRTUAL. Emission-only, like `default`: live
     /// introspection does not carry this expression into the structural snapshot,
@@ -301,16 +311,37 @@ pub struct GeneratedColumnSnapshot {
     pub stored: bool,
 }
 
-// `default` + the two sentinels are intentionally excluded from equality +
-// hashing — they are DDL-emission metadata, not drift attributes (see the type
-// doc). Comparing `default` would phantom-drift against Postgres' normalised
-// stored default; the sentinels are never introspected into the snapshot at all
-// (`snapshot_schema` leaves them `None`), so comparing them would make every
-// freshly-created encrypted/masked table phantom-drift against itself and break
-// the round-trip oracle. Generated/identity metadata follows the same policy:
-// the structural column + PK shape round-trips, while the expression/sequence
-// details remain emission metadata unless a future live-catalog facet recovers
-// them byte-exactly.
+impl std::fmt::Debug for ColumnSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("ColumnSnapshot");
+        s.field("name", &self.name)
+            .field("data_type", &self.data_type)
+            .field("nullable", &self.nullable)
+            .field("default", &self.default);
+        if self.ddl_type_override.is_some() {
+            s.field("ddl_type_override", &self.ddl_type_override);
+        }
+        if !self.inline_checks.is_empty() {
+            s.field("inline_checks", &self.inline_checks);
+        }
+        s.field("generated", &self.generated)
+            .field("identity", &self.identity)
+            .field("encryption_sentinel", &self.encryption_sentinel)
+            .field("comment_sentinel", &self.comment_sentinel)
+            .finish()
+    }
+}
+
+// `default` + type overrides + inline checks + the two sentinels are intentionally
+// excluded from equality + hashing — they are DDL-emission metadata, not drift
+// attributes (see the type doc). Comparing `default` would phantom-drift against
+// Postgres' normalised stored default; the sentinels are never introspected into
+// the snapshot at all (`snapshot_schema` leaves them `None`), so comparing them
+// would make every freshly-created encrypted/masked table phantom-drift against
+// itself and break the round-trip oracle. Generated/identity metadata follows the
+// same policy: the structural column + PK shape round-trips, while the
+// expression/sequence details remain emission metadata unless a future live-catalog
+// facet recovers them byte-exactly.
 impl PartialEq for ColumnSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -508,6 +539,17 @@ pub struct SchemaSnapshot {
     pub tables: BTreeMap<String, TableSnapshot>,
     /// Views in the schema, keyed + ordered by name.
     pub views: BTreeMap<String, ViewSnapshot>,
+    /// Named enum/domain types in the schema, keyed + ordered by name.
+    pub named_types: BTreeMap<String, NamedTypeSnapshot>,
+}
+
+/// A schema-level named type. The engine only needs the object class for drift and
+/// guard probes; enum labels/domain predicates are modeled by the neutral IR and
+/// by column use-site metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedTypeSnapshot {
+    /// `"enum"` or `"domain"`.
+    pub kind: String,
 }
 
 /// One same-name object whose ATTRIBUTES diverge across the two snapshots.
@@ -619,6 +661,7 @@ pub async fn snapshot_schema(
 ) -> Result<SchemaSnapshot, DriftError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
+    let mut named_types: BTreeMap<String, NamedTypeSnapshot> = BTreeMap::new();
 
     // Base tables in the schema. `table_schema` is BOUND ($1), never interpolated.
     let table_rows = conn
@@ -665,6 +708,31 @@ pub async fn snapshot_schema(
             columns: None,
             definition,
         });
+    }
+
+    let type_rows = conn
+        .query(
+            "SELECT t.typname AS type_name, t.typtype \
+             FROM pg_type t \
+             JOIN pg_namespace n ON n.oid = t.typnamespace \
+             WHERE n.nspname = $1 AND t.typtype IN ('e', 'd') \
+             ORDER BY t.typname",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &type_rows {
+        let typtype: i8 = r.get("typtype");
+        let kind = match u8::try_from(typtype).ok().map(char::from) {
+            Some('e') => "enum",
+            Some('d') => "domain",
+            _ => continue,
+        };
+        named_types.insert(
+            r.get("type_name"),
+            NamedTypeSnapshot {
+                kind: kind.to_string(),
+            },
+        );
     }
 
     // Columns (one query for the whole schema; bucket by table).
@@ -828,7 +896,11 @@ pub async fn snapshot_schema(
         }
     }
 
-    Ok(SchemaSnapshot { tables, views })
+    Ok(SchemaSnapshot {
+        tables,
+        views,
+        named_types,
+    })
 }
 
 /// Diff an **expected** snapshot against the **actual** (live) snapshot — a PURE
@@ -882,6 +954,30 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
     for name in actual.views.keys() {
         if !expected.views.contains_key(name) {
             unexpected.push(format!("view {name}"));
+        }
+    }
+    for (name, exp_ty) in &expected.named_types {
+        if !actual.named_types.contains_key(name) {
+            missing.push(format!("{} {name}", exp_ty.kind));
+        }
+    }
+    for (name, act_ty) in &actual.named_types {
+        if !expected.named_types.contains_key(name) {
+            unexpected.push(format!("{} {name}", act_ty.kind));
+        }
+    }
+    for (name, exp_ty) in &expected.named_types {
+        let Some(act_ty) = actual.named_types.get(name) else {
+            continue;
+        };
+        if exp_ty.kind != act_ty.kind {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("type {name}"),
+                field: "kind".to_string(),
+                expected: exp_ty.kind.clone(),
+                actual: act_ty.kind.clone(),
+            });
         }
     }
     for (name, exp_v) in &expected.views {

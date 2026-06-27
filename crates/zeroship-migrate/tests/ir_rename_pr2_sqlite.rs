@@ -478,6 +478,8 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
                 data_type: a_type,
                 nullable: true,
                 default: None,
+                ddl_type_override: None,
+                inline_checks: Vec::new(),
                 generated: None,
                 identity: None,
                 encryption_sentinel: None,

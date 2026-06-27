@@ -23,6 +23,8 @@ export {
   table,
   // cross-dialect view authoring entry — emits the closed SelectAst by default
   view,
+  pgEnum,
+  pgDomain,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -63,6 +65,12 @@ export type {
   IndexRef,
   CreateTableArgs,
   ForeignKeyReference,
+  EnumHandle,
+  DomainHandle,
+  CreateEnumArgs,
+  DropEnumArgs,
+  CreateDomainArgs,
+  DropDomainArgs,
   // op-arg shapes
   InsertArgs,
   UpdateArgs,

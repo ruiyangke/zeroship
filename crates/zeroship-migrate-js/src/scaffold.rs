@@ -640,6 +640,8 @@ fn render_t_for(ty: &ColType) -> String {
         ColType::Uuid => "t.uuid()".into(),
         ColType::Bytea => "t.bytes()".into(),
         ColType::Decimal { precision, scale } => format!("t.numeric({precision}, {scale})"),
+        ColType::Enum { name } => format!("t.enum({})", js_str(name)),
+        ColType::Domain { name } => format!("t.domain({})", js_str(name)),
         // Goodies are not generated (rejected earlier); render a hand-author note.
         _ => "t.text() /* TODO: hand-author this column type */".into(),
     }

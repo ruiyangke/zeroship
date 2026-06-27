@@ -156,8 +156,8 @@ fn every_op_variant_has_a_fixture() {
         .collect();
     assert_eq!(
         expected.len(),
-        39,
-        "the closed Op set has 39 variants (20 portable/core trigger/view variants + 19 @zeroship/migrate/pg vendor)"
+        43,
+        "the closed Op set has 43 variants (24 portable/core enum/domain/trigger/view variants + 19 @zeroship/migrate/pg vendor)"
     );
 
     // The union of op discriminants across all recorded fixtures.

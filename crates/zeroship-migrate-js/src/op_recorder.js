@@ -58,7 +58,7 @@ function resolveName(mod) {
 // structured `OP_OUTSIDE_RECORDER` error rather than a silently-lost op.
 function recordPhase(phase) {
   if (typeof phase !== "function") return [];
-  __begin();
+  __begin("up");
   phase();
   return __drain();
 }

@@ -317,6 +317,18 @@ pub enum ColType {
         /// Digits after the point.
         scale: u32,
     },
+    /// Named enum type reference. Materialized as a Postgres `CREATE TYPE` ref,
+    /// inlined as SQLite `TEXT CHECK (...)`, and inlined as MySQL `ENUM(...)`.
+    Enum {
+        /// The enum type name.
+        name: String,
+    },
+    /// Named domain type reference. Materialized as a Postgres `CREATE DOMAIN`
+    /// ref, and inlined as base type + constraints on SQLite/MySQL.
+    Domain {
+        /// The domain type name.
+        name: String,
+    },
     /// Application-level encrypted column wrapping an inner type.
     Encrypted {
         /// The inner (plaintext) type.
@@ -1761,6 +1773,63 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         materialized: Option<bool>,
     },
+    /// Create a named enum value set. PostgreSQL materializes it as a schema type;
+    /// SQLite/MySQL register it for column-use-site inlining.
+    CreateEnum {
+        /// Enum type name.
+        name: String,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Closed value set.
+        values: Vec<String>,
+    },
+    /// Drop a named enum value set.
+    DropEnum {
+        /// Enum type name.
+        name: String,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here). Lowering stamps
+        /// a named-type catalog probe.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
+    /// Create a named domain. PostgreSQL materializes it as a schema type;
+    /// SQLite/MySQL register it for column-use-site inlining.
+    CreateDomain {
+        /// Domain type name.
+        name: String,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// Base type.
+        #[serde(rename = "as")]
+        as_type: ColType,
+        /// Optional domain check. A `ColRef` named `VALUE` refers to the domain
+        /// value; inline dialects rewrite it to the use-site column identifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check: Option<Expr>,
+        /// Optional domain default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<IrDefault>,
+        /// Optional domain NOT NULL marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_null: Option<bool>,
+    },
+    /// Drop a named domain.
+    DropDomain {
+        /// Domain type name.
+        name: String,
+        /// Optional schema qualifier.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here). Lowering stamps
+        /// a named-type catalog probe.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
 
     // ──────────────────────────────────────────────────────────────────────
     // VENDOR (`@zeroship/migrate/pg`) — Postgres-ONLY privileged primitives
@@ -2094,7 +2163,11 @@ impl Op {
             | Op::Delete { .. }
             | Op::Backfill { .. }
             | Op::CreateTrigger { .. }
-            | Op::DropTrigger { .. } => Vec::new(),
+            | Op::DropTrigger { .. }
+            | Op::CreateEnum { .. }
+            | Op::DropEnum { .. }
+            | Op::CreateDomain { .. }
+            | Op::DropDomain { .. } => Vec::new(),
             Op::CreateView {
                 query: ViewQuery::Structured { .. },
                 materialized,
@@ -2169,7 +2242,12 @@ impl Op {
             | Op::Update { table, .. }
             | Op::Delete { table, .. }
             | Op::Backfill { table, .. } => Some(table.as_str()),
-            Op::CreateView { .. } | Op::DropView { .. } => None,
+            Op::CreateView { .. }
+            | Op::DropView { .. }
+            | Op::CreateEnum { .. }
+            | Op::DropEnum { .. }
+            | Op::CreateDomain { .. }
+            | Op::DropDomain { .. } => None,
             // The owning table is an optional dialect hint on a DROP INDEX; when
             // present it is the touched table, otherwise the op names only the
             // index (resolved against the live schema downstream).
@@ -2225,7 +2303,11 @@ impl Op {
             | Op::Delete { schema, .. }
             | Op::Backfill { schema, .. }
             | Op::CreateView { schema, .. }
-            | Op::DropView { schema, .. } => schema.as_deref(),
+            | Op::DropView { schema, .. }
+            | Op::CreateEnum { schema, .. }
+            | Op::DropEnum { schema, .. }
+            | Op::CreateDomain { schema, .. }
+            | Op::DropDomain { schema, .. } => schema.as_deref(),
             // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
             Op::CreateExtension { schema, .. }
@@ -2284,12 +2366,16 @@ impl Op {
             | Op::RenameColumn { existence_guard, .. }
             | Op::AddConstraint { existence_guard, .. }
             | Op::DropConstraint { existence_guard, .. }
-            | Op::DropView { existence_guard, .. } => *existence_guard,
+            | Op::DropView { existence_guard, .. }
+            | Op::DropEnum { existence_guard, .. }
+            | Op::DropDomain { existence_guard, .. } => *existence_guard,
             Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
-            | Op::CreateView { .. } => None,
+            | Op::CreateView { .. }
+            | Op::CreateEnum { .. }
+            | Op::CreateDomain { .. } => None,
             // VENDOR — the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
             // an engine-synthesized `pg_roles` probe rendered inline by the vendor
             // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
@@ -2337,12 +2423,16 @@ impl Op {
             | Op::AlterColumnNullability { .. }
             | Op::RenameColumn { .. }
             | Op::DropConstraint { .. }
-            | Op::DropView { .. } => Some(ExistenceGuard::IfExists),
+            | Op::DropView { .. }
+            | Op::DropEnum { .. }
+            | Op::DropDomain { .. } => Some(ExistenceGuard::IfExists),
             Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
-            | Op::CreateView { .. } => None,
+            | Op::CreateView { .. }
+            | Op::CreateEnum { .. }
+            | Op::CreateDomain { .. } => None,
             // VENDOR — vendor ops carry no `ExistenceGuard` (native clause instead).
             Op::CreateSchema { .. }
             | Op::DropSchema { .. }

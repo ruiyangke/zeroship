@@ -36,18 +36,24 @@ import type {
   ColumnRef,
   ConstraintRef,
   CreateRawViewArgs,
+  CreateDomainArgs,
+  CreateEnumArgs,
   CreateTablePolicyArgs,
   CreateTriggerArgs,
   CreateTableArgs,
   CreateViewArgs,
   DelArgs,
+  DomainHandle,
   DeterminismFinding,
   DropTablePolicyArgs,
+  DropDomainArgs,
+  DropEnumArgs,
   DropViewArgs,
   Expr,
   ExprBuilder,
   ExprChain as ExprChainType,
   ExprFn,
+  EnumHandle,
   FnNamespace,
   ForeignKeyRef,
   ForeignKeyReference,
@@ -103,7 +109,10 @@ interface Recorder {
   nextSelectorId: number;
 }
 
+type RecorderPhase = "up" | "down";
+
 let active: Recorder | null = null;
+const deferredUpOps: Node[] = [];
 
 function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
   const err = new Error(message) as Error & Record<string, unknown>;
@@ -113,8 +122,12 @@ function structuredError(code: string, message: string, extra?: Record<string, u
 }
 
 /** Begin a fresh recording buffer (the build evaluator calls this before a phase). */
-export function __begin(): void {
-  active = { ops: [], pending: new Map(), nextSelectorId: 0 };
+export function __begin(phase: RecorderPhase = "up"): void {
+  active = {
+    ops: phase === "up" ? deferredUpOps.map((op) => structuredClone(op)) : [],
+    pending: new Map(),
+    nextSelectorId: 0,
+  };
 }
 
 /**
@@ -159,6 +172,15 @@ function recorder(): Recorder {
 
 function push(op: Node): Node {
   recorder().ops.push(op);
+  return op;
+}
+
+function pushOrDeferUp(op: Node): Node {
+  if (active === null) {
+    deferredUpOps.push(op);
+    return op;
+  }
+  active.ops.push(op);
   return op;
 }
 
@@ -519,6 +541,16 @@ export const t: TypeLexicon = {
   int: () => new ColumnDefImpl("int"),
   bigInt: () => new ColumnDefImpl("bigInt"),
   float: () => new ColumnDefImpl("float"),
+  enum: (name) => {
+    const n = typeof name === "string" ? name : name.name;
+    requireString(n, "t.enum(name)");
+    return new ColumnDefImpl({ enum: { name: n } } as ColType);
+  },
+  domain: (name) => {
+    const n = typeof name === "string" ? name : name.name;
+    requireString(n, "t.domain(name)");
+    return new ColumnDefImpl({ domain: { name: n } } as ColType);
+  },
   encrypted: (arg) => {
     const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
     const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
@@ -532,6 +564,44 @@ export const t: TypeLexicon = {
 function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
   if (isColumnDef(typeArg)) return typeArg._type;
   return typeArg as ColType;
+}
+
+export function pgEnum(
+  name: string,
+  values: readonly string[],
+  args: CreateEnumArgs = {},
+): EnumHandle {
+  const enumValues = stringArray(values, "pgEnum(name, values)");
+  recordCreateEnum(name, enumValues, args);
+  const handle: EnumHandle = {
+    name,
+    values: enumValues,
+    create(createArgs: CreateEnumArgs = {}) {
+      recordCreateEnum(name, enumValues, createArgs);
+      return handle;
+    },
+    drop(dropArgs: DropEnumArgs = {}) {
+      recordDropEnum(name, dropArgs);
+      return handle;
+    },
+  };
+  return handle;
+}
+
+export function pgDomain(name: string): DomainHandle {
+  requireString(name, "pgDomain(name)");
+  const handle: DomainHandle = {
+    name,
+    create(args: CreateDomainArgs) {
+      recordCreateDomain(name, args);
+      return handle;
+    },
+    drop(args: DropDomainArgs = {}) {
+      recordDropDomain(name, args);
+      return handle;
+    },
+  };
+  return handle;
 }
 
 // ── (A) The shared `@zeroship/db` lexicon bridge (PR5) ──
@@ -690,6 +760,71 @@ function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
 }
 function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
   return v ? "ifExists" : undefined;
+}
+
+function stringArray(values: unknown, what: string): string[] {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be a string[]`);
+  }
+  for (const v of values) requireString(v, what);
+  return [...values];
+}
+
+function recordCreateEnum(name: string, values: readonly string[], args: CreateEnumArgs = {}): void {
+  requireString(name, "pgEnum(name, values)");
+  pushOrDeferUp(
+    compact({
+      op: "createEnum",
+      name,
+      schema: args.schema,
+      values: stringArray(values, "pgEnum(name, values)"),
+    }),
+  );
+}
+
+function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
+  requireString(name, "pgEnum(name, values).drop()");
+  push(
+    compact({
+      op: "dropEnum",
+      name,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+    }),
+  );
+}
+
+function recordCreateDomain(name: string, args: CreateDomainArgs): void {
+  requireString(name, "pgDomain(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "pgDomain(name).create({ as, ... }) needs an object");
+  }
+  if (args.notNull !== undefined && typeof args.notNull !== "boolean") {
+    throw structuredError("OP_INVALID", "pgDomain(name).create({ notNull }): notNull must be a boolean");
+  }
+  pushOrDeferUp(
+    compact({
+      op: "createDomain",
+      name,
+      schema: args.schema,
+      as: colTypeOf(args.as),
+      check: resolveExpr(args.check as ExprFn | ExprChainType | Node | undefined),
+      default: args.default === undefined ? undefined : toIrDefault(args.default),
+      notNull: args.notNull,
+    }),
+  );
+}
+
+function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
+  requireString(name, "pgDomain(name).drop()");
+  push(
+    compact({
+      op: "dropDomain",
+      name,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+    }),
+  );
 }
 
 // ── (D) The internal op-construction helpers (the single source of truth) ──

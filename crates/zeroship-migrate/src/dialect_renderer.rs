@@ -31,6 +31,8 @@ pub(crate) enum Capability {
     TriggerStatementForEach,
     TriggerExecuteFunction,
     TriggerBody,
+    MaterializedEnumType,
+    MaterializedDomainType,
 }
 
 pub(crate) trait DialectSupports {
@@ -58,6 +60,8 @@ impl DialectSupports for SqlDialect {
                 Capability::TriggerStatementForEach => true,
                 Capability::TriggerExecuteFunction => true,
                 Capability::TriggerBody => false,
+                Capability::MaterializedEnumType => true,
+                Capability::MaterializedDomainType => true,
             },
             SqlDialect::Sqlite => match cap {
                 Capability::NonPkIdentity => false,
@@ -77,6 +81,8 @@ impl DialectSupports for SqlDialect {
                 Capability::TriggerStatementForEach => false,
                 Capability::TriggerExecuteFunction => false,
                 Capability::TriggerBody => true,
+                Capability::MaterializedEnumType => false,
+                Capability::MaterializedDomainType => false,
             },
             SqlDialect::Mysql => match cap {
                 Capability::NonPkIdentity => false,
@@ -96,6 +102,8 @@ impl DialectSupports for SqlDialect {
                 Capability::TriggerStatementForEach => false,
                 Capability::TriggerExecuteFunction => false,
                 Capability::TriggerBody => true,
+                Capability::MaterializedEnumType => false,
+                Capability::MaterializedDomainType => false,
             },
         }
     }

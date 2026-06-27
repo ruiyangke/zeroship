@@ -194,8 +194,47 @@ export interface TypeLexicon {
   int(): ColumnDef;
   bigInt(): ColumnDef;
   float(): ColumnDef;
+  /** A named enum reference declared with `pgEnum(name, values)`. */
+  enum(name: string | EnumHandle): ColumnDef;
+  /** A named domain reference declared with `pgDomain(name).create(...)`. */
+  domain(name: string | DomainHandle): ColumnDef;
   /** An application-level encrypted column wrapping an inner type. */
   encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType): ColumnDef;
+}
+
+export interface CreateEnumArgs {
+  schema?: string;
+}
+
+export interface DropEnumArgs {
+  schema?: string;
+  ifExists?: boolean;
+}
+
+export interface EnumHandle {
+  readonly name: string;
+  readonly values: readonly string[];
+  create(args?: CreateEnumArgs): EnumHandle;
+  drop(args?: DropEnumArgs): EnumHandle;
+}
+
+export interface CreateDomainArgs {
+  as: ColumnDef | ColType;
+  check?: ExprFn | ExprChain | Expr;
+  default?: ScalarValue | { fn: "now" | "genRandomUuid" };
+  notNull?: boolean;
+  schema?: string;
+}
+
+export interface DropDomainArgs {
+  schema?: string;
+  ifExists?: boolean;
+}
+
+export interface DomainHandle {
+  readonly name: string;
+  create(args: CreateDomainArgs): DomainHandle;
+  drop(args?: DropDomainArgs): DomainHandle;
 }
 
 // ── Scalars / rows ──

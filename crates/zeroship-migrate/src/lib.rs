@@ -138,7 +138,7 @@ pub use db::{connect, ConnectError, ExecutorConfig, PgConfinement};
 pub use drift::{
     check_checksum_drift, diff_snapshots, snapshot_schema, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, ColumnSnapshot, ConstraintSnapshot, DriftError, DriftReport, IndexSnapshot,
-    OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot, ViewSnapshot,
+    NamedTypeSnapshot, OrphanJournal, SchemaSnapshot, StructuralDrift, TableSnapshot, ViewSnapshot,
 };
 pub use executor::{
     apply, rollback, ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict,
