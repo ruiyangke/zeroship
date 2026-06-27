@@ -103,6 +103,11 @@ pub enum SqlDialect {
     /// value is tagged with the [`SQLITE_ENC_BLOB_PREFIX`] sentinel so
     /// the session actor binds raw bytes (BLOB) instead of text.
     Sqlite,
+    /// MySQL dialect: encrypted-column binds wrap the placeholder with
+    /// `FROM_BASE64(?)` so the LONGBLOB column receives raw bytes from the
+    /// base64 text param. Phase 1 is render-only; no live MySQL runtime/backend
+    /// constructs this dialect for execution.
+    Mysql,
 }
 
 /// Dialect-specific schema/DDL spelling.
@@ -138,9 +143,11 @@ pub trait SchemaRenderer {
 
 struct PostgresSchemaRenderer;
 struct SqliteSchemaRenderer;
+struct MysqlSchemaRenderer;
 
 static POSTGRES_SCHEMA_RENDERER: PostgresSchemaRenderer = PostgresSchemaRenderer;
 static SQLITE_SCHEMA_RENDERER: SqliteSchemaRenderer = SqliteSchemaRenderer;
+static MYSQL_SCHEMA_RENDERER: MysqlSchemaRenderer = MysqlSchemaRenderer;
 
 /// Return the schema renderer for a dialect.
 ///
@@ -151,6 +158,7 @@ pub fn renderer(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
     match dialect {
         SqlDialect::Postgres => &POSTGRES_SCHEMA_RENDERER,
         SqlDialect::Sqlite => &SQLITE_SCHEMA_RENDERER,
+        SqlDialect::Mysql => &MYSQL_SCHEMA_RENDERER,
     }
 }
 
@@ -403,6 +411,134 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 }
 
+impl SchemaRenderer for MysqlSchemaRenderer {
+    fn dialect(&self) -> SqlDialect {
+        SqlDialect::Mysql
+    }
+
+    fn encrypted_column_bind_placeholder(&self, _n: usize) -> String {
+        "FROM_BASE64(?)".to_string()
+    }
+
+    fn wrap_encrypted_param(&self, b64_value: String) -> String {
+        b64_value
+    }
+
+    fn system_field_columns(&self) -> Vec<String> {
+        let (ts_type, ts_default) = ("DATETIME(6)", "CURRENT_TIMESTAMP(6)");
+        vec![
+            "`id` VARCHAR(191) PRIMARY KEY".to_string(),
+            format!("`created_at` {ts_type} NOT NULL DEFAULT {ts_default}"),
+            format!("`updated_at` {ts_type} NOT NULL DEFAULT {ts_default}"),
+            "`created_by` VARCHAR(191) NULL".to_string(),
+            "`updated_by` VARCHAR(191) NULL".to_string(),
+            "`version` INT NOT NULL DEFAULT 1".to_string(),
+            format!("`deleted_at` {ts_type} NULL"),
+        ]
+    }
+
+    fn system_field_indexes(
+        &self,
+        app_id: &str,
+        collection: &str,
+        _sqlite_scope: SqliteEmitScope,
+    ) -> Vec<String> {
+        const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
+        SYSTEM_INDEXED_COLS
+            .iter()
+            .map(|col| {
+                let idx_name = index_name(collection, &[col], /* unique = */ false);
+                format!(
+                    "CREATE INDEX {} ON {}.{} ({})",
+                    mysql_quote_ident(&idx_name),
+                    mysql_quote_ident(app_id),
+                    mysql_quote_ident(collection),
+                    mysql_quote_ident(col),
+                )
+            })
+            .collect()
+    }
+
+    fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
+        format!("{}.{}", mysql_quote_ident(app_id), mysql_quote_ident(target))
+    }
+
+    fn column_type(&self, def: &serde_json::Value) -> String {
+        if def.get("encrypted").is_some() {
+            return "LONGBLOB".to_string();
+        }
+
+        if let Some(values) = mysql_native_enum_values(def) {
+            return format!("ENUM({})", values.join(", "));
+        }
+
+        let zs_type = def.get("type").and_then(|t| t.as_str());
+
+        if zs_type == Some("vector") {
+            return "BLOB".to_string();
+        }
+
+        if zs_type == Some("geoPoint") {
+            return "POINT SRID 4326".to_string();
+        }
+
+        match zs_type {
+            Some("string") => {
+                let max = def
+                    .get("maxLength")
+                    .or_else(|| def.get("max"))
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|n| *n > 0 && *n <= 65_535);
+                match max {
+                    Some(n) if n <= 16_383 => format!("VARCHAR({n})"),
+                    Some(_) => "LONGTEXT".to_string(),
+                    None => "VARCHAR(191)".to_string(),
+                }
+            }
+            Some("number") => "DOUBLE".to_string(),
+            Some("boolean") => "TINYINT(1)".to_string(),
+            Some("date") => "DATETIME(6)".to_string(),
+            Some("calendarDate") => "DATE".to_string(),
+            Some("json") | Some("object") | Some("array") | Some("union") => "JSON".to_string(),
+            Some("ref") => "VARCHAR(191)".to_string(),
+            Some("bytes") => "LONGBLOB".to_string(),
+            Some("literal") => match def.get("literalValue") {
+                Some(serde_json::Value::Number(_)) => "DECIMAL(65, 30)".to_string(),
+                Some(serde_json::Value::Bool(_)) => "TINYINT(1)".to_string(),
+                _ => "VARCHAR(191)".to_string(),
+            },
+            Some("bigInt") | Some("bigint") | Some("int8") => "BIGINT".to_string(),
+            Some("integer") | Some("int") | Some("int4") => "INT".to_string(),
+            _ => "VARCHAR(191)".to_string(),
+        }
+    }
+
+    fn json_object_default(&self) -> String {
+        "DEFAULT (JSON_OBJECT())".to_string()
+    }
+
+    fn json_array_default(&self) -> String {
+        "DEFAULT (JSON_ARRAY())".to_string()
+    }
+
+    fn current_timestamp_expr(&self) -> &'static str {
+        "CURRENT_TIMESTAMP(6)"
+    }
+
+    fn column_comment_statements(
+        &self,
+        _app_id: &str,
+        _collection: &str,
+        _schema: &serde_json::Value,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn canonical_type(&self, raw: &str) -> String {
+        mysql_canonical_type(raw)
+    }
+}
+
 #[cfg(test)]
 mod schema_renderer_tests {
     use super::*;
@@ -411,6 +547,7 @@ mod schema_renderer_tests {
     fn dispatch_returns_expected_schema_renderer() {
         assert_eq!(renderer(SqlDialect::Postgres).dialect(), SqlDialect::Postgres);
         assert_eq!(renderer(SqlDialect::Sqlite).dialect(), SqlDialect::Sqlite);
+        assert_eq!(renderer(SqlDialect::Mysql).dialect(), SqlDialect::Mysql);
     }
 }
 
@@ -817,6 +954,33 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Quote a MySQL identifier with backticks.
+/// Escapes any embedded backticks by doubling them.
+pub fn mysql_quote_ident(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
+}
+
+fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Postgres | SqlDialect::Sqlite => quote_ident(name),
+        SqlDialect::Mysql => mysql_quote_ident(name),
+    }
+}
+
+fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
+    let values = def.get("enum")?.as_array()?;
+    let mut rendered = Vec::with_capacity(values.len());
+    for value in values {
+        let s = value.as_str()?;
+        rendered.push(format!("'{}'", s.replace('\'', "''")));
+    }
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DDL builders for registerModel
 // ---------------------------------------------------------------------------
@@ -1011,7 +1175,11 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     let table = if sqlite_table_unqualified {
         quote_ident(collection)
     } else {
-        format!("{}.{}", quote_ident(app_id), quote_ident(collection))
+        format!(
+            "{}.{}",
+            quote_ident_for_dialect(app_id, dialect),
+            quote_ident_for_dialect(collection, dialect)
+        )
     };
 
     let mut columns = build_system_field_columns(dialect);
@@ -1090,7 +1258,10 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                     Some(s) => format!(" /* {s} */"),
                     None => String::new(),
                 };
-                columns.push(format!("{} TEXT{inline_comment}", quote_ident(&sibling_col)));
+                columns.push(format!(
+                    "{} TEXT{inline_comment}",
+                    quote_ident_for_dialect(&sibling_col, dialect)
+                ));
             }
 
             // B2 — append FOREIGN KEY clause when this is a ref. Inline
@@ -1132,7 +1303,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             if def.get("discriminator").and_then(|v| v.as_str()) == Some("__discriminator__") {
                 if let Some(variants) = def.get("variants").and_then(|v| v.as_array()) {
                     let constraint_clauses =
-                        emit_union_variant_checks(collection, field, def, variants);
+                        emit_union_variant_checks(collection, field, def, variants, dialect);
                     union_checks.extend(constraint_clauses);
                 }
             }
@@ -1170,7 +1341,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 // identifier — first whitespace-delimited token. We
                 // strip the leading `"` if present.
                 let first = col.split_whitespace().next().unwrap_or("");
-                let name = first.trim_matches('"');
+                let name = first.trim_matches('"').trim_matches('`');
                 if SYSTEM_FIELD_NAMES.contains(&name) {
                     if !seen.insert(name.to_string()) {
                         ok = false;
@@ -1402,7 +1573,7 @@ fn build_fk_clause(
         .unwrap_or(true);
 
     let target_qualified = renderer(dialect).foreign_key_target(app_id, target);
-    let deferrable_clause = if deferrable {
+    let deferrable_clause = if deferrable && !matches!(dialect, SqlDialect::Mysql) {
         " DEFERRABLE INITIALLY DEFERRED"
     } else {
         ""
@@ -1410,8 +1581,8 @@ fn build_fk_clause(
 
     Ok(format!(
         "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id) ON DELETE {} ON UPDATE {}{}",
-        quote_ident(&constraint_name),
-        quote_ident(field),
+        quote_ident_for_dialect(&constraint_name, dialect),
+        quote_ident_for_dialect(field, dialect),
         target_qualified,
         on_delete,
         on_update,
@@ -2235,7 +2406,7 @@ fn field_to_column_for_dialect(
     // `sqlite_master.sql` for the introspector regex.
     Ok(format!(
         "{} {}{} {}",
-        quote_ident(field),
+        quote_ident_for_dialect(field, dialect),
         sql_type,
         enc_comment,
         constraints
@@ -2280,8 +2451,9 @@ fn emit_union_variant_checks(
     disc_field: &str,
     disc_def: &serde_json::Value,
     variants: &[serde_json::Value],
+    dialect: SqlDialect,
 ) -> Vec<String> {
-    let disc_col = quote_ident(disc_field);
+    let disc_col = quote_ident_for_dialect(disc_field, dialect);
     let disc_primitive = disc_def.get("type").and_then(|t| t.as_str()).unwrap_or("string");
 
     let mut out = Vec::new();
@@ -2305,7 +2477,7 @@ fn emit_union_variant_checks(
             }
             let is_required = fd.get("required").and_then(serde_json::Value::as_bool) == Some(true);
             if is_required {
-                required_cols.push(quote_ident(field));
+                required_cols.push(quote_ident_for_dialect(field, dialect));
             }
         }
 
@@ -2353,7 +2525,7 @@ fn emit_union_variant_checks(
                 .join(" AND ");
             format!(
                 "CONSTRAINT {} CHECK ({} <> {} OR ({}))",
-                quote_ident(&constraint_name),
+                quote_ident_for_dialect(&constraint_name, dialect),
                 disc_col,
                 lit_sql,
                 null_clause
@@ -2524,6 +2696,65 @@ pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
     }
 }
 
+/// Canonicalise MySQL `information_schema.COLUMNS.COLUMN_TYPE` / rendered DDL
+/// type strings for drift/probe comparison.
+#[must_use]
+pub fn mysql_canonical_type(data_type: &str) -> String {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let no_width = strip_mysql_int_display_width(&lower);
+    if no_width.starts_with("enum(") {
+        return no_width;
+    }
+    if no_width.starts_with("varchar(") || no_width.ends_with("text") || no_width == "char" {
+        return "text".to_string();
+    }
+    if no_width.starts_with("varbinary(") || no_width.ends_with("blob") || no_width == "bytea" {
+        return "blob".to_string();
+    }
+    if no_width.starts_with("datetime")
+        || no_width.starts_with("timestamp")
+        || matches!(no_width.as_str(), "timestamp with time zone" | "timestamptz")
+    {
+        return "datetime".to_string();
+    }
+    if no_width.starts_with("decimal") || no_width == "numeric" {
+        return "decimal".to_string();
+    }
+    if no_width.starts_with("double")
+        || matches!(no_width.as_str(), "double precision" | "float" | "real")
+    {
+        return "double".to_string();
+    }
+    if no_width.starts_with("tinyint(1)") || no_width == "boolean" {
+        return "boolean".to_string();
+    }
+    match no_width.as_str() {
+        "int" | "integer" | "int4" => "int".to_string(),
+        "bigint" | "int8" => "bigint".to_string(),
+        "json" | "jsonb" => "json".to_string(),
+        "date" => "date".to_string(),
+        "point" | "point srid 4326" | "geography(point, 4326)" | "geography(POINT, 4326)" => {
+            "point".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+fn strip_mysql_int_display_width(input: &str) -> String {
+    for ty in ["tinyint", "smallint", "mediumint", "int", "integer", "bigint"] {
+        if let Some(rest) = input.strip_prefix(ty) {
+            if let Some(after_open) = rest.strip_prefix('(') {
+                if let Some((digits, after_close)) = after_open.split_once(')') {
+                    if digits.chars().all(|c| c.is_ascii_digit()) {
+                        return format!("{ty}{after_close}");
+                    }
+                }
+            }
+        }
+    }
+    input.to_string()
+}
+
 /// Generate column constraints from field definition.
 fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
     def_to_constraints_for_dialect(field, def, SqlDialect::Postgres)
@@ -2580,7 +2811,7 @@ fn def_to_constraints_for_dialect(
     }
 
     // Check constraints for min/max
-    let col = quote_ident(field);
+    let col = quote_ident_for_dialect(field, dialect);
     if let (Some("number"), Some(min)) = (def.get("type").and_then(|t| t.as_str()), def.get("min").and_then(|v| v.as_f64())) {
         if let Some(max) = def.get("max").and_then(|v| v.as_f64()) {
             parts.push(format!("CHECK ({col} >= {min} AND {col} <= {max})"));
@@ -2612,6 +2843,10 @@ fn def_to_constraints_for_dialect(
     }
 
     // Enum constraint — supports both string and numeric values
+    if matches!(dialect, SqlDialect::Mysql) && mysql_native_enum_values(def).is_some() {
+        return parts.join(" ");
+    }
+
     if let Some(enums) = def.get("enum").and_then(|v| v.as_array()) {
         let values: Vec<String> = enums
             .iter()
@@ -3714,6 +3949,7 @@ pub fn build_update_one_with_system_fields(
     let target_col = match dialect {
         SqlDialect::Postgres => "ctid",
         SqlDialect::Sqlite => "rowid",
+        SqlDialect::Mysql => "id",
     };
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
@@ -3975,6 +4211,7 @@ pub fn build_delete_one_with_dialect(
     let target_col = match dialect {
         SqlDialect::Postgres => "ctid",
         SqlDialect::Sqlite => "rowid",
+        SqlDialect::Mysql => "id",
     };
     let sql = format!(
         "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1) RETURNING *",
@@ -4129,6 +4366,7 @@ pub fn build_soft_delete_one_with_system_fields(
     let target_col = match dialect {
         SqlDialect::Postgres => "ctid",
         SqlDialect::Sqlite => "rowid",
+        SqlDialect::Mysql => "id",
     };
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
@@ -4208,6 +4446,7 @@ pub fn build_restore_one_with_system_fields(
     let target_col = match dialect {
         SqlDialect::Postgres => "ctid",
         SqlDialect::Sqlite => "rowid",
+        SqlDialect::Mysql => "id",
     };
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1) RETURNING *",
@@ -5201,6 +5440,9 @@ fn build_field_condition_with_dialect(
                             SqlDialect::Sqlite => {
                                 format!("{col} LIKE ${} COLLATE NOCASE", params.len())
                             }
+                            SqlDialect::Mysql => {
+                                format!("{col} LIKE ${} COLLATE utf8mb4_0900_ai_ci", params.len())
+                            }
                         }
                     }
                     "$search" => {
@@ -5485,6 +5727,11 @@ fn build_order_term_expr(col: &str, descending: bool, dialect: SqlDialect) -> St
             format!("{col} {dir} {nulls}")
         }
         SqlDialect::Sqlite => {
+            let dir = if descending { "DESC" } else { "ASC" };
+            let null_bucket = if descending { "DESC" } else { "ASC" };
+            format!("{col} IS NULL {null_bucket}, {col} {dir}")
+        }
+        SqlDialect::Mysql => {
             let dir = if descending { "DESC" } else { "ASC" };
             let null_bucket = if descending { "DESC" } else { "ASC" };
             format!("{col} IS NULL {null_bucket}, {col} {dir}")
@@ -8656,6 +8903,31 @@ mod tests {
     }
 
     #[test]
+    fn mysql_string_enum_uses_native_enum_type() {
+        let schema = json!({
+            "status": {
+                "type": "string",
+                "required": true,
+                "enum": ["active", "paused"]
+            }
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "apps",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Mysql,
+        )
+        .unwrap();
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS `app1`.`apps`"), "{sql}");
+        assert!(
+            sql.contains("`status` ENUM('active', 'paused') NOT NULL"),
+            "{sql}"
+        );
+        assert!(!sql.contains("CHECK (`status` IN"), "{sql}");
+    }
+
+    #[test]
     fn c2_standalone_literal_field_emits_check_equality() {
         // A top-level (non-union) literal field — `kind: t.literal("login")`
         // alone — gets a `CHECK (kind = 'login')` constraint.
@@ -9684,6 +9956,12 @@ mod tests {
     }
 
     #[test]
+    fn dialect_mysql_encrypted_placeholder_is_from_base64_param() {
+        let p = SqlDialect::Mysql.encrypted_column_bind_placeholder(7);
+        assert_eq!(p, "FROM_BASE64(?)");
+    }
+
+    #[test]
     fn dialect_pg_wrap_encrypted_param_is_identity() {
         let v = SqlDialect::Postgres.wrap_encrypted_param("abc==".to_string());
         assert_eq!(v, "abc==");
@@ -9693,6 +9971,12 @@ mod tests {
     fn dialect_sqlite_wrap_encrypted_param_prepends_sentinel() {
         let v = SqlDialect::Sqlite.wrap_encrypted_param("abc==".to_string());
         assert_eq!(v, format!("{SQLITE_ENC_BLOB_PREFIX}abc=="));
+    }
+
+    #[test]
+    fn dialect_mysql_wrap_encrypted_param_is_identity() {
+        let v = SqlDialect::Mysql.wrap_encrypted_param("abc==".to_string());
+        assert_eq!(v, "abc==");
     }
 
     /// PG-flavour `build_insert` for an encrypted column must continue

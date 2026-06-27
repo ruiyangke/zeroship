@@ -914,6 +914,7 @@ impl IrAuthor {
         let target = match self.dialect {
             SqlDialect::Postgres => crate::validate::Dialect::Postgres,
             SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+            SqlDialect::Mysql => crate::validate::Dialect::Mysql,
         };
         // **PR10** — the non-guarded `load_and_lower` is the Confined creator entry;
         // pin the schema-confinement scope to the bound project schema (§2.7), so a
@@ -956,6 +957,7 @@ impl IrAuthor {
         let target = match self.dialect {
             SqlDialect::Postgres => crate::validate::Dialect::Postgres,
             SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+            SqlDialect::Mysql => crate::validate::Dialect::Mysql,
         };
         // **PR10** — derive the schema-confinement scope from the guard config's
         // trust posture (§2.7): Confined ⇒ pin the project schema (refuse
@@ -1480,7 +1482,7 @@ impl IrAuthor {
                 }
                 vec![decl.lower_drop_column(table, column)]
             }
-            Op::DropIndex { name, unique, .. } => {
+            Op::DropIndex { name, unique, table, .. } => {
                 // A bare-name DropIndex is rejected fail-closed UPSTREAM by the
                 // validator (§8.6); a table-hinted one reaches here.
                 //
@@ -1524,7 +1526,7 @@ impl IrAuthor {
                         expect: None,
                     });
                 }
-                vec![decl.lower_drop_index(&idx)]
+                vec![decl.lower_drop_index(table.as_deref(), &idx)]
             }
             Op::AlterColumnType { table, column, ty, using, .. } => {
                 // SQLite has NO `ALTER COLUMN` — a type change is reconciled by the
@@ -1857,6 +1859,7 @@ impl IrAuthor {
         let target = match dialect {
             SqlDialect::Postgres => crate::validate::Dialect::Postgres,
             SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+            SqlDialect::Mysql => crate::validate::Dialect::Mysql,
         };
         // Structural gate (a)/(b)/(d) BEFORE assembly. op_index 0 is a local
         // attribution; the loader's `validate_ir` already ran with the true op
@@ -2658,6 +2661,9 @@ impl IrAuthor {
                     )
                     .map_err(|e| IrLowerError::RenameLower(e.to_string()))
             }
+            SqlDialect::Mysql => Err(IrLowerError::RenameLower(
+                "renameColumn is not live-rendered for MySQL in render-only Phase 1".to_string(),
+            )),
         }
     }
 
@@ -2804,7 +2810,7 @@ fn render_view_op(
             let renderer = crate::dialect_renderer::renderer(dialect);
             renderer.validate_view_materialized(materialized)?;
             let qname = renderer.view_object_name(name, eff_schema)?;
-            let cols = render_view_columns(columns.as_deref())?;
+            let cols = render_view_columns(columns.as_deref(), dialect)?;
             let query_sql = render_view_query(query, eff_schema, dialect, scope)?;
             let replace = replace.unwrap_or(false);
             let mut create = renderer.view_create_prefix(materialized, replace)?;
@@ -2859,6 +2865,7 @@ fn render_view_query(
             let target = match dialect {
                 SqlDialect::Postgres => crate::validate::Dialect::Postgres,
                 SqlDialect::Sqlite => crate::validate::Dialect::Sqlite,
+                SqlDialect::Mysql => crate::validate::Dialect::Mysql,
             };
             crate::validate::validate_raw_view_body_sql(sql, target, 0, None, scope)
                 .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
@@ -2923,19 +2930,27 @@ fn render_join(
 
 fn render_select_item(item: &SelectItem, dialect: SqlDialect) -> Result<String, IrLowerError> {
     let (mut sql, alias) = match item {
-        SelectItem::ColRef { table, name, alias } => (render_col_ref(table.as_deref(), name)?, alias),
+        SelectItem::ColRef { table, name, alias } => {
+            (render_col_ref(table.as_deref(), name, dialect)?, alias)
+        }
         SelectItem::Expr { expr, alias } => (crate::dml::render_expr_inline(expr, dialect)?, alias),
     };
     if let Some(alias) = alias {
         sql.push_str(" AS ");
-        sql.push_str(&crate::dml::quote_bare_ident("column alias", alias)?);
+        sql.push_str(&crate::dml::quote_bare_ident_for_dialect(
+            "column alias",
+            alias,
+            dialect,
+        )?);
     }
     Ok(sql)
 }
 
 fn render_order_item(item: &OrderItem, dialect: SqlDialect) -> Result<String, IrLowerError> {
     let (mut sql, dir): (String, Option<OrderDir>) = match item {
-        OrderItem::ColRef { table, name, dir } => (render_col_ref(table.as_deref(), name)?, *dir),
+        OrderItem::ColRef { table, name, dir } => {
+            (render_col_ref(table.as_deref(), name, dialect)?, *dir)
+        }
         OrderItem::Expr { expr, dir } => (crate::dml::render_expr_inline(expr, dialect)?, *dir),
     };
     if let Some(dir) = dir {
@@ -2945,10 +2960,18 @@ fn render_order_item(item: &OrderItem, dialect: SqlDialect) -> Result<String, Ir
     Ok(sql)
 }
 
-fn render_col_ref(table: Option<&str>, name: &str) -> Result<String, IrLowerError> {
-    let qcol = crate::dml::quote_bare_ident("column", name)?;
+fn render_col_ref(
+    table: Option<&str>,
+    name: &str,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    let qcol = crate::dml::quote_bare_ident_for_dialect("column", name, dialect)?;
     if let Some(table) = table {
-        Ok(format!("{}.{}", crate::dml::quote_bare_ident("table alias", table)?, qcol))
+        Ok(format!(
+            "{}.{}",
+            crate::dml::quote_bare_ident_for_dialect("table alias", table, dialect)?,
+            qcol
+        ))
     } else {
         Ok(qcol)
     }
@@ -2962,15 +2985,20 @@ fn render_table_ref(
     crate::dialect_renderer::renderer(dialect).render_table_ref(table, eff_schema)
 }
 
-fn render_view_columns(columns: Option<&[String]>) -> Result<String, IrLowerError> {
+fn render_view_columns(
+    columns: Option<&[String]>,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
     let Some(columns) = columns else {
         return Ok(String::new());
     };
     if columns.is_empty() {
         return Ok(String::new());
     }
-    let qcols: Result<Vec<_>, _> =
-        columns.iter().map(|c| crate::dml::quote_bare_ident("view column", c)).collect();
+    let qcols: Result<Vec<_>, _> = columns
+        .iter()
+        .map(|c| crate::dml::quote_bare_ident_for_dialect("view column", c, dialect))
+        .collect();
     Ok(format!(" ({})", qcols?.join(", ")))
 }
 

@@ -258,9 +258,16 @@ pub enum RunError {
         last_error: String,
     },
     /// The DB URL selects a database engine this CLI does not support. An HONEST
-    /// refusal, not a panic — only the Postgres + SQLite backends are supported.
-    #[error("unsupported database engine (only postgres and sqlite are supported)")]
+    /// refusal, not a panic — only the known engine set is accepted.
+    #[error("unsupported database engine (supported: postgres, sqlite, mysql render-only)")]
     UnsupportedEngine,
+    /// MySQL exists as a render-only dialect in this phase. Any command that would
+    /// touch a real MySQL database fails closed until a backend/driver phase lands.
+    #[error(
+        "live MySQL execution is not implemented: MySQL is render-only in this phase \
+         (use `plan --sql --engine mysql` for offline SQL preview)"
+    )]
+    MysqlLiveExecUnimplemented,
     /// An explicit `--engine` (or `ZEROSHIP_MIGRATE_ENGINE` / config `engine`)
     /// contradicts the engine the DSN's unambiguous scheme implies. We refuse
     /// rather than silently trusting one side.
@@ -372,8 +379,10 @@ pub enum Engine {
     /// `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare filesystem path —
     /// the hardened [`SqliteBackend`] on that file. Carries the app-file path.
     Sqlite(PathBuf),
+    /// `mysql://` / `mysqlx://` / `mariadb://` — render-only in this phase. No
+    /// backend is opened; live runner commands fail closed.
+    Mysql,
     /// Any other explicit scheme (`redis://`, …) — unsupported by this binary.
-    /// Only Postgres + SQLite are supported.
     Unsupported,
 }
 
@@ -384,6 +393,7 @@ pub enum Engine {
 /// - `postgres://` / `postgresql://` ⇒ [`Engine::Postgres`].
 /// - `sqlite:` / `sqlite://` / `file:` / `:memory:` / a bare path ⇒
 ///   [`Engine::Sqlite`] with the extracted file path.
+/// - `mysql://` / `mysqlx://` / `mariadb://` ⇒ [`Engine::Mysql`] (render-only).
 /// - an explicit but unrecognised scheme (e.g. `redis://`) ⇒ [`Engine::Unsupported`].
 #[must_use]
 pub fn classify_engine(url: &str) -> Engine {
@@ -391,6 +401,12 @@ pub fn classify_engine(url: &str) -> Engine {
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
         return Engine::Postgres;
+    }
+    if lower.starts_with("mysql://")
+        || lower.starts_with("mysqlx://")
+        || lower.starts_with("mariadb://")
+    {
+        return Engine::Mysql;
     }
     // libpq **keyword/value** DSN (`host=… port=… dbname=…`) — the form the
     // existing PG callers (compose/ops, the `cli_platform_pg` suite) pass. The
@@ -435,7 +451,7 @@ fn is_libpq_keyword_dsn(dsn: &str) -> bool {
     })
 }
 
-/// The operator's EXPLICIT engine choice (`--engine pg|sqlite`). Distinct from the
+/// The operator's EXPLICIT engine choice (`--engine pg|sqlite|mysql`). Distinct from the
 /// resolved [`Engine`] (which carries the SQLite app-file path): this is just the
 /// kind, before a DSN is bound. It overrides DSN auto-detection and is checked for
 /// contradiction against an unambiguous DSN scheme.
@@ -445,6 +461,8 @@ pub enum EngineKind {
     Postgres,
     /// `--engine sqlite` — force the SQLite backend.
     Sqlite,
+    /// `--engine mysql` — render-only; live DB commands fail closed.
+    Mysql,
 }
 
 impl EngineKind {
@@ -453,13 +471,15 @@ impl EngineKind {
         match self {
             Self::Postgres => "pg",
             Self::Sqlite => "sqlite",
+            Self::Mysql => "mysql",
         }
     }
 }
 
 /// The engine a DSN's UNAMBIGUOUS scheme implies, if any. `postgres://` /
 /// `postgresql://` / a libpq keyword DSN ⇒ Postgres; `sqlite:` / `sqlite://` /
-/// `file:` / `:memory:` ⇒ SQLite. A BARE filesystem path is AMBIGUOUS (it has no
+/// `file:` / `:memory:` ⇒ SQLite; `mysql://` / `mysqlx://` / `mariadb://` ⇒ MySQL.
+/// A BARE filesystem path is AMBIGUOUS (it has no
 /// scheme — it defaults to SQLite under auto-detect, but `--engine` may legitimately
 /// resolve it either way), so this returns `None` for it. An unknown explicit
 /// scheme also returns `None` (it has no supported engine to contradict). This is
@@ -473,6 +493,12 @@ fn dsn_scheme_engine(url: &str) -> Option<EngineKind> {
         || is_libpq_keyword_dsn(trimmed)
     {
         return Some(EngineKind::Postgres);
+    }
+    if lower.starts_with("mysql://")
+        || lower.starts_with("mysqlx://")
+        || lower.starts_with("mariadb://")
+    {
+        return Some(EngineKind::Mysql);
     }
     if lower == ":memory:"
         || lower.starts_with("sqlite://")
@@ -495,7 +521,8 @@ fn dsn_scheme_engine(url: &str) -> Option<EngineKind> {
 ///   a *different* engine ([`dsn_scheme_engine`]), that is a hard
 ///   [`RunError::EngineConflict`] (we never silently trust one side). For an
 ///   AMBIGUOUS bare-path DSN the override resolves it deterministically: `pg` ⇒
-///   [`Engine::Postgres`], `sqlite` ⇒ the hardened SQLite backend on that path.
+///   [`Engine::Postgres`], `sqlite` ⇒ the hardened SQLite backend on that path,
+///   `mysql` ⇒ render-only [`Engine::Mysql`].
 ///
 /// # Errors
 /// [`RunError::EngineConflict`] when the override contradicts an unambiguous DSN
@@ -530,6 +557,7 @@ pub fn resolve_engine(database_url: &str, override_kind: Option<EngineKind>) -> 
         // returns it verbatim. For a `sqlite:`/`file:`/`:memory:` DSN it strips the
         // scheme the same way `classify_engine` would.
         EngineKind::Sqlite => Engine::Sqlite(sqlite_file_path(database_url)),
+        EngineKind::Mysql => Engine::Mysql,
     })
 }
 
@@ -670,6 +698,7 @@ pub async fn run_migrate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
         Engine::Postgres => run_migrate_pg(cfg).await,
         Engine::Sqlite(app) => run_migrate_sqlite(cfg, &app).await,
+        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -732,6 +761,7 @@ pub async fn run_status(cfg: &RunConfig) -> Result<RunReport, RunError> {
             let exec_cfg = sqlite_exec_cfg(cfg);
             status_via_backend(&backend, &exec_cfg, &migrations).await?
         }
+        Engine::Mysql => return Err(RunError::MysqlLiveExecUnimplemented),
         Engine::Unsupported => return Err(RunError::UnsupportedEngine),
     };
     Ok(RunReport::Status(Box::new(st)))
@@ -809,6 +839,7 @@ pub async fn run_resolve_pending(
                     .to_string(),
             ))
         }
+        Engine::Mysql => return Err(RunError::MysqlLiveExecUnimplemented),
         Engine::Unsupported => return Err(RunError::UnsupportedEngine),
     }
 
@@ -1031,6 +1062,7 @@ pub async fn run_validate(cfg: &RunConfig) -> Result<RunReport, RunError> {
     match cfg.resolve_engine()? {
         Engine::Postgres => run_validate_pg(cfg).await,
         Engine::Sqlite(app) => run_validate_sqlite(cfg, &app).await,
+        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -1371,6 +1403,7 @@ pub async fn run_dump_trailer(cfg: &RunConfig) -> Result<Vec<TrailerEntry>, RunE
                 })
                 .collect())
         }
+        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -1646,6 +1679,7 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
     match cfg.resolve_engine()? {
         Engine::Postgres => run_load_pg(cfg, &ddl, &entries).await,
         Engine::Sqlite(app) => run_load_sqlite(cfg, &app, &ddl, &entries).await,
+        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -1889,6 +1923,7 @@ pub async fn run_rollback(
     match cfg.resolve_engine()? {
         Engine::Postgres => run_rollback_pg(cfg, target).await,
         Engine::Sqlite(app) => run_rollback_sqlite(cfg, &app, target).await,
+        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented),
         Engine::Unsupported => Err(RunError::UnsupportedEngine),
     }
 }
@@ -2075,6 +2110,7 @@ async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
             // path hardens the connection but does not bootstrap the journal.
             open_sqlite_backend(app).map(|_| ()).map_err(|e| e.to_string())
         }
+        Engine::Mysql => Err(RunError::MysqlLiveExecUnimplemented.to_string()),
         Engine::Unsupported => Err(RunError::UnsupportedEngine.to_string()),
     }
 }
@@ -2149,6 +2185,23 @@ mod tests {
         }
     }
 
+    fn mysql_run_config() -> RunConfig {
+        RunConfig {
+            dir: std::path::PathBuf::from("/definitely/missing/mysql-render-only-migrations"),
+            database_url: "mysql://localhost/zeroship".to_string(),
+            engine_override: Some(EngineKind::Mysql),
+            profile: RunProfile::Trusted,
+            project_id: "mysql_render_only".to_string(),
+            project_schema: "app".to_string(),
+            schemas: Vec::new(),
+            extensions: Vec::new(),
+            meta_schema: "schema_migrations".to_string(),
+            yes: false,
+            statement_timeout: Duration::from_secs(60),
+            lock_timeout: Duration::from_secs(30),
+        }
+    }
+
     // ---- H1 destructive-gate decision (pure, no DB) ------------------------
 
     #[test]
@@ -2193,6 +2246,19 @@ mod tests {
         let plan = plan_with(false, true);
         let approval = destructive_gate_decision(&plan, true).expect("requires_approval + --yes");
         assert_eq!(approval, Approval::Approved);
+    }
+
+    #[test]
+    fn mysql_live_migrate_fails_closed_before_loading_dir() {
+        let cfg = mysql_run_config();
+        let err = compio::runtime::Runtime::new()
+            .expect("compio runtime")
+            .block_on(run_migrate(&cfg))
+            .expect_err("live MySQL migrate must be refused");
+        assert!(
+            matches!(err, RunError::MysqlLiveExecUnimplemented),
+            "expected MySQL fail-closed error, got {err:?}"
+        );
     }
 
     // ---- the runner mints a Platform config (token confined here) ----------
@@ -2295,6 +2361,10 @@ mod tests {
             Engine::Sqlite(PathBuf::from("/var/lib/zeroship/dev.sqlite"))
         );
 
+        assert_eq!(classify_engine("mysql://user@host/db"), Engine::Mysql);
+        assert_eq!(classify_engine("mysqlx://host/db"), Engine::Mysql);
+        assert_eq!(classify_engine("mariadb://host/db"), Engine::Mysql);
+
         // An explicit unknown scheme is the honest unsupported refusal.
         assert_eq!(classify_engine("redis://localhost:6379"), Engine::Unsupported);
     }
@@ -2306,6 +2376,7 @@ mod tests {
             "postgres://h/db",
             "host=h dbname=db",
             "sqlite:/tmp/x.db",
+            "mysql://h/db",
             "/bare/path.db",
             "redis://h",
         ] {
@@ -2328,6 +2399,10 @@ mod tests {
             resolve_engine("/data/app.db", Some(EngineKind::Postgres)).expect("ok"),
             Engine::Postgres
         );
+        assert_eq!(
+            resolve_engine("/data/app.db", Some(EngineKind::Mysql)).expect("ok"),
+            Engine::Mysql
+        );
     }
 
     #[test]
@@ -2339,6 +2414,10 @@ mod tests {
         assert_eq!(
             resolve_engine("postgres://h/db", Some(EngineKind::Postgres)).expect("ok"),
             Engine::Postgres
+        );
+        assert_eq!(
+            resolve_engine("mysql://h/db", Some(EngineKind::Mysql)).expect("ok"),
+            Engine::Mysql
         );
     }
 
@@ -2359,9 +2438,15 @@ mod tests {
         // --engine sqlite vs a libpq keyword DSN (also unambiguously PG).
         let err = resolve_engine("host=h dbname=db", Some(EngineKind::Sqlite)).unwrap_err();
         assert!(matches!(err, RunError::EngineConflict { .. }));
+        // --engine pg vs a mysql:// DSN.
+        let err = resolve_engine("mysql://h/db", Some(EngineKind::Postgres)).unwrap_err();
+        assert!(
+            matches!(err, RunError::EngineConflict { requested: "pg", dsn: "mysql" }),
+            "expected an engine conflict, got {err:?}"
+        );
     }
 
-    /// MED-2 RED: an UNSUPPORTED explicit scheme (`redis://`, `mysql://…`) must NOT
+    /// MED-2 RED: an UNSUPPORTED explicit scheme (`redis://`, etc.) must NOT
     /// be coerced by `--engine` into a file/connect attempt. With no override,
     /// `classify_engine` already refuses (Unsupported); `--engine` must still refuse
     /// — it must never make the unsupported-scheme case WORSE. The url
@@ -2372,12 +2457,6 @@ mod tests {
     fn resolve_engine_override_does_not_coerce_unsupported_scheme() {
         // --engine sqlite + redis://h must refuse, NOT open a file named "redis://h".
         let err = resolve_engine("redis://h", Some(EngineKind::Sqlite)).unwrap_err();
-        assert!(
-            matches!(err, RunError::UnsupportedEngine | RunError::EngineConflict { .. }),
-            "expected a clean refusal, got {err:?}"
-        );
-        // --engine pg + mysql://h/db must refuse, NOT hand mysql://h/db to libpq.
-        let err = resolve_engine("mysql://h/db", Some(EngineKind::Postgres)).unwrap_err();
         assert!(
             matches!(err, RunError::UnsupportedEngine | RunError::EngineConflict { .. }),
             "expected a clean refusal, got {err:?}"
@@ -2412,6 +2491,8 @@ mod tests {
         assert_eq!(dsn_scheme_engine("postgres://h/db"), Some(EngineKind::Postgres));
         assert_eq!(dsn_scheme_engine("sqlite:/x"), Some(EngineKind::Sqlite));
         assert_eq!(dsn_scheme_engine(":memory:"), Some(EngineKind::Sqlite));
+        assert_eq!(dsn_scheme_engine("mysql://h/db"), Some(EngineKind::Mysql));
+        assert_eq!(dsn_scheme_engine("mariadb://h/db"), Some(EngineKind::Mysql));
     }
 
     #[test]

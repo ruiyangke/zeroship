@@ -111,6 +111,8 @@ pub enum Dialect {
     Postgres,
     /// SQLite.
     Sqlite,
+    /// MySQL.
+    Mysql,
 }
 
 impl Dialect {
@@ -120,6 +122,7 @@ impl Dialect {
         match self {
             Dialect::Postgres => "postgres",
             Dialect::Sqlite => "sqlite",
+            Dialect::Mysql => "mysql",
         }
     }
 }
@@ -1147,42 +1150,56 @@ fn validate_trigger_dialect(
                 "use action: { kind: \"executeFunction\", name: \"...\" } and create the trigger function separately".to_string(),
             ));
         }
-        (Dialect::Sqlite, crate::ir::TriggerAction::ExecuteFunction { .. }) => {
+        (Dialect::Sqlite | Dialect::Mysql, crate::ir::TriggerAction::ExecuteFunction { .. }) => {
+            let dialect_name = target_dialect.as_str();
             return Err(unsupported_trigger(
                 "executeFunction",
                 target_dialect,
                 op_index,
                 ts_location,
-                "SQLite has no CREATE TRIGGER EXECUTE FUNCTION form".to_string(),
-                "use action: { kind: \"body\", statements: [...] } for SQLite triggers".to_string(),
+                format!("{dialect_name} has no CREATE TRIGGER EXECUTE FUNCTION form"),
+                format!("use action: {{ kind: \"body\", statements: [...] }} for {dialect_name} triggers"),
             ));
         }
         _ => {}
     }
 
-    if matches!(target_dialect, Dialect::Sqlite)
+    if matches!(target_dialect, Dialect::Sqlite | Dialect::Mysql)
         && events.iter().any(|e| matches!(e, crate::ir::TriggerEvent::Truncate))
     {
+        let dialect_name = target_dialect.as_str();
         return Err(unsupported_trigger(
             "triggerEventTruncate",
             target_dialect,
             op_index,
             ts_location,
-            "SQLite has no TRUNCATE trigger event".to_string(),
-            "remove the truncate event for SQLite, or target Postgres for this trigger".to_string(),
+            format!("{dialect_name} has no TRUNCATE trigger event"),
+            format!("remove the truncate event for {dialect_name}, or target Postgres for this trigger"),
         ));
     }
 
-    if matches!(target_dialect, Dialect::Sqlite)
+    if matches!(target_dialect, Dialect::Mysql) && events.len() > 1 {
+        return Err(unsupported_trigger(
+            "triggerMultipleEvents",
+            target_dialect,
+            op_index,
+            ts_location,
+            "MySQL CREATE TRIGGER accepts exactly one trigger event".to_string(),
+            "split this into one trigger per event when targeting MySQL".to_string(),
+        ));
+    }
+
+    if matches!(target_dialect, Dialect::Sqlite | Dialect::Mysql)
         && matches!(for_each, crate::ir::ForEach::Statement)
     {
+        let dialect_name = target_dialect.as_str();
         return Err(unsupported_trigger(
             "forEachStatement",
             target_dialect,
             op_index,
             ts_location,
-            "SQLite triggers are row-level only".to_string(),
-            "use forEach: \"row\" for SQLite, or target Postgres for statement-level triggers".to_string(),
+            format!("{dialect_name} triggers are row-level only"),
+            format!("use forEach: \"row\" for {dialect_name}, or target Postgres for statement-level triggers"),
         ));
     }
 
@@ -1455,7 +1472,7 @@ fn validate_identity_placement(
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
-    if col.identity.is_none() || !matches!(target_dialect, Dialect::Sqlite) {
+    if col.identity.is_none() || !matches!(target_dialect, Dialect::Sqlite | Dialect::Mysql) {
         return Ok(());
     }
     let err = |reason: String| AuthoringError {
@@ -1466,22 +1483,23 @@ fn validate_identity_placement(
         dialect: target_dialect,
         reason,
         suggested_fix: Some(
-            "on SQLite, use identity only on the sole integer primary key, or remove \
+            "use identity only on the sole integer primary key for this dialect, or remove \
              `.identity(...)`"
                 .to_string(),
         ),
     };
     if is_add_column {
         return Err(err(
-            "identity: non-PK identity has no sound SQLite emulation; SQLite \
-             AUTOINCREMENT is only sound on an inline INTEGER PRIMARY KEY"
+            "identity: non-PK identity has no sound target-dialect render; SQLite \
+             AUTOINCREMENT and MySQL AUTO_INCREMENT are only sound on an inline \
+             integer primary key"
                 .to_string(),
         ));
     }
     let Some(pk_cols) = pk_cols else {
         return Err(err(format!(
             "identity: column {:?} is not the declared primary key; non-PK identity \
-             has no sound SQLite emulation",
+             has no sound target-dialect render",
             col.name
         )));
     };
@@ -1489,8 +1507,8 @@ fn validate_identity_placement(
         return Ok(());
     }
     Err(err(format!(
-        "identity: column {:?} is part of {:?}, but SQLite identity is only sound \
-         for the sole integer primary key",
+        "identity: column {:?} is part of {:?}, but this dialect's identity is only \
+         sound for the sole integer primary key",
         col.name, pk_cols
     )))
 }
