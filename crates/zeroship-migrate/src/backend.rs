@@ -79,6 +79,22 @@ pub trait MigrationBackend {
     /// in the generic body (e.g. `transaction:false` on SQLite, design §2.3/L3).
     fn dialect(&self) -> SqlDialect;
 
+    /// Whether this backend can commit DDL atomically with its journal row inside
+    /// one transaction. Postgres/SQLite return true; auto-commit DDL dialects
+    /// return false and force the two-phase started/completed path for every
+    /// migration.
+    fn ddl_is_transactional(&self) -> bool;
+
+    /// Whether a migration must take the two-phase non-transactional apply path.
+    ///
+    /// Existing Postgres/SQLite behavior reduces exactly to
+    /// `!m.flags.transactional` because both backends report transactional DDL. A
+    /// future auto-commit DDL backend forces this path regardless of the
+    /// per-migration flag.
+    fn uses_two_phase_path(&self, m: &Migration) -> bool {
+        !self.ddl_is_transactional() || !m.flags.transactional
+    }
+
     // -- connection / session I/O -------------------------------------------
 
     /// Acquire the project apply-serialization lock (PG `pg_advisory_lock`).
@@ -101,39 +117,24 @@ pub trait MigrationBackend {
 
     // -- per-migration confined apply ---------------------------------------
 
-    /// Apply ONE migration transactionally (design §2.3): `BEGIN; SET LOCAL …;
-    /// SET LOCAL ROLE migrator; <up>; RESET ROLE; INSERT journal; (edges); COMMIT`.
-    /// DDL + journal row commit atomically. Used for the default path AND the
-    /// repeatable re-apply (`kind="repeatable"`, `supersedes` empty).
-    async fn apply_up_transactional(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-        applied_by: &str,
-        supersedes: &[&str],
-        kind: &str,
-    ) -> Result<(), ApplyError>;
-
-    /// Configure the session for the **non-txn** path (no transaction to scope
-    /// `SET LOCAL` within): pin `search_path` + the mandatory timeouts. Restored
-    /// on exit by [`restore_session`](Self::restore_session).
-    async fn configure_session_non_txn(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-    ) -> Result<(), ApplyError>;
-
-    /// Apply ONE migration non-transactionally (design §2.4): two-phase
-    /// `started` marker → run the confined `<up>` → immutable `completed` row +
-    /// clear marker, with idempotent crash recovery when `had_inflight`.
-    /// Returns `true` iff this was a recovery.
-    async fn apply_up_non_transactional(
+    /// Apply ONE migration. The backend owns the atomicity decision:
+    ///
+    /// - transactional-DDL + `transactional:true`: `BEGIN; SET LOCAL …;
+    ///   SET LOCAL ROLE migrator; <up>; RESET ROLE; INSERT journal; (edges);
+    ///   COMMIT`;
+    /// - non-transactional-DDL OR `transactional:false`: two-phase `started`
+    ///   marker → run the confined `<up>` → immutable `completed` row + clear
+    ///   marker, with idempotent crash recovery when `had_inflight`.
+    ///
+    /// Returns `true` iff a two-phase apply recovered a prior inflight marker.
+    async fn apply_one(
         &self,
         cfg: &ExecutorConfig,
         m: &Migration,
         applied_by: &str,
         had_inflight: bool,
         supersedes: &[&str],
+        kind: &str,
     ) -> Result<bool, ApplyError>;
 
     /// Roll back ONE migration transactionally (design §5): `BEGIN; SET LOCAL …;
@@ -307,7 +308,7 @@ pub trait MigrationBackend {
     /// is an engine-mode structured operation (drop-stale-temp / CREATE new / copy /
     /// drop old / rename / replay captured dependents) with `foreign_keys` toggles
     /// straddling the transaction — so it cannot flow through
-    /// [`apply_up_transactional`](Self::apply_up_transactional); the engine drives it
+    /// [`apply_one`](Self::apply_one); the engine drives it
     /// here, after the destructive/approval gate it already runs for the rebuild's
     /// `destructive`-flagged journal migration.
     ///
@@ -566,6 +567,10 @@ impl MigrationBackend for PostgresBackend<'_> {
         SqlDialect::Postgres
     }
 
+    fn ddl_is_transactional(&self) -> bool {
+        true
+    }
+
     async fn acquire_project_lock(&self, project_id: &str) -> Result<(), ApplyError> {
         crate::executor::pg::acquire_project_lock(self.conn, project_id).await
     }
@@ -588,38 +593,33 @@ impl MigrationBackend for PostgresBackend<'_> {
         }
     }
 
-    async fn apply_up_transactional(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-        applied_by: &str,
-        supersedes: &[&str],
-        kind: &str,
-    ) -> Result<(), ApplyError> {
-        crate::executor::pg::apply_transactional(self.conn, cfg, m, applied_by, supersedes, kind)
-            .await
-    }
-
-    async fn configure_session_non_txn(
-        &self,
-        cfg: &ExecutorConfig,
-        m: &Migration,
-    ) -> Result<(), ApplyError> {
-        crate::executor::pg::configure_session_non_txn(self.conn, cfg, m).await
-    }
-
-    async fn apply_up_non_transactional(
+    async fn apply_one(
         &self,
         cfg: &ExecutorConfig,
         m: &Migration,
         applied_by: &str,
         had_inflight: bool,
         supersedes: &[&str],
+        kind: &str,
     ) -> Result<bool, ApplyError> {
-        crate::executor::pg::apply_non_transactional(
-            self.conn, cfg, m, applied_by, had_inflight, supersedes,
-        )
-        .await
+        if self.uses_two_phase_path(m) {
+            crate::executor::pg::configure_session_non_txn(self.conn, cfg, m).await?;
+            crate::executor::pg::apply_non_transactional(
+                self.conn,
+                cfg,
+                m,
+                applied_by,
+                had_inflight,
+                supersedes,
+            )
+            .await
+        } else {
+            crate::executor::pg::apply_transactional(
+                self.conn, cfg, m, applied_by, supersedes, kind,
+            )
+            .await?;
+            Ok(false)
+        }
     }
 
     async fn rollback_one_transactional(

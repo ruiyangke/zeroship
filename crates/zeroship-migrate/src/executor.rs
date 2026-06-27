@@ -1141,10 +1141,10 @@ async fn apply_locked<B: MigrationBackend>(
         // (re-runnable by crash recovery). Reject the non-idempotent form with a
         // clear error. Behind the seam: PG parses with `pg_query`; SQLite rejects
         // `transaction:false` at the dialect boundary (design §2.3/L3). The gate
-        // mirrors the apply-path decision ([`uses_two_phase_path`]): a
-        // `transaction:false` migration must be idempotent (re-runnable by crash
-        // recovery).
-        if uses_two_phase_path(m) {
+        // mirrors the backend-owned apply-path decision: a `transaction:false`
+        // migration, or any migration on a non-transactional-DDL backend, must be
+        // idempotent (re-runnable by crash recovery).
+        if backend.uses_two_phase_path(m) {
             backend.validate_non_txn(m)?;
         }
     }
@@ -1173,18 +1173,6 @@ async fn apply_locked<B: MigrationBackend>(
     apply_repeatables(backend, cfg, &repeatables, applied_by, &mut outcome).await?;
 
     Ok(outcome)
-}
-
-/// Whether a migration must take the **two-phase non-transactional** apply path
-/// (`started → completed` inflight marker + crash recovery) rather than the atomic
-/// `BEGIN; <up>; INSERT journal; COMMIT` path.
-///
-/// A migration takes the two-phase path when it is `transaction:false` — i.e. it
-/// contains a statement that cannot run inside a transaction (Postgres `CREATE
-/// INDEX CONCURRENTLY` / `ALTER TYPE … ADD VALUE`). This is the per-migration
-/// opt-in; every transactional migration on PG/SQLite takes the atomic path.
-fn uses_two_phase_path(m: &Migration) -> bool {
-    !m.flags.transactional
 }
 
 /// The execute pass (design §2.3 step 6): for each pending migration, evaluate
@@ -1259,28 +1247,15 @@ async fn execute_pending<B: MigrationBackend>(
         // repeatable never reaches the versioned pipeline (it is partitioned out).
         let kind = if sups.is_empty() { "apply" } else { "squash" };
 
-        if uses_two_phase_path(m) {
-            // Two-phase `started → completed` path. Reached when the migration is
-            // `transaction:false` (PG `CREATE INDEX CONCURRENTLY` / `ALTER TYPE …
-            // ADD VALUE`); SQLite has no non-txn DDL so it never fires there.
-            //
-            // Mandatory timeouts + pinned search_path on the session (the non-txn
-            // path has no transaction to SET LOCAL within). Restored on exit by
-            // `apply` so nothing leaks (H2). Per-migration timeout applied (H3).
-            backend.configure_session_non_txn(cfg, m).await?;
-            let recovered = backend
-                .apply_up_non_transactional(cfg, m, applied_by, had_inflight, &sups)
-                .await?;
-            if recovered {
-                outcome.recovered.push(version.to_string());
-            }
-        } else {
-            // Atomic path: the `<up>` and its journal row commit together in one
-            // `BEGIN … COMMIT`. The default for a transactional migration on a
-            // transactional backend (PG/SQLite).
-            backend
-                .apply_up_transactional(cfg, m, applied_by, &sups, kind)
-                .await?;
+        // The backend owns the atomicity strategy. On today's PG/SQLite backends,
+        // `ddl_is_transactional() == true`, so this routes exactly like the old
+        // executor branch: `transactional:false` uses two-phase, everything else
+        // uses the atomic apply.
+        let recovered = backend
+            .apply_one(cfg, m, applied_by, had_inflight, &sups, kind)
+            .await?;
+        if recovered {
+            outcome.recovered.push(version.to_string());
         }
         outcome.applied.push(version.to_string());
     }
@@ -1370,15 +1345,16 @@ async fn apply_repeatables<B: MigrationBackend>(
             continue;
         }
 
-        // Replace-style: always transactional, never superseding. `apply_transactional`
-        // runs `up` under the migrator role and appends a fresh `completed` event with
-        // the NEW checksum — exactly the re-apply record the next deploy compares against.
+        // Replace-style: always transactional on today's PG/SQLite backends, never
+        // superseding. `apply_one` runs `up` under the migrator role and appends a
+        // fresh `completed` event with the NEW checksum — exactly the re-apply record
+        // the next deploy compares against.
         // Stamped `kind='repeatable'` (v3 Plan E re-critic): the journaled kind is the
         // tamper anchor, so the drift exemption can distinguish a genuine repeatable
         // re-run from a flipped once-only, and `latest_completed_checksums` reads only
         // `kind='repeatable'` rows for the re-run oracle.
         backend
-            .apply_up_transactional(cfg, m, applied_by, &[], "repeatable")
+            .apply_one(cfg, m, applied_by, false, &[], "repeatable")
             .await?;
         outcome.applied.push(version.to_string());
     }

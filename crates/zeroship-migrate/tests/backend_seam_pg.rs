@@ -115,6 +115,28 @@ async fn pg_backend_reports_postgres_dialect() {
     assert_eq!(backend.dialect(), SqlDialect::Postgres);
 }
 
+/// Selector pin for ARCH P2a: PG has transactional DDL, so the backend-owned
+/// two-phase selector reduces exactly to the migration flag.
+#[compio::test]
+async fn pg_backend_transactional_ddl_selector_matches_migration_flag() {
+    let conn = pg().await;
+    let backend = PostgresBackend::new(&conn);
+    let transactional = mig(
+        MigrationId::generate(),
+        "default_txn",
+        "CREATE TABLE selector_default (id bigint)",
+    );
+    let non_transactional = mig_nontxn(
+        MigrationId::generate(),
+        "nontxn",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS selector_idx ON selector_default (id)",
+    );
+
+    assert!(backend.ddl_is_transactional());
+    assert!(!backend.uses_two_phase_path(&transactional));
+    assert!(backend.uses_two_phase_path(&non_transactional));
+}
+
 /// `ensure_journal` + `applied` round-trip THROUGH THE TRAIT: a fresh meta schema
 /// has an empty net-state, and the journal bootstrap is the one the seam drives.
 #[compio::test]
