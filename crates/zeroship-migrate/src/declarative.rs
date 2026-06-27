@@ -255,7 +255,9 @@ fn sqlite_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
 }
 
 fn column_type_for_render(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> String {
-    if matches!(dialect, SqlDialect::Sqlite) && sqlite_identity_pk(c, inline_pk) {
+    if let Some(ty) = &c.ddl_type_override {
+        ty.clone()
+    } else if matches!(dialect, SqlDialect::Sqlite) && sqlite_identity_pk(c, inline_pk) {
         "INTEGER".to_string()
     } else if matches!(dialect, SqlDialect::Sqlite) {
         sqlite_ddl_type(&c.data_type).to_string()
@@ -263,6 +265,14 @@ fn column_type_for_render(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bo
         mysql_ddl_type(&c.data_type).to_string()
     } else {
         ddl_type(&c.data_type).to_string()
+    }
+}
+
+fn inline_checks_clause(c: &ColumnSnapshot) -> String {
+    if c.inline_checks.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", c.inline_checks.join(" "))
     }
 }
 
@@ -325,6 +335,10 @@ fn has_generated_or_identity(t: &TableSnapshot) -> bool {
     t.columns
         .iter()
         .any(|c| c.generated.is_some() || c.identity.is_some())
+}
+
+fn has_inline_checks(t: &TableSnapshot) -> bool {
+    t.columns.iter().any(|c| !c.inline_checks.is_empty())
 }
 
 /// A lowered migration paired with its STRUCTURAL per-statement list — the exact
@@ -1180,6 +1194,7 @@ fn column_snapshot_for_field(
         identity: f.identity,
         encryption_sentinel,
         comment_sentinel,
+        ..Default::default()
     })
 }
 
@@ -1610,6 +1625,7 @@ pub(crate) fn build_table_snapshot(
                     identity: None,
                     encryption_sentinel: None,
                     comment_sentinel,
+                    ..Default::default()
                 });
             }
             // CHECK constraints (#3 literal-pin, #4 min/max + enum). These are
@@ -2045,6 +2061,8 @@ fn fts_objects_pg(
         // NOT a drift attribute (excluded from `ColumnSnapshot` equality) — the
         // `__fts` COLUMN itself round-trips as a plain nullable tsvector column.
         default: Some(format!("{GENERATED_PREFIX}{generation_expr}")),
+        ddl_type_override: None,
+        inline_checks: Vec::new(),
         generated: None,
         identity: None,
         encryption_sentinel: None,
@@ -3656,7 +3674,7 @@ impl DeclarativeAuthor {
             ))
         })?;
         if let Some(snapshot) = desired.snapshot.tables.get(table) {
-            if has_generated_or_identity(snapshot) {
+            if has_generated_or_identity(snapshot) || has_inline_checks(snapshot) {
                 return Ok(self
                     .render_create_table_sqlite_snapshot_statements(table, snapshot)
                     .join(";\n"));
@@ -4359,6 +4377,7 @@ impl DeclarativeAuthor {
             // #4: emit the DEFAULT clause (emission-only metadata), including the
             // legacy T12 `__fts` generated-column sentinel path.
             let default = default_clause(c.default.as_deref());
+            let checks = inline_checks_clause(c);
             // **P4 HALF A** — the inline `/* zsenc:… */` sentinel rides between
             // the type and the constraints, exactly as the shared kernel's
             // `field_to_column_for_dialect` bakes it, so a `generate`d encrypted
@@ -4369,7 +4388,7 @@ impl DeclarativeAuthor {
                 .map(|s| format!(" {s}"))
                 .unwrap_or_default();
             parts.push(format!(
-                "{} {}{}{}{}{}{}{}",
+                "{} {}{}{}{}{}{}{}{}",
                 quote_ident(&c.name),
                 ty,
                 enc,
@@ -4378,6 +4397,7 @@ impl DeclarativeAuthor {
                 pk,
                 null,
                 default,
+                checks,
             ));
         }
         for fk in inline_fks {
@@ -4434,6 +4454,7 @@ impl DeclarativeAuthor {
             let null = null_clause(c, SqlDialect::Sqlite, inline_pk);
             let generated = generated_clause(c.generated.as_ref());
             let default = default_clause(c.default.as_deref());
+            let checks = inline_checks_clause(c);
             let enc = c
                 .encryption_sentinel
                 .as_deref()
@@ -4448,7 +4469,7 @@ impl DeclarativeAuthor {
                 String::new()
             };
             parts.push(format!(
-                "{} {}{}{}{}{}{}{}",
+                "{} {}{}{}{}{}{}{}{}",
                 quote_ident(&c.name),
                 ty,
                 enc,
@@ -4457,6 +4478,7 @@ impl DeclarativeAuthor {
                 pk,
                 null,
                 default,
+                checks,
             ));
         }
         for c in &t.constraints {
@@ -4504,8 +4526,9 @@ impl DeclarativeAuthor {
             let identity = mysql_identity_clause(c);
             let generated = mysql_generated_clause(c.generated.as_ref());
             let default = mysql_default_clause(c.default.as_deref());
+            let checks = inline_checks_clause(c);
             parts.push(format!(
-                "{} {}{}{}{}{}{}",
+                "{} {}{}{}{}{}{}{}",
                 mysql_quote_ident(&c.name),
                 ty,
                 identity,
@@ -4513,6 +4536,7 @@ impl DeclarativeAuthor {
                 pk,
                 null,
                 default,
+                checks,
             ));
         }
         for fk in inline_fks {
@@ -4687,7 +4711,7 @@ impl DeclarativeAuthor {
     /// fraction), so there is no structural down. A re-diff after applying it is
     /// clean because live then matches desired.
     fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
-        let ty = ddl_type(&c.data_type);
+        let ty = column_type_for_render(c, self.dialect, false);
         let up = format!(
             "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{}",
             self.qualified(table),
@@ -4945,7 +4969,7 @@ impl DeclarativeAuthor {
                 // §6.4 byte-identity holds on the SQLite leg too. The `down` is the
                 // unqualified `DROP TABLE` (main IS the app file), byte-identical to
                 // the differ's SQLite create-table down.
-                let statements = if has_generated_or_identity(snapshot) {
+                let statements = if has_generated_or_identity(snapshot) || has_inline_checks(snapshot) {
                     self.render_create_table_sqlite_snapshot_statements(table, snapshot)
                 } else {
                     self.render_create_table_sqlite_value_statements(table, sqlite_schema)?
@@ -5319,6 +5343,7 @@ impl DdlEmitter for PgEmitter {
         let generated = generated_clause(c.generated.as_ref());
         let default = default_clause(c.default.as_deref());
         let identity = pg_identity_clause(c);
+        let checks = inline_checks_clause(c);
         let enc = c
             .encryption_sentinel
             .as_deref()
@@ -5326,7 +5351,7 @@ impl DdlEmitter for PgEmitter {
             .unwrap_or_default();
         let table_ref = self.qualified(table);
         let add = format!(
-            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}",
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}{}",
             table_ref,
             quote_ident(&c.name),
             column_type_for_render(c, SqlDialect::Postgres, inline_pk),
@@ -5335,6 +5360,7 @@ impl DdlEmitter for PgEmitter {
             generated,
             null,
             default,
+            checks,
         );
         let mut up: Vec<String> = vec![add];
         // **P4 HALF A** (PG only) — a column added via ADD COLUMN carries its comment
@@ -5527,6 +5553,7 @@ impl DdlEmitter for SqliteEmitter {
         let null = null_clause(c, SqlDialect::Sqlite, inline_pk);
         let generated = generated_clause(c.generated.as_ref());
         let default = default_clause(c.default.as_deref());
+        let checks = inline_checks_clause(c);
         // **P4 HALF A** — inline `/* zsenc:… */` for an encrypted column added
         // after the table exists.
         let enc = c
@@ -5564,7 +5591,7 @@ impl DdlEmitter for SqliteEmitter {
             ddl_type(&c.data_type).to_string()
         };
         let up = format!(
-            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}",
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}{}",
             table_ref,
             quote_ident(&c.name),
             ty,
@@ -5573,6 +5600,7 @@ impl DdlEmitter for SqliteEmitter {
             generated,
             null,
             default,
+            checks,
         );
         let down = format!(
             "ALTER TABLE {} DROP COLUMN {}",
@@ -5670,9 +5698,10 @@ impl DdlEmitter for MysqlEmitter {
         let generated = mysql_generated_clause(c.generated.as_ref());
         let default = mysql_default_clause(c.default.as_deref());
         let identity = mysql_identity_clause(c);
+        let checks = inline_checks_clause(c);
         let table_ref = self.qualified(table);
         let up = format!(
-            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}",
+            "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}",
             table_ref,
             mysql_quote_ident(&c.name),
             column_type_for_render(c, SqlDialect::Mysql, inline_pk),
@@ -5680,6 +5709,7 @@ impl DdlEmitter for MysqlEmitter {
             generated,
             null,
             default,
+            checks,
         );
         let down = format!(
             "ALTER TABLE {} DROP COLUMN {}",

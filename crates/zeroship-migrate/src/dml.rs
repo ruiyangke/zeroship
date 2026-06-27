@@ -602,33 +602,52 @@ fn render_unary(op: UnaryOp, operand: &str) -> String {
 /// casts render the same SQL spelling as the bound path. NO binds — the backfill
 /// executor pages the statement and cannot carry positional binds.
 pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlError> {
+    render_expr_inline_with_col(expr, dialect, &|name| {
+        quote_ident_for_dialect("column", name, dialect)
+    })
+}
+
+pub(crate) fn render_expr_inline_with_col<F>(
+    expr: &Expr,
+    dialect: SqlDialect,
+    col_ref: &F,
+) -> Result<String, DmlError>
+where
+    F: Fn(&str) -> Result<String, DmlError>,
+{
     Ok(match expr {
-        Expr::ColRef { name } => quote_ident_for_dialect("column", name, dialect)?,
+        Expr::ColRef { name } => col_ref(name)?,
         Expr::Literal { value } => inline_literal(value)?,
         Expr::BinOp { op, lhs, rhs } => {
-            let l = render_expr_inline(lhs, dialect)?;
-            let r = render_expr_inline(rhs, dialect)?;
+            let l = render_expr_inline_with_col(lhs, dialect, col_ref)?;
+            let r = render_expr_inline_with_col(rhs, dialect, col_ref)?;
             format!("({} {} {})", l, binary_op_sql(*op), r)
         }
-        Expr::UnaryOp { op, operand } => {
-            render_unary(*op, &render_expr_inline(operand, dialect)?)
-        }
+        Expr::UnaryOp { op, operand } => render_unary(
+            *op,
+            &render_expr_inline_with_col(operand, dialect, col_ref)?,
+        ),
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
             for b in branches {
-                let c = render_expr_inline(&b.condition, dialect)?;
-                let r = render_expr_inline(&b.result, dialect)?;
+                let c = render_expr_inline_with_col(&b.condition, dialect, col_ref)?;
+                let r = render_expr_inline_with_col(&b.result, dialect, col_ref)?;
                 s.push_str(&format!(" WHEN {c} THEN {r}"));
             }
             if let Some(e) = r#else {
-                s.push_str(&format!(" ELSE {}", render_expr_inline(e, dialect)?));
+                s.push_str(&format!(
+                    " ELSE {}",
+                    render_expr_inline_with_col(e, dialect, col_ref)?
+                ));
             }
             s.push_str(" END");
             s
         }
         Expr::FnCall { r#fn, args } => {
             let rs: Result<Vec<_>, _> =
-                args.iter().map(|a| render_expr_inline(a, dialect)).collect();
+                args.iter()
+                    .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
+                    .collect();
             render_scalar_fn_call(*r#fn, &rs?)
         }
         Expr::FnSynth { r#fn, args } => match r#fn {
@@ -643,12 +662,14 @@ pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<Str
                         args.len()
                     )));
                 }
-                let col_sql = render_expr_inline(&args[0], dialect)?;
+                let col_sql = render_expr_inline_with_col(&args[0], dialect, col_ref)?;
                 render_split_part(&col_sql, &args[1], &args[2], dialect)?
             }
             SynthFn::ConcatWs => {
                 let rs: Result<Vec<_>, _> =
-                    args.iter().map(|a| render_expr_inline(a, dialect)).collect();
+                    args.iter()
+                        .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
+                        .collect();
                 render_concat_ws(&rs?, dialect)
             }
             SynthFn::Now => crate::dialect_renderer::renderer(dialect).synth_now(),
@@ -657,7 +678,7 @@ pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<Str
         Expr::Cast { operand, target } => {
             format!(
                 "CAST({} AS {})",
-                render_expr_inline(operand, dialect)?,
+                render_expr_inline_with_col(operand, dialect, col_ref)?,
                 cast_target_sql(*target, dialect)
             )
         }

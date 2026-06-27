@@ -55,13 +55,16 @@ use crate::declarative::{
 };
 use crate::dialect_renderer::{Capability, DialectSupports};
 use crate::drift::{
-    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
+    TableSnapshot, ViewSnapshot,
 };
 use crate::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction,
 };
 use crate::ir_author::{
-    create_index_snapshot, derived_constraint_name, index_method_access, ir_column_to_field,
+    create_index_snapshot, derived_constraint_name, enum_inline_check, index_method_access,
+    ir_column_to_field, mysql_enum_type, render_domain_check, render_ir_default,
+    IrLowerError, NamedTypeRegistry,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -84,6 +87,24 @@ pub enum FoldError {
     DuplicateView(String),
     /// A `dropView` named a view not present in the folded schema.
     MissingView(String),
+    /// A column references a named enum/domain that has not been registered.
+    NamedTypeMissing {
+        /// `"enum"` or `"domain"`.
+        kind: &'static str,
+        /// Referenced type name.
+        name: String,
+    },
+    /// A named enum/domain cannot be folded soundly.
+    NamedTypeUnsupported {
+        /// `"enum"` or `"domain"`.
+        kind: &'static str,
+        /// Referenced type name.
+        name: String,
+        /// Why it cannot be folded.
+        reason: &'static str,
+    },
+    /// Rendering named-type metadata failed.
+    NamedTypeRender(String),
     /// An op targeted a column not present on its table.
     MissingColumn {
         /// The table.
@@ -144,6 +165,13 @@ impl std::fmt::Display for FoldError {
             FoldError::DuplicateTable(t) => write!(f, "fold: table `{t}` already exists"),
             FoldError::DuplicateView(v) => write!(f, "fold: view `{v}` already exists"),
             FoldError::MissingView(v) => write!(f, "fold: view `{v}` does not exist"),
+            FoldError::NamedTypeMissing { kind, name } => {
+                write!(f, "fold: {kind} `{name}` is not registered")
+            }
+            FoldError::NamedTypeUnsupported { kind, name, reason } => {
+                write!(f, "fold: {kind} `{name}` is unsupported: {reason}")
+            }
+            FoldError::NamedTypeRender(e) => write!(f, "fold: named type render error: {e}"),
             FoldError::MissingColumn { table, column } => {
                 write!(f, "fold: column `{table}.{column}` does not exist")
             }
@@ -175,6 +203,16 @@ impl std::error::Error for FoldError {}
 impl From<DeclarativeError> for FoldError {
     fn from(e: DeclarativeError) -> Self {
         FoldError::Shape(e)
+    }
+}
+
+fn fold_named_type_error(e: IrLowerError) -> FoldError {
+    match e {
+        IrLowerError::NamedTypeMissing { kind, name } => FoldError::NamedTypeMissing { kind, name },
+        IrLowerError::NamedTypeUnsupported { kind, name, reason } => {
+            FoldError::NamedTypeUnsupported { kind, name, reason }
+        }
+        other => FoldError::NamedTypeRender(other.to_string()),
     }
 }
 
@@ -240,9 +278,59 @@ pub fn fold_ops(
 ) -> Result<SchemaSnapshot, FoldError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
+    let mut named_types = NamedTypeRegistry::default();
+    let mut named_type_snapshots: BTreeMap<String, NamedTypeSnapshot> = BTreeMap::new();
 
     for op in ops {
         match op {
+            Op::CreateEnum { name, values, .. } => {
+                named_types
+                    .create_enum(name, project_schema, values)
+                    .map_err(fold_named_type_error)?;
+                if dialect.supports(Capability::MaterializedEnumType) {
+                    named_type_snapshots.insert(
+                        name.clone(),
+                        NamedTypeSnapshot {
+                            kind: "enum".to_string(),
+                        },
+                    );
+                }
+            }
+            Op::DropEnum { name, .. } => {
+                named_types.drop_enum(name);
+                named_type_snapshots.remove(name);
+            }
+            Op::CreateDomain {
+                name,
+                as_type,
+                check,
+                default,
+                not_null,
+                ..
+            } => {
+                named_types
+                    .create_domain(
+                        name,
+                        project_schema,
+                        as_type,
+                        check,
+                        default,
+                        not_null.unwrap_or(false),
+                    )
+                    .map_err(fold_named_type_error)?;
+                if dialect.supports(Capability::MaterializedDomainType) {
+                    named_type_snapshots.insert(
+                        name.clone(),
+                        NamedTypeSnapshot {
+                            kind: "domain".to_string(),
+                        },
+                    );
+                }
+            }
+            Op::DropDomain { name, .. } => {
+                named_types.drop_domain(name);
+                named_type_snapshots.remove(name);
+            }
             Op::CreateTable { name, columns, constraints, indexes, .. } => {
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
@@ -252,6 +340,14 @@ pub fn fold_ops(
                 }
                 let desc = create_table_descriptor(name, columns);
                 let mut snap = build_table_snapshot(project_schema, &desc, dialect)?;
+                apply_fold_named_type_metadata(
+                    name,
+                    columns,
+                    &mut snap,
+                    &named_types,
+                    dialect,
+                    project_schema,
+                )?;
                 fold_create_table_specs(
                     name,
                     project_schema,
@@ -342,6 +438,27 @@ pub fn fold_ops(
                     *identity,
                     project_schema,
                     dialect,
+                )?;
+                let source_col = IrColumn {
+                    name: column.clone(),
+                    ty: ty.clone(),
+                    nullable: *nullable,
+                    default: default.clone(),
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: *vector_metric,
+                    mask: *mask,
+                    generated: generated.clone(),
+                    identity: *identity,
+                };
+                let mut col = col;
+                apply_fold_named_type_column_metadata(
+                    table,
+                    &source_col,
+                    &mut col,
+                    &named_types,
+                    dialect,
+                    project_schema,
                 )?;
                 snap.columns.push(col);
                 if let Some(sibling) = masked_sibling {
@@ -467,7 +584,7 @@ pub fn fold_ops(
                 // `using` / SQLite alter refusals). Detection is symmetric:
                 //   - the TARGET type carries a sentinel (plain→encrypted/masked), OR
                 //   - the SOURCE column carries one (encrypted/masked→anything).
-                let (new_col, _sibling) = add_column_snapshot(
+                let (mut new_col, _sibling) = add_column_snapshot(
                     table,
                     column,
                     ty,
@@ -480,6 +597,50 @@ pub fn fold_ops(
                     project_schema,
                     dialect,
                 )?;
+                if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
+                    match ty {
+                        ColType::Enum { name }
+                            if !dialect.supports(Capability::MaterializedEnumType) =>
+                        {
+                            return Err(FoldError::NamedTypeUnsupported {
+                                kind: "enum",
+                                name: name.clone(),
+                                reason: "unreachable use-site",
+                            });
+                        }
+                        ColType::Domain { name }
+                            if !dialect.supports(Capability::MaterializedDomainType) =>
+                        {
+                            return Err(FoldError::NamedTypeUnsupported {
+                                kind: "domain",
+                                name: name.clone(),
+                                reason: "unreachable use-site",
+                            });
+                        }
+                        _ => {
+                            let source_col = IrColumn {
+                                name: column.clone(),
+                                ty: ty.clone(),
+                                nullable: None,
+                                default: None,
+                                unique: None,
+                                id_prefix: None,
+                                vector_metric: None,
+                                mask: None,
+                                generated: None,
+                                identity: None,
+                            };
+                            apply_fold_named_type_column_metadata(
+                                table,
+                                &source_col,
+                                &mut new_col,
+                                &named_types,
+                                dialect,
+                                project_schema,
+                            )?;
+                        }
+                    }
+                }
                 let target_has_sentinel = new_col.encryption_sentinel.is_some()
                     || new_col.comment_sentinel.is_some();
                 let snap = table_mut(&mut tables, table)?;
@@ -648,7 +809,11 @@ pub fn fold_ops(
         }
     }
 
-    Ok(SchemaSnapshot { tables, views })
+    Ok(SchemaSnapshot {
+        tables,
+        views,
+        named_types: named_type_snapshots,
+    })
 }
 
 /// `&mut TableSnapshot` for `table`, or [`FoldError::MissingTable`] (fail-closed).
@@ -734,6 +899,119 @@ fn add_column_snapshot(
         .ok_or(FoldError::Unsupported("addColumn (column folded away)"))?;
     let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
     Ok((main, sibling))
+}
+
+fn apply_fold_named_type_metadata(
+    table: &str,
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    named_types: &NamedTypeRegistry,
+    dialect: SqlDialect,
+    project_schema: &str,
+) -> Result<(), FoldError> {
+    for source in columns {
+        if !matches!(source.ty, ColType::Enum { .. } | ColType::Domain { .. }) {
+            continue;
+        }
+        let col = snap
+            .columns
+            .iter_mut()
+            .find(|c| c.name == source.name)
+            .ok_or(FoldError::Unsupported("named type column folded away"))?;
+        apply_fold_named_type_column_metadata(
+            table,
+            source,
+            col,
+            named_types,
+            dialect,
+            project_schema,
+        )?;
+    }
+    Ok(())
+}
+
+fn pg_type_data_type(schema: &str, name: &str) -> String {
+    format!("{schema}.{name}")
+}
+
+fn apply_fold_named_type_column_metadata(
+    table: &str,
+    source: &IrColumn,
+    col: &mut ColumnSnapshot,
+    named_types: &NamedTypeRegistry,
+    dialect: SqlDialect,
+    project_schema: &str,
+) -> Result<(), FoldError> {
+    match &source.ty {
+        ColType::Enum { name } => {
+            let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
+            match dialect {
+                SqlDialect::Postgres => {
+                    col.data_type = pg_type_data_type(&def.schema, name);
+                }
+                SqlDialect::Sqlite => {
+                    col.data_type = "text".to_string();
+                    col.inline_checks.push(
+                        enum_inline_check(&source.name, &def.values, dialect)
+                            .map_err(fold_named_type_error)?,
+                    );
+                }
+                SqlDialect::Mysql => {
+                    let ty = mysql_enum_type(&def.values);
+                    col.data_type = ty.clone();
+                    col.ddl_type_override = Some(ty);
+                }
+            }
+        }
+        ColType::Domain { name } => {
+            let def = named_types.domain_def(name).map_err(fold_named_type_error)?;
+            if matches!(def.as_type, ColType::Enum { .. } | ColType::Domain { .. }) {
+                return Err(FoldError::NamedTypeUnsupported {
+                    kind: "domain",
+                    name: name.clone(),
+                    reason: "nested named base type",
+                });
+            }
+            let (base, _sibling) = add_column_snapshot(
+                table,
+                &source.name,
+                &def.as_type,
+                source.nullable,
+                source.default.as_ref(),
+                source.vector_metric,
+                source.mask,
+                source.generated.as_ref(),
+                source.identity,
+                project_schema,
+                dialect,
+            )?;
+            col.data_type = base.data_type;
+            col.ddl_type_override = base.ddl_type_override;
+            if matches!(dialect, SqlDialect::Postgres) {
+                col.data_type = pg_type_data_type(&def.schema, name);
+            } else {
+                if def.not_null {
+                    col.nullable = false;
+                }
+                if col.default.is_none() {
+                    if let Some(default) = &def.default {
+                        col.default =
+                            Some(render_ir_default(default, dialect).map_err(fold_named_type_error)?);
+                    }
+                }
+                if let Some(check) = &def.check {
+                    let value_sql =
+                        crate::dml::quote_ident_for_dialect("column", &source.name, dialect)
+                            .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
+                    let expr = render_domain_check(check, dialect, &value_sql)
+                        .map_err(fold_named_type_error)?;
+                    col.inline_checks.push(format!("CHECK ({expr})"));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// Fold a `createTable`'s TABLE-LEVEL constraints + indexes onto the

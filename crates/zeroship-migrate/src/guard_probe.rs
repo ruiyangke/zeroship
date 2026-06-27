@@ -221,6 +221,19 @@ pub enum GuardProbe {
         /// Guard direction.
         direction: GuardDir,
     },
+    /// `dropEnum ifExists` / `dropDomain ifExists`: presence-only on a schema-level
+    /// named type, with the object class verified so a same-name different type
+    /// fails closed rather than being silently skipped.
+    NamedType {
+        /// The effective schema.
+        schema: String,
+        /// The named type.
+        name: String,
+        /// `"enum"` or `"domain"`.
+        kind: String,
+        /// Guard direction.
+        direction: GuardDir,
+    },
     /// `alterColumnType` / `alterColumnNullability` / `renameColumn` `ifExists`:
     /// the SOURCE column must EXIST (presence-only — an alter/rename intentionally
     /// CHANGES the shape, so there is no shape to verify).
@@ -247,6 +260,7 @@ impl GuardProbe {
             | GuardProbe::Index { schema, .. }
             | GuardProbe::Constraint { schema, .. }
             | GuardProbe::View { schema, .. }
+            | GuardProbe::NamedType { schema, .. }
             | GuardProbe::ColumnPresence { schema, .. } => schema,
         }
     }
@@ -321,6 +335,9 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             )
         }
         GuardProbe::View { name, direction, .. } => decide_view(name, *direction, live),
+        GuardProbe::NamedType { name, kind, direction, .. } => {
+            decide_named_type(name, kind, *direction, live)
+        }
         GuardProbe::ColumnPresence { table, column, .. } => {
             // Always IfExists. Source column must EXIST → RunBare; absent → Noop.
             if column_present(live, table, column) {
@@ -329,6 +346,30 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
                 GuardVerdict::SatisfiedNoop
             }
         }
+    }
+}
+
+fn decide_named_type(
+    name: &str,
+    kind: &str,
+    direction: GuardDir,
+    live: &SchemaSnapshot,
+) -> GuardVerdict {
+    match live.named_types.get(name) {
+        Some(actual) if actual.kind == kind => match direction {
+            GuardDir::IfExists => GuardVerdict::RunBare,
+            GuardDir::IfNotExists => GuardVerdict::SatisfiedNoop,
+        },
+        Some(actual) => GuardVerdict::FailDrift(Divergence {
+            object: format!("type {name}"),
+            field: "kind".to_string(),
+            expected: kind.to_string(),
+            actual: actual.kind.clone(),
+        }),
+        None => match direction {
+            GuardDir::IfExists => GuardVerdict::SatisfiedNoop,
+            GuardDir::IfNotExists => GuardVerdict::RunBare,
+        },
     }
 }
 
@@ -779,6 +820,8 @@ mod tests {
             data_type: dtype.to_string(),
             nullable,
             default: None,
+            ddl_type_override: None,
+            inline_checks: Vec::new(),
             generated: None,
             identity: None,
             encryption_sentinel: None,

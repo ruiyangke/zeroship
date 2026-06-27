@@ -99,6 +99,10 @@ fn op_variant_names_from_schema() {
         "backfill",
         "createView",
         "dropView",
+        "createEnum",
+        "dropEnum",
+        "createDomain",
+        "dropDomain",
         "createTrigger",
         "dropTrigger",
         // VENDOR (`@zeroship/migrate/pg`) — the Postgres-only privileged primitives.

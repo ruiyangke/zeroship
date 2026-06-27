@@ -276,7 +276,11 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
         t.constraints.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    Ok(SchemaSnapshot { tables, views })
+    Ok(SchemaSnapshot {
+        tables,
+        views,
+        ..Default::default()
+    })
 }
 
 /// Columns via `PRAGMA table_info(<t>)`. Columns: cid, name, type, notnull,
@@ -338,6 +342,8 @@ async fn introspect_columns(
             generated: None,
             identity: None,
             encryption_sentinel: None,
+            ddl_type_override: None,
+            inline_checks: Vec::new(),
             comment_sentinel: recover_inline_sentinel(stored_create_sql, &name),
         });
     }

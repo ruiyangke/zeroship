@@ -221,6 +221,17 @@ async fn fold_equals_introspect_pg() {
     ]}"#;
     all_ops.extend(apply_doc(&conn, &cfg, parents, &registry(&[]), Approval::None).await);
 
+    // (1b) A neutral enum definition plus an enum-typed column. PG materializes the
+    //      enum as a user-defined type, so this pins the fold's canonical data_type
+    //      against live `format_type(...)` introspection.
+    let plans = r#"{"ir_version":1,"name":"create_plan_enum","ops":[
+        {"op":"createEnum","name":"plan_tier","values":["free","pro"]},
+        {"op":"createTable","name":"plans","columns":[
+            {"name":"tier","type":{"enum":{"name":"plan_tier"}},"nullable":false}
+        ]}
+    ]}"#;
+    all_ops.extend(apply_doc(&conn, &cfg, plans, &registry(&[]), Approval::None).await);
+
     // (2) `users` with varied column types + a `ref parents` + an encrypted
     //     column, a TABLE-LEVEL UNIQUE, a single-`id` FK to parents, and an extra
     //     index. (A `vector(N)` / `geoPoint` column needs the pgvector / PostGIS

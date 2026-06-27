@@ -479,6 +479,14 @@ pub fn validate_op_scoped(
             let scope = TargetScope::structural_only(table);
             check_constraint(&constraint.kind, &scope)
         }
+        Op::CreateDomain { check, .. } => {
+            if let Some(check) = check {
+                let cols = vec!["VALUE".to_string()];
+                let scope = TargetScope::new("domain", &cols);
+                validate_expr(check, target_dialect, &scope, op_index, ts_location)?;
+            }
+            Ok(())
+        }
         Op::Update { table, set, r#where, .. } => {
             let scope = TargetScope::structural_only(table);
             for rhs in set.values() {
@@ -712,6 +720,9 @@ pub fn validate_op_scoped(
         | Op::AlterColumnNullability { .. }
         | Op::RenameColumn { .. }
         | Op::DropConstraint { .. }
+        | Op::CreateEnum { .. }
+        | Op::DropEnum { .. }
+        | Op::DropDomain { .. }
         | Op::Insert { .. }
         | Op::CreateSchema { .. }
         | Op::DropSchema { .. }
