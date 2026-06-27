@@ -4496,8 +4496,11 @@ fn render_exclusion_element(
             dialect,
         )
         .map_err(IrLowerError::DmlAssemble)?,
-        ColumnOrExpr::Expr { expr } => crate::render::dml::render_expr_inline(expr, dialect)
-            .map_err(IrLowerError::DmlAssemble)?,
+        ColumnOrExpr::Expr { expr } => {
+            let expr = crate::render::dml::render_expr_inline(expr, dialect)
+                .map_err(IrLowerError::DmlAssemble)?;
+            format!("({expr})")
+        }
     };
     Ok(format!("{target} WITH {}", exclusion_operator_sql(element.operator)))
 }

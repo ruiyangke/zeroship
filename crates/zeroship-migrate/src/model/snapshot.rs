@@ -194,16 +194,20 @@ impl IndexSnapshot {
 }
 
 /// One constraint of a table, as introspected from
-/// `information_schema.table_constraints` (kind) + `pg_get_constraintdef` (body).
+/// `information_schema.table_constraints` (kind) + byte-comparable
+/// `pg_get_constraintdef` bodies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintSnapshot {
     /// Constraint name.
     pub name: String,
     /// The constraint type as Postgres reports it: `PRIMARY KEY`, `FOREIGN KEY`,
-    /// `UNIQUE`, `CHECK`.
+    /// `UNIQUE`, `CHECK`, `EXCLUDE`.
     pub kind: String,
     /// The full constraint definition as `pg_get_constraintdef(oid)` renders it,
     /// e.g. `CHECK ((age > 0))`, `FOREIGN KEY (user_id) REFERENCES users(id)`.
+    ///
+    /// Empty for `EXCLUDE`: PG canonicalizes exclusion definitions differently from
+    /// the closed IR renderer, and drift tracks those constraints by name + kind.
     pub definition: String,
 }
 
