@@ -338,6 +338,20 @@ async fn transaction_false_rejected() {
     );
 }
 
+#[compio::test]
+async fn sqlite_backend_transactional_ddl_selector_matches_migration_flag() {
+    let p = paths("selector");
+    let be = backend(&p);
+    let transactional = mig("CREATE TABLE t (id INTEGER);");
+    let mut non_transactional = mig("CREATE TABLE t2 (id INTEGER);");
+    non_transactional.flags.transactional = false;
+    non_transactional.checksum = Checksum::of(&ChecksumInput::from_migration(&non_transactional));
+
+    assert!(be.ddl_is_transactional());
+    assert!(!be.uses_two_phase_path(&transactional));
+    assert!(be.uses_two_phase_path(&non_transactional));
+}
+
 // ---------------------------------------------------------------------------
 // C3 SEAM PIN — squash routes THROUGH the backend. The SQLite backend never
 // produces a squash (the descriptor author emits empty `supersedes`), so a squash

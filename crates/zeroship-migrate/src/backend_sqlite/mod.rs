@@ -353,6 +353,10 @@ impl MigrationBackend for SqliteBackend {
         SqlDialect::Sqlite
     }
 
+    fn ddl_is_transactional(&self) -> bool {
+        true
+    }
+
     // -- connection / session I/O -------------------------------------------
     // The in-process lock is the single-actor serialization itself (§2.3): one
     // writer, one flume queue. Cross-process is P5b (NOT built here). So the
@@ -382,14 +386,21 @@ impl MigrationBackend for SqliteBackend {
 
     // -- per-migration confined apply ---------------------------------------
 
-    async fn apply_up_transactional(
+    async fn apply_one(
         &self,
         _cfg: &ExecutorConfig,
         m: &Migration,
         applied_by: &str,
+        _had_inflight: bool,
         supersedes: &[&str],
         kind: &str,
-    ) -> Result<(), ApplyError> {
+    ) -> Result<bool, ApplyError> {
+        if self.uses_two_phase_path(m) {
+            return Err(ApplyError::Backend(
+                "sqlite backend: non-transactional apply does not exist on SQLite (design §2.3/L3)"
+                    .to_string(),
+            ));
+        }
         // P2 covers the additive path (a caller-supplied CREATE TABLE up + the
         // atomic journal write). Squash/supersession + repeatable journaling are
         // P5/P6 surface; reject here rather than silently dropping the edges.
@@ -407,8 +418,8 @@ impl MigrationBackend for SqliteBackend {
         // **PR10 Part B — existence-guard catalog probe (SQLite).** Mirror the PG
         // probe: read the live SQLite catalog and `decide` BEFORE running the `up`.
         // The read + the additive apply both run under the SAME held project lock +
-        // atomic boundary `execute_pending` already enforces (apply_up_transactional
-        // is called under the held lock), so there is no probe→act TOCTOU window.
+        // atomic boundary `execute_pending` already enforces (apply_one is called
+        // under the held lock), so there is no probe→act TOCTOU window.
         //
         // - RunBare       → normal `apply_one_additive`.
         // - SatisfiedNoop → journal the completed row WITHOUT running the `up` DDL.
@@ -422,13 +433,13 @@ impl MigrationBackend for SqliteBackend {
                 crate::guard_probe::GuardVerdict::RunBare => {
                     return journal_sql::apply_one_additive(&self.actor, m, applied_by)
                         .await
-                        .map(|_| ())
+                        .map(|_| false)
                         .map_err(apply_err);
                 }
                 crate::guard_probe::GuardVerdict::SatisfiedNoop => {
                     return journal_sql::journal_satisfied_noop(&self.actor, m, applied_by)
                         .await
-                        .map(|_| ())
+                        .map(|_| false)
                         .map_err(apply_err);
                 }
                 crate::guard_probe::GuardVerdict::FailDrift(d) => {
@@ -444,35 +455,8 @@ impl MigrationBackend for SqliteBackend {
         }
         journal_sql::apply_one_additive(&self.actor, m, applied_by)
             .await
-            .map(|_| ())
+            .map(|_| false)
             .map_err(apply_err)
-    }
-
-    async fn configure_session_non_txn(
-        &self,
-        _cfg: &ExecutorConfig,
-        _m: &Migration,
-    ) -> Result<(), ApplyError> {
-        // SQLite has no non-txn DDL path; validate_non_txn rejects transaction:false
-        // before this is reached. If reached, it is a logic error.
-        Err(ApplyError::Backend(
-            "sqlite backend: non-transactional apply does not exist on SQLite (design §2.3/L3)"
-                .to_string(),
-        ))
-    }
-
-    async fn apply_up_non_transactional(
-        &self,
-        _cfg: &ExecutorConfig,
-        _m: &Migration,
-        _applied_by: &str,
-        _had_inflight: bool,
-        _supersedes: &[&str],
-    ) -> Result<bool, ApplyError> {
-        Err(ApplyError::Backend(
-            "sqlite backend: non-transactional apply does not exist on SQLite (design §2.3/L3)"
-                .to_string(),
-        ))
     }
 
     async fn rollback_one_transactional(

@@ -2,7 +2,7 @@
 //! probe on REAL SQLite (temp-file backend). Each test builds a guarded `op.*` IR,
 //! lowers it through the REAL `IrAuthor` (SQLite dialect, which stamps the
 //! `GuardProbe` onto the lowered `Migration`), and applies it through the REAL
-//! `SqliteBackend::apply_up_transactional` — the same per-migration apply seam
+//! `SqliteBackend::apply_one` — the same per-migration apply seam
 //! `execute_pending` drives under the held lock. No shims.
 //!
 //! SQLite-supported guarded ops (addConstraint/alterColumn/dropConstraint are
@@ -77,7 +77,9 @@ fn lower(op: Op) -> Vec<Migration> {
 }
 
 async fn apply_one(be: &SqliteBackend, m: &Migration) -> Result<(), ApplyError> {
-    be.apply_up_transactional(&cfg(), m, "deployer", &[], "apply").await
+    be.apply_one(&cfg(), m, "deployer", false, &[], "apply")
+        .await
+        .map(|_| ())
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
