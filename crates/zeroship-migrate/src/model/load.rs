@@ -173,6 +173,9 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::DropEnum { .. }
         | Op::CreateDomain { .. }
         | Op::DropDomain { .. }
+        | Op::CreateSequence { .. }
+        | Op::AlterSequence { .. }
+        | Op::DropSequence { .. }
         | Op::CreateRole { .. }
         | Op::AlterRole { .. }
         | Op::DropRole { .. }

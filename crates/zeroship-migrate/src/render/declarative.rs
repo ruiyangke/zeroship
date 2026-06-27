@@ -4415,7 +4415,7 @@ impl DeclarativeAuthor {
         // a named unique round-trips against the live catalog. CHECK is inlined the
         // same way; both are emission-only bodies the differ does not re-diff.
         for c in &t.constraints {
-            if c.kind == "CHECK" || c.kind == "UNIQUE" {
+            if c.kind == "CHECK" || c.kind == "UNIQUE" || c.kind == "EXCLUDE" {
                 parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
             }
         }

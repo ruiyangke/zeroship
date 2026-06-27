@@ -36,10 +36,10 @@ use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::expr::Expr;
 use crate::guard::{guard_for, GuardConfig, GuardError};
 use crate::model::ir::{
-    ColType, ExistenceGuard, ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex,
-    IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel, RefAction,
-    SelectAst, SelectItem, TableRef, TriggerAction, TriggerEvent, TriggerStmt, VectorMetric,
-    ViewQuery,
+    ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod, ExclusionOperator, ExistenceGuard,
+    ForEach, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod,
+    Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel, RefAction, SelectAst, SelectItem,
+    SequenceOwnedBy, TableRef, TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::snapshot::{ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, TableSnapshot};
@@ -592,6 +592,23 @@ pub enum IrLowerError {
         /// The target dialect that cannot render the facet.
         dialect: SqlDialect,
     },
+    /// Standalone sequences are PostgreSQL-only; SQLite/MySQL auto-increment is
+    /// not a general sequence object and is never used as an emulation.
+    #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect:?} }}")]
+    SequenceUnsupported {
+        /// Stable unsupported-kind token.
+        kind: &'static str,
+        /// The target dialect.
+        dialect: SqlDialect,
+    },
+    /// Exclusion constraints are PostgreSQL-only.
+    #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect:?} }}")]
+    ExclusionConstraintUnsupported {
+        /// Stable unsupported-kind token.
+        kind: &'static str,
+        /// The target dialect.
+        dialect: SqlDialect,
+    },
     /// A column facet is unsupported on the target dialect. Generated/identity
     /// columns are cross-dialect core with per-facet refusals (for example,
     /// SQLite non-PK identity or Postgres virtual generated columns).
@@ -817,6 +834,14 @@ fn pg_type_qname(schema: &str, name: &str) -> Result<String, IrLowerError> {
         "{}.{}",
         quote_engine_ident("schema", schema)?,
         quote_engine_ident("type", name)?
+    ))
+}
+
+fn pg_sequence_qname(schema: &str, name: &str) -> Result<String, IrLowerError> {
+    Ok(format!(
+        "{}.{}",
+        quote_engine_ident("schema", schema)?,
+        quote_engine_ident("sequence", name)?
     ))
 }
 
@@ -1581,6 +1606,21 @@ impl IrAuthor {
                 } else {
                     Vec::new()
                 }
+            }
+            Op::CreateSequence { .. } | Op::AlterSequence { .. } => {
+                let stmt = render_sequence_op(op, &eff_schema, self.dialect)?;
+                vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
+            }
+            Op::DropSequence { name, .. } => {
+                if let Some(g) = guard {
+                    probe = Some(crate::render::existence_probe::GuardProbe::Sequence {
+                        schema: eff_schema.clone(),
+                        name: name.clone(),
+                        direction: g.into(),
+                    });
+                }
+                let stmt = render_sequence_op(op, &eff_schema, self.dialect)?;
+                vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
             }
             Op::CreateTable { name, columns, constraints, indexes, .. } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
@@ -2693,6 +2733,24 @@ impl IrAuthor {
                         ),
                     });
                 }
+                IrConstraintKind::Exclusion { elements, .. } => {
+                    if !self.dialect.supports(Capability::ExclusionConstraint) {
+                        return Err(IrLowerError::ExclusionConstraintUnsupported {
+                            kind: "exclusionConstraint",
+                            dialect: self.dialect,
+                        });
+                    }
+                    let name = c.name.as_deref().map_or_else(
+                        || derived_exclusion_constraint_name(table, elements),
+                        str::to_string,
+                    );
+                    let definition = render_exclusion_constraint_body(&c.kind, self.dialect)?;
+                    snap.constraints.push(ConstraintSnapshot {
+                        name,
+                        kind: "EXCLUDE".to_string(),
+                        definition,
+                    });
+                }
             }
         }
         for ix in indexes {
@@ -3176,6 +3234,14 @@ impl IrAuthor {
         table: &str,
         constraint: &IrConstraint,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
+        if matches!(constraint.kind, IrConstraintKind::Exclusion { .. })
+            && !self.dialect.supports(Capability::ExclusionConstraint)
+        {
+            return Err(IrLowerError::ExclusionConstraintUnsupported {
+                kind: "exclusionConstraint",
+                dialect: self.dialect,
+            });
+        }
         self.require_capability_for(
             Capability::AlterTableAddConstraint,
             "addConstraint",
@@ -3243,6 +3309,16 @@ impl IrAuthor {
                 // the Wave-C expression renderer (no `Expr`→SQL path yet).
                 return Err(IrLowerError::ExprRenderDeferred("addConstraint(check)"));
             }
+            IrConstraintKind::Exclusion { elements, .. } => {
+                let cname = name.map_or_else(
+                    || derived_exclusion_constraint_name(table, elements),
+                    str::to_string,
+                );
+                let body = render_exclusion_constraint_body(&constraint.kind, self.dialect)?;
+                // An exclusion constraint validates existing rows and creates a
+                // backing index; gate it like UNIQUE/PK.
+                decl.lower_add_constraint(table, &cname, &body, true)
+            }
         };
         Ok(vec![mig])
     }
@@ -3267,6 +3343,171 @@ struct ViewStatement {
     name: String,
     up: Vec<String>,
     down: Option<String>,
+}
+
+struct SequenceStatement {
+    name: String,
+    up: String,
+    down: Option<String>,
+}
+
+fn render_sequence_op(
+    op: &Op,
+    eff_schema: &str,
+    dialect: SqlDialect,
+) -> Result<SequenceStatement, IrLowerError> {
+    if !dialect.supports(Capability::Sequence) {
+        return Err(IrLowerError::SequenceUnsupported {
+            kind: "sequence",
+            dialect,
+        });
+    }
+    match op {
+        Op::CreateSequence {
+            name,
+            as_type,
+            increment,
+            start,
+            min_value,
+            max_value,
+            cache,
+            cycle,
+            owned_by,
+            ..
+        } => {
+            let qname = pg_sequence_qname(eff_schema, name)?;
+            let mut up = format!("CREATE SEQUENCE {qname}");
+            if let Some(as_type) = as_type {
+                up.push_str(" AS ");
+                up.push_str(render_sequence_as_type(as_type)?);
+            }
+            if let Some(n) = increment {
+                up.push_str(" INCREMENT BY ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(n) = start {
+                up.push_str(" START WITH ");
+                up.push_str(&n.to_string());
+            }
+            render_sequence_optional_bound(&mut up, "MINVALUE", "NO MINVALUE", min_value);
+            render_sequence_optional_bound(&mut up, "MAXVALUE", "NO MAXVALUE", max_value);
+            if let Some(n) = cache {
+                up.push_str(" CACHE ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(cycle) = cycle {
+                up.push_str(if *cycle { " CYCLE" } else { " NO CYCLE" });
+            }
+            if let Some(owned_by) = owned_by {
+                up.push_str(" OWNED BY ");
+                up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
+            }
+            Ok(SequenceStatement {
+                name: format!("create_sequence_{name}"),
+                up,
+                down: Some(format!("DROP SEQUENCE {qname}")),
+            })
+        }
+        Op::AlterSequence {
+            name,
+            increment,
+            restart,
+            min_value,
+            max_value,
+            cache,
+            cycle,
+            owned_by,
+            ..
+        } => {
+            let qname = pg_sequence_qname(eff_schema, name)?;
+            let mut up = format!("ALTER SEQUENCE {qname}");
+            if let Some(n) = increment {
+                up.push_str(" INCREMENT BY ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(restart) = restart {
+                up.push_str(" RESTART");
+                if let Some(n) = restart {
+                    up.push_str(" WITH ");
+                    up.push_str(&n.to_string());
+                }
+            }
+            render_sequence_optional_bound(&mut up, "MINVALUE", "NO MINVALUE", min_value);
+            render_sequence_optional_bound(&mut up, "MAXVALUE", "NO MAXVALUE", max_value);
+            if let Some(n) = cache {
+                up.push_str(" CACHE ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(cycle) = cycle {
+                up.push_str(if *cycle { " CYCLE" } else { " NO CYCLE" });
+            }
+            if let Some(owned_by) = owned_by {
+                up.push_str(" OWNED BY ");
+                up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
+            }
+            Ok(SequenceStatement {
+                name: format!("alter_sequence_{name}"),
+                up,
+                down: None,
+            })
+        }
+        Op::DropSequence { name, existence_guard, .. } => {
+            let qname = pg_sequence_qname(eff_schema, name)?;
+            let mut up = String::from("DROP SEQUENCE ");
+            if matches!(existence_guard, Some(ExistenceGuard::IfExists)) {
+                up.push_str("IF EXISTS ");
+            }
+            up.push_str(&qname);
+            Ok(SequenceStatement {
+                name: format!("drop_sequence_{name}"),
+                up,
+                down: None,
+            })
+        }
+        _ => Err(IrLowerError::UnsupportedOp("non-sequence op routed to sequence renderer")),
+    }
+}
+
+fn render_sequence_optional_bound(
+    sql: &mut String,
+    value_kw: &'static str,
+    none_kw: &'static str,
+    value: &Option<Option<i64>>,
+) {
+    if let Some(value) = value {
+        sql.push(' ');
+        match value {
+            Some(n) => {
+                sql.push_str(value_kw);
+                sql.push(' ');
+                sql.push_str(&n.to_string());
+            }
+            None => sql.push_str(none_kw),
+        }
+    }
+}
+
+fn render_sequence_as_type(as_type: &ColType) -> Result<&'static str, IrLowerError> {
+    match as_type {
+        ColType::Int => Ok("integer"),
+        ColType::BigInt => Ok("bigint"),
+        _ => Err(IrLowerError::UnsupportedOp("sequence AS type must be int or bigInt")),
+    }
+}
+
+fn render_sequence_owned_by(
+    owned_by: Option<&SequenceOwnedBy>,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    let Some(owned_by) = owned_by else {
+        return Ok("NONE".to_string());
+    };
+    Ok(format!(
+        "{}.{}.{}",
+        quote_engine_ident("schema", eff_schema)?,
+        quote_engine_ident("table", &owned_by.table)?,
+        quote_engine_ident("column", &owned_by.column)?
+    ))
 }
 
 fn render_view_op(
@@ -3923,6 +4164,9 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::DropEnum { .. } => "dropEnum",
         Op::CreateDomain { .. } => "createDomain",
         Op::DropDomain { .. } => "dropDomain",
+        Op::CreateSequence { .. } => "createSequence",
+        Op::AlterSequence { .. } => "alterSequence",
+        Op::DropSequence { .. } => "dropSequence",
         // VENDOR (`@zeroship/migrate/pg`).
         Op::CreateSchema { .. } => "createSchema",
         Op::DropSchema { .. } => "dropSchema",
@@ -4179,6 +4423,119 @@ pub(crate) fn quote_cols(cols: &[String]) -> String {
         .join(", ")
 }
 
+/// Render an exclusion constraint body (`EXCLUDE USING …`) from the closed IR.
+pub(crate) fn render_exclusion_constraint_body(
+    kind: &IrConstraintKind,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    let IrConstraintKind::Exclusion {
+        using_method,
+        elements,
+        where_predicate,
+        deferrable,
+        initially_deferred,
+    } = kind
+    else {
+        return Err(IrLowerError::UnsupportedOp(
+            "non-exclusion kind routed to exclusion renderer",
+        ));
+    };
+    if !dialect.supports(Capability::ExclusionConstraint) {
+        return Err(IrLowerError::ExclusionConstraintUnsupported {
+            kind: "exclusionConstraint",
+            dialect,
+        });
+    }
+    if elements.is_empty() {
+        return Err(IrLowerError::UnsupportedOp(
+            "exclusion constraint needs at least one element",
+        ));
+    }
+
+    let rendered_elements = elements
+        .iter()
+        .map(|element| render_exclusion_element(element, dialect))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let mut body = format!(
+        "EXCLUDE USING {} ({rendered_elements})",
+        exclusion_method_sql(*using_method)
+    );
+    if let Some(predicate) = where_predicate {
+        let pred = crate::render::dml::render_expr_inline(predicate, dialect)
+            .map_err(IrLowerError::DmlAssemble)?;
+        body.push_str(" WHERE (");
+        body.push_str(&pred);
+        body.push(')');
+    }
+    if let Some(deferrable) = deferrable {
+        if *deferrable {
+            body.push_str(" DEFERRABLE");
+            if let Some(initially_deferred) = initially_deferred {
+                body.push_str(if *initially_deferred {
+                    " INITIALLY DEFERRED"
+                } else {
+                    " INITIALLY IMMEDIATE"
+                });
+            }
+        } else {
+            body.push_str(" NOT DEFERRABLE");
+        }
+    }
+    Ok(body)
+}
+
+fn render_exclusion_element(
+    element: &ExclusionElement,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    let target = match &element.target {
+        ColumnOrExpr::Column { name } => crate::render::dml::quote_ident_for_dialect(
+            "column",
+            name,
+            dialect,
+        )
+        .map_err(IrLowerError::DmlAssemble)?,
+        ColumnOrExpr::Expr { expr } => crate::render::dml::render_expr_inline(expr, dialect)
+            .map_err(IrLowerError::DmlAssemble)?,
+    };
+    Ok(format!("{target} WITH {}", exclusion_operator_sql(element.operator)))
+}
+
+fn exclusion_method_sql(method: ExclusionMethod) -> &'static str {
+    match method {
+        ExclusionMethod::Gist => "gist",
+        ExclusionMethod::Spgist => "spgist",
+        ExclusionMethod::Btree => "btree",
+    }
+}
+
+fn exclusion_operator_sql(operator: ExclusionOperator) -> &'static str {
+    match operator {
+        ExclusionOperator::Overlaps => "&&",
+        ExclusionOperator::Equal => "=",
+        ExclusionOperator::NotEqual => "<>",
+        ExclusionOperator::Less => "<",
+        ExclusionOperator::Greater => ">",
+        ExclusionOperator::LessEqual => "<=",
+        ExclusionOperator::GreaterEqual => ">=",
+    }
+}
+
+pub(crate) fn derived_exclusion_constraint_name(
+    table: &str,
+    elements: &[ExclusionElement],
+) -> String {
+    let parts = elements
+        .iter()
+        .map(|element| match &element.target {
+            ColumnOrExpr::Column { name } => name.clone(),
+            ColumnOrExpr::Expr { .. } => "expr".to_string(),
+        })
+        .collect::<Vec<_>>();
+    derived_constraint_name(table, &parts, "excl")
+}
+
 /// A deterministic constraint name for an unnamed UNIQUE/PK add:
 /// `<table>_<cols>_<suffix>` (`key` for UNIQUE, `pkey` for PRIMARY KEY), capped to
 /// the server-side identifier limit via [`crate::author::cap_ident_name`] so the
@@ -4226,6 +4583,13 @@ fn ir_constraint_name_and_kind(table: &str, constraint: &IrConstraint) -> (Strin
         IrConstraintKind::Check { .. } => (
             explicit.unwrap_or("").to_string(),
             "CHECK".to_string(),
+        ),
+        IrConstraintKind::Exclusion { elements, .. } => (
+            explicit.map_or_else(
+                || derived_exclusion_constraint_name(table, elements),
+                str::to_string,
+            ),
+            "EXCLUDE".to_string(),
         ),
     }
 }

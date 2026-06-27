@@ -221,6 +221,15 @@ pub enum GuardProbe {
         /// Guard direction.
         direction: GuardDir,
     },
+    /// `dropSequence ifExists`: presence-only on a standalone sequence name.
+    Sequence {
+        /// The effective schema.
+        schema: String,
+        /// The sequence name.
+        name: String,
+        /// Guard direction.
+        direction: GuardDir,
+    },
     /// `dropEnum ifExists` / `dropDomain ifExists`: presence-only on a schema-level
     /// named type, with the object class verified so a same-name different type
     /// fails closed rather than being silently skipped.
@@ -260,6 +269,7 @@ impl GuardProbe {
             | GuardProbe::Index { schema, .. }
             | GuardProbe::Constraint { schema, .. }
             | GuardProbe::View { schema, .. }
+            | GuardProbe::Sequence { schema, .. }
             | GuardProbe::NamedType { schema, .. }
             | GuardProbe::ColumnPresence { schema, .. } => schema,
         }
@@ -335,6 +345,9 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             )
         }
         GuardProbe::View { name, direction, .. } => decide_view(name, *direction, live),
+        GuardProbe::Sequence { name, direction, .. } => {
+            decide_sequence(name, *direction, live)
+        }
         GuardProbe::NamedType { name, kind, direction, .. } => {
             decide_named_type(name, kind, *direction, live)
         }
@@ -378,6 +391,18 @@ fn decide_view(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardV
     match direction {
         GuardDir::IfExists => {
             // dropView: presence-only.
+            if present { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
+        }
+        GuardDir::IfNotExists => {
+            if present { GuardVerdict::SatisfiedNoop } else { GuardVerdict::RunBare }
+        }
+    }
+}
+
+fn decide_sequence(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardVerdict {
+    let present = live.sequences.contains_key(name);
+    match direction {
+        GuardDir::IfExists => {
             if present { GuardVerdict::RunBare } else { GuardVerdict::SatisfiedNoop }
         }
         GuardDir::IfNotExists => {

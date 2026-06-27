@@ -33,6 +33,8 @@ pub(crate) enum Capability {
     TriggerBody,
     MaterializedEnumType,
     MaterializedDomainType,
+    Sequence,
+    ExclusionConstraint,
 }
 
 pub(crate) trait DialectSupports {
@@ -62,6 +64,8 @@ impl DialectSupports for SqlDialect {
                 Capability::TriggerBody => false,
                 Capability::MaterializedEnumType => true,
                 Capability::MaterializedDomainType => true,
+                Capability::Sequence => true,
+                Capability::ExclusionConstraint => true,
             },
             SqlDialect::Sqlite => match cap {
                 Capability::NonPkIdentity => false,
@@ -83,6 +87,8 @@ impl DialectSupports for SqlDialect {
                 Capability::TriggerBody => true,
                 Capability::MaterializedEnumType => false,
                 Capability::MaterializedDomainType => false,
+                Capability::Sequence => false,
+                Capability::ExclusionConstraint => false,
             },
             SqlDialect::Mysql => match cap {
                 Capability::NonPkIdentity => false,
@@ -104,6 +110,8 @@ impl DialectSupports for SqlDialect {
                 Capability::TriggerBody => true,
                 Capability::MaterializedEnumType => false,
                 Capability::MaterializedDomainType => false,
+                Capability::Sequence => false,
+                Capability::ExclusionConstraint => false,
             },
         }
     }
@@ -815,6 +823,8 @@ mod tests {
         Capability::TriggerStatementForEach,
         Capability::TriggerExecuteFunction,
         Capability::TriggerBody,
+        Capability::Sequence,
+        Capability::ExclusionConstraint,
     ];
 
     #[test]
@@ -853,6 +863,8 @@ mod tests {
                     (Capability::TriggerStatementForEach, true),
                     (Capability::TriggerExecuteFunction, true),
                     (Capability::TriggerBody, false),
+                    (Capability::Sequence, true),
+                    (Capability::ExclusionConstraint, true),
                 ],
             ),
             (
@@ -875,6 +887,8 @@ mod tests {
                     (Capability::TriggerStatementForEach, false),
                     (Capability::TriggerExecuteFunction, false),
                     (Capability::TriggerBody, true),
+                    (Capability::Sequence, false),
+                    (Capability::ExclusionConstraint, false),
                 ],
             ),
             (
@@ -897,6 +911,8 @@ mod tests {
                     (Capability::TriggerStatementForEach, false),
                     (Capability::TriggerExecuteFunction, false),
                     (Capability::TriggerBody, true),
+                    (Capability::Sequence, false),
+                    (Capability::ExclusionConstraint, false),
                 ],
             ),
         ];

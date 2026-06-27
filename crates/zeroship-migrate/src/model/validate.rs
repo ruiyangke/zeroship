@@ -383,7 +383,7 @@ pub fn validate_op_scoped(
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
-    use crate::model::ir::{IrConstraintKind, Op, TriggerAction, ViewQuery};
+    use crate::model::ir::{ColumnOrExpr, IrConstraintKind, Op, TriggerAction, ViewQuery};
 
     // **PR10** — schema confinement + guard-direction gate, BEFORE any expression
     // walk. Fail-closed: a Confined cross-schema op never reaches lower.
@@ -398,11 +398,32 @@ pub fn validate_op_scoped(
     // here; Platform/Trusted (`Allowlist`/`None`) grant the operator preset.
     validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
 
-    // A `Check` constraint's expr validates against the given scope.
+    // Constraint-embedded expressions validate against the given table scope.
     let check_constraint =
         |kind: &IrConstraintKind, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
-            if let IrConstraintKind::Check { expr } = kind {
-                validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+            match kind {
+                IrConstraintKind::Check { expr } => {
+                    validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+                }
+                IrConstraintKind::Exclusion { elements, where_predicate, .. } => {
+                    for element in elements {
+                        match &element.target {
+                            ColumnOrExpr::Column { name } => {
+                                let col = crate::model::expr::Expr::ColRef {
+                                    name: name.clone(),
+                                };
+                                validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
+                            }
+                            ColumnOrExpr::Expr { expr } => {
+                                validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+                            }
+                        }
+                    }
+                    if let Some(pred) = where_predicate {
+                        validate_expr(pred, target_dialect, scope, op_index, ts_location)?;
+                    }
+                }
+                _ => {}
             }
             Ok(())
         };
@@ -723,6 +744,9 @@ pub fn validate_op_scoped(
         | Op::CreateEnum { .. }
         | Op::DropEnum { .. }
         | Op::DropDomain { .. }
+        | Op::CreateSequence { .. }
+        | Op::AlterSequence { .. }
+        | Op::DropSequence { .. }
         | Op::Insert { .. }
         | Op::CreateSchema { .. }
         | Op::DropSchema { .. }

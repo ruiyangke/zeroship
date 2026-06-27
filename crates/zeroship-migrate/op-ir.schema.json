@@ -1240,6 +1240,222 @@
           ]
         },
         {
+          "description": "Create a standalone sequence. PostgreSQL renders it natively; SQLite/MySQL\nrefuse fail-closed because their auto-increment features are not general\nsequence objects.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Sequence name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "as": {
+              "description": "Optional sequence integer type (`int`/`bigInt` today).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ColType"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "increment": {
+              "description": "Optional increment.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "start": {
+              "description": "Optional start value.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "minValue": {
+              "description": "Optional minimum value. `null` means `NO MINVALUE`; absent omits the\nclause.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "maxValue": {
+              "description": "Optional maximum value. `null` means `NO MAXVALUE`; absent omits the\nclause.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "cache": {
+              "description": "Optional cache size.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "cycle": {
+              "description": "Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "ownedBy": {
+              "description": "Optional ownership. `null` means `OWNED BY NONE`; absent omits the\nclause.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceOwnedBy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createSequence"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "Alter a standalone sequence.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Sequence name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "increment": {
+              "description": "Optional increment.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "restart": {
+              "description": "Optional restart. `null` means bare `RESTART`; a value renders\n`RESTART WITH n`; absent omits the clause.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "minValue": {
+              "description": "Optional minimum value. `null` means `NO MINVALUE`; absent omits the\nclause.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "maxValue": {
+              "description": "Optional maximum value. `null` means `NO MAXVALUE`; absent omits the\nclause.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "cache": {
+              "description": "Optional cache size.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            },
+            "cycle": {
+              "description": "Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "ownedBy": {
+              "description": "Optional ownership. `null` means `OWNED BY NONE`; absent omits the\nclause.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SequenceOwnedBy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "alterSequence"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
+          "description": "Drop a standalone sequence.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Sequence name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "Optional schema qualifier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "`ifExists` drop guard.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropSequence"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
+          ]
+        },
+        {
           "description": "**VENDOR** — `CREATE SCHEMA [IF NOT EXISTS] <name> [AUTHORIZATION <role>]`.",
           "type": "object",
           "properties": {
@@ -3197,6 +3413,58 @@
             "kind",
             "expr"
           ]
+        },
+        {
+          "description": "PostgreSQL exclusion constraint (`EXCLUDE USING …`). Operators and\nexpression targets are closed tokens/ASTs, never raw SQL.",
+          "type": "object",
+          "properties": {
+            "usingMethod": {
+              "description": "Access method. Defaults to GiST on the wire when omitted.",
+              "$ref": "#/$defs/ExclusionMethod",
+              "default": "gist"
+            },
+            "elements": {
+              "description": "`(target WITH operator)` elements.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ExclusionElement"
+              }
+            },
+            "wherePredicate": {
+              "description": "Optional partial-exclusion predicate.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "deferrable": {
+              "description": "Optional `DEFERRABLE` flag.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "initiallyDeferred": {
+              "description": "Optional `INITIALLY DEFERRED` flag. Meaningful only when deferrable.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "exclusion"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "elements"
+          ]
         }
       ]
     },
@@ -3227,6 +3495,128 @@
           "description": "`ON DELETE/UPDATE NO ACTION` (the SQL default).",
           "type": "string",
           "const": "noAction"
+        }
+      ]
+    },
+    "ExclusionMethod": {
+      "description": "CLOSED exclusion access-method set. PostgreSQL supports more methods, but the\nIR only admits the audited methods below.",
+      "oneOf": [
+        {
+          "description": "GiST (the default and common range/geometry exclusion method).",
+          "type": "string",
+          "const": "gist"
+        },
+        {
+          "description": "SP-GiST.",
+          "type": "string",
+          "const": "spgist"
+        },
+        {
+          "description": "B-tree.",
+          "type": "string",
+          "const": "btree"
+        }
+      ]
+    },
+    "ExclusionElement": {
+      "description": "One `(target WITH operator)` element inside an exclusion constraint.",
+      "type": "object",
+      "properties": {
+        "target": {
+          "description": "Column or closed expression target.",
+          "$ref": "#/$defs/ColumnOrExpr"
+        },
+        "operator": {
+          "description": "CLOSED operator token.",
+          "$ref": "#/$defs/ExclusionOperator"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "operator"
+      ]
+    },
+    "ColumnOrExpr": {
+      "description": "The CLOSED target shape for an exclusion-constraint element. A target is\neither a quoted column name or a closed expression AST; never raw SQL.",
+      "oneOf": [
+        {
+          "description": "A table column target.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Column name.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "column"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "description": "A closed expression target.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "Expression AST.",
+              "$ref": "#/$defs/Expr"
+            },
+            "kind": {
+              "type": "string",
+              "const": "expr"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "expr"
+          ]
+        }
+      ]
+    },
+    "ExclusionOperator": {
+      "description": "CLOSED exclusion-operator set. The SQL operator spelling is rendered from\nthis enum, never carried as an arbitrary string.",
+      "oneOf": [
+        {
+          "description": "`&&`",
+          "type": "string",
+          "const": "&&"
+        },
+        {
+          "description": "`=`",
+          "type": "string",
+          "const": "="
+        },
+        {
+          "description": "`<>`",
+          "type": "string",
+          "const": "<>"
+        },
+        {
+          "description": "`<`",
+          "type": "string",
+          "const": "<"
+        },
+        {
+          "description": "`>`",
+          "type": "string",
+          "const": ">"
+        },
+        {
+          "description": "`<=`",
+          "type": "string",
+          "const": "<="
+        },
+        {
+          "description": "`>=`",
+          "type": "string",
+          "const": ">="
         }
       ]
     },
@@ -3705,6 +4095,25 @@
           "type": "string",
           "const": "desc"
         }
+      ]
+    },
+    "SequenceOwnedBy": {
+      "description": "Optional sequence ownership target (`OWNED BY table.column`).",
+      "type": "object",
+      "properties": {
+        "table": {
+          "description": "Owning table.",
+          "type": "string"
+        },
+        "column": {
+          "description": "Owning column.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "table",
+        "column"
       ]
     },
     "Privilege": {

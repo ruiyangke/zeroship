@@ -55,16 +55,17 @@ use crate::render::declarative::{
 };
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
-    TableSnapshot, ViewSnapshot,
+    SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, RefAction,
 };
 use crate::render::lower::{
-    create_index_snapshot, derived_constraint_name, enum_inline_check, index_method_access,
-    ir_column_to_field, mysql_enum_type, render_domain_check, render_ir_default,
-    IrLowerError, NamedTypeRegistry,
+    create_index_snapshot, derived_constraint_name, derived_exclusion_constraint_name,
+    enum_inline_check, index_method_access, ir_column_to_field, mysql_enum_type,
+    render_domain_check, render_exclusion_constraint_body, render_ir_default, IrLowerError,
+    NamedTypeRegistry,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -87,6 +88,10 @@ pub enum FoldError {
     DuplicateView(String),
     /// A `dropView` named a view not present in the folded schema.
     MissingView(String),
+    /// A `createSequence` named a sequence already present.
+    DuplicateSequence(String),
+    /// A `dropSequence`/`alterSequence` named a sequence not present.
+    MissingSequence(String),
     /// A column references a named enum/domain that has not been registered.
     NamedTypeMissing {
         /// `"enum"` or `"domain"`.
@@ -105,6 +110,8 @@ pub enum FoldError {
     },
     /// Rendering named-type metadata failed.
     NamedTypeRender(String),
+    /// Rendering a fold-visible body failed.
+    Render(String),
     /// An op targeted a column not present on its table.
     MissingColumn {
         /// The table.
@@ -165,6 +172,10 @@ impl std::fmt::Display for FoldError {
             FoldError::DuplicateTable(t) => write!(f, "fold: table `{t}` already exists"),
             FoldError::DuplicateView(v) => write!(f, "fold: view `{v}` already exists"),
             FoldError::MissingView(v) => write!(f, "fold: view `{v}` does not exist"),
+            FoldError::DuplicateSequence(s) => {
+                write!(f, "fold: sequence `{s}` already exists")
+            }
+            FoldError::MissingSequence(s) => write!(f, "fold: sequence `{s}` does not exist"),
             FoldError::NamedTypeMissing { kind, name } => {
                 write!(f, "fold: {kind} `{name}` is not registered")
             }
@@ -172,6 +183,7 @@ impl std::fmt::Display for FoldError {
                 write!(f, "fold: {kind} `{name}` is unsupported: {reason}")
             }
             FoldError::NamedTypeRender(e) => write!(f, "fold: named type render error: {e}"),
+            FoldError::Render(e) => write!(f, "fold: render error: {e}"),
             FoldError::MissingColumn { table, column } => {
                 write!(f, "fold: column `{table}.{column}` does not exist")
             }
@@ -214,6 +226,10 @@ fn fold_named_type_error(e: IrLowerError) -> FoldError {
         }
         other => FoldError::NamedTypeRender(other.to_string()),
     }
+}
+
+fn fold_lower_error(e: IrLowerError) -> FoldError {
+    FoldError::Render(e.to_string())
 }
 
 /// Rewrite every INCOMING FK `definition` in OTHER tables to follow a table
@@ -278,6 +294,7 @@ pub fn fold_ops(
 ) -> Result<SchemaSnapshot, FoldError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
+    let mut sequences: BTreeMap<String, SequenceSnapshot> = BTreeMap::new();
     let mut named_types = NamedTypeRegistry::default();
     let mut named_type_snapshots: BTreeMap<String, NamedTypeSnapshot> = BTreeMap::new();
 
@@ -330,6 +347,22 @@ pub fn fold_ops(
             Op::DropDomain { name, .. } => {
                 named_types.drop_domain(name);
                 named_type_snapshots.remove(name);
+            }
+            Op::CreateSequence { name, .. } => {
+                if sequences.contains_key(name) {
+                    return Err(FoldError::DuplicateSequence(name.clone()));
+                }
+                sequences.insert(name.clone(), SequenceSnapshot::default());
+            }
+            Op::AlterSequence { name, .. } => {
+                if !sequences.contains_key(name) {
+                    return Err(FoldError::MissingSequence(name.clone()));
+                }
+            }
+            Op::DropSequence { name, .. } => {
+                if sequences.remove(name).is_none() {
+                    return Err(FoldError::MissingSequence(name.clone()));
+                }
             }
             Op::CreateTable { name, columns, constraints, indexes, .. } => {
                 if tables.contains_key(name) {
@@ -682,7 +715,7 @@ pub fn fold_ops(
                 // `pg_get_constraintdef`-matching body + the implicit unique index PG
                 // names after the constraint, CHECK deferred. Verify the target table
                 // FIRST (fail-closed) before stamping.
-                let folded = add_constraint_snapshot(table, project_schema, constraint)?;
+                let folded = add_constraint_snapshot(table, project_schema, constraint, dialect)?;
                 let snap = table_mut(&mut tables, table)?;
                 push_folded_constraint(table, snap, folded)?;
                 snap.constraints.sort_by(|a, b| a.name.cmp(&b.name));
@@ -813,6 +846,7 @@ pub fn fold_ops(
         tables,
         views,
         named_types: named_type_snapshots,
+        sequences,
     })
 }
 
@@ -1134,6 +1168,31 @@ fn fold_create_table_specs(
                 );
                 push_folded_constraint(table, snap, unique_constraint(&name, columns))?;
             }
+            IrConstraintKind::Exclusion { elements, .. } => {
+                if !dialect.supports(Capability::ExclusionConstraint) {
+                    return Err(FoldError::Unsupported(
+                        "createTable exclusion constraint is PostgreSQL-only",
+                    ));
+                }
+                let name = c.name.as_deref().map_or_else(
+                    || derived_exclusion_constraint_name(table, elements),
+                    str::to_string,
+                );
+                let definition = render_exclusion_constraint_body(&c.kind, dialect)
+                    .map_err(fold_lower_error)?;
+                push_folded_constraint(
+                    table,
+                    snap,
+                    FoldedConstraint {
+                        constraint: ConstraintSnapshot {
+                            name,
+                            kind: "EXCLUDE".to_string(),
+                            definition,
+                        },
+                        index: None,
+                    },
+                )?;
+            }
         }
     }
     for ix in indexes {
@@ -1249,6 +1308,7 @@ fn add_constraint_snapshot(
     table: &str,
     project_schema: &str,
     constraint: &IrConstraint,
+    dialect: SqlDialect,
 ) -> Result<FoldedConstraint, FoldError> {
     let name = constraint.name.as_deref();
     match &constraint.kind {
@@ -1305,6 +1365,27 @@ fn add_constraint_snapshot(
             ))
         }
         IrConstraintKind::Check { .. } => Err(FoldError::ExprDeferred("addConstraint(check)")),
+        IrConstraintKind::Exclusion { elements, .. } => {
+            if !dialect.supports(Capability::ExclusionConstraint) {
+                return Err(FoldError::Unsupported(
+                    "addConstraint exclusion constraint is PostgreSQL-only",
+                ));
+            }
+            let cname = name.map_or_else(
+                || derived_exclusion_constraint_name(table, elements),
+                str::to_string,
+            );
+            let definition =
+                render_exclusion_constraint_body(&constraint.kind, dialect).map_err(fold_lower_error)?;
+            Ok(FoldedConstraint {
+                constraint: ConstraintSnapshot {
+                    name: cname,
+                    kind: "EXCLUDE".to_string(),
+                    definition,
+                },
+                index: None,
+            })
+        }
     }
 }
 

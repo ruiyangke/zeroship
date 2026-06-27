@@ -186,17 +186,18 @@ pub use model::migration::{
 };
 pub use model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexSnapshot, NamedTypeSnapshot,
-    SchemaSnapshot, TableSnapshot, ViewSnapshot,
+    SchemaSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 // The `op.*` portable IR (§2.1/§2.3/§2.5): the migration document, the closed
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the
 // `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown` (property A);
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use model::ir::{
-    CanonicalOpList, ColType, GeneratedCol, IdentityCol, IndexMethod, IrBatch, IrClassification,
+    CanonicalOpList, ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod,
+    ExclusionOperator, GeneratedCol, IdentityCol, IndexMethod, IrBatch, IrClassification,
     IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask,
-    IrMaskKind, IrScalar, IrVersionError, MigrationIr, Op, RefAction, SafeU64, SynthDefaultFn,
-    VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+    IrMaskKind, IrScalar, IrVersionError, MigrationIr, Op, RefAction, SafeU64,
+    SequenceOwnedBy, SynthDefaultFn, VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint
