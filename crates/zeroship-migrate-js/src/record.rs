@@ -173,6 +173,13 @@ pub fn record_migration_to_ir_with_warnings(
         // (a second module copy would carry its own `__active` and record into a
         // dead buffer). The separate specifier makes the privileged surface
         // lexically obvious in a migration's imports (vendor spec §2.0).
+        //
+        // Boundary (review #5): recording is not the trust gate. Confined
+        // deploy/load validation rejects every vendor op emitted here; operator
+        // paths must pass an explicit Platform/Trusted capability to validate and
+        // lower it. A JS-visible authoring flag would be spoofable inside the
+        // untrusted migration module, so do not bolt one onto this shim without a
+        // host-proven recorder protocol change.
         ModuleEntry {
             specifier: "@zeroship/migrate/pg".into(),
             source: r#"export { pg } from "@zeroship/migrate";"#.to_string(),

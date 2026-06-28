@@ -1,5 +1,12 @@
 // `@zeroship/migrate/pg` — the privileged Postgres vendor authoring surface.
 //
+// Boundary: this subpath is intentionally importable so platform/operator
+// migrations can author closed vendor IR. It is not the security gate. Confined
+// creator deploy/load paths reject every op emitted here with VENDOR_OP_DENIED;
+// operator callers must pass an explicit platform/trusted capability to validate
+// and lower it. Do not add a client-side "trust" global here: migration JS is
+// untrusted authoring code, so a spoofable flag would only create a false gate.
+//
 // This is intentionally published as a separate subpath and is not re-exported
 // from `@zeroship/migrate`. Each method records the same op payload shape as the
 // engine-embedded recorder twin (`crates/zeroship-migrate-js/src/migrate_ops.js`).
