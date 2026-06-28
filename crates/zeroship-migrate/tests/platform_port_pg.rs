@@ -26,6 +26,7 @@ use compio_postgres::Client;
 use zeroship_migrate::command::runner::{
     run_migrate, run_rollback, run_status, RunConfig, RunProfile, RunReport,
 };
+use zeroship_migrate::test_support::acquire_global_platform_resource_lock;
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
@@ -808,6 +809,7 @@ async fn policy_exists(conn: &Client, schema: &str, table: &str, policy: &str) -
 
 #[compio::test]
 async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
+    let _global_lock = acquire_global_platform_resource_lock(&dsn()).await;
     let conn = pg().await;
     let meta = format!("portmeta_{}", token());
     reset(&conn, &meta).await;
@@ -898,10 +900,12 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
     conn.batch_execute(&format!("DROP SCHEMA IF EXISTS \"{meta}\" CASCADE;"))
         .await
         .expect("drop journal schema");
+    _global_lock.release().await;
 }
 
 #[compio::test]
 async fn ported_changelog_is_full_schema_equivalent_to_original_liquibase() {
+    let _global_lock = acquire_global_platform_resource_lock(&dsn()).await;
     let tok = short_token();
     let liquibase_db = format!("zsdiff_liq_{tok}");
     let port_db = format!("zsdiff_port_{tok}");
@@ -945,6 +949,7 @@ async fn ported_changelog_is_full_schema_equivalent_to_original_liquibase() {
 
     drop_database(&admin, &liquibase_db).await;
     drop_database(&admin, &port_db).await;
+    _global_lock.release().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -975,6 +980,7 @@ async fn ported_changelog_is_full_schema_equivalent_to_original_liquibase() {
 
 #[compio::test]
 async fn ported_set_rolls_back_the_last_platform_migration_via_its_down_sql() {
+    let _global_lock = acquire_global_platform_resource_lock(&dsn()).await;
     let conn = pg().await;
     let meta = format!("portrbmeta_{}", token());
     reset(&conn, &meta).await;
@@ -1055,4 +1061,5 @@ async fn ported_set_rolls_back_the_last_platform_migration_via_its_down_sql() {
     conn.batch_execute(&format!("DROP SCHEMA IF EXISTS \"{meta}\" CASCADE;"))
         .await
         .expect("drop journal schema");
+    _global_lock.release().await;
 }

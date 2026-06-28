@@ -30,6 +30,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use compio_postgres::Client;
+use zeroship_migrate::test_support::acquire_global_platform_resource_lock;
 
 const ADMIN_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
@@ -202,6 +203,7 @@ async fn journal_completed_count(conn: &Client, meta: &str) -> i64 {
 
 #[compio::test]
 async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema() {
+    let _global_lock = acquire_global_platform_resource_lock(&admin_dsn()).await;
     let tok = token();
     let db = format!("zsmig_bin_e2e_{tok}");
     let meta = format!("binmeta_{tok}");
@@ -349,4 +351,5 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
     // Teardown: drop the throwaway db (this drops its schemas + journal with it).
     // Roles are cluster-wide and intentionally left (idempotent across runs).
     drop_db(&admin, &db).await;
+    _global_lock.release().await;
 }

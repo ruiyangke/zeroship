@@ -23,6 +23,7 @@
 //! + the real journal.
 
 use compio_postgres::Client;
+use zeroship_migrate::test_support::acquire_fault_injection_test_lock;
 use zeroship_migrate::{ColumnSnapshot, TableSnapshot};
 use zeroship_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zeroship_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
@@ -192,6 +193,7 @@ fn lower_pg_rename(
 // after the expand and the backfill mirrored the rows.
 #[compio::test]
 async fn ir_renamecolumn_applies_as_pg_online_dual_write_through_apply_plan() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -311,6 +313,7 @@ async fn ir_renamecolumn_applies_as_pg_online_dual_write_through_apply_plan() {
 // counterpart to a `down()` that calls `renameColumn(to, from)`.
 #[compio::test]
 async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -444,6 +447,7 @@ async fn ir_renamecolumn_pg_fully_applied_rename_reverses_via_inverse_rename() {
 // (E2→backfill) crash on the IR-lowered plan. This version arms the seam.
 #[compio::test]
 async fn ir_renamecolumn_pg_crash_resumes_roll_forward() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
