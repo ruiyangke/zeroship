@@ -228,11 +228,12 @@ pub(super) fn spawn_tls_connect_task(
         let connector = match crate::transport::tls::build_tls_connector(&connector_opts) {
             Ok(connector) => connector,
             Err(e) => {
+                let code = tls_connector_error_code(&e);
                 push_error_and_close(
                     &state,
                     socket_id,
                     format!("TLS connector failed: {e}"),
-                    "ERR_TLS_HANDSHAKE",
+                    code,
                 );
                 return;
             }
@@ -306,6 +307,15 @@ pub(super) fn spawn_tls_connect_task(
         run_socket_driver(state, socket_id, SocketStream::Tls(tls), rx).await;
     };
     compio::runtime::spawn(crate::panic_util::guard("node-tls-connect", task)).detach();
+}
+
+#[cfg(feature = "runtime_tls")]
+pub(super) fn tls_connector_error_code(error: &std::io::Error) -> &'static str {
+    if crate::transport::tls::is_tls_pin_required(error) {
+        crate::transport::tls::TLS_PIN_REQUIRED_CODE
+    } else {
+        "ERR_TLS_HANDSHAKE"
+    }
 }
 
 fn drain_pending_to_writer(

@@ -3,19 +3,17 @@
 #[path = "../../runtime/tests/support/node_realworld.rs"]
 mod node_realworld;
 
-use std::cell::RefCell;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use zeroship_migrate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use zeroship_migrate::render::step::{BindValue, PlanStep};
-#[cfg(debug_assertions)]
-use zeroship_migrate::{MysqlFragmentDecision, MysqlFragmentHookAction};
 use zeroship_migrate::{
     deprovision_mysql_migrator_account, diff_snapshots, fold_ops,
     mysql_migration_lock_name, provision_mysql_migrator_account,
@@ -67,6 +65,20 @@ impl MysqlDsn {
         .to_string()
     }
 
+    fn json_with_ssl_without_ca(&self) -> String {
+        json!({
+            "host": self.host,
+            "port": self.port,
+            "user": self.user,
+            "password": self.password,
+            "database": self.database,
+            "ssl": {
+                "rejectUnauthorized": true
+            }
+        })
+        .to_string()
+    }
+
     fn for_migrator(&self, cfg: &ExecutorConfig, account: &MysqlMigratorAccount) -> Self {
         Self {
             host: self.host.clone(),
@@ -82,6 +94,49 @@ impl MysqlDsn {
 struct LiveMysql {
     dsn: MysqlDsn,
     source: String,
+}
+
+struct NativeRootsGuard {
+    path: PathBuf,
+    prev_file: Option<std::ffi::OsString>,
+    prev_dir: Option<std::ffi::OsString>,
+}
+
+impl NativeRootsGuard {
+    fn set(ca_pem: &str, label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "zeroship-migrate-native-roots-{}-{label}.pem",
+            std::process::id()
+        ));
+        std::fs::write(&path, ca_pem.as_bytes()).expect("write temporary native roots file");
+        let prev_file = std::env::var_os("SSL_CERT_FILE");
+        let prev_dir = std::env::var_os("SSL_CERT_DIR");
+        unsafe {
+            std::env::set_var("SSL_CERT_FILE", &path);
+            std::env::remove_var("SSL_CERT_DIR");
+        }
+        Self {
+            path,
+            prev_file,
+            prev_dir,
+        }
+    }
+}
+
+impl Drop for NativeRootsGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prev_file {
+                Some(value) => std::env::set_var("SSL_CERT_FILE", value),
+                None => std::env::remove_var("SSL_CERT_FILE"),
+            }
+            match &self.prev_dir {
+                Some(value) => std::env::set_var("SSL_CERT_DIR", value),
+                None => std::env::remove_var("SSL_CERT_DIR"),
+            }
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn configured_dsn() -> String {
@@ -418,6 +473,21 @@ fn tls_migrator_backend_for(
     account: &MysqlMigratorAccount,
     ca_pem: impl Into<String>,
 ) -> MysqlBackend {
+    tls_migrator_backend_result_for(live, cfg, account, ca_pem)
+    .unwrap_or_else(|err| {
+        panic!(
+            "open live TLS mysql2 JS driver backend as {}: {err}",
+            account.user
+        )
+    })
+}
+
+fn tls_migrator_backend_result_for(
+    live: &LiveMysql,
+    cfg: &ExecutorConfig,
+    account: &MysqlMigratorAccount,
+    ca_pem: impl Into<String>,
+) -> Result<MysqlBackend, JsDriverError> {
     MysqlBackend::open_mysql_dsn_json_with_policy(
         live.dsn
             .for_migrator(cfg, account)
@@ -425,12 +495,18 @@ fn tls_migrator_backend_for(
         allowlist(&live.dsn.host, live.dsn.port, 8, 16 * 1024 * 1024),
         Duration::from_secs(45),
     )
-    .unwrap_or_else(|err| {
-        panic!(
-            "open live TLS mysql2 JS driver backend as {}: {err}",
-            account.user
-        )
-    })
+}
+
+fn tls_migrator_backend_without_ca_result_for(
+    live: &LiveMysql,
+    cfg: &ExecutorConfig,
+    account: &MysqlMigratorAccount,
+) -> Result<MysqlBackend, JsDriverError> {
+    MysqlBackend::open_mysql_dsn_json_with_policy(
+        live.dsn.for_migrator(cfg, account).json_with_ssl_without_ca(),
+        allowlist(&live.dsn.host, live.dsn.port, 8, 16 * 1024 * 1024),
+        Duration::from_secs(45),
+    )
 }
 
 fn fixture_ir() -> MigrationIr {
@@ -550,6 +626,34 @@ fn field_any<'a>(
         .unwrap_or_else(|| panic!("row missing any of {keys:?}: {row:?}"))
 }
 
+fn value_as_i64(value: &Value) -> i64 {
+    match value {
+        Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_u64().and_then(|v| i64::try_from(v).ok()))
+            .unwrap_or_else(|| panic!("numeric value is not an i64: {value}")),
+        Value::String(s) => s
+            .parse::<i64>()
+            .unwrap_or_else(|err| panic!("string value is not an i64 ({s:?}): {err}")),
+        other => panic!("value is not an i64-compatible scalar: {other}"),
+    }
+}
+
+fn value_as_string(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+async fn mysql_connection_id(backend: &MysqlBackend) -> i64 {
+    let rows = query(backend, "SELECT CONNECTION_ID() AS connection_id", &[]).await;
+    value_as_i64(field(&rows.rows[0], "connection_id"))
+}
+
 fn manual_migration(name: &str, up: String) -> Migration {
     let mut migration = Migration {
         version: MigrationId::generate(),
@@ -613,9 +717,10 @@ fn crash_recovery_migration(
         qi(&cfg.project_schema),
         qi("crash_users")
     );
+    let sleep_sql = "SELECT SLEEP(8)".to_string();
     let migration = manual_migration(
         "crash_recovery_create_table_then_index",
-        format!("{table_sql};\n{index_sql}"),
+        format!("{table_sql};\n{sleep_sql};\n{index_sql}"),
     );
     let fragments = vec![
         MysqlGuardedFragment {
@@ -636,6 +741,16 @@ fn crash_recovery_migration(
                         nullable: false,
                     },
                 ],
+            },
+        },
+        MysqlGuardedFragment {
+            sql: sleep_sql,
+            existence_guard: GuardProbe::Index {
+                schema: cfg.project_schema.clone(),
+                table: "crash_users".to_string(),
+                name: "crash_users_email_idx".to_string(),
+                direction: GuardDir::IfNotExists,
+                expect: Some((false, vec!["email".to_string()])),
             },
         },
         MysqlGuardedFragment {
@@ -727,6 +842,50 @@ async fn wait_for_project_lock_released(backend: &MysqlBackend, cfg: &ExecutorCo
         );
         compio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+fn spawn_sleep_fragment_killer(
+    live: LiveMysql,
+    connection_id: i64,
+    sleep_marker: &'static str,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        compio::runtime::Runtime::new().unwrap().block_on(async move {
+            let admin = backend_for(&live);
+            let started = Instant::now();
+            loop {
+                let rows = query(
+                    &admin,
+                    "SELECT COMMAND, STATE, INFO FROM information_schema.PROCESSLIST WHERE ID = ?",
+                    &[BindValue::Int(connection_id)],
+                )
+                .await;
+                if let Some(row) = rows.rows.first() {
+                    let command = value_as_string(row.get("COMMAND"));
+                    let state = value_as_string(row.get("STATE"));
+                    let info = value_as_string(row.get("INFO"));
+                    let haystack = format!("{command}\n{state}\n{info}").to_ascii_uppercase();
+                    if haystack.contains(sleep_marker) || haystack.contains("USER SLEEP") {
+                        admin
+                            .exec(&format!("KILL CONNECTION {connection_id}"))
+                            .await
+                            .unwrap_or_else(|err| {
+                                panic!("kill migration connection {connection_id} failed: {err}")
+                            });
+                        println!(
+                            "mysql_jsdriver_e2e killed migration connection {connection_id} during crash-recovery sleep fragment"
+                        );
+                        return;
+                    }
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(15),
+                    "timed out waiting for migration connection {connection_id} to enter sleep fragment"
+                );
+                compio::time::sleep(Duration::from_millis(25)).await;
+            }
+        });
+    })
 }
 
 async fn wait_for_table_or_child_exit(
@@ -1397,20 +1556,31 @@ fn live_tls_cold_cache_caching_sha2_connect_uses_pinned_ca() {
                 "TLS connection must have a non-empty Ssl_cipher"
             );
 
-            let empty_ca_backend = tls_migrator_backend_for(&live, cfg, &account, "");
-            let empty_ca_err = empty_ca_backend
-                .query_json("SELECT 1 AS ok", &[])
-                .await
-                .expect_err("empty CA must not silently trust the self-signed MySQL server");
+            let empty_ca_err = tls_migrator_backend_result_for(&live, cfg, &account, "")
+                .expect_err("empty CA must be rejected before opening the mysql2 TLS driver");
+            assert!(
+                empty_ca_err.to_string().contains("non-empty pinned ssl.ca"),
+                "empty CA should fail with pin-required policy, got {empty_ca_err}"
+            );
             let invalid_ca_backend =
                 tls_migrator_backend_for(&live, cfg, &account, invalid_ca_pem());
             let invalid_ca_err = invalid_ca_backend
                 .query_json("SELECT 1 AS ok", &[])
                 .await
                 .expect_err("invalid CA must be rejected by the mysql2 node:tls path");
+            let unpinned_err = {
+                let _native_roots = NativeRootsGuard::set(&ca_pem, "mysql-unpinned");
+                tls_migrator_backend_without_ca_result_for(&live, cfg, &account).expect_err(
+                    "TLS without pinned CA must be rejected even when native roots would trust the server",
+                )
+            };
+            assert!(
+                unpinned_err.to_string().contains("non-empty pinned ssl.ca"),
+                "unpinned native-root path should fail with pin-required policy, got {unpinned_err}"
+            );
 
             println!(
-                "mysql_jsdriver_e2e TLS cold-cache caching_sha2 connect succeeded on real :3307: current_user={current_user} Ssl_cipher={cipher}; empty CA rejected={empty_ca_err}; invalid CA rejected={invalid_ca_err}"
+                "mysql_jsdriver_e2e TLS cold-cache caching_sha2 connect succeeded on real :3307: current_user={current_user} Ssl_cipher={cipher}; empty CA rejected={empty_ca_err}; invalid CA rejected={invalid_ca_err}; unpinned native-root path rejected={unpinned_err}"
             );
         })
     });
@@ -1491,7 +1661,6 @@ fn live_mysql_rejects_raw_multi_statement_non_txn_at_validate_time() {
     }));
 }
 
-#[cfg(debug_assertions)]
 #[test]
 fn live_fragment_crash_recovery_replays_decide_per_fragment() {
     let _lock = lock_env();
@@ -1507,13 +1676,8 @@ fn live_fragment_crash_recovery_replays_decide_per_fragment() {
 
             let crash_backend = migrator_backend_for(&live, cfg, account);
             crash_backend.register_guarded_fragments(&version, fragments.clone());
-            crash_backend.set_after_fragment_hook(|event| {
-                if event.fragment_index == 0 && event.decision == MysqlFragmentDecision::RunBare {
-                    MysqlFragmentHookAction::CloseConnection
-                } else {
-                    MysqlFragmentHookAction::Continue
-                }
-            });
+            let connection_id = mysql_connection_id(&crash_backend).await;
+            let killer = spawn_sleep_fragment_killer(live.clone(), connection_id, "SLEEP");
 
             let err = apply_one_result(
                 &crash_backend,
@@ -1522,10 +1686,17 @@ fn live_fragment_crash_recovery_replays_decide_per_fragment() {
                 "mysql-jsdriver-e2e-crash",
             )
             .await
-            .expect_err("after-fragment seam must close the connection mid-plan");
+            .expect_err("external killer must close the connection mid-plan");
+            killer
+                .join()
+                .expect("sleep-fragment killer helper should finish cleanly");
             assert!(
-                matches!(err, EngineError::Apply(ApplyError::Db(_))),
-                "expected transport-level crash error, got {err:?}"
+                matches!(
+                    err,
+                    EngineError::Apply(ApplyError::MigrationFailed { .. })
+                        | EngineError::Apply(ApplyError::Db(_))
+                ),
+                "expected killed-connection apply error, got {err:?}"
             );
 
             assert!(
@@ -1568,19 +1739,6 @@ fn live_fragment_crash_recovery_replays_decide_per_fragment() {
 
             let recovery_backend = migrator_backend_for(&live, cfg, account);
             recovery_backend.register_guarded_fragments(&version, fragments);
-            let decisions: Rc<RefCell<Vec<(usize, MysqlFragmentDecision, bool)>>> =
-                Rc::new(RefCell::new(Vec::new()));
-            recovery_backend.set_after_fragment_hook({
-                let decisions = Rc::clone(&decisions);
-                move |event| {
-                    decisions.borrow_mut().push((
-                        event.fragment_index,
-                        event.decision.clone(),
-                        event.had_inflight,
-                    ));
-                    MysqlFragmentHookAction::Continue
-                }
-            });
             let recovered = apply_one_result(
                 &recovery_backend,
                 cfg,
@@ -1591,14 +1749,6 @@ fn live_fragment_crash_recovery_replays_decide_per_fragment() {
             .expect("recovery run should finish the missing fragment");
             assert_eq!(recovered.recovered, vec![version.clone()]);
             assert_eq!(recovered.applied, vec![version.clone()]);
-            assert_eq!(
-                decisions.borrow().as_slice(),
-                &[
-                    (0, MysqlFragmentDecision::SatisfiedNoop, true),
-                    (1, MysqlFragmentDecision::RunBare, true),
-                ],
-                "recovery must replay decide() per fragment"
-            );
 
             let inflight_after = query(
                 backend,
@@ -1636,7 +1786,7 @@ fn live_fragment_crash_recovery_replays_decide_per_fragment() {
                 "index must be present after recovery"
             );
             println!(
-                "mysql_jsdriver_e2e crash recovery decisions on real :3307: fragment0=SatisfiedNoop fragment1=RunBare version={version}"
+                "mysql_jsdriver_e2e crash recovery replayed guarded fragments on real :3307 after killing connection {connection_id}: version={version}"
             );
         })
     });

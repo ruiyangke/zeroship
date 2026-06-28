@@ -12,6 +12,8 @@ use crate::render::step::BindValue;
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const TRUSTED_DRIVER_MAX_SOCKETS: u32 = 4;
 const TRUSTED_DRIVER_EGRESS_CEILING: u64 = 64 * 1024 * 1024;
+const MYSQL_TLS_PIN_REQUIRED_MESSAGE: &str =
+    "mysql TLS requires a non-empty pinned ssl.ca when ssl is enabled; refusing public roots with disabled hostname verification";
 
 const MYSQL_DRIVER_ENTRY_PREFIX: &str = r#"
 import mysql from "mysql2/promise";
@@ -46,7 +48,7 @@ async function main() {
         __zsResolve(cmd.id, { ok: rows });
 "#;
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 const MYSQL_DRIVER_TEST_CLOSE_BRANCH: &str = r#"
       } else if (cmd.kind === "__zs_close_for_test") {
         const stream = conn?.connection?.stream;
@@ -78,14 +80,14 @@ void main().catch((err) => {
 export default {};
 "#;
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn mysql_driver_entry() -> String {
     format!(
         "{MYSQL_DRIVER_ENTRY_PREFIX}{MYSQL_DRIVER_TEST_CLOSE_BRANCH}{MYSQL_DRIVER_ENTRY_SUFFIX}"
     )
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(test))]
 fn mysql_driver_entry() -> String {
     format!("{MYSQL_DRIVER_ENTRY_PREFIX}{MYSQL_DRIVER_ENTRY_SUFFIX}")
 }
@@ -294,6 +296,7 @@ impl JsDriverConn {
         net_policy: NetPolicy,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
+        validate_mysql_tls_pin(&dsn_json)?;
         let entry_source = mysql_driver_entry();
         Self::open_with_entry(
             dsn_json,
@@ -459,7 +462,7 @@ impl JsDriverConn {
         drop(self.runtime.take());
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub async fn close_for_test(&mut self, message: impl Into<String>) -> Result<(), JsDriverError> {
         let message = message.into();
         let result = self
@@ -508,6 +511,60 @@ fn mysql_dsn_net_policy(dsn_json: &str) -> Result<NetPolicy, JsDriverError> {
         TRUSTED_DRIVER_EGRESS_CEILING,
     )
     .map_err(|e| JsDriverError::transport(format!("invalid MySQL net policy: {e}")))
+}
+
+fn validate_mysql_tls_pin(dsn_json: &str) -> Result<(), JsDriverError> {
+    let dsn: Value = serde_json::from_str(dsn_json).map_err(|e| {
+        JsDriverError::transport(format!("invalid MySQL DSN JSON for TLS policy: {e}"))
+    })?;
+    let Some(ssl) = dsn.get("ssl") else {
+        return Ok(());
+    };
+    match ssl {
+        Value::Null | Value::Bool(false) => Ok(()),
+        Value::Object(ssl) => {
+            if ca_value_contains_pem(ssl.get("ca"))? {
+                Ok(())
+            } else {
+                Err(JsDriverError::transport(MYSQL_TLS_PIN_REQUIRED_MESSAGE))
+            }
+        }
+        Value::Bool(true) | Value::String(_) => {
+            Err(JsDriverError::transport(MYSQL_TLS_PIN_REQUIRED_MESSAGE))
+        }
+        _ => Err(JsDriverError::transport(
+            "mysql TLS ssl config must be an object with a non-empty pinned ssl.ca",
+        )),
+    }
+}
+
+fn ca_value_contains_pem(value: Option<&Value>) -> Result<bool, JsDriverError> {
+    match value {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::String(ca)) => ca_string_contains_pem(ca),
+        Some(Value::Array(values)) => {
+            let mut saw_pem = false;
+            for value in values {
+                saw_pem |= ca_value_contains_pem(Some(value))?;
+            }
+            Ok(saw_pem)
+        }
+        Some(_) => Err(JsDriverError::transport(
+            "mysql TLS ssl.ca must be a PEM-encoded certificate string",
+        )),
+    }
+}
+
+fn ca_string_contains_pem(ca: &str) -> Result<bool, JsDriverError> {
+    if ca.trim().is_empty() {
+        return Ok(false);
+    }
+    if ca.contains("-----BEGIN CERTIFICATE-----") && ca.contains("-----END CERTIFICATE-----") {
+        return Ok(true);
+    }
+    Err(JsDriverError::transport(
+        "mysql TLS ssl.ca must contain PEM-encoded certificates",
+    ))
 }
 
 fn bind_to_json(bind: &BindValue) -> Value {
@@ -579,6 +636,64 @@ mod tests {
         assert_eq!(entries.as_slice().len(), 1);
         assert_eq!(entries.as_slice()[0].host(), "db.local.test");
         assert_eq!(entries.as_slice()[0].port(), 4406);
+    }
+
+    #[test]
+    fn mysql_tls_dsn_requires_non_empty_pinned_ca() {
+        for ssl in [
+            serde_json::json!(true),
+            serde_json::json!({}),
+            serde_json::json!({ "ca": "" }),
+            serde_json::json!({ "ca": [] }),
+        ] {
+            let dsn = serde_json::json!({
+                "host": "db.local.test",
+                "port": 3306,
+                "ssl": ssl,
+            })
+            .to_string();
+            let err = validate_mysql_tls_pin(&dsn).expect_err("TLS without pinned CA must fail");
+            assert!(
+                err.to_string().contains("non-empty pinned ssl.ca"),
+                "unexpected error: {err}"
+            );
+        }
+
+        let invalid = serde_json::json!({
+            "host": "db.local.test",
+            "port": 3306,
+            "ssl": { "ca": "not a certificate" },
+        })
+        .to_string();
+        let err = validate_mysql_tls_pin(&invalid).expect_err("invalid PEM must fail");
+        assert!(
+            err.to_string().contains("PEM-encoded certificates"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mysql_tls_dsn_accepts_absent_ssl_and_pinned_pem_ca() {
+        validate_mysql_tls_pin(
+            &serde_json::json!({
+                "host": "db.local.test",
+                "port": 3306,
+            })
+            .to_string(),
+        )
+        .expect("plain MySQL DSN should not require TLS CA");
+
+        validate_mysql_tls_pin(
+            &serde_json::json!({
+                "host": "db.local.test",
+                "port": 3306,
+                "ssl": {
+                    "ca": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+                },
+            })
+            .to_string(),
+        )
+        .expect("non-empty PEM CA should satisfy the migrate TLS pin policy");
     }
 
     #[test]

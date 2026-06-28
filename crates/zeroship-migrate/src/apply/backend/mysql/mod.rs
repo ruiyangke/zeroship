@@ -9,7 +9,7 @@ pub mod transport;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-#[cfg(debug_assertions)]
+#[cfg(test)]
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -43,7 +43,7 @@ pub struct MysqlSessionSnapshot {
 pub struct MysqlBackend {
     conn: RefCell<JsDriverConn>,
     guarded_fragments: RefCell<HashMap<String, Vec<MysqlGuardedFragment>>>,
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     after_fragment_hook: RefCell<Option<Rc<dyn Fn(MysqlFragmentEvent) -> MysqlFragmentHookAction>>>,
 }
 
@@ -76,14 +76,14 @@ pub struct MysqlGuardedFragment {
     pub existence_guard: GuardProbe,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MysqlFragmentDecision {
     RunBare,
     SatisfiedNoop,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MysqlFragmentEvent {
     pub version: String,
@@ -93,7 +93,7 @@ pub struct MysqlFragmentEvent {
     pub had_inflight: bool,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MysqlFragmentHookAction {
     Continue,
@@ -115,7 +115,7 @@ impl MysqlBackend {
         Self {
             conn: RefCell::new(conn),
             guarded_fragments: RefCell::new(HashMap::new()),
-            #[cfg(debug_assertions)]
+            #[cfg(test)]
             after_fragment_hook: RefCell::new(None),
         }
     }
@@ -176,7 +176,7 @@ impl MysqlBackend {
             .insert(version.to_string(), fragments);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub fn set_after_fragment_hook(
         &self,
         hook: impl Fn(MysqlFragmentEvent) -> MysqlFragmentHookAction + 'static,
@@ -184,7 +184,7 @@ impl MysqlBackend {
         *self.after_fragment_hook.borrow_mut() = Some(Rc::new(hook));
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(test)]
     pub fn clear_after_fragment_hook(&self) {
         *self.after_fragment_hook.borrow_mut() = None;
     }
@@ -241,7 +241,7 @@ impl MysqlBackend {
         decision: MysqlApplyDecision,
         had_inflight: bool,
     ) -> Result<(), ApplyError> {
-        #[cfg(debug_assertions)]
+        #[cfg(test)]
         {
             let event = MysqlFragmentEvent {
                 version: version.to_string(),

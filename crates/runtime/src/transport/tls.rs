@@ -14,6 +14,10 @@ use rustls::{
     ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 
+pub const TLS_PIN_REQUIRED_CODE: &str = "ERR_TLS_PIN_REQUIRED";
+pub const TLS_PIN_REQUIRED_MESSAGE: &str =
+    "hostname verification disabled requires a pinned ca; refusing public roots";
+
 #[derive(Debug, Clone)]
 pub struct TlsConnectorOptions {
     pub reject_unauthorized: bool,
@@ -40,8 +44,16 @@ pub fn build_tls_connector(opts: &TlsConnectorOptions) -> io::Result<TlsConnecto
         return Ok(TlsConnector::from(Arc::new(cfg)));
     }
 
+    let ca_pem = opts.ca_pem.as_deref().filter(|ca| !ca.trim().is_empty());
+    if !opts.verify_identity && ca_pem.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            TLS_PIN_REQUIRED_MESSAGE,
+        ));
+    }
+
     let mut root_store = RootCertStore::empty();
-    if let Some(ca_pem) = opts.ca_pem.as_deref() {
+    if let Some(ca_pem) = ca_pem {
         let certs = parse_ca_certs(ca_pem)?;
         let added = root_store.add_parsable_certificates(certs);
         if added.0 == 0 {
@@ -78,6 +90,11 @@ pub fn build_tls_connector(opts: &TlsConnectorOptions) -> io::Result<TlsConnecto
             .with_no_client_auth()
     };
     Ok(TlsConnector::from(Arc::new(cfg)))
+}
+
+pub fn is_tls_pin_required(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        && error.to_string() == TLS_PIN_REQUIRED_MESSAGE
 }
 
 fn parse_ca_certs(input: &str) -> io::Result<Vec<CertificateDer<'static>>> {

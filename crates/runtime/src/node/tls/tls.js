@@ -1,6 +1,7 @@
 (function () {
   const Socket = globalThis.__zsNetSocket;
   const pemDecoder = new TextDecoder("utf-8", { fatal: true });
+  const normalizedOptionsMarker = Symbol("zeroship.tls.normalizedOptions");
 
   function tlsError(code, message) {
     const err = new Error(message);
@@ -30,7 +31,8 @@
   function normalizeCa(ca) {
     if (ca == null) return undefined;
     if (Array.isArray(ca)) {
-      return ca.map(normalizeCa).filter((v) => v != null && v !== "").join("\n");
+      const joined = ca.map(normalizeCa).filter((v) => v != null && v !== "").join("\n");
+      return joined === "" ? undefined : joined;
     }
     if (typeof ca === "string") return assertPemCa(ca);
     if (ca instanceof ArrayBuffer) {
@@ -65,6 +67,7 @@
     if (!options || typeof options !== "object") {
       throw new TypeError("tls.connect options must be an object");
     }
+    if (options[normalizedOptionsMarker]) return options;
     rejectClientAuthOptions(options);
     const secureContext = options.secureContext || undefined;
     const socket = options.socket || undefined;
@@ -72,7 +75,9 @@
     const port = Number(options.port);
     const servername = String(options.servername || options.host || options.hostname || "localhost");
     const rejectUnauthorized = options.rejectUnauthorized !== false;
-    const ca = normalizeCa(options.ca) || normalizeCa(secureContext && secureContext.ca);
+    const optionCa = normalizeCa(options.ca);
+    const contextCa = normalizeCa(secureContext && secureContext.ca);
+    const ca = optionCa == null ? contextCa : optionCa;
     const verifyIdentity = typeof options.checkServerIdentity !== "function";
 
     if (!socket) {
@@ -81,7 +86,16 @@
       }
     }
 
-    return { socket, host, port, servername, rejectUnauthorized, ca, verifyIdentity };
+    return {
+      socket,
+      host,
+      port,
+      servername,
+      rejectUnauthorized,
+      ca,
+      verifyIdentity,
+      [normalizedOptionsMarker]: true,
+    };
   }
 
   class TLSSocket extends Socket {

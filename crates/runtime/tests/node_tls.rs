@@ -593,6 +593,111 @@ return new Promise((resolve) => {{
 }
 
 #[test]
+fn tls_chain_only_without_pinned_ca_is_rejected() {
+    let _lock = lock_env();
+    let cert = ca_signed_test_cert();
+    let native_roots_path = std::env::temp_dir().join(format!(
+        "zeroship-chain-only-native-roots-{}-{}.pem",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("node_tls")
+    ));
+    std::fs::write(&native_roots_path, cert.ca_pem.as_bytes()).unwrap();
+
+    let result = {
+        let _env = EnvGuard::set_with_native_roots(true, Some(&native_roots_path));
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let addr = spawn_tls_server(cert, TlsServerMode::DirectEcho).await;
+            run_js_module(
+                tls_module(&format!(
+                    r#"
+return new Promise((resolve) => {{
+    const s = tls.connect({{
+        host: "127.0.0.1",
+        port: {},
+        servername: "attacker.local.test",
+        checkServerIdentity: () => undefined,
+    }});
+    const events = [];
+    s.on("secureConnect", () => resolve("unexpected-secure"));
+    s.on("error", (err) => events.push(`error:${{err.code}}:${{err.message}}`));
+    s.on("close", () => resolve(events.join("|") + "|close"));
+    setTimeout(() => resolve(`timeout:${{events.join("|")}}`), 3000);
+}});
+"#,
+                    addr.port()
+                )),
+                allowlist(addr, 4),
+                Duration::from_secs(5),
+            )
+            .await
+        })
+    };
+    let _ = std::fs::remove_file(&native_roots_path);
+
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.contains("error:ERR_TLS_PIN_REQUIRED")
+            && result
+                .body
+                .contains("hostname verification disabled requires a pinned ca")
+            && result.body.contains("|close"),
+        "chain-only TLS without a pinned CA must fail closed before native roots are used, got: {}",
+        result.body
+    );
+}
+
+#[test]
+fn native_roots_with_hostname_verification_still_work() {
+    let _lock = lock_env();
+    let cert = ca_signed_test_cert();
+    let native_roots_path = std::env::temp_dir().join(format!(
+        "zeroship-public-tls-native-roots-{}-{}.pem",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("node_tls")
+    ));
+    std::fs::write(&native_roots_path, cert.ca_pem.as_bytes()).unwrap();
+
+    let result = {
+        let _env = EnvGuard::set_with_native_roots(true, Some(&native_roots_path));
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let addr = spawn_tls_server(cert.clone(), TlsServerMode::DirectEcho).await;
+            let result = run_js_module(
+                tls_module(&format!(
+                    r#"
+return new Promise((resolve) => {{
+    const s = tls.connect({{
+        host: "127.0.0.1",
+        port: {},
+        servername: "db.local.test",
+    }});
+    let data = "";
+    s.on("secureConnect", () => s.write("native"));
+    s.on("data", (chunk) => {{
+        data += chunk.toString();
+        s.end();
+    }});
+    s.on("close", () => resolve(`authorized=${{s.authorized}};data=${{data}}`));
+    s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}}`));
+    setTimeout(() => resolve(`timeout:data=${{data}}`), 3000);
+}});
+"#,
+                    addr.port()
+                )),
+                allowlist(addr, 4),
+                Duration::from_secs(5),
+            )
+            .await;
+            assert_seen_sni(&cert, "db.local.test");
+            result
+        })
+    };
+    let _ = std::fs::remove_file(&native_roots_path);
+
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert_eq!(result.body, "authorized=true;data=native");
+}
+
+#[test]
 fn custom_ca_replaces_native_roots_instead_of_augmenting_them() {
     let _lock = lock_env();
     let cert = ca_signed_test_cert();

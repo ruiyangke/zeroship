@@ -47,7 +47,7 @@ pub use capability::{
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
 pub use postgres::PostgresBackend;
-#[cfg(debug_assertions)]
+#[cfg(test)]
 pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
 pub use mysql::{
     deprovision_mysql_migrator_account, mysql_migration_lock_name,
