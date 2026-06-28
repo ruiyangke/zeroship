@@ -23,7 +23,7 @@ verification** are real.
   same dev server the cargo integration tests use. The harness creates a
   **dedicated** DB `zeroship_stripe_e2e` and **never** touches the real
   `zeroship` DB nor the concurrent `zeroship_billing_test` DB.
-- `docker` (for the Liquibase migrate step via `ops/db-migrate.sh`), `node`,
+- `docker`, the `zeroship-migrate` bin (built; the migrate step via `ops/db-migrate.sh`), `node`,
   `openssl`, `curl`, and `psql` (default path is the Nix store path; override
   with `ZEROSHIP_PSQL`).
 - The operator's Stripe **TEST** keys, sourced from the env file (see Secrets).
@@ -62,7 +62,7 @@ sourced, no PG :5440, no docker, missing tools) so it is CI-safe. It
 ## What each stage proves (with real object ids in the output)
 
 1. **DB + control** — dedicated `zeroship_stripe_e2e` migrated with the full
-   changelog; control booted at `https://api.stripe.com`.
+   zeroship-migrate platform set; control booted at `https://api.stripe.com`.
 2. **Customer + PM** — real `cus_…` + a saved test PaymentMethod (`pm_card_visa`).
 3. **Reconcile** — `POST /internal/billing/reconcile` drives the real
    `bill_creator`: real invoice item + invoice + finalize on Stripe; the

@@ -21,6 +21,25 @@ jobs:
           node-version: 22
       - run: cd web/dashboard && npm ci && npx tsc --noEmit && npx vite build
 
+  # Gate the SDK type-level + unit suites. In particular this runs
+  # @zeroship/migrate's `check` (tsc + the PR5 tsconfig.types.json
+  # `@ts-expect-error` structural-safety / names-stay-strings suite) and its
+  # node:test suite, so the tsc-as-assertion structural proof can no longer
+  # silently rot — the assertion is now gated, not human-run-only.
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      # The migrate type layer reads @zeroship/db's built types; build SDKs first.
+      - run: pnpm build
+      - run: pnpm --filter @zeroship/migrate run check
+      - run: pnpm --filter @zeroship/migrate test
+
   e2e:
     runs-on: ubuntu-latest
     needs: [rust, frontend]

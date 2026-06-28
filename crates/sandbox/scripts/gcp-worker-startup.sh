@@ -480,8 +480,8 @@ umask 022
 #   - SANDBOX_ADMIN_TOKEN_PATH points at /etc/zeroship/sandbox-admin-token
 #
 # The controller no longer self-migrates: the unified `zeroship` schema
-# is owned by Liquibase (db/changelog/, applied by ops/db-migrate.sh /
-# the compose `migrate` service). The controller boots assuming the
+# is owned by zeroship-migrate (db/migrations, applied by ops/db-migrate.sh
+# / the compose `migrate` service). The controller boots assuming the
 # schema already exists.
 
 cat > /etc/systemd/system/zsbx-ctl.service <<EOF
@@ -551,8 +551,8 @@ Environment=SANDBOX_SNAPSHOT_ROOT_KEK_PATH=$ROOT_KEK_PATH
 # Admin token file
 Environment=SANDBOX_ADMIN_TOKEN_PATH=$ART/sandbox-admin-token
 
-# pg schema is owned by Liquibase (db/changelog/); the controller does
-# not self-migrate. Nothing to set here.
+# pg schema is owned by zeroship-migrate (db/migrations); the controller
+# does not self-migrate. Nothing to set here.
 
 # Option C Phase 4 (T-8b-stress-r7) — driver-side disk image staging.
 # With this flag flipped TRUE, the controller emits \`zsbx_stage_disks=true\`

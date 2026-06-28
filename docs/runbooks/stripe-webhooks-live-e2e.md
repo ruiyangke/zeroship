@@ -34,7 +34,7 @@ stripe listen --print-secret              → capture the STABLE whsec_…
 - Postgres on `localhost:5440` (user `postgres`, pw `zeroship`). The harness
   creates a **dedicated** DB `zeroship_stripe_e2e` and **never** touches the real
   `zeroship` DB nor the concurrent `zeroship_billing_test` DB.
-- `docker` (Liquibase migrate via `ops/db-migrate.sh`), `node`, `openssl`, `curl`,
+- `docker`, the `zeroship-migrate` bin (migrate via `ops/db-migrate.sh`), `node`, `openssl`, `curl`,
   `psql` (default Nix store path; override with `ZEROSHIP_PSQL`).
 - The operator's Stripe **TEST** secret key, sourced from the env file.
 
@@ -64,7 +64,7 @@ key. Self-managed up/down: tears down `stripe listen` + control on exit.
 ## What each stage proves (with real ids in the output)
 
 1. **DB + control + forwarder** — dedicated `zeroship_stripe_e2e` migrated with
-   the full changelog (incl. `0054` webhook follow-ups); control at
+   the full zeroship-migrate platform set (incl. `0054` webhook follow-ups); control at
    `https://api.stripe.com`; `stripe listen` forwarder READY.
 2. **Core loop, Stripe-DELIVERED** — a real customer + a real paid invoice; Stripe
    DELIVERS the natural money cascade (`invoice.created → finalized → invoiceitem.created

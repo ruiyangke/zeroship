@@ -1,0 +1,12 @@
+DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE ALL ON zeroship.creator_billing FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.billing_customer_refs FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.invoices FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.invoice_lines FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.billing_provider_refs FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.billing_line_provider_refs FROM zeroship_control'; END IF; END $rb$;
+DROP TRIGGER IF EXISTS invoice_lines_immutable_trg ON zeroship.invoice_lines;
+DROP FUNCTION IF EXISTS zeroship.invoice_lines_immutable();
+DROP TRIGGER IF EXISTS invoices_immutable_trg ON zeroship.invoices;
+DROP FUNCTION IF EXISTS zeroship.invoices_immutable();
+DROP TABLE zeroship.billing_line_provider_refs;
+DROP TABLE zeroship.billing_provider_refs;
+DROP TABLE zeroship.invoice_lines;
+DROP INDEX IF EXISTS zeroship.invoices_active_period_claim;
+DROP TABLE zeroship.invoices;
+DROP TABLE zeroship.billing_customer_refs;
+DROP TABLE zeroship.creator_billing;

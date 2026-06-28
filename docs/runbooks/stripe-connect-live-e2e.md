@@ -42,7 +42,7 @@ and the charge path runs.
 - Postgres on `localhost:5440` (user `postgres`, pw `zeroship`). The harness
   creates a **dedicated** DB `zeroship_stripe_e2e` and **never** touches the real
   `zeroship` DB nor a concurrent `zeroship_billing_test` DB.
-- `docker` (Liquibase migrate via `ops/db-migrate.sh`), `node`, `openssl`, `curl`,
+- `docker`, the `zeroship-migrate` bin (migrate via `ops/db-migrate.sh`), `node`, `openssl`, `curl`,
   `psql` (default Nix store path; override with `ZEROSHIP_PSQL`).
 - The operator's Stripe **TEST** secret key, sourced from the env file.
 
@@ -72,8 +72,8 @@ down control and deletes the test-mode connected accounts it minted on exit.
 ## What each stage proves (when Connect is enabled)
 
 1. **DB + control** — dedicated `zeroship_stripe_e2e` migrated with the full
-   changelog (incl. `0044` `creator_fee_policy` + the `creator_accounts` Connect
-   flags); control at `https://api.stripe.com`.
+   zeroship-migrate platform set (incl. `V0044` `creator_fee_policy` + the
+   `creator_accounts` Connect flags); control at `https://api.stripe.com`.
 2. **Express account + onboarding link** — `onboard` mints a real `acct_…`
    (`type=express`, `metadata[creator_id]` ownership signal) and returns a real
    `account_links` onboarding URL; `callback` verifies ownership + persists
@@ -108,7 +108,7 @@ Code map: handlers in `crates/control/src/stripe_handlers.rs`
 wire shapes in `crates/control/src/stripe_client.rs`
 (`create_connect_account` :963, `create_account_link` :983,
 `create_connect_payment_intent` :1021); schema in
-`db/changelog/changesets/0044_creator_fee_policy.sql`. Offline logic coverage:
+`db/migrations/V0044__creator_fee_policy.sql`. Offline logic coverage:
 `crates/control/tests/connect_fee_test.rs`.
 
 Any genuine handler bug surfaced by real Stripe is **flagged** (a divergence),

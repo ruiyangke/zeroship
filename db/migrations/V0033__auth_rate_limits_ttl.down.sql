@@ -1,0 +1,1 @@
+DROP INDEX zeroship.auth_rate_limits_updated_at_idx;

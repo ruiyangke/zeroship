@@ -153,6 +153,74 @@ pub async fn query_text_params(
     }
 }
 
+/// Execute a non-row statement with **NULL-aware text-format** parameters,
+/// returning the affected-row count.
+///
+/// The `execute` peer of [`query_text_params`]: Parse is sent with an empty OID
+/// list so the server infers each parameter's type FROM ITS POSITION in the SQL,
+/// and every param is encoded in TEXT format (code 0). This is the
+/// JSON-query-builder coercion model — a value passed as text is implicit-cast to
+/// the target column type (`'2026-01-01'` → `timestamptz`, `'1.5'` → `numeric`),
+/// which the typed-binary `execute_typed` path cannot do for a cross-type bind.
+/// A `None` param is a SQL NULL (sent with no bytes). The op.* DML executor uses
+/// this so a creator `insert`/`update` value coerces to the column type without
+/// the assembler knowing the schema (names-are-strings, §3.3).
+pub async fn execute_text_params(
+    client: &Arc<InnerClient>,
+    query: &str,
+    params: &[Option<String>],
+) -> Result<u64, Error> {
+    let buf = client.with_buf(|buf| {
+        frontend::parse("", query, std::iter::empty::<u32>(), buf).map_err(Error::parse)?;
+        let param_refs: Vec<Option<&[u8]>> =
+            params.iter().map(|s| s.as_ref().map(|v| v.as_bytes())).collect();
+        frontend::bind(
+            "",
+            "",
+            std::iter::once(0i16), // all params: text format
+            param_refs,
+            |val: Option<&[u8]>, out: &mut BytesMut| match val {
+                Some(bytes) => {
+                    out.extend_from_slice(bytes);
+                    Ok(postgres_protocol::IsNull::No)
+                }
+                None => Ok(postgres_protocol::IsNull::Yes),
+            },
+            std::iter::once(1i16), // results: binary (no rows for a DML, but keep uniform)
+            buf,
+        )
+        .map_err(|e| match e {
+            frontend::BindError::Serialization(io_err) => Error::encode(io_err),
+            frontend::BindError::Conversion(boxed) => {
+                Error::encode(std::io::Error::other(format!("bind: {boxed}")))
+            }
+        })?;
+        frontend::describe(b'P', "", buf).map_err(Error::encode)?;
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })?;
+
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut rows = 0;
+    loop {
+        match responses.next().await? {
+            Message::ParseComplete
+            | Message::BindComplete
+            | Message::ParameterDescription(_)
+            | Message::RowDescription(_) => {}
+            Message::NoData => rows = 0,
+            Message::DataRow(_) => {}
+            Message::CommandComplete(body) => {
+                rows = extract_row_affected(&body)?;
+            }
+            Message::EmptyQueryResponse => rows = 0,
+            Message::ReadyForQuery(_) => return Ok(rows),
+            _ => return Err(Error::unexpected_message()),
+        }
+    }
+}
+
 pub async fn query_typed<P, I>(
     client: &Arc<InnerClient>,
     query: &str,

@@ -243,7 +243,13 @@ pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
 /// (today's only shape) become a one-element `modules` vector tagged
 /// `index.js`; multi-module deploys will pass a richer slice once the
 /// V8 module-resolve callback lands.
-pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits) -> bool {
+pub fn load_app(
+    app_id: Uuid,
+    bundle_bytes: &[u8],
+    app_limits: AppRuntimeLimits,
+    deploy_hash: Option<&str>,
+    runtime_descriptor: Option<&str>,
+) -> bool {
     let source = match std::str::from_utf8(bundle_bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -279,6 +285,15 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
         let meter = METER.with(|m| m.borrow().clone());
         let mut env_vars = HashMap::new();
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
+        // **T6** — inject the per-app deploy/schema-version token so plugin-db's
+        // deploy-keyed introspection cache (crypto/mask/column metadata) keys off
+        // the real `deploy_hash` and invalidates on a redeploy. `mint_db` reads
+        // this out of the isolate's `env_vars` and stamps it into the per-isolate
+        // DB context. Omitted when the control plane reported no deploy hash;
+        // plugin-db then defaults to the `"cold_start"` token.
+        if let Some(dh) = deploy_hash {
+            env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
+        }
 
         let limits = runtime_limits_from_app(&app_limits);
         // Pass `app_id` so the runtime's RPC fast path can register
@@ -290,7 +305,12 @@ pub fn load_app(app_id: Uuid, bundle_bytes: &[u8], app_limits: AppRuntimeLimits)
             .env_vars(env_vars)
             .limits(limits)
             .plugins(plugins)
-            .app_id(app_id);
+            .app_id(app_id)
+            // **Migration-first cutover (P4b)** — hand the bundled
+            // `RuntimeSchemaDescriptor` JSON (resolved from
+            // `manifest.runtime_descriptor`'s blob by the caller) to the
+            // runtime, which exposes it as `globalThis.__zsRuntimeDescriptor`.
+            .runtime_descriptor(runtime_descriptor.map(str::to_string));
         if let Some(meter) = meter {
             builder = builder.meter(meter);
         }

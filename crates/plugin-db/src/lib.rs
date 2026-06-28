@@ -53,7 +53,12 @@ use crate::error::DbError;
 // Always pub:
 pub mod broker;
 pub mod error;
-pub mod query;
+// **Schema-authority P1** — the DDL builders + `QueryError` + `SqlDialect` +
+// the system-field / validation helpers were extracted into the leaf crate
+// `zeroship-schema`. plugin-db re-exports the module wholesale so every
+// existing `crate::query::…` reference (and `use crate::query;` then
+// `query::…`) resolves unchanged — behaviour identical, no call-site churn.
+pub use zeroship_schema::query;
 pub mod v8_classes;
 
 // `backend` is crate-private by default; under `test-helpers` it
@@ -88,17 +93,19 @@ pub mod cross_app_fk;
 pub(crate) mod crud;
 #[cfg(feature = "test-helpers")]
 pub mod crud;
-// **P5.5 PR 6** — `diff` is crate-private in release builds; `pub`
-// under `test-helpers` so `tests/sqlite_integration.rs` (and
-// `tests/integration.rs`) can reach `diff::{compute_diff, ChangeKind,
-// ChangeClass, MaskKind, Classification, DiffOp, MaskMeta,
-// LiveSchema, ColumnInfo}` for the mask-transition round-trip tests
-// and the PG-arm end-to-end coverage. Same shape as `crud` /
-// `encryption` above.
+// **Schema-authority P1** — the diff classifier (`compute_diff`,
+// `ChangeKind`, `ChangeClass`, `DiffOp`), the live introspection
+// (`read_live_schema`, `estimate_row_count`), and the schema metadata
+// types (`MaskMeta`, `EncryptionMeta`, `MaskKind`, `Classification`,
+// `WrappedType`, `LiveSchema`, `ColumnInfo`) were extracted into the leaf
+// crate `zeroship-schema`. plugin-db re-exports the module so every
+// `crate::diff::…` reference resolves unchanged. The original `pub(crate)`
+// vs `pub` (under `test-helpers`) visibility is preserved by the cfg gate;
+// the integration suites reach `diff::{…}` only under `test-helpers`.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod diff;
+pub(crate) use zeroship_schema::diff;
 #[cfg(feature = "test-helpers")]
-pub mod diff;
+pub use zeroship_schema::diff;
 pub(crate) mod read_set;
 pub(crate) mod v8_bridge;
 
@@ -225,6 +232,37 @@ pub(crate) fn is_model_registered(app_id: &str, collection: &str) -> bool {
 /// Mark a model as registered.
 pub(crate) fn mark_model_registered(app_id: &str, collection: &str) {
     ctx_mut(|c| c.mark_model_registered(app_id, collection));
+}
+
+/// **P4 HALF B test helper** — mark a model registered on the current isolate,
+/// mirroring what `register_model` does at the SDK boundary. The runtime schema
+/// resolver gates on `is_model_registered` (the cold-schema contract), so a
+/// faithful e2e that drives the CRUD pipelines directly must mark the model.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn mark_model_registered_for_tests(app_id: &str, collection: &str) {
+    mark_model_registered(app_id, collection);
+}
+
+/// **P6b test helper** — clear the registered mark so a re-register of the same
+/// `(app, collection)` with a CHANGED schema re-runs the cold path (a real dev
+/// re-deploy mints a fresh isolate; tests reuse one). Used by the destructive-
+/// apply test to drive a v1→v2 schema change through the engine.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn clear_model_registered_for_tests(app_id: &str, collection: &str) {
+    ctx_mut(|c| c.clear_model_registered(app_id, collection));
+}
+
+/// **T6** — stamp the per-`app_id` deploy/schema-version token into the
+/// per-isolate context, the way `mint_db` does from the worker-injected
+/// `ZEROSHIP_DEPLOY_ID`. A faithful e2e that drives the CRUD pipelines directly
+/// uses this to simulate a redeploy (bump the token) and prove the deploy-keyed
+/// introspection cache re-introspects the new schema's metadata.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn set_deploy_token_for_tests(app_id: &str, token: &str) {
+    context::with_mut(|c| c.set_deploy_token(app_id, token));
 }
 
 // The synchronous `ensure_pool(scope)` helper that used to live here
@@ -415,7 +453,33 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
-    ctx_mut(|c| c.cache_schema(app_id, collection, schema));
+    ctx_mut(|c| {
+        c.cache_schema(app_id, collection, schema);
+        // **P4 HALF B** — production `register_model` BOTH caches the declared
+        // schema AND marks the model registered; the runtime schema resolver
+        // (`crud::introspect_schema::runtime_schema_for`) gates on
+        // `is_model_registered` to preserve the cold-schema contract. Mark it
+        // here too so this helper stays a faithful mirror of registration (a
+        // schema cached but not marked registered would never be consulted, an
+        // unfaithful half-state).
+        c.mark_model_registered(app_id, collection);
+    });
+}
+
+/// **H1 test helper**: drop every cached declared schema for `app_id` (and clear
+/// the model-registered marks for the given collections). Simulates a FRESH
+/// isolate booting against a WARM app file — the per-isolate sibling cache starts
+/// empty even though the file already holds the tables. The H1 warm-multi-
+/// collection drop-suppression path must survive exactly this state.
+#[cfg(any(test, feature = "test-helpers"))]
+#[doc(hidden)]
+pub fn simulate_fresh_isolate_for_tests(app_id: &str, collections: &[&str]) {
+    ctx_mut(|c| {
+        c.clear_schemas_for_app(app_id);
+        for coll in collections {
+            c.clear_model_registered(app_id, coll);
+        }
+    });
 }
 
 /// **P5.5 PR 5 test helper**: clear the per-isolate mask-policy cache
@@ -597,6 +661,27 @@ pub async fn drop_pooled_lock_guard_without_release_for_tests(
 enum BackendUrl {
     Postgres,
     Sqlite { path: PathBuf },
+}
+
+/// `true` iff `url` resolves to the SQLite (dev-tier) backend under the SAME
+/// grammar [`backend_for_url`] uses (`sqlite:` / `sqlite://` / `file:` /
+/// `:memory:` / a bare filesystem path). PG (`postgres://`/`postgresql://`)
+/// and an empty / unknown-scheme URL are `false`.
+///
+/// Delegates to [`zeroship_core::db_url::is_sqlite_url`] so the grammar has ONE
+/// source of truth shared with the runtime's single-isolate clamp and the
+/// worker's hard-abort guard (neither can depend on plugin-db, which depends on
+/// the runtime). A debug assertion keeps it in lock-step with `backend_for_url`
+/// — the opener and the classifier can never silently diverge.
+#[must_use]
+pub fn is_sqlite_url(url: &str) -> bool {
+    let v = zeroship_core::db_url::is_sqlite_url(url);
+    debug_assert_eq!(
+        v,
+        matches!(backend_for_url(url), Ok(BackendUrl::Sqlite { .. })),
+        "is_sqlite_url drifted from backend_for_url for {url:?}"
+    );
+    v
 }
 
 fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {

@@ -15,11 +15,44 @@ use crate::state::TimerCallback;
 // V8 platform init
 // ===========================================================================
 
-/// Initialize V8 (safe to call multiple times).
-pub fn init_v8() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
+// V8's platform is a PROCESS-GLOBAL installed exactly once. `init_v8` (multi-threaded
+// default platform) and `init_v8_single_threaded` (single-threaded platform) are
+// mutually exclusive — a process commits to ONE. They share this single `Once` so the
+// FIRST caller's choice wins and any later call of EITHER variant is a no-op (rather
+// than a second `initialize_platform` that panics with "Invalid global state").
+static V8_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Records WHICH platform flavor the `V8_INIT` `Once` actually committed, so a later
+/// caller can verify the flavor it needs is the one that won (the `Once` is
+/// first-caller-wins; a second call of EITHER variant no-ops silently). `0` = not yet
+/// initialized, `1` = multi-threaded default platform, `2` = single-threaded platform.
+///
+/// This exists for the build-time recorder child's FAIL-CLOSED single-threaded check:
+/// the recorder's whole-process landlock coverage depends on the single-threaded
+/// platform being the one installed (landlock has no TSYNC). If any future code path
+/// in the recorder process called the multi-threaded `init_v8` before
+/// `init_v8_single_threaded`, the recorder would otherwise come up MULTI-THREADED with
+/// NO error, silently re-opening the thread-scope gap. [`v8_platform_flavor`] lets the
+/// recorder detect that and REFUSE TO RUN rather than silently degrade.
+static V8_FLAVOR: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The committed V8 platform flavor (see [`V8_FLAVOR`]): `0` = uninitialized, `1` =
+/// multi-threaded default platform, `2` = single-threaded platform. Used by the
+/// recorder child to fail closed if the multi-threaded platform won the `Once` race.
+pub fn v8_platform_flavor() -> u8 {
+    V8_FLAVOR.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Shared one-time V8 setup. `single_threaded` selects the platform flavor.
+fn init_v8_platform(single_threaded: bool) {
+    V8_INIT.call_once(|| {
+        // Record the flavor the FIRST caller committed (first-caller-wins). Stored
+        // inside `call_once` so it reflects the platform actually installed, not a
+        // later no-op call's argument.
+        V8_FLAVOR.store(
+            if single_threaded { 2 } else { 1 },
+            std::sync::atomic::Ordering::SeqCst,
+        );
         // Install the TLS crypto provider (rustls needs this for HTTPS fetch).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -30,17 +63,52 @@ pub fn init_v8() {
         v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
             .expect("failed to load ICU data");
 
-        // `--expose-gc` makes `request_garbage_collection_for_testing`
-        // available so memory-pressure tests can force a GC pass
-        // mid-run instead of waiting for isolate teardown. The flag
-        // only enables a test entry point — it doesn't affect
-        // production behavior.
-        v8::V8::set_flags_from_string("--expose-gc");
-
-        let platform = v8::new_default_platform(0, false).make_shared();
-        v8::V8::initialize_platform(platform);
+        if single_threaded {
+            // `--single_threaded` keeps V8's GC/compiler work on the calling thread;
+            // the single-threaded platform spawns NO worker-thread pool. `--expose-gc`
+            // mirrors the multi-threaded init so memory-pressure handling is identical.
+            v8::V8::set_flags_from_string("--single_threaded --expose-gc");
+            let platform = v8::new_single_threaded_default_platform(false).make_shared();
+            v8::V8::initialize_platform(platform);
+        } else {
+            // `--expose-gc` makes `request_garbage_collection_for_testing`
+            // available so memory-pressure tests can force a GC pass
+            // mid-run instead of waiting for isolate teardown. The flag
+            // only enables a test entry point — it doesn't affect
+            // production behavior.
+            v8::V8::set_flags_from_string("--expose-gc");
+            let platform = v8::new_default_platform(0, false).make_shared();
+            v8::V8::initialize_platform(platform);
+        }
         v8::V8::initialize();
     });
+}
+
+/// Initialize V8 with the multi-threaded default platform (safe to call multiple
+/// times). The standard worker/gateway/dev init.
+pub fn init_v8() {
+    init_v8_platform(false);
+}
+
+/// Initialize V8 with a **single-threaded** platform (no GC/compiler/platform
+/// worker-thread pool). Same one-time setup as [`init_v8`] (rustls provider, ICU data,
+/// `--expose-gc`) plus `--single_threaded` and `new_single_threaded_default_platform`,
+/// so V8 runs all of its own background work inline on the calling thread.
+///
+/// This exists for the build-time kernel-sandboxed recorder child
+/// (`zeroship-migrate-js`): seccomp's calling-thread-only `apply_filter` and
+/// landlock's calling-thread-only `restrict_self` cannot reach a thread that already
+/// exists when the lockdown runs. The multi-threaded default platform spawns such
+/// threads at init; a single-threaded platform spawns NONE, so the in-process
+/// lockdown covers the only thread (landlock has no TSYNC equivalent, so this is the
+/// sound way to give it full coverage). See `zeroship-migrate-js/src/sandbox.rs`.
+///
+/// MUST be chosen INSTEAD of [`init_v8`] for the whole process: both share one `Once`,
+/// so a process must call this BEFORE any path that calls `init_v8` (e.g.
+/// `Runtime::build`) for the single-threaded platform to win. Safe to call multiple
+/// times; a no-op once either variant has run.
+pub fn init_v8_single_threaded() {
+    init_v8_platform(true);
 }
 
 // ===========================================================================
@@ -817,15 +885,47 @@ function _zsIsWsUpgrade(request) {
     return true;
 }
 
-// Resolve the user's default.fetch once at module init. When present, we
-// export it directly as our `default.fetch` — no wrapper, no extra async
-// frame, no extra try/catch. The kernel's `call_fetch_inner` already
-// turns thrown exceptions into `DispatchResult::ErrorValue` with the
-// correct HTTP status (honoring `err.status`), so a JS-side try/catch
-// here would just add cost. This is the single biggest per-fetch win
-// after dropping the URL parse and __bindRequest.
-const USER_FETCH = (user && user.default && typeof user.default.fetch === "function")
+// Schema-readiness gate (ISS-66 / C1). `DB_INIT_JS` (runtime-entry)
+// stashes the async DDL chain on `globalThis.__zsSchemaReady` but does
+// NOT await it (top-level await would leave module eval pending and
+// 404 every dispatch). The RPC dispatcher already awaits it before the
+// first procedure; the WinterCG fetch / fetchFast entries did NOT — so a
+// `default.fetch` handler doing `env.db.users.insert(...)` raced the
+// cold-boot SQLite migration ("no such table" / mid-rebuild read).
+//
+// Gate fetch + fetchFast at REQUEST time (not module-eval time): await
+// the same promise the dispatcher awaits before invoking the user slot.
+// In production (Postgres) `registerModel` is a no-op and the schema is
+// applied at deploy, so `__zsSchemaReady` resolves ~immediately → the
+// await is near-free on the warm path (a settled promise). A REJECTED
+// chain (failed migration) surfaces as a thrown error from the gate, so
+// the fetch fails loud rather than hanging or reading a half-built DB.
+async function __zsAwaitSchemaReady() {
+    const ready = globalThis.__zsSchemaReady;
+    if (ready && typeof ready.then === "function") {
+        // A rejection here throws out of this await — the caller (the
+        // gated fetch/fetchFast shim) propagates it to the kernel, which
+        // maps it to an HTTP error envelope. Do NOT swallow it: a fetch
+        // after a failed schema-apply must surface a clear error.
+        await ready;
+    }
+}
+
+// Resolve the user's default.fetch once at module init. When present we
+// wrap it in a thin async shim that AWAITS `__zsSchemaReady` first, so
+// the user handler never runs against an un-migrated / mid-rebuild DB.
+// The kernel already awaits a returned Promise and turns thrown
+// exceptions into `DispatchResult::ErrorValue` (honoring `err.status`),
+// so the shim adds one settled-promise await on the warm path and
+// correctly propagates a rejected schema chain on the cold path.
+const __USER_FETCH_RAW = (user && user.default && typeof user.default.fetch === "function")
     ? user.default.fetch
+    : null;
+const USER_FETCH = __USER_FETCH_RAW
+    ? async function gatedFetch(request, env, ctx) {
+          await __zsAwaitSchemaReady();
+          return __USER_FETCH_RAW.call(user.default, request, env, ctx);
+      }
     : null;
 
 // Optional zeroship extension: `user.default.fetchFast(method, url, body, env)`.
@@ -837,8 +937,20 @@ const USER_FETCH = (user && user.default && typeof user.default.fetch === "funct
 // Kernel dispatches to this for non-/__zeroship/v1/<id> traffic when the user
 // module exports it. /__zeroship/v1/<id> requests go through `default.rpc`
 // instead — fetchFast and rpc are siblings, not layered.
-const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast === "function")
+const __USER_FETCH_FAST_RAW = (user && user.default && typeof user.default.fetchFast === "function")
     ? user.default.fetchFast
+    : null;
+// Same schema-readiness gate as `fetch` (C1). The shim is async, so it
+// returns a Promise; the kernel's fetchFast path already awaits a
+// promise return and re-classifies the resolved value (null → fall
+// through to the slow `default.fetch`, which is itself gated). A
+// rejected `__zsSchemaReady` throws out of the shim → kernel maps it to
+// an error envelope. Near-free on the warm path (settled promise).
+const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
+    ? async function gatedFetchFast(method, url, body, env) {
+          await __zsAwaitSchemaReady();
+          return __USER_FETCH_FAST_RAW(method, url, body, env);
+      }
     : null;
 
 // Standalone RPC entry — the kernel calls this directly when the URL
@@ -921,7 +1033,10 @@ async function fallbackFetch(request) {
     // GET / (or any path) → user.index() convention. The export
     // returns HTML (string or Response). Lets RPC-only apps still
     // render a UI without forcing creators to handle URL routing.
+    // Gate on schema readiness (C1) — `user.index()` may read `env.db`,
+    // so it must not run before the cold-boot migration resolves.
     if (request.method === "GET" && typeof user.index === "function") {
+        await __zsAwaitSchemaReady();
         try {
             const url = new URL(request.url);
             if (url.pathname === "/" || url.pathname === "") {
@@ -1925,6 +2040,41 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         let f = v8::Function::new(scope, zs_db_platform_callback).unwrap();
         let key = v8::String::new(scope, "__zsDbPlatform").unwrap();
         global.set(scope, key.into(), f.into());
+    }
+
+    // __zsRuntimeDescriptor — the migration-first cutover (P4b). When the
+    // deployed `.zship` carries a `manifest.runtime_descriptor`, the worker
+    // resolves its blob and stamps the JSON onto `RuntimeState`. We parse it
+    // here and expose the resulting `Record<collection, Record<column,
+    // FieldDef>>` object as a global so `@zeroship/bootstrap`'s entry sources
+    // the schema from the migration fold instead of `user.default.schema`.
+    // Absent (`None`) for apps that ship no migrations — the bootstrap entry
+    // then falls back to the declared `default.schema` (a transitional path;
+    // P5 deletes the fallback). A parse failure is logged and skipped so a
+    // corrupt descriptor degrades to the fallback rather than bricking boot.
+    {
+        let descriptor_json = {
+            let state: crate::state::SharedState = scope
+                .get_slot::<crate::state::SharedState>()
+                .expect("RuntimeState not in isolate slot")
+                .clone();
+            let json = state.borrow().runtime_descriptor.clone();
+            json
+        };
+        if let Some(json) = descriptor_json {
+            match v8::String::new(scope, &json).and_then(|s| v8::json::parse(scope, s)) {
+                Some(parsed) if parsed.is_object() => {
+                    let key = v8::String::new(scope, "__zsRuntimeDescriptor").unwrap();
+                    global.set(scope, key.into(), parsed);
+                }
+                _ => {
+                    tracing::warn!(
+                        "runtime: failed to parse manifest.runtime_descriptor JSON; \
+                         falling back to default.schema"
+                    );
+                }
+            }
+        }
     }
 
     // __zs_bind_request_ctx / __zs_get_request_ctx — per-request ctx stash

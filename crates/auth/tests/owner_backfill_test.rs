@@ -1,4 +1,4 @@
-//! Regression test for the `0031_app_members_owner_backfill` changeset
+//! Regression test for the `V0031__app_members_owner_backfill` migration
 //! (red-team round-2 finding 2.0 / 6.1).
 //!
 //! The backfill repairs apps that predate `create_app`'s owner binding by
@@ -10,9 +10,10 @@
 //! is promoted; a delegated sole member keeps its assigned role.
 //!
 //! This test DRIVES THE PRODUCTION MIGRATION SQL: it reads the exact INSERT
-//! statement out of `db/changelog/changesets/0031_app_members_owner_backfill.sql`
-//! (the same text Liquibase runs) rather than re-typing it, so the assertions
-//! track whatever ships. It seeds the scenario rows itself (production path:
+//! statement out of `db/migrations/V0031__app_members_owner_backfill.sql`
+//! (the same text the zeroship-migrate engine runs) rather than re-typing it,
+//! so the assertions track whatever ships. It seeds the scenario rows itself
+//! (production path:
 //! hand-shaped `app_members` rows the same way a pre-binding DB would have),
 //! runs the real statement inside a transaction, asserts, and ROLLS BACK so the
 //! live DB is left untouched.
@@ -35,17 +36,17 @@ async fn pg() -> Option<Client> {
 }
 
 /// Pull the single `INSERT INTO zeroship.app_members ... ;` statement out of the
-/// production changeset file, stripping Liquibase `--` directive/comment lines.
-/// This is the *exact* SQL Liquibase executes for the backfill.
+/// production migration file, stripping `--` comment lines.
+/// This is the *exact* SQL the zeroship-migrate engine executes for the backfill.
 fn production_backfill_sql() -> String {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../db/changelog/changesets/0031_app_members_owner_backfill.sql"
+        "/../../db/migrations/V0031__app_members_owner_backfill.sql"
     );
-    let raw = std::fs::read_to_string(path).expect("read changeset file");
+    let raw = std::fs::read_to_string(path).expect("read migration file");
 
-    // Keep only the body lines (drop `--liquibase`, `--changeset`, `--rollback`,
-    // and plain `--` comments). The body is one statement terminated by `;`.
+    // Keep only the body lines (drop the `--validCheckSum` directive and plain
+    // `--` comments). The body is one statement terminated by `;`.
     let body: String = raw
         .lines()
         .filter(|l| !l.trim_start().starts_with("--"))

@@ -78,8 +78,9 @@ pub struct AppState {
     /// §8.2). `None` is the disabled-by-absence shape:
     /// `SANDBOX_DATABASE_URL` is unset, so pg integration is off.
     /// The unified `zeroship` schema (sandbox tables included) is owned
-    /// by Liquibase; boot only verifies connectivity (`Database::ping`)
-    /// and assumes the migrate service already applied the changelog.
+    /// by zeroship-migrate; boot only verifies connectivity
+    /// (`Database::ping`) and assumes the migrate service already applied
+    /// the `db/migrations` migrations.
     ///
     /// A6b (deferred): restricted to `pub(crate)` because the DSN held
     /// inside `Database` carries an embedded pg password. A
@@ -744,9 +745,9 @@ impl AppState {
         };
 
         if let Some(db) = &database {
-            // The unified `zeroship` schema is owned by Liquibase (the
-            // compose `migrate` service / `ops/db-migrate.sh` applies
-            // `db/changelog/` before the controller starts). The
+            // The unified `zeroship` schema is owned by zeroship-migrate
+            // (the compose `migrate` service / `ops/db-migrate.sh` applies
+            // `db/migrations` before the controller starts). The
             // controller no longer self-migrates; boot just verifies
             // connectivity. Failure aborts startup unless the operator
             // set the SANDBOX_PG_OPTIONAL=1 dev escape hatch.
@@ -763,7 +764,7 @@ impl AppState {
             } else {
                 tracing::info!(
                     host_id = %db.host_id(),
-                    "sandbox pg: connected (schema owned by Liquibase)"
+                    "sandbox pg: connected (schema owned by zeroship-migrate)"
                 );
             }
         }

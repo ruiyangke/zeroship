@@ -395,7 +395,13 @@ async fn audit_log_roundtrip() {
     assert_eq!(rows[0].resource.as_deref(), Some("STRIPE_KEY"));
     assert_eq!(rows[0].source_ip, None);
     assert_eq!(rows[1].action, "set_secret");
-    assert_eq!(rows[1].source_ip.as_deref(), Some("203.0.113.7"));
+    // `app_audit.source_ip` is a Postgres `inet`: a host address always
+    // carries an explicit netmask, so the stored+read-back text form of the
+    // bare IPv4 `203.0.113.7` is its /32 host form `203.0.113.7/32`. Assert
+    // the normalized value the storage layer actually round-trips (this still
+    // pins the exact address; it would re-fail if the IP were dropped or
+    // mangled).
+    assert_eq!(rows[1].source_ip.as_deref(), Some("203.0.113.7/32"));
     assert_eq!(rows[0].actor_user_id, Some(second_actor));
     assert_eq!(rows[0].actor_token_id, None);
     assert_eq!(rows[1].actor_user_id, Some(first_actor));

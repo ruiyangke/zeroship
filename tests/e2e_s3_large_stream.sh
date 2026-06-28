@@ -32,7 +32,7 @@
 # it as evidence (elapsed, bytes-to-MinIO, peak RSS), NOT silently bump a knob.
 #
 # Stack bring-up mirrors e2e_s3_storage.sh verbatim (sources tests/lib/
-# e2e_stack.sh for preflight + PAT mint; inlines the same PG + Liquibase + S3
+# e2e_stack.sh for preflight + PAT mint; inlines the same PG + zeroship-migrate + S3
 # control/worker/gateway boot) but on its OWN port band + container names so
 # the two harnesses never collide.
 #
@@ -65,7 +65,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
 fi
 
 # --- preflight: binaries + built example -----------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
 done
 ST_ZSHIP="$ROOT/examples/storage-gallery/dist/app.zship"
@@ -157,7 +157,7 @@ unset AWS_SESSION_TOKEN 2>/dev/null || true
 . "$ROOT/tests/lib/e2e_stack.sh"
 
 echo ""
-echo "=== Stage 2: ephemeral PG + Liquibase, then control/worker/gateway on s3:// ==="
+echo "=== Stage 2: ephemeral PG + zeroship-migrate, then control/worker/gateway on s3:// ==="
 stack_preflight || { fail "preflight failed"; exit 1; }
 
 WORK="$(mktemp -d -t zs-e2e-s3-large-XXXXXX)"
@@ -176,15 +176,14 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephe
 [ -f "$ROOT/ops/postgres-init.sql" ] && docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
   && pass "applied ops/postgres-init.sql" || true
 
-MIG_LOG="$WORK/liquibase.log"
-if docker run --rm --network host -v "$ROOT/db/changelog:/liquibase/changelog" \
-    liquibase/liquibase:4.31 \
-    --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-    --username=postgres --password=zeroship \
-    --changelog-file=changelog/db.changelog-master.yaml update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied cleanly from scratch"
+MIG_LOG="$WORK/migrate.log"
+if "$BIN/zeroship-migrate" migrate \
+    --dir "$ROOT/db/migrations" \
+    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+    --profile platform --yes > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
 else
-  fail "Liquibase migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null

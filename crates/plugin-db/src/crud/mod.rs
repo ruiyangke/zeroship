@@ -102,6 +102,7 @@ pub(crate) mod system_fields_pass;
 #[cfg(feature = "test-helpers")]
 pub mod system_fields_pass;
 
+mod introspect_schema;
 mod read_pipeline;
 mod write_pipeline;
 
@@ -991,8 +992,20 @@ pub(crate) fn dispatch_update_one<'s>(
             };
         }
 
+        // **P4 HALF B** — the per-row-randomised-encryption decision is sourced
+        // from live introspection (cached); an introspection failure rejects the
+        // op rather than silently skipping the per-row path.
         let per_row_encrypted_update =
-            write_pipeline::update_requires_per_row_encryption(&app, &coll, &update);
+            match write_pipeline::update_requires_per_row_encryption(&app, &coll, &update).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return OpResult::JsValue {
+                        resolver,
+                        value: ResolveValue::RejectError(e.to_op_error()),
+                        request_id,
+                    };
+                }
+            };
         let target_row = if per_row_encrypted_update {
             let target_rows = match write_pipeline::resolve_target_row_ids(
                 &app,
@@ -1226,8 +1239,19 @@ pub(crate) fn dispatch_update_many<'s>(
             };
         }
 
+        // **P4 HALF B** — per-row-randomised-encryption decision from live
+        // introspection (cached); an introspection failure rejects the op.
         let per_row_encrypted_update =
-            write_pipeline::update_requires_per_row_encryption(&app, &coll, &update);
+            match write_pipeline::update_requires_per_row_encryption(&app, &coll, &update).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return OpResult::JsValue {
+                        resolver,
+                        value: ResolveValue::RejectError(e.to_op_error()),
+                        request_id,
+                    };
+                }
+            };
         let autobump = query::SystemFieldAutoBump {
             dispatch_write: true,
             actor_id: actor_id.as_deref(),
@@ -2491,6 +2515,39 @@ pub async fn prepare_insert_many_docs_for_write(
         write_pipeline::ApplyMode::InsertMany { actor_id },
     )
     .await
+}
+
+/// **P4 HALF B test helper** — drive the REAL read pipeline
+/// (`read_pipeline::apply` with default options: decrypt + mask-wrap on) over a
+/// set of freshly-fetched rows, so a faithful round-trip e2e can exercise the
+/// introspection-sourced decrypt + mask-wrap path end-to-end (not an AEAD-unit
+/// shim). Returns the finalized rows; `has_masked` is dropped (the caller
+/// asserts on the row contents).
+#[cfg(feature = "test-helpers")]
+pub async fn finalize_rows_on_read_for_tests(
+    app_id: &str,
+    collection: &str,
+    rows: Vec<Value>,
+) -> Result<Vec<Value>, DbError> {
+    let result = read_pipeline::apply(
+        app_id,
+        collection,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await?;
+    Ok(result.rows)
+}
+
+/// **P4 HALF B test helper** — resolve the runtime data-access schema the way
+/// the CRUD passes do (live introspection + sentinels, cached). Lets a test
+/// assert the metadata actually came from the catalog, not the declared schema.
+#[cfg(feature = "test-helpers")]
+pub async fn runtime_schema_for_tests(
+    app_id: &str,
+    collection: &str,
+) -> Result<Option<Value>, DbError> {
+    introspect_schema::runtime_schema_for(app_id, collection).await
 }
 
 #[cfg(not(feature = "test-helpers"))]

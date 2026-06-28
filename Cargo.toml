@@ -46,6 +46,12 @@ indexmap = { version = "2", features = ["serde"] }
 # CLI argument parsing
 clap = { version = "4", features = ["derive", "env"] }
 
+# JSON Schema generation for the `op.*` migration IR contract (op-ir.schema.json).
+# schemars 1.x: `schemars::schema_for!(T)` -> `schemars::Schema`, `#[derive(schemars::JsonSchema)]`.
+# Used only by zeroship-migrate to emit the discriminated-union schema the JS
+# `op.*` builder targets; leaf, sync, no tokio.
+schemars = "1"
+
 # Crypto
 sha2 = "0.10"
 sha1 = "0.10"
@@ -122,6 +128,14 @@ lru = "0.12"
 memmap2 = "0.9"
 mimalloc = { version = "0.1", default-features = false }
 libc = "0.2"
+# Kernel-sandbox primitives for the PR4a build-time recorder (design §8.9).
+# `seccompiler` is Firecracker's audited seccomp-bpf compiler (default-deny
+# syscall filter); `landlock` is the ABI-aware Landlock LSM wrapper (read-only
+# filesystem ruleset, requires Linux >= 5.13). Both are pure-Rust, no C
+# toolchain. Used ONLY by `zeroship-migrate-js`'s recorder child + sandbox
+# module — the build-time analogue of the apply-time least-priv migrator role.
+seccompiler = "0.5"
+landlock = "0.4"
 itoa = "1"
 socket2 = { version = "0.5", features = ["all"] }
 ada-url = "3.4.4"
@@ -179,6 +193,9 @@ zeroship-bundle = { path = "crates/bundle" }
 compio-postgres = { path = "crates/compio-postgres" }
 compio-redis = { path = "crates/compio-redis" }
 compio-s3 = { path = "crates/compio-s3" }
+zeroship-schema = { path = "crates/zeroship-schema" }
+zeroship-migrate = { path = "crates/zeroship-migrate" }
+zeroship-migrate-js = { path = "crates/zeroship-migrate-js" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }
@@ -188,6 +205,9 @@ zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-auth = { path = "crates/auth" }
 zeroship-authz = { path = "crates/authz" }
 zeroship-mailer = { path = "crates/mailer" }
+# Control plane — declared here only so the P7 capstone e2e crate
+# (`crates/schema-authority-e2e`) can dev-depend on its real deploy-migrate fn.
+zeroship-control = { path = "crates/control" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

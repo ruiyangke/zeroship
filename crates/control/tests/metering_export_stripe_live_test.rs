@@ -22,8 +22,8 @@
 //!     `POST /v1/billing/meters` and passed in as `STRIPE_LIVE_METER_ID`.
 //!   * REAL zeroship `StripeProvider`/`StripeClient` (cyper) pointed at
 //!     `https://api.stripe.com` with the operator's TEST secret key.
-//!   * REAL ephemeral zeroship Postgres + the full Liquibase changelog (the cron
-//!     reads/writes usage_aggregates + metering_exports).
+//!   * REAL ephemeral zeroship Postgres + the full `zeroship-migrate` platform
+//!     migrations (the cron reads/writes usage_aggregates + metering_exports).
 //!
 //! ## Real-API divergences from the mock (the whole point — what the mock hid)
 //!

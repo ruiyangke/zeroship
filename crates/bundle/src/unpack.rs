@@ -349,6 +349,39 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
         out.insert(k.clone());
         out.insert(v.clone());
     }
+    // Migration file blobs (schema-authority §8): each carried migration's
+    // body is content-addressed exactly like a worker module. `validate()`
+    // already enforced the hash format + bare-filename safety; gather the
+    // hashes so step 8 asserts every migration blob was present in the tar.
+    for entry in &manifest.migrations {
+        if !crate::blob::validate_hash_format(&entry.hash) {
+            return Err(IngestError::bad(
+                "invalid manifest",
+                format!(
+                    "migrations[{name}].hash {hash:?} is not lowercase sha256 hex",
+                    name = entry.name,
+                    hash = entry.hash
+                ),
+            ));
+        }
+        out.insert(entry.hash.clone());
+    }
+    // Runtime schema descriptor blob (migration-first cutover): the
+    // `schema.runtime.json` body is content-addressed like a migration. Gather
+    // its hash so step 8 asserts the blob was present in the tar. `validate()`
+    // already enforced the hash format; re-check here as defence in depth.
+    if let Some(desc) = &manifest.runtime_descriptor {
+        if !crate::blob::validate_hash_format(&desc.hash) {
+            return Err(IngestError::bad(
+                "invalid manifest",
+                format!(
+                    "runtime_descriptor.hash {hash:?} is not lowercase sha256 hex",
+                    hash = desc.hash
+                ),
+            ));
+        }
+        out.insert(desc.hash.clone());
+    }
     Ok(out)
 }
 
@@ -463,6 +496,54 @@ mod tests {
         assert!(set.contains(&"a".repeat(64)));
         assert!(set.contains(&"b".repeat(64)));
         assert!(set.contains(&"c".repeat(64)));
+    }
+
+    #[test]
+    fn collect_expected_walks_migration_blobs() {
+        // A manifest carrying two migration files: their blob hashes must be
+        // in the expected set so ingest asserts they were present in the tar.
+        let m1 = "e".repeat(64);
+        let m2 = "f".repeat(64);
+        let m: Manifest = serde_json::from_value(json!({
+            "version": 1,
+            "rules": [],
+            "assets": {},
+            "runtime_assets": {},
+            "asset_version": 0,
+            "sourcemaps": {},
+            "migrations": [
+                { "name": "V0001__create_users.sql", "hash": m1 },
+                { "name": "V0002__add_index.sql", "hash": m2 },
+            ],
+            "metadata": { "built_at": "2026-04-29T00:00:00Z" }
+        }))
+        .unwrap();
+        let set = collect_expected_hashes(&m).unwrap();
+        assert!(set.contains(&"e".repeat(64)), "first migration blob expected");
+        assert!(set.contains(&"f".repeat(64)), "second migration blob expected");
+    }
+
+    #[test]
+    fn collect_expected_walks_runtime_descriptor_blob() {
+        // A manifest carrying a runtime schema descriptor: its blob hash must be
+        // in the expected set so ingest asserts it was present in the tar.
+        let desc = "9".repeat(64);
+        let m: Manifest = serde_json::from_value(json!({
+            "version": 1,
+            "rules": [],
+            "assets": {},
+            "runtime_assets": {},
+            "asset_version": 0,
+            "sourcemaps": {},
+            "runtime_descriptor": { "hash": desc },
+            "metadata": { "built_at": "2026-04-29T00:00:00Z" }
+        }))
+        .unwrap();
+        let set = collect_expected_hashes(&m).unwrap();
+        assert!(
+            set.contains(&"9".repeat(64)),
+            "runtime descriptor blob must be in the expected set"
+        );
     }
 
     #[test]

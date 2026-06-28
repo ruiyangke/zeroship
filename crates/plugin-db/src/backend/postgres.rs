@@ -280,13 +280,20 @@ impl SchemaIntrospect for PostgresBackend {
     type LiveSchema = LiveSchema;
 
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        // `read_live_schema` now returns typed `DbError` with SQLSTATE
-        // classification preserved — flow through verbatim.
-        crate::diff::read_live_schema(&self.pool, app_id).await
+        // **Schema-authority P1** — `read_live_schema` now lives in the leaf
+        // crate `zeroship-schema` and returns `SchemaError` (it cannot name
+        // `DbError`). `From<SchemaError> for DbError` re-creates the exact
+        // `coded_sql("diff: …", e)` shape, so the SQLSTATE classification +
+        // operator-facing message are preserved verbatim.
+        crate::diff::read_live_schema(&self.pool, app_id)
+            .await
+            .map_err(DbError::from)
     }
 
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
-        crate::diff::estimate_row_count(&self.pool, app_id, collection).await
+        crate::diff::estimate_row_count(&self.pool, app_id, collection)
+            .await
+            .map_err(DbError::from)
     }
 }
 

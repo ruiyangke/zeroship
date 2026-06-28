@@ -334,6 +334,22 @@ pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
+    // **T6** — stamp this app's deploy/schema-version token into the per-isolate
+    // DB context. The worker injects the app's `deploy_hash` as the
+    // `ZEROSHIP_DEPLOY_ID` env var at load (see `worker::cache::load_app`); a
+    // redeploy that changes the hash re-mints this wrapper, re-stamping the new
+    // token and invalidating the deploy-keyed introspection cache so the
+    // crypto/mask/column metadata of the *new* schema is re-read on the next op.
+    // Absent (dev `zeroship serve` / raw-JS / tests) ⇒ leave the context default
+    // (`"cold_start"`), preserving the historical cold contract.
+    {
+        let state = crate::v8_bridge::runtime_state(scope);
+        let deploy_id = state.borrow().env_vars.get("ZEROSHIP_DEPLOY_ID").cloned();
+        if let Some(token) = deploy_id {
+            crate::context::with_mut(|c| c.set_deploy_token(app_id, &token));
+        }
+    }
+
     let class_tmpl = Db::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
     let obj = inst_tmpl.new_instance(scope)?;

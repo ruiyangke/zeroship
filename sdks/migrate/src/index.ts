@@ -1,0 +1,130 @@
+// `@zeroship/migrate` — the no-raw-SQL, fully-structured, FLUENT-only op builder
+// for portable bi-dialect (PG + SQLite) migrations (design
+// `2026-06-25-op-dsl-fluent-redesign.md`).
+//
+// A migration is a `.ts` module that imports `{ table, t }`, and exports a single
+// `default { up, down? }` object whose parameterless `up()`/`down()` author
+// against the ambient per-migration recorder via `table()`. Names are plain
+// strings (NOT live-schema-bound). Every expression is the fluent `(c) => Expr`
+// builder; there is no raw escape and no `Raw` type (property A).
+//
+//   import { table, t } from "@zeroship/migrate";
+//
+//   export default {
+//     up() {
+//       table("users")
+//         .column("first_name").add({ type: t.text() })
+//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
+//     },
+//   };
+
+export {
+  // the SOLE public authoring entry — the reusable fluent TableHandle
+  table,
+  // cross-dialect view authoring entry — emits the closed SelectAst by default
+  view,
+  pgEnum,
+  pgDomain,
+  sequence,
+  comment,
+  // the immutable fluent column-type lexicon
+  t,
+  // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
+  // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
+  fromDb,
+  // the determinism lint (best-effort source scan)
+  lintDeterminism,
+} from "./ops.js";
+
+// The single-source `@zeroship/db` field → migration `ColType` reduction (PR5
+// goal A) + its structured boundary error. The JS inverse of the engine's Rust
+// `col_type_to_token`; the proof the migration DSL and the runtime schema share
+// ONE type lexicon.
+export { colTypeFromDbField, UnsupportedColTypeError } from "./db-lexicon.js";
+export type { DbSchemaField, DbFieldType } from "./db-lexicon.js";
+
+export type {
+  // authoring types
+  ColumnDef,
+  TypeLexicon,
+  ExprBuilder,
+  ExprChain,
+  ExprFn,
+  FnNamespace,
+  ScalarValue,
+  Row,
+  Migration,
+  // the fluent handle + selector sub-handles
+  TableHandle,
+  TableOptions,
+  ViewHandle,
+  ViewOptions,
+  ColumnRef,
+  ForeignKeyRef,
+  UniqueRef,
+  CheckRef,
+  ExclusionRef,
+  ConstraintRef,
+  IndexRef,
+  CreateTableArgs,
+  ForeignKeyReference,
+  ExclusionTarget,
+  ExclusionElementArg,
+  ExclusionConstraintArgs,
+  ExclusionAddArgs,
+  IndexElement,
+  IndexElementArg,
+  CommentTarget,
+  CommentTargetArg,
+  EnumHandle,
+  DomainHandle,
+  SequenceHandle,
+  CreateEnumArgs,
+  DropEnumArgs,
+  CreateDomainArgs,
+  DropDomainArgs,
+  CreateSequenceArgs,
+  AlterSequenceArgs,
+  DropSequenceArgs,
+  SequenceOwnedBy,
+  // op-arg shapes
+  InsertArgs,
+  UpdateArgs,
+  DelArgs,
+  BackfillArgs,
+  CreateViewArgs,
+  CreateRawViewArgs,
+  DropViewArgs,
+  ViewQueryBuilder,
+  IndexMethod,
+  ExclusionMethod,
+  ExclusionOperator,
+  RefAction,
+  DeterminismFinding,
+  // sensitive-data column facets (#173/#174/#178)
+  MaskKind,
+  Classification,
+  VectorMetric,
+  IdOptions,
+  VectorOptions,
+  MaskOptions,
+  // re-exported generated IR wire types (ergonomics; goldens are the contract)
+  ColType,
+  Expr,
+  IrBatch,
+  IrScalar,
+  ViewQuery,
+  SelectAst,
+  TableRef,
+  SelectItem,
+  Join,
+  JoinKind,
+  OrderItem,
+  OrderDir,
+} from "./types.js";
+
+// The full generated dialect-neutral IR wire types (`Op`, `IrConstraint`,
+// `MigrationIr`, …) — generated from the engine's `op-ir.schema.json`. Re-exported
+// AS ERGONOMICS so an advanced caller can name the exact serde shape; the golden
+// `.ir.json` corpus remains the source of truth.
+export type * as ir from "./generated/ir.js";

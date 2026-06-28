@@ -444,20 +444,37 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
         return;
     };
     let fx = Fixture::new(&db_url, "owner-any", None).await;
-    let app_id = format!("app-{}", Uuid::new_v4().simple());
-    fx.state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
-            &[&app_id, &fx.user_id],
+    // The owned resource must be a REAL app row: `app_members.app_id` is a
+    // `uuid` column with an FK into `zeroship.apps(id)`, and `apps.plan_id`
+    // FKs into the `zeroship.plans` catalog. Seed the built-in plans, then go
+    // through `Registry::create_app`, which writes the app + the owner
+    // `app_members` row in one transaction (binding `fx.user_id` as owner) —
+    // the canonical path, instead of hand-inserting a bogus `"app-<uuid>"`
+    // string into the uuid column (the old fixture's WrongType bug).
+    common::ensure_builtin_plans(&fx.state.registry).await;
+    let app_name = format!("owner-any-{}", Uuid::new_v4().simple());
+    let owned = fx
+        .state
+        .registry
+        .create_app(
+            &app_name,
+            &zeroship_control::bootstrap_console::free_plan_id(),
+            &fx.user_id,
         )
         .await
-        .expect("insert owner app member");
+        .expect("create owned app (seeds app + owner app_members atomically)");
     let app = init_control!(fx);
 
     let created = create_pat!(app, "owner deploy");
     assert!(created.get("token").and_then(Value::as_str).is_some());
 
+    // Drop the owned app (CASCADE removes its `app_members` row) before the
+    // generic fixture teardown deletes the user.
+    fx.state
+        .control_pg
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&owned.id])
+        .await
+        .expect("delete owned app");
     fx.cleanup().await;
 }
 

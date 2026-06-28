@@ -1,0 +1,13 @@
+DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_user_identities;
+ALTER TABLE zeroship.app_user_identities NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.app_user_identities DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_session_anchors;
+ALTER TABLE zeroship.app_session_anchors NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.app_session_anchors DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON zeroship.gateway_sessions;
+ALTER TABLE zeroship.gateway_sessions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.gateway_sessions DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_secrets;
+ALTER TABLE zeroship.app_secrets NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.app_secrets DISABLE ROW LEVEL SECURITY;
+DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_auth') THEN EXECUTE 'DROP OWNED BY zeroship_auth, zeroship_control, zeroship_gateway, zeroship_worker, zeroship_app'; EXECUTE 'DROP ROLE IF EXISTS zeroship_auth, zeroship_control, zeroship_gateway, zeroship_worker, zeroship_app'; END IF; END $rb$;

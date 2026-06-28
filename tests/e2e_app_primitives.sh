@@ -5,8 +5,8 @@
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
 #   1. Stand up a fresh ephemeral Postgres + apply ops/postgres-init.sql +
-#      the FULL Liquibase changelog (0001→0036). A migration failure here is
-#      a finding — the changelog must apply cleanly from scratch.
+#      the full zeroship-migrate platform set (0001→0036). A migration failure here is
+#      a finding — the migration set must apply cleanly from scratch.
 #   2. Boot control + worker + gateway with `--dev-insecure` (current code
 #      requires WORKER_KEY/SIGNING_KEY otherwise — ISS-53).
 #   3. Mint an admin PAT OFFLINE (control's `/api/apps` now requires a real
@@ -92,7 +92,7 @@ echo "  zeroship E2E — app primitives over the edge (ISS-54/G1)"
 echo "============================================"
 
 # --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
 done
 ZSHIP="$ROOT/examples/db-todos/dist/app.zship"
@@ -119,15 +119,14 @@ if [ -f "$ROOT/ops/postgres-init.sql" ]; then
     && pass "applied ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
-MIG_LOG="$WORK/liquibase.log"
-if docker run --rm --network host -v "$ROOT/db/changelog:/liquibase/changelog" \
-    liquibase/liquibase:4.31 \
-    --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-    --username=postgres --password=zeroship \
-    --changelog-file=changelog/db.changelog-master.yaml update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog 0001→0036 applied cleanly from scratch"
+MIG_LOG="$WORK/migrate.log"
+if "$BIN/zeroship-migrate" migrate \
+    --dir "$ROOT/db/migrations" \
+    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+    --profile platform --yes > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
 else
-  fail "Liquibase migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # sanity: control tables + apps.system column

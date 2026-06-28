@@ -107,6 +107,12 @@ pub struct SecretSection {
     pub stripe_secret_key: Option<String>,
     /// Primary database URL reference.
     pub database_url: Option<String>,
+    /// Privileged provisioning database URL reference (control only). The
+    /// CREATEROLE + CREATE-on-db admin role deploy-time migrations use to
+    /// create the per-app schema + `migrator_<app_id>` role — SEPARATE from
+    /// the least-privilege `database_url` (`zeroship_control`), which has
+    /// neither privilege. Resolved into control's `--provision-db`.
+    pub provision_db_url: Option<String>,
     /// Auth database URL reference.
     pub auth_db_url: Option<String>,
     /// App-runtime KV (Redis) connection URL reference. Back-fills the

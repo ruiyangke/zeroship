@@ -1,0 +1,1 @@
+DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_auth') THEN EXECUTE 'REVOKE SELECT, INSERT, UPDATE ON zeroship.token_revocations FROM zeroship_auth'; EXECUTE 'REVOKE SELECT, UPDATE ON zeroship.app_session_anchors FROM zeroship_auth'; END IF; END $$;

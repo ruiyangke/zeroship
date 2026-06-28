@@ -1,0 +1,10 @@
+DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE ALL ON zeroship.refunds FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.refund_provider_refs FROM zeroship_control'; END IF; END $rb$;
+DROP TRIGGER IF EXISTS refunds_immutable_trg ON zeroship.refunds;
+DROP FUNCTION IF EXISTS zeroship.refunds_immutable();
+DROP TRIGGER IF EXISTS refunds_no_over_refund_trg ON zeroship.refunds;
+DROP FUNCTION IF EXISTS zeroship.refunds_no_over_refund();
+DROP TABLE zeroship.refund_provider_refs;
+DROP INDEX IF EXISTS zeroship.refunds_invoice_idx;
+DROP TABLE zeroship.refunds;
+DROP DOMAIN IF EXISTS zeroship.refund_status;
+DROP DOMAIN IF EXISTS zeroship.refund_destination;

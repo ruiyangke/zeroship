@@ -1,0 +1,1 @@
+DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sandbox_app') THEN EXECUTE 'ALTER ROLE sandbox_app NOLOGIN'; EXECUTE 'ALTER ROLE sandbox_audit NOLOGIN'; EXECUTE 'ALTER ROLE sandbox_gdpr NOLOGIN'; END IF; END $rb$;

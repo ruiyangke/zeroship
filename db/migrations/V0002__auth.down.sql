@@ -1,0 +1,18 @@
+DROP TABLE zeroship.token_revocations;
+DROP TABLE zeroship.jwk_key_state;
+DROP TABLE zeroship.cron_state;
+DROP TABLE zeroship.dpop_jti;
+DROP TABLE zeroship.gateway_sessions;
+DROP TRIGGER IF EXISTS audit_events_block_truncate ON zeroship.audit_events;
+DROP TRIGGER IF EXISTS audit_events_block_delete ON zeroship.audit_events;
+DROP TRIGGER IF EXISTS audit_events_block_update ON zeroship.audit_events;
+DROP FUNCTION IF EXISTS zeroship.audit_events_block_tamper();
+DROP TABLE zeroship.audit_events;
+DROP TABLE zeroship.rate_limits;
+DROP TABLE zeroship.email_suppressions;
+DROP TABLE zeroship.email_verifications;
+DROP TABLE zeroship.magic_completions;
+DROP TABLE zeroship.magic_links;
+DROP TABLE zeroship.idp_sessions;
+DROP TABLE zeroship.federated_identities;
+DROP TABLE zeroship.users;

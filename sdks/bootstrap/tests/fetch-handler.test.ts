@@ -143,6 +143,114 @@ describe("createFetchHandler — superjson wire", () => {
     });
   });
 
+  // C1 — the fetch fall-through to `default.fetch` MUST be gated on schema
+  // readiness, symmetric with the RPC dispatcher. Otherwise a `default.fetch`
+  // handler doing `env.db.users.insert(...)` runs CONCURRENTLY with the cold-
+  // boot SQLite migration (the destructive 12-step rebuild) and observes a
+  // half-built schema ("no such table"). We model the migration as a deferred
+  // promise that flips `schemaMigrated` to true only when it resolves; the user
+  // fetch reads that flag. The gate must make the handler observe `true`.
+  describe("C1 — schema-readiness gate on default.fetch", () => {
+    test("awaits schema readiness before invoking the user fetch handler", async () => {
+      // The "migration in flight" — resolves on the next macrotask, flipping the
+      // flag. A handler that runs BEFORE this resolves would read `false`.
+      let schemaMigrated = false;
+      let resolveMigration!: () => void;
+      const migration = new Promise<void>((res) => {
+        resolveMigration = () => {
+          schemaMigrated = true;
+          res();
+        };
+      });
+      // Kick the migration onto a later turn so an UNGATED fetch would win the race.
+      setTimeout(() => resolveMigration(), 0);
+
+      const handler = createFetchHandler(
+        async () => ({
+          userDefault: {},
+          fetch(_req: Request) {
+            // This stands in for `env.db.<coll>.find()` inside default.fetch:
+            // it must only run once the migration has applied.
+            return new Response(JSON.stringify({ migrated: schemaMigrated }), {
+              status: schemaMigrated ? 200 : 503,
+            });
+          },
+          rpc: {},
+        }),
+        // The gate the dev-entry / runtime wires in: await the in-flight migration.
+        () => migration,
+      );
+
+      const res = await handler(new Request("https://app.test/"), {}, {});
+      const body = (await res.json()) as { migrated: boolean };
+
+      assert.equal(res.status, 200, "gated fetch must run AFTER the migration applied");
+      assert.equal(
+        body.migrated,
+        true,
+        "C1: default.fetch must observe the fully-migrated schema, never race the cold-boot migration",
+      );
+    });
+
+    test("RED-control: WITHOUT the gate the same handler races the migration", async () => {
+      // Proves the test is meaningful: drop the `awaitSchemaReady` arg and the
+      // identical handler observes the un-migrated state (the pre-fix bug).
+      let schemaMigrated = false;
+      setTimeout(() => {
+        schemaMigrated = true;
+      }, 0);
+
+      const ungated = createFetchHandler(async () => ({
+        userDefault: {},
+        fetch(_req: Request) {
+          return new Response(JSON.stringify({ migrated: schemaMigrated }), {
+            status: schemaMigrated ? 200 : 503,
+          });
+        },
+        rpc: {},
+      }));
+
+      const res = await ungated(new Request("https://app.test/"), {}, {});
+      const body = (await res.json()) as { migrated: boolean };
+      assert.equal(
+        body.migrated,
+        false,
+        "control: the ungated handler races the migration (this is the bug the gate fixes)",
+      );
+    });
+
+    test("surfaces a rejected schema chain as a sanitized 500, not a half-built read", async () => {
+      // A failed cold-boot migration must make the fetch fail LOUD (clear error),
+      // never hang and never run the handler against a broken DB.
+      const handler = createFetchHandler(
+        async () => ({
+          userDefault: {},
+          fetch(_req: Request) {
+            // Must NOT be reached — the gate rejects before we get here.
+            return new Response("should not run", { status: 200 });
+          },
+          rpc: {},
+        }),
+        () => Promise.reject(new Error("registerModel: rebuild failed: disk I/O error")),
+      );
+
+      const log = console.error;
+      console.error = () => {};
+      try {
+        const res = await handler(new Request("https://app.test/"), {}, {});
+        const body = (await res.json()) as Record<string, unknown>;
+        assert.equal(res.status, 500, "a failed schema-apply must surface as 500");
+        assert.equal(
+          JSON.stringify(body).includes("disk I/O error"),
+          false,
+          "the raw migration error must be sanitized out of the 5xx body",
+        );
+      } finally {
+        console.error = log;
+      }
+    });
+  });
+
   test("serializes rich output values with meta", async () => {
     await withDispatch(async () => {
       const handler = createFetchHandler(async () => ({

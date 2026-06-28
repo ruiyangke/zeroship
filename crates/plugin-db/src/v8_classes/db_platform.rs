@@ -104,10 +104,19 @@ impl DbPlatform {
         Err(OpError::type_error("Illegal constructor"))
     }
 
-    /// `__platform.registerModel(collection, schema, indexes?)` — DDL
-    /// orchestrator entry. Idempotent. Moved off `Db` in P9 PR 4; the
+    /// `__platform.registerModel(collection, schema, indexes?, declared?)` —
+    /// DDL orchestrator entry. Idempotent. Moved off `Db` in P9 PR 4; the
     /// [`register_model_dispatch`] pipeline is unchanged — only the JS
     /// carrier relocated behind the capability handle.
+    ///
+    /// `declared` (H1) is the FULL set of collection names the app declared in
+    /// `default.schema` — `installSchema` passes `Object.keys(schemas)` on
+    /// every per-collection call. The dev SQLite drop pass uses it to tell a
+    /// not-yet-registered sibling (declared, must NOT be dropped) from a
+    /// genuinely-removed collection (not declared, a real drop candidate). It
+    /// is inert on PG (registerModel issues no DDL there). Optional: omitted
+    /// (raw deploys / older callers) → empty set → pre-H1 per-collection
+    /// behaviour.
     #[v8_method]
     #[v8_name = "registerModel"]
     fn register_model<'s>(
@@ -116,6 +125,7 @@ impl DbPlatform {
         collection: String,
         schema: v8::Local<v8::Value>,
         indexes: v8::Local<v8::Value>,
+        declared: v8::Local<v8::Value>,
     ) -> Result<v8::Local<'s, v8::Value>, OpError> {
         if collection.is_empty() {
             return Err(OpError::type_error(
@@ -128,12 +138,26 @@ impl DbPlatform {
         } else {
             read_json_arg(scope, Some(indexes))
         };
+        // Parse the declared-collection-name set from the optional 4th arg. A
+        // JSON string array; anything else (null/undefined/non-array) → empty.
+        let declared_collections: Vec<String> = if declared.is_null_or_undefined() {
+            Vec::new()
+        } else {
+            match read_json_arg(scope, Some(declared)) {
+                serde_json::Value::Array(items) => items
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
         Ok(register_model_dispatch(
             scope,
             &self.app_id,
             &collection,
             schema_v,
             indexes_v,
+            declared_collections,
         )
         .into())
     }

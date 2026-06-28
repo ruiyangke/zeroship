@@ -13,6 +13,25 @@ zeroship-runtime-macros = { workspace = true }
 # (no external crate) — flagged in the PR 3 commit body per the
 # "new Cargo dep" disclosure rule.
 zeroship-core = { workspace = true }
+# **Schema-authority P1** — the schema-description layer (DDL builders,
+# diff classifier, live introspection, sentinel codec, schema-shape
+# descriptor enums) was extracted into the leaf crate `zeroship-schema`.
+# plugin-db's data plane (CRUD / AEAD / mask transforms / register_model)
+# now calls *into* it for any DDL / diff / introspection / codec it needs,
+# and re-exports the moved items from their original module paths
+# (`crate::query`, `crate::diff`, `crate::backend::{VectorMetric,…}`,
+# `crate::crud::mask_backfill::{build,parse}_mask_sentinel`) so existing
+# call sites resolve unchanged. Behaviour is identical (pure refactor).
+zeroship-schema = { workspace = true }
+# **SQLite-engine wiring P6b** — the dev `registerModel` SQLite arm
+# (`run_sqlite_via_engine`) drives the security-hardened migration engine
+# (journal / versioning / drift / 12-step rebuild / baseline) instead of the
+# retired bespoke `run_sqlite_pipeline`. It constructs the engine's hardened
+# `SqliteBackend` (connection B) on the app file, plans a descriptor diff vs
+# live introspection, and applies through `MigrationEngine::apply_declarative`.
+# zeroship-migrate depends only on core + schema (no runtime/plugin-db), so no
+# dependency cycle.
+zeroship-migrate = { workspace = true }
 # Metering infrastructure: exec.rs emits a raw usage metric
 # (db_reads / db_writes / db_rows_written) in the success arm of each
 # query / mutation / count via a MeterHandle. Platform-measured,
@@ -153,6 +172,17 @@ required-features = ["test-helpers"]
 [[test]]
 name = "sqlite_integration"
 path = "tests/sqlite_integration.rs"
+required-features = ["test-helpers"]
+
+# Native `Db.transaction(fn)` orchestrator E2E (P9 PR 3). Reaches the
+# `test-helpers`-gated symbols (`set_db_url_for_tests`, the otherwise
+# `pub(crate)` `register_model` module + `exec_register_model_with_pool`),
+# so it must carry the same `required-features` guard as the integration
+# targets above — otherwise bare `cargo test -p zeroship-plugin-db`
+# auto-discovers it and fails to compile (E0425/E0603).
+[[test]]
+name = "native_transaction"
+path = "tests/native_transaction.rs"
 required-features = ["test-helpers"]
 
 [lints]

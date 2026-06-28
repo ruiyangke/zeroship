@@ -138,15 +138,34 @@ const _zsFetch = (typeof _zsUserDefault.fetch === "function")
   ? _zsUserDefault.fetch
   : (typeof _zsTopLevelFetch === "function" ? _zsTopLevelFetch : undefined);
 
+// Migration-first cutover (P4b) — prefer the runtime-injected
+// RuntimeSchemaDescriptor (the migration fold's wire-FieldDef map) over the
+// declared default.schema. The runtime sets globalThis.__zsRuntimeDescriptor
+// from manifest.runtime_descriptor; absent -> the declared schema is the
+// transitional fallback (P5 deletes it). Whoever reads default.schema (the
+// bootstrap runtime-entry's fallback, the fetch handler) then sees the same
+// source the runtime-entry installs from.
+const _zsRuntimeDescriptor = globalThis.__zsRuntimeDescriptor;
+const _zsSchema = (_zsRuntimeDescriptor && typeof _zsRuntimeDescriptor === "object"
+  && Object.keys(_zsRuntimeDescriptor).length > 0)
+  ? _zsRuntimeDescriptor
+  : _zsUserDefault.schema;
+
 const _zsFetchHandler = createFetchHandler(async () => ({
-  schema: _zsUserDefault.schema,
+  schema: _zsSchema,
   fetch: _zsFetch,
   rpc: _zsRpc,
   userDefault: _zsUserDefaultThis,
 }));
 
 export default {
-  schema: _zsUserDefault.schema,
+  schema: _zsSchema,
+  // P4b review fix (MED) — forward the ORIGINAL declared schema (the t.*
+  // SchemaBuilder map) untouched. _zsSchema is the descriptor when one is
+  // bundled, which is field-only and cannot encode collection-level options
+  // (softDelete / versioning / indexes); the runtime-entry reads this carrier
+  // to recover them while the declared schema still coexists (P5 deletes it).
+  __zsDeclaredSchema: _zsUserDefault.schema,
   fetch: _zsFetchHandler,
   rpc: _zsRpc,
 };
@@ -257,15 +276,30 @@ const _zsFetch = (typeof _zsUserDefault.fetch === "function")
   ? _zsUserDefault.fetch
   : (typeof _zsTopLevelFetch === "function" ? _zsTopLevelFetch : undefined);
 
+// Migration-first cutover (P4b) — prefer the runtime-injected
+// RuntimeSchemaDescriptor over the declared default.schema (see the
+// namespace-walk entry for the rationale).
+const _zsRuntimeDescriptor = globalThis.__zsRuntimeDescriptor;
+const _zsSchema = (_zsRuntimeDescriptor && typeof _zsRuntimeDescriptor === "object"
+  && Object.keys(_zsRuntimeDescriptor).length > 0)
+  ? _zsRuntimeDescriptor
+  : _zsUserDefault.schema;
+
 const _zsFetchHandler = createFetchHandler(async () => ({
-  schema: _zsUserDefault.schema,
+  schema: _zsSchema,
   fetch: _zsFetch,
   rpc: _zsRpc,
   userDefault: _zsUserDefaultThis,
 }));
 
 export default {
-  schema: _zsUserDefault.schema,
+  schema: _zsSchema,
+  // P4b review fix (MED) — forward the ORIGINAL declared schema (the t.*
+  // SchemaBuilder map) untouched. _zsSchema is the descriptor when one is
+  // bundled, which is field-only and cannot encode collection-level options
+  // (softDelete / versioning / indexes); the runtime-entry reads this carrier
+  // to recover them while the declared schema still coexists (P5 deletes it).
+  __zsDeclaredSchema: _zsUserDefault.schema,
   fetch: _zsFetchHandler,
   rpc: _zsRpc,
 };

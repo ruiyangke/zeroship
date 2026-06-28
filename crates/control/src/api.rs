@@ -396,6 +396,8 @@ pub async fn deploy(
     id: Path<String>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
+    // PR9c: the operator-approval seam. Absent/empty ⇒ fail-closed routine deploy.
+    approval_query: web::types::Query<DeployApprovalQuery>,
     mut body: web::types::Payload,
 ) -> web::HttpResponse {
     // Authz + uuid + content-type rejections happen BEFORE any body byte
@@ -596,10 +598,78 @@ pub async fn deploy(
                 ),
             }
 
+            // P6 (schema-authority §8): apply the bundle's DB migrations BEFORE
+            // the go-live commit. The `.zship` carries its versioned migration
+            // files (manifest.migrations → content-addressed blobs); we
+            // reconstruct them on disk and hand them to `zeroship-migrate`
+            // (Confined, schema "<app_id>", the per-app migrator role). A
+            // migrate FAILURE returns here and DOES NOT commit go-live — the old
+            // bundle keeps serving its already-migrated schema (§8.3). The app
+            // identity is the trusted path id `uid`, never a request body.
+            //
+            // Half-state contract (§8.4): migrate commits its journal, then
+            // go-live commits. If migrate succeeds but the go-live UPDATE below
+            // fails, the schema is ahead of the live code (additive-forward =
+            // safe); the next deploy's roll-forward reconciles. No verify gate.
+            // PR9c: thread the operator's approved version-id set. Empty (the default)
+            // keeps the routine fail-closed apply; a non-empty set routes to the SCOPED
+            // approved apply so the reviewed online-rename/destructive ops complete.
+            let approved_versions = approval_query.approved_version_ids();
+            // PR9c H2: the operator's reviewed manifest hash (out-of-band), bound to
+            // the approval on the scoped path so a tampered/reordered set is refused
+            // before any DDL.
+            let expected_manifest = approval_query.expected_manifest_hash();
+
+            // PR9c CRITICAL — OPERATOR-ONLY APPROVAL GATE. `?approved_versions=` is the
+            // go-live channel that COMPLETES an online-rename EXPAND / a scoped destructive
+            // migration. It MUST NOT be self-satisfiable by the bundle AUTHOR with their own
+            // `apps:deploy` grant (the anti-bypass point: a creator — or a prompt-injected AI
+            // deploying on their behalf, threat-model vector 4 — could otherwise enumerate
+            // their own destructive/online version-ids and self-approve). So a NON-EMPTY
+            // approval set is gated on the DISTINCT, operator-only `Action::AppsApproveMigration`
+            // (`migrations:approve`) — NOT granted by app_owner/editor/viewer/self_service; only
+            // the platform `admin` role's universal-allow grants it. A caller holding only
+            // `apps:deploy` is refused 403 here, BEFORE any approval set reaches the migrate
+            // phase. The empty-set routine deploy is unaffected (no approval ⇒ no extra gate).
+            //
+            // The authorized approver's principal is then stamped into the §2.2 immutable
+            // journal (`DeployActor::Approved`) so an operator-approved go-live is forensically
+            // distinct from a routine deploy — defeating the static `"deploy"` actor string.
+            let deploy_actor = if approved_versions.is_empty() {
+                crate::deploy_migrate::DeployActor::Routine
+            } else {
+                if let Err(resp) = authz
+                    .require(
+                        Action::AppsApproveMigration,
+                        Resource::App { id: uid.to_string() },
+                        &state,
+                    )
+                    .await
+                {
+                    return resp;
+                }
+                crate::deploy_migrate::DeployActor::Approved {
+                    approver: authz.principal_id.to_string(),
+                }
+            };
+
+            if let Err(resp) = run_deploy_migrations(
+                &uid,
+                &success.manifest_json,
+                &approved_versions,
+                expected_manifest.as_deref(),
+                &deploy_actor,
+                &state,
+            )
+            .await
+            {
+                return resp;
+            }
+
             // Atomic UPDATE: deploy_hash + manifest_json land together
             // so the gateway never sees half-applied state. Committed AFTER
-            // OAuth provisioning so the route only becomes resolvable once the
-            // client exists.
+            // OAuth provisioning + the migrate phase so the route only becomes
+            // resolvable once the client exists AND the schema is applied.
             match state
                 .registry
                 .set_deploy_with_manifest(&uid, &success.deploy_hash, &success.manifest_json)
@@ -617,6 +687,240 @@ pub async fn deploy(
         }
         Err(e) => ingest_error_to_response(e),
     }
+}
+
+/// P6 migrate phase: reconstruct the bundle's migration files from the blob
+/// store and apply them via `zeroship-migrate` (Confined, schema `"<app_id>"`)
+/// BEFORE the go-live commit (schema-authority §8).
+///
+/// Returns `Ok(())` on success (incl. the no-migrations no-op), or
+/// `Err(HttpResponse)` the deploy handler returns verbatim — in which case the
+/// caller MUST NOT commit go-live. A migrate failure is a 422 (the creator's
+/// migrations are at fault: a denied/destructive/unparseable migration) or a
+/// 503 (infra: connect / provision); both keep the old bundle serving.
+async fn run_deploy_migrations(
+    app_id: &Uuid,
+    manifest_json: &str,
+    // PR9c: the operator's individually-reviewed version-ids approved for THIS deploy.
+    // EMPTY ⇒ the routine fail-closed apply (`Approval::None`): an online-rename EXPAND
+    // / any destructive op is refused before go-live. NON-EMPTY ⇒ the SCOPED approved
+    // apply (`ApprovalScope::Versions`): only the listed versions' destructive/online
+    // ops run; everything else stays refused. NEVER a blanket bundle-wide approval.
+    approved_versions: &[String],
+    // PR9c H2: the operator's reviewed COMBINED manifest hash (out-of-band), or `None`
+    // for a version-scoped-only / routine deploy. On the scoped approved path the
+    // arrived bundle must recompute it before any DDL, else the deploy is refused.
+    expected_manifest: Option<&str>,
+    // PR9c CRITICAL: the forensic actor for the §2.2 journal — `Routine` (static marker)
+    // when no approval set was passed, or `Approved { approver }` carrying the
+    // operator/admin principal the handler authorized via `Action::AppsApproveMigration`.
+    deploy_actor: &crate::deploy_migrate::DeployActor,
+    state: &AppState,
+) -> Result<(), web::HttpResponse> {
+    // Re-parse the (already-validated) ingested manifest for its migrations.
+    let manifest: zeroship_bundle::Manifest = match serde_json::from_str(manifest_json) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(app_id = %app_id, error = %e, "control: deploy-migrate manifest reparse failed");
+            return Err(web::HttpResponse::InternalServerError().json(&serde_json::json!({
+                "error": "manifest reparse failed",
+                "detail": e.to_string(),
+            })));
+        }
+    };
+
+    // No migrations ⇒ nothing to do (the app ships no schema). Skip even the
+    // tmp-dir + admin connection.
+    if manifest.migrations.is_empty() {
+        return Ok(());
+    }
+
+    // Reconstruct the migration files under a per-deploy tmp dir. `validate()`
+    // already enforced bare-filename safety (no separators / traversal), so the
+    // join stays confined to `mig_dir`. The dir is removed on every exit path.
+    let mig_dir = state
+        .deploy_tmp_dir
+        .join(format!("zeroship-migrations-{}", Uuid::new_v4().simple()));
+    if let Err(e) = compio::fs::create_dir_all(&mig_dir).await {
+        return Err(infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "deploy-migrate tmp dir",
+            format_args!("{e}; path={}", mig_dir.display()),
+        ));
+    }
+
+    // The privileged provisioning DSN (CREATEROLE + CREATE on db) — distinct
+    // from control's least-privilege `zeroship_control` DSN, which CANNOT
+    // `CREATE SCHEMA` / `CREATE ROLE`. Absent ⇒ deploy-migrate infrastructure
+    // is unconfigured; fail BEFORE touching the DB rather than 503 mid-CREATE.
+    let Some(provision_dsn) = state.registry.migrate_dsn() else {
+        let _ = std::fs::remove_dir_all(&mig_dir);
+        return Err(infrastructure_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "migration_infrastructure",
+            "no provisioning DSN configured (set --provision-db / PROVISION_DATABASE_URL \
+             to a CREATEROLE admin role)",
+        ));
+    };
+
+    let write_result = reconstruct_migration_files(&manifest, app_id, state, &mig_dir).await;
+    let outcome = match write_result {
+        Ok(()) => {
+            // PR9c GO-LIVE ROUTING — `apply_bundle_migrations_routed` is the SINGLE seam
+            // that maps `approved_versions` to one of the two apply surfaces (the e2e drives
+            // this EXACT code, no test copy):
+            //   • EMPTY  ⇒ ROUTINE `apply_bundle_migrations` (`Approval::None`) — an
+            //     online-rename EXPAND / any destructive op is FAIL-CLOSED refused before
+            //     go-live (byte-identical to pre-PR9c behavior).
+            //   • NON-EMPTY ⇒ SCOPED `apply_bundle_migrations_approved`
+            //     (`ApprovalScope::Versions(approved)` built internally) — ONLY the operator-
+            //     reviewed versions' online/destructive ops complete; everything outside the
+            //     set stays refused (`ApprovalNotScoped`). NEVER a blanket bundle-wide
+            //     approval / all-versions scope. The §2.0.3 cross-deploy pending-contract
+            //     interlock read-back AND the per-version scope are INHERITED on this exact
+            //     path (the scoped surface routes through
+            //     `apply_plan_with_touched_and_depends_scoped` under the held project lock —
+            //     see deploy_migrate.rs); verified by the go-live e2e, not assumed.
+            crate::deploy_migrate::apply_bundle_migrations_routed(
+                provision_dsn,
+                app_id,
+                &mig_dir,
+                approved_versions,
+                deploy_actor,
+                expected_manifest,
+            )
+            .await
+        }
+        Err(resp) => {
+            let _ = std::fs::remove_dir_all(&mig_dir);
+            return Err(resp);
+        }
+    };
+    let _ = std::fs::remove_dir_all(&mig_dir);
+
+    match outcome {
+        Ok(report) => {
+            tracing::info!(
+                app_id = %app_id,
+                applied = report.applied.len(),
+                skipped = report.skipped.len(),
+                "control: deploy-migrate applied"
+            );
+            // PR9c (§2.0.2/§2.0.3): `pending_contract` is EMPTY on the routine
+            // (`Approval::None`) path — an online-rename EXPAND is refused before it can
+            // complete + owe a contract — and POPULATED on the approved path where the
+            // EXPAND completed. CRITICAL: this `warn!` is the OPERATOR-FACING SURFACING of
+            // an obligation that is ALREADY DURABLY JOURNALED engine-side
+            // (`record_pending_contract`, written inside the approved apply's EXPAND under
+            // the held project lock — see deploy_migrate.rs / backend.rs). It is NOT the
+            // obligation itself: even if this log were dropped, the durable journal still
+            // fail-closed refuses a later deploy touching the pending table
+            // (`TABLE_HAS_PENDING_CONTRACT`). We log at WARN so the owed follow-up CONTRACT
+            // (the C2 drop-old-column whose loss would orphan the old column behind a
+            // forever-pending dual-write trigger) is operator-visible for scheduling the
+            // approved contract deploy.
+            if !report.pending_contract.is_empty() {
+                tracing::warn!(
+                    app_id = %app_id,
+                    pending_contract = ?report.pending_contract,
+                    "control: deploy-migrate completed an online-rename EXPAND; a follow-up \
+                     APPROVED contract deploy (drop old column) is OWED (§2.0.2 cross-deploy \
+                     expand-contract) — the control plane must schedule it"
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            use crate::deploy_migrate::DeployMigrateError as DME;
+            // A creator-fault migration (bad grammar / denied / destructive /
+            // checksum drift) is a 422 the creator can act on; an infra fault
+            // (connect / provision) is a 503. Either way: NO go-live.
+            let (status, kind) = match &e {
+                // Creator-fault: bad `.sql` grammar / denied / destructive / drift,
+                // OR a `.ir.json` the fail-closed gate refused (malformed / future
+                // ir_version / structural reject / ownership / checksum) or that
+                // could not lower. The creator can act on all of these → 422.
+                DME::Load(_) | DME::Apply(_) | DME::OnlineExpand(_) | DME::Ir { .. } => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "migration_failed")
+                }
+                // PR9c H2: the arrived set does not match the operator-approved
+                // manifest — a tampered/reordered set between approval and apply. The
+                // creator/build pipeline can act on it (re-review / re-approve) → 422.
+                DME::ManifestMismatch { .. } => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, "approved_manifest_mismatch")
+                }
+                // Infra-fault: connect / provision / live-introspection / IR file
+                // read — not the creator's migration content → 503.
+                DME::Connect(_)
+                | DME::ProvisionSchema(_)
+                | DME::ProvisionRole(_)
+                | DME::Snapshot(_)
+                | DME::IrRead { .. } => {
+                    (StatusCode::SERVICE_UNAVAILABLE, "migration_infrastructure")
+                }
+            };
+            tracing::error!(app_id = %app_id, error = %e, "control: deploy-migrate failed; NOT committing go-live");
+            Err(web::HttpResponse::build(status).json(&serde_json::json!({
+                "error": kind,
+                "detail": e.to_string(),
+            })))
+        }
+    }
+}
+
+/// Stream each carried migration blob out of the blob store and write it to
+/// `mig_dir/<name>`. Returns `Err(HttpResponse)` (a 503/500) if a referenced
+/// blob is missing or a write fails — both abort the deploy before go-live.
+async fn reconstruct_migration_files(
+    manifest: &zeroship_bundle::Manifest,
+    app_id: &Uuid,
+    state: &AppState,
+    mig_dir: &StdPath,
+) -> Result<(), web::HttpResponse> {
+    for entry in &manifest.migrations {
+        let bytes = match state.blob_store.get_blob(&entry.hash).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    app_id = %app_id, name = %entry.name, hash = %entry.hash, error = %e,
+                    "control: deploy-migrate could not read migration blob"
+                );
+                return Err(web::HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                    "error": "migration_blob_unavailable",
+                    "detail": format!("migration {} (blob {}): {e}", entry.name, entry.hash),
+                })));
+            }
+        };
+        let path = mig_dir.join(&entry.name);
+        // Defense-in-depth against a duplicate `entry.name` slipping past
+        // Manifest::validate: `create_new` (O_EXCL) refuses to truncate an
+        // existing file, so a name collision fails the deploy loudly instead
+        // of silently clobbering an already-written migration's content.
+        use compio::io::AsyncWriteAtExt;
+        let mut file = match compio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return Err(infrastructure_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "deploy-migrate open migration file",
+                    format_args!("{e}; path={}", path.display()),
+                ));
+            }
+        };
+        if let Err(e) = file.write_all_at(bytes.to_vec(), 0).await.0 {
+            return Err(infrastructure_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "deploy-migrate write migration file",
+                format_args!("{e}; path={}", path.display()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Permissive content-type check. We accept the canonical
@@ -975,6 +1279,80 @@ pub struct InvoiceListQuery {
 pub struct CreatorScopeQuery {
     #[serde(default)]
     pub creator_id: Option<Uuid>,
+}
+
+/// **PR9c — the operator-approval seam for online/destructive go-live.** The
+/// optional `?approved_versions=` query on `POST /api/apps/{id}/deploy` carries the
+/// operator's individually-reviewed migration version-ids (comma-joined) that this
+/// deploy is approved to apply.
+///
+/// **Fail-closed default.** Absent / empty ⇒ an empty set ⇒ the deploy routes to the
+/// ROUTINE apply (`Approval::None`): an online-rename EXPAND or any destructive op is
+/// REFUSED before go-live, byte-identical to today. A NON-empty set routes to the
+/// SCOPED approved apply (`ApprovalScope::Versions`), where ONLY the listed versions
+/// may run their destructive/online ops; everything outside the set stays refused
+/// (`ApprovalNotScoped`). There is no blanket bundle-wide approval — `Versions({})`
+/// admits nothing.
+///
+/// The approval does NOT travel inside the creator-authored `.zship` (an operator
+/// decision must not be forgeable by the bundle author — the anti-bypass point of the
+/// PR9b scoping); it rides the request as a separate, authz-gated channel (only an
+/// `AppsDeploy`-authorized caller can pass it at all, and a NON-empty set additionally
+/// requires the operator-only `Action::AppsApproveMigration`). The version-ids an
+/// operator approves are the ones `deploy_migrate::plan_reviewed_versions` enumerates
+/// for the bundle.
+///
+/// **PR9c H2 — the approval can bind the exact reviewed BYTES.** Alongside the version
+/// set, the operator may pass `?expected_manifest=<hash>` — the reviewed bundle's
+/// combined integrity manifest (`deploy_migrate::plan_reviewed_manifest`). When present,
+/// the approved apply refuses the deploy before any DDL if the arrived set recomputes a
+/// different hash (a reorder/edit/insert/remove between review and apply). This is the
+/// trusted-out-of-band stamp the H2 follow-up called for, threaded inline on the
+/// approval channel rather than via a separate persisted approval-record workflow.
+#[derive(Deserialize, Default)]
+pub struct DeployApprovalQuery {
+    #[serde(default)]
+    pub approved_versions: Option<String>,
+    /// **PR9c H2** — the integrity manifest hash the operator REVIEWED + approved,
+    /// supplied out-of-band on the approval channel. When present (alongside a
+    /// non-empty `approved_versions`), the approved apply REFUSES the bundle before
+    /// any DDL if the arrived migration set recomputes a different combined manifest
+    /// (a reorder/edit/insert/remove between approval and apply — a TOCTOU). This
+    /// binds the approval to the exact reviewed BYTES, not just a version-id list.
+    /// Absent ⇒ version-scoped only (integrity-traceable, not tamper-prevented — the
+    /// documented pre-H2 posture).
+    #[serde(default)]
+    pub expected_manifest: Option<String>,
+}
+
+impl DeployApprovalQuery {
+    /// Parse the comma-joined `approved_versions` into a de-duplicated, trimmed
+    /// version-id list. Absent / empty / all-blank ⇒ an EMPTY vec (the fail-closed
+    /// routine path). Never errors: an unparseable spelling simply yields fewer
+    /// approved versions, which can only narrow (never widen) what may run.
+    fn approved_version_ids(&self) -> Vec<String> {
+        self.approved_versions
+            .as_deref()
+            .map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The trimmed reviewed-manifest hash, or `None` when absent/blank. A blank
+    /// value is treated as absent (version-scoped only) rather than as a hash that
+    /// can never match — an empty string is not a meaningful approval stamp.
+    fn expected_manifest_hash(&self) -> Option<String> {
+        self.expected_manifest
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    }
 }
 
 /// Resolve the OWNING creator (`app_members.role='owner'`) for an app, or `None`

@@ -45,19 +45,15 @@
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
-use crate::backend::{
-    AuditWriter, DialectBuilder, FullTextIndex, IndexBuilder, LockScope, RegisterBackend,
-    SpatialIndex, SqliteBackend, VectorIndex,
-};
+use crate::backend::{AuditWriter, DialectBuilder, RegisterBackend};
 use crate::context;
-use crate::diff::{ChangeClass, ChangeKind};
 use crate::error::DbError;
-use crate::query::IndexKind;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
 pub(crate) mod apply;
 pub(crate) mod bootstrap;
 pub(crate) mod plan;
+pub(crate) mod sqlite_engine;
 pub(crate) mod validate;
 
 /// `zeroship.db.registerModel(collection, schemaJson)` → `Promise<void>`
@@ -71,6 +67,7 @@ pub fn register_model_dispatch<'s>(
     collection: &str,
     schema: Value,
     indexes: Value,
+    declared_collections: Vec<String>,
 ) -> v8::Local<'s, v8::Promise> {
     let state = runtime_state(scope);
 
@@ -88,7 +85,15 @@ pub fn register_model_dispatch<'s>(
     let collection_owned = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match exec_register_model(&app_id_owned, &collection_owned, &schema, &indexes).await {
+        match exec_register_model(
+            &app_id_owned,
+            &collection_owned,
+            &schema,
+            &indexes,
+            &declared_collections,
+        )
+        .await
+        {
             Ok(()) => {
                 crate::mark_model_registered(&app_id_owned, &collection_owned);
                 // **P5 PR 2** — cache the schema so the CRUD encryption
@@ -123,6 +128,7 @@ async fn exec_register_model(
     collection: &str,
     schema: &Value,
     indexes: &Value,
+    declared_collections: &[String],
 ) -> Result<(), DbError> {
     // Lazy pool init
     let has_pool = context::with(|c| c.pool_initialised());
@@ -134,24 +140,90 @@ async fn exec_register_model(
 
     let backend = context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("backend_not_initialized", "db: backend not initialized"))?;
-    // P0 PR 5: `BackendHandle` is the enum (no `dyn Backend`). The
-    // PG-only register-model pipeline pulls a `&PostgresBackend` out
-    // of the enum via `as_postgres()` for the duration of the
-    // `run_pipeline` await — async-friendly shape (closure-based
-    // `with_postgres` can't span `.await` ergonomically).
-    //
-    // Post-P0 mop-up (MAJOR-R14-1): map the `None` arm to a typed
-    // `backend_unsupported` `DbError::Configuration` so a future SQLite
-    // arm surfaces a coded SDK-visible error rather than aborting the
-    // spawned compio task via `.expect()` panic.
-    let deploy_id =
-        std::env::var("ZEROSHIP_DEPLOY_ID").unwrap_or_else(|_| "cold_start".to_string());
 
+    // **P5 — the cutover (dialect-conditional; do NOT brick SQLite dev).** The
+    // schema-authority split (`docs/proposals/2026-06-18-schema-authority-drizzle-
+    // model-design.md` §6/§9/§12 P5) makes `zeroship-migrate` the SOLE PG schema
+    // applier: the engine creates/migrates the per-app PG schema (and provisions
+    // the `migrator_<app_id>` role) at DEPLOY, BEFORE go-live (P6,
+    // `control`'s `deploy_migrate::apply_bundle_migrations`). So on the PG dialect
+    // `registerModel` STOPS being a schema authority — it issues NO runtime DDL
+    // (no `bootstrap` create-schema / `plan` / `validate` / `apply`). This is what
+    // eliminates the two-applier overlap (plugin-db + engine both running DDL
+    // under disjoint advisory-lock namespaces — the prior design's CRITICAL #1).
+    //
+    // What the PG no-DDL path STILL guarantees — the "schema-ready + metadata-
+    // available" contract the P4 introspection cache depends on (design §6):
+    //   * readiness — the dispatch caller (`register_model_dispatch`) marks
+    //     `is_model_registered` on this `Ok(())`, which is the gate
+    //     `crud::introspect_schema::runtime_schema_for` checks before sourcing
+    //     per-collection metadata from LIVE introspection + the engine's sentinels
+    //     (the P4 `runtime_schema_for` path). Introspection itself is lazy +
+    //     deploy-keyed and runs on the first CRUD op, so marking readiness here is
+    //     sufficient — we deliberately do NOT introspect (no catalog reads) at
+    //     register time, matching the old fast/cheap registration boundary.
+    //   * declared-schema cache — the dispatch caller also still calls
+    //     `cache_schema`, so the declared-ONLY hints that introspection cannot
+    //     recover keep working byte-identically: the `t.id(prefix)` typed-id
+    //     `idPrefix` read by `system_fields_pass::prefix_for_collection`, and the
+    //     `schema_for` hints consulted by vector-search / unmask / mask-drift.
+    // Net on PG: the runtime never CREATEs/ALTERs schema; it only reads. If the
+    // engine somehow has not applied the schema at deploy, runtime CRUD errors
+    // normally ("column does not exist") — deploy ordering (§8) guarantees the
+    // schema is present first; we deliberately do NOT re-add a runtime
+    // auto-migrate fallback.
+    //
+    // On the SQLite dialect (dev tier) `registerModel` drives the SAME hardened
+    // zeroship-migrate engine the PG deploy path uses (P6b): it routes through
+    // `sqlite_engine::run_sqlite_via_engine` (journal / versioning / drift /
+    // 12-step rebuild / baseline adoption / dev auto-approve), NOT a bespoke
+    // runtime auto-migrate — the retired `run_sqlite_pipeline` is gone. The split
+    // is now only in WHEN the engine runs: PG schema is engine-owned at DEPLOY;
+    // SQLite dev applies at first-`registerModel` (cold path) on the developer's
+    // own local file. `default.schema` / `installSchema` stay PG-UNUSED for DDL
+    // (PG runtime metadata comes from introspection) but remain SQLite-CONSUMED
+    // right here as the descriptor source the engine diffs against live state.
     match (backend.as_postgres(), backend.as_sqlite()) {
-        (Some(pg), _) => run_pipeline(pg, app_id, collection, schema, indexes, &deploy_id).await,
+        // PG: NO runtime DDL — the engine (P6 deploy-apply) is the PG schema
+        // authority. This path no-ops the apply; the dispatch caller stamps
+        // readiness (`mark_model_registered`) + the declared cache (`cache_schema`)
+        // on the returned `Ok(())`, preserving the metadata-readiness contract
+        // above WITHOUT any CREATE/ALTER. `_pg` is bound only to select the arm.
+        //
+        // **Migration-first cutover (P4b).** The `schema` value this arm
+        // receives (and that the dispatch caller stamps into `cache_schema`)
+        // now originates from the bundled `RuntimeSchemaDescriptor` (the
+        // migration fold's wire-FieldDef map), not the declared `default.schema`
+        // t.* object: the runtime injects the descriptor as
+        // `globalThis.__zsRuntimeDescriptor` and `installSchema` runs the
+        // `registerModel` chain off it. So the declared-only hints the PG CRUD
+        // passes read out of the cache (`t.id(prefix)` idPrefix, encrypted /
+        // mask facets) come from the fold — higher fidelity than the old
+        // declared object — while this arm stays a pure no-op (no DDL). The
+        // descriptor path is PG/`.zship`-only; SQLite dev (below) still receives
+        // the declared schema and diffs it against live state.
+        (Some(_pg), _) => Ok(()),
+        // SQLite dev tier (P6b): drive the security-hardened migration engine
+        // (journal / versioning / drift / 12-step rebuild / baseline / dev
+        // auto-approve), NOT the retired bespoke `run_sqlite_pipeline`. `sqlite`
+        // is the data-plane backend A; `run_sqlite_via_engine` constructs the
+        // hardened migration backend B on the same app file, applies through the
+        // engine, drops B, re-ATTACHes A, and bridges the CDC name-cache — all
+        // inside this awaited body (the ordering barrier, §7b.5). `deploy_id` is
+        // read inside it (from ZEROSHIP_DEPLOY_ID) for journal/audit grouping.
         (_, Some(sqlite)) => {
-            run_sqlite_pipeline(sqlite, app_id, collection, schema, indexes, &deploy_id).await
+            sqlite_engine::run_sqlite_via_engine(
+                sqlite,
+                app_id,
+                collection,
+                schema,
+                indexes,
+                declared_collections,
+            )
+            .await
         }
+        // Unknown / future backend surfaces a typed, SDK-visible error rather than
+        // aborting the spawned compio task via an `.expect()` panic.
         _ => Err(DbError::backend_unsupported("register_model")),
     }
 }
@@ -250,233 +322,6 @@ pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(
     apply::apply(backend, ctx, lock_guard, approved).await
 }
 
-async fn run_sqlite_pipeline(
-    backend: &SqliteBackend,
-    app_id: &str,
-    collection: &str,
-    schema: &Value,
-    indexes: &Value,
-    deploy_id: &str,
-) -> Result<(), DbError> {
-    crate::cross_app_fk::reject_cross_app_fk(schema, app_id)?;
-
-    let strictness = schema
-        .get("_meta")
-        .and_then(|m| m.get("strictness"))
-        .and_then(Value::as_str)
-        .unwrap_or("strict")
-        .to_string();
-
-    let scope = LockScope::GlobalApp {
-        app_id: app_id.to_string(),
-        name: bootstrap::LOCK_TAG.to_string(),
-    };
-    let _lock_guard = crate::backend::sqlite::lock::SqliteLockGuard::acquire(backend, &scope).await?;
-
-    let ctx = match bootstrap::build_ctx(
-        backend,
-        app_id,
-        collection,
-        schema,
-        indexes,
-        deploy_id,
-        strictness,
-    )
-    .await
-    {
-        Ok(ctx) => ctx,
-        Err(e) => return Err(e),
-    };
-
-    let approved_res = match plan::compute_plan(backend, &ctx, collection, schema).await {
-        Ok(plan) => validate::validate(backend, &ctx, plan)
-            .await
-            .map_err(|envelope_json| DbError::SchemaRefused {
-                code: "validation_refused",
-                envelope_json,
-            }),
-        Err(e) => Err(e),
-    };
-    let approved = match approved_res {
-        Ok(approved) => approved,
-        Err(e) => return Err(e),
-    };
-
-    apply_sqlite(backend, &ctx, &approved).await
-}
-
-async fn apply_sqlite(
-    backend: &SqliteBackend,
-    ctx: &bootstrap::RegisterContext,
-    approved: &validate::ApprovedPlan,
-) -> Result<(), DbError> {
-    for op in &approved.ops {
-        if op.class == ChangeClass::Destructive {
-            continue;
-        }
-
-        let audit_id = match backend
-            .write_audit_row_returning_id(
-                &ctx.app_id,
-                &crate::audit::AuditRow {
-                    collection: op.collection.clone(),
-                    phase: crate::audit::Phase::Ddl,
-                    change_class: op.class.as_audit(),
-                    change_kind: op.change_kind.as_sql().to_string(),
-                    details: op.details.clone(),
-                    ddl_sql: op.sql.clone(),
-                    status: crate::audit::InitialStatus::Running,
-                    deploy_id: ctx.deploy_id.clone(),
-                    schema_version: ctx.schema_version,
-                    actor: crate::audit::ActorKind::Auto,
-                },
-            )
-            .await
-        {
-            Ok(id) => Some(id),
-            Err(audit_err) => {
-                tracing::warn!(
-                    app_id = %ctx.app_id,
-                    collection = %op.collection,
-                    transition = "Running/insert_failed",
-                    audit_err = %audit_err,
-                    "audit: failed to insert running row",
-                );
-                None
-            }
-        };
-
-        let result = match &op.change_kind {
-            ChangeKind::CreateTable
-            | ChangeKind::AddColumn
-            | ChangeKind::AddForeignKey
-            | ChangeKind::DropForeignKey => {
-                if let Some(sql) = &op.sql {
-                    backend.exec_batch(sql).await
-                } else {
-                    Ok(())
-                }
-            }
-            ChangeKind::AddIndex => {
-                let spec = ctx
-                    .declared_indexes
-                    .iter()
-                    .find(|s| {
-                        op.details.get("index_name").and_then(Value::as_str)
-                            == Some(s.name.as_str())
-                    })
-                    .cloned();
-                if let Some(spec) = spec {
-                    match &spec.kind {
-                        IndexKind::BTree => {
-                            backend
-                                .create_index_with_recovery(
-                                    &ctx.app_id,
-                                    &op.collection,
-                                    &spec,
-                                    &ctx.deploy_id,
-                                    ctx.schema_version,
-                                )
-                                .await
-                        }
-                        IndexKind::Vector { dims, metric } => {
-                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
-                            backend
-                                .ensure_vector_index(
-                                    &ctx.app_id,
-                                    &op.collection,
-                                    column,
-                                    *dims,
-                                    *metric,
-                                )
-                                .await
-                        }
-                        IndexKind::Fts { language } => {
-                            backend
-                                .ensure_fts_index(
-                                    &ctx.app_id,
-                                    &op.collection,
-                                    &spec.columns,
-                                    language,
-                                )
-                                .await
-                        }
-                        IndexKind::Spatial => {
-                            let column = spec.columns.first().map(String::as_str).unwrap_or("");
-                            backend
-                                .ensure_spatial_index(&ctx.app_id, &op.collection, column)
-                                .await
-                        }
-                    }
-                } else {
-                    Ok(())
-                }
-            }
-            ChangeKind::MaskBackfill { .. }
-            | ChangeKind::MaskRewrite { .. }
-            | ChangeKind::MaskRemove { .. } => Err(DbError::backend_unsupported("register_model")),
-            ChangeKind::DropColumn | ChangeKind::DropIndex => continue,
-        };
-
-        if result.is_ok() && refreshes_sqlite_cdc_name_cache(&op.change_kind) {
-            backend.invalidate_cdc_name_cache(&ctx.app_id, &op.collection);
-        }
-
-        if let Some(id) = audit_id {
-            match &result {
-                Ok(_) => {
-                    if let Err(audit_err) = backend
-                        .update_audit_status(
-                            &ctx.app_id,
-                            id,
-                            crate::audit::TerminalStatus::Applied,
-                            None,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            app_id = %ctx.app_id,
-                            audit_id = id,
-                            transition = "Applied",
-                            audit_err = %audit_err,
-                            "update_audit_status failed; row stays in 'running' until reset",
-                        );
-                    }
-                }
-                Err(e) => {
-                    let msg = e.clone().into_string();
-                    if let Err(audit_err) = backend
-                        .update_audit_status(
-                            &ctx.app_id,
-                            id,
-                            crate::audit::TerminalStatus::Failed,
-                            Some(msg.as_str()),
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            app_id = %ctx.app_id,
-                            audit_id = id,
-                            transition = "Failed",
-                            ddl_err = %msg,
-                            audit_err = %audit_err,
-                            "update_audit_status failed; row stays in 'running' until reset",
-                        );
-                    }
-                }
-            }
-        }
-
-        result?;
-    }
-
-    Ok(())
-}
-
-fn refreshes_sqlite_cdc_name_cache(change_kind: &ChangeKind) -> bool {
-    matches!(change_kind, ChangeKind::CreateTable | ChangeKind::AddColumn)
-}
-
 /// Pool-driven entry retained for integration tests that hand in a
 /// `Rc<Pool>` directly (predates the Backend trait). Builds an ad-hoc
 /// [`PostgresBackend`] around the pool and delegates to
@@ -500,6 +345,28 @@ pub async fn exec_register_model_with_pool(
     run_pipeline(&backend, app_id, collection, schema, indexes, deploy_id).await
 }
 
+/// **P5 test seam** — drive the PRODUCTION dialect dispatch
+/// ([`exec_register_model`]) without the V8 lifecycle. The backend is read
+/// from the per-isolate context (install it first via
+/// `set_postgres_pool_for_tests` / `set_sqlite_backend_for_tests`), so this
+/// exercises the EXACT PG-no-DDL vs SQLite-auto-migrate branch the cutover
+/// introduces — unlike `exec_register_model_with_pool`, which bypasses the
+/// dispatch and calls `run_pipeline` directly.
+#[cfg(feature = "test-helpers")]
+pub async fn exec_register_model_via_dispatch_for_tests(
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    indexes: &Value,
+) -> Result<(), DbError> {
+    // No declared-set hint from this seam — pass empty, which makes the dev
+    // SQLite drop pass treat every non-desired live table as a real drop
+    // candidate (the pre-H1 single-collection behaviour). Tests that exercise
+    // the warm multi-collection drop-suppression path call
+    // `run_sqlite_via_engine` directly with an explicit declared set.
+    exec_register_model(app_id, collection, schema, indexes, &[]).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,6 +375,7 @@ mod tests {
     use crate::broker::SubscriptionMessage;
     use serde_json::json;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::time::Duration;
 
     fn run<F: std::future::Future>(f: F) -> F::Output {
@@ -532,11 +400,25 @@ mod tests {
         panic!("timed out waiting for broker change event");
     }
 
+    /// **P6b CDC-bridge regression (rewritten for the engine path).** After a
+    /// SQLite ADD COLUMN through `run_sqlite_via_engine`, connection A's CDC
+    /// name cache must reflect the new column (the engine ran the DDL on the
+    /// hardened backend B; the bridge invalidates A's cache). Pre-bridge a stale
+    /// cache would synthesize positional `c<N>` fallback keys for the new column.
+    ///
+    /// This drives the REAL engine path (B applies → drop B → A re-ATTACHes → CDC
+    /// invalidate), not the retired `apply_sqlite` shim, with backend A installed
+    /// in the per-isolate context exactly as production does.
     #[test]
-    fn sqlite_register_model_refreshes_cdc_column_name_cache_after_add_column() {
+    fn sqlite_register_model_via_engine_refreshes_cdc_name_cache_after_add_column() {
         run(async {
             let dir = tempfile::tempdir().expect("create tempdir");
-            let backend = SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
+            );
+            // Install A in the per-isolate context so `run_sqlite_via_engine`
+            // resolves the same data-plane backend the CDC publisher reads.
+            crate::set_sqlite_backend_for_tests(backend.clone());
             let app_id = "app_cdc_name_refresh";
             let collection = "messages";
 
@@ -544,19 +426,21 @@ mod tests {
                 "_meta": {"strictness": "lenient"},
                 "title": {"type": "string", "required": true}
             });
-            run_sqlite_pipeline(
+            sqlite_engine::run_sqlite_via_engine(
                 &backend,
                 app_id,
                 collection,
                 &schema_v1,
                 &json!([]),
-                "deploy_v1",
+                &[collection.to_string()],
             )
             .await
-            .expect("register initial schema");
+            .expect("engine registers the initial schema");
 
             let sub = crate::broker::subscribe(app_id, collection);
 
+            // CRUD on A (the data plane) — the ATTACH from step 5 means A sees the
+            // engine-created table. A write here fires CDC and primes the cache.
             backend
                 .pool_exec(
                     r#"INSERT INTO "app_cdc_name_refresh"."messages" (id, title)
@@ -564,50 +448,30 @@ mod tests {
                     &[],
                 )
                 .await
-                .expect("seed row for CDC cache prime");
+                .expect("seed row for CDC cache prime (A sees the migrated table)");
             let first = next_change(&sub).await;
             assert!(
                 first.new_tuple.contains_key("title"),
                 "first CDC decode must resolve the original column names"
             );
 
+            // v2: ADD COLUMN body, through the engine. The DDL runs on B; the
+            // bridge invalidates A's CDC name cache for `messages`.
             let schema_v2 = json!({
                 "_meta": {"strictness": "lenient"},
                 "title": {"type": "string", "required": true},
                 "body": {"type": "string"}
             });
-            let ctx = bootstrap::RegisterContext {
-                app_id: app_id.to_string(),
-                deploy_id: "deploy_v2".to_string(),
-                schema_version: 2,
-                strictness: "lenient".to_string(),
-                declared_indexes: Vec::new(),
-                collection: collection.to_string(),
-                schema_json: schema_v2.clone(),
-            };
-            let approved = validate::ApprovedPlan {
-                ops: vec![crate::diff::DiffOp {
-                    collection: collection.to_string(),
-                    change_kind: ChangeKind::AddColumn,
-                    class: ChangeClass::Additive,
-                    sql: Some(
-                        r#"ALTER TABLE "app_cdc_name_refresh"."messages" ADD COLUMN "body" TEXT"#
-                            .to_string(),
-                    ),
-                    details: json!({
-                        "kind": "add_column",
-                        "field": "body",
-                    }),
-                    field: Some("body".to_string()),
-                }],
-            };
-            apply_sqlite(
+            sqlite_engine::run_sqlite_via_engine(
                 &backend,
-                &ctx,
-                &approved,
+                app_id,
+                collection,
+                &schema_v2,
+                &json!([]),
+                &[collection.to_string()],
             )
             .await
-            .expect("apply widened schema");
+            .expect("engine applies the widened schema (ADD COLUMN body)");
 
             backend
                 .pool_exec(
@@ -616,12 +480,12 @@ mod tests {
                     &[],
                 )
                 .await
-                .expect("insert row after ADD COLUMN");
+                .expect("insert row after ADD COLUMN (A sees the migrated column)");
             let second = next_change(&sub).await;
 
             assert!(
                 second.new_tuple.contains_key("body"),
-                "CDC decode must refresh the cached column names after register_model ADD COLUMN"
+                "CDC decode must refresh the cached column names after the engine ADD COLUMN"
             );
             assert!(
                 second.changed_columns.iter().any(|c| c == "body"),
@@ -636,5 +500,139 @@ mod tests {
                 second.new_tuple.keys().collect::<Vec<_>>()
             );
         });
+    }
+
+    /// True if `table` exists in the app's ATTACHed SQLite schema (the data-plane
+    /// backend A view). Reads `sqlite_master` in the app's schema namespace.
+    async fn table_exists(backend: &SqliteBackend, app_id: &str, table: &str) -> bool {
+        let sql = format!(
+            r#"SELECT name FROM "{app_id}".sqlite_master WHERE type='table' AND name='{table}'"#
+        );
+        let rows = backend.query_json(&sql, &[]).await.expect("query sqlite_master");
+        !rows.is_empty()
+    }
+
+    /// **H1 regression — warm multi-collection boot must NOT fail closed.**
+    ///
+    /// A warm app file already holds tables `c1` + `c2` (registered by a prior
+    /// isolate). A FRESH isolate then registers them one at a time (the
+    /// install-schema.ts order), `c1` FIRST. When `c1` registers, the sibling
+    /// cache is empty → the per-collection desired union is `{c1}`, but live is
+    /// `{c1,c2}`. Pre-fix, `c2` was a live-only table with no `live_ownership`
+    /// entry → the differ's fail-closed drop pass raised `DropOfUnownedTable` and
+    /// `registerModel` REJECTED — the app broke on every warm boot of any 2+-
+    /// collection schema.
+    ///
+    /// Post-fix: `c2` is in the FULL declared set `[c1, c2]`, so the drop pass
+    /// hides it (not-yet-registered sibling) → NO error, `c2` is NOT dropped, and
+    /// then registering `c2` is a clean no-op. Both tables stay usable.
+    ///
+    /// RED before the fix: the first phase-2 `run_sqlite_via_engine(c1)` returns
+    /// `Err(DropOfUnownedTable)` and the `.expect(...)` panics.
+    #[test]
+    fn sqlite_warm_multi_collection_fresh_isolate_registers_c1_first_no_drop() {
+        run(async {
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
+            );
+            crate::set_sqlite_backend_for_tests(backend.clone());
+            let app_id = "default";
+            let declared = [c("c1"), c("c2")];
+
+            let c1_schema = json!({"title": {"type": "string", "required": true}});
+            let c2_schema = json!({"label": {"type": "string", "required": true}});
+
+            // ---- Prior isolate: register both, warming the file with c1 + c2. ----
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &declared)
+                .await
+                .expect("warm: register c1");
+            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &declared)
+                .await
+                .expect("warm: register c2");
+            crate::cache_schema_for_tests(app_id, "c2", c2_schema.clone());
+
+            assert!(table_exists(&backend, app_id, "c1").await, "warm c1 created");
+            assert!(table_exists(&backend, app_id, "c2").await, "warm c2 created");
+
+            // ---- Fresh isolate: empty sibling cache; register c1 FIRST. ----
+            crate::simulate_fresh_isolate_for_tests(app_id, &["c1", "c2"]);
+
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &declared)
+                .await
+                .expect("H1: fresh-isolate register of c1 first must NOT fail closed on the live c2 sibling");
+            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
+
+            // c2 must survive the c1 register (it is declared, just not yet
+            // re-registered on this isolate).
+            assert!(
+                table_exists(&backend, app_id, "c2").await,
+                "H1: c2 must NOT be dropped when c1 registers first on a warm file"
+            );
+
+            // Then c2 re-registers cleanly (no-op against the warm table).
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &declared)
+                .await
+                .expect("H1: re-register c2 must be a clean no-op");
+
+            assert!(table_exists(&backend, app_id, "c1").await, "c1 still usable");
+            assert!(table_exists(&backend, app_id, "c2").await, "c2 still usable");
+        });
+    }
+
+    /// **H1 over-suppression guard — a GENUINELY-removed collection still drops.**
+    ///
+    /// Warm file holds `c1` + `c2`. The app's schema is then edited to declare
+    /// ONLY `c1` (c2 removed). A fresh isolate registers `c1` with the FULL
+    /// declared set `[c1]` (c2 is NOT in it). The drop pass must now author the
+    /// owned drop of `c2` — confirming the H1 fix did not over-suppress real
+    /// removals.
+    ///
+    /// RED before the fix: pre-fix `c2` had no `live_ownership` entry, so this
+    /// path raised `DropOfUnownedTable` instead of dropping (`.expect` panics);
+    /// the assertion that c2 is gone could never be reached.
+    #[test]
+    fn sqlite_genuinely_removed_collection_is_dropped() {
+        run(async {
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let backend = Rc::new(
+                SqliteBackend::new(PathBuf::from(dir.path())).expect("open backend"),
+            );
+            crate::set_sqlite_backend_for_tests(backend.clone());
+            let app_id = "default";
+
+            let c1_schema = json!({"title": {"type": "string", "required": true}});
+            let c2_schema = json!({"label": {"type": "string", "required": true}});
+
+            // Warm the file with both.
+            let both = [c("c1"), c("c2")];
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &both)
+                .await
+                .expect("warm: register c1");
+            crate::cache_schema_for_tests(app_id, "c1", c1_schema.clone());
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c2", &c2_schema, &json!([]), &both)
+                .await
+                .expect("warm: register c2");
+            crate::cache_schema_for_tests(app_id, "c2", c2_schema.clone());
+            assert!(table_exists(&backend, app_id, "c2").await, "warm c2 created");
+
+            // Fresh isolate; the new declared schema has ONLY c1 (c2 removed).
+            crate::simulate_fresh_isolate_for_tests(app_id, &["c1", "c2"]);
+            let only_c1 = [c("c1")];
+            sqlite_engine::run_sqlite_via_engine(&backend, app_id, "c1", &c1_schema, &json!([]), &only_c1)
+                .await
+                .expect("register c1 with c2 removed from the declared set");
+
+            assert!(table_exists(&backend, app_id, "c1").await, "c1 still present");
+            assert!(
+                !table_exists(&backend, app_id, "c2").await,
+                "H1 guard: a collection genuinely removed from the declared schema MUST be dropped"
+            );
+        });
+    }
+
+    fn c(s: &str) -> String {
+        s.to_string()
     }
 }

@@ -129,6 +129,87 @@ fn audit_locked_app_denies_writes() {
     assert_eq!(decision, Decision::Deny);
 }
 
+/// **PR9c CRITICAL regression — operator-vs-creator separation for migration
+/// approval.** The app OWNER (the bundle AUTHOR) has otherwise-universal authority
+/// over their own app, but MUST be DENIED the operator-only
+/// `migrations:approve` action — otherwise the owner (or a prompt-injected AI
+/// deploying on their behalf) could self-approve a destructive/online go-live by
+/// passing `?approved_versions=`, defeating the anti-bypass. Only the platform
+/// `admin` role grants it.
+///
+/// Pre-fix `app_owner.cedar` permitted an UNBOUND `action`, so it granted EVERY
+/// action including `migrations:approve`; this assertion would have FAILED RED
+/// (Allow instead of Deny).
+#[test]
+fn app_owner_is_denied_operator_only_migration_approval() {
+    let policies = load_platform_policies().expect("static policies should parse");
+
+    // Owner of APP_ID, no platform role (a plain creator). `app_owner_of` is a SET
+    // of App entity refs — the same shape `entities::restricted_app_set` builds — so
+    // `resource in principal.app_owner_of` matches APP_ID.
+    let entities = Entities::from_json_value(
+        json!([
+            {
+                "uid": { "type": "User", "id": "owner_user" },
+                "attrs": {
+                    "platform_role": zeroship_authz::DEFAULT_PLATFORM_ROLE,
+                    "app_owner_of": [ { "__entity": { "type": "App", "id": APP_ID } } ]
+                },
+                "parents": []
+            },
+            {
+                "uid": { "type": "App", "id": APP_ID },
+                "attrs": { "suspended": false, "audit_locked": false },
+                "parents": []
+            }
+        ]),
+        None,
+    )
+    .expect("entities should parse");
+
+    // Sanity: the owner DOES get a routine app action (universal owner authority
+    // is otherwise preserved).
+    let deploy = request("owner_user", "apps:deploy", APP_ID);
+    assert_eq!(
+        Authorizer::new()
+            .is_authorized(&deploy, &policies, &entities)
+            .decision(),
+        Decision::Allow,
+        "owner must retain routine apps:deploy on their own app"
+    );
+
+    // The fix: the owner is DENIED migrations:approve on their OWN app.
+    let approve = request("owner_user", "migrations:approve", APP_ID);
+    assert_eq!(
+        Authorizer::new()
+            .is_authorized(&approve, &policies, &entities)
+            .decision(),
+        Decision::Deny,
+        "app owner (bundle author) must NOT self-approve destructive/online migrations — \
+         migrations:approve is operator-only"
+    );
+}
+
+/// The operator side of the same separation: the platform `admin` role's
+/// universal-allow DOES grant `migrations:approve`, so an operator can drive a
+/// reviewed go-live.
+#[test]
+fn platform_admin_is_allowed_migration_approval() {
+    let policies = load_platform_policies().expect("static policies should parse");
+    let request = request("admin_user", "migrations:approve", APP_ID);
+    let entities = entities("admin_user", "admin", false, false);
+
+    let decision = Authorizer::new()
+        .is_authorized(&request, &policies, &entities)
+        .decision();
+
+    assert_eq!(
+        decision,
+        Decision::Allow,
+        "platform admin must be able to approve a reviewed migration go-live"
+    );
+}
+
 fn request(principal_id: &str, action: &str, app_id: &str) -> Request {
     Request::new(
         entity_uid("User", principal_id),

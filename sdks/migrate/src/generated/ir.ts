@@ -1,0 +1,518 @@
+// The dialect-neutral IR STRUCTURAL types (`MigrationIr`, `Op`, `Expr`,
+// `ColType`, `IrConstraint`, …), HAND-AUTHORED as a faithful transcription of the
+// engine's single-source-of-truth schema `crates/zeroship-migrate/op-ir.schema.json`.
+//
+// WHY HAND-AUTHORED (not generated): these defs form a self-recursive `oneOf` AST
+// (`Expr` → `BinOp.lhs: Expr`; `ColType` → `encrypted.of: ColType`; `Op` carries
+// `Expr`), which `json-schema-to-typescript` v15 cannot express — it inlines the
+// `$ref` cycle and overflows the stack. So per PR3 ("manual types for any serde
+// shape codegen cannot express"), the recursive structural types are authored
+// here, while the closed STRING-ENUM tokens (`BinaryOp`, `SynthFn`, `CastTarget`,
+// …) are GENERATED into `./enums.ts` and imported below.
+//
+// DRIFT GUARD: `tests/ir-types-drift.test.ts` pins every enum token, every `Op`
+// variant tag, and every `Expr` node tag in THIS file against the schema, so the
+// manual transcription cannot silently drift from the engine contract.
+//
+// These types are ERGONOMICS for an advanced caller; the golden `.ir.json` corpus
+// + the `Checksum::of_ir` round-trip are the contract source of truth (§4.3/PR3).
+
+import type {
+  BinaryOp,
+  CastTarget,
+  CmpOp,
+  ExistenceGuard,
+  ExclusionMethod,
+  ExclusionOperator,
+  ForEach,
+  FuncArgMode,
+  FuncLanguage,
+  FuncVolatility,
+  IndexMethod,
+  JoinKind,
+  OnUnmet,
+  OnlinePhase,
+  OrderDir,
+  PolicyCmd,
+  Privilege,
+  RaiseLevel,
+  RefAction,
+  ScalarFn,
+  SynthDefaultFn,
+  SynthFn,
+  TriggerEvent,
+  TriggerTiming,
+  UnaryOp,
+} from "./enums.js";
+
+export type {
+  BinaryOp,
+  CastTarget,
+  CmpOp,
+  ExistenceGuard,
+  ExclusionMethod,
+  ExclusionOperator,
+  ForEach,
+  FuncArgMode,
+  FuncLanguage,
+  FuncVolatility,
+  IndexMethod,
+  JoinKind,
+  OnUnmet,
+  OnlinePhase,
+  OrderDir,
+  PolicyCmd,
+  Privilege,
+  RaiseLevel,
+  RefAction,
+  ScalarFn,
+  SynthDefaultFn,
+  SynthFn,
+  TriggerEvent,
+  TriggerTiming,
+  UnaryOp,
+};
+
+/** Signed integer constrained by the engine schema to the JS safe-integer range. */
+export type SafeI64 = number;
+
+/** Unsigned integer constrained by the engine schema to the JS safe-integer range. */
+export type SafeU64 = number;
+
+/** A typed scalar (the §2.5 numeric domain): null / bool / safe-int / string /
+ *  decimal-string / base64-bytes. */
+export type IrScalar =
+  | null
+  | boolean
+  | number
+  | string
+  | { decimal: string }
+  | { bytes: string };
+
+/** The dialect-NEUTRAL column-type lexicon (§3.2). Closed; camel-cased on the
+ *  wire. `encrypted.of` is itself a `ColType` (the recursive arm). */
+export type ColType =
+  | "string"
+  | "text"
+  | "int"
+  | "bigInt"
+  | "float"
+  | "bool"
+  | "json"
+  | "timestamp"
+  | "uuid"
+  | "bytea"
+  | "geoPoint"
+  | { ref: { references: string } }
+  | { vector: { vector: number } }
+  | { decimal: { precision: number; scale: number } }
+  | { enum: { name: string } }
+  | { domain: { name: string } }
+  | { encrypted: { of: ColType } };
+
+/** The CLOSED pgvector distance-metric lexicon (P2a §4) — drives the ivfflat/hnsw
+ *  operator class. Camel-cased on the wire; faithful transcription of the schema
+ *  `VectorMetric` `oneOf` const set. A DECLARED-ONLY hint introspection cannot
+ *  recover, so it is carried on the column. */
+export type VectorMetric = "cosine" | "l2" | "innerProduct";
+
+/** The CLOSED column-masking transform lexicon (`.mask({ kind })`, #174) — faithful
+ *  transcription of the schema `IrMaskKind` `oneOf` const set. The two date forms
+ *  are KEBAB (`date-year`/`date-decade`); the rest are single camelCase words. */
+export type MaskKind =
+  | "full"
+  | "last4"
+  | "first4"
+  | "email"
+  | "name"
+  | "date-year"
+  | "date-decade"
+  | "none";
+
+/** The CLOSED sensitivity-classification lexicon (`.mask({ classification })`,
+ *  #174) — faithful transcription of the schema `IrClassification` `oneOf` const
+ *  set. */
+export type Classification = "public" | "pii" | "spi" | "phi" | "pci" | "internal";
+
+/** A standalone column-masking facet (`.mask({ kind, classification })`, #174). */
+export interface IrMask {
+  kind: MaskKind;
+  classification: Classification;
+}
+
+/** A column DEFAULT — a typed scalar literal OR a nullary synth scalar
+ *  (`now`/`genRandomUuid`). Never raw SQL (property A). */
+export type IrDefault =
+  | { literal: { value: IrScalar } }
+  | { fn: { fn: SynthDefaultFn } };
+
+/** The CLOSED expression AST node (§3.3.1), internally tagged on `node`. */
+export type Expr =
+  | { node: "colRef"; name: string }
+  | { node: "literal"; value: IrScalar }
+  | { node: "binOp"; op: BinaryOp; lhs: Expr; rhs: Expr }
+  | { node: "unaryOp"; op: UnaryOp; operand: Expr }
+  | { node: "case"; branches: CaseBranch[]; else?: Expr | null }
+  | { node: "fnCall"; fn: ScalarFn; args: Expr[] }
+  | { node: "fnSynth"; fn: SynthFn; args: Expr[] }
+  | { node: "cast"; operand: Expr; target: CastTarget };
+
+/** One `(condition, result)` branch of an `Expr` `case`. */
+export interface CaseBranch {
+  condition: Expr;
+  result: Expr;
+}
+
+/** A generated/computed column facet. `expr` is the closed expression AST; `stored`
+ *  is `true` for STORED and `false` for SQLite VIRTUAL. */
+export interface GeneratedCol {
+  expr: Expr;
+  stored: boolean;
+}
+
+/** A SQL identity column facet. `always:true` means GENERATED ALWAYS; `false`
+ *  means GENERATED BY DEFAULT. */
+export interface IdentityCol {
+  always: boolean;
+}
+
+/** A column definition inside `createTable` / `addColumn`. */
+export interface IrColumn {
+  name: string;
+  type: ColType;
+  nullable?: boolean | null;
+  default?: IrDefault | null;
+  unique?: boolean | null;
+  /** **P2a §2b** — the `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
+   *  introspection cannot recover. Camel-cased on the wire. Default-absent. */
+  idPrefix?: string | null;
+  /** **P2a §2b** — the `t.vector(n, { metric })` distance metric (closed
+   *  {@link VectorMetric}). Default-absent. */
+  vectorMetric?: VectorMetric | null;
+  /** **#174** — a STANDALONE column mask. Default-absent. */
+  mask?: IrMask | null;
+  /** Generated/computed column facet. Default-absent. */
+  generated?: GeneratedCol | null;
+  /** SQL identity column facet. Default-absent. */
+  identity?: IdentityCol | null;
+}
+
+/** The kind of a table constraint (closed, internally tagged on `kind`). */
+export type IrConstraintKind =
+  | { kind: "pk"; columns: string[] }
+  | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[]; onDelete?: RefAction | null; onUpdate?: RefAction | null }
+  | { kind: "unique"; columns: string[] }
+  | { kind: "check"; expr: Expr }
+  | {
+      kind: "exclusion";
+      usingMethod?: ExclusionMethod;
+      elements: ExclusionElement[];
+      wherePredicate?: Expr | null;
+      deferrable?: boolean | null;
+      initiallyDeferred?: boolean | null;
+    };
+
+/** Exclusion target: a column name or a closed expression AST. */
+export type ColumnOrExpr =
+  | { kind: "column"; name: string }
+  | { kind: "expr"; expr: Expr };
+
+/** Index target: a column name or a closed expression AST. */
+export type IndexElement =
+  | { kind: "column"; name: string }
+  | { kind: "expr"; expr: Expr };
+
+/** One `(target WITH operator)` element in an exclusion constraint. */
+export interface ExclusionElement {
+  target: ColumnOrExpr;
+  operator: ExclusionOperator;
+}
+
+/** COMMENT ON target. Function comments are name-only in this IR; overloaded
+ *  function signatures are intentionally not modeled. */
+export type CommentTarget =
+  | { kind: "table"; schema?: string | null; name: string }
+  | { kind: "column"; schema?: string | null; table: string; name: string }
+  | { kind: "index"; schema?: string | null; name: string }
+  | { kind: "constraint"; schema?: string | null; table: string; name: string }
+  | { kind: "view"; schema?: string | null; name: string }
+  | { kind: "type"; schema?: string | null; name: string }
+  | { kind: "sequence"; schema?: string | null; name: string }
+  | { kind: "function"; schema?: string | null; name: string };
+
+/** A named table constraint (the `kind` is a nested internally-tagged object). */
+export interface IrConstraint {
+  name?: string | null;
+  kind: IrConstraintKind;
+}
+
+/** Optional sequence ownership target. */
+export interface SequenceOwnedBy {
+  table: string;
+  column: string;
+}
+
+/** An index definition inside a `createTable` op. */
+export interface IrIndex {
+  name?: string | null;
+  columns: IndexElement[];
+  unique?: boolean | null;
+  using?: IndexMethod | null;
+  where?: Expr | null;
+}
+
+/** The optional `insert { onConflict }` upsert clause (PG-only). */
+export interface IrOnConflict {
+  columns: string[];
+  doUpdate?: { [column: string]: IrScalar } | null;
+}
+
+/** A batched-backfill / batched-update knob. */
+export interface IrBatch {
+  cursorColumn: string;
+  batchSize: number;
+}
+
+/** §A2 — the closed trigger action: either call an operator-provided function
+ *  (PG render path) or carry a structured trigger body (SQLite render path). */
+export type TriggerAction =
+  | { kind: "executeFunction"; name: string }
+  | { kind: "body"; statements: TriggerStmt[] };
+
+/** §A2/§3.2 — one structured trigger body statement. Reuses the DML payload
+ *  shapes where possible and adds the closed `Raise` node. */
+export type TriggerStmt =
+  | { stmt: "insert"; table: string; columns: string[]; rows: IrScalar[][]; schema?: string | null }
+  | { stmt: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; schema?: string | null }
+  | { stmt: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
+  | { stmt: "select"; expr: Expr }
+  | { stmt: "raise"; level: RaiseLevel; message: string; errcode?: string | null };
+
+/** §A1 — a view body is either the closed, portable SelectAst subset or an
+ *  operator-gated raw SELECT body. */
+export type ViewQuery =
+  | { kind: "structured"; select: SelectAst }
+  | { kind: "raw"; sql: string };
+
+/** §3.1 — the closed SELECT subset rendered by the engine for structured views. */
+export interface SelectAst {
+  from: TableRef;
+  /** Empty means `*`. */
+  projection: SelectItem[];
+  joins?: Join[];
+  where?: Expr | null;
+  orderBy?: OrderItem[] | null;
+  limit?: number | null;
+}
+
+export interface TableRef {
+  name: string;
+  schema?: string | null;
+  alias?: string | null;
+}
+
+export type SelectItem =
+  | { kind: "colRef"; table?: string | null; name: string; alias?: string | null }
+  | { kind: "expr"; expr: Expr; alias?: string | null };
+
+export interface Join {
+  kind: JoinKind;
+  table: TableRef;
+  on: Expr;
+}
+
+export type OrderItem =
+  | { kind: "colRef"; table?: string | null; name: string; dir?: OrderDir | null }
+  | { kind: "expr"; expr: Expr; dir?: OrderDir | null };
+
+/** **VENDOR** — one CREATE FUNCTION argument. */
+export interface FuncArg {
+  name?: string | null;
+  type: string;
+  mode?: FuncArgMode | null;
+}
+
+/** **VENDOR** — the closed GRANT/REVOKE target. */
+export type GrantTarget =
+  | { kind: "table"; names: string[]; schema?: string | null }
+  | { kind: "schema"; names: string[] }
+  | { kind: "sequence"; in: string }
+  | { kind: "database"; names: string[] };
+
+/** The CLOSED `op.*` operation enum (§2.3), internally tagged on `op`,
+ *  camel-cased. NOTE the `del()` DSL function records the `"delete"` variant tag.
+ *
+ *  **PR10** — every TABLE-TARGETING variant carries an optional `schema?` (the
+ *  §2.7 schema-qualifier — honored under Trusted/Platform, pinned/refused under
+ *  Confined), and every GUARDABLE DDL variant additionally carries an optional
+ *  `existenceGuard?`. The DML ops (`insert`/`update`/`delete`/`backfill`) carry
+ *  `schema?` but NO `existenceGuard?` (DML has no existence semantics). The
+ *  removed native `ifExists?: boolean` on `dropTable`/`dropColumn`/`dropIndex`/
+ *  `dropView` is GONE (the intentional wire break) — the guard is now the uniform
+ *  `existenceGuard?` token. */
+export type Op =
+  | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[]; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | {
+      op: "createIndex";
+      table: string;
+      columns: IndexElement[];
+      name?: string | null;
+      unique?: boolean | null;
+      using?: IndexMethod | null;
+      where?: Expr | null;
+      concurrently?: boolean | null;
+      schema?: string | null;
+      existenceGuard?: ExistenceGuard | null;
+    }
+  | { op: "dropIndex"; name: string; table?: string | null; unique?: boolean | null; concurrently?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "alterColumnType"; table: string; column: string; type: ColType; using?: Expr | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "alterColumnNullability"; table: string; column: string; nullable: boolean; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "insert"; table: string; columns: string[]; rows: IrScalar[][]; onConflict?: IrOnConflict | null; schema?: string | null }
+  | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
+  | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
+  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null }
+  | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
+  | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }
+  | { op: "createEnum"; name: string; schema?: string | null; values: string[] }
+  | { op: "dropEnum"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "createDomain"; name: string; schema?: string | null; as: ColType; check?: Expr | null; default?: IrDefault | null; notNull?: boolean | null }
+  | { op: "dropDomain"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | {
+      op: "createSequence";
+      name: string;
+      schema?: string | null;
+      as?: ColType | null;
+      increment?: SafeI64 | null;
+      start?: SafeI64 | null;
+      minValue?: SafeI64 | null;
+      maxValue?: SafeI64 | null;
+      cache?: SafeU64 | null;
+      cycle?: boolean | null;
+      ownedBy?: SequenceOwnedBy | null;
+    }
+  | {
+      op: "alterSequence";
+      name: string;
+      schema?: string | null;
+      increment?: SafeI64 | null;
+      restart?: SafeI64 | null;
+      minValue?: SafeI64 | null;
+      maxValue?: SafeI64 | null;
+      cache?: SafeU64 | null;
+      cycle?: boolean | null;
+      ownedBy?: SequenceOwnedBy | null;
+    }
+  | { op: "dropSequence"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "comment"; target: CommentTarget; comment?: string | null }
+  | {
+      op: "createTrigger";
+      name: string;
+      table: string;
+      schema?: string | null;
+      timing: TriggerTiming;
+      events: TriggerEvent[];
+      forEach: ForEach;
+      action: TriggerAction;
+      when?: Expr | null;
+    }
+  | { op: "dropTrigger"; name: string; table: string; schema?: string | null; ifExists?: boolean | null }
+  | { op: "createSchema"; name: string; ifNotExists?: boolean | null; authorization?: string | null }
+  | { op: "dropSchema"; name: string; ifExists?: boolean | null; cascade?: boolean | null }
+  | { op: "createExtension"; name: string; ifNotExists?: boolean | null; schema?: string | null }
+  | { op: "dropExtension"; name: string; ifExists?: boolean | null }
+  | {
+      op: "createRole";
+      name: string;
+      login?: boolean | null;
+      password?: string | null;
+      bypassRls?: boolean | null;
+      createRole?: boolean | null;
+      createDb?: boolean | null;
+      superuser?: boolean | null;
+      inRole?: string[] | null;
+      setSearchPath?: string[] | null;
+      ifNotExists?: boolean | null;
+    }
+  | { op: "alterRole"; name: string; setSearchPath?: string[] | null; resetSearchPath?: boolean | null }
+  | { op: "dropRole"; name: string; ifExists?: boolean | null }
+  | { op: "dropOwnedBy"; roles: string[] }
+  | { op: "grant"; privileges: Privilege[]; on: GrantTarget; to: string[]; withGrantOption?: boolean | null }
+  | { op: "revoke"; privileges: Privilege[]; on: GrantTarget; from: string[] }
+  | { op: "enableRls"; table: string; schema?: string | null }
+  | { op: "forceRls"; table: string; schema?: string | null }
+  | { op: "disableRls"; table: string; schema?: string | null }
+  | { op: "noForceRls"; table: string; schema?: string | null }
+  | {
+      op: "createPolicy";
+      name: string;
+      table: string;
+      schema?: string | null;
+      forCmd: PolicyCmd;
+      to?: string[] | null;
+      using: Expr;
+      withCheck?: Expr | null;
+    }
+  | { op: "dropPolicy"; name: string; table: string; schema?: string | null; ifExists?: boolean | null }
+  | {
+      op: "createFunction";
+      name: string;
+      schema?: string | null;
+      args?: FuncArg[] | null;
+      returns: string;
+      language: FuncLanguage;
+      replace?: boolean | null;
+      volatility?: FuncVolatility | null;
+      body: string;
+    }
+  | { op: "dropFunction"; name: string; schema?: string | null; argTypes?: string[] | null; ifExists?: boolean | null }
+  | { op: "pgRaw"; sql: string; binds?: IrScalar[] };
+
+/** All-`Option` overrides of the migration flags. */
+export interface IrFlagsOverride {
+  transactional?: boolean | null;
+  destructive?: boolean | null;
+  online?: boolean | null;
+  requires_approval?: boolean | null;
+  repeatable?: boolean | null;
+  engine_goodie_ddl?: boolean | null;
+  timeout_ms?: number | null;
+  /** Per-deploy maintenance-window lock-acquisition budget (JS-safe-integer
+   *  bounded); distinct from `timeout_ms` (the statement budget). */
+  lock_timeout_ms?: number | null;
+  phase?: OnlinePhase | null;
+}
+
+/** A single precondition assertion evaluated against the live DB. */
+export type Precondition =
+  | { TableExists: { table: string } }
+  | { TableNotExists: { table: string } }
+  | { ColumnExists: { table: string; column: string } }
+  | { ColumnNotExists: { table: string; column: string } }
+  | { RowCount: { table: string; op: CmpOp; value: number } }
+  | { SqlBoolean: { sql: string } };
+
+/** One precondition + its unmet policy. */
+export interface PreconditionCheck {
+  check: Precondition;
+  on_unmet?: OnUnmet;
+}
+
+/** The portable migration IR document (`.ir.json`, §2.1). */
+export interface MigrationIr {
+  ir_version: number;
+  name: string;
+  owner_app?: string;
+  ops: Op[];
+  flags?: IrFlagsOverride;
+  depends_on?: string[];
+  supersedes?: string[];
+  preconditions?: PreconditionCheck[];
+  checksum?: string | null;
+}

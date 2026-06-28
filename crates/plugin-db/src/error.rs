@@ -673,6 +673,36 @@ impl From<crate::query::QueryError> for DbError {
     }
 }
 
+// **Schema-authority P1** — the live-introspection helpers
+// (`zeroship_schema::diff::{read_live_schema, estimate_row_count}`) were
+// relocated into the leaf crate, which cannot name `DbError` (it is built
+// on `zeroship_runtime::OpError`). They return [`zeroship_schema::error::SchemaError`]
+// carrying the per-call-site context phrase + the raw driver error. This
+// `From` re-creates the exact pre-extraction shape: the diff layer wrapped
+// every introspection error as `coded_sql("diff: <context>", e)`, so we
+// re-attach the `"diff: "` prefix here and route through `coded_sql` so the
+// SQLSTATE-derived `.code` selection stays the single source of truth.
+// Behaviour at the V8 boundary is byte-identical to before the move.
+impl From<zeroship_schema::error::SchemaError> for DbError {
+    fn from(e: zeroship_schema::error::SchemaError) -> Self {
+        coded_sql(&format!("diff: {}", e.context), e.source)
+    }
+}
+
+// **Schema-authority P1** — the mask-sentinel codec
+// (`zeroship_schema::mask_codec::parse_mask_sentinel`) was relocated into the
+// leaf crate and returns [`zeroship_schema::error::MaskSentinelError`] whose
+// `.message` already carries the `mask_sentinel_malformed: …` prefix the SDK
+// contract + introspector expect. The pre-extraction parser returned
+// `DbError::internal(<that same message>)`; this `From` reproduces it exactly,
+// so the `mask_sentinel_malformed` code-discriminator the SDK round-trips is
+// preserved.
+impl From<zeroship_schema::error::MaskSentinelError> for DbError {
+    fn from(e: zeroship_schema::error::MaskSentinelError) -> Self {
+        DbError::internal(e.message)
+    }
+}
+
 /// Walk the `std::error::Error::source` chain so the JS console sees the
 /// underlying Postgres `DbError` body, not the bare wrapper kind. Mirrors
 /// the old `fmt_db_err` from `v8_bridge` so the message shape is
@@ -1123,6 +1153,32 @@ mod tests {
                     assert!(
                         hint.contains(name),
                         "hint must list system field {name:?}; got: {hint}"
+                    );
+                }
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    /// **Schema-authority P1** — relocated from `query.rs`'s test module
+    /// (which moved to the leaf crate `zeroship-schema`, where `DbError`
+    /// is not nameable). Pins the end-to-end lift: the schema-crate
+    /// validator `validate_field_name_for_declaration` rejects a reserved
+    /// system field, and `From<QueryError> for DbError` (which lives here)
+    /// stamps `code = "reserved_system_field_name"` + a hint listing all 7
+    /// system fields. Behaviour-identical to the pre-extraction test.
+    #[test]
+    fn system_field_reservation_error_carries_correct_code() {
+        let err = crate::query::validate_field_name_for_declaration("id").unwrap_err();
+        let db_err = DbError::from(err);
+        match db_err {
+            DbError::ValidationFailed { code, hint, .. } => {
+                assert_eq!(code, "reserved_system_field_name");
+                let hint = hint.expect("reservation hint required for SDK remediation");
+                for name in crate::query::SYSTEM_FIELD_NAMES {
+                    assert!(
+                        hint.contains(name),
+                        "reservation hint must list all 7 system fields; missing {name:?}"
                     );
                 }
             }

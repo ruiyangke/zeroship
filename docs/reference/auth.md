@@ -204,7 +204,7 @@ Adding or rotating a client is an edit to the TOML; `crates/auth/src/bootstrap` 
 
 ## Data model
 
-The auth tables live in the single `zeroship` PostgreSQL schema (owned by Liquibase — `db/changelog/changesets/0002_auth.sql` and follow-ups; see [Database migrations](../runbooks/db-migrations.md)):
+The auth tables live in the single `zeroship` PostgreSQL schema (owned by zeroship-migrate — `db/migrations/V0002__auth.sql` and follow-ups; see [Database migrations](../runbooks/db-migrations.md)):
 
 | Table | Purpose |
 |---|---|
@@ -221,7 +221,7 @@ The auth tables live in the single `zeroship` PostgreSQL schema (owned by Liquib
 | `zeroship.dpop_jti` / `zeroship.token_revocations` | DPoP replay + revocation state |
 | `zeroship.jwk_key_state` / `zeroship.cron_state` | Key rotation + cron bookkeeping |
 
-Hydra's own tables live in the separate `oauth_hydra` schema (Liquibase changeset `0027` pre-creates the schema + least-privilege role; the `hydra-migrate` one-shot populates it — not `crates/auth`).
+Hydra's own tables live in the separate `oauth_hydra` schema (zeroship-migrate `V0027` pre-creates the schema + least-privilege role; the `hydra-migrate` one-shot populates it — not `crates/auth`).
 
 ## Operator notes
 

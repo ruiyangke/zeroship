@@ -1,0 +1,15 @@
+DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE ALL ON zeroship.app_spend_limit FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.app_spend_state FROM zeroship_control'; EXECUTE 'REVOKE ALL ON zeroship.spend_state_history FROM zeroship_control'; END IF; END $rb$;
+DROP POLICY IF EXISTS tenant_isolation ON zeroship.spend_state_history;
+ALTER TABLE zeroship.spend_state_history NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.spend_state_history DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_spend_state;
+ALTER TABLE zeroship.app_spend_state NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.app_spend_state DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_spend_limit;
+ALTER TABLE zeroship.app_spend_limit NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE zeroship.app_spend_limit DISABLE ROW LEVEL SECURITY;
+DROP INDEX IF EXISTS zeroship.idx_spend_state_history_period;
+DROP INDEX IF EXISTS zeroship.idx_spend_state_history_app_at;
+DROP TABLE zeroship.spend_state_history;
+DROP TABLE zeroship.app_spend_state;
+DROP TABLE zeroship.app_spend_limit;

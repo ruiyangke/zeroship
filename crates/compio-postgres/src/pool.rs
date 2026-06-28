@@ -735,6 +735,11 @@ impl Pool {
     }
 
     /// Acquire a connection, execute a statement, return the connection.
+    ///
+    /// Uses the **extended/prepared** protocol — exactly ONE command per call.
+    /// Multi-statement SQL (e.g. DDL with a trailing `COMMENT ON COLUMN`
+    /// sentinel) raises `42601 cannot insert multiple commands into a prepared
+    /// statement`; use [`Pool::batch_execute`] for those.
     pub async fn execute(
         &self,
         sql: &str,
@@ -742,6 +747,22 @@ impl Pool {
     ) -> Result<u64, Error> {
         let client = self.get().await?;
         client.execute(sql, params).await
+    }
+
+    /// Acquire a connection and run one or more `;`-separated statements via the
+    /// **simple-query** protocol, then return the connection.
+    ///
+    /// This is the correct primitive for multi-statement DDL — e.g. the
+    /// `CREATE TABLE …; COMMENT ON COLUMN … IS 'zsenc:…'` / `'__zsmask:…'`
+    /// sentinel batches the schema builder emits (P4 HALF A / P5.5 PR 6).
+    /// `Pool::execute` cannot run those (it prepares a single command).
+    ///
+    /// # Errors
+    /// Returns [`Error`] if a connection cannot be acquired or the server
+    /// rejects any statement in the batch.
+    pub async fn batch_execute(&self, sql: &str) -> Result<(), Error> {
+        let client = self.get().await?;
+        client.batch_execute(sql).await
     }
 
     // ── Pool stats (for metrics endpoint) ────────────────────────────────

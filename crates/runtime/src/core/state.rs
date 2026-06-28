@@ -544,6 +544,17 @@ pub struct RuntimeState {
     /// user-controlled environment.
     pub env_vars: HashMap<String, String>,
 
+    /// **Migration-first cutover (P4b)** — the bundled `RuntimeSchemaDescriptor`
+    /// JSON (`schema.runtime.json`, a `Record<collection, Record<column,
+    /// FieldDef>>`) carried in `manifest.runtime_descriptor`. The worker
+    /// resolves the descriptor blob via `BlobStore` at bundle-load and stamps
+    /// it here through `RuntimeBuilder::runtime_descriptor`. `setup_globals`
+    /// parses it and exposes it to JS as `globalThis.__zsRuntimeDescriptor` so
+    /// `@zeroship/bootstrap`'s entry sources the schema from the migration fold
+    /// instead of `user.default.schema`. `None` for apps that ship no
+    /// migrations/descriptor (the transitional `default.schema` fallback).
+    pub runtime_descriptor: Option<String>,
+
     /// User-controlled `vars` half of the EnvSnapshot. Plaintext. Always
     /// surfaced via `process.env`, the `zeroship.env` import, and
     /// `env.get()`. `BTreeMap` for deterministic iteration order.
@@ -715,6 +726,7 @@ impl RuntimeState {
 
             kv_store: HashMap::new(),
             env_vars,
+            runtime_descriptor: None,
             env_app_vars: BTreeMap::new(),
             env_app_secrets: BTreeMap::new(),
             env_expose_keys: Vec::new(),

@@ -191,13 +191,29 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   async function registerSchema(mod: unknown): Promise<void> {
     const defaultExport =
       (mod && typeof mod === "object" && (mod as { default?: unknown }).default) || null;
-    const schema =
+    const declaredSchema =
       (defaultExport &&
         typeof defaultExport === "object" &&
         (defaultExport as { schema?: unknown }).schema &&
         typeof (defaultExport as { schema?: unknown }).schema === "object")
         ? (defaultExport as { schema: unknown }).schema
         : undefined;
+
+    // **Migration-first cutover (P4b)** — prefer the bundled
+    // RuntimeSchemaDescriptor if the runtime injected one as
+    // `globalThis.__zsRuntimeDescriptor`. In self-contained dev (Vite +
+    // SQLite) no descriptor is bundled, so this is normally absent and the
+    // declared `default.schema` remains the source (which the SQLite-dev
+    // engine then diffs against live state). Honored here for symmetry with
+    // the production runtime-entry so a descriptor, if present, wins.
+    const descriptor = (globalThis as unknown as {
+      __zsRuntimeDescriptor?: Record<string, Record<string, unknown>>;
+    }).__zsRuntimeDescriptor;
+    const hasDescriptor =
+      descriptor != null &&
+      typeof descriptor === "object" &&
+      Object.keys(descriptor).length > 0;
+    const schema = hasDescriptor ? descriptor : declaredSchema;
 
     if (!schema) {
       schemaInstalled = true;
@@ -233,7 +249,18 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       const { ready } = installSchema(
         schema as Parameters<typeof installSchema>[0],
         envDb as Parameters<typeof installSchema>[1],
-        { platform } as Parameters<typeof installSchema>[2],
+        {
+          platform,
+          // **P4b** — in descriptor mode this is the source of truth.
+          descriptor: hasDescriptor ? descriptor : undefined,
+          // **P4b review fix (MED)** — recover collection-LEVEL options
+          // (softDelete / versioning / indexes) the field-only descriptor
+          // cannot encode. Inert in self-contained dev (no descriptor is
+          // bundled), present for parity with the production runtime-entry.
+          declaredSchemas: hasDescriptor
+            ? (declaredSchema as Record<string, unknown> | undefined)
+            : undefined,
+        } as Parameters<typeof installSchema>[2],
       );
       schemaReady = (async () => {
         await ready;
@@ -327,7 +354,17 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     return dispatchRpcAsync(name, input, ctx);
   }
 
-  const userFetchHandler = createFetchHandler(loadNormalized);
+  // Gate the dev fetch fall-through on schema readiness (C1). By the
+  // time `createFetchHandler` calls this, it has already awaited
+  // `loadNormalized()` — which runs `maybeRegisterSchema` and populates
+  // the module-local `schemaReady`. So reading it here observes the
+  // freshly-installed chain (or `undefined` for schema-less apps). A
+  // rejected chain rejects here and the handler surfaces a 500.
+  const userFetchHandler = createFetchHandler(loadNormalized, () =>
+    (schemaReady && typeof schemaReady.then === "function")
+      ? (schemaReady as Promise<unknown>).then(() => undefined)
+      : undefined,
+  );
 
   // Dev-tier auth provider — owns the same-origin `/__zeroship/auth/*` endpoints in
   // self-contained dev (no gateway/Hydra). Reads its config from the spawn env

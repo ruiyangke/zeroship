@@ -148,8 +148,41 @@ pub fn build_error_body(
 /// verbatim to clients even at a 5xx status. These carry no secret
 /// content — the message is a fixed platform string with no stack and no
 /// user-supplied data — so the 5xx body-sanitization rail exempts them.
+///
+/// Two families qualify:
+///
+/// 1. `capability_violation` — the gateway/dispatch capability gate's own
+///    refusal (P9).
+///
+/// 2. The **developer-facing DB validation / CAS guardrail** family
+///    (`crates/plugin-db/src/error.rs`). These are `DbError::ValidationFailed`
+///    (and `QueryError`-derived) refusals: the plugin rejected the *shape* of
+///    a request before touching any row. They are platform-owned static
+///    message strings whose only variable content is the caller's own
+///    collection / filter shape (never another tenant's data, never a stack).
+///    Crucially they carry no 4xx `status` — a native throw materialises a
+///    `CodedError` with `.code` + `.hint` but no `.status`, so `statusFromError`
+///    defaults them to 500 and the sanitization rail would otherwise strip the
+///    very `.code` the SDK branches on (`version_mismatch` →
+///    `OptimisticLockError`, etc.). Exempting them keeps the developer-facing
+///    code on the wire without leaking anything secret. (Mirrors the TS
+///    fetch-handler rail, which already preserves any string `.code` at 5xx.)
 fn is_public_error_code(code: &str) -> bool {
-    matches!(code, "capability_violation")
+    matches!(
+        code,
+        "capability_violation"
+            // Optimistic-concurrency (CAS) guardrails — plugin-db error.rs
+            | "version_mismatch"
+            | "version_filter_must_be_top_level"
+            | "multi_row_version_filter_unsupported"
+            // Request-shape validation refusals (QueryError + ValidationFailed)
+            | "invalid_filter"
+            | "invalid_collection"
+            | "invalid_identifier"
+            | "reserved_system_field_name"
+            | "immutable_system_field"
+            | "filter_nesting_too_deep"
+    )
 }
 
 fn expose_internal_dispatch_errors() -> bool {
@@ -488,5 +521,83 @@ pub fn fire_timer_callback(
         if cb.interval.is_some() {
             state.borrow_mut().timer_callbacks.insert(timer_id, cb);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn extras_with_code(code: &str) -> ErrorExtras<'_> {
+        ErrorExtras {
+            code: Some(code),
+            ..Default::default()
+        }
+    }
+
+    /// Regression for `sqlite-cas-nested-version-code-dropped`: a
+    /// developer-facing DB validation / CAS guardrail throws a
+    /// `CodedError` with no `.status`, so `statusFromError` defaults it to
+    /// 500. The 5xx sanitization rail must NOT strip the `.code` for this
+    /// family — the SDK branches on it (`version_mismatch` →
+    /// `OptimisticLockError`, etc.). Pre-fix the rail returned the bare
+    /// `{message:"internal error",...}` envelope and dropped the code.
+    #[test]
+    fn validation_cas_codes_survive_the_5xx_sanitization_rail() {
+        for code in [
+            "version_filter_must_be_top_level",
+            "version_mismatch",
+            "multi_row_version_filter_unsupported",
+            "invalid_filter",
+            "invalid_collection",
+            "invalid_identifier",
+            "reserved_system_field_name",
+            "immutable_system_field",
+            "filter_nesting_too_deep",
+            // The pre-existing P9 capability gate code must still pass.
+            "capability_violation",
+        ] {
+            let body = build_error_body(500, 42, "the real message", "Error", extras_with_code(code));
+            assert!(
+                body.contains(&format!(r#""code":"{code}""#)),
+                "code {code:?} must survive the 5xx rail, got: {body}"
+            );
+            assert!(
+                !body.contains(r#""message":"internal error""#),
+                "verbatim body expected for whitelisted code {code:?}, got sanitized: {body}"
+            );
+        }
+    }
+
+    /// The rail still sanitizes a genuinely-internal 5xx error: a code the
+    /// platform does NOT whitelist (e.g. `internal`, a transient DB
+    /// failure) must be blanked to the fixed envelope, with no message
+    /// leak. This guards against the whitelist being widened into a
+    /// blanket "keep every code" rule.
+    #[test]
+    fn non_whitelisted_5xx_code_is_still_sanitized() {
+        let body = build_error_body(
+            500,
+            7,
+            "secret connection string leaked here",
+            "Error",
+            extras_with_code("transient"),
+        );
+        assert_eq!(
+            body,
+            r#"{"message":"internal error","name":"Error","request_id":"7"}"#,
+            "non-whitelisted 5xx code must be sanitized"
+        );
+        assert!(!body.contains("secret connection string"));
+    }
+
+    /// 4xx errors are a developer-facing boundary — the rail leaves them
+    /// verbatim regardless of code (the sanitization only applies to
+    /// 500-599).
+    #[test]
+    fn four_xx_errors_are_not_sanitized() {
+        let body = build_error_body(400, 1, "bad request", "Error", extras_with_code("whatever"));
+        assert!(body.contains("bad request"));
+        assert!(body.contains(r#""code":"whatever""#));
     }
 }

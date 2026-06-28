@@ -75,74 +75,34 @@ use crate::query::quote_ident;
 /// allocation).
 pub const BATCH_SIZE: i64 = 1_000;
 
-/// **P5.5 PR 6** — render the canonical mask-sentinel payload for a
-/// `<col>_masked` sibling column.
-///
-/// Stored on PG via `COMMENT ON COLUMN "<schema>"."<table>"."<sibling>"
-/// IS '<sentinel>'` and on SQLite as a `/* <sentinel> */` inline
-/// comment after the sibling column DDL. The parser side
-/// ([`parse_mask_sentinel`]) accepts the exact same string.
-///
-/// Format: `__zsmask:kind=<kind>,classification=<class>`.
-#[must_use]
-pub fn build_mask_sentinel(kind: MaskKind, classification: Classification) -> String {
-    format!(
-        "__zsmask:kind={},classification={}",
-        kind.as_sql(),
-        classification.as_sql(),
-    )
-}
+// **Schema-authority P1** — the mask-sentinel CODEC (build/parse the
+// `__zsmask:…` string) was relocated into the leaf crate
+// `zeroship_schema::mask_codec`. It is a schema-shape concern (the contract
+// the schema layer writes into DDL and the data plane reads back); the
+// backfill *runner* below (`run_mask_backfill` / `run_mask_rewrite`) STAYS
+// here in the data plane.
+//
+// `build_mask_sentinel` re-exports verbatim (it is pure). `parse_mask_sentinel`
+// gets a thin wrapper that preserves the `Result<_, DbError>` shape the
+// plugin-db callers expect: the leaf codec returns `MaskSentinelError`
+// (it cannot name `DbError`), which the `From` impl in `crate::error` maps
+// back to `DbError::internal(<same message>)` — byte-identical to the
+// pre-extraction parser.
+pub use zeroship_schema::mask_codec::build_mask_sentinel;
 
 /// **P5.5 PR 6** — parse a `__zsmask:kind=…,classification=…`
 /// sentinel string back into a `(MaskKind, Classification)` pair.
 ///
-/// Returns `Err(DbError::Internal { … })` with the code-discriminator
+/// Thin `DbError`-shaped wrapper over the relocated leaf codec
+/// [`zeroship_schema::mask_codec::parse_mask_sentinel`]. Returns
+/// `Err(DbError::Internal { … })` with the code-discriminator
 /// `mask_sentinel_malformed` for any parse failure — unknown kind,
-/// unknown classification, missing field, extra trailing junk. The
-/// caller surfaces the typed error from the introspector with the
-/// column name appended so an operator hand-debugging
-/// `pg_description` sees exactly which sibling is malformed.
+/// unknown classification, missing field, extra trailing junk — exactly
+/// as before the codec was extracted. The caller surfaces the typed error
+/// from the introspector with the column name appended so an operator
+/// hand-debugging `pg_description` sees exactly which sibling is malformed.
 pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), DbError> {
-    let body = s.strip_prefix("__zsmask:").ok_or_else(|| {
-        DbError::internal(format!(
-            "mask_sentinel_malformed: expected '__zsmask:' prefix, got {s:?}"
-        ))
-    })?;
-    let mut kind_str: Option<&str> = None;
-    let mut class_str: Option<&str> = None;
-    for piece in body.split(',') {
-        let trimmed = piece.trim();
-        if let Some(v) = trimmed.strip_prefix("kind=") {
-            kind_str = Some(v);
-        } else if let Some(v) = trimmed.strip_prefix("classification=") {
-            class_str = Some(v);
-        } else {
-            return Err(DbError::internal(format!(
-                "mask_sentinel_malformed: unrecognised key in {s:?}"
-            )));
-        }
-    }
-    let kind_str = kind_str.ok_or_else(|| {
-        DbError::internal(format!(
-            "mask_sentinel_malformed: missing kind= in {s:?}"
-        ))
-    })?;
-    let class_str = class_str.ok_or_else(|| {
-        DbError::internal(format!(
-            "mask_sentinel_malformed: missing classification= in {s:?}"
-        ))
-    })?;
-    let kind = MaskKind::from_sql(kind_str).ok_or_else(|| {
-        DbError::internal(format!(
-            "mask_sentinel_malformed: unknown kind {kind_str:?} in {s:?}"
-        ))
-    })?;
-    let classification = Classification::from_sql(class_str).ok_or_else(|| {
-        DbError::internal(format!(
-            "mask_sentinel_malformed: unknown classification {class_str:?} in {s:?}"
-        ))
-    })?;
-    Ok((kind, classification))
+    zeroship_schema::mask_codec::parse_mask_sentinel(s).map_err(DbError::from)
 }
 
 /// **P5.5 PR 6** — compute the masked representation for one row's

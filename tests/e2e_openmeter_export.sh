@@ -21,8 +21,8 @@
 #   * Real OpenMeter (CloudEvents ingest → Kafka → sink-worker → ClickHouse →
 #     /query aggregate), stood up by docker-compose.openmeter.yml.
 #   * Real zeroship OpenMeterProvider/OpenMeterClient (cyper) pointed at it.
-#   * Real ephemeral zeroship Postgres + the full Liquibase changelog (the cron
-#     reads/writes usage_aggregates + metering_exports).
+#   * Real ephemeral zeroship Postgres + the full zeroship-migrate platform set
+#     (the cron reads/writes usage_aggregates + metering_exports).
 #
 # DO NO HARM: the zeroship PG here is a DEDICATED ephemeral container on its own
 # port (NOT :5440 — the billing PG the cargo integration tests use). The
@@ -100,7 +100,7 @@ done
 
 # ===========================================================================
 echo ""
-echo "=== Stage 2: dedicated ephemeral zeroship PG (:$PG_PORT, NOT :5440) + Liquibase ==="
+echo "=== Stage 2: dedicated ephemeral zeroship PG (:$PG_PORT, NOT :5440) + zeroship-migrate ==="
 # ===========================================================================
 lsof -ti :"$PG_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
@@ -115,15 +115,14 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
 [ -f "$ROOT/ops/postgres-init.sql" ] && docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 < "$ROOT/ops/postgres-init.sql" >/dev/null 2>&1 \
   && pass "applied ops/postgres-init.sql" || true
 
-MIG_LOG="$WORK/liquibase.log"
-if docker run --rm --network host -v "$ROOT/db/changelog:/liquibase/changelog" \
-    liquibase/liquibase:4.31 \
-    --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-    --username=postgres --password=zeroship \
-    --changelog-file=changelog/db.changelog-master.yaml update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied cleanly (incl. 0043 metering_exports)"
+MIG_LOG="$WORK/migrate.log"
+if cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -p zeroship-migrate --bin zeroship-migrate -- migrate \
+    --dir "$ROOT/db/migrations" \
+    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+    --profile platform --yes > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
 else
-  fail "Liquibase migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # ===========================================================================

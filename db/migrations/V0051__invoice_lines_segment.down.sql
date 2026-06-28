@@ -1,0 +1,10 @@
+DO $rb$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeroship_control') THEN EXECUTE 'REVOKE DELETE ON zeroship.invoice_lines FROM zeroship_control'; EXECUTE 'REVOKE DELETE ON zeroship.billing_line_provider_refs FROM zeroship_control'; END IF; END $rb$;
+ALTER TABLE zeroship.billing_line_provider_refs DROP CONSTRAINT billing_line_provider_refs_line_fk;
+ALTER TABLE zeroship.billing_line_provider_refs DROP CONSTRAINT billing_line_provider_refs_pkey;
+ALTER TABLE zeroship.billing_line_provider_refs DROP COLUMN segment_no;
+ALTER TABLE zeroship.billing_line_provider_refs ADD CONSTRAINT billing_line_provider_refs_pkey PRIMARY KEY (invoice_id, app_id, provider, ref_kind);
+ALTER TABLE zeroship.invoice_lines DROP CONSTRAINT invoice_lines_pkey;
+ALTER TABLE zeroship.invoice_lines ADD CONSTRAINT invoice_lines_pkey PRIMARY KEY (invoice_id, app_id);
+ALTER TABLE zeroship.invoice_lines DROP COLUMN plan_id;
+ALTER TABLE zeroship.invoice_lines DROP COLUMN segment_no;
+ALTER TABLE zeroship.billing_line_provider_refs ADD CONSTRAINT billing_line_provider_refs_line_fk FOREIGN KEY (invoice_id, app_id) REFERENCES zeroship.invoice_lines(invoice_id, app_id) ON DELETE CASCADE;

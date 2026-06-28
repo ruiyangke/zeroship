@@ -7,7 +7,7 @@
 #
 # What this does, end to end, against a CLEAN ephemeral stack:
 #   1. Stand up a fresh ephemeral Postgres + ops/postgres-init.sql + the FULL
-#      Liquibase changelog. (Control still needs a DB for app CRUD + deploy.)
+#      zeroship-migrate platform set. (Control still needs a DB for app CRUD + deploy.)
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
 #      embedded redb — see crates/worker/src/cache.rs create_plugins()).
 #   3. Boot control + worker + gateway with `--dev-insecure`. The worker gets
@@ -97,7 +97,7 @@ echo "  zeroship E2E — env.kv + env.storage over the edge (G2/G4)"
 echo "============================================"
 
 # --- preflight -------------------------------------------------------------
-for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
+for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b — run: cargo build --release"; exit 2; }
 done
 KV_ZSHIP="$ROOT/examples/kv-dashboard/dist/app.zship"
@@ -131,15 +131,14 @@ if [ -f "$ROOT/ops/postgres-init.sql" ]; then
     && pass "applied ops/postgres-init.sql" || fail "postgres-init.sql failed"
 fi
 
-MIG_LOG="$WORK/liquibase.log"
-if docker run --rm --network host -v "$ROOT/db/changelog:/liquibase/changelog" \
-    liquibase/liquibase:4.31 \
-    --url="jdbc:postgresql://localhost:$PG_PORT/zeroship" \
-    --username=postgres --password=zeroship \
-    --changelog-file=changelog/db.changelog-master.yaml update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied cleanly from scratch"
+MIG_LOG="$WORK/migrate.log"
+if "$BIN/zeroship-migrate" migrate \
+    --dir "$ROOT/db/migrations" \
+    --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
+    --profile platform --yes > "$MIG_LOG" 2>&1; then
+  pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
 else
-  fail "Liquibase migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 # ---------------------------------------------------------------------------

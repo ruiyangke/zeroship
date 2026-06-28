@@ -83,6 +83,22 @@ async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -
     rows.iter().map(|r| row_to_json(r)).collect()
 }
 
+/// Stamp a unique text `id` onto a seed insert document. **P7 convergence**:
+/// the platform `id` system field is now `TEXT PRIMARY KEY` with NO DB default
+/// — production stamps a typed id via the system-fields pass before
+/// `build_insert`. Tests that bypass that pass (calling `build_insert` directly)
+/// must supply the `id` themselves, otherwise the row trips the `id` NOT-NULL.
+fn with_seed_id(mut doc: Value) -> Value {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::SeqCst);
+    if let Some(obj) = doc.as_object_mut() {
+        obj.entry("id")
+            .or_insert_with(|| Value::String(format!("seed_{n}")));
+    }
+    doc
+}
+
 /// Simplified row → JSON (just text columns for testing).
 fn row_to_json(row: &compio_postgres::Row) -> Value {
     let mut obj = serde_json::Map::new();
@@ -896,7 +912,13 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
 
     let create_table =
         build_create_table_with_fks(app, collection, &schema, &FkEmission::Inline).unwrap();
-    pool.execute(&create_table, &[]).await.unwrap();
+    // `build_create_table_with_fks` emits MULTI-statement DDL (the CREATE TABLE
+    // plus the system-field index `CREATE INDEX`s, and on PG the
+    // `COMMENT ON COLUMN … '__zsmask:…'` / `'zsenc:…'` sentinels). The
+    // extended/prepared `execute` path rejects that with `42601 cannot insert
+    // multiple commands into a prepared statement`; the simple-query
+    // `batch_execute` is the correct executor for rendered DDL batches.
+    pool.batch_execute(&create_table).await.unwrap();
 
     // Generate and execute the new index DDL.
     let indexes =
@@ -953,11 +975,13 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     // The silent-bug live repro: insert two rows with the same email and
     // assert the second one fails with SQLSTATE 23505.
     // -----------------------------------------------------------------------
-    let ins1 = build_insert(app, collection, &json!({"email": "a@x.com"})).unwrap();
+    let ins1 = build_insert(app, collection, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
     let p1: Vec<&str> = ins1.params.iter().map(String::as_str).collect();
     pool.query_text_params(&ins1.sql, &p1).await.unwrap();
 
-    let ins2 = build_insert(app, collection, &json!({"email": "a@x.com"})).unwrap();
+    // Distinct `id` so the second insert is rejected for the DUPLICATE EMAIL
+    // (the unique index under test), not an incidental duplicate PK.
+    let ins2 = build_insert(app, collection, &with_seed_id(json!({"email": "a@x.com"}))).unwrap();
     let p2: Vec<&str> = ins2.params.iter().map(String::as_str).collect();
     let err = pool.query_text_params(&ins2.sql, &p2).await.unwrap_err();
     let code = err.code().map(|c| c.code().to_string()).unwrap_or_default();
@@ -1465,9 +1489,9 @@ async fn a2_not_null_on_non_empty_refused() {
     .unwrap();
 
     // Insert some data so the table is non-empty.
-    let bq = build_insert(app, "people", &json!({"name": "alice"})).unwrap();
+    let bq = build_insert(app, "people", &with_seed_id(json!({"name": "alice"}))).unwrap();
     exec_mutation(&pool, bq).await;
-    let bq = build_insert(app, "people", &json!({"name": "bob"})).unwrap();
+    let bq = build_insert(app, "people", &with_seed_id(json!({"name": "bob"}))).unwrap();
     exec_mutation(&pool, bq).await;
     // ANALYZE to populate reltuples (estimate_row_count reads pg_class.reltuples).
     pool.execute(&format!("ANALYZE \"{app}\".\"people\""), &[])
@@ -1615,7 +1639,7 @@ async fn a2_required_with_default_is_compatible() {
     .unwrap();
 
     // Insert + analyze to make non-empty.
-    let bq = build_insert(app, "things", &json!({"name": "x"})).unwrap();
+    let bq = build_insert(app, "things", &with_seed_id(json!({"name": "x"}))).unwrap();
     exec_mutation(&pool, bq).await;
     pool.execute(&format!("ANALYZE \"{app}\".\"things\""), &[])
         .await
@@ -2834,12 +2858,14 @@ async fn b2_ref_blocks_orphan_insert() {
     b2_setup_users_posts(&pool, app).await;
 
     // Insert into posts with non-existent authorId; must fail with FK violation.
+    // **P7 convergence**: `id` is `TEXT PRIMARY KEY` (no DB default) — supply one
+    // so the row reaches FK validation rather than tripping the id NOT NULL.
     let result = pool
         .query_text_params(
             &format!(
-                "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+                "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
             ),
-            &["hello", "9999"],
+            &["pst_b2_orphan_1", "hello", "usr_does_not_exist"],
         )
         .await;
     let err = result.expect_err("orphan insert should fail");
@@ -2859,20 +2885,26 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
     let app = "b2_restrict_delete";
     b2_setup_users_posts(&pool, app).await;
 
-    // Insert one user + one post that references it.
+    // Insert one user + one post that references it. **P7 convergence**: `id`
+    // is now `TEXT PRIMARY KEY` (no DB default — production stamps a typed id via
+    // the system-fields pass), so the seed INSERT must supply it and read it as
+    // text. A `posts` row also needs its own `id`.
+    let user_id = "usr_b2_restrict_1";
     let user_rows = pool
         .query_text_params(
-            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
-            &["alice"],
+            &format!(
+                "INSERT INTO \"{app}\".\"users\" (\"id\", \"name\") VALUES ($1, $2) RETURNING id"
+            ),
+            &[user_id, "alice"],
         )
         .await
         .unwrap();
-    let user_id: i32 = user_rows[0].get("id");
+    let user_id: String = user_rows[0].get("id");
     pool.query_text_params(
         &format!(
-            "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
         ),
-        &["hello", &user_id.to_string()],
+        &["pst_b2_restrict_1", "hello", &user_id],
     )
     .await
     .unwrap();
@@ -2881,7 +2913,7 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
     let result = pool
         .query_text_params(
             &format!("DELETE FROM \"{app}\".\"users\" WHERE id = $1"),
-            &[&user_id.to_string()],
+            &[&user_id],
         )
         .await;
     let err = result.expect_err("RESTRICT must block parent delete");
@@ -2917,21 +2949,25 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
     .await
     .unwrap();
 
-    // Insert user + 3 posts that reference it.
+    // Insert user + 3 posts that reference it. **P7 convergence**: `id` is now
+    // `TEXT PRIMARY KEY` (no DB default), so seed inserts must supply text ids.
+    let user_id = "usr_b2_cascade_1";
     let user_rows = pool
         .query_text_params(
-            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
-            &["bob"],
+            &format!(
+                "INSERT INTO \"{app}\".\"users\" (\"id\", \"name\") VALUES ($1, $2) RETURNING id"
+            ),
+            &[user_id, "bob"],
         )
         .await
         .unwrap();
-    let user_id: i32 = user_rows[0].get("id");
-    for title in ["a", "b", "c"] {
+    let user_id: String = user_rows[0].get("id");
+    for (i, title) in ["a", "b", "c"].iter().enumerate() {
         pool.query_text_params(
             &format!(
-                "INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"
+                "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
             ),
-            &[title, &user_id.to_string()],
+            &[&format!("pst_b2_cascade_{i}"), title, &user_id],
         )
         .await
         .unwrap();
@@ -2940,7 +2976,7 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
     // Delete the user — CASCADE should also delete the 3 posts.
     pool.query_text_params(
         &format!("DELETE FROM \"{app}\".\"users\" WHERE id = $1"),
-        &[&user_id.to_string()],
+        &[&user_id],
     )
     .await
     .unwrap();
@@ -3098,33 +3134,43 @@ async fn b2_adding_fk_to_existing_data_validates() {
         std::rc::Rc::clone(&pool), app, "users", &users_schema, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
+    // **P7 convergence**: `id` is now `TEXT PRIMARY KEY`, so the FK target
+    // (`users.id`) is text — `authorId` must be a text-shaped column to later
+    // become a `t.ref("users")`. (Pre-convergence `id` was SERIAL/INTEGER and
+    // this used `number`.)
     let posts_schema_v1 = json!({
         "title": {"type": "string", "required": true},
-        "authorId": {"type": "number"},
+        "authorId": {"type": "string"},
     });
     zeroship_plugin_db::register_model::exec_register_model_with_pool(
         std::rc::Rc::clone(&pool), app, "posts", &posts_schema_v1, &serde_json::json!([]), "v1",)
     .await
     .unwrap();
 
-    // Insert valid + orphan rows.
+    // Insert valid + orphan rows. Seed inserts must supply a text `id`.
     let urows = pool
         .query_text_params(
-            &format!("INSERT INTO \"{app}\".\"users\" (\"name\") VALUES ($1) RETURNING id"),
-            &["alice"],
+            &format!(
+                "INSERT INTO \"{app}\".\"users\" (\"id\", \"name\") VALUES ($1, $2) RETURNING id"
+            ),
+            &["usr_b2_existing_1", "alice"],
         )
         .await
         .unwrap();
-    let valid_uid: i32 = urows[0].get("id");
+    let valid_uid: String = urows[0].get("id");
     pool.query_text_params(
-        &format!("INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"),
-        &["valid", &valid_uid.to_string()],
+        &format!(
+            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
+        ),
+        &["pst_b2_existing_valid", "valid", &valid_uid],
     )
     .await
     .unwrap();
     pool.query_text_params(
-        &format!("INSERT INTO \"{app}\".\"posts\" (\"title\", \"authorId\") VALUES ($1, $2)"),
-        &["orphan", "9999"],
+        &format!(
+            "INSERT INTO \"{app}\".\"posts\" (\"id\", \"title\", \"authorId\") VALUES ($1, $2, $3)"
+        ),
+        &["pst_b2_existing_orphan", "orphan", "usr_does_not_exist"],
     )
     .await
     .unwrap();
@@ -5247,7 +5293,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
     }
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let err = VectorIndex::ensure_vector_index(
+    let ensure_err = VectorIndex::ensure_vector_index(
         &backend,
         "vector_missing",
         "any",
@@ -5257,23 +5303,10 @@ async fn pgvector_extension_missing_reports_typed_error() {
     )
     .await
     .expect_err("missing extension must yield a typed error");
-    match err {
-        DbError::Configuration { code, message, hint } => {
-            assert_eq!(code, "vector_extension_missing", "got {message}");
-            assert!(
-                hint.as_deref()
-                    .map(|h| h.contains("CREATE EXTENSION"))
-                    .unwrap_or(false),
-                "hint must mention `CREATE EXTENSION vector;`: {hint:?}"
-            );
-        }
-        other => panic!("expected Configuration {{ vector_extension_missing }}, got {other:?}"),
-    }
 
-    // Also assert vector_search produces the same typed error — the
-    // SDK branches on `e.code === "vector_extension_missing"` from
-    // BOTH entry points.
-    let err = VectorIndex::vector_search(
+    // Also exercise vector_search — the SDK branches on
+    // `e.code === "vector_extension_missing"` from BOTH entry points.
+    let search_err = VectorIndex::vector_search(
         &backend,
         "vector_missing",
         "any",
@@ -5285,7 +5318,31 @@ async fn pgvector_extension_missing_reports_typed_error() {
     )
     .await
     .expect_err("missing extension must yield a typed error on search too");
-    match err {
+
+    // RESTORE the extension BEFORE asserting: this test deliberately drops a
+    // SHARED, cluster-/db-wide object (the `vector` extension lives in
+    // `public`, not in a per-app schema), so leaving it dropped breaks every
+    // vector-dependent test ordered after this one in a single-threaded run
+    // (e.g. `p4_round_trip_encrypted_masked_vector_via_introspected_metadata`,
+    // which `registerModel`s a `vector` column). Restore happens before the
+    // assertions so a failed assertion can never leak the dropped state.
+    pool.execute("CREATE EXTENSION IF NOT EXISTS vector", &[])
+        .await
+        .expect("restore the shared vector extension after the missing-extension probe");
+
+    match ensure_err {
+        DbError::Configuration { code, message, hint } => {
+            assert_eq!(code, "vector_extension_missing", "got {message}");
+            assert!(
+                hint.as_deref()
+                    .map(|h| h.contains("CREATE EXTENSION"))
+                    .unwrap_or(false),
+                "hint must mention `CREATE EXTENSION vector;`: {hint:?}"
+            );
+        }
+        other => panic!("expected Configuration {{ vector_extension_missing }}, got {other:?}"),
+    }
+    match search_err {
         DbError::Configuration { code, .. } => {
             assert_eq!(code, "vector_extension_missing");
         }
@@ -5406,6 +5463,16 @@ async fn fts_search_matches_substring() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
+    // guards `SET LOCAL ROLE app_<app>_role`), so the role + its admin
+    // template must exist before the search — exactly as every other
+    // role-scoped test provisions via `ensure_per_app_role`.
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
     pool.execute(
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
@@ -5508,6 +5575,14 @@ async fn fts_and_filter_compose() {
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
+    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
+    // guards `SET LOCAL ROLE app_<app>_role`); provision it first.
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
+        .await
+        .unwrap();
     pool.execute(
         &format!(
             "CREATE TABLE \"{app}\".\"{coll}\" (\
@@ -5597,6 +5672,14 @@ async fn fts_trigger_keeps_index_in_sync_after_update() {
         .await
         .unwrap();
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+    // `fts_search` runs under the per-app role (autocommit §17.5 + DB-1
+    // guards `SET LOCAL ROLE app_<app>_role`); provision it first.
+    zeroship_plugin_db::auth::ensure_admin_schema(&pool)
+        .await
+        .unwrap();
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     pool.execute(
@@ -6172,6 +6255,448 @@ async fn encrypted_deterministic_equality_lookup() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 5, "deterministic equality lookup must match all 5 shared-ssn rows");
+}
+
+/// **P4 ROUND-TRIP e2e** — the proof both halves cohere: a collection with an
+/// `encrypted` + a `masked` + a `vector` field, schema CREATED via the real
+/// `registerModel` (HALF A: it writes the `zsenc`/`__zsmask` sentinels), then
+/// CRUD driven ENTIRELY by the introspection-sourced metadata (HALF B):
+///   - insert through the REAL write pipeline → AEAD-encrypts the encrypted
+///     column and populates the masked sibling (metadata from introspection);
+///   - read raw rows back, finalize through the REAL read pipeline → decrypts
+///     the encrypted column to plaintext and wraps the masked column.
+/// Nothing here consults the declared schema for the crypto/mask decisions —
+/// the seam is `crud::introspect_schema::runtime_schema_for`, exercised faithfully.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"d".repeat(64));
+
+    let app = "p4_round_trip";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // Schema: encrypted `ssn`, masked `phone`, and a `vector` embedding.
+    let schema = json!({
+        "name": {"type": "string", "required": true},
+        "ssn": {
+            "type": "string",
+            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+        },
+        "phone": {
+            "type": "string",
+            "mask": {"kind": "last4", "classification": "pci"}
+        },
+        "embedding": {"type": "vector", "vectorDims": 3, "vectorMetric": "cosine"},
+    });
+
+    // HALF A path: registerModel creates the table AND writes the sentinels
+    // (zsenc COMMENT on `ssn`, __zsmask COMMENT on `phone_masked`).
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema,
+        &serde_json::json!([]),
+        "p4_deploy_1",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("registerModel failed: {e}"));
+
+    // Install the pool into the per-isolate context so HALF B's
+    // `runtime_schema_for` can introspect, and mark the model registered (the
+    // cold-schema gate) — exactly what the production register path does.
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+
+    // Sanity: the introspected runtime schema recovers BOTH goodies — proving
+    // the data-access metadata comes from the live catalog + sentinels.
+    let introspected =
+        zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+            .await
+            .expect("introspect")
+            .expect("people has goodies");
+    assert_eq!(introspected["ssn"]["encrypted"]["mode"], "randomised");
+    assert_eq!(introspected["phone"]["mask"]["kind"], "last4");
+
+    // ----- WRITE (real pipeline, introspected metadata) -----
+    let mut docs = json!([{
+        "id": "psn_round_trip_1",
+        "name": "Ada",
+        "ssn": "123-45-6789",
+        "phone": "415-555-0142",
+        "embedding": [0.1, 0.2, 0.3],
+    }]);
+    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
+        .await
+        .expect("write pipeline");
+
+    // The write pipeline encrypted `ssn` (base64 blob + `__zsenc__ssn` marker)
+    // and derived the masked sibling `phone_masked` from the plaintext.
+    let doc = &docs[0];
+    assert!(
+        doc["ssn"].as_str().is_some() && doc["ssn"] != json!("123-45-6789"),
+        "ssn must be replaced by ciphertext on write, got {:?}",
+        doc["ssn"]
+    );
+    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(
+        doc["phone_masked"], json!("***-***-0142"),
+        "mask pass must derive the last4 sibling on write, got {:?}",
+        doc["phone_masked"]
+    );
+
+    // Persist it the way the SQL builder would (decode the encrypted blob, store
+    // the masked sibling). We INSERT the encrypted ssn + the masked sibling.
+    let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
+    let phone_masked = doc["phone_masked"].as_str().unwrap().to_string();
+    // The vector literal is a test-controlled constant — format it inline with a
+    // `::vector` cast (compio-postgres infers a `vector`-typed param from the
+    // bind otherwise, which it cannot encode an `&str` into).
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, phone_masked, embedding) \
+             VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
+        ),
+        &[
+            &"psn_round_trip_1",
+            &"Ada",
+            &ssn_b64.as_str(),
+            &"415-555-0142",
+            &phone_masked.as_str(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // ----- READ (real pipeline, introspected metadata) -----
+    // Fetch the raw row the way the SELECT builder would (encrypted blob as
+    // base64, the masked sibling aliased back to the parent name).
+    let raw = pool
+        .query_text_params(
+            &format!(
+                "SELECT id, name, encode(ssn, 'base64') AS ssn, \
+                 phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
+            ),
+            &[&"psn_round_trip_1"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw.len(), 1);
+    let row = json!({
+        "id": "psn_round_trip_1",
+        "name": "Ada",
+        "ssn": raw[0].get::<_, String>("ssn"),
+        "phone": raw[0].get::<_, String>("phone"),
+    });
+
+    let finalized =
+        zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(app, "people", vec![row])
+            .await
+            .expect("read pipeline");
+    let out = &finalized[0];
+
+    // Encrypted column decrypted back to plaintext (driven by introspected meta).
+    assert_eq!(
+        out["ssn"], json!("123-45-6789"),
+        "encrypted column must decrypt to plaintext on read, got {:?}",
+        out["ssn"]
+    );
+    // Masked column wrapped into the platform MaskedValue sentinel, carrying the
+    // last4-masked string + the introspected classification.
+    assert_eq!(out["phone"]["sentinel"], json!("__zsmask__"), "phone wrapped");
+    assert_eq!(
+        out["phone"]["masked"], json!("***-***-0142"),
+        "masked phone surfaces last4 form, got {:?}",
+        out["phone"]
+    );
+    assert_eq!(out["phone"]["classification"], json!("pci"));
+}
+
+// ---------------------------------------------------------------------------
+// P5 — THE CUTOVER. On the PG dialect, `registerModel` STOPS being a schema
+// authority: it issues NO runtime DDL (the engine creates/migrates the schema
+// at DEPLOY, P6). It only ensures readiness + the declared cache so the P4
+// introspection path keeps working. SQLite dev is UNCHANGED (it still
+// auto-migrates from the declared schema). These three tests are the faithful
+// behaviour-identical + no-runtime-DDL proof:
+//   (c) p5_pg_register_model_issues_no_runtime_ddl — the cutover proof: the PG
+//       dispatch never CREATEs/ALTERs (no table, no schema, no audit row).
+//   (a) p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl — a collection
+//       whose schema was created the way the engine/deploy-apply does (sentinels
+//       and all) → PG registerModel no-ops the apply, yet CRUD + encryption +
+//       mask round-trip via the INTROSPECTED metadata.
+//   (b) p5_sqlite_register_model_still_auto_migrates — SQLite registerModel is
+//       unchanged: it still creates the table from the declared schema.
+// ---------------------------------------------------------------------------
+
+/// Count rows in the per-app audit journal (`__zeroship_migrations`), or `None`
+/// when the table is absent. The OLD PG `registerModel` wrote one audit row per
+/// applied DDL op; the P5 PG path applies nothing, so this stays put across a
+/// dispatch call — a direct, faithful "no DDL was issued" probe.
+async fn audit_row_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i64> {
+    let exists = pool
+        .query_text_params(
+            "SELECT to_regclass($1) IS NOT NULL AS present",
+            &[&format!("\"{app}\".\"__zeroship_migrations\"").as_str()],
+        )
+        .await
+        .ok()?;
+    let present: bool = exists.first()?.get("present");
+    if !present {
+        return None;
+    }
+    let rows = pool
+        .query_text_params(
+            &format!("SELECT count(*)::bigint AS n FROM \"{app}\".\"__zeroship_migrations\""),
+            &[],
+        )
+        .await
+        .ok()?;
+    Some(rows.first()?.get::<_, i64>("n"))
+}
+
+/// True iff a `<app>.<table>` relation exists in the catalog.
+async fn pg_table_exists(pool: &std::rc::Rc<Pool>, app: &str, table: &str) -> bool {
+    pool.query_text_params(
+        "SELECT to_regclass($1) IS NOT NULL AS present",
+        &[&format!("\"{app}\".\"{table}\"").as_str()],
+    )
+    .await
+    .ok()
+    .and_then(|r| r.first().map(|row| row.get::<_, bool>("present")))
+    .unwrap_or(false)
+}
+
+/// **P5 (c) — the cutover proof.** On the PG dialect, the production
+/// `registerModel` dispatch issues NO schema DDL. We install a PG backend into
+/// the per-isolate context, call the EXACT production dispatch
+/// (`exec_register_model_via_dispatch_for_tests` → `exec_register_model`'s PG
+/// arm) against a schema whose table does NOT yet exist, and assert that:
+///   * no table was created (the old path would `CREATE TABLE`),
+///   * no per-app schema/audit journal was created (the old `bootstrap` did),
+/// proving the runtime is no longer a PG schema applier. The engine (P6
+/// deploy-apply) is the sole PG authority.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn p5_pg_register_model_issues_no_runtime_ddl() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+
+    let app = "p5_no_ddl";
+    // Clean slate: NO schema, NO table — the engine hasn't run here.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // Install the PG backend so the production dispatch resolves the PG arm.
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+
+    let schema = json!({
+        "title": {"type": "string", "required": true},
+        "secret": {
+            "type": "string",
+            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+        },
+    });
+
+    // Drive the PRODUCTION dialect dispatch. On PG this must NO-OP the apply.
+    zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+        app,
+        "widgets",
+        &schema,
+        &json!([]),
+    )
+    .await
+    .expect("PG registerModel dispatch must succeed (no-op)");
+
+    // PROOF: nothing was created. The OLD path would have CREATE SCHEMA +
+    // CREATE TABLE + the __zeroship_migrations journal + audit rows.
+    assert!(
+        !pg_table_exists(&pool, app, "widgets").await,
+        "P5 PG cutover: registerModel must NOT create the table at runtime"
+    );
+    assert_eq!(
+        audit_row_count(&pool, app).await,
+        None,
+        "P5 PG cutover: registerModel must NOT create the audit journal / write \
+         any DDL audit rows at runtime"
+    );
+
+    // Sanity teardown.
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
+}
+
+/// **P5 (a) — behaviour-identical CRUD with NO runtime DDL.** The engine creates
+/// the schema at deploy (here simulated by a one-shot pipeline build that emits
+/// the same DDL + `zsenc`/`__zsmask` sentinels the relocated engine produces).
+/// Then the production PG dispatch runs and must NOT touch the schema (audit row
+/// count is unchanged), yet encryption + mask CRUD still round-trip end-to-end
+/// driven by the INTROSPECTED metadata (the P4 path) — proving the data plane is
+/// intact while the runtime applied nothing.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"e".repeat(64));
+
+    let app = "p5_engine_created";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    let schema = json!({
+        "name": {"type": "string", "required": true},
+        "ssn": {
+            "type": "string",
+            "encrypted": {"mode": "randomised", "keyId": "default", "wraps": "string"}
+        },
+        "phone": {
+            "type": "string",
+            "mask": {"kind": "last4", "classification": "pci"}
+        },
+    });
+
+    // === Simulate the engine/deploy-apply: create the table + sentinels. ===
+    // This is the SAME DDL/sentinel emission the relocated engine uses (P2/P4);
+    // we drive it once via the pipeline to stand in for the deploy-time apply.
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema,
+        &json!([]),
+        "engine_deploy_1",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("engine schema build (deploy stand-in) failed: {e}"));
+
+    // Snapshot the audit journal AFTER the engine's apply — the runtime dispatch
+    // below must not add to it.
+    let audit_before = audit_row_count(&pool, app).await;
+    assert!(
+        audit_before.is_some(),
+        "engine stand-in created the journal"
+    );
+
+    // === The runtime: install PG backend, run the PRODUCTION dispatch. ===
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_plugin_db::register_model::exec_register_model_via_dispatch_for_tests(
+        app,
+        "people",
+        &schema,
+        &json!([]),
+    )
+    .await
+    .expect("PG registerModel dispatch must succeed (no-op apply)");
+
+    // PROOF the runtime issued NO DDL: the audit journal is byte-for-byte the
+    // same count it was after the engine's apply.
+    assert_eq!(
+        audit_row_count(&pool, app).await,
+        audit_before,
+        "P5 PG cutover: the runtime dispatch must add ZERO DDL audit rows"
+    );
+
+    // Readiness contract: mark the model (the dispatch caller does this in prod;
+    // the via-dispatch seam stops at `exec_register_model`, so mirror it here),
+    // exactly like the P4 round-trip test does.
+    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+
+    // The introspected runtime schema recovers BOTH goodies from the live catalog
+    // + the engine's sentinels — no declared schema consulted for crypto/mask.
+    let introspected = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect")
+        .expect("people has goodies");
+    assert_eq!(introspected["ssn"]["encrypted"]["mode"], "randomised");
+    assert_eq!(introspected["phone"]["mask"]["kind"], "last4");
+
+    // ----- WRITE via the real pipeline (introspected metadata) -----
+    let mut docs = json!([{
+        "id": "psn_p5_1",
+        "name": "Grace",
+        "ssn": "987-65-4321",
+        "phone": "650-555-0199",
+    }]);
+    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
+        .await
+        .expect("write pipeline");
+    let doc = &docs[0];
+    assert!(
+        doc["ssn"].as_str().is_some() && doc["ssn"] != json!("987-65-4321"),
+        "ssn must be ciphertext on write, got {:?}",
+        doc["ssn"]
+    );
+    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(
+        doc["phone_masked"], json!("***-***-0199"),
+        "mask pass derives the last4 sibling on write, got {:?}",
+        doc["phone_masked"]
+    );
+
+    let ssn_b64 = doc["ssn"].as_str().unwrap().to_string();
+    let phone_masked = doc["phone_masked"].as_str().unwrap().to_string();
+    pool.execute(
+        &format!(
+            "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, phone_masked) \
+             VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5)"
+        ),
+        &[
+            &"psn_p5_1",
+            &"Grace",
+            &ssn_b64.as_str(),
+            &"650-555-0199",
+            &phone_masked.as_str(),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // ----- READ via the real pipeline (introspected metadata) -----
+    let raw = pool
+        .query_text_params(
+            &format!(
+                "SELECT id, name, encode(ssn, 'base64') AS ssn, \
+                 phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
+            ),
+            &[&"psn_p5_1"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw.len(), 1);
+    let row = json!({
+        "id": "psn_p5_1",
+        "name": "Grace",
+        "ssn": raw[0].get::<_, String>("ssn"),
+        "phone": raw[0].get::<_, String>("phone"),
+    });
+    let finalized =
+        zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(app, "people", vec![row])
+            .await
+            .expect("read pipeline");
+    let out = &finalized[0];
+    assert_eq!(
+        out["ssn"], json!("987-65-4321"),
+        "encrypted column decrypts to plaintext on read, got {:?}",
+        out["ssn"]
+    );
+    assert_eq!(out["phone"]["sentinel"], json!("__zsmask__"), "phone wrapped");
+    assert_eq!(out["phone"]["masked"], json!("***-***-0199"));
+    assert_eq!(out["phone"]["classification"], json!("pci"));
+
+    // FINAL proof: still zero runtime DDL after the full CRUD round-trip.
+    assert_eq!(
+        audit_row_count(&pool, app).await,
+        audit_before,
+        "P5 PG cutover: CRUD must not have triggered any runtime DDL"
+    );
+
+    let _ = pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[]).await;
 }
 
 /// **P5 PR 2** — when `ZEROSHIP_COLUMN_KEY_DEFAULT` is unset (no env
@@ -8207,4 +8732,127 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     assert!(!role_exists(&pool, app).await, "retry must drop the role");
 
     c1_cleanup(&pool, app).await;
+}
+
+// ---------------------------------------------------------------------------
+// T6 — the deploy-keyed introspection cache invalidates on a REAL deploy bump.
+//
+// Regression for `deploy-id-never-set-cache-invalidation-inert`: the
+// introspected-schema cache was keyed on `std::env::var("ZEROSHIP_DEPLOY_ID")`,
+// which NOTHING in worker/runtime/control ever set — so the token was pinned at
+// `"cold_start"` for the life of a long-lived worker isolate and the cache NEVER
+// invalidated. After a redeploy ALTERed the schema (e.g. added a masked column),
+// the runtime kept applying the STALE metadata it cached at first-introspection,
+// silently dropping the new column's mask/crypto behaviour.
+//
+// The fix re-keys the cache on the per-app deploy token the worker now injects as
+// `ZEROSHIP_DEPLOY_ID` (= the app's `deploy_hash`), stamped into the per-isolate
+// context at `mint_db` and read via `IsolateDbContext::deploy_token_for`. This
+// test drives the FAITHFUL path: register v1, introspect+cache under token
+// `deploy_1`, ALTER to v2 via the same engine register path, and prove:
+//   (a) WITHOUT bumping the token the cache holds the v1 result (no re-introspect);
+//   (b) bumping the token to `deploy_2` invalidates the entry and re-introspection
+//       surfaces the v2 column's mask metadata.
+//
+// PRE-FIX this test FAILS at assertion (b): the old `deploy_token()` ignored the
+// stamped token entirely (read the never-set env var → always `"cold_start"`), so
+// the bumped token had no effect and the stale v1 schema (no `phone` mask) was
+// returned.
+#[allow(unsafe_code)]
+#[compio::test]
+async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
+    let url = require_pg().await;
+    let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let _env = WithEnv::set("ZEROSHIP_COLUMN_KEY_DEFAULT", &"t".repeat(64));
+
+    let app = "t6_deploy_cache";
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+
+    // ===== Deploy 1: a goodie-FREE collection (plain `name`). =====
+    let schema_v1 = json!({
+        "name": {"type": "string", "required": true},
+    });
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema_v1,
+        &json!([]),
+        "deploy_1",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("deploy 1 register failed: {e}"));
+
+    // Install the PG backend, mark readiness, and stamp the per-app deploy token
+    // exactly as `mint_db` does from the worker-injected `ZEROSHIP_DEPLOY_ID`.
+    zeroship_plugin_db::set_postgres_pool_for_tests(std::rc::Rc::clone(&pool), &url);
+    zeroship_plugin_db::mark_model_registered_for_tests(app, "people");
+    zeroship_plugin_db::set_deploy_token_for_tests(app, "deploy_1");
+
+    // First introspection under `deploy_1`: collection has no goodies → the
+    // schema carries `name` but no `phone` field (and no mask anywhere). This
+    // result is now cached under the `deploy_1` token.
+    let v1 = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect v1")
+        .expect("table exists → Some");
+    assert_eq!(v1["name"]["type"], "string");
+    assert!(
+        v1.get("phone").is_none(),
+        "deploy 1 has no phone column yet, got {v1:?}"
+    );
+
+    // ===== Deploy 2: ALTER to add a MASKED `phone` column (engine path). =====
+    let schema_v2 = json!({
+        "name": {"type": "string", "required": true},
+        "phone": {
+            "type": "string",
+            "mask": {"kind": "last4", "classification": "pci"}
+        },
+    });
+    zeroship_plugin_db::register_model::exec_register_model_with_pool(
+        std::rc::Rc::clone(&pool),
+        app,
+        "people",
+        &schema_v2,
+        &json!([]),
+        "deploy_2",
+    )
+    .await
+    .unwrap_or_else(|e| panic!("deploy 2 register (add masked column) failed: {e}"));
+
+    // (a) The catalog NOW has the masked `phone` column, but until the deploy
+    // token is bumped the per-isolate cache must still return the v1 result —
+    // this proves the cache is real (not re-introspecting every call) AND that
+    // the only thing that should invalidate it is a deploy bump.
+    let still_cached = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect (still deploy_1 token)")
+        .expect("table exists → Some");
+    assert!(
+        still_cached.get("phone").is_none(),
+        "cache must hold the deploy_1 result until the deploy token bumps, got {still_cached:?}"
+    );
+
+    // (b) Simulate the redeploy: bump the per-app deploy token (a new
+    // `deploy_hash` → new `ZEROSHIP_DEPLOY_ID` injected at the next isolate
+    // load). The cache entry is now stale and must be re-introspected, surfacing
+    // the masked `phone` column's metadata. PRE-FIX this assertion fails — the
+    // token bump was inert because the cache keyed off the never-set env var.
+    zeroship_plugin_db::set_deploy_token_for_tests(app, "deploy_2");
+    let v2 = zeroship_plugin_db::crud::runtime_schema_for_tests(app, "people")
+        .await
+        .expect("introspect v2")
+        .expect("table exists → Some");
+    assert_eq!(
+        v2["phone"]["mask"]["kind"], "last4",
+        "deploy bump must re-introspect and surface the new masked column, got {v2:?}"
+    );
+    assert_eq!(v2["phone"]["mask"]["classification"], "pci");
+
+    let _ = pool
+        .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await;
 }

@@ -117,6 +117,23 @@ impl ChangeClass {
     }
 }
 
+// **Schema-authority P1** — map the schema layer's classification
+// (`zeroship_schema::diff::ChangeClass`) onto this audit-row enum. The
+// conversion used to live as `diff::ChangeClass::as_audit()`, but the diff
+// classifier was relocated into the leaf crate `zeroship-schema`, which must
+// not reach into this data-plane lifecycle type. The conversion therefore
+// lives here (where the audit enum is defined); call sites in
+// `register_model::{validate, apply, mod}` use `ChangeClass::from(op.class)`.
+impl From<crate::diff::ChangeClass> for ChangeClass {
+    fn from(c: crate::diff::ChangeClass) -> Self {
+        match c {
+            crate::diff::ChangeClass::Additive => Self::Additive,
+            crate::diff::ChangeClass::Compatible => Self::Compatible,
+            crate::diff::ChangeClass::Destructive => Self::Destructive,
+        }
+    }
+}
+
 /// Initial status accepted on INSERT — proposal A3 state machine
 /// (`pending` for asynchronous queueing, `running` for synchronous DDL
 /// where the orchestrator owns the work).

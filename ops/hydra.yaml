@@ -1,7 +1,7 @@
 # DSN is intentionally NOT inlined here. Hydra reads it from the `DSN`
 # environment variable, which production MUST inject as a secret reference to
-# the least-privileged `oauth_hydra` login role (provisioned by Liquibase
-# changeset 0027 — its own `oauth_hydra` schema + search_path, NO superuser /
+# the least-privileged `oauth_hydra` login role (provisioned by zeroship-migrate
+# V0027 — its own `oauth_hydra` schema + search_path, NO superuser /
 # BYPASSRLS). Never connect Hydra as the `postgres` superuser: that defeats the
 # schema isolation (BYPASSRLS over every tenant table) and scatters hydra_*
 # tables into the platform `zeroship` schema. Shape (password from your secret

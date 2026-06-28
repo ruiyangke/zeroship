@@ -5,6 +5,17 @@ pub enum Action {
     AppsRead,
     AppsWrite,
     AppsDeploy,
+    /// **`PR9c` — operator-only migration approval.** Authorizes passing the
+    /// `?approved_versions=` go-live channel that COMPLETES an online-rename
+    /// EXPAND / a scoped destructive migration op. Deliberately NOT in the
+    /// creator scope vocabulary ([`crate::Scope`]) and NOT granted by the
+    /// `app_owner` / `app_editor` / `app_viewer` / `self_service` Cedar
+    /// policies — only the platform `admin` role's universal-allow grants it.
+    /// This is the operator-vs-creator separation the bundle author cannot
+    /// self-satisfy with their own `apps:deploy` grant: a creator (or a
+    /// prompt-injected AI deploying on their behalf) holding only `apps:deploy`
+    /// is refused (403) the moment they pass a non-empty approval set.
+    AppsApproveMigration,
     AppsDelete,
     DeploymentsRead,
     DeploymentsRollback,
@@ -28,6 +39,7 @@ impl Action {
             Self::AppsRead => "apps:read",
             Self::AppsWrite => "apps:write",
             Self::AppsDeploy => "apps:deploy",
+            Self::AppsApproveMigration => "migrations:approve",
             Self::AppsDelete => "apps:delete",
             Self::DeploymentsRead => "deployments:read",
             Self::DeploymentsRollback => "deployments:rollback",
@@ -51,6 +63,7 @@ impl Action {
             "apps:read" => Self::AppsRead,
             "apps:write" => Self::AppsWrite,
             "apps:deploy" => Self::AppsDeploy,
+            "migrations:approve" => Self::AppsApproveMigration,
             "apps:delete" => Self::AppsDelete,
             "deployments:read" => Self::DeploymentsRead,
             "deployments:rollback" => Self::DeploymentsRollback,
@@ -92,6 +105,7 @@ impl<'de> Deserialize<'de> for Action {
                     "apps:read",
                     "apps:write",
                     "apps:deploy",
+                    "migrations:approve",
                     "apps:delete",
                     "deployments:read",
                     "deployments:rollback",

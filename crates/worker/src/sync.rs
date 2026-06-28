@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use uuid::Uuid;
-use zeroship_bundle::Manifest;
+use zeroship_bundle::{BlobStore, Manifest};
 use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
@@ -23,6 +23,46 @@ pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<St
                 app_id = %app_id,
                 entry = ?worker.entry,
                 "worker-sync: manifest.worker.entry missing from modules"
+            );
+            None
+        }
+    }
+}
+
+/// **Migration-first cutover (P4b)** — resolve the bundled
+/// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`) for an app from its
+/// `manifest.runtime_descriptor` slot. The descriptor is a separate
+/// content-addressed blob; we read it via `BlobStore` so the runtime can
+/// expose it as `globalThis.__zsRuntimeDescriptor`.
+///
+/// Returns `None` when:
+///   - the manifest carries no `runtime_descriptor` (app ships no
+///     migrations — the bootstrap entry falls back to `default.schema`), or
+///   - the blob read / UTF-8 decode fails (degrade to the fallback rather
+///     than failing the load; ingest already asserted the blob was present).
+pub(crate) async fn runtime_descriptor_json(
+    manifest: &Manifest,
+    blob_store: &Arc<dyn BlobStore>,
+    app_id: &Uuid,
+) -> Option<String> {
+    let hash = manifest.runtime_descriptor.as_ref()?.hash.clone();
+    match blob_store.get_blob(&hash).await {
+        Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %e,
+                    "worker-sync: runtime_descriptor blob is not UTF-8; falling back to default.schema"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                app_id = %app_id,
+                error = %e,
+                "worker-sync: runtime_descriptor blob fetch failed; falling back to default.schema"
             );
             None
         }
@@ -279,7 +319,23 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 }
                             }
 
-                            if cache::load_app(*local_id, &bytes, info.runtime.clone()) {
+                            // Resolve the bundled RuntimeSchemaDescriptor (if
+                            // any) so the runtime sources the schema from the
+                            // migration fold (P4b). Absent → default.schema
+                            // fallback.
+                            let descriptor_json = match info.manifest.as_ref() {
+                                Some(m) => {
+                                    runtime_descriptor_json(m, &config.blob_store, local_id).await
+                                }
+                                None => None,
+                            };
+                            if cache::load_app(
+                                *local_id,
+                                &bytes,
+                                info.runtime.clone(),
+                                info.deploy_hash.as_deref(),
+                                descriptor_json.as_deref(),
+                            ) {
                                 // Record what the fresh isolate was loaded
                                 // against — the reload decision above keys
                                 // off this on the next cycle.
@@ -666,7 +722,7 @@ mod tests {
 
             // Load the app the way the worker does, recording that the
             // isolate was hydrated against env version 1.
-            assert!(crate::cache::load_app(app_id, source, AppRuntimeLimits::default()));
+            assert!(crate::cache::load_app(app_id, source, AppRuntimeLimits::default(), None, None));
             crate::cache::set_loaded_meta(
                 app_id,
                 crate::cache::LoadedMeta {

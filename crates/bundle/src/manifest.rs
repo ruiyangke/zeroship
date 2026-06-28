@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +129,77 @@ pub struct Manifest {
     /// entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<ManifestExports>,
+
+    /// Versioned DB migration files carried by the `.zship`, in **apply
+    /// order** (the order the build/`generate` step emitted them). Each
+    /// entry maps a migration filename (e.g. `V0001__create_users.sql`,
+    /// or a dbmate `<14-digit>_<desc>.sql`) to the sha256 hash of its
+    /// blob, content-addressed exactly like worker modules + assets.
+    ///
+    /// At deploy the control plane reconstructs these files on disk and
+    /// hands them to `zeroship-migrate` (Confined profile, schema
+    /// `"<app_id>"`) BEFORE the go-live commit (schema-authority §8). An
+    /// empty list (the default; `skip_serializing_if`) means the app
+    /// ships no schema — the migrate phase is a no-op.
+    ///
+    /// The *filename* is load-bearing: the migration loader derives each
+    /// migration's version + ordering from it, so it must round-trip
+    /// verbatim. The loader (not this struct) enforces the
+    /// `V<NNNN>__…`/dbmate grammar; `validate()` only enforces the blob
+    /// hash format + a path-safety check (no separators / traversal).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<MigrationFileEntry>,
+
+    /// The generated **runtime schema descriptor** carried by the `.zship`,
+    /// content-addressed exactly like a migration blob (`{hash}`).
+    ///
+    /// This is the `schema.runtime.json` artifact `gen-types` emits by folding
+    /// the migration set — a `Record<collection, Record<column, FieldDef>>` that
+    /// formalises what the runtime's `normalizeSchema` produces. In the
+    /// migration-first cutover (`docs/proposals/2026-06-25-migration-first-schema.md`)
+    /// the runtime stops reading `default.schema` off the user module (P4b) and
+    /// reads this descriptor instead — making the migration set the SOLE source
+    /// of schema truth.
+    ///
+    /// **P4a is purely additive: nothing reads this slot yet.** It only gives the
+    /// `.zship` the capacity to carry the descriptor so P4b can flip the runtime
+    /// read path. `None` (the default; `skip_serializing_if`) when the app ships
+    /// no migrations / no descriptor — pack still succeeds.
+    ///
+    /// `validate()` enforces the blob-hash format only; the descriptor's JSON
+    /// shape is the producer's (`gen-types`) and consumer's (P4b runtime) contract,
+    /// not this struct's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_descriptor: Option<RuntimeDescriptorEntry>,
+}
+
+/// The generated runtime schema descriptor carried by a `.zship`
+/// (`manifest.runtime_descriptor`).
+///
+/// Content-addressed exactly like [`MigrationFileEntry`]: `hash` is the sha256 of
+/// the `schema.runtime.json` blob body. There is no `name` — unlike migrations
+/// (whose filename is load-bearing for version/ordering), the descriptor is a
+/// single anonymous artifact reconstructed from its blob alone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeDescriptorEntry {
+    /// sha256 hash (lowercase, 64 hex chars) of the `schema.runtime.json` blob.
+    pub hash: String,
+}
+
+/// One migration file carried by a `.zship` (`manifest.migrations[i]`).
+///
+/// `name` is the migration's on-disk filename (the loader parses its
+/// `V<NNNN>__…`/dbmate grammar + derives ordering from it); `hash` is the
+/// sha256 of the file body's content-addressed blob.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationFileEntry {
+    /// Migration filename, e.g. `V0001__create_users.sql`. A bare filename
+    /// only — no path separators, no `.`/`..` traversal (enforced by
+    /// [`Manifest::validate`]).
+    pub name: String,
+    /// sha256 hash (lowercase, 64 hex chars) of the migration file body's
+    /// blob.
+    pub hash: String,
 }
 
 impl Default for Manifest {
@@ -148,6 +219,8 @@ impl Default for Manifest {
             auth: AuthConfig::default(),
             metadata: ManifestMetadata::default(),
             exports: None,
+            migrations: Vec::new(),
+            runtime_descriptor: None,
         }
     }
 }
@@ -332,6 +405,8 @@ impl Manifest {
                 built_at: "1970-01-01T00:00:00Z".to_string(),
             },
             exports: None,
+            migrations: Vec::new(),
+            runtime_descriptor: None,
         }
     }
 
@@ -426,6 +501,63 @@ impl Manifest {
         // dependency this crate deliberately does not.
         for scope in &self.auth.scopes {
             ScopeDef::validate_id_format(&scope.id)?;
+        }
+        // Migration entries: each blob hash must be a 64-char lowercase
+        // sha256, and each `name` must be a bare filename (no path
+        // separators / `.`/`..` traversal) so reconstructing it under a
+        // deploy tmp dir can never escape that dir. The migration-file
+        // GRAMMAR (`V<NNNN>__…`/dbmate) is the loader's job at deploy, not
+        // here — this is the wire-format + path-safety guard only.
+        // Cross-entry uniqueness: two entries that share a `name` would
+        // clobber on disk during `reconstruct_migration_files` (a truncating
+        // per-name write), silently dropping one migration's content before
+        // the loader's DuplicateVersion guard ever sees the file. Two entries
+        // that share a `hash` under different names point at the same blob —
+        // a content-addressing inconsistency the producer must not emit.
+        let mut seen_names: BTreeSet<&str> = BTreeSet::new();
+        let mut seen_hashes: BTreeSet<&str> = BTreeSet::new();
+        for entry in &self.migrations {
+            if !is_sha256_hex(&entry.hash) {
+                return Err(format!(
+                    "migrations[{name}].hash {hash:?} is not a lowercase 64-char sha256 hex",
+                    name = entry.name,
+                    hash = entry.hash
+                ));
+            }
+            if !is_safe_migration_name(&entry.name) {
+                return Err(format!(
+                    "migrations[].name {name:?} must be a bare filename \
+                     (no path separators or '.'/'..' traversal)",
+                    name = entry.name
+                ));
+            }
+            if !seen_names.insert(entry.name.as_str()) {
+                return Err(format!(
+                    "migrations[].name {name:?} is duplicated; entry names must be \
+                     unique (a collision would clobber on disk during reconstruction)",
+                    name = entry.name
+                ));
+            }
+            if !seen_hashes.insert(entry.hash.as_str()) {
+                return Err(format!(
+                    "migrations[].hash {hash:?} is duplicated across entries with \
+                     different names; each migration blob must be referenced by one name",
+                    hash = entry.hash
+                ));
+            }
+        }
+        // Runtime schema descriptor (migration-first cutover): the
+        // `schema.runtime.json` blob is content-addressed exactly like a
+        // migration body, so the only wire-format invariant is the hash format.
+        // The descriptor's JSON shape is the producer/consumer contract, not
+        // this struct's — `validate()` does not parse it.
+        if let Some(desc) = &self.runtime_descriptor {
+            if !is_sha256_hex(&desc.hash) {
+                return Err(format!(
+                    "runtime_descriptor.hash {hash:?} is not a lowercase 64-char sha256 hex",
+                    hash = desc.hash
+                ));
+            }
         }
         if !self.resources.is_empty() {
             self.validate_resources()?;
@@ -668,4 +800,178 @@ fn is_supported_variant_encoding(s: &str) -> bool {
 
 fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
+}
+
+/// True if `name` is a safe bare migration filename: non-empty, no path
+/// separators (`/` or `\`), and not a `.`/`..` traversal component. The
+/// control plane reconstructs each migration under a deploy tmp dir using
+/// this name, so rejecting separators + traversal keeps the write confined
+/// to that dir.
+fn is_safe_migration_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+}
+
+#[cfg(test)]
+mod migration_validation_tests {
+    use super::*;
+
+    fn base() -> Manifest {
+        Manifest {
+            metadata: ManifestMetadata {
+                compiler: Some("test".into()),
+                built_at: "2026-04-29T00:00:00Z".into(),
+            },
+            ..Manifest::default()
+        }
+    }
+
+    #[test]
+    fn migrations_default_empty_and_omitted_on_wire() {
+        let m = base();
+        assert!(m.migrations.is_empty());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("migrations"),
+            "empty migrations must be omitted: {json}"
+        );
+        // Round-trips: a manifest without `migrations` deserializes fine.
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert!(back.migrations.is_empty());
+    }
+
+    #[test]
+    fn valid_migrations_pass_validate_and_round_trip() {
+        let mut m = base();
+        m.migrations = vec![
+            MigrationFileEntry {
+                name: "V0001__create_users.sql".into(),
+                hash: "a".repeat(64),
+            },
+            MigrationFileEntry {
+                name: "20240617123000_add_index.sql".into(),
+                hash: "b".repeat(64),
+            },
+        ];
+        m.validate().expect("valid migrations accepted");
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.migrations, m.migrations, "migrations round-trip in order");
+    }
+
+    #[test]
+    fn rejects_bad_migration_hash() {
+        let mut m = base();
+        m.migrations = vec![MigrationFileEntry {
+            name: "V0001__x.sql".into(),
+            hash: "NOTAHASH".into(),
+        }];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("not a lowercase 64-char sha256"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_path_traversal_migration_name() {
+        for bad in ["../escape.sql", "sub/dir.sql", "..", ".", "a\\b.sql", ""] {
+            let mut m = base();
+            m.migrations = vec![MigrationFileEntry {
+                name: bad.into(),
+                hash: "c".repeat(64),
+            }];
+            let err = m.validate().unwrap_err();
+            assert!(
+                err.contains("bare filename"),
+                "name {bad:?} must be rejected, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_migration_name() {
+        // Two entries with the same `name` would clobber on disk during
+        // reconstruct_migration_files (a truncating per-name write), silently
+        // dropping one migration's content before the loader's DuplicateVersion
+        // guard ever sees the file. validate() must reject the manifest.
+        let mut m = base();
+        m.migrations = vec![
+            MigrationFileEntry {
+                name: "V0001__x.sql".into(),
+                hash: "a".repeat(64),
+            },
+            MigrationFileEntry {
+                name: "V0001__x.sql".into(),
+                hash: "b".repeat(64),
+            },
+        ];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("duplicated"), "duplicate name must be rejected, got {err}");
+    }
+
+    #[test]
+    fn rejects_duplicate_migration_hash() {
+        // Same blob referenced under two different names is a content-addressing
+        // inconsistency the producer must not emit.
+        let mut m = base();
+        m.migrations = vec![
+            MigrationFileEntry {
+                name: "V0001__x.sql".into(),
+                hash: "a".repeat(64),
+            },
+            MigrationFileEntry {
+                name: "V0002__y.sql".into(),
+                hash: "a".repeat(64),
+            },
+        ];
+        let err = m.validate().unwrap_err();
+        assert!(err.contains("duplicated"), "duplicate hash must be rejected, got {err}");
+    }
+
+    // ── Runtime schema descriptor slot (migration-first P4a) ─────────────────
+
+    #[test]
+    fn runtime_descriptor_defaults_none_and_omitted_on_wire() {
+        let m = base();
+        assert!(m.runtime_descriptor.is_none());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("runtime_descriptor"),
+            "absent descriptor must be omitted on the wire: {json}"
+        );
+        // A manifest without `runtime_descriptor` deserializes to None.
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert!(back.runtime_descriptor.is_none());
+    }
+
+    #[test]
+    fn runtime_descriptor_round_trips_byte_identical() {
+        let mut m = base();
+        let hash = "a".repeat(64);
+        m.runtime_descriptor = Some(RuntimeDescriptorEntry { hash: hash.clone() });
+        m.validate().expect("valid descriptor accepted");
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("runtime_descriptor"), "descriptor must serialize: {json}");
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.runtime_descriptor, m.runtime_descriptor,
+            "runtime_descriptor must round-trip byte-identical"
+        );
+        assert_eq!(back.runtime_descriptor.unwrap().hash, hash);
+    }
+
+    #[test]
+    fn rejects_bad_runtime_descriptor_hash() {
+        let mut m = base();
+        m.runtime_descriptor = Some(RuntimeDescriptorEntry {
+            hash: "NOTAHASH".into(),
+        });
+        let err = m.validate().unwrap_err();
+        assert!(
+            err.contains("runtime_descriptor.hash") && err.contains("sha256"),
+            "malformed descriptor hash must be rejected, got {err}"
+        );
+    }
 }

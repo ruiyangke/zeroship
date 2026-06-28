@@ -36,12 +36,8 @@
 //! ```bash
 //! # 1. create + migrate a dedicated DB (one time):
 //! createdb -h localhost -p 5440 -U postgres zeroship_metering_load
-//! docker run --rm --network host -v "$PWD/db/changelog:/liquibase/changelog:ro" \
-//!   liquibase/liquibase:4.31 \
-//!   --url=jdbc:postgresql://localhost:5440/zeroship_metering_load \
-//!   --username=postgres --password=zeroship \
-//!   --changelog-file=changelog/db.changelog-master.yaml \
-//!   --liquibase-schema-name=public update
+//! zeroship-migrate migrate --dir db/migrations --profile platform --yes \
+//!   --database-url postgres://postgres:zeroship@localhost:5440/zeroship_metering_load
 //!
 //! # 2. run (the env var both gates AND points the harness):
 //! METERING_LOAD_DB='postgres://postgres:zeroship@localhost:5440/zeroship_metering_load' \
@@ -126,7 +122,7 @@ fn print_skip_note() {
     println!("    cargo bench -p zeroship-control --bench metering_load -- all");
     println!();
     println!("Do NOT use the real `zeroship` DB or `zeroship_billing_test`. See the file");
-    println!("header for the createdb + Liquibase migration steps.");
+    println!("header for the createdb + `zeroship-migrate` migration steps.");
 }
 
 // ===========================================================================
@@ -147,7 +143,7 @@ async fn connect(db_url: &str) -> Client {
 /// Ensure the built-in catalog prereqs the spend/reconcile pricing reads need
 /// exist: a free plan, the `requests` metric weight (1 CU/op), and a global
 /// default FX. The platform metrics (`requests`, `cpu_us`, …) are seeded by the
-/// changelog, so ingest of the fixed counters never FK-aborts.
+/// platform migrations, so ingest of the fixed counters never FK-aborts.
 async fn seed_prereqs(admin: &Client) {
     admin
         .execute(

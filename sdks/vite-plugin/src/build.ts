@@ -18,8 +18,41 @@ import {
   zeroshipBootstrapResolverPlugin,
   zeroshipModulePlugin,
 } from "./zeroship-module.js";
+import { genTypesViaCli } from "./migrations.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
+
+/** The migration sub-options the build pipeline accepts (the public
+ *  `ZeroshipOptions.migrations` shape, forwarded verbatim). */
+export interface BuildMigrationsOptions {
+  dir?: string;
+  genTypesOut?: string;
+  cliPath?: string;
+  ownerApp?: string;
+  recorderUrl?: string;
+}
+
+/**
+ * Forward the FULL migration sub-options into the `.zship` packer's
+ * `emitZship({ migrations })` call.
+ *
+ * The packer's migration discovery (`discoverMigrations`, zship.ts step 8b)
+ * consumes `ownerApp`/`recorderUrl` to record a `.ts` that lacks a committed
+ * `.ir.json`; the descriptor read (step 8c) uses `genTypesOut`. A partial
+ * spread that drops `ownerApp`/`recorderUrl` silently breaks the recorder
+ * arg-fork in production builds — so the whole set is forwarded as one object.
+ */
+export function migrationsForEmit(
+  opts: BuildMigrationsOptions | undefined,
+): BuildMigrationsOptions {
+  return {
+    dir: opts?.dir,
+    genTypesOut: opts?.genTypesOut,
+    cliPath: opts?.cliPath,
+    ownerApp: opts?.ownerApp,
+    recorderUrl: opts?.recorderUrl,
+  };
+}
 
 /** Public specifier for the client manifest virtual module. */
 export const CLIENT_MANIFEST_VIRTUAL_ID = "virtual:zeroship/client-manifest";
@@ -288,6 +321,14 @@ export function buildPlugin(
     serverEntry?: string;
     /** "static" → skip the SSR sub-build entirely. */
     mode?: "full" | "static";
+    /** Migration-first gen-types (P3). See `ZeroshipOptions.migrations`. */
+    migrations?: {
+      dir?: string;
+      genTypesOut?: string;
+      cliPath?: string;
+      ownerApp?: string;
+      recorderUrl?: string;
+    };
   } = {}
 ): Plugin {
   const { serverFunctionMap } = state;
@@ -467,6 +508,64 @@ export function buildPlugin(
     name: "zeroship:build",
 
     /**
+     * Migration-first gen-types (P3). Before the bundle is walked, fold the
+     * committed `.ir.json` migration set into the typed `env.db` surface
+     * (`env.db.ts` + `schema.runtime.json`) by shelling the EXISTING
+     * `zeroship-migrate-js gen-types` subcommand.
+     *
+     * In production (`viteMode === "production"`) we run `--check`: a DRIFT
+     * GATE that hard-fails the build when the committed artifacts no longer
+     * track the migrations (someone changed a migration without regenerating).
+     * In a non-production build we REGENERATE (write) so a local
+     * `vite build --mode development` refreshes the committed types.
+     *
+     * **P3 deferral:** the emitted artifacts are committed but live OUTSIDE the
+     * app tsconfig `include` (default `generated/zeroship/`) and are NOT wired
+     * into the typecheck — P5 owns the type-activation cutover (alias swap +
+     * deletion of `export default { schema }`). See `migrations.ts`.
+     *
+     * Skipped in dev (the dev-server's `hotUpdate` handles regeneration) and
+     * when there is no migrations dir on disk.
+     */
+    buildStart() {
+      if (isDev) return;
+      const migrationsRel = options.migrations?.dir ?? "migrations";
+      // No migrations dir → nothing to generate (an app may ship none).
+      if (!existsSync(resolve(root, migrationsRel))) return;
+
+      const isProd = viteMode === "production";
+      try {
+        const result = genTypesViaCli({
+          root,
+          migrationsDir: migrationsRel,
+          genTypesOut: options.migrations?.genTypesOut,
+          cliPath: options.migrations?.cliPath,
+          // Production: drift gate. Non-production: regenerate (write).
+          check: isProd,
+          // The drift gate must not silently pass if the binary is missing.
+          requireBinary: isProd,
+        });
+        if (result.status === "skipped") {
+          console.warn(
+            `[zeroship] gen-types skipped — ${result.reason}`
+          );
+        } else if (isProd) {
+          console.log(
+            "[zeroship] gen-types --check: env.db.ts + schema.runtime.json track the migrations"
+          );
+        } else {
+          console.log(
+            "[zeroship] gen-types: regenerated env.db.ts + schema.runtime.json from the migrations"
+          );
+        }
+      } catch (e) {
+        // A drift / load / fold failure is a real build error — surface it.
+        console.error(`[zeroship] gen-types failed: ${(e as Error).message}`);
+        throw e;
+      }
+    },
+
+    /**
      * Satisfy Vite's "needs at least one input" check by injecting a
      * virtual entry that resolves to an empty module, when the client
      * build would otherwise have NO input. The matching `generateBundle`
@@ -630,6 +729,12 @@ export function buildPlugin(
             resources: extras.resources,
             transformer: extras.transformer,
           },
+          // Carry the op.* migrations + the generated runtime schema descriptor
+          // (`schema.runtime.json`) the buildStart gen-types step emitted (P4a).
+          // Forward the FULL migration sub-options (incl. ownerApp/recorderUrl,
+          // which the packer's migration discovery consumes) — a partial spread
+          // would silently break the recorder arg-fork in production builds.
+          migrations: migrationsForEmit(options.migrations),
         });
       } catch (e) {
         console.error(`[zeroship] failed to emit .zship: ${(e as Error).message}`);

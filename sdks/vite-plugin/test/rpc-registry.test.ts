@@ -97,8 +97,19 @@ describe("rpcRegistryPlugin — resolveId / load", () => {
     // The new normaliser shape: dict-shape `default.rpc` + schema +
     // fetch keys on the default object.
     assert.match(code, /export default \{/);
-    assert.match(code, /schema:\s*_zsUserDefault\.schema/);
+    // **Migration-first cutover (P4b)** — the entry exposes `_zsSchema`, which
+    // prefers the runtime-injected RuntimeSchemaDescriptor over the declared
+    // `default.schema`. (Pre-P4b the entry hard-wired `_zsUserDefault.schema`.)
+    assert.match(code, /schema:\s*_zsSchema/);
+    assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
+    assert.match(code, /_zsSchema\s*=[\s\S]*_zsUserDefault\.schema/);
     assert.match(code, /rpc:\s*_zsRpc/);
+    // **P4b review fix (MED)** — `_zsSchema` is the descriptor when one is
+    // bundled (field-only, no collection-level options). The entry MUST also
+    // forward the ORIGINAL declared schema as `__zsDeclaredSchema` so the
+    // runtime-entry can recover softDelete / versioning / indexes. Pre-fix this
+    // carrier did not exist, so the runtime silently dropped those options.
+    assert.match(code, /__zsDeclaredSchema:\s*_zsUserDefault\.schema/);
   });
 
   test("load returns null for unrelated ids", () => {
@@ -149,7 +160,10 @@ describe("buildServerEntrySource — dict-shape normaliser (namespace-walk)", ()
       userEntryRel: "/proj/src/server.ts",
     });
     // Dict-shape — `rpc` is the _zsRpc OBJECT, not a function call.
-    assert.match(code, /schema:\s*_zsUserDefault\.schema/);
+    // P4b — schema is `_zsSchema` (descriptor-preferred), not the raw
+    // `_zsUserDefault.schema`.
+    assert.match(code, /schema:\s*_zsSchema/);
+    assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
     assert.match(code, /fetch:\s*_zsFetchHandler/);
     assert.match(code, /rpc:\s*_zsRpc/);
   });
@@ -311,9 +325,14 @@ describe("buildServerEntrySource — Phase-2 (binding-fed) shape", () => {
       ]),
     });
     assert.match(code, /export default \{/);
-    assert.match(code, /schema:\s*_zsUserDefault\.schema/);
+    // P4b — descriptor-preferred schema on the Phase-2 entry too.
+    assert.match(code, /schema:\s*_zsSchema/);
+    assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
     assert.match(code, /fetch:\s*_zsFetch/);
     assert.match(code, /rpc:\s*_zsRpc/);
+    // **P4b review fix (MED)** — the original declared schema carrier for
+    // collection-level option recovery (see the namespace-walk entry).
+    assert.match(code, /__zsDeclaredSchema:\s*_zsUserDefault\.schema/);
   });
 
   test("user dict-shape default.rpc merges with binding-derived entries", () => {

@@ -79,7 +79,7 @@ esac
 command -v node    >/dev/null 2>&1 || { echo "  ⚠ ABORT: node required."; exit 2; }
 command -v curl    >/dev/null 2>&1 || { echo "  ⚠ ABORT: curl required."; exit 2; }
 command -v openssl >/dev/null 2>&1 || { echo "  ⚠ ABORT: openssl required."; exit 2; }
-command -v docker  >/dev/null 2>&1 || { echo "  ⚠ ABORT: docker required for the Liquibase migrate."; exit 2; }
+command -v docker  >/dev/null 2>&1 || { echo "  ⚠ ABORT: docker required."; exit 2; }
 [ -x "$BIN/zeroship-control" ] || { echo "  ⚠ ABORT: missing $BIN/zeroship-control — run: cargo build --release -p zeroship-control"; exit 2; }
 
 export PGPASSWORD="$PGPW"
@@ -123,7 +123,7 @@ lsof -ti :"$CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 
 # ===========================================================================
 echo ""
-echo "=== Stage 1: dedicated DB ($DB) + full Liquibase changelog + control at REAL Stripe ==="
+echo "=== Stage 1: dedicated DB ($DB) + full zeroship-migrate platform set + control at REAL Stripe ==="
 # ===========================================================================
 "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
@@ -133,11 +133,11 @@ ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
 pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + the other demo DBs untouched)"
 
-MIG_LOG="$WORK/liquibase.log"
-if ZEROSHIP_DB_JDBC="jdbc:postgresql://$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" update > "$MIG_LOG" 2>&1; then
-  pass "Liquibase changelog applied to $DB (plans, metric_weights, pricing_config, invoicing, proration)"
+MIG_LOG="$WORK/migrate.log"
+if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/ops/db-migrate.sh" migrate --yes > "$MIG_LOG" 2>&1; then
+  pass "zeroship-migrate platform set applied to $DB (plans, metric_weights, pricing_config, invoicing, proration)"
 else
-  fail "Liquibase migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
+  fail "zeroship-migrate FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
