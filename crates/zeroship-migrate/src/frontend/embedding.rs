@@ -61,6 +61,57 @@ pub enum FrontendGlobals {
     Schema,
 }
 
+/// Seed for the build-time determinism probe.
+///
+/// A seeded recorder run replaces known authoring-time nondeterministic globals
+/// with deterministic sequences. Probe A and probe B deliberately use distinct
+/// bases, so any recorded IR field that depends on wall-clock/RNG input diverges
+/// between the two runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeterminismProbeSeed {
+    /// Numeric seed id. `1` and `2` are the canonical record-twice probe pair.
+    pub run: u8,
+}
+
+impl DeterminismProbeSeed {
+    /// First deterministic probe run.
+    pub const A: Self = Self { run: 1 };
+    /// Second deterministic probe run.
+    pub const B: Self = Self { run: 2 };
+
+    fn date_base_ms(self) -> u64 {
+        match self.run {
+            1 => 1_000_000,
+            2 => 2_000_000,
+            n => 1_000_000 + (u64::from(n) * 1_000_000),
+        }
+    }
+
+    fn perf_base_ms(self) -> u64 {
+        match self.run {
+            1 => 10_000,
+            2 => 20_000,
+            n => 10_000 + (u64::from(n) * 10_000),
+        }
+    }
+
+    fn random_base_byte(self) -> u8 {
+        match self.run {
+            1 => 0x11,
+            2 => 0x88,
+            n => n.wrapping_mul(73).wrapping_add(17),
+        }
+    }
+
+    fn random_fraction(self) -> &'static str {
+        match self.run {
+            1 => "0.1111111111111111",
+            2 => "0.8888888888888888",
+            _ => "0.4242424242424242",
+        }
+    }
+}
+
 fn module(specifier: &str, source: &str) -> ModuleEntry {
     ModuleEntry {
         specifier: specifier.to_string(),
@@ -111,6 +162,7 @@ pub fn module_graph(program: FrontendProgram<'_>) -> Vec<ModuleEntry> {
 pub fn install_frontend_globals(
     scope: &mut v8::PinScope,
     globals: FrontendGlobals,
+    determinism_probe_seed: Option<DeterminismProbeSeed>,
 ) -> Result<(), String> {
     zeroship_runtime::init::setup_globals(scope)?;
     match globals {
@@ -125,5 +177,134 @@ pub fn install_frontend_globals(
             zeroship_runtime::init::install_dom(scope);
         }
     }
+    if let Some(seed) = determinism_probe_seed {
+        install_determinism_probe_globals(scope, seed)?;
+    }
+    Ok(())
+}
+
+fn install_determinism_probe_globals(
+    scope: &mut v8::PinScope,
+    seed: DeterminismProbeSeed,
+) -> Result<(), String> {
+    let script = format!(
+        r#"
+(function() {{
+  const g = globalThis;
+  const OriginalDate = g.Date;
+  let dateCounter = 0;
+  let perfCounter = 0;
+  let byteCounter = 0;
+  const dateBase = {date_base};
+  const perfBase = {perf_base};
+  const randomBase = {random_base};
+  const randomFraction = {random_fraction};
+
+  function nextDateMs() {{
+    return dateBase + dateCounter++;
+  }}
+
+  function ProbeDate(...args) {{
+    if (new.target) {{
+      if (args.length === 0) {{
+        return Reflect.construct(OriginalDate, [nextDateMs()], new.target);
+      }}
+      return Reflect.construct(OriginalDate, args, new.target);
+    }}
+    return new OriginalDate(nextDateMs()).toString();
+  }}
+  Object.setPrototypeOf(ProbeDate, OriginalDate);
+  ProbeDate.prototype = OriginalDate.prototype;
+  Object.defineProperty(ProbeDate, "now", {{
+    value: () => nextDateMs(),
+    configurable: true,
+    writable: true
+  }});
+  Object.defineProperty(ProbeDate, "parse", {{
+    value: OriginalDate.parse.bind(OriginalDate),
+    configurable: true,
+    writable: true
+  }});
+  Object.defineProperty(ProbeDate, "UTC", {{
+    value: OriginalDate.UTC.bind(OriginalDate),
+    configurable: true,
+    writable: true
+  }});
+  g.Date = ProbeDate;
+
+  if (!g.performance || typeof g.performance !== "object") {{
+    g.performance = {{}};
+  }}
+  Object.defineProperty(g.performance, "now", {{
+    value: () => perfBase + perfCounter++,
+    configurable: true,
+    writable: true
+  }});
+
+  Object.defineProperty(g.Math, "random", {{
+    value: () => randomFraction,
+    configurable: true,
+    writable: true
+  }});
+
+  function nextByte() {{
+    const b = (randomBase + (byteCounter * 17)) & 255;
+    byteCounter++;
+    return b;
+  }}
+
+  function getRandomValues(view) {{
+    if (!view || typeof view.length !== "number") {{
+      throw new TypeError("getRandomValues requires a typed array");
+    }}
+    const isBig = typeof BigInt64Array !== "undefined" &&
+      (view instanceof BigInt64Array || view instanceof BigUint64Array);
+    for (let i = 0; i < view.length; i++) {{
+      const byte = nextByte();
+      view[i] = isBig ? BigInt(byte) : byte;
+    }}
+    return view;
+  }}
+
+  function randomUUID() {{
+    const b = new Uint8Array(16);
+    getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const hex = Array.from(b, x => x.toString(16).padStart(2, "0"));
+    return `${{hex[0]}}${{hex[1]}}${{hex[2]}}${{hex[3]}}-${{hex[4]}}${{hex[5]}}-${{hex[6]}}${{hex[7]}}-${{hex[8]}}${{hex[9]}}-${{hex[10]}}${{hex[11]}}${{hex[12]}}${{hex[13]}}${{hex[14]}}${{hex[15]}}`;
+  }}
+
+  const originalCrypto = g.crypto;
+  const probeCrypto = Object.create(originalCrypto || null);
+  Object.defineProperty(probeCrypto, "getRandomValues", {{
+    value: getRandomValues,
+    configurable: true,
+    writable: true
+  }});
+  Object.defineProperty(probeCrypto, "randomUUID", {{
+    value: randomUUID,
+    configurable: true,
+    writable: true
+  }});
+  Object.defineProperty(g, "crypto", {{
+    value: probeCrypto,
+    configurable: true,
+    writable: true
+  }});
+}})();
+"#,
+        date_base = seed.date_base_ms(),
+        perf_base = seed.perf_base_ms(),
+        random_base = seed.random_base_byte(),
+        random_fraction = seed.random_fraction(),
+    );
+    let source = v8::String::new(scope, &script)
+        .ok_or_else(|| "determinism probe globals: source alloc failed".to_string())?;
+    let compiled = v8::Script::compile(scope, source, None)
+        .ok_or_else(|| "determinism probe globals: compile failed".to_string())?;
+    compiled
+        .run(scope)
+        .ok_or_else(|| "determinism probe globals: install failed".to_string())?;
     Ok(())
 }

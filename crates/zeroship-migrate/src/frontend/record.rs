@@ -14,10 +14,16 @@
 //! The recorder runs untrusted creator JS under the same sandbox parity as app
 //! code (§8.9).
 
-use crate::MigrationIr;
+use std::collections::BTreeSet;
+
+use crate::model::ir::CanonicalOpList;
+use crate::{Checksum, MigrationFlags, MigrationIr};
 use zeroship_runtime::Runtime;
 
-use super::embedding::{install_frontend_globals, module_graph, FrontendGlobals, FrontendProgram};
+use super::embedding::{
+    install_frontend_globals, module_graph, DeterminismProbeSeed, FrontendGlobals,
+    FrontendProgram,
+};
 use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 
 /// An error from recording a migration module.
@@ -50,14 +56,18 @@ pub enum RecordError {
         /// The observed byte count.
         actual: usize,
     },
-    /// The determinism lint detected a host-clock/RNG accessor in authoring JS.
+    /// The record-twice determinism probe found that seeded host-clock/RNG globals
+    /// change the recorded IR.
     #[error(
-        "nondeterministic authoring JS uses {accessors}; use DB-evaluated c.fn.* scalars instead"
+        "nondeterministic authoring JS changes recorded IR using {accessors} at {differing_path}; use DB-evaluated c.fn.* scalars instead"
     )]
     Nondeterministic {
-        /// Comma-separated accessor summary.
+        /// Comma-separated accessor summary when the advisory source lint can name it.
         accessors: String,
-        /// The structured lint findings.
+        /// First differing IR path/field.
+        differing_path: String,
+        /// Advisory structured lint findings. These are hints only; the hard error
+        /// comes from recorded IR divergence.
         findings: Vec<DeterminismFinding>,
     },
 }
@@ -65,7 +75,7 @@ pub enum RecordError {
 /// A recorded migration plus the determinism lint outcome.
 ///
 /// Detected nondeterminism is now a hard error. This wrapper keeps the older test
-/// oracle shape but successful recordings carry an empty `warnings` vector.
+/// oracle shape; successful recordings may carry advisory source-lint warnings.
 #[derive(Debug, Clone)]
 pub struct RecordOutcome {
     /// The recorded, frozen-contract-validated migration IR.
@@ -125,14 +135,16 @@ pub fn record_migration_to_ir_unsandboxed(
 /// in-process-eval threat):
 /// the PR4 build/CLI path records via the kernel-sandboxed child, never here.
 ///
-/// Record a migration's `up()` into a typed [`MigrationIr`] after the determinism
-/// lint proves the source clean.
+/// Record a migration's `up()` into a typed [`MigrationIr`] after the record-twice
+/// determinism probe proves the emitted IR is stable.
 ///
 /// This is the same record path as [`record_migration_to_ir_unsandboxed`], but it
 /// keeps the historical [`RecordOutcome`] wrapper used by tests. Detected
-/// `Date.now()`/`Math.random()`/`crypto.randomUUID()`/`new Date()` accessors are a
-/// hard [`RecordError::Nondeterministic`]; lint infrastructure failure is also a
-/// hard error. On success `RecordOutcome::warnings` is empty.
+/// If seeded `Date.now()`/`Date()`/`new Date()`/`performance.now()`/
+/// `Math.random()`/`crypto.getRandomValues()`/`crypto.randomUUID()` calls change
+/// the recorded IR, this returns hard [`RecordError::Nondeterministic`]. The
+/// legacy regex lint is retained only as an advisory warning source and never
+/// gates recording.
 ///
 /// # Errors
 /// See [`RecordError`].
@@ -143,9 +155,57 @@ pub fn record_migration_to_ir_with_warnings_unsandboxed(
     name: &str,
 ) -> Result<RecordOutcome, RecordError> {
     reject_oversized_source("ts_source", migration_source)?;
-    zeroship_runtime::init_v8();
 
-    enforce_deterministic_source(migration_source)?;
+    let probe_a = record_migration_value_unsandboxed(
+        migration_source,
+        owner_app,
+        name,
+        Some(DeterminismProbeSeed::A),
+    )?;
+    let probe_b = record_migration_value_unsandboxed(
+        migration_source,
+        owner_app,
+        name,
+        Some(DeterminismProbeSeed::B),
+    )?;
+
+    if probe_a != probe_b {
+        let differing_path =
+            first_json_difference_path(&probe_a, &probe_b).unwrap_or_else(|| "$".to_string());
+        let findings = advisory_determinism_findings(migration_source);
+        return Err(RecordError::Nondeterministic {
+            accessors: accessor_summary(&findings),
+            differing_path,
+            findings,
+        });
+    }
+
+    let ir_a = ir_from_value(probe_a)?;
+    let ir_b = ir_from_value(probe_b)?;
+    let checksum_a = determinism_checksum(&ir_a);
+    let checksum_b = determinism_checksum(&ir_b);
+    if checksum_a != checksum_b {
+        let findings = advisory_determinism_findings(migration_source);
+        return Err(RecordError::Nondeterministic {
+            accessors: accessor_summary(&findings),
+            differing_path: "$.checksum".to_string(),
+            findings,
+        });
+    }
+    let warnings = advisory_determinism_findings(migration_source);
+    Ok(RecordOutcome {
+        ir: ir_a,
+        warnings,
+    })
+}
+
+fn record_migration_value_unsandboxed(
+    migration_source: &str,
+    owner_app: &str,
+    name: &str,
+    determinism_probe_seed: Option<DeterminismProbeSeed>,
+) -> Result<serde_json::Value, RecordError> {
+    zeroship_runtime::init_v8();
 
     let modules = module_graph(FrontendProgram::RecordMigration {
         source: migration_source,
@@ -154,7 +214,12 @@ pub fn record_migration_to_ir_with_warnings_unsandboxed(
     let runtime = Runtime::builder().build();
 
     let ir_json: Result<String, RecordError> = runtime.with_scope(|scope| {
-        install_frontend_globals(scope, FrontendGlobals::Migration).map_err(RecordError::V8)?;
+        install_frontend_globals(
+            scope,
+            FrontendGlobals::Migration,
+            determinism_probe_seed,
+        )
+        .map_err(RecordError::V8)?;
 
         // Expose ONLY the filename-derived name to the adapter. owner_app is
         // DELIBERATELY NOT a global: it is a tenant-identifying field folded into the
@@ -204,6 +269,10 @@ pub fn record_migration_to_ir_with_warnings_unsandboxed(
             );
         }
     }
+    Ok(ir_value)
+}
+
+fn ir_from_value(ir_value: serde_json::Value) -> Result<MigrationIr, RecordError> {
     // Re-serialize the recorded envelope to canonical JSON bytes, then deserialize
     // through the REAL `MigrationIr` — so the recorded ops pass the SAME frozen
     // wire contract (camelCase op fields, closed Op/Expr AST, the `< 2^53` numeric
@@ -212,10 +281,7 @@ pub fn record_migration_to_ir_with_warnings_unsandboxed(
         .map_err(|e| RecordError::Recording(e.to_string()))?;
     let ir = serde_json::from_str::<MigrationIr>(&bytes)
         .map_err(|e| RecordError::Contract(e.to_string()))?;
-    Ok(RecordOutcome {
-        ir,
-        warnings: Vec::new(),
-    })
+    Ok(ir)
 }
 
 /// **UNSANDBOXED, in-process — for the test oracle / trusted-input use ONLY.**
@@ -269,22 +335,94 @@ fn reject_oversized_source(field: &'static str, source: &str) -> Result<(), Reco
     }
 }
 
-fn enforce_deterministic_source(migration_source: &str) -> Result<(), RecordError> {
-    let findings = lint_migration_determinism(migration_source)?;
+fn advisory_determinism_findings(migration_source: &str) -> Vec<DeterminismFinding> {
+    lint_migration_determinism(migration_source).unwrap_or_default()
+}
+
+pub(crate) fn accessor_summary(findings: &[DeterminismFinding]) -> String {
     if findings.is_empty() {
-        return Ok(());
+        return "Date.now()/Date()/new Date()/performance.now()/Math.random()/crypto randomness"
+            .to_string();
     }
     let accessors = findings
         .iter()
         .map(|f| f.accessor.as_str())
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>()
         .join(", ");
-    Err(RecordError::Nondeterministic {
-        accessors,
-        findings,
-    })
+    accessors
+}
+
+pub(crate) fn determinism_checksum(ir: &MigrationIr) -> String {
+    Checksum::of_ir(
+        &CanonicalOpList(&ir.ops),
+        &MigrationFlags::default(),
+        &ir.owner_app,
+        &[],
+        &[],
+        &ir.preconditions,
+    )
+    .as_str()
+    .to_string()
+}
+
+pub(crate) fn first_json_difference_path(
+    a: &serde_json::Value,
+    b: &serde_json::Value,
+) -> Option<String> {
+    fn fmt(path: &[String]) -> String {
+        if path.is_empty() {
+            "$".to_string()
+        } else {
+            format!("${}", path.join(""))
+        }
+    }
+
+    fn walk(
+        a: &serde_json::Value,
+        b: &serde_json::Value,
+        path: &mut Vec<String>,
+    ) -> Option<String> {
+        match (a, b) {
+            (serde_json::Value::Object(ma), serde_json::Value::Object(mb)) => {
+                let keys = ma.keys().chain(mb.keys()).collect::<BTreeSet<_>>();
+                for key in keys {
+                    path.push(format!(".{key}"));
+                    match (ma.get(key), mb.get(key)) {
+                        (Some(va), Some(vb)) => {
+                            if let Some(found) = walk(va, vb, path) {
+                                return Some(found);
+                            }
+                        }
+                        _ => return Some(fmt(path)),
+                    }
+                    path.pop();
+                }
+                None
+            }
+            (serde_json::Value::Array(aa), serde_json::Value::Array(ab)) => {
+                let len = aa.len().max(ab.len());
+                for i in 0..len {
+                    path.push(format!("[{i}]"));
+                    match (aa.get(i), ab.get(i)) {
+                        (Some(va), Some(vb)) => {
+                            if let Some(found) = walk(va, vb, path) {
+                                return Some(found);
+                            }
+                        }
+                        _ => return Some(fmt(path)),
+                    }
+                    path.pop();
+                }
+                None
+            }
+            _ if a == b => None,
+            _ => Some(fmt(path)),
+        }
+    }
+
+    walk(a, b, &mut Vec::new())
 }
 
 /// Run the §4.3 determinism lint over a migration's SOURCE through the REAL V8
@@ -306,7 +444,7 @@ pub fn lint_migration_determinism(
     let runtime = Runtime::builder().build();
 
     let out_json: Result<String, RecordError> = runtime.with_scope(|scope| {
-        install_frontend_globals(scope, FrontendGlobals::Migration).map_err(RecordError::V8)?;
+        install_frontend_globals(scope, FrontendGlobals::Migration, None).map_err(RecordError::V8)?;
 
         {
             let global = scope.get_current_context().global(scope);

@@ -52,7 +52,7 @@ fn svc() -> (RecorderService, Arc<AtomicUsize>) {
 fn record_succeeds_for_owned_app() {
     let (s, calls) = svc();
     let res = s
-        .record("pat_alice", "app_alice", MIGRATION, "m1", None)
+        .record("pat_alice", "app_alice", MIGRATION, "m1", None, None)
         .expect("owned app records");
     assert!(res.ir_json.contains("svc_tbl"), "got: {}", res.ir_json);
     // owner_app HINT is stamped server-side from the cross-checked app_id.
@@ -65,7 +65,7 @@ fn record_fails_closed_for_unowned_app() {
     let (s, _) = svc();
     // alice's token, but a DIFFERENT app she doesn't own — fail-closed.
     let err = s
-        .record("pat_alice", "app_someone_else", MIGRATION, "m1", None)
+        .record("pat_alice", "app_someone_else", MIGRATION, "m1", None, None)
         .expect_err("ownership mismatch must be refused");
     assert!(matches!(err, RecorderError::Unauthorized(_)), "got {err:?}");
     assert_eq!(err.code(), "RECORDER_UNAUTHORIZED");
@@ -75,7 +75,7 @@ fn record_fails_closed_for_unowned_app() {
 fn record_fails_closed_for_unknown_token() {
     let (s, _) = svc();
     let err = s
-        .record("pat_unknown", "app_alice", MIGRATION, "m1", None)
+        .record("pat_unknown", "app_alice", MIGRATION, "m1", None, None)
         .expect_err("unknown token must be refused");
     assert!(matches!(err, RecorderError::Unauthorized(_)), "got {err:?}");
 }
@@ -107,13 +107,13 @@ fn per_token_concurrency_limit_rejects_a_burst() {
     let slow_owned = slow.to_string();
     let h = std::thread::spawn(move || {
         // This call holds the only per-token slot while it spins.
-        let _ = s1.record("pat_alice", "app_alice", &slow_owned, "slow", None);
+        let _ = s1.record("pat_alice", "app_alice", &slow_owned, "slow", None, None);
     });
 
     // Give the first call time to acquire the slot + start spinning.
     std::thread::sleep(std::time::Duration::from_millis(150));
     // A second concurrent call for the same token must be Overloaded.
-    let second = s.record("pat_alice", "app_alice", MIGRATION, "m2", None);
+    let second = s.record("pat_alice", "app_alice", MIGRATION, "m2", None, None);
     match second {
         Err(RecorderError::Overloaded) => {}
         // If the first call already finished (fast host), the slot was free and the
@@ -142,7 +142,7 @@ fn global_concurrency_cap_rejects_excess() {
         global_max: 0,
     });
     let err = s
-        .record("pat_alice", "app_alice", MIGRATION, "m1", None)
+        .record("pat_alice", "app_alice", MIGRATION, "m1", None, None)
         .expect_err("global cap 0 must reject");
     assert!(matches!(err, RecorderError::Overloaded), "got {err:?}");
     // The authorizer ran (auth precedes the limiter), but no child was spawned.

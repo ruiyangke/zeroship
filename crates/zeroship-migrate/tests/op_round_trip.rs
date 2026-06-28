@@ -83,6 +83,7 @@ fn record_via_child_to_json(mig_src: &str, stem: &str) -> String {
         budget: ResourceBudget::default(),
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let res = spawn_sandboxed_record(&req)
         .unwrap_or_else(|e| panic!("sandboxed child record {stem}: {e}"));

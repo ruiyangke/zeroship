@@ -364,7 +364,11 @@ fn run_record_migration(
     });
 
     let ir_json: Result<String, String> = runtime.with_scope(|scope| {
-        install_frontend_globals(scope, FrontendGlobals::Migration)?;
+        install_frontend_globals(
+            scope,
+            FrontendGlobals::Migration,
+            req.determinism_probe_seed,
+        )?;
 
         {
             // Only the filename-derived NAME is exposed to JS (a benign fallback for
@@ -443,7 +447,7 @@ fn run_schema_eval(
     });
 
     let schema_json: Result<String, String> = runtime.with_scope(|scope| {
-        install_frontend_globals(scope, FrontendGlobals::Schema)?;
+        install_frontend_globals(scope, FrontendGlobals::Schema, None)?;
 
         {
             let global = scope.get_current_context().global(scope);

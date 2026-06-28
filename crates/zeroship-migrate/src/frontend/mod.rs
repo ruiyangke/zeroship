@@ -55,6 +55,7 @@ pub use build::{
     discover_migrations, recheck_not_yet_applied, BuildError, BuildOutcome, BuiltMigration,
     DiscoveredMigration, RecordPath, RecordVia, RecorderClient,
 };
+pub use embedding::DeterminismProbeSeed;
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use gen_types::{
     check_artifacts, load_dir_ops, render_artifacts, write_artifacts, GenTypesError,

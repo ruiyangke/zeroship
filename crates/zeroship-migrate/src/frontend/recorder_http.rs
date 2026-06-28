@@ -23,6 +23,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
+use super::embedding::DeterminismProbeSeed;
 use super::recorder_service::{RecorderError, RecorderService};
 
 /// Max accepted client-controlled migration `name` (PR4a code-critic MED #5). A
@@ -61,6 +62,9 @@ pub struct RecordHttpRequest {
     /// The filename-derived migration name (optional; the module's own `name` wins).
     #[serde(default)]
     pub name: Option<String>,
+    /// Optional build-time determinism probe seed for this recording pass.
+    #[serde(default)]
+    pub determinism_probe_seed: Option<DeterminismProbeSeed>,
 }
 
 /// The 200 response body (design §8.9.2).
@@ -212,6 +216,7 @@ pub fn handle_record(
         &req.ts_source,
         name,
         req.schema_types_blob.as_deref(),
+        req.determinism_probe_seed,
     ) {
         Ok(result) => {
             // Fold the single authoritative typed-value checksum over the recorded IR

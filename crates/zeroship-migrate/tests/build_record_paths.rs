@@ -61,6 +61,7 @@ impl RecorderClient for UnreachableClient {
         _app: &str,
         _name: &str,
         _blob: Option<&str>,
+        _determinism_probe_seed: Option<zeroship_migrate::frontend::DeterminismProbeSeed>,
     ) -> Result<String, StructuredError> {
         Err(StructuredError {
             code: "RECORDER_UNREACHABLE".into(),
@@ -80,6 +81,7 @@ impl RecorderClient for RejectClient {
         _app: &str,
         _name: &str,
         _blob: Option<&str>,
+        _determinism_probe_seed: Option<zeroship_migrate::frontend::DeterminismProbeSeed>,
     ) -> Result<String, StructuredError> {
         Err(StructuredError {
             code: "RECORD_EVAL_ERROR".into(),
@@ -207,6 +209,64 @@ fn build_rejects_nondeterministic_date_now_as_hard_error() {
 }
 
 #[test]
+fn date_now_inside_comment_or_string_is_not_a_false_reject() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_comment_string";
+    let clean = r#"
+        import { table } from "@zeroship/migrate";
+        // Audit note: Date.now() and Math.random() are mentioned here only as text.
+        export function up() {
+          table("events").insert({
+            rows: [ { note: "ran Date.now() and Math.random() at build" } ],
+          });
+        }
+    "#;
+    write_mig(dir.path(), stem, clean);
+
+    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect("comment/string mentions of nondeterministic APIs must not hard-fail");
+    assert_eq!(outcome.migrations.len(), 1);
+    assert!(
+        dir.path().join(format!("{stem}.ir.json")).exists(),
+        "deterministic source with inert Date.now/Math.random text must commit IR"
+    );
+}
+
+#[test]
+fn math_random_in_op_value_is_caught_by_ir_divergence() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_random";
+    let dirty = r#"
+        import { table } from "@zeroship/migrate";
+        export function up() {
+          const random = Math["random"];
+          table("events").insert({ rows: [ { sample: random() } ] });
+        }
+    "#;
+    write_mig(dir.path(), stem, dirty);
+
+    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect_err("Math.random-derived op value must be a hard determinism error");
+    match err {
+        BuildError::Nondeterministic {
+            differing_path, ..
+        } => {
+            assert!(
+                differing_path.contains(".ops"),
+                "expected a differing op path, got {differing_path}"
+            );
+        }
+        other => panic!("expected Nondeterministic, got {other:?}"),
+    }
+    assert!(
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "nondeterministic source must not write a committed artifact"
+    );
+}
+
+#[test]
 fn local_and_hosted_paths_yield_same_typed_value_checksum() {
     assert_child_built();
 
@@ -235,6 +295,7 @@ fn local_and_hosted_paths_yield_same_typed_value_checksum() {
             app: &str,
             name: &str,
             _blob: Option<&str>,
+            determinism_probe_seed: Option<zeroship_migrate::frontend::DeterminismProbeSeed>,
         ) -> Result<String, StructuredError> {
             use zeroship_migrate::frontend::recorder_service::{
                 spawn_sandboxed_record, RecordRequest,
@@ -248,6 +309,7 @@ fn local_and_hosted_paths_yield_same_typed_value_checksum() {
                 budget: ResourceBudget::default(),
                 allow_read_paths: vec![],
                 schema_types_blob: None,
+                determinism_probe_seed,
             };
             spawn_sandboxed_record(&req)
                 .map(|r| r.ir_json)

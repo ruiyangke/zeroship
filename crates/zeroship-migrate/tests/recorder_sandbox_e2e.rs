@@ -102,6 +102,7 @@ fn child_request(src: &str, hosted: bool, netns: bool, rlimit: bool) -> String {
         heap_limit_mb: 256,
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
         // The test's own (parent) net-ns inode, so the child's inode-inequality check
         // (LOW #1) has a baseline to compare against when this request drives a netns
         // probe. 0 when unreadable -> child falls back to the interface heuristic.
@@ -158,6 +159,7 @@ fn happy_path_records_under_full_sandbox() {
         budget: ResourceBudget::default(),
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let res = spawn_sandboxed_record(&req).expect("happy recording under sandbox");
     assert!(
@@ -305,6 +307,7 @@ fn rlimit_cpu_or_wall_bounds_an_infinite_loop() {
         },
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let err = spawn_sandboxed_record(&req).expect_err("infinite loop must be bounded");
     match err {
@@ -346,6 +349,7 @@ fn memory_budget_bounds_an_allocation_bomb() {
         },
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let start = std::time::Instant::now();
     let err = spawn_sandboxed_record(&req).expect_err("alloc bomb must be bounded");
@@ -386,6 +390,7 @@ fn wall_watchdog_bounds_a_cpu_idle_hang() {
         },
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let start = std::time::Instant::now();
     let err = spawn_sandboxed_record(&req).expect_err("wall hang must be bounded");
@@ -605,6 +610,7 @@ fn concurrent_records_get_separate_sandbox_children() {
                 budget: ResourceBudget::default(),
                 allow_read_paths: vec![],
                 schema_types_blob: None,
+                determinism_probe_seed: None,
             };
             spawn_sandboxed_record(&req).expect("record")
         })
@@ -655,6 +661,7 @@ fn untrusted_up_cannot_forge_owner_app() {
         budget: ResourceBudget::default(),
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let res = spawn_sandboxed_record(&req).expect("forge migration still records");
     assert!(
@@ -712,6 +719,7 @@ fn large_migration_ir_exceeding_pipe_buffer_records() {
         budget: ResourceBudget::default(),
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let res = spawn_sandboxed_record(&req)
         .expect("large migration must record (not spurious BudgetExceeded)");
@@ -1017,6 +1025,7 @@ fn recorder_process_stub_invariants_are_pinned() {
         budget: ResourceBudget::default(),
         allow_read_paths: vec![],
         schema_types_blob: None,
+        determinism_probe_seed: None,
     };
     let res = spawn_sandboxed_record(&req).expect("process-stub probe migration records");
     assert!(

@@ -405,6 +405,24 @@ fn record_path_rejects_nondeterministic_source() {
     );
 }
 
+#[test]
+fn record_path_allows_date_now_inside_comment_or_string() {
+    use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
+
+    let clean = r#"
+        import { table } from "@zeroship/migrate";
+        // Human note only: Date.now() and Math.random() are not executed.
+        export default { name: "n", up() {
+            table("t").insert({
+                rows: [ { note: "literal mentions Date.now() and Math.random()" } ],
+            });
+        }};
+    "#;
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "comment_string")
+        .expect("inert Date.now/Math.random text must not be a hard determinism error");
+    assert_eq!(outcome.ir.ops.len(), 1);
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // PR10 review F1 (HIGH) — twin-fidelity round-trip.
 //
