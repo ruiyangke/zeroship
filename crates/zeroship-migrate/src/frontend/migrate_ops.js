@@ -39,11 +39,34 @@ const __deferredUpOps = [];
 // Capture the native nondeterministic function symbols before a migration module
 // can mutate globals. A bare symbol is an opt-in to DB-side evaluation; calls just
 // evaluate normally and the resulting value records like any other scalar.
+if (typeof globalThis !== "undefined") {
+  if (typeof globalThis.crypto === "undefined" || globalThis.crypto === null) {
+    Object.defineProperty(globalThis, "crypto", {
+      value: {},
+      configurable: true,
+      writable: false,
+    });
+  }
+  if (typeof globalThis.crypto.randomUUID !== "function") {
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      value: function randomUUID() {
+        throw new Error(
+          "crypto.randomUUID() is not available in the migration recorder; " +
+            "use the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()",
+        );
+      },
+      configurable: true,
+      writable: false,
+    });
+  }
+}
 const __nativeDateNow = typeof Date !== "undefined" ? Date.now : undefined;
 const __nativeMathRandom = typeof Math !== "undefined" ? Math.random : undefined;
 const __nativeCryptoRandomUUID =
-  typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID
+  typeof globalThis !== "undefined" &&
+  globalThis.crypto &&
+  typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID
     : undefined;
 
 function nativeFnSynthName(value) {
@@ -60,12 +83,22 @@ function nativeFnSynthNode(value) {
   return fn === undefined ? undefined : { node: "fnSynth", fn, args: [] };
 }
 
+const INVALID_FUNCTION_VALUE_MESSAGE =
+  "function values are not valid here; only the supported native symbols " +
+  "Date.now / Math.random / crypto.randomUUID translate to DB-evaluated scalars";
+
 /** Structured error helper — mirrors the machine-readable envelope. */
 function structuredError(code, message, extra) {
   const err = new Error(message);
   err.code = code;
   if (extra) Object.assign(err, extra);
   return err;
+}
+
+function rejectFunctionValue(value) {
+  if (typeof value === "function") {
+    throw structuredError("OP_INVALID", INVALID_FUNCTION_VALUE_MESSAGE);
+  }
 }
 
 /** Begin a fresh recording buffer (called by the adapter before a phase). */
@@ -496,6 +529,7 @@ function toIrScalar(value) {
 function toIrValue(value) {
   const synth = nativeFnSynthNode(value);
   if (synth !== undefined) return synth;
+  rejectFunctionValue(value);
   if (value instanceof ExprChain) return value.__node;
   if (value && typeof value === "object" && typeof value.node === "string") return value;
   return toIrScalar(value);
@@ -509,6 +543,7 @@ function toIrDefault(value) {
   if (fn !== undefined) {
     return { fn: { fn } };
   }
+  rejectFunctionValue(value);
   if (value && typeof value === "object" && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
   }
@@ -691,6 +726,7 @@ function chain(node) {
 function exprArg(x) {
   const synth = nativeFnSynthNode(x);
   if (synth !== undefined) return synth;
+  rejectFunctionValue(x);
   if (x instanceof ExprChain) return x.__node;
   if (x && typeof x === "object" && typeof x.node === "string") return x; // a raw AST node
   return { node: "literal", value: x };

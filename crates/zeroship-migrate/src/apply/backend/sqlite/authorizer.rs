@@ -126,11 +126,16 @@ impl AuthMode {
 /// auditable; MUST be kept in lockstep with the emitter's function set (§4 closing
 /// note — fail-closed: a new emitter function the allowlist lacks is DENIED).
 ///
-/// `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_TIME` are SQL *keywords*, not
-/// functions, so they do not pass through `SQLITE_FUNCTION` and are not listed.
+/// `CURRENT_TIMESTAMP`/`CURRENT_DATE`/`CURRENT_TIME` are SQL keywords, but SQLite
+/// still reports them through `SQLITE_FUNCTION` in some DML positions. They are
+/// listed explicitly so engine-rendered fnSynth timestamp values can compile
+/// under CreatorUp.
 const FUNCTION_ALLOWLIST: &[&str] = &[
     "abs",
     "coalesce",
+    "current_timestamp",
+    "current_date",
+    "current_time",
     "length",
     "lower",
     "upper",
@@ -162,6 +167,11 @@ const FUNCTION_ALLOWLIST: &[&str] = &[
     "instr",
     "typeof",
     "hex",
+    // `randomblob` is emitted only by the engine's SQLite fnSynth UUID renderer:
+    // `lower(hex(randomblob(16)))`. It is a SQLite builtin with no extension load
+    // or tenant escape; without it, a legitimate DB-evaluated UUID insert fails at
+    // prepare time under CreatorUp.
+    "randomblob",
     "quote",
     // `printf` / `format` are invoked INTERNALLY by SQLite when it rewrites a
     // table's schema during `ALTER TABLE … ADD COLUMN` (and similar additive DDL)
