@@ -216,9 +216,24 @@ export interface RpcConfig {
   dev?: boolean;
 }
 
+export interface NetRequest {
+  host: string;
+  port: number;
+  reason: string;
+}
+
+export interface NetConfig {
+  requests?: NetRequest[];
+}
+
 /** Root argument for `defineApp({ ... })`. */
 export interface AppDefinition {
   resources?: ResourceTree;
+  /**
+   * Inert outbound TCP request hints. These do not grant access; the control
+   * plane diffs them against operator-authored grants for review.
+   */
+  net?: NetConfig;
   /**
    * App-level RPC config. Per-procedure overrides are pulled from
    * each procedure's `fn.config`; this block sets the app-wide

@@ -110,6 +110,12 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "AuthConfig::is_empty")]
     pub auth: AuthConfig,
 
+    /// Inert creator-authored outbound TCP request hints. These are NOT grants
+    /// and never affect worker enforcement directly; control diffs them against
+    /// the operator-owned grant table to surface pending review.
+    #[serde(default, skip_serializing_if = "NetConfig::is_empty")]
+    pub net: NetConfig,
+
     /// Informational; not load-bearing on the hot path.
     #[serde(default)]
     pub metadata: ManifestMetadata,
@@ -217,6 +223,7 @@ impl Default for Manifest {
             asset_version: 0,
             sourcemaps: HashMap::new(),
             auth: AuthConfig::default(),
+            net: NetConfig::default(),
             metadata: ManifestMetadata::default(),
             exports: None,
             migrations: Vec::new(),
@@ -247,6 +254,56 @@ impl AuthConfig {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.scopes.is_empty()
+    }
+}
+
+/// Inert outbound raw-TCP request hints carried by the manifest.
+///
+/// These entries are creator-authored and therefore never become enforcement
+/// policy by themselves. Control surfaces them as pending review until an
+/// operator writes the corresponding `app_net_grants` table row.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct NetConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<NetRequest>,
+}
+
+impl NetConfig {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetRequest {
+    pub host: String,
+    pub port: u16,
+    pub reason: String,
+}
+
+impl NetRequest {
+    fn validate(&self) -> Result<(), String> {
+        let host = self.host.trim();
+        if host.is_empty() {
+            return Err("net.requests host must not be empty".to_string());
+        }
+        if self.port == 0 {
+            return Err("net.requests port must be between 1 and 65535".to_string());
+        }
+        let star_count = host.bytes().filter(|b| *b == b'*').count();
+        if host == "*" {
+            return Err("net.requests host cannot be bare '*'".to_string());
+        }
+        if star_count > 0 && !host.starts_with("*.") {
+            return Err(format!(
+                "net.requests host {host:?} must use the '*.example.com' wildcard form"
+            ));
+        }
+        if self.reason.trim().is_empty() {
+            return Err("net.requests reason must not be empty".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -397,6 +454,7 @@ impl Manifest {
             asset_version: 0,
             sourcemaps: HashMap::new(),
             auth: AuthConfig::default(),
+            net: NetConfig::default(),
             metadata: ManifestMetadata {
                 compiler: Some(format!(
                     "zeroship-passthrough@{}",
@@ -501,6 +559,9 @@ impl Manifest {
         // dependency this crate deliberately does not.
         for scope in &self.auth.scopes {
             ScopeDef::validate_id_format(&scope.id)?;
+        }
+        for request in &self.net.requests {
+            request.validate()?;
         }
         // Migration entries: each blob hash must be a 64-char lowercase
         // sha256, and each `name` must be a bare filename (no path

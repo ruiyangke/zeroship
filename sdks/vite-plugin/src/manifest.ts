@@ -93,8 +93,24 @@ export type WireResource = Record<string, unknown>;
 export interface ManifestExtras {
   resources: Record<string, WireResource>;
   transformer: "superjson" | "json";
+  net?: NetConfig;
   /** Hint for the manifest schema version (1 — the initial published shape). */
   versionHint: 1;
+}
+
+export interface NetRequest {
+  host: string;
+  port: number;
+  reason: string;
+}
+
+export interface NetConfig {
+  requests?: NetRequest[];
+}
+
+interface DefineAppConfig {
+  resources?: Record<string, Record<string, unknown>>;
+  net?: NetConfig;
 }
 
 // ── camelCase → snake_case rename map ──────────────────────────────────────
@@ -453,10 +469,10 @@ function parentResourceKey(key: string): string | null {
 // This is the simplest possible extraction that handles the documented
 // happy path. A full ts-morph based parse is future work.
 
-async function loadDefineAppResources(
+async function loadDefineAppConfig(
   root: string,
   configPath?: string,
-): Promise<Record<string, Record<string, unknown>> | null> {
+): Promise<DefineAppConfig | null> {
   // Exactly one canonical path: `src/server/config.ts`. The vite-plugin
   // never reads `zeroship.config.ts` at the project root, never reads
   // per-directory `$config.ts` — there is one place app-level defaults
@@ -489,7 +505,7 @@ async function loadDefineAppResources(
 export function extractDefineAppLiteral(
   src: string,
   filePath: string,
-): Record<string, Record<string, unknown>> | null {
+): DefineAppConfig | null {
   // Strip TS-only syntax that's harmless to evaluate-time JS:
   //   - TS type annotations on var/let/const (limited support)
   //   - import statements (we don't need them for the literal)
@@ -533,9 +549,15 @@ export function extractDefineAppLiteral(
     );
   }
   if (!arg || typeof arg !== "object") return null;
-  const resources = (arg as { resources?: unknown }).resources;
-  if (!resources || typeof resources !== "object") return null;
-  return resources as Record<string, Record<string, unknown>>;
+  const config = arg as { resources?: unknown; net?: unknown };
+  const out: DefineAppConfig = {};
+  if (config.resources && typeof config.resources === "object") {
+    out.resources = config.resources as Record<string, Record<string, unknown>>;
+  }
+  if (config.net && typeof config.net === "object" && !Array.isArray(config.net)) {
+    out.net = config.net as NetConfig;
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 function matchParen(src: string, openIdx: number): number {
@@ -732,8 +754,8 @@ export async function computeManifestExtras(
   }
 
   // 4. defineApp({ resources }) tree from src/server/config.ts.
-  const userTree = await loadDefineAppResources(root, configPath);
-  const userFlat = userTree ? flattenAuthorTree(userTree) : {};
+  const appConfig = await loadDefineAppConfig(root, configPath);
+  const userFlat = appConfig?.resources ? flattenAuthorTree(appConfig.resources) : {};
 
   // 5. Merge: auto-derived first, user entries on top (user wins).
   const merged: Record<string, WireResource> = { ...autoResources };
@@ -748,9 +770,24 @@ export async function computeManifestExtras(
   // 6. Validate.
   validateResources(merged, mode, onWarn);
 
-  return {
+  const extras: ManifestExtras = {
     resources: merged,
     transformer: "json",
     versionHint: 1,
+  };
+  const net = normalizeNetConfig(appConfig?.net);
+  if (net) extras.net = net;
+  return extras;
+}
+
+function normalizeNetConfig(net: NetConfig | undefined): NetConfig | undefined {
+  const requests = net?.requests;
+  if (!Array.isArray(requests) || requests.length === 0) return undefined;
+  return {
+    requests: requests.map((r) => ({
+      host: String(r.host),
+      port: Number(r.port),
+      reason: String(r.reason),
+    })),
   };
 }

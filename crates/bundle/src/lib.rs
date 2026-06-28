@@ -25,7 +25,7 @@ pub use limits::{
 };
 pub use manifest::{
     AuthConfig, HandlerEntry, Manifest, ManifestExports, ManifestMetadata, MigrationFileEntry,
-    RuntimeDescriptorEntry, ScopeDef, WorkerCode,
+    NetConfig, NetRequest, RuntimeDescriptorEntry, ScopeDef, WorkerCode,
 };
 pub use rule::{
     Action, AuthLevel, CacheCtl, Cors, HttpMethod, Match, ProcedureKind, RateLimit,

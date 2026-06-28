@@ -728,6 +728,7 @@ export function buildPlugin(
           rpcExtras: {
             resources: extras.resources,
             transformer: extras.transformer,
+            net: extras.net,
           },
           // Carry the op.* migrations + the generated runtime schema descriptor
           // (`schema.runtime.json`) the buildStart gen-types step emitted (P4a).

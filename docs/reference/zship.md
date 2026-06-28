@@ -21,6 +21,7 @@ The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bu
 - `runtime_assets`
 - `asset_version`
 - `sourcemaps`
+- `net`
 - `metadata`
 - `exports` (deprecated compatibility field)
 
@@ -36,6 +37,28 @@ The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bu
 ```
 
 `resources` is the routing source of truth. `assets` holds build-time static assets; `runtime_assets` holds runtime-emitted assets; `asset_version` is the change counter the gateway uses to know when to resync runtime assets.
+
+## Network Requests
+
+`net.requests` is a non-authoritative review hint for creator outbound egress:
+
+```json
+{
+  "net": {
+    "requests": [
+      {
+        "host": "api.example.com",
+        "port": 443,
+        "reason": "Call the upstream API"
+      }
+    ]
+  }
+}
+```
+
+The manifest never grants network access. Control compares these requests
+against operator-authored rows in `zeroship.app_net_grants`; ungranted
+host/port pairs remain denied until a grant row exists.
 
 ## Deprecated field
 

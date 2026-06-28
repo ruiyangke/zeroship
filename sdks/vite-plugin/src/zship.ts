@@ -94,6 +94,8 @@ interface Manifest {
   resources?: Record<string, Record<string, unknown>>;
   /** Wire transformer: `"json"` (default) or `"superjson"`. */
   transformer?: "superjson" | "json";
+  /** Inert outbound TCP request hints. Grants live only in control's table. */
+  net?: NetConfig;
   /**
    * The op.* DSL migrations carried by the bundle (PR4 A4). Each entry's `name`
    * is the committed `<14-digit>_<desc>.ir.json` filename; `hash` is the sha256 of
@@ -113,6 +115,16 @@ interface Manifest {
    * from `default.schema` to this artifact.
    */
   runtime_descriptor?: RuntimeDescriptorEntry;
+}
+
+interface NetConfig {
+  requests?: NetRequest[];
+}
+
+interface NetRequest {
+  host: string;
+  port: number;
+  reason: string;
 }
 
 /** One migration file carried by the `.zship` (`manifest.migrations[i]`). Mirrors
@@ -201,6 +213,7 @@ export interface ZshipOptions {
   rpcExtras?: {
     resources: Record<string, Record<string, unknown>>;
     transformer: "superjson" | "json";
+    net?: NetConfig;
   };
   /**
    * The op.* DSL migrations dir relative to `root` (default `migrations`). The
@@ -459,6 +472,9 @@ export async function emitZship(
     manifest.resources = mergedResources;
   }
   manifest.transformer = transformer;
+  if (options.rpcExtras?.net && (options.rpcExtras.net.requests?.length ?? 0) > 0) {
+    manifest.net = options.rpcExtras.net;
+  }
 
   // 8b. Discover + bundle op.* migrations (PR4 A4). The committed `.ir.json`
   //     bytes are staged as content blobs (deduped by hash, exactly like assets)
