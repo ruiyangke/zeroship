@@ -16,6 +16,7 @@ import {
   ENV_DEV,
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
+  ENV_RUNTIME_DESCRIPTOR,
   ENV_DEV_AUTH,
   ENV_DEV_AUTH_SECRET,
   DEFAULT_DEV_PORT,
@@ -28,7 +29,11 @@ import {
 import { findServerEntry } from "./build.js";
 import type { TransformState } from "./transform.js";
 import { resolveDevDatabase, type DevDatabase } from "./dev-db.js";
-import { genTypesViaCli } from "./migrations.js";
+import {
+  GEN_TYPES_OUT_DEFAULT,
+  RUNTIME_DESCRIPTOR_FILE,
+  genTypesViaCli,
+} from "./migrations.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -80,11 +85,28 @@ function isUnderMigrationsDir(file: string, migrationsAbs: string): boolean {
  *
  * Dev always WRITES (no `--check` drift gate; that is a CI/build concern).
  */
+function readGeneratedRuntimeDescriptor(
+  root: string,
+  migrations: DevServerOptions["migrations"],
+): string | undefined {
+  const descriptorPath = resolve(
+    root,
+    migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT,
+    RUNTIME_DESCRIPTOR_FILE,
+  );
+  try {
+    const json = readFileSync(descriptorPath, "utf8").trim();
+    return json.length > 0 ? json : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function regenTypesDev(
   root: string,
   migrations: DevServerOptions["migrations"],
   warnedNoBinaryRef: { value: boolean }
-): void {
+): string | undefined {
   try {
     const result = genTypesViaCli({
       root,
@@ -109,6 +131,7 @@ function regenTypesDev(
     // Dev: never throw — a malformed migration must not take down the server.
     console.error(`[zeroship] gen-types failed (dev): ${(e as Error).message}`);
   }
+  return readGeneratedRuntimeDescriptor(root, migrations);
 }
 
 function writeJson(
@@ -266,6 +289,8 @@ export function devServerPlugin(
   // to ONCE per dev-server lifetime.
   let migrationsAbs: string | null = null;
   const warnedNoBinary = { value: false };
+  let runtimeDescriptorJson: string | undefined;
+  let pendingRuntimeDescriptorJson: string | null | undefined;
 
   // Accumulates file paths changed since the last HMR poll. The V8 runtime
   // polls GET /__zeroship_hmr_check every 500ms via setInterval + fetch().
@@ -320,7 +345,7 @@ export function devServerPlugin(
         // server was down (`hotUpdate` only fires on a *subsequent* change, so
         // without this a fresh `pnpm dev` leaves env.db.ts stale). Fire-and-forget
         // — `regenTypesDev` logs on error and NEVER throws.
-        regenTypesDev(root, options.migrations, warnedNoBinary);
+        runtimeDescriptorJson = regenTypesDev(root, options.migrations, warnedNoBinary);
       }
 
       // 1. Module fetch endpoint ─────────────────────────────────────────
@@ -429,9 +454,19 @@ export function devServerPlugin(
 
           const changed = [...pendingHmrChanges];
           pendingHmrChanges.clear();
+          const descriptorJson = pendingRuntimeDescriptorJson;
+          pendingRuntimeDescriptorJson = undefined;
+
+          const payload: {
+            changed: string[];
+            runtimeDescriptorJson?: string | null;
+          } = { changed };
+          if (descriptorJson !== undefined) {
+            payload.runtimeDescriptorJson = descriptorJson;
+          }
 
           res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({ changed }));
+          res.end(JSON.stringify(payload));
         }
       );
 
@@ -513,11 +548,6 @@ export function devServerPlugin(
           );
           logDatabaseUrlSource(source, databaseUrl);
 
-          // Stage 5c: schema discovery is unified — dev-bootstrap
-          // reads `mod.default.schema` lazily on first request (via
-          // `maybeRegisterSchema`). No more split-file env-var path;
-          // the entry-default convention is the only path.
-
           const childEnv: NodeJS.ProcessEnv = {
             ...dotenvVars,
             ...process.env,
@@ -525,6 +555,9 @@ export function devServerPlugin(
             [ENV_DEV]: "1",
             [ENV_VITE_ORIGIN]: `http://localhost:${vitePort}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
+            ...(runtimeDescriptorJson !== undefined
+              ? { [ENV_RUNTIME_DESCRIPTOR]: runtimeDescriptorJson }
+              : {}),
             // Dev-tier auth: when enabled, hand the child the dev-user config +
             // the cookie HMAC secret. The runtime's `dev_auth.rs` reads the
             // secret to verify the `__zeroship_dev_session` cookie → server-side
@@ -674,7 +707,8 @@ export function devServerPlugin(
       // regenerates the typed `env.db` surface. Fire-and-forget — the helper
       // logs on error and NEVER throws (a bad migration must not crash dev).
       if (migrationsAbs != null && isUnderMigrationsDir(file, migrationsAbs)) {
-        regenTypesDev(root, options.migrations, warnedNoBinary);
+        runtimeDescriptorJson = regenTypesDev(root, options.migrations, warnedNoBinary);
+        pendingRuntimeDescriptorJson = runtimeDescriptorJson ?? null;
         // Don't return — a migration `.ts` is still a `.ts`; fall through to the
         // HMR-queue path below so the runtime re-fetches if it imported one.
       }

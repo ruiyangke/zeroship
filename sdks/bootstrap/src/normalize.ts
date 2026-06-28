@@ -1,8 +1,8 @@
 /**
- * Turn a user module namespace into the standard `{ schema, fetch, rpc }`
- * shape the runtime expects. Used by `dev-entry.ts` (and indirectly by
- * the Vite plugin's synthetic SSR entry, which emits equivalent inline
- * code — see `sdks/vite-plugin/src/rpc-registry.ts`).
+ * Turn a user module namespace into the standard `{ fetch, rpc }` shape
+ * the runtime expects. Used by `dev-entry.ts` (and indirectly by the Vite
+ * plugin's synthetic SSR entry, which emits equivalent inline code — see
+ * `sdks/vite-plugin/src/rpc-registry.ts`).
  *
  * Resolution order — `rpc` dict:
  *   1. `mod.default.rpc` (if a plain object) is the base — passed
@@ -20,7 +20,6 @@
  */
 
 export interface NormalizedUserModule {
-  schema: unknown;
   fetch:
     | ((request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response)
     | undefined;
@@ -36,7 +35,7 @@ export interface NormalizedUserModule {
 }
 
 /**
- * Build a normalized `{ schema, fetch, rpc, userDefault }` view of the
+ * Build a normalized `{ fetch, rpc, userDefault }` view of the
  * user's module namespace. Optionally merges a caller-supplied
  * registry of `wireId → handler` last; the dev path uses this to honour
  * the transform's `__register` side-effects on top of the namespace
@@ -90,7 +89,6 @@ export function normalizeUserModule(
         : undefined;
 
   return {
-    schema: userDefault?.schema,
     fetch,
     rpc,
     userDefault,

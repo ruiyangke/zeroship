@@ -110,9 +110,8 @@ interface Manifest {
    * staged as a blob. `undefined` when the app ships no migrations / no
    * descriptor. Mirrors the Rust `bundle::manifest::RuntimeDescriptorEntry`.
    *
-   * **P4a is purely additive — nothing reads it yet.** It only gives the
-   * `.zship` the capacity to carry the descriptor so P4b can flip the runtime
-   * from `default.schema` to this artifact.
+   * The runtime/worker path reads this descriptor and exposes it as
+   * `globalThis.__zsRuntimeDescriptor` for bootstrap schema install.
    */
   runtime_descriptor?: RuntimeDescriptorEntry;
 }
@@ -502,8 +501,8 @@ export async function emitZship(
     //     migration set; the packer reads it VERBATIM, stages it as a content
     //     blob (deduped by hash, exactly like a migration), and records
     //     `manifest.runtime_descriptor = { hash }`. Absent (no migrations / not
-    //     yet generated) → the slot is left undefined; pack still succeeds. P4a
-    //     is purely additive: nothing reads this slot yet (P4b flips the runtime).
+    //     yet generated) → the slot is left undefined; pack still succeeds and
+    //     the runtime installs no schema.
     const genTypesOut = options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT;
     const descriptorPath = resolve(root, genTypesOut, RUNTIME_DESCRIPTOR_FILE);
     let descriptorBytes: Buffer | undefined;
@@ -519,13 +518,6 @@ export async function emitZship(
       log(`bundled runtime schema descriptor (${RUNTIME_DESCRIPTOR_FILE})`);
     }
   }
-
-  // Stage 5c: `manifest.exports.schema` is no longer written. The
-  // runtime reads `user.default.schema` off the loaded entry directly
-  // (see `crates/runtime/src/bootstrap/db_init.js`). The field stays
-  // on the Rust wire type (`crates/bundle/src/manifest.rs`) as
-  // deprecated-but-deserialisable for graceful upgrade of older
-  // archives.
 
   // 9. Validate cross-references. Catches bugs where a manifest hash
   //    doesn't have a matching tar entry (which would 400 on the server).

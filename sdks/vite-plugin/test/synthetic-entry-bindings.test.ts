@@ -73,7 +73,7 @@ describe("buildServerEntrySource — binding-fed emission", () => {
     assert.match(code, /"b1":\s*_user_TARGET_1_\.b1/);
   });
 
-  test("default export shape carries schema + fetch + dict-shape rpc", () => {
+  test("default export shape carries fetch + dict-shape rpc only", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
@@ -81,7 +81,10 @@ describe("buildServerEntrySource — binding-fed emission", () => {
       ]),
     });
     // Dict-shape — `rpc` is the `_zsRpc` OBJECT, not a function call.
-    assert.match(code, /export default \{[\s\S]*schema:[\s\S]*fetch:[\s\S]*rpc:\s*_zsRpc/);
+    assert.match(code, /export default \{[\s\S]*fetch:[\s\S]*rpc:\s*_zsRpc/);
+    assert.doesNotMatch(code, /\bschema:\s*/);
+    assert.doesNotMatch(code, /__zsDeclaredSchema/);
+    assert.doesNotMatch(code, /_zsUserDefault\.schema/);
   });
 
   test("user fetch fall-through is shaped through default.fetch", () => {

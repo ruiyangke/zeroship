@@ -5,8 +5,8 @@
  * validation, capability frame, stream framing, output
  * validation) lives in the runtime's `__zsDispatch`
  * (`crates/runtime/src/bootstrap/rpc_dispatch.js`). The plugin only
- * shapes the user module into `default = { schema?, fetch?, rpc? }`
- * where `rpc` is a PLAIN OBJECT (dict-shape).
+ * shapes the user module into `default = { fetch, rpc }` where `rpc`
+ * is a PLAIN OBJECT (dict-shape).
  *
  * These tests verify:
  *   - resolveId returns the resolved id for the synthetic entry
@@ -53,6 +53,13 @@ function bindingMap(rows: Array<Partial<ServerBinding>>): Map<string, ServerBind
   return out;
 }
 
+function assertNoSchemaCarrier(code: string): void {
+  assert.doesNotMatch(code, /__zsDeclaredSchema/);
+  assert.doesNotMatch(code, /_zsUserDefault\.schema/);
+  assert.doesNotMatch(code, /globalThis\.__zsRuntimeDescriptor/);
+  assert.doesNotMatch(code, /\bschema:\s*/);
+}
+
 describe("rpcRegistryPlugin — resolveId / load", () => {
   function callResolveId(plugin: ReturnType<typeof rpcRegistryPlugin>, id: string): unknown {
     const fn = plugin.resolveId as (id: string) => unknown;
@@ -94,22 +101,12 @@ describe("rpcRegistryPlugin — resolveId / load", () => {
     const code = callLoad(plugin, SERVER_ENTRY_RESOLVED_ID) as string;
     assert.equal(typeof code, "string");
     assert.match(code, /import \* as _zsUser from "\/proj\/src\/server\.ts"/);
-    // The new normaliser shape: dict-shape `default.rpc` + schema +
-    // fetch keys on the default object.
+    // Descriptor-only normaliser shape: dict-shape `default.rpc` +
+    // fetch handler, with no schema carrier.
     assert.match(code, /export default \{/);
-    // **Migration-first cutover (P4b)** — the entry exposes `_zsSchema`, which
-    // prefers the runtime-injected RuntimeSchemaDescriptor over the declared
-    // `default.schema`. (Pre-P4b the entry hard-wired `_zsUserDefault.schema`.)
-    assert.match(code, /schema:\s*_zsSchema/);
-    assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
-    assert.match(code, /_zsSchema\s*=[\s\S]*_zsUserDefault\.schema/);
+    assert.match(code, /fetch:\s*_zsFetchHandler/);
     assert.match(code, /rpc:\s*_zsRpc/);
-    // **P4b review fix (MED)** — `_zsSchema` is the descriptor when one is
-    // bundled (field-only, no collection-level options). The entry MUST also
-    // forward the ORIGINAL declared schema as `__zsDeclaredSchema` so the
-    // runtime-entry can recover softDelete / versioning / indexes. Pre-fix this
-    // carrier did not exist, so the runtime silently dropped those options.
-    assert.match(code, /__zsDeclaredSchema:\s*_zsUserDefault\.schema/);
+    assertNoSchemaCarrier(code);
   });
 
   test("load returns null for unrelated ids", () => {
@@ -155,17 +152,14 @@ describe("buildServerEntrySource — dict-shape normaliser (namespace-walk)", ()
     assert.match(code, /typeof _zsTopLevelFetch === "function"/);
   });
 
-  test("default export shape: { schema, fetch, rpc }", () => {
+  test("default export shape: { fetch, rpc }", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
     });
     // Dict-shape — `rpc` is the _zsRpc OBJECT, not a function call.
-    // P4b — schema is `_zsSchema` (descriptor-preferred), not the raw
-    // `_zsUserDefault.schema`.
-    assert.match(code, /schema:\s*_zsSchema/);
-    assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
     assert.match(code, /fetch:\s*_zsFetchHandler/);
     assert.match(code, /rpc:\s*_zsRpc/);
+    assertNoSchemaCarrier(code);
   });
 
   test("default.rpc is an object literal, NOT a function expression", () => {
@@ -213,6 +207,9 @@ describe("buildServerEntrySource — forbidden helpers (Stage 5b cleanup)", () =
     "Vercel AI-SDK Data Stream",
     "_zsRegister",
     "__zsRegister",
+    "__zsDeclaredSchema",
+    "_zsUserDefault.schema",
+    "__zsRuntimeDescriptor",
     "_rpc-registry",
     "_installSchema",               // Stage-6 legacy (also forbid the new name)
     "installSchema",
@@ -317,7 +314,7 @@ describe("buildServerEntrySource — Phase-2 (binding-fed) shape", () => {
     assert.doesNotMatch(code, /import \* as _user_TARGET_\d+_ from "\/proj\/src\/lazy\.ts"/);
   });
 
-  test("default export shape on the Phase-2 entry: { schema, fetch, rpc }", () => {
+  test("default export shape on the Phase-2 entry: { fetch, rpc }", () => {
     const code = buildServerEntrySource({
       userEntryRel: "/proj/src/server.ts",
       bindings: bindingMap([
@@ -325,14 +322,9 @@ describe("buildServerEntrySource — Phase-2 (binding-fed) shape", () => {
       ]),
     });
     assert.match(code, /export default \{/);
-    // P4b — descriptor-preferred schema on the Phase-2 entry too.
-    assert.match(code, /schema:\s*_zsSchema/);
-    assert.match(code, /globalThis\.__zsRuntimeDescriptor/);
     assert.match(code, /fetch:\s*_zsFetch/);
     assert.match(code, /rpc:\s*_zsRpc/);
-    // **P4b review fix (MED)** — the original declared schema carrier for
-    // collection-level option recovery (see the namespace-walk entry).
-    assert.match(code, /__zsDeclaredSchema:\s*_zsUserDefault\.schema/);
+    assertNoSchemaCarrier(code);
   });
 
   test("user dict-shape default.rpc merges with binding-derived entries", () => {
@@ -449,7 +441,7 @@ export function createFetchHandler(loadNormalized) {
       await writeFile(entryPath, entry, "utf8");
 
       const mod = (await import(pathToFileURL(entryPath).href)) as {
-        default: { rpc: Record<string, Function>; fetch: Function; schema: unknown };
+        default: { rpc: Record<string, Function>; fetch: Function; schema?: unknown };
       };
       const def = mod.default;
       // rpc is a plain object, not a function.
@@ -459,11 +451,65 @@ export function createFetchHandler(loadNormalized) {
       assert.equal(typeof def.rpc.ping, "function");
       // fn.config.id wins.
       assert.equal(typeof def.rpc["math.double"], "function");
-      // schema surfaces.
-      assert.deepEqual(def.schema, { todos: {} });
+      // schema does not surface through the generated entry.
+      assert.equal("schema" in def, false);
       // fetch surfaces.
       assert.equal(typeof def.fetch, "function");
     } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("descriptor-present app is unaffected by a throwing default.schema getter", async () => {
+    const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { pathToFileURL } = await import("node:url");
+
+    await mkdir(workspaceTmpRoot, { recursive: true });
+    const dir = await mkdtemp(join(workspaceTmpRoot, "zsrpc-throwing-schema-"));
+    const g = globalThis as { __zsRuntimeDescriptor?: unknown };
+    const prevDescriptor = g.__zsRuntimeDescriptor;
+    try {
+      await installBootstrapStub(dir);
+      const userPath = join(dir, "user.mjs");
+      await writeFile(
+        userPath,
+        `const def = { fetch: () => new Response("hi") };
+         Object.defineProperty(def, "schema", {
+           get() { throw new Error("default.schema must not be read"); },
+         });
+         export function ping() { return "pong"; }
+         export default def;`,
+        "utf8",
+      );
+
+      g.__zsRuntimeDescriptor = {
+        version: 1,
+        collections: {
+          todos: {
+            fields: { title: { type: "string" } },
+            options: { softDelete: false, versioning: false },
+            indexes: [],
+          },
+        },
+      };
+
+      const entry = buildServerEntrySource({
+        userEntryRel: pathToFileURL(userPath).href,
+      });
+      const entryPath = join(dir, "entry.mjs");
+      await writeFile(entryPath, entry, "utf8");
+
+      const mod = (await import(pathToFileURL(entryPath).href)) as {
+        default: Record<string, unknown>;
+      };
+      assert.equal(typeof mod.default.fetch, "function");
+      assert.equal(typeof mod.default.rpc, "object");
+      assert.equal("schema" in mod.default, false);
+      assert.equal("__zsDeclaredSchema" in mod.default, false);
+    } finally {
+      if (prevDescriptor === undefined) delete g.__zsRuntimeDescriptor;
+      else g.__zsRuntimeDescriptor = prevDescriptor;
       await rm(dir, { recursive: true, force: true });
     }
   });

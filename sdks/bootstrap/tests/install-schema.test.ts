@@ -160,10 +160,15 @@ describe("normalizeUserModule — minimal smoke", () => {
     assert.equal(out2.fetch, fetchFn);
   });
 
-  test("surfaces schema from default.schema", () => {
-    const mod = { default: { schema: { todos: {} } } };
-    const out = normalizeUserModule(mod);
-    assert.deepEqual(out.schema, { todos: {} });
+  test("does not read or surface default.schema", () => {
+    const def: Record<string, unknown> = {};
+    Object.defineProperty(def, "schema", {
+      get() {
+        throw new Error("default.schema must not be read");
+      },
+    });
+    const out = normalizeUserModule({ default: def });
+    assert.equal("schema" in out, false);
   });
 });
 

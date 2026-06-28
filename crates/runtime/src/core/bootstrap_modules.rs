@@ -4,7 +4,7 @@
 //!
 //! The runtime splices `runtime-entry.js` into the bootstrap `index.js`
 //! it wraps every app with (see `core::init::BOOTSTRAP_JS`). During module
-//! evaluation that entry runs, for any app declaring a `default.schema`:
+//! evaluation that entry runs for any app carrying a runtime schema descriptor:
 //!
 //! ```js
 //! const sdk = await import("@zeroship/bootstrap/install-schema");

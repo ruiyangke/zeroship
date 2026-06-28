@@ -189,10 +189,9 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   }
 
   async function registerSchema(_mod: unknown): Promise<void> {
-    // **Migration-first cutover (P5 S3)** — dev also installs from the generated
-    // RuntimeSchemaDescriptor only. S4 wires the Vite dev server to inject that
-    // descriptor consistently; until then an absent descriptor is treated as a
-    // schema-less app rather than falling back to `default.schema`.
+    // **Migration-first cutover (P5 S4)** — dev installs from the generated
+    // RuntimeSchemaDescriptor the Vite dev server injects. An absent descriptor
+    // is a schema-less app.
     const descriptor = (globalThis as unknown as {
       __zsRuntimeDescriptor?: Record<string, unknown>;
     }).__zsRuntimeDescriptor;

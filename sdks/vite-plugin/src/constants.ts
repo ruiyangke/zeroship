@@ -8,6 +8,7 @@ export const HMR_POLL_PATH = "/__zeroship_hmr_check";
 export const ENV_DEV = "ZEROSHIP_DEV";
 export const ENV_VITE_ORIGIN = "ZEROSHIP_VITE_ORIGIN";
 export const ENV_ENTRY = "ZEROSHIP_ENTRY";
+export const ENV_RUNTIME_DESCRIPTOR = "ZEROSHIP_RUNTIME_DESCRIPTOR";
 
 /**
  * Dev-tier auth env vars passed to the spawned `zeroship serve` child.

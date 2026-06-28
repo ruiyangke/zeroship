@@ -37,9 +37,9 @@ pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<St
 ///
 /// Returns `None` when:
 ///   - the manifest carries no `runtime_descriptor` (app ships no
-///     migrations — the bootstrap entry falls back to `default.schema`), or
-///   - the blob read / UTF-8 decode fails (degrade to the fallback rather
-///     than failing the load; ingest already asserted the blob was present).
+///     migrations — the bootstrap entry installs no schema), or
+///   - the blob read / UTF-8 decode fails (schema-less for now; S6 promotes
+///     corrupt descriptors to hard load errors).
 pub(crate) async fn runtime_descriptor_json(
     manifest: &Manifest,
     blob_store: &Arc<dyn BlobStore>,
@@ -53,7 +53,7 @@ pub(crate) async fn runtime_descriptor_json(
                 tracing::warn!(
                     app_id = %app_id,
                     error = %e,
-                    "worker-sync: runtime_descriptor blob is not UTF-8; falling back to default.schema"
+                    "worker-sync: runtime_descriptor blob is not UTF-8; loading schema-less app"
                 );
                 None
             }
@@ -62,7 +62,7 @@ pub(crate) async fn runtime_descriptor_json(
             tracing::warn!(
                 app_id = %app_id,
                 error = %e,
-                "worker-sync: runtime_descriptor blob fetch failed; falling back to default.schema"
+                "worker-sync: runtime_descriptor blob fetch failed; loading schema-less app"
             );
             None
         }
@@ -323,8 +323,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
 
                             // Resolve the bundled RuntimeSchemaDescriptor (if
                             // any) so the runtime sources the schema from the
-                            // migration fold (P4b). Absent → default.schema
-                            // fallback.
+                            // migration fold. Absent → schema-less app.
                             let descriptor_json = match info.manifest.as_ref() {
                                 Some(m) => {
                                     runtime_descriptor_json(m, &config.blob_store, local_id).await

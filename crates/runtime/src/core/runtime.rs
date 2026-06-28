@@ -489,8 +489,8 @@ pub struct RuntimeBuilder {
     /// `RuntimeSchemaDescriptor` JSON the worker resolves from
     /// `manifest.runtime_descriptor`'s blob.
     /// Exposed to JS as `globalThis.__zsRuntimeDescriptor` so the bootstrap
-    /// entry sources the schema from the migration fold. `None` for apps
-    /// without a descriptor (transitional `default.schema` fallback).
+    /// entry sources the schema from the migration fold. `None` means the app
+    /// is schema-less.
     runtime_descriptor: Option<String>,
 }
 
@@ -594,7 +594,7 @@ impl RuntimeBuilder {
     /// **Migration-first cutover (P4b/P5 S2)** — set the bundled
     /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`). Exposed to JS
     /// as `globalThis.__zsRuntimeDescriptor`; the bootstrap entry installs
-    /// the schema from it instead of `user.default.schema` when present.
+    /// the schema from it when present.
     pub fn runtime_descriptor(mut self, descriptor: Option<String>) -> Self {
         self.runtime_descriptor = descriptor;
         self

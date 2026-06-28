@@ -413,11 +413,9 @@ export function buildPlugin(
     // relative specifiers don't anchor to anything sensible.
     const userEntryRel = entry.replace(/\\/g, "/");
 
-    // Stage 5c: schema discovery runs in the runtime bootstrap and
-    // reads `user.default.schema` directly off the loaded entry. The
-    // synthetic entry already re-exports `_zsUserDefault.schema` on
-    // its own `default.schema` (Stage 5b normaliser). No
-    // `manifest.exports.schema` field is written; no resolver runs.
+    // Descriptor-only schema install: the SSR bundle never carries a
+    // schema side channel. The generated `schema.runtime.json` descriptor
+    // is packed into `manifest.runtime_descriptor` below.
 
     const ssrConfig = buildSsrInlineConfig({
       root,
@@ -714,11 +712,6 @@ export function buildPlugin(
           procedures,
           mode: viteMode,
         });
-
-        // Stage 5c: schema lives on the synthetic entry's
-        // `default.schema` (passed through from the user module). The
-        // runtime reads it directly at boot — no
-        // `manifest.exports.schema` field, no resolver, no log line.
 
         await emitZship({
           root,

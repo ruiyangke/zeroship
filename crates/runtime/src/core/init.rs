@@ -2046,8 +2046,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // here and expose the resulting v1 `{ version, collections }` descriptor as
     // a global so `@zeroship/bootstrap`'s entry sources the schema from the
     // migration fold. Absent (`None`) means schema-less app.
-    // S6 promotes parse failure to a hard boot error; S3 logs and skips install,
-    // but never falls back to `default.schema`.
+    // S6 promotes parse failure to a hard boot error; S4 logs and skips install.
     {
         let descriptor_json = {
             let state: crate::state::SharedState = scope

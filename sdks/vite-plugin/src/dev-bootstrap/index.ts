@@ -26,6 +26,7 @@ import { createRunner } from "./transport";
 import type { ModuleRunner } from "vite/module-runner";
 import { devEntry } from "@zeroship/bootstrap/dev";
 import {
+  ENV_RUNTIME_DESCRIPTOR,
   ENV_VITE_ORIGIN,
   HMR_POLL_PATH,
 } from "../constants.js";
@@ -51,6 +52,41 @@ const registry = createDevRpcRegistry();
 };
 (globalThis as Record<string, unknown>).__lookup = (name: string) =>
   registry.registry.get(name);
+
+function applyRuntimeDescriptorJson(
+  json: string | null | undefined,
+  source: string,
+): void {
+  const g = globalThis as {
+    __zsRuntimeDescriptor?: Record<string, unknown>;
+  };
+
+  if (json == null || json.trim() === "") {
+    delete g.__zsRuntimeDescriptor;
+    return;
+  }
+
+  try {
+    const parsed = JSON.parse(json);
+    if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      g.__zsRuntimeDescriptor = parsed as Record<string, unknown>;
+      return;
+    }
+    console.error(`[zeroship:dev] ignored ${source} runtime descriptor: expected JSON object`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[zeroship:dev] ignored ${source} runtime descriptor: ${msg}`);
+  }
+
+  delete g.__zsRuntimeDescriptor;
+}
+
+const initialRuntimeDescriptorJson = (globalThis as {
+  process?: { env?: Record<string, string | undefined> };
+}).process?.env?.[ENV_RUNTIME_DESCRIPTOR];
+if (initialRuntimeDescriptorJson !== undefined) {
+  applyRuntimeDescriptorJson(initialRuntimeDescriptorJson, "boot");
+}
 
 async function getRunner(): Promise<ModuleRunner> {
   if (runner) return runner;
@@ -143,6 +179,10 @@ function ensureHmrPollStarted() {
       for (const file of files) {
         registry.pruneModule(file);
       }
+    },
+    (runtimeDescriptorJson) => {
+      applyRuntimeDescriptorJson(runtimeDescriptorJson, "HMR");
+      entry.resetSchemaInstalled();
     },
   );
 

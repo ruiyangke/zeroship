@@ -552,8 +552,8 @@ pub struct RuntimeState {
     /// it here through `RuntimeBuilder::runtime_descriptor`. `setup_globals`
     /// parses it and exposes it to JS as `globalThis.__zsRuntimeDescriptor` so
     /// `@zeroship/bootstrap`'s entry sources the schema from the migration fold
-    /// instead of `user.default.schema`. `None` for apps that ship no
-    /// migrations/descriptor (the transitional `default.schema` fallback).
+    /// when present. `None` for apps that ship no migrations/descriptor; those
+    /// apps install no schema.
     pub runtime_descriptor: Option<String>,
 
     /// User-controlled `vars` half of the EnvSnapshot. Plaintext. Always

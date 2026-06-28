@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createServer, type ViteDevServer } from "vite";
 
 import {
+  ENV_RUNTIME_DESCRIPTOR,
   HMR_POLL_PATH,
   MODULE_FETCH_PATH,
 } from "../src/constants.js";
@@ -44,6 +45,7 @@ interface RuntimeLog {
     DATABASE_URL?: string;
     ZEROSHIP_DEV?: string;
     ZEROSHIP_ENTRY?: string;
+    ZEROSHIP_RUNTIME_DESCRIPTOR?: string;
     ZEROSHIP_VITE_ORIGIN?: string;
   };
 }
@@ -234,6 +236,82 @@ describe("devServerPlugin", () => {
     assert.equal(process.listenerCount("SIGTERM"), beforeSigtermListeners);
   });
 
+  test("injects the generated runtime descriptor into the spawned dev runtime", async () => {
+    const descriptor = JSON.stringify({
+      version: 1,
+      collections: {
+        todos: {
+          fields: { title: { type: "string" } },
+          options: { softDelete: false, versioning: false },
+          indexes: [],
+        },
+      },
+    });
+    const harness = await startHarness({
+      devServerPort: 3904,
+      migrations: { descriptorJson: descriptor },
+    });
+    try {
+      const runtime = await harness.runtimeLog();
+      assert.deepEqual(
+        JSON.parse(runtime.env.ZEROSHIP_RUNTIME_DESCRIPTOR ?? "null"),
+        JSON.parse(descriptor),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  test("migration hot-update regenerates and re-injects the runtime descriptor", async () => {
+    const firstDescriptor = JSON.stringify({
+      version: 1,
+      collections: {
+        todos: {
+          fields: { title: { type: "string" } },
+          options: { softDelete: false, versioning: false },
+          indexes: [],
+        },
+      },
+    });
+    const secondDescriptor = JSON.stringify({
+      version: 1,
+      collections: {
+        notes: {
+          fields: { body: { type: "string" } },
+          options: { softDelete: true, versioning: false },
+          indexes: [],
+        },
+      },
+    });
+    const harness = await startHarness({
+      devServerPort: 3905,
+      migrations: { descriptorJson: firstDescriptor },
+    });
+    try {
+      const migrationFile = resolve(harness.root, "migrations/20240617123000_notes.ts");
+      process.env.ZSTUB_DESCRIPTOR = secondDescriptor;
+      await fs.writeFile(migrationFile, "export function up() { return 'changed'; }\n");
+      await harness.queueHmrChange(migrationFile);
+
+      const resp = await fetch(`${harness.origin}${HMR_POLL_PATH}`);
+      assert.equal(resp.status, 200);
+      const payload = await resp.json() as {
+        changed?: string[];
+        runtimeDescriptorJson?: string | null;
+      };
+      assert.ok(
+        payload.changed?.includes(migrationFile),
+        `expected HMR payload to include ${migrationFile}`,
+      );
+      assert.deepEqual(
+        JSON.parse(payload.runtimeDescriptorJson ?? "null"),
+        JSON.parse(secondDescriptor),
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
   test("prefers DATABASE_URL from the parent environment over .env", async () => {
     const harness = await startHarness({
       dotenv: "DATABASE_URL=postgres://dotenv-user:secret@dotenv-host/dotenv-db\n",
@@ -276,6 +354,9 @@ async function startHarness(options: {
   dotenv?: string;
   parentDatabaseUrl?: string;
   devServerPort?: number;
+  migrations?: {
+    descriptorJson: string;
+  };
 } = {}): Promise<Harness> {
   const root = await fs.mkdtemp(join(tmpdir(), "zs-vite-dev-server-"));
   const serverEntry = resolve(root, "src/server.ts");
@@ -283,7 +364,9 @@ async function startHarness(options: {
   const runtimeCountPath = resolve(root, ".zeroship-runtime.count");
   const runtimeStopPath = resolve(root, ".zeroship-runtime.stopped");
   const childScriptPath = resolve(root, "node_modules/.bin/zeroship");
+  const migrateCliPath = resolve(root, "node_modules/.bin/zeroship-migrate-js");
   const previousDatabaseUrl = process.env.DATABASE_URL;
+  const previousStubDescriptor = process.env.ZSTUB_DESCRIPTOR;
 
   await fs.mkdir(dirname(serverEntry), { recursive: true });
   await fs.mkdir(dirname(childScriptPath), { recursive: true });
@@ -307,6 +390,30 @@ async function startHarness(options: {
   await fs.writeFile(resolve(root, "index.html"), "<!doctype html><html><body></body></html>\n");
   if (options.dotenv) {
     await fs.writeFile(resolve(root, ".env"), options.dotenv);
+  }
+  if (options.migrations) {
+    process.env.ZSTUB_DESCRIPTOR = options.migrations.descriptorJson;
+    await fs.mkdir(resolve(root, "migrations"), { recursive: true });
+    await fs.writeFile(
+      resolve(root, "migrations/20240617123000_notes.ts"),
+      "export function up() {}\n",
+    );
+    await fs.writeFile(
+      migrateCliPath,
+      [
+        "#!/usr/bin/env node",
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        "const args = process.argv.slice(2);",
+        "if (args[0] !== 'gen-types') { process.stderr.write('bad command'); process.exit(2); }",
+        "const out = args[args.indexOf('--out') + 1];",
+        "fs.mkdirSync(out, { recursive: true });",
+        "fs.writeFileSync(path.join(out, 'env.db.ts'), '// stub env.db.ts\\n');",
+        "fs.writeFileSync(path.join(out, 'schema.runtime.json'), process.env.ZSTUB_DESCRIPTOR + '\\n');",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
   }
   await fs.writeFile(
     childScriptPath,
@@ -332,6 +439,7 @@ async function startHarness(options: {
       "    DATABASE_URL: process.env.DATABASE_URL,",
       "    ZEROSHIP_DEV: process.env.ZEROSHIP_DEV,",
       "    ZEROSHIP_ENTRY: process.env.ZEROSHIP_ENTRY,",
+      "    ZEROSHIP_RUNTIME_DESCRIPTOR: process.env.ZEROSHIP_RUNTIME_DESCRIPTOR,",
       "    ZEROSHIP_VITE_ORIGIN: process.env.ZEROSHIP_VITE_ORIGIN,",
       "  },",
       "}, null, 2));",
@@ -362,6 +470,15 @@ async function startHarness(options: {
     {
       devServerPort: options.devServerPort ?? 3901,
       serverEntry,
+      ...(options.migrations
+        ? {
+            migrations: {
+              cliPath: migrateCliPath,
+              dir: "migrations",
+              genTypesOut: "generated/zeroship",
+            },
+          }
+        : {}),
     },
     state,
   );
@@ -420,10 +537,10 @@ async function startHarness(options: {
           });
         }
         if (cleanup) {
-          await cleanupRoot(root, previousDatabaseUrl);
+          await cleanupRoot(root, previousDatabaseUrl, previousStubDescriptor);
         }
       },
-      cleanup: async () => cleanupRoot(root, previousDatabaseUrl),
+      cleanup: async () => cleanupRoot(root, previousDatabaseUrl, previousStubDescriptor),
       queueHmrChange: async (file = serverEntry) => {
         await devServerPluginImpl.hotUpdate!({ file } as any);
       },
@@ -432,16 +549,25 @@ async function startHarness(options: {
     if (server) {
       await server.close().catch(() => {});
     }
-    await cleanupRoot(root, previousDatabaseUrl);
+    await cleanupRoot(root, previousDatabaseUrl, previousStubDescriptor);
     throw error;
   }
 }
 
-async function cleanupRoot(root: string, previousDatabaseUrl: string | undefined): Promise<void> {
+async function cleanupRoot(
+  root: string,
+  previousDatabaseUrl: string | undefined,
+  previousStubDescriptor: string | undefined,
+): Promise<void> {
   if (previousDatabaseUrl === undefined) {
     delete process.env.DATABASE_URL;
   } else {
     process.env.DATABASE_URL = previousDatabaseUrl;
+  }
+  if (previousStubDescriptor === undefined) {
+    delete process.env.ZSTUB_DESCRIPTOR;
+  } else {
+    process.env.ZSTUB_DESCRIPTOR = previousStubDescriptor;
   }
   await fs.rm(root, { recursive: true, force: true });
 }

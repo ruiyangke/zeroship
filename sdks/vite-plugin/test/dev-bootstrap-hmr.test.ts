@@ -121,4 +121,25 @@ describe("dev-bootstrap HMR", () => {
     assert.deepEqual(pruned, [["/app/src/server.ts"]]);
     assert.deepEqual(runner.invalidated, ["/app/src/server.ts"]);
   });
+
+  test("poll applies runtime descriptor updates before returning", async () => {
+    const updates: Array<string | null> = [];
+
+    const invalidated = await pollHmrChanges({
+      pollUrl: "http://vite.test/__zeroship_hmr_check",
+      getCurrentRunner: () => null,
+      fetchImpl: async () => ({
+        async json() {
+          return {
+            changed: [],
+            runtimeDescriptorJson: '{"version":1,"collections":{}}',
+          };
+        },
+      } as Response),
+      onRuntimeDescriptorJson: (json) => updates.push(json),
+    });
+
+    assert.equal(invalidated, 0);
+    assert.deepEqual(updates, ['{"version":1,"collections":{}}']);
+  });
 });

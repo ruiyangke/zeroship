@@ -1236,8 +1236,7 @@ async fn load_on_demand(
         return Err(format!("env parse failed: {e}"));
     }
     // Resolve the bundled RuntimeSchemaDescriptor (if any) so the runtime
-    // sources the schema from the migration fold (P4b). Absent → the
-    // bootstrap entry falls back to default.schema.
+    // sources the schema from the migration fold. Absent → schema-less app.
     let descriptor_json =
         crate::sync::runtime_descriptor_json(manifest, &config.blob_store, app_id).await;
     if !cache::load_app(
