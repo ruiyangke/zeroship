@@ -697,7 +697,8 @@ mod tests {
             let app_id = Uuid::new_v4();
             let runtime = test_net_runtime();
             let state = runtime.state();
-            let socket_id = zeroship_runtime::node::net::state::alloc_native_socket_id(&state);
+            let socket_id = zeroship_runtime::node::net::state::alloc_native_socket_id(&state)
+                .expect("alloc test socket id");
             zeroship_runtime::node::net::state::reserve_socket_slot(&state, socket_id)
                 .expect("reserve test socket slot");
             assert_eq!(runtime.active_native_socket_count(), 1);
