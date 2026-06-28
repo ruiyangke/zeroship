@@ -568,6 +568,26 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
+        Op::Insert { table, rows, on_conflict, .. } => {
+            let scope = TargetScope::structural_only(table);
+            for row in rows {
+                for value in row {
+                    if let crate::model::ir::IrValue::Expr(expr) = value {
+                        validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                    }
+                }
+            }
+            if let Some(on_conflict) = on_conflict {
+                if let Some(do_update) = &on_conflict.do_update {
+                    for value in do_update.values() {
+                        if let crate::model::ir::IrValue::Expr(expr) = value {
+                            validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
         Op::DropIndex { name, table, .. } => {
             // §8.6 fail-closed (HIGH): a DropIndex carries an index `name` and an
             // OPTIONAL owning-table hint. The ownership gate
@@ -784,7 +804,6 @@ pub fn validate_op_scoped(
         | Op::AlterSequence { .. }
         | Op::DropSequence { .. }
         | Op::Comment { .. }
-        | Op::Insert { .. }
         | Op::CreateSchema { .. }
         | Op::DropSchema { .. }
         | Op::CreateExtension { .. }
@@ -1504,7 +1523,18 @@ fn validate_trigger_stmt(
     };
 
     match stmt {
-        crate::model::ir::TriggerStmt::Insert { schema, .. } => validate_schema(schema.as_deref()),
+        crate::model::ir::TriggerStmt::Insert { table, rows, schema, .. } => {
+            validate_schema(schema.as_deref())?;
+            let scope = TargetScope::structural_only(table);
+            for row in rows {
+                for value in row {
+                    if let crate::model::ir::IrValue::Expr(expr) = value {
+                        validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                    }
+                }
+            }
+            Ok(())
+        }
         crate::model::ir::TriggerStmt::Update { table, set, r#where, schema } => {
             validate_schema(schema.as_deref())?;
             let scope = TargetScope::structural_only(table);

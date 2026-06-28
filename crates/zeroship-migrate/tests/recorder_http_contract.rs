@@ -35,7 +35,6 @@ fn post_record_returns_ir_provenance_and_checksum() {
         app_id: "app_x".into(),
         schema_types_blob: None,
         name: Some("http_m".into()),
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Ok(resp) => {
@@ -57,7 +56,6 @@ fn missing_bearer_is_401() {
         app_id: "app_x".into(),
         schema_types_blob: None,
         name: None,
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), None, &req) {
         RecordHttpOutcome::Err(e) => {
@@ -75,7 +73,6 @@ fn ownership_mismatch_is_403() {
         app_id: "app_other".into(), // pat_x does not own app_other
         schema_types_blob: None,
         name: None,
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Err(e) => {
@@ -101,7 +98,6 @@ fn authoring_reject_is_422_not_retryable() {
         app_id: "app_x".into(),
         schema_types_blob: None,
         name: None,
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Err(e) => {
@@ -141,7 +137,6 @@ fn up_throw_surfaces_real_error_not_success() {
         app_id: "app_x".into(),
         schema_types_blob: None,
         name: None,
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Err(e) => {
@@ -173,7 +168,6 @@ fn oversized_app_id_is_rejected_before_spawn() {
         app_id: huge_id,
         schema_types_blob: None,
         name: None,
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Err(e) => {
@@ -197,7 +191,6 @@ fn oversized_schema_types_blob_is_rejected_before_spawn() {
         app_id: "app_x".into(),
         schema_types_blob: Some(huge_blob),
         name: None,
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Err(e) => {
@@ -231,7 +224,6 @@ fn oversized_ts_source_is_rejected_before_spawn() {
         app_id: "app_x".into(),
         schema_types_blob: None,
         name: None,
-        determinism_probe_seed: None,
     };
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Err(e) => {

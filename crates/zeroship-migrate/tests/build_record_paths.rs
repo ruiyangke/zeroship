@@ -61,7 +61,6 @@ impl RecorderClient for UnreachableClient {
         _app: &str,
         _name: &str,
         _blob: Option<&str>,
-        _determinism_probe_seed: Option<zeroship_migrate::frontend::DeterminismProbeSeed>,
     ) -> Result<String, StructuredError> {
         Err(StructuredError {
             code: "RECORDER_UNREACHABLE".into(),
@@ -81,7 +80,6 @@ impl RecorderClient for RejectClient {
         _app: &str,
         _name: &str,
         _blob: Option<&str>,
-        _determinism_probe_seed: Option<zeroship_migrate::frontend::DeterminismProbeSeed>,
     ) -> Result<String, StructuredError> {
         Err(StructuredError {
             code: "RECORD_EVAL_ERROR".into(),
@@ -177,34 +175,30 @@ fn local_build_rejects_oversized_source_before_recording() {
 }
 
 #[test]
-fn build_rejects_nondeterministic_date_now_as_hard_error() {
+fn build_allows_date_now_call_with_soft_warning() {
     assert_child_built();
     let dir = tempfile::tempdir().unwrap();
-    let stem = "20240617120000_dirty";
-    let dirty = r#"
+    let stem = "20240617120000_date_now_call";
+    let src = r#"
         import { table } from "@zeroship/migrate";
         export function up() {
           table("events").insert({ rows: [ { created_at: Date.now() } ] });
         }
     "#;
-    write_mig(dir.path(), stem, dirty);
+    write_mig(dir.path(), stem, src);
 
-    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
-        .expect_err("Date.now() must be a hard determinism build error");
-    match err {
-        BuildError::Nondeterministic {
-            accessors,
-            findings,
-            ..
-        } => {
-            assert!(accessors.contains("Date.now"), "accessors: {accessors}");
-            assert!(findings.iter().any(|f| f.accessor.contains("Date.now")));
-        }
-        other => panic!("expected Nondeterministic, got {other:?}"),
-    }
+    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect("Date.now() call evaluates and records");
+    assert_eq!(outcome.migrations.len(), 1);
+    let m = &outcome.migrations[0];
     assert!(
-        !dir.path().join(format!("{stem}.ir.json")).exists(),
-        "nondeterministic source must not write a committed artifact"
+        m.warnings.iter().any(|f| f.accessor.contains("Date.now")),
+        "Date.now() call should surface only a soft advisory warning: {:?}",
+        m.warnings
+    );
+    assert!(
+        dir.path().join(format!("{stem}.ir.json")).exists(),
+        "Date.now() call should still write a committed artifact"
     );
 }
 
@@ -225,7 +219,7 @@ fn date_now_inside_comment_or_string_is_not_a_false_reject() {
     write_mig(dir.path(), stem, clean);
 
     let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
-        .expect("comment/string mentions of nondeterministic APIs must not hard-fail");
+        .expect("comment/string mentions of nondeterministic APIs record normally");
     assert_eq!(outcome.migrations.len(), 1);
     assert!(
         dir.path().join(format!("{stem}.ir.json")).exists(),
@@ -234,101 +228,54 @@ fn date_now_inside_comment_or_string_is_not_a_false_reject() {
 }
 
 #[test]
-fn math_random_in_op_value_is_caught_by_ir_divergence() {
+fn math_random_calls_evaluate_and_do_not_hard_fail() {
     assert_child_built();
     let dir = tempfile::tempdir().unwrap();
-    let stem = "20240617120000_random";
-    let dirty = r#"
+    let stem = "20240617120000_random_calls";
+    let src = r#"
         import { table } from "@zeroship/migrate";
         export function up() {
           const random = Math["random"];
-          table("events").insert({ rows: [ { sample: random() } ] });
-        }
-    "#;
-    write_mig(dir.path(), stem, dirty);
-
-    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
-        .expect_err("Math.random-derived op value must be a hard determinism error");
-    match err {
-        BuildError::Nondeterministic {
-            accessors,
-            differing_path,
-            ..
-        } => {
-            assert!(accessors.contains("Math.random"), "accessors: {accessors}");
-            assert_eq!(differing_path, "$.nondeterminismUsed");
-        }
-        other => panic!("expected Nondeterministic, got {other:?}"),
-    }
-    assert!(
-        !dir.path().join(format!("{stem}.ir.json")).exists(),
-        "nondeterministic source must not write a committed artifact"
-    );
-}
-
-#[test]
-fn math_random_difference_is_caught_by_invocation_not_just_divergence() {
-    assert_child_built();
-    let dir = tempfile::tempdir().unwrap();
-    let stem = "20240617120000_random_difference";
-    let dirty = r#"
-        import { table } from "@zeroship/migrate";
-        export function up() {
           const collapsed = Math.random() - Math.random();
-          table("events").insert({ rows: [ { sample: collapsed } ] });
+          table("events").insert({ rows: [ { sample: random(), collapsed } ] });
         }
     "#;
-    write_mig(dir.path(), stem, dirty);
+    write_mig(dir.path(), stem, src);
 
-    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
-        .expect_err("Math.random() - Math.random() must be caught by invocation");
-    match err {
-        BuildError::Nondeterministic {
-            accessors,
-            differing_path,
-            ..
-        } => {
-            assert!(accessors.contains("Math.random"), "accessors: {accessors}");
-            assert_eq!(differing_path, "$.nondeterminismUsed");
-        }
-        other => panic!("expected Nondeterministic, got {other:?}"),
-    }
+    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect("Math.random() calls evaluate and record");
+    assert_eq!(outcome.migrations.len(), 1);
     assert!(
-        !dir.path().join(format!("{stem}.ir.json")).exists(),
-        "nondeterministic source must not write a committed artifact"
+        outcome.migrations[0]
+            .warnings
+            .iter()
+            .any(|f| f.accessor.contains("Math.random")),
+        "literal Math.random() calls should surface only a soft advisory warning: {:?}",
+        outcome.migrations[0].warnings
+    );
+    assert!(
+        dir.path().join(format!("{stem}.ir.json")).exists(),
+        "Math.random() calls should still write a committed artifact"
     );
 }
 
 #[test]
-fn argless_new_date_field_is_caught() {
+fn date_now_arithmetic_call_evaluates_and_does_not_hard_fail() {
     assert_child_built();
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617120000_folded_date_now";
-    let dirty = r#"
+    let src = r#"
         import { table } from "@zeroship/migrate";
         export function up() {
           table("events").insert({ rows: [ { ms: Date.now() % 1000000 } ] });
         }
     "#;
-    write_mig(dir.path(), stem, dirty);
+    write_mig(dir.path(), stem, src);
 
-    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
-        .expect_err("folded Date.now() must be caught by invocation");
-    match err {
-        BuildError::Nondeterministic {
-            accessors,
-            differing_path,
-            ..
-        } => {
-            assert!(accessors.contains("Date.now"), "accessors: {accessors}");
-            assert_eq!(differing_path, "$.nondeterminismUsed");
-        }
-        other => panic!("expected Nondeterministic, got {other:?}"),
-    }
-    assert!(
-        !dir.path().join(format!("{stem}.ir.json")).exists(),
-        "nondeterministic source must not write a committed artifact"
-    );
+    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect("Date.now() arithmetic call evaluates and records");
+    assert_eq!(outcome.migrations.len(), 1);
+    assert!(dir.path().join(format!("{stem}.ir.json")).exists());
 }
 
 #[test]
@@ -360,7 +307,6 @@ fn local_and_hosted_paths_yield_same_typed_value_checksum() {
             app: &str,
             name: &str,
             _blob: Option<&str>,
-            determinism_probe_seed: Option<zeroship_migrate::frontend::DeterminismProbeSeed>,
         ) -> Result<String, StructuredError> {
             use zeroship_migrate::frontend::recorder_service::{
                 spawn_sandboxed_record, RecordRequest,
@@ -374,7 +320,6 @@ fn local_and_hosted_paths_yield_same_typed_value_checksum() {
                 budget: ResourceBudget::default(),
                 allow_read_paths: vec![],
                 schema_types_blob: None,
-                determinism_probe_seed,
             };
             spawn_sandboxed_record(&req)
                 .map(|r| r.ir_json)

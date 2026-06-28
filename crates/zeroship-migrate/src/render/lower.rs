@@ -4022,8 +4022,10 @@ fn render_sqlite_trigger_stmt(
                         },
                     ));
                 }
-                let vals: Result<Vec<_>, _> =
-                    row.iter().map(crate::render::dml::inline_literal).collect();
+                let vals: Result<Vec<_>, _> = row
+                    .iter()
+                    .map(|v| crate::render::dml::render_value_inline(v, zeroship_schema::query::SqlDialect::Sqlite))
+                    .collect();
                 groups.push(format!("({})", vals?.join(", ")));
             }
             Ok(format!(

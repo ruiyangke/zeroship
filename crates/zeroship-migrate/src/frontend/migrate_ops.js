@@ -36,6 +36,30 @@
 let __active = null;
 const __deferredUpOps = [];
 
+// Capture the native nondeterministic function symbols before a migration module
+// can mutate globals. A bare symbol is an opt-in to DB-side evaluation; calls just
+// evaluate normally and the resulting value records like any other scalar.
+const __nativeDateNow = typeof Date !== "undefined" ? Date.now : undefined;
+const __nativeMathRandom = typeof Math !== "undefined" ? Math.random : undefined;
+const __nativeCryptoRandomUUID =
+  typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID
+    : undefined;
+
+function nativeFnSynthName(value) {
+  if (value === __nativeDateNow) return "now";
+  if (value === __nativeMathRandom) return "genRandomUuid";
+  if (__nativeCryptoRandomUUID !== undefined && value === __nativeCryptoRandomUUID) {
+    return "genRandomUuid";
+  }
+  return undefined;
+}
+
+function nativeFnSynthNode(value) {
+  const fn = nativeFnSynthName(value);
+  return fn === undefined ? undefined : { node: "fnSynth", fn, args: [] };
+}
+
 /** Structured error helper — mirrors the machine-readable envelope. */
 function structuredError(code, message, extra) {
   const err = new Error(message);
@@ -462,14 +486,29 @@ function bytesToBase64(bytes) {
  *   - everything else passes through verbatim. */
 function toIrScalar(value) {
   if (typeof value === "bigint") return { decimal: value.toString() };
+  if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
+    return { decimal: String(value) };
+  }
   if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
   return value;
+}
+
+function toIrValue(value) {
+  const synth = nativeFnSynthNode(value);
+  if (synth !== undefined) return synth;
+  if (value instanceof ExprChain) return value.__node;
+  if (value && typeof value === "object" && typeof value.node === "string") return value;
+  return toIrScalar(value);
 }
 
 /** Coerce a `.default(value)` arg into the closed `IrDefault` carrier:
  *   - `{ fn: "now" | "genRandomUuid" }` → a nullary synth default;
  *   - any other typed scalar → a `{ literal: { value } }` literal default. */
 function toIrDefault(value) {
+  const fn = nativeFnSynthName(value);
+  if (fn !== undefined) {
+    return { fn: { fn } };
+  }
   if (value && typeof value === "object" && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
   }
@@ -650,6 +689,8 @@ function chain(node) {
 
 /** Auto-wrap a bare JS value to a `Literal` node; pass a chain/node through. */
 function exprArg(x) {
+  const synth = nativeFnSynthNode(x);
+  if (synth !== undefined) return synth;
   if (x instanceof ExprChain) return x.__node;
   if (x && typeof x === "object" && typeof x.node === "string") return x; // a raw AST node
   return { node: "literal", value: x };
@@ -808,8 +849,8 @@ export const cFn = {
     });
   },
 
-  /** DB-evaluated apply-time scalars (the structured replacement for a frozen
-   *  `Date.now()` / UUID literal). Render to `now()` / `gen_random_uuid()`. */
+  /** DB-evaluated apply-time scalars, equivalent to the supported bare native
+   *  symbols (`Date.now`, `Math.random`, `crypto.randomUUID`). */
   now: () => chain({ node: "fnSynth", fn: "now", args: [] }),
   genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
 };
@@ -1401,7 +1442,7 @@ function normalizeInsertRows(rows, what) {
   if (!Array.isArray(normalizedRows)) normalizedRows = [normalizedRows];
   const columns = normalizedRows.length > 0 ? Object.keys(normalizedRows[0]) : [];
   const positional = normalizedRows.map((r) =>
-    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar(r[col]) : null)),
+    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? toIrValue(r[col]) : null)),
   );
   return { columns, rows: positional };
 }
@@ -1427,7 +1468,7 @@ function normalizeOnConflict(oc) {
   if (oc === undefined || oc === null) return undefined;
   if (oc.doUpdate === undefined) return { columns: oc.columns };
   const doUpdate = {};
-  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrScalar(oc.doUpdate[col]);
+  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrValue(oc.doUpdate[col]);
   return { columns: oc.columns, doUpdate };
 }
 
@@ -2251,19 +2292,17 @@ function scalarBind(v) {
 }
 
 // ===========================================================================
-// (C) Determinism lint. Flag the JS nondeterminism accessors (`Date.now()` /
-// `Math.random()` / `crypto.randomUUID()` / `new Date()`), steering authors to
-// the DB-evaluated `c.fn.now()` / `c.fn.genRandomUuid()` (`FnSynth`) scalars. A
-// AST-free SOURCE scan. Findings are advisory only; the Rust build/record gate
-// records twice with divergent seeded nondeterministic globals and compares the
-// recorded IR/checksum for the authoritative hard error.
+// (C) Determinism lint. Flag CALLS to JS nondeterminism accessors (`Date.now()` /
+// `Math.random()` / `crypto.randomUUID()` / `new Date()`), steering authors to the
+// bare function SYMBOL or the DB-evaluated `c.fn.*` (`FnSynth`) scalar. This is a
+// coarse AST-free SOURCE scan and is advisory only.
 // ===========================================================================
 
 const NONDETERMINISM_PATTERNS = [
-  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "c.fn.now()" },
-  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "c.fn.genRandomUuid() (for an id) or a DB-evaluated value" },
-  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "c.fn.genRandomUuid()" },
-  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "c.fn.now()" },
+  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or c.fn.now()" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or c.fn.genRandomUuid()" },
+  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()" },
+  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or c.fn.now()" },
 ];
 
 /**
@@ -2272,8 +2311,8 @@ const NONDETERMINISM_PATTERNS = [
  *
  * SCOPE — intentional coarse whole-source scan: it OVER-flags (a clock accessor
  * in a comment / a non-op helper trips it) and NEVER under-flags. The record/build
- * path surfaces these only as warnings; hard determinism errors come from the
- * record-twice IR comparison.
+ * path surfaces these only as warnings; calls are allowed and record their
+ * evaluated value.
  */
 export function lintDeterminism(source) {
   if (typeof source !== "string") return [];

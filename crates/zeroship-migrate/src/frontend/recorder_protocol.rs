@@ -9,7 +9,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::embedding::DeterminismProbeSeed;
 use super::sandbox::SandboxReport;
 
 /// Max accepted migration/schema source size for every recorder ingress path.
@@ -81,10 +80,6 @@ pub struct ChildRequest {
     /// input is actually delivered (no contract drift — PR4a code-critic LOW #7).
     #[serde(default)]
     pub schema_types_blob: Option<String>,
-    /// Optional build-time determinism probe seed. Present only for migration
-    /// recording; schema eval and normal runtime/deploy paths leave it absent.
-    #[serde(default)]
-    pub determinism_probe_seed: Option<DeterminismProbeSeed>,
 }
 
 /// The result the child writes to its stdout.

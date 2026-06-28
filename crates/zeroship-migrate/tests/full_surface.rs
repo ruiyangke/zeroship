@@ -9,6 +9,7 @@
 
 use serde_json::{json, Value};
 use zeroship_migrate::frontend::{lint_migration_determinism, record_migration_to_ir_unsandboxed};
+use zeroship_migrate::{CanonicalOpList, Checksum, MigrationFlags};
 
 const OWNER: &str = "app_pr3";
 
@@ -187,6 +188,104 @@ fn insert_row_object_normalizes_to_columns_and_rows() {
     assert_eq!(op.get("rows").unwrap(), &serde_json::json!([[1, "a"], [2, "b"]]));
 }
 
+#[test]
+fn date_now_symbol_records_as_fnsynth_now() {
+    let symbol = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { at: Date.now } ] });
+        }};
+    "#;
+    let explicit = r#"
+        import { table, cFn } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { at: cFn.now() } ] });
+        }};
+    "#;
+    assert_eq!(ops(&record(symbol, "date_now_symbol"))[0], ops(&record(explicit, "date_now_explicit"))[0]);
+}
+
+#[test]
+fn math_random_symbol_records_as_fnsynth_gen_random_uuid() {
+    let symbol = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { id: Math.random } ] });
+        }};
+    "#;
+    let explicit = r#"
+        import { table, cFn } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { id: cFn.genRandomUuid() } ] });
+        }};
+    "#;
+    assert_eq!(ops(&record(symbol, "math_random_symbol"))[0], ops(&record(explicit, "math_random_explicit"))[0]);
+}
+
+#[test]
+fn default_date_now_symbol_equals_default_fn_now() {
+    let symbol = r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").create({ columns: { at: t.timestamp().default(Date.now) } });
+        }};
+    "#;
+    let explicit = r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").create({ columns: { at: t.timestamp().default({ fn: "now" }) } });
+        }};
+    "#;
+    assert_eq!(ops(&record(symbol, "default_date_now_symbol"))[0], ops(&record(explicit, "default_fn_now"))[0]);
+}
+
+#[test]
+fn date_now_symbol_is_deterministic_across_records() {
+    let src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { at: Date.now } ] });
+        }};
+    "#;
+    let a = record_migration_to_ir_unsandboxed(src, OWNER, "date_now_symbol_a").unwrap();
+    let b = record_migration_to_ir_unsandboxed(src, OWNER, "date_now_symbol_a").unwrap();
+    let checksum = |ir: &zeroship_migrate::MigrationIr| {
+        Checksum::of_ir(
+            &CanonicalOpList(&ir.ops),
+            &MigrationFlags::default(),
+            &ir.owner_app,
+            &[],
+            &[],
+            &ir.preconditions,
+        )
+        .as_str()
+        .to_string()
+    };
+    assert_eq!(checksum(&a), checksum(&b));
+}
+
+#[test]
+fn date_now_call_just_evaluates_no_error() {
+    use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
+
+    let src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { at: Date.now() } ] });
+        }};
+    "#;
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "date_now_call")
+        .expect("Date.now() call should evaluate and record");
+    let value = serde_json::to_value(&outcome.ir).expect("ir -> value");
+    let cell = &ops(&value)[0]["rows"][0][0];
+    assert!(cell.as_i64().is_some(), "Date.now() call records its evaluated number: {cell}");
+    assert!(
+        outcome.warnings.iter().any(|f| f.accessor.contains("Date.now")),
+        "Date.now() call should produce only a soft advisory warning: {:?}",
+        outcome.warnings
+    );
+}
+
 /// The §4.3 determinism lint flags `Date.now()` in an op argument and steers the
 /// author to `c.fn.now()`; a clean migration produces NO findings.
 #[test]
@@ -205,21 +304,18 @@ fn determinism_lint_flags_date_now_in_op_arg() {
     let f = &findings[0];
     assert_eq!(f.code, "NONDETERMINISTIC_OP_ARG");
     assert!(f.accessor.contains("Date.now"), "accessor names Date.now(): {}", f.accessor);
-    assert!(
-        f.suggested_fix.contains("c.fn.now()"),
-        "steer the author to c.fn.now(): {}",
-        f.suggested_fix
-    );
+    assert!(f.suggested_fix.contains("Date.now symbol"), "steer names symbol form: {}", f.suggested_fix);
+    assert!(f.suggested_fix.contains("c.fn.now()"), "steer names c.fn.now(): {}", f.suggested_fix);
 
     let clean = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").insert({ rows: [ { created_at: (c) => c.fn.now() } ] });
+            table("t").insert({ rows: [ { created_at: Date.now } ] });
         }};
     "#;
     assert!(
         lint_migration_determinism(clean).expect("lint runs").is_empty(),
-        "the c.fn.now() form must produce NO determinism findings"
+        "the Date.now symbol form must produce NO determinism findings"
     );
 }
 
@@ -363,33 +459,40 @@ fn update_carries_a_batch_knob() {
     assert_eq!(batch.get("batchSize").unwrap(), 500);
 }
 
-/// The §4.3 determinism lint is WIRED into the record/build path (not just an inert
-/// standalone function): recording a migration whose op argument carries a
-/// non-deterministic accessor is a HARD error. A pre-hardening recorder only
-/// surfaced a warning and still produced IR.
+/// The determinism lint is WIRED into the record path as a soft advisory only:
+/// calls evaluate normally, the recorder persists the produced value, and the
+/// source lint steers authors toward DB-evaluated symbols / `c.fn.*`.
 #[test]
-fn record_path_rejects_nondeterministic_source() {
-    use zeroship_migrate::frontend::{
-        record_migration_to_ir_with_warnings_unsandboxed, RecordError,
-    };
+fn record_path_allows_date_now_call_with_soft_warning() {
+    use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
-    let dirty = r#"
+    let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
     "#;
-    let err = record_migration_to_ir_with_warnings_unsandboxed(dirty, OWNER, "dirty")
-        .expect_err("Date.now() must be a hard determinism error");
-    match err {
-        RecordError::Nondeterministic { findings, .. } => {
-            assert!(findings.iter().any(|f| f.accessor.contains("Date.now")));
-            assert!(findings.iter().all(|f| f.code == "NONDETERMINISTIC_OP_ARG"));
-        }
-        other => panic!("expected Nondeterministic, got {other:?}"),
-    }
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "date_call")
+        .expect("Date.now() call evaluates and records");
+    assert_eq!(outcome.ir.ops.len(), 1);
+    let created_at = match &outcome.ir.ops[0] {
+        zeroship_migrate::Op::Insert { rows, .. } => &rows[0][0],
+        other => panic!("expected insert, got {other:?}"),
+    };
+    assert!(
+        matches!(created_at, zeroship_migrate::IrValue::Scalar(zeroship_migrate::IrScalar::Int(v)) if *v > 0),
+        "Date.now() call must record its evaluated integer value, got {created_at:?}"
+    );
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|f| f.code == "NONDETERMINISTIC_OP_ARG" && f.accessor.contains("Date.now")),
+        "Date.now() call should surface advisory warning: {:?}",
+        outcome.warnings
+    );
 
-    // The structured `c.fn.now()` replacement records cleanly — NO warnings.
+    // A normal deterministic migration still records cleanly with no advisory.
     let clean = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
@@ -406,58 +509,66 @@ fn record_path_rejects_nondeterministic_source() {
 }
 
 #[test]
-fn record_path_rejects_math_random_difference_by_invocation() {
-    use zeroship_migrate::frontend::{
-        record_migration_to_ir_with_warnings_unsandboxed, RecordError,
-    };
+fn record_path_allows_math_random_calls_with_soft_warning() {
+    use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
-    let dirty = r#"
+    let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
             const collapsed = Math.random() - Math.random();
             table("t").insert({ rows: [ { sample: collapsed } ] });
         }};
     "#;
-    let err = record_migration_to_ir_with_warnings_unsandboxed(dirty, OWNER, "random_difference")
-        .expect_err("Math.random() - Math.random() must be caught by invocation");
-    match err {
-        RecordError::Nondeterministic {
-            accessors,
-            differing_path,
-            ..
-        } => {
-            assert!(accessors.contains("Math.random"), "accessors: {accessors}");
-            assert_eq!(differing_path, "$.nondeterminismUsed");
-        }
-        other => panic!("expected Nondeterministic, got {other:?}"),
-    }
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "random_difference")
+        .expect("Math.random() calls evaluate and record");
+    assert_eq!(outcome.ir.ops.len(), 1);
+    let sample = match &outcome.ir.ops[0] {
+        zeroship_migrate::Op::Insert { rows, .. } => &rows[0][0],
+        other => panic!("expected insert, got {other:?}"),
+    };
+    assert!(
+        matches!(sample, zeroship_migrate::IrValue::Scalar(zeroship_migrate::IrScalar::Decimal(_))),
+        "Math.random() arithmetic should record the evaluated finite number carrier, got {sample:?}"
+    );
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|f| f.code == "NONDETERMINISTIC_OP_ARG" && f.accessor.contains("Math.random")),
+        "Math.random() call should surface advisory warning: {:?}",
+        outcome.warnings
+    );
 }
 
 #[test]
-fn record_path_rejects_argless_new_date_by_invocation() {
-    use zeroship_migrate::frontend::{
-        record_migration_to_ir_with_warnings_unsandboxed, RecordError,
-    };
+fn record_path_allows_argless_new_date_call_with_soft_warning() {
+    use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
-    let dirty = r#"
+    let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { year: new Date().getUTCFullYear() } ] });
         }};
     "#;
-    let err = record_migration_to_ir_with_warnings_unsandboxed(dirty, OWNER, "argless_date")
-        .expect_err("argless new Date() must be caught by invocation");
-    match err {
-        RecordError::Nondeterministic {
-            accessors,
-            differing_path,
-            ..
-        } => {
-            assert!(accessors.contains("new Date"), "accessors: {accessors}");
-            assert_eq!(differing_path, "$.nondeterminismUsed");
-        }
-        other => panic!("expected Nondeterministic, got {other:?}"),
-    }
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(src, OWNER, "argless_date")
+        .expect("argless new Date() call evaluates and records");
+    assert_eq!(outcome.ir.ops.len(), 1);
+    let year = match &outcome.ir.ops[0] {
+        zeroship_migrate::Op::Insert { rows, .. } => &rows[0][0],
+        other => panic!("expected insert, got {other:?}"),
+    };
+    assert!(
+        matches!(year, zeroship_migrate::IrValue::Scalar(zeroship_migrate::IrScalar::Int(v)) if *v >= 2026),
+        "new Date().getUTCFullYear() should record the evaluated year, got {year:?}"
+    );
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|f| f.code == "NONDETERMINISTIC_OP_ARG" && f.accessor.contains("new Date")),
+        "argless new Date() should surface advisory warning: {:?}",
+        outcome.warnings
+    );
 }
 
 #[test]
@@ -471,7 +582,7 @@ fn record_path_allows_explicit_new_date_argument() {
         }};
     "#;
     let outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "explicit_date")
-        .expect("new Date(<explicit ms>) must not trip the invocation gate");
+        .expect("new Date(<explicit ms>) records normally");
     assert_eq!(outcome.ir.ops.len(), 1);
 }
 
@@ -489,7 +600,7 @@ fn record_path_allows_date_now_inside_comment_or_string() {
         }};
     "#;
     let outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "comment_string")
-        .expect("inert Date.now/Math.random text must not be a hard determinism error");
+        .expect("inert Date.now/Math.random text records normally");
     assert_eq!(outcome.ir.ops.len(), 1);
 }
 
