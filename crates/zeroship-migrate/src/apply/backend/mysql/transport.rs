@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zeroship_runtime::channel::{result_slot, ResultReceiver};
-use zeroship_runtime::{EnvSnapshot, NetPolicy, Runtime};
+use zeroship_runtime::{EnvSnapshot, HostPort, NetPolicy, Runtime};
 
 use crate::frontend::embedding::js_driver_module_graph;
 use crate::render::step::BindValue;
@@ -220,16 +220,53 @@ impl JsDriverConn {
         dsn_json: String,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
-        Self::open_with_entry(
+        Self::open_mysql_dsn_json_with_policy(
             dsn_json,
-            MYSQL_DRIVER_ENTRY,
             NetPolicy::trusted(TRUSTED_DRIVER_MAX_SOCKETS, TRUSTED_DRIVER_EGRESS_CEILING),
             command_timeout,
         )
     }
 
+    pub fn open_mysql_dsn_json_allowlisted(
+        dsn_json: String,
+        host: &str,
+        port: u16,
+        command_timeout: Duration,
+    ) -> Result<Self, JsDriverError> {
+        let policy = NetPolicy::allowlist(
+            vec![HostPort::new(host, port)],
+            TRUSTED_DRIVER_MAX_SOCKETS,
+            TRUSTED_DRIVER_EGRESS_CEILING,
+        )
+        .map_err(|e| JsDriverError::transport(format!("invalid MySQL net policy: {e}")))?;
+        Self::open_mysql_dsn_json_with_policy(dsn_json, policy, command_timeout)
+    }
+
+    pub fn open_mysql_dsn_json_with_policy(
+        dsn_json: String,
+        net_policy: NetPolicy,
+        command_timeout: Duration,
+    ) -> Result<Self, JsDriverError> {
+        Self::open_with_entry(
+            dsn_json,
+            MYSQL_DRIVER_ENTRY,
+            net_policy,
+            command_timeout,
+        )
+    }
+
     pub async fn exec(&mut self, sql: &str) -> Result<(), JsDriverError> {
-        let _ = self.command("exec", sql, Vec::new()).await?;
+        self.exec_with_binds(sql, &[]).await
+    }
+
+    pub async fn exec_with_binds(
+        &mut self,
+        sql: &str,
+        binds: &[BindValue],
+    ) -> Result<(), JsDriverError> {
+        let _ = self
+            .command("exec", sql, binds.iter().map(bind_to_json).collect())
+            .await?;
         Ok(())
     }
 

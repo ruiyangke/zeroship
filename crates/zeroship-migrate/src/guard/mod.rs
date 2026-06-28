@@ -119,9 +119,10 @@ impl GuardConfig {
         }
     }
 
-    /// Confined **MySQL** render-only config. MySQL has no live backend in this
-    /// phase; generated SQL may be previewed, but raw/live execution is refused
-    /// before any database path is reached.
+    /// Confined **MySQL** config. MySQL live apply accepts descriptor-generated
+    /// DDL through the MySQL backend; raw SQL still has no MySQL parser/deny-walk
+    /// and is refused by [`SqlGuard::check`] instead of being mis-vetted by
+    /// libpg_query.
     #[must_use]
     pub fn confined_mysql(project_schema: impl Into<String>) -> Self {
         Self {
@@ -159,8 +160,8 @@ impl GuardConfig {
                 Self::confined_sqlite(project_schema)
             }
             SqlDialect::Mysql => {
-                // MySQL is render-only in this phase. Drop any privileged PG posture
-                // and keep only the first confined schema for generated previews.
+                // MySQL uses the descriptor-generated DDL guard. Drop any
+                // privileged PG posture and keep only the first confined schema.
                 let project_schema = match &self.schemas {
                     SchemaScope::Single(s) => s.clone(),
                     SchemaScope::Allowlist(list) => list.first().cloned().unwrap_or_default(),
@@ -372,12 +373,12 @@ pub enum GuardError {
          SqliteBackend authorizer is the line-2 defense)"
     )]
     SqliteRawSqlRejected,
-    /// A raw SQL string was presented to the Postgres guard on the render-only
-    /// MySQL path. MySQL has no live parser/backend in this phase, so raw SQL is
-    /// refused fail-closed instead of being mis-vetted by libpg_query.
+    /// A raw SQL string was presented to the Postgres guard on the MySQL path.
+    /// MySQL has no parser/deny-walk in this crate, so raw SQL is refused
+    /// fail-closed instead of being mis-vetted by libpg_query.
     #[error(
-        "raw SQL is not accepted on the render-only MySQL path: MySQL migrations \
-         are SQL-preview only in this phase (no live parser/backend is available)"
+        "raw SQL is not accepted on the MySQL path: MySQL migrations must be \
+         descriptor-generated because no MySQL parser/deny-walk is available"
     )]
     MysqlRawSqlRejected,
 }

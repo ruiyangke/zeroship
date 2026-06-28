@@ -6956,6 +6956,7 @@ dependencies = [
  "landlock",
  "libc",
  "pg_query",
+ "rcgen",
  "rusqlite",
  "schemars 1.2.1",
  "seccompiler",

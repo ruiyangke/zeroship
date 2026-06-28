@@ -16,6 +16,7 @@ pub struct MysqlCatalogRowSets {
     pub statistics: RowSet,
     pub table_constraints: RowSet,
     pub key_column_usage: RowSet,
+    pub referential_constraints: RowSet,
     pub views: RowSet,
 }
 
@@ -63,6 +64,11 @@ pub fn rowsets_to_schema_snapshot(
         let Some(snapshot) = tables.get_mut(&table) else {
             continue;
         };
+        let name = if index == "PRIMARY" {
+            format!("{table}_pkey")
+        } else {
+            index
+        };
         let first = group.first().expect("group_statistics never emits empty groups");
         let unique = numeric_field(first, &["NON_UNIQUE", "non_unique"]).unwrap_or(1) == 0;
         let access_method = optional_str(first, &["INDEX_TYPE", "index_type"])
@@ -76,7 +82,7 @@ pub fn rowsets_to_schema_snapshot(
             }
         }
         snapshot.indexes.push(IndexSnapshot {
-            name: index,
+            name,
             unique,
             columns: columns.clone(),
             elements: columns.into_iter().map(IndexElementSnapshot::column).collect(),
@@ -90,18 +96,23 @@ pub fn rowsets_to_schema_snapshot(
     let key_columns = group_key_columns(rows.key_column_usage.rows);
     for row in &rows.table_constraints.rows {
         let table = required_str(row, &["TABLE_NAME", "table_name"])?;
-        let name = required_str(row, &["CONSTRAINT_NAME", "constraint_name"])?;
+        let raw_name = required_str(row, &["CONSTRAINT_NAME", "constraint_name"])?;
         let Some(snapshot) = tables.get_mut(table) else {
             continue;
         };
         let kind = required_str(row, &["CONSTRAINT_TYPE", "constraint_type"])?
             .to_ascii_uppercase();
+        let name = if kind == "PRIMARY KEY" && raw_name == "PRIMARY" {
+            format!("{table}_pkey")
+        } else {
+            raw_name.to_string()
+        };
         let cols = key_columns
-            .get(&(table.to_string(), name.to_string()))
+            .get(&(table.to_string(), raw_name.to_string()))
             .cloned()
             .unwrap_or_default();
         snapshot.constraints.push(ConstraintSnapshot {
-            name: name.to_string(),
+            name,
             kind: kind.clone(),
             definition: mysql_constraint_definition(&kind, &cols),
             comment: None,
@@ -148,7 +159,7 @@ pub(crate) fn mysql_canonical_type(raw: &str) -> String {
     }
     match lower.as_str() {
         "tinyint(1)" | "bool" | "boolean" => "boolean".to_string(),
-        "json" => "json".to_string(),
+        "json" => "jsonb".to_string(),
         "datetime" | "datetime(6)" | "timestamp" | "timestamp(6)" => {
             "timestamp with time zone".to_string()
         }
@@ -227,7 +238,7 @@ fn group_key_columns(rows: Vec<Map<String, Value>>) -> BTreeMap<(String, String)
 fn mysql_constraint_definition(kind: &str, columns: &[String]) -> String {
     let list = columns
         .iter()
-        .map(|c| format!("`{}`", c.replace('`', "``")))
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
     match kind {
@@ -287,7 +298,7 @@ mod tests {
         assert_eq!(mysql_canonical_type("tinyint(1)"), "boolean");
         assert_eq!(mysql_canonical_type("int(11)"), "integer");
         assert_eq!(mysql_canonical_type("BIGINT(20)"), "bigint");
-        assert_eq!(mysql_canonical_type("JSON"), "json");
+        assert_eq!(mysql_canonical_type("JSON"), "jsonb");
         assert_eq!(mysql_canonical_type("datetime(6)"), "timestamp with time zone");
         assert_eq!(mysql_canonical_type("varchar(191)"), "text");
     }
@@ -354,6 +365,7 @@ mod tests {
                     "ORDINAL_POSITION": 1
                 }))],
             },
+            referential_constraints: RowSet::default(),
             views: RowSet::default(),
         })
         .expect("maps");
@@ -370,13 +382,14 @@ mod tests {
             vec![
                 ("active", "boolean", false),
                 ("created_at", "timestamp with time zone", false),
-                ("profile", "json", true),
+                ("profile", "jsonb", true),
                 ("visits", "integer", false),
             ]
         );
         assert_eq!(users.indexes.len(), 1);
         assert_eq!(users.indexes[0].name, "idx_users_active");
         assert_eq!(users.indexes[0].access_method, "btree");
-        assert_eq!(users.constraints[0].definition, "PRIMARY KEY (`id`)");
+        assert_eq!(users.constraints[0].name, "users_pkey");
+        assert_eq!(users.constraints[0].definition, "PRIMARY KEY (id)");
     }
 }
