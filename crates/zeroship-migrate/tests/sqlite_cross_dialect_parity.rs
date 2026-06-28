@@ -238,6 +238,7 @@ fn common_ops() -> Vec<Op> {
             ],
             constraints: vec![pk_id()],
             indexes: Vec::new(),
+            runtime_options: None,
             existence_guard: None,
         },
         Op::CreateTable {
@@ -268,6 +269,7 @@ fn common_ops() -> Vec<Op> {
                 using: None,
                 r#where: None,
             }],
+            runtime_options: Default::default(),
             existence_guard: None,
         },
         Op::CreateView {
@@ -658,7 +660,8 @@ fn table_check_constraints_fail_closed_until_expr_renderer_lands() {
             },
         }],
         indexes: Vec::new(),
-        existence_guard: None,
+        runtime_options: None,
+            existence_guard: None,
     };
 
     for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
@@ -694,7 +697,8 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
             },
         ],
         indexes: Vec::new(),
-        existence_guard: None,
+        runtime_options: None,
+            existence_guard: None,
     };
     let fk_err = IrAuthor::new(PROJECT, OWNER, SqlDialect::Sqlite)
         .lower(&ir("sqlite_fk_gap", vec![fk_op]), &LiveSchema::default())
@@ -718,7 +722,8 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
             },
         ],
         indexes: Vec::new(),
-        existence_guard: None,
+        runtime_options: None,
+            existence_guard: None,
     };
     let unique_err = IrAuthor::new(PROJECT, OWNER, SqlDialect::Sqlite)
         .lower(

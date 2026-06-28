@@ -199,7 +199,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         ? (defaultExport as { schema: unknown }).schema
         : undefined;
 
-    // **Migration-first cutover (P4b)** — prefer the bundled
+    // **Migration-first cutover (P4b/P5 S2)** — prefer the bundled
     // RuntimeSchemaDescriptor if the runtime injected one as
     // `globalThis.__zsRuntimeDescriptor`. In self-contained dev (Vite +
     // SQLite) no descriptor is bundled, so this is normally absent and the
@@ -207,13 +207,38 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     // engine then diffs against live state). Honored here for symmetry with
     // the production runtime-entry so a descriptor, if present, wins.
     const descriptor = (globalThis as unknown as {
-      __zsRuntimeDescriptor?: Record<string, Record<string, unknown>>;
+      __zsRuntimeDescriptor?: Record<string, unknown>;
     }).__zsRuntimeDescriptor;
     const hasDescriptor =
       descriptor != null &&
       typeof descriptor === "object" &&
       Object.keys(descriptor).length > 0;
-    const schema = hasDescriptor ? descriptor : declaredSchema;
+    const runtimeDescriptorFields = (
+      value: Record<string, unknown> | undefined,
+    ): Record<string, unknown> | undefined => {
+      if (
+        value != null &&
+        typeof value === "object" &&
+        (value as { version?: unknown }).version === 1 &&
+        (value as { collections?: unknown }).collections != null &&
+        typeof (value as { collections?: unknown }).collections === "object"
+      ) {
+        const out: Record<string, unknown> = {};
+        for (const [name, collection] of Object.entries(
+          (value as { collections: Record<string, unknown> }).collections,
+        )) {
+          if (collection != null && typeof collection === "object") {
+            const fields = (collection as { fields?: unknown }).fields;
+            if (fields !== undefined) {
+              out[name] = fields;
+            }
+          }
+        }
+        return out;
+      }
+      return value;
+    };
+    const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : declaredSchema;
 
     if (!schema) {
       schemaInstalled = true;

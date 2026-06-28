@@ -75,7 +75,8 @@ fn create_users() -> Op {
         ],
         constraints: Vec::new(),
         indexes: Vec::new(),
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }
 }

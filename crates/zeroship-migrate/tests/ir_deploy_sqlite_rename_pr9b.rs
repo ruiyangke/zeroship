@@ -98,7 +98,7 @@ fn defaulted_text_field(name: &str) -> FieldDescriptor {
 }
 
 fn descriptor(table: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {
-    CollectionDescriptor { name: table.into(), owner_app: APP.into(), fields, indexes: vec![] }
+    CollectionDescriptor { name: table.into(), owner_app: APP.into(), fields, indexes: vec![], runtime_options: Default::default() }
 }
 
 // The headline production-path proof.

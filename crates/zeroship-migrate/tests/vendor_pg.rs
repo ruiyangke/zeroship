@@ -548,11 +548,11 @@ fn out_of_set_trigger_timing_rejected_at_deserialize() {
     assert!(r.is_err(), "an out-of-set trigger timing must be rejected at deserialize");
 }
 
-// ── 5. ir_version 5 ─────────────────────────────────────────────────────────
+// ── 5. ir_version 6 ─────────────────────────────────────────────────────────
 
 #[test]
 fn ir_version_is_current() {
-    assert_eq!(CURRENT_IR_VERSION, 5);
+    assert_eq!(CURRENT_IR_VERSION, 6);
     // A future version is fail-closed; the current version validates.
     let mut ir = ir_with(vec![]);
     ir.ir_version = CURRENT_IR_VERSION + 1;

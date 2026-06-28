@@ -544,9 +544,10 @@ pub struct RuntimeState {
     /// user-controlled environment.
     pub env_vars: HashMap<String, String>,
 
-    /// **Migration-first cutover (P4b)** — the bundled `RuntimeSchemaDescriptor`
-    /// JSON (`schema.runtime.json`, a `Record<collection, Record<column,
-    /// FieldDef>>`) carried in `manifest.runtime_descriptor`. The worker
+    /// **Migration-first cutover (P4b/P5 S2)** — the bundled
+    /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`; v1 is
+    /// `{ version, collections: { fields, options, indexes } }`) carried in
+    /// `manifest.runtime_descriptor`. The worker
     /// resolves the descriptor blob via `BlobStore` at bundle-load and stamps
     /// it here through `RuntimeBuilder::runtime_descriptor`. `setup_globals`
     /// parses it and exposes it to JS as `globalThis.__zsRuntimeDescriptor` so

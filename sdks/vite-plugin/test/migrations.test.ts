@@ -162,10 +162,17 @@ describe("op.* migration discovery + bundling (A4)", () => {
 // it yet (P4b flips the runtime).
 describe("op.* runtime schema descriptor bundling (P4a)", () => {
   // The exact JSON gen-types' schema.runtime.json holds:
-  // Record<collection, Record<column, FieldDef>>.
+  // RuntimeSchemaDescriptor v1.
   const DESCRIPTOR = `{
-  "notes": {
-    "title": { "type": "string" }
+  "version": 1,
+  "collections": {
+    "notes": {
+      "fields": {
+        "title": { "type": "string" }
+      },
+      "options": { "softDelete": false, "versioning": false, "strictness": "strict" },
+      "indexes": []
+    }
   }
 }
 `;

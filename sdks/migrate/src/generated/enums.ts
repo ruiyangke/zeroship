@@ -239,3 +239,9 @@ export type FuncLanguage = "plpgsql" | "sql";
  * **VENDOR** — the CLOSED function-volatility lexicon.
  */
 export type FuncVolatility = "volatile" | "stable" | "immutable";
+
+/**
+ * Per-collection deploy-time data-validation strictness, mirroring the
+ * `@zeroship/db` `schema(...).strictness(...)` builder.
+ */
+export type TableStrictness = "strict" | "lenient" | "off";

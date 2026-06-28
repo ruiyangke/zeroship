@@ -83,6 +83,7 @@ import type {
   SequenceHandle,
   TableHandle,
   TableOptions,
+  TableStrictness,
   TableRef,
   TriggerBodyBuilder,
   TriggerStmt,
@@ -235,6 +236,60 @@ function requireString(v: unknown, what: string): asserts v is string {
   if (typeof v !== "string") {
     throw structuredError("OP_INVALID", `${what} must be a string; got ${typeof v}`);
   }
+}
+
+function requireStrictness(v: unknown, what: string): TableStrictness | undefined {
+  if (v === undefined) return undefined;
+  if (v !== "strict" && v !== "lenient" && v !== "off") {
+    throw structuredError("OP_INVALID", `${what} must be \"strict\", \"lenient\", or \"off\"`);
+  }
+  return v;
+}
+
+function requireOptionalBoolean(v: unknown, what: string): boolean | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "boolean") {
+    throw structuredError("OP_INVALID", `${what} must be a boolean`);
+  }
+  return v;
+}
+
+function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
+  const softDelete = requireOptionalBoolean(args.softDelete, "create({ softDelete })");
+  const versioning = requireOptionalBoolean(args.versioning, "create({ versioning })");
+  const strictness = requireStrictness(args.strictness, "create({ strictness })");
+  const hasOptions =
+    softDelete !== undefined ||
+    versioning !== undefined ||
+    strictness !== undefined;
+  if (!hasOptions) return undefined;
+  return compact({
+    softDelete: softDelete ?? false,
+    versioning: versioning ?? false,
+    strictness: strictness ?? "strict",
+  });
+}
+
+function runtimeOptionsPatchFromArgs(args: {
+  softDelete?: boolean;
+  versioning?: boolean;
+  strictness?: TableStrictness;
+}): Node {
+  const softDelete = requireOptionalBoolean(args.softDelete, "setOptions({ softDelete })");
+  const versioning = requireOptionalBoolean(args.versioning, "setOptions({ versioning })");
+  const strictness = requireStrictness(args.strictness, "setOptions({ strictness })");
+  const patch = compact({
+    softDelete,
+    versioning,
+    strictness,
+  });
+  if (Object.keys(patch).length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "setOptions(...) must set at least one of softDelete, versioning, or strictness",
+    );
+  }
+  return patch;
 }
 
 function requireSafeI64(v: unknown, what: string): number | undefined {
@@ -1069,8 +1124,23 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
       columns: cols,
       constraints: constraints.length ? constraints : undefined,
       indexes: indexes.length ? indexes : undefined,
+      runtimeOptions: runtimeOptionsFromCreateArgs(args),
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    }),
+  );
+}
+
+function recordSetTableOptions(
+  table: string,
+  args: { softDelete?: boolean; versioning?: boolean; strictness?: TableStrictness; schema?: string },
+): void {
+  push(
+    compact({
+      op: "setTableOptions",
+      table,
+      options: runtimeOptionsPatchFromArgs(args),
+      schema: args.schema,
     }),
   );
 }
@@ -1943,6 +2013,22 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         ifExists: args.ifExists,
         schema: pickSchema(args, dflt),
       });
+      return handle;
+    },
+    setOptions(args) {
+      recordSetTableOptions(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    softDelete(enabled = true, args = {}) {
+      recordSetTableOptions(name, { softDelete: enabled, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    withVersioning(enabled = true, args = {}) {
+      recordSetTableOptions(name, { versioning: enabled, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    strictness(level, args = {}) {
+      recordSetTableOptions(name, { strictness: level, schema: pickSchema(args, dflt) });
       return handle;
     },
     comment(text, args = {}) {

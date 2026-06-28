@@ -159,7 +159,8 @@ async fn add_column_ifnotexists_absent_runs() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -203,7 +204,8 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -259,7 +261,8 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -320,7 +323,8 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -379,7 +383,8 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -435,7 +440,8 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -450,7 +456,8 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     let err = apply_one(&be, &migs[0]).await.expect_err("wider live table fails closed");
@@ -478,7 +485,8 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
         columns: vec![col("legacy", ColType::String)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -536,7 +544,8 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
         columns: vec![col("title", ColType::String), col("happened", ColType::Timestamp)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
 
@@ -609,7 +618,8 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
             unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
 
@@ -674,7 +684,8 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");
@@ -749,7 +760,8 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
         columns: vec![col("name", ColType::String)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }) {
         apply_one(&be, &m).await.expect("create base table");

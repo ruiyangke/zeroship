@@ -73,6 +73,7 @@ const ENUM_DEFS = [
   "FuncArgMode",
   "FuncLanguage",
   "FuncVolatility",
+  "TableStrictness",
 ];
 
 const banner = `/* eslint-disable */

@@ -182,6 +182,7 @@ async fn assert_type_fidelity(dsl_type: &str, ddl_type: &str, required: bool) {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
 
@@ -330,6 +331,7 @@ async fn type_fidelity_whole_table_round_trips_to_zero_drift() {
             FieldDescriptor { name: "joined".into(), ty: "date".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let drift = diff_snapshots(&desired.snapshot, &live);
@@ -381,6 +383,7 @@ async fn additive_create_table_with_column_and_index_applies_to_zero_drift() {
             FieldDescriptor { name: "done".into(), ty: "boolean".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![IndexDescriptor { name: "tasks_title_idx".into(), columns: vec!["title".into()], unique: false }],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let empty = SchemaSnapshot::default();
@@ -438,6 +441,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let posts_tbl = CollectionDescriptor {
         name: "posts".into(),
@@ -461,6 +465,7 @@ async fn full_shape_round_trips_to_zero_drift_the_canonical_idempotency_oracle()
             // Custom-named index whose name has NO relation to its column (1a).
             IndexDescriptor { name: "weird_custom_name".into(), columns: vec!["a".into()], unique: true },
         ],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[posts_tbl, authors_tbl]).expect("desired_snapshot");
     let empty = SchemaSnapshot::default();
@@ -512,8 +517,8 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
     let engine = MigrationEngine::new();
 
     // Two possible targets + a referencing table whose FK points at `alpha`.
-    let alpha = CollectionDescriptor { name: "alpha".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
-    let beta = CollectionDescriptor { name: "beta".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let alpha = CollectionDescriptor { name: "alpha".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
+    let beta = CollectionDescriptor { name: "beta".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
     let child_v1 = CollectionDescriptor {
         name: "child".into(),
         owner_app: "app_test".into(),
@@ -526,6 +531,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[alpha.clone(), beta.clone(), child_v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -546,6 +552,7 @@ async fn changed_fk_target_is_unsupported_in_v1_not_silently_skipped() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[alpha, beta, child_v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -585,6 +592,7 @@ async fn long_table_and_field_unique_index_name_is_capped_and_re_diffs_clean() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
 
@@ -633,6 +641,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -645,6 +654,7 @@ async fn index_uniqueness_flip_on_same_name_is_unsupported_in_v1_not_silent() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: true }],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -669,6 +679,7 @@ async fn additive_diff_is_idempotent_second_plan_is_empty() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let empty = SchemaSnapshot::default();
@@ -707,6 +718,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -722,6 +734,7 @@ async fn additive_add_column_to_existing_table_applies_clean() {
             FieldDescriptor { name: "qty".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -761,12 +774,14 @@ async fn fk_ordering_referencing_table_after_target_applies_clean() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let a = CollectionDescriptor {
         name: "customers".into(),
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[b, a]).expect("desired_snapshot");
     apply_plan(&engine, &desired, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -797,7 +812,8 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
@@ -806,7 +822,8 @@ async fn type_change_emits_a_gated_alter_not_an_error_and_never_auto_applies() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "attr".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
@@ -827,6 +844,7 @@ async fn malicious_table_name_is_rejected_at_author_boundary() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let err = author.diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[]).unwrap_err();
@@ -849,6 +867,7 @@ async fn malicious_column_name_is_rejected_at_author_boundary() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     let err = author.diff(&desired, &SchemaSnapshot::default(), &HashMap::new(), &[]).unwrap_err();
@@ -874,6 +893,7 @@ async fn every_generated_migration_passes_through_the_guard_no_bypass() {
                 FieldDescriptor { name: "payload".into(), ty: "json".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![IndexDescriptor { name: "events_kind_idx".into(), columns: vec!["kind".into()], unique: false }],
+        runtime_options: Default::default(),
         };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
@@ -908,6 +928,7 @@ async fn drop_table_is_gated_and_not_auto_applied() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -977,6 +998,7 @@ async fn drop_column_is_destructive_and_gated() {
             FieldDescriptor { name: "nickname".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -989,6 +1011,7 @@ async fn drop_column_is_destructive_and_gated() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -1039,6 +1062,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![IndexDescriptor { name: "logs_level_idx".into(), columns: vec!["level".into()], unique: false }],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -1051,6 +1075,7 @@ async fn drop_index_is_not_data_loss_so_it_is_not_gated() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "level".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -1093,6 +1118,7 @@ async fn malicious_type_in_descriptor_is_rejected_not_silently_mapped_to_text() 
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
     assert!(
@@ -1120,6 +1146,7 @@ async fn vector_type_is_accepted_and_maps_to_vector_column() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("vector accepted");
     let col = desired.snapshot.tables["embeddings"]
@@ -1158,6 +1185,7 @@ async fn t12_vector_field_models_ivfflat_ann_index_and_renders_using_ivfflat() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
 
@@ -1208,7 +1236,8 @@ async fn t12_l2_and_inner_product_metrics_pick_the_right_opclass() {
                 ..Default::default()
             }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
         let ann = desired.snapshot.tables["e"]
             .indexes
@@ -1258,6 +1287,7 @@ async fn t12_fts_field_round_trips_to_zero_drift_via_gin_index() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
 
@@ -1339,6 +1369,7 @@ async fn t12_fts_added_to_existing_table_applies_in_order_and_re_diffs_clean() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired1");
     apply_plan(&engine, &desired1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -1358,6 +1389,7 @@ async fn t12_fts_added_to_existing_table_applies_in_order_and_re_diffs_clean() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired2");
     apply_plan(&engine, &desired2, &live1, &author, &cfg, &conn, Approval::None)
@@ -1543,6 +1575,7 @@ async fn t13_geopoint_field_round_trips_to_zero_drift_via_gist_index() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("geoPoint accepted");
 
@@ -1650,6 +1683,7 @@ async fn typo_type_token_is_rejected_not_silently_text() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
     assert!(
@@ -1750,12 +1784,14 @@ async fn conflicting_declaration_across_apps_is_rejected_not_silently_merged() {
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let second = CollectionDescriptor {
         name: "dup".into(),
         owner_app: "app_b".into(),
         fields: vec![FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let err = desired_snapshot(&cfg.project_schema, &[first, second]).unwrap_err();
     assert!(
@@ -1779,6 +1815,7 @@ async fn conflict_app_pair_is_deterministic_regardless_of_descriptor_order() {
         owner_app: app.into(),
         fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     // Order A: app_z first, then app_a.
     let err_a = desired_snapshot(&cfg.project_schema, &[mk("app_z", "z"), mk("app_a", "a")]).unwrap_err();
@@ -1811,6 +1848,7 @@ async fn conflict_with_three_declarers_reports_deterministic_set_across_permutat
         owner_app: app.into(),
         fields: vec![FieldDescriptor { name: field.into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let a = || mk("app_a", "x");
     let b = || mk("app_b", "x"); // identical shape to A
@@ -1851,6 +1889,7 @@ async fn identical_redeclaration_by_two_apps_is_idempotent_one_table_no_error() 
             FieldDescriptor { name: "count".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![IndexDescriptor { name: "shared_title_idx".into(), columns: vec!["title".into()], unique: false }],
+    runtime_options: Default::default(),
     };
     // app_b declared first, app_a second — identical shape.
     let d = desired_snapshot(&cfg.project_schema, &[mk("app_b"), mk("app_a")])
@@ -1878,6 +1917,7 @@ async fn single_app_declaration_owns_its_table() {
         owner_app: "app_solo".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     assert_eq!(d.snapshot.tables.len(), 1);
@@ -1908,6 +1948,7 @@ async fn non_owner_deploy_changing_only_own_tables_is_fine() {
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let union_v1 = desired_snapshot(&cfg.project_schema, &[a_tbl()]).expect("union v1");
     apply_plan(&engine, &union_v1, &SchemaSnapshot::default(), &author_app(&cfg, "app_a"), &cfg, &conn, Approval::None)
@@ -1921,6 +1962,7 @@ async fn non_owner_deploy_changing_only_own_tables_is_fine() {
         owner_app: "app_b".into(),
         fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let union_v2 = desired_snapshot(&cfg.project_schema, &[a_tbl(), b_tbl]).expect("union v2");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -1953,6 +1995,7 @@ async fn non_owner_deploy_altering_a_foreign_owned_table_is_refused() {
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let union = desired_snapshot(&cfg.project_schema, &[authors]).expect("union");
     // Live is empty → the union would CREATE authors, a structural change.
@@ -1998,6 +2041,7 @@ async fn non_owner_using_a_foreign_table_unchanged_is_a_noop_not_refused() {
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let union_v1 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v1");
     apply_plan(&engine, &union_v1, &SchemaSnapshot::default(), &author_app(&cfg, "app_a"), &cfg, &conn, Approval::None)
@@ -2039,6 +2083,7 @@ async fn partial_union_deploy_refuses_to_drop_a_foreign_owned_live_table() {
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "x".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let live = desired_snapshot(&cfg.project_schema, &[a_tbl]).expect("live snapshot").snapshot;
 
@@ -2048,6 +2093,7 @@ async fn partial_union_deploy_refuses_to_drop_a_foreign_owned_live_table() {
         owner_app: "app_b".into(),
         fields: vec![FieldDescriptor { name: "y".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let partial = desired_snapshot(&cfg.project_schema, &[b_tbl]).expect("partial union");
     // The caller's live_ownership: a_table is a_app's. (b_table is not live yet.)
@@ -2079,6 +2125,7 @@ async fn owner_dropping_its_own_table_is_allowed_when_live_ownership_confirms_it
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let live = desired_snapshot(&cfg.project_schema, &[posts]).expect("live").snapshot;
     // app_a now declares nothing → it removes its own posts table.
@@ -2115,6 +2162,7 @@ async fn dropping_a_live_table_with_unknown_ownership_fails_closed() {
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let live = desired_snapshot(&cfg.project_schema, &[orphan]).expect("live").snapshot;
     let empty = DesiredSchema::default();
@@ -2153,6 +2201,7 @@ async fn cross_app_fk_to_a_union_table_orders_and_applies_clean() {
         owner_app: "app_a".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let union_v1 = desired_snapshot(&cfg.project_schema, &[authors()]).expect("union v1");
     apply_plan(&engine, &union_v1, &SchemaSnapshot::default(), &author_app(&cfg, "app_a"), &cfg, &conn, Approval::None)
@@ -2168,6 +2217,7 @@ async fn cross_app_fk_to_a_union_table_orders_and_applies_clean() {
             FieldDescriptor { name: "author".into(), ty: "ref".into(), required: false, unique: false, references: Some("authors".into()), ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let union_v2 = desired_snapshot(&cfg.project_schema, &[authors(), books]).expect("union v2");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -2207,6 +2257,7 @@ async fn cross_app_fk_to_a_table_no_app_declares_is_a_clear_error() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let union = desired_snapshot(&cfg.project_schema, &[books]).expect("union builds");
     let live = SchemaSnapshot::default();
@@ -2241,7 +2292,8 @@ async fn malicious_ref_target_is_rejected_at_author_boundary() {
                 ..Default::default()
             }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
         // Fail-closed either way: a dot-qualified target trips the cross-app FK
         // guard (#2, the more specific rejection — it crosses a schema boundary),
@@ -2284,6 +2336,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
             IndexDescriptor { name: "members_email_uq".into(), columns: vec!["email".into()], unique: true },
             IndexDescriptor { name: "members_tier_idx".into(), columns: vec!["tier".into()], unique: false },
         ],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -2302,6 +2355,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
             // unique index dropped; plain index kept.
             IndexDescriptor { name: "members_tier_idx".into(), columns: vec!["tier".into()], unique: false },
         ],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -2338,6 +2392,7 @@ async fn dropping_a_unique_index_is_gated_dropping_a_plain_index_is_not() {
             FieldDescriptor { name: "tier".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d3 = desired_snapshot(&cfg.project_schema, &[v3]).expect("desired_snapshot");
     let live3 = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap4");
@@ -2382,6 +2437,7 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -2405,6 +2461,7 @@ async fn rename_hint_routes_drop_add_through_expand_contract_not_drop_add() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -2539,6 +2596,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -2563,6 +2621,7 @@ async fn declarative_rename_preserves_preexisting_rows_through_expand_then_contr
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -2717,6 +2776,7 @@ async fn rename_only_deploy_leaves_session_role_and_search_path_clean() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -2730,6 +2790,7 @@ async fn rename_only_deploy_leaves_session_role_and_search_path_clean() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -2794,6 +2855,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -2813,6 +2875,7 @@ async fn flattening_a_rename_into_the_plain_plan_loses_data_or_is_gate_blocked()
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -2886,7 +2949,8 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
@@ -2895,7 +2959,8 @@ async fn without_a_hint_the_same_desired_is_two_independent_ops_not_a_rename() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
@@ -2933,7 +2998,8 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
@@ -2942,7 +3008,8 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email_address".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
 
@@ -2963,7 +3030,8 @@ async fn rename_hint_naming_a_nonexistent_column_is_an_error() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hint = vec![RenameHint { table: "users".into(), from: "email".into(), to: "email_address".into() }];
@@ -2985,7 +3053,8 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
@@ -2995,7 +3064,8 @@ async fn rename_hint_with_a_type_mismatch_is_an_error() {
             // renamed AND retyped (string → number).
             fields: vec![FieldDescriptor { name: "rating".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hint = vec![RenameHint { table: "users".into(), from: "score".into(), to: "rating".into() }];
@@ -3029,7 +3099,8 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
                 FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
@@ -3039,7 +3110,8 @@ async fn two_hints_sharing_a_to_are_rejected_as_duplicate() {
             // Both old columns map onto a single new column `c`.
             fields: vec![FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hints = vec![
@@ -3067,7 +3139,8 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "a".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
@@ -3079,7 +3152,8 @@ async fn two_hints_sharing_a_from_are_rejected_as_duplicate() {
                 FieldDescriptor { name: "d".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hints = vec![
@@ -3110,7 +3184,8 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
                 FieldDescriptor { name: "b".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = {
@@ -3122,7 +3197,8 @@ async fn a_rename_chain_is_rejected_explicitly_not_incidentally() {
                 FieldDescriptor { name: "c".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() },
             ],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hints = vec![
@@ -3149,7 +3225,8 @@ async fn a_noop_rename_hint_from_equals_to_is_a_precise_error() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     // Same shape on both sides; the only "change" is the no-op hint.
@@ -3178,7 +3255,8 @@ async fn a_hint_on_a_created_table_is_unmatched() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let hints = vec![RenameHint { table: "posts".into(), from: "old".into(), to: "body".into() }];
@@ -3200,7 +3278,8 @@ async fn a_hint_on_a_dropped_table_is_unmatched() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "body".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot")
     };
     let desired = DesiredSchema::default();
@@ -3234,6 +3313,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "score".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -3246,6 +3326,7 @@ async fn type_change_is_gated_refused_without_approval_applied_with_then_re_diff
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "score".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -3294,6 +3375,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -3306,6 +3388,7 @@ async fn set_not_null_is_gated_drop_not_null_is_ungated_and_both_re_diff_clean()
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "email".into(), ty: "string".into(), required: true, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -3369,6 +3452,7 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "v".into(), ty: "string".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -3380,6 +3464,7 @@ async fn unapplied_gated_type_change_keeps_re_diffing_nonempty_documented_semant
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "v".into(), ty: "number".into(), required: false, unique: false, references: None, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
 
@@ -3461,12 +3546,13 @@ async fn fk_with_cascade_policy_round_trips_clean() {
     let author = author_for(&cfg);
     let engine = MigrationEngine::new();
 
-    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
     let child = CollectionDescriptor {
         name: "child".into(),
         owner_app: "app_test".into(),
         fields: vec![ref_field("p", "parent", Some("cascade"), Some("cascade"), Some(true))],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
     apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
@@ -3485,13 +3571,14 @@ async fn fk_with_set_null_policy_round_trips_clean() {
     let author = author_for(&cfg);
     let engine = MigrationEngine::new();
 
-    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
     let child = CollectionDescriptor {
         name: "child".into(),
         owner_app: "app_test".into(),
         // SET NULL on delete; default (restrict) on update; deferrable default true.
         fields: vec![ref_field("p", "parent", Some("set null"), None, None)],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
     apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
@@ -3513,7 +3600,7 @@ async fn fk_sdk_default_restrict_deferrable_round_trips_clean() {
     let author = author_for(&cfg);
     let engine = MigrationEngine::new();
 
-    let parent = CollectionDescriptor { name: "authors".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let parent = CollectionDescriptor { name: "authors".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
     let child = CollectionDescriptor {
         name: "posts".into(),
         owner_app: "app_test".into(),
@@ -3525,6 +3612,7 @@ async fn fk_sdk_default_restrict_deferrable_round_trips_clean() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
     apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
@@ -3545,12 +3633,13 @@ async fn fk_no_action_non_deferrable_round_trips_clean() {
     let author = author_for(&cfg);
     let engine = MigrationEngine::new();
 
-    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
     let child = CollectionDescriptor {
         name: "child".into(),
         owner_app: "app_test".into(),
         fields: vec![ref_field("p", "parent", Some("no action"), Some("no action"), Some(false))],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
     apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
@@ -3573,6 +3662,7 @@ async fn cross_app_ref_target_is_rejected_fail_closed() {
         owner_app: "app_test".into(),
         fields: vec![ref_field("author", "other_app.users", None, None, None)],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
     assert!(
@@ -3596,12 +3686,13 @@ async fn own_schema_bare_ref_target_is_allowed() {
     let author = author_for(&cfg);
     let engine = MigrationEngine::new();
 
-    let users = CollectionDescriptor { name: "users".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![] };
+    let users = CollectionDescriptor { name: "users".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
     let posts = CollectionDescriptor {
         name: "posts".into(),
         owner_app: "app_test".into(),
         fields: vec![ref_field("author", "users", None, None, None)],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[users, posts]).expect("bare ref allowed");
     apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
@@ -3708,6 +3799,7 @@ async fn literal_field_maps_and_check_pins_value_round_trips() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("literal maps");
     // Type fidelity: kind→text, count→numeric, flag→boolean.
@@ -3731,6 +3823,7 @@ async fn bare_literal_with_no_value_is_rejected_not_silently_text() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "x".into(), ty: "literal".into(), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
     assert!(
@@ -3781,6 +3874,7 @@ async fn column_with_default_and_enum_check_round_trips() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
     // The DEFAULT is carried on the column (emission metadata).
@@ -3821,6 +3915,7 @@ async fn add_column_with_immutable_default_is_additive_not_destructive() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("d1");
     apply_plan(&engine, &d1, &SchemaSnapshot::default(), &author, &cfg, &conn, Approval::None)
@@ -3844,6 +3939,7 @@ async fn add_column_with_immutable_default_is_additive_not_destructive() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("d2");
     let live = snapshot_schema(&conn, &cfg.project_schema).await.expect("snap");
@@ -3887,6 +3983,7 @@ async fn re_declaring_id_with_prefix_folds_into_the_system_pk_no_second_column()
             FieldDescriptor { name: "title".into(), ty: "string".into(), ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("id-fold");
     // Exactly ONE `id` column (the system PK), not two.
@@ -3911,6 +4008,7 @@ async fn reserved_id_prefix_usr_is_rejected() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "id".into(), ty: "id".into(), id_prefix: Some("usr".into()), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
     assert!(
@@ -3929,7 +4027,8 @@ async fn malformed_id_prefix_is_rejected() {
             owner_app: "app_test".into(),
             fields: vec![FieldDescriptor { name: "id".into(), ty: "id".into(), id_prefix: Some(bad.into()), ..Default::default() }],
             indexes: vec![],
-        };
+        runtime_options: Default::default(),
+    };
         let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
         assert!(matches!(err, DeclarativeError::Invalid(_)), "prefix {bad:?} must be rejected, got {err:?}");
     }
@@ -3945,6 +4044,7 @@ async fn field_named_id_with_non_id_type_is_rejected() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "id".into(), ty: "number".into(), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let err = desired_snapshot(&cfg.project_schema, &[desc]).unwrap_err();
     assert!(matches!(err, DeclarativeError::Invalid(_)), "got {err:?}");
@@ -3975,6 +4075,7 @@ async fn system_field_indexes_are_modelled_and_a_fresh_table_re_diffs_empty() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
 
@@ -4030,6 +4131,7 @@ async fn p2_goodies_are_accepted_not_rejected() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let dv = desired_snapshot(&cfg.project_schema, &[v]).expect("vector accepted");
     assert_eq!(
@@ -4043,6 +4145,7 @@ async fn p2_goodies_are_accepted_not_rejected() {
         owner_app: "app_test".into(),
         fields: vec![FieldDescriptor { name: "loc".into(), ty: "geoPoint".into(), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let dg = desired_snapshot(&cfg.project_schema, &[g]).expect("geoPoint accepted");
     assert_eq!(
@@ -4061,6 +4164,7 @@ async fn p2_goodies_are_accepted_not_rejected() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let de = desired_snapshot(&cfg.project_schema, &[e]).expect("encrypted accepted");
     assert_eq!(
@@ -4079,6 +4183,7 @@ async fn p2_goodies_are_accepted_not_rejected() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let dm = desired_snapshot(&cfg.project_schema, &[m]).expect("mask accepted");
     let cols: Vec<&str> = dm.snapshot.tables["people"].columns.iter().map(|c| c.name.as_str()).collect();
@@ -4122,6 +4227,7 @@ async fn p2_encrypted_and_mask_columns_apply_and_round_trip_to_zero_drift() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
 
@@ -4192,6 +4298,7 @@ async fn p4_half_a_generated_ddl_carries_sentinels_and_round_trips_through_intro
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired");
 
@@ -4290,6 +4397,7 @@ fn golden_descs() -> Vec<CollectionDescriptor> {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let accounts = CollectionDescriptor {
         name: "accounts".into(),
@@ -4325,6 +4433,7 @@ fn golden_descs() -> Vec<CollectionDescriptor> {
             columns: vec!["title".into()],
             unique: false,
         }],
+    runtime_options: Default::default(),
     };
     vec![users, accounts]
 }
@@ -4399,6 +4508,7 @@ fn golden_pg_add_column() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let mut v2 = v1.clone();
     v2.fields.push(FieldDescriptor {
@@ -4481,6 +4591,7 @@ fn golden_pg_drops() {
             columns: vec!["title".into()],
             unique: false,
         }],
+    runtime_options: Default::default(),
     };
     let gone = CollectionDescriptor {
         name: "gone".into(),
@@ -4491,6 +4602,7 @@ fn golden_pg_drops() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired_accounts = CollectionDescriptor {
         name: "accounts".into(),
@@ -4502,6 +4614,7 @@ fn golden_pg_drops() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let (live, ownership) = golden_live(&[live_accounts, gone]);
     let desired = desired_snapshot(G_PROJECT, &[desired_accounts]).expect("desired");

@@ -189,7 +189,8 @@ pub use model::ir::{
     IndexMethod, IrBatch, IrClassification, IrColumn, IrConstraint, IrConstraintKind,
     IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar, IrVersionError,
     MigrationIr, Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SynthDefaultFn,
-    VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+    TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
+    CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint

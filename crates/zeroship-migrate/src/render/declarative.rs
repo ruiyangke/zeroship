@@ -44,6 +44,7 @@ use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot,
     IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use crate::model::ir::TableRuntimeOptions;
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
@@ -589,6 +590,10 @@ pub struct CollectionDescriptor {
     /// The declared named indexes (`_indexes`).
     #[serde(default)]
     pub indexes: Vec<IndexDescriptor>,
+    /// Collection-level runtime options that do not round-trip through physical
+    /// catalog state.
+    #[serde(rename = "runtimeOptions", default)]
+    pub runtime_options: TableRuntimeOptions,
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,6 +1818,7 @@ pub(crate) fn build_table_snapshot(
             columns,
             indexes,
             constraints,
+            runtime_options: d.runtime_options.clone(),
             comment: None,
             stored_create_sql: None,
         })
@@ -6099,6 +6105,7 @@ mod snapshot_builder_refactor_safety_tests {
                 columns: vec!["author".into(), "slug".into()],
                 unique: false,
             }],
+            runtime_options: Default::default(),
         }
     }
 
@@ -6165,6 +6172,7 @@ mod snapshot_builder_refactor_safety_tests {
                 ..Default::default()
             }],
             indexes: vec![],
+            runtime_options: Default::default(),
         }
     }
 

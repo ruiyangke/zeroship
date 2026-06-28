@@ -61,6 +61,7 @@ fn descriptor(table: &str, field: &str) -> CollectionDescriptor {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 
@@ -341,6 +342,7 @@ fn descriptor_unique(table: &str, field: &str, index: &str) -> CollectionDescrip
             columns: vec![field.into()],
             unique: true,
         }],
+        runtime_options: Default::default(),
     }
 }
 
@@ -468,6 +470,7 @@ fn descriptor3(table: &str, a: &str, b: &str, c: &str) -> CollectionDescriptor {
             FieldDescriptor { name: c.into(), ty: "string".into(), required: false, ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 

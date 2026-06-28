@@ -1,5 +1,5 @@
 {
-  "ir_version": 5,
+  "ir_version": 6,
   "name": "ddl_addcol_constraints",
   "owner_app": "app_corpus",
   "ops": [

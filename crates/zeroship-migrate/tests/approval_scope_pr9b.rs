@@ -178,7 +178,8 @@ fn live_members() -> LiveSchema {
         ],
         indexes: vec![],
         constraints: vec![],
-        comment: None,
+        runtime_options: Default::default(),
+            comment: None,
         stored_create_sql: None,
     };
     let mut live = LiveSchema::default();

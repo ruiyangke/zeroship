@@ -89,6 +89,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();
@@ -228,6 +229,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();
@@ -321,6 +323,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();

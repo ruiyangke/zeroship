@@ -524,9 +524,11 @@ describe("gen-types against the REAL zeroship-migrate-js binary (faithful e2e)",
 
       const runtime = JSON.parse(
         await fs.readFile(join(fx.root, "generated/zeroship/schema.runtime.json"), "utf8")
-      ) as Record<string, unknown>;
+      ) as { version?: unknown; collections?: Record<string, unknown> };
+      assert.equal(runtime.version, 1);
       assert.ok(
-        Object.prototype.hasOwnProperty.call(runtime, "real_notes"),
+        runtime.collections &&
+          Object.prototype.hasOwnProperty.call(runtime.collections, "real_notes"),
         `schema.runtime.json must carry the folded collection; got ${JSON.stringify(runtime)}`
       );
 

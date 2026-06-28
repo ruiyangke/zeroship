@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use zeroship_migrate::model::ir::{
     ColType, IndexElement, IrColumn, IrDefault, Op, SynthDefaultFn, CURRENT_IR_VERSION,
-    SYSTEM_FIELD_NAMES,
+    SYSTEM_FIELD_NAMES, TableRuntimeOptions, TableStrictness,
 };
 use zeroship_migrate::plan::loader::{is_valid_migration_name, suggest_migration_name};
 use zeroship_migrate::render::declarative::{
@@ -387,6 +387,7 @@ fn synth_delta_ops(
                         columns,
                         constraints: Vec::new(),
                         indexes: Vec::new(),
+                        runtime_options: Some(want.runtime_options.clone()),
                         schema: None,
                         existence_guard: None,
                     },
@@ -577,16 +578,21 @@ export function up() {{
 /// the emitted `.ts`, when recorded, yields the same IR.
 fn render_op_call(op: &Op) -> String {
     match op {
-        Op::CreateTable { name, columns, .. } => {
+        Op::CreateTable {
+            name,
+            columns,
+            runtime_options,
+            ..
+        } => {
             let cols: Vec<String> = columns
                 .iter()
                 .map(|c| format!("      {}: {}", json_key(&c.name), render_col(c)))
                 .collect();
-            format!(
-                "table({}).create({{\n    columns: {{\n{}\n    }},\n  }});",
-                js_str(name),
-                cols.join(",\n")
-            )
+            let mut args = vec![format!("    columns: {{\n{}\n    }}", cols.join(",\n"))];
+            if let Some(options) = runtime_options {
+                args.extend(render_create_runtime_options(options));
+            }
+            format!("table({}).create({{\n{},\n  }});", js_str(name), args.join(",\n"))
         }
         Op::AddColumn {
             table,
@@ -655,6 +661,21 @@ fn render_op_call(op: &Op) -> String {
         // op kind is authored by hand, not generated. Render a placeholder comment.
         _ => "// (op authored by hand — not generated)".to_string(),
     }
+}
+
+fn render_create_runtime_options(options: &TableRuntimeOptions) -> Vec<String> {
+    vec![
+        format!("    softDelete: {}", options.soft_delete),
+        format!("    versioning: {}", options.versioning),
+        format!(
+            "    strictness: {}",
+            js_str(match options.strictness {
+                TableStrictness::Strict => "strict",
+                TableStrictness::Lenient => "lenient",
+                TableStrictness::Off => "off",
+            })
+        ),
+    ]
 }
 
 /// Render a column as a `t.*` chain inside a `create({ columns })` map.

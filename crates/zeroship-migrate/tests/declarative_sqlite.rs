@@ -75,6 +75,7 @@ fn goodies_desc() -> CollectionDescriptor {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 
@@ -208,6 +209,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let posts = CollectionDescriptor {
         name: "posts".into(),
@@ -219,6 +221,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[users, posts]).expect("desired_snapshot");
 
@@ -289,6 +292,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[posts]).expect("desired_snapshot");
     let author = sqlite_author();
@@ -410,6 +414,7 @@ async fn second_deploy_add_column_is_sqlite_legal_and_applies() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let mut v2 = v1.clone();
     v2.fields.push(FieldDescriptor {
@@ -493,6 +498,7 @@ async fn second_deploy_drop_index_actually_drops_on_sqlite() {
             columns: vec!["handle".into()],
             unique: false,
         }],
+    runtime_options: Default::default(),
     };
     // Second deploy: the same table WITHOUT the index → DROP INDEX.
     let mut v2 = v1.clone();
@@ -568,6 +574,7 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     // Second deploy: the same column re-typed to `string` (`text`) — a type change.
     let mut v2 = v1.clone();
@@ -663,6 +670,7 @@ fn spelling_gap_desc() -> CollectionDescriptor {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 
@@ -826,6 +834,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let mut v2 = v1.clone();
     v2.fields[0].ty = "string".into();
@@ -907,6 +916,7 @@ async fn golden_sqlite_create_table_and_index() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let accounts = CollectionDescriptor {
         name: "accounts".into(),
@@ -942,6 +952,7 @@ async fn golden_sqlite_create_table_and_index() {
             columns: vec!["title".into()],
             unique: false,
         }],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[users, accounts]).expect("desired_snapshot");
     let migs = sqlite_author()
@@ -986,6 +997,7 @@ async fn golden_sqlite_add_column() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let mut v2 = v1.clone();
     v2.fields.push(FieldDescriptor {
@@ -1064,6 +1076,7 @@ async fn golden_sqlite_drops() {
             columns: vec!["title".into()],
             unique: false,
         }],
+    runtime_options: Default::default(),
     };
     let gone = CollectionDescriptor {
         name: "gone".into(),
@@ -1074,6 +1087,7 @@ async fn golden_sqlite_drops() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired_accounts = CollectionDescriptor {
         name: "accounts".into(),
@@ -1085,6 +1099,7 @@ async fn golden_sqlite_drops() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let (live, ownership) = golden_live(&[live_accounts, gone]);
     let desired = desired_snapshot(PROJECT, &[desired_accounts]).expect("desired");
@@ -1148,6 +1163,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     // v1: `owner` is a plain STRING (→ snapshot `text` → SQLite TEXT affinity).
     let accounts_v1 = CollectionDescriptor {
@@ -1159,6 +1175,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
 
     let p = paths("differ_string_to_ref_noop");
@@ -1206,6 +1223,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired2 = desired_snapshot(PROJECT, &[users, accounts_v2]).expect("v2 desired");
     let plan = sqlite_author()

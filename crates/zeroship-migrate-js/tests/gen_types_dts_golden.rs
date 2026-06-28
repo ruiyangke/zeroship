@@ -16,7 +16,8 @@
 
 use zeroship_migrate::model::expr::{BinaryOp, Expr};
 use zeroship_migrate::model::ir::{
-    ColType, IrColumn, IrConstraint, IrConstraintKind, IrScalar, Op, RefAction, VectorMetric,
+    ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar, Op, RefAction,
+    TableRuntimeOptions, TableStrictness, VectorMetric,
 };
 use zeroship_migrate_js::render_artifacts;
 
@@ -127,6 +128,7 @@ fn all_types_ops() -> Vec<Op> {
             IrConstraint { name: Some("gadgets_status_enum_check".into()), kind: IrConstraintKind::Check { expr: status_enum } },
         ],
         indexes: Vec::new(),
+        runtime_options: None,
         schema: None,
         existence_guard: None,
     }]
@@ -180,16 +182,89 @@ fn runtime_descriptor_is_the_wire_fielddef_map() {
     let artifacts = render_artifacts(&ops, "public").expect("render");
     let value: serde_json::Value =
         serde_json::from_str(&artifacts.runtime_descriptor).expect("runtime descriptor is JSON");
-    let gadgets = value.get("gadgets").expect("gadgets collection present");
-    // A spot-check that the RuntimeSchemaDescriptor is the per-column wire-FieldDef
-    // map (the same shape `normalizeSchema` produces at runtime).
-    assert_eq!(gadgets["id"]["type"], "id");
-    assert_eq!(gadgets["id"]["idPrefix"], "gdt");
-    assert_eq!(gadgets["owner"]["refTarget"], "users");
-    assert_eq!(gadgets["owner"]["onDelete"], "cascade");
-    assert_eq!(gadgets["embedding"]["vectorDims"], 768);
-    assert_eq!(gadgets["embedding"]["vectorMetric"], "l2");
-    assert_eq!(gadgets["age"]["min"], 0.0);
-    assert_eq!(gadgets["age"]["max"], 120.0);
-    assert_eq!(gadgets["status"]["enum"], serde_json::json!(["on", "off"]));
+    assert_eq!(value["version"], 1);
+    let gadgets = value["collections"].get("gadgets").expect("gadgets collection present");
+    let fields = &gadgets["fields"];
+    // A spot-check that descriptor v1 nests the per-column wire-FieldDef map under
+    // `collections[*].fields` while carrying collection metadata alongside it.
+    assert_eq!(fields["id"]["type"], "id");
+    assert_eq!(fields["id"]["idPrefix"], "gdt");
+    assert_eq!(fields["owner"]["refTarget"], "users");
+    assert_eq!(fields["owner"]["onDelete"], "cascade");
+    assert_eq!(fields["embedding"]["vectorDims"], 768);
+    assert_eq!(fields["embedding"]["vectorMetric"], "l2");
+    assert_eq!(fields["age"]["min"], 0.0);
+    assert_eq!(fields["age"]["max"], 120.0);
+    assert_eq!(fields["status"]["enum"], serde_json::json!(["on", "off"]));
+    assert_eq!(
+        gadgets["options"],
+        serde_json::json!({ "softDelete": false, "versioning": false, "strictness": "strict" })
+    );
+    assert_eq!(gadgets["indexes"], serde_json::json!([]));
+}
+
+#[test]
+fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
+    let ops = vec![
+        Op::CreateTable {
+            name: "posts".into(),
+            columns: vec![
+                IrColumn { name: "title".into(), ty: ColType::Text, nullable: Some(false), default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                IrColumn { name: "author_id".into(), ty: ColType::Text, nullable: Some(false), default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                IrColumn { name: "status".into(), ty: ColType::Text, nullable: Some(false), default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+            ],
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            runtime_options: Some(TableRuntimeOptions {
+                soft_delete: true,
+                versioning: true,
+                strictness: TableStrictness::Lenient,
+            }),
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateIndex {
+            table: "posts".into(),
+            columns: vec![
+                IndexElement::Column { name: "author_id".into() },
+                IndexElement::Column { name: "status".into() },
+            ],
+            name: Some("posts_author_status_idx".into()),
+            unique: Some(false),
+            using: None,
+            r#where: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+    ];
+    let artifacts = render_artifacts(&ops, "public").expect("render");
+    let value: serde_json::Value =
+        serde_json::from_str(&artifacts.runtime_descriptor).expect("runtime descriptor is JSON");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "version": 1,
+            "collections": {
+                "posts": {
+                    "fields": {
+                        "title": { "type": "string", "required": true },
+                        "author_id": { "type": "string", "required": true },
+                        "status": { "type": "string", "required": true }
+                    },
+                    "options": {
+                        "softDelete": true,
+                        "versioning": true,
+                        "strictness": "lenient"
+                    },
+                    "indexes": [
+                        {
+                            "name": "posts_author_status_idx",
+                            "fields": ["author_id", "status"]
+                        }
+                    ]
+                }
+            }
+        })
+    );
 }

@@ -131,6 +131,7 @@ async fn type_change_rebuild_preserves_data_and_recreates_index() {
             columns: vec!["n".into()],
             unique: false,
         }],
+        runtime_options: Default::default(),
     }];
     // v2: the same column re-typed to string → TEXT affinity. A genuine type change.
     let mut v2 = v1.clone();
@@ -239,6 +240,7 @@ async fn nullability_tighten_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].required = true;
@@ -306,6 +308,7 @@ async fn column_rename_rebuild_carries_data() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "handle".into();
@@ -410,6 +413,7 @@ async fn goodie_sentinels_survive_rebuild() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     // v2: re-type `amount` number → string (a rebuild) — the goodie columns are
     // UNCHANGED but must survive the rebuild with their sentinels intact.
@@ -618,6 +622,7 @@ async fn confinement_holds_across_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -766,6 +771,7 @@ async fn creator_trigger_and_partial_index_survive_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -1071,6 +1077,7 @@ async fn pre_created_temp_table_does_not_pollute_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -1183,6 +1190,7 @@ async fn h1_drop_column_in_index_routes_to_rebuild() {
                 unique: false,
             },
         ],
+        runtime_options: Default::default(),
     }];
     // v2: drop `extra` (and its index). `n` + its index survive.
     let v2 = vec![CollectionDescriptor {
@@ -1199,6 +1207,7 @@ async fn h1_drop_column_in_index_routes_to_rebuild() {
             columns: vec!["n".into()],
             unique: false,
         }],
+        runtime_options: Default::default(),
     }];
 
     let p = paths("h1_idx");
@@ -1285,6 +1294,7 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     // v2: drop `points` (the CHECK-constrained column). `label` survives.
     let v2 = vec![CollectionDescriptor {
@@ -1297,6 +1307,7 @@ async fn h1_drop_column_in_check_routes_to_rebuild() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
 
     let p = paths("h1_check");
@@ -1383,6 +1394,7 @@ async fn nullability_loosen_rebuild_preserves_data() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].required = false;
@@ -1472,6 +1484,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let posts_fk = CollectionDescriptor {
         name: "posts".into(),
@@ -1483,6 +1496,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     // v2: `author` becomes a plain string column — the FK is dropped.
     let posts_nofk = CollectionDescriptor {
@@ -1495,6 +1509,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let v1 = vec![users.clone(), posts_fk];
     let v2 = vec![users, posts_nofk];
@@ -1625,6 +1640,7 @@ async fn rebuild_one_seam_refuses_destructive_rebuild_outside_version_scope() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();

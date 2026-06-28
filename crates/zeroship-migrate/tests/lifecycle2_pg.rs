@@ -1282,6 +1282,7 @@ fn collection(name: &str, owner: &str, fields: Vec<FieldDescriptor>) -> Collecti
         owner_app: owner.into(),
         fields,
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 

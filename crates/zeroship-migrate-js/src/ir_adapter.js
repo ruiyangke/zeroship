@@ -89,7 +89,7 @@ function fieldDefToDescriptor(name, def) {
 // `ownerApp` stamps the declaring app (the project-umbrella ownership
 // subject); the host passes it in via a global the Rust side sets before
 // evaluation.
-function collectionToDescriptor(name, fieldRecord, indexes, ownerApp) {
+function collectionToDescriptor(name, fieldRecord, indexes, runtimeOptions, ownerApp) {
   const fields = [];
   for (const [fieldName, builder] of Object.entries(fieldRecord)) {
     if (!(builder instanceof TypeBuilder)) {
@@ -105,6 +105,13 @@ function collectionToDescriptor(name, fieldRecord, indexes, ownerApp) {
   }
 
   const out = { name, owner_app: ownerApp, fields };
+  if (runtimeOptions && typeof runtimeOptions === "object") {
+    out.runtimeOptions = {
+      softDelete: runtimeOptions.softDelete === true,
+      versioning: runtimeOptions.versioning === true,
+      strictness: runtimeOptions.strictness ?? "strict",
+    };
+  }
   if (Array.isArray(indexes) && indexes.length > 0) {
     out.indexes = indexes.map((idx) => {
       const d = { name: idx.name, columns: idx.fields ?? idx.columns ?? [] };
@@ -122,11 +129,13 @@ function buildIR(schemaMap, ownerApp) {
     // `{ fields, indexes }` shape (the SchemaBuilder form). Support both.
     let fieldRecord = value;
     let indexes = [];
+    let runtimeOptions = undefined;
     if (value && typeof value === "object" && value.fields && typeof value.fields === "object") {
       fieldRecord = value.fields;
       indexes = value.indexes ?? [];
+      runtimeOptions = value.options;
     }
-    collections.push(collectionToDescriptor(collName, fieldRecord, indexes, ownerApp));
+    collections.push(collectionToDescriptor(collName, fieldRecord, indexes, runtimeOptions, ownerApp));
   }
   return collections;
 }

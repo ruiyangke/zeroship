@@ -378,13 +378,12 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     assert.deepEqual(calls.map((c) => c.name), ["todos"]);
   });
 
-  // **Review fix (MED).** The RuntimeSchemaDescriptor is a pure field-map and
-  // cannot carry collection-LEVEL options (`softDelete` / `versioning`). Source
-  // the fields off the descriptor but recover those options from the matching
-  // declared SchemaBuilder, else apps that ship a migration descriptor AND
-  // declare `.softDelete()`/`.versioning()` silently lose the runtime behaviour.
-  // These two FAIL pre-fix (descriptor mode hard-coded softDelete=false /
-  // versioning=false), so they pin the merge.
+  // **Review fix (MED).** Legacy RuntimeSchemaDescriptors are pure field maps
+  // and cannot carry collection-level options (`softDelete` / `versioning`).
+  // Source the fields off the descriptor but recover those options from the
+  // matching declared SchemaBuilder, else apps that ship a legacy descriptor AND
+  // declare `.softDelete()`/`.versioning()` silently lose runtime behaviour.
+  // These two pin the transitional merge until P5 S3 deletes the fallback.
 
   // A native env.db whose `collection(name)` records which mutating op it
   // routed to (soft delete → `update`; hard delete → `delete`).
@@ -409,6 +408,78 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       },
     } as unknown as ZeroshipDb;
   }
+
+  test("reads collection options and indexes directly from descriptor v1", async () => {
+    const ops: Array<{ name: string; op: string }> = [];
+    const calls: Array<{ name: string; indexes: unknown }> = [];
+    const native = {
+      registerModel(name: string, _schema: Record<string, unknown>, indexes?: unknown) {
+        calls.push({ name, indexes });
+        return Promise.resolve();
+      },
+      transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
+      collection(name: string) {
+        return {
+          update() {
+            ops.push({ name, op: "update" });
+            return Promise.resolve(null);
+          },
+          delete() {
+            ops.push({ name, op: "delete" });
+            return Promise.resolve(null);
+          },
+          async find() { return []; },
+        };
+      },
+    } as unknown as ZeroshipDb;
+    const descriptor = {
+      version: 1,
+      collections: {
+        posts: {
+          fields: {
+            id: { type: "id", idPrefix: "post" },
+            title: { type: "string", required: true },
+            status: { type: "string", required: true },
+          },
+          options: { softDelete: true, versioning: true, strictness: "lenient" },
+          indexes: [{ name: "posts_title_status_idx", fields: ["title", "status"] }],
+        },
+      },
+    };
+    const { ready } = installSchema(
+      { ignored: { name: t.string() } } as never,
+      native,
+      { descriptor } as never,
+    );
+    await ready;
+
+    assert.deepEqual(calls, [
+      {
+        name: "posts",
+        indexes: [{ name: "posts_title_status_idx", fields: ["title", "status"] }],
+      },
+    ]);
+
+    const handle = native as unknown as Record<
+      string,
+      {
+        delete(id: string): Promise<unknown>;
+        update(
+          idOrFilter: unknown,
+          patch: unknown,
+        ): Promise<{ data: unknown; error: { code?: string } | null }>;
+      }
+    >;
+    await handle.posts.delete("post_abc");
+    assert.deepEqual(
+      ops,
+      [{ name: "posts", op: "update" }],
+      "descriptor v1 softDelete must route delete through native update",
+    );
+
+    const res = await handle.posts.update({ id: "post_abc", version: 1 }, { title: "x" });
+    assert.equal(res.error?.code, "OPTIMISTIC_CONCURRENCY");
+  });
 
   test("preserves the declared collection's softDelete option in descriptor mode", async () => {
     const ops: Array<{ name: string; op: string }> = [];

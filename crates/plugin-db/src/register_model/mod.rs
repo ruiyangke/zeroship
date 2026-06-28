@@ -190,11 +190,11 @@ async fn exec_register_model(
         // on the returned `Ok(())`, preserving the metadata-readiness contract
         // above WITHOUT any CREATE/ALTER. `_pg` is bound only to select the arm.
         //
-        // **Migration-first cutover (P4b).** The `schema` value this arm
+        // **Migration-first cutover (P4b/P5 S2).** The `schema` value this arm
         // receives (and that the dispatch caller stamps into `cache_schema`)
         // now originates from the bundled `RuntimeSchemaDescriptor` (the
-        // migration fold's wire-FieldDef map), not the declared `default.schema`
-        // t.* object: the runtime injects the descriptor as
+        // migration fold's runtime descriptor), not the declared
+        // `default.schema` t.* object: the runtime injects the descriptor as
         // `globalThis.__zsRuntimeDescriptor` and `installSchema` runs the
         // `registerModel` chain off it. So the declared-only hints the PG CRUD
         // passes read out of the cache (`t.id(prefix)` idPrefix, encrypted /

@@ -339,7 +339,7 @@ import "@zeroship/db/internal";
 #[test]
 fn init_script_sources_schema_from_runtime_descriptor_when_present() {
     // **Migration-first cutover (P4b).** When the deploy carries a bundled
-    // `RuntimeSchemaDescriptor` (the migration fold's wire-FieldDef map), the
+    // `RuntimeSchemaDescriptor` (v1 `{ fields, options, indexes }` per collection), the
     // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`
     // and `setup_globals` exposes it as `globalThis.__zsRuntimeDescriptor`. The
     // bootstrap's `runtime-entry` must then install the schema FROM the
@@ -387,11 +387,10 @@ export default {
 export function installSchema(schema, _env, _options) {
     globalThis.__zsCapturedSchema = JSON.stringify({
         keys: Object.keys(schema),
-        // **P4b review fix (MED)** — the declared schema rides
-        // `options.declaredSchemas` so collection-LEVEL options
-        // (softDelete / versioning / indexes) the field-only descriptor
-        // cannot encode are recoverable. Capture its keys to prove the
-        // runtime-entry threads it (the descriptor stays the field source).
+        // The declared schema still rides `options.declaredSchemas` until S3
+        // deletes the fallback. Descriptor v1 itself carries options/indexes;
+        // capture declared keys to prove runtime-entry still threads the
+        // transitional fallback without making it the field source.
         declaredKeys: (_options && _options.declaredSchemas)
             ? Object.keys(_options.declaredSchemas)
             : [],
@@ -416,8 +415,7 @@ import "@zeroship/db/internal";
 
     // The bundled descriptor: a DIFFERENT collection (`posts`) than the
     // declared `todos`, carrying platform system fields the fold materialised.
-    let descriptor =
-        r#"{"posts":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true},"created_at":{"type":"date"}}}"#;
+    let descriptor = r#"{"version":1,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true},"created_at":{"type":"date"}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
 
     let runtime = Runtime::builder()
         .modules(modules)
@@ -445,14 +443,12 @@ import "@zeroship/db/internal";
     // collections (`posts`), NOT the declared `todos`.
     assert!(body.contains(r#"\"keys\":[\"posts\"]"#),
         "expected installSchema sourced from the descriptor (posts), got: {body}");
-    // **P4b review fix (MED)** — the declared `todos` schema is NOT the field
-    // source, but its collection-LEVEL options (softDelete / versioning /
-    // indexes) must still be recoverable: the runtime-entry threads the declared
-    // map through `options.declaredSchemas`. Pre-fix it was passed nowhere, so
-    // `declaredKeys` was `[]` and those options were silently dropped.
+    // The declared `todos` schema is NOT the field source. It is still threaded
+    // through `options.declaredSchemas` as the transitional legacy fallback until
+    // S3 deletes declared-schema fallback support.
     assert!(body.contains(r#"\"declaredKeys\":[\"todos\"]"#),
         "the declared `todos` schema must reach installSchema via options.declaredSchemas \
-         (collection-option recovery), got: {body}");
+         (transitional fallback), got: {body}");
 }
 
 #[test]

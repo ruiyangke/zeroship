@@ -62,7 +62,7 @@ use crate::model::snapshot::{
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
     ColType, CommentTarget, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op,
-    RefAction, SafeI64, SafeU64, SequenceOwnedBy,
+    RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
 };
 use crate::render::lower::{
     create_index_snapshot, derived_constraint_name, derived_exclusion_constraint_name,
@@ -518,14 +518,21 @@ pub fn fold_ops(
                     return Err(FoldError::MissingSequence(name.clone()));
                 }
             }
-            Op::CreateTable { name, columns, constraints, indexes, .. } => {
+            Op::CreateTable {
+                name,
+                columns,
+                constraints,
+                indexes,
+                runtime_options,
+                ..
+            } => {
                 if tables.contains_key(name) {
                     return Err(FoldError::DuplicateTable(name.clone()));
                 }
                 if views.contains_key(name) {
                     return Err(FoldError::DuplicateView(name.clone()));
                 }
-                let desc = create_table_descriptor(name, columns);
+                let desc = create_table_descriptor(name, columns, runtime_options.as_ref());
                 let mut snap = build_table_snapshot(project_schema, &desc, dialect)?;
                 apply_fold_named_type_metadata(
                     name,
@@ -544,6 +551,18 @@ pub fn fold_ops(
                     dialect,
                 )?;
                 tables.insert(name.clone(), snap);
+            }
+            Op::SetTableOptions { table, options, .. } => {
+                let snap = table_mut(&mut tables, table)?;
+                if let Some(soft_delete) = options.soft_delete {
+                    snap.runtime_options.soft_delete = soft_delete;
+                }
+                if let Some(versioning) = options.versioning {
+                    snap.runtime_options.versioning = versioning;
+                }
+                if let Some(strictness) = options.strictness {
+                    snap.runtime_options.strictness = strictness;
+                }
             }
             Op::DropTable { table, .. } => {
                 // Remove ONLY the target table. We do NOT cascade-drop FK constraints
@@ -1155,12 +1174,17 @@ fn apply_comment(
 /// constraints/indexes are folded on separately by [`fold_create_table_specs`],
 /// exactly as the lower does). `owner_app` is the fold-internal constant (drift-
 /// irrelevant).
-fn create_table_descriptor(name: &str, columns: &[IrColumn]) -> CollectionDescriptor {
+fn create_table_descriptor(
+    name: &str,
+    columns: &[IrColumn],
+    runtime_options: Option<&TableRuntimeOptions>,
+) -> CollectionDescriptor {
     CollectionDescriptor {
         name: name.to_string(),
         owner_app: FOLD_OWNER_APP.to_string(),
         fields: columns.iter().map(ir_column_to_field).collect(),
         indexes: Vec::new(),
+        runtime_options: runtime_options.cloned().unwrap_or_default(),
     }
 }
 
@@ -1212,6 +1236,7 @@ fn add_column_snapshot(
         owner_app: FOLD_OWNER_APP.to_string(),
         fields: vec![field],
         indexes: Vec::new(),
+        runtime_options: Default::default(),
     };
     let snap = build_table_snapshot(project_schema, &desc, dialect)?;
     let sibling_name = format!("{column}_masked");
@@ -2157,6 +2182,7 @@ pub fn fold_to_field_defs(
             owner_app: FOLD_OWNER_APP.to_string(),
             fields: cols.into_values().collect(),
             indexes: Vec::new(),
+            runtime_options: Default::default(),
         };
         out.insert(table, crate::render::declarative::descriptor_to_sdk_schema(&desc));
     }
@@ -2493,6 +2519,7 @@ pub fn descriptors_to_create_ops(
             columns,
             constraints,
             indexes: Vec::new(),
+            runtime_options: Some(d.runtime_options.clone()),
             schema: None,
             existence_guard: None,
         });
@@ -2600,7 +2627,7 @@ fn json_value_to_ir_scalar_default(v: &serde_json::Value) -> crate::model::ir::I
 mod tests {
     use super::*;
     use crate::model::expr::Expr;
-    use crate::model::ir::{IndexElement, IrScalar};
+    use crate::model::ir::{IndexElement, IrScalar, TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness};
 
     const SCHEMA: &str = "proj_test";
 
@@ -2629,6 +2656,7 @@ mod tests {
             columns,
             constraints: Vec::new(),
             indexes: Vec::new(),
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -3644,6 +3672,7 @@ mod tests {
                 using: None,
                 r#where: None,
             }],
+            runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
         };
@@ -3652,6 +3681,61 @@ mod tests {
         assert!(t.constraints.iter().any(|c| c.name == "m_slot_uq" && c.kind == "UNIQUE"));
         assert!(t.constraints.iter().any(|c| c.name == "m_team_fk" && c.kind == "FOREIGN KEY"));
         assert!(t.indexes.iter().any(|i| i.name == "m_team_idx"));
+    }
+
+    #[test]
+    fn runtime_options_and_plain_indexes_fold_into_table_snapshot() {
+        let ops = vec![
+            Op::CreateTable {
+                name: "posts".to_string(),
+                columns: vec![
+                    col("author_id", ColType::Text, false),
+                    col("status", ColType::Text, false),
+                ],
+                constraints: Vec::new(),
+                indexes: Vec::new(),
+                runtime_options: Some(TableRuntimeOptions {
+                    soft_delete: true,
+                    versioning: true,
+                    strictness: TableStrictness::Lenient,
+                }),
+                schema: None,
+                existence_guard: None,
+            },
+            Op::CreateIndex {
+                table: "posts".to_string(),
+                columns: vec![
+                    IndexElement::Column { name: "author_id".to_string() },
+                    IndexElement::Column { name: "status".to_string() },
+                ],
+                name: Some("posts_author_status_idx".to_string()),
+                unique: Some(false),
+                using: None,
+                r#where: None,
+                concurrently: None,
+                schema: None,
+                existence_guard: None,
+            },
+            Op::SetTableOptions {
+                table: "posts".to_string(),
+                options: TableRuntimeOptionsPatch {
+                    soft_delete: None,
+                    versioning: Some(false),
+                    strictness: Some(TableStrictness::Off),
+                },
+                schema: None,
+            },
+        ];
+        let snap = fold(&ops).unwrap();
+        let posts = &snap.tables["posts"];
+        assert!(posts.runtime_options.soft_delete);
+        assert!(!posts.runtime_options.versioning);
+        assert_eq!(posts.runtime_options.strictness, TableStrictness::Off);
+        assert!(posts.indexes.iter().any(|idx| {
+            idx.name == "posts_author_status_idx"
+                && idx.columns == vec!["author_id".to_string(), "status".to_string()]
+                && !idx.unique
+        }));
     }
 
     /// PURITY: `fold_ops` is a plain synchronous `fn` — it takes NO DSN / `Client`,
@@ -3683,6 +3767,7 @@ mod tests {
             columns: vec![col("a", ColType::Text, false), col("b", ColType::Text, false)],
             constraints: vec![pk],
             indexes: Vec::new(),
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         };
@@ -3790,6 +3875,7 @@ mod tests {
             columns,
             constraints,
             indexes,
+            runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
         }
@@ -3915,6 +4001,7 @@ mod tests {
             owner_app: FOLD_OWNER_APP.to_string(),
             fields: vec![field],
             indexes: Vec::new(),
+            runtime_options: Default::default(),
         };
         build_table_snapshot(SCHEMA, &desc, SqlDialect::Postgres)
             .unwrap()
@@ -4290,6 +4377,7 @@ mod tests {
             columns,
             constraints: checks,
             indexes: Vec::new(),
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -4470,6 +4558,7 @@ mod tests {
             owner_app: "app_test".into(),
             fields,
             indexes: Vec::new(),
+            runtime_options: Default::default(),
         }
     }
 

@@ -629,6 +629,21 @@ export type ExclusionAddArgs = ExclusionConstraintArgs & {
   schema?: string;
 };
 
+export type TableStrictness = "strict" | "lenient" | "off";
+
+export interface TableRuntimeOptions {
+  softDelete: boolean;
+  versioning: boolean;
+  strictness?: TableStrictness;
+}
+
+export interface SetTableOptionsArgs {
+  softDelete?: boolean;
+  versioning?: boolean;
+  strictness?: TableStrictness;
+  schema?: string;
+}
+
 /** The all-object `create({...})` payload (§3.1). Table-level constraints/indexes
  *  are FIELDS (no `build` callback — "no exceptions"); each carries a required
  *  `name` (name-first, §3.4).
@@ -656,6 +671,12 @@ export type ExclusionAddArgs = ExclusionConstraintArgs & {
  *  lower time. */
 export interface CreateTableArgs {
   columns: Record<string, ColumnDef>;
+  /** Collection runtime metadata, carried into `schema.runtime.json`.
+   *  `softDelete` mirrors `@zeroship/db` `.softDelete()`, `versioning` mirrors
+   *  `.withVersioning()`, and `strictness` mirrors `.strictness(...)`. */
+  softDelete?: boolean;
+  versioning?: boolean;
+  strictness?: TableStrictness;
   /** Composite PK. DEFERRED/UNSUPPORTED at apply — the platform owns the synthetic
    *  `id` primary key; a composite/per-column user PK is a HARD lower error (a
    *  second PRIMARY KEY is never satisfiable). Use `t.id()`. */
@@ -781,6 +802,10 @@ export interface TableHandle {
    *  online column expand-contract; `ifExists` guards the source table). Records a
    *  `renameTable` Op; the engine emits the inverse rename as the down-migration. */
   rename(args: { to: string; ifExists?: boolean; schema?: string }): TableHandle;
+  setOptions(args: SetTableOptionsArgs): TableHandle;
+  softDelete(enabled?: boolean, args?: { schema?: string }): TableHandle;
+  withVersioning(enabled?: boolean, args?: { schema?: string }): TableHandle;
+  strictness(level: TableStrictness, args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects

@@ -148,6 +148,49 @@ function requireString(v, what) {
   }
 }
 
+function requireStrictness(v, what) {
+  if (v === undefined) return undefined;
+  if (v !== "strict" && v !== "lenient" && v !== "off") {
+    throw structuredError("OP_INVALID", `${what} must be "strict", "lenient", or "off"`);
+  }
+  return v;
+}
+
+function requireOptionalBoolean(v, what) {
+  if (v === undefined) return undefined;
+  if (typeof v !== "boolean") {
+    throw structuredError("OP_INVALID", `${what} must be a boolean`);
+  }
+  return v;
+}
+
+function runtimeOptionsFromCreateArgs(args) {
+  const softDelete = requireOptionalBoolean(args.softDelete, "create({ softDelete })");
+  const versioning = requireOptionalBoolean(args.versioning, "create({ versioning })");
+  const strictness = requireStrictness(args.strictness, "create({ strictness })");
+  const hasOptions = softDelete !== undefined || versioning !== undefined || strictness !== undefined;
+  if (!hasOptions) return undefined;
+  return compact({
+    softDelete: softDelete ?? false,
+    versioning: versioning ?? false,
+    strictness: strictness ?? "strict",
+  });
+}
+
+function runtimeOptionsPatchFromArgs(args) {
+  const softDelete = requireOptionalBoolean(args.softDelete, "setOptions({ softDelete })");
+  const versioning = requireOptionalBoolean(args.versioning, "setOptions({ versioning })");
+  const strictness = requireStrictness(args.strictness, "setOptions({ strictness })");
+  const patch = compact({ softDelete, versioning, strictness });
+  if (Object.keys(patch).length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "setOptions(...) must set at least one of softDelete, versioning, or strictness",
+    );
+  }
+  return patch;
+}
+
 function requireSafeI64(v, what) {
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isSafeInteger(v)) {
@@ -1020,8 +1063,20 @@ function recordCreateTable(name, args) {
       columns: cols,
       constraints: constraints.length ? constraints : undefined,
       indexes: indexes.length ? indexes : undefined,
+      runtimeOptions: runtimeOptionsFromCreateArgs(args),
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    }),
+  );
+}
+
+function recordSetTableOptions(table, args) {
+  push(
+    compact({
+      op: "setTableOptions",
+      table,
+      options: runtimeOptionsPatchFromArgs(args),
+      schema: args.schema,
     }),
   );
 }
@@ -1755,6 +1810,22 @@ export function table(name, opts = {}) {
         ifExists: args.ifExists,
         schema: pickSchema(args, dflt),
       });
+      return handle;
+    },
+    setOptions(args) {
+      recordSetTableOptions(name, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    softDelete(enabled = true, args = {}) {
+      recordSetTableOptions(name, { softDelete: enabled, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    withVersioning(enabled = true, args = {}) {
+      recordSetTableOptions(name, { versioning: enabled, schema: pickSchema(args, dflt) });
+      return handle;
+    },
+    strictness(level, args = {}) {
+      recordSetTableOptions(name, { strictness: level, schema: pickSchema(args, dflt) });
       return handle;
     },
     comment(text, args = {}) {

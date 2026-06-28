@@ -376,6 +376,7 @@ pub async fn snapshot_schema(
             columns: Vec::new(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            runtime_options: Default::default(),
             comment: r.try_get("comment").ok().flatten(),
             // PG recovers CHECK / generated / partial-index references from the
             // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.

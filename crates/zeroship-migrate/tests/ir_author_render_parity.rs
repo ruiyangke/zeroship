@@ -35,6 +35,7 @@ fn empty_table_snapshot() -> TableSnapshot {
         columns: vec![],
         indexes: vec![],
         constraints: vec![],
+        runtime_options: Default::default(),
         comment: None,
         stored_create_sql: None,
     }
@@ -128,6 +129,7 @@ fn create_table_render_is_byte_identical_pg() {
             FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
 
     let ops = vec![Op::CreateTable {
@@ -154,7 +156,8 @@ fn create_table_render_is_byte_identical_pg() {
         ],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
 
@@ -183,6 +186,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     // `authors` is declared (so it stays in the union, not dropped) AND already
     // live (so the FK inlines, not deferred). The diff then emits ONLY the `posts`
@@ -192,6 +196,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let mut live_snapshot = SchemaSnapshot::default();
     live_snapshot.tables.insert("authors".into(), empty_table_snapshot());
@@ -216,7 +221,8 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
     let mut live = BTreeSet::new();
@@ -259,6 +265,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "vault".into(),
@@ -271,7 +278,8 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
 
@@ -324,6 +332,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "people".into(),
@@ -344,7 +353,8 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
 
@@ -379,6 +389,7 @@ fn add_column_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[desc])
         .expect("desired snapshot");
@@ -388,6 +399,7 @@ fn add_column_render_is_byte_identical_pg() {
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let live_full = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc])
         .expect("live snapshot");
@@ -436,6 +448,7 @@ fn create_index_render_is_byte_identical_pg() {
             columns: vec!["kind".into(), "at".into()],
             unique: false,
         }],
+        runtime_options: Default::default(),
     };
     // Diff against a live table that already has the columns but not the index, so
     // the ONLY emitted op is the CREATE INDEX.
@@ -526,12 +539,14 @@ fn alter_column_type_render_is_byte_identical_pg() {
         owner_app: OWNER.into(),
         fields: vec![FieldDescriptor { name: "qty".into(), ty: "number".into(), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let live_desc = CollectionDescriptor {
         name: "widgets".into(),
         owner_app: OWNER.into(),
         fields: vec![FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
     let live = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
@@ -573,12 +588,14 @@ fn alter_column_nullability_render_is_byte_identical_pg() {
         owner_app: OWNER.into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: true, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let live_desc = CollectionDescriptor {
         name: "people".into(),
         owner_app: OWNER.into(),
         fields: vec![FieldDescriptor { name: "name".into(), ty: "string".into(), required: false, ..Default::default() }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[desired_desc]).expect("desired");
     let live = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[live_desc]).expect("live");
@@ -627,6 +644,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let authors = CollectionDescriptor {
         name: "authors".into(),
@@ -638,6 +656,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = zeroship_migrate::render::declarative::desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
     let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
@@ -966,6 +985,7 @@ fn create_table_render_is_byte_identical_sqlite() {
             FieldDescriptor { name: "qty".into(), ty: "int".into(), ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "widgets".into(),
@@ -991,7 +1011,8 @@ fn create_table_render_is_byte_identical_sqlite() {
         ],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
 
@@ -1030,6 +1051,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     // `authors` is declared (stays in the union) AND already live (so the FK
     // INLINES — on SQLite a non-live FK target is a hard error, no late ADD
@@ -1039,6 +1061,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let mut live_snapshot = SchemaSnapshot::default();
     live_snapshot.tables.insert("authors".into(), empty_table_snapshot());
@@ -1067,7 +1090,8 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
     let mut live = BTreeSet::new();
@@ -1103,6 +1127,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "vault".into(),
@@ -1114,7 +1139,8 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
     let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
@@ -1160,6 +1186,7 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let ops = vec![Op::CreateTable {
         name: "people".into(),
@@ -1180,7 +1207,8 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }];
 
@@ -1212,6 +1240,7 @@ fn add_column_render_is_byte_identical_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired =
         zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[desc], SqlDialect::Sqlite)
@@ -1221,6 +1250,7 @@ fn add_column_render_is_byte_identical_sqlite() {
         owner_app: OWNER.into(),
         fields: vec![],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let live_full =
         zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
@@ -1268,6 +1298,7 @@ fn create_index_render_is_byte_identical_sqlite() {
             columns: vec!["kind".into(), "at".into()],
             unique: false,
         }],
+        runtime_options: Default::default(),
     };
     let desired =
         zeroship_migrate::render::declarative::desired_snapshot_for_dialect(SCHEMA, std::slice::from_ref(&desc), SqlDialect::Sqlite)

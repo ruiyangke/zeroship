@@ -40,6 +40,7 @@ import type {
   ScalarFn,
   SynthDefaultFn,
   SynthFn,
+  TableStrictness,
   TriggerEvent,
   TriggerTiming,
   UnaryOp,
@@ -68,6 +69,7 @@ export type {
   ScalarFn,
   SynthDefaultFn,
   SynthFn,
+  TableStrictness,
   TriggerEvent,
   TriggerTiming,
   UnaryOp,
@@ -261,6 +263,26 @@ export interface IrIndex {
   where?: Expr | null;
 }
 
+/** Complete collection-level runtime options stamped on `createTable`. */
+export interface TableRuntimeOptions {
+  /** `schema(...).softDelete()`. */
+  softDelete: boolean;
+  /** `schema(...).withVersioning()`. */
+  versioning: boolean;
+  /** `schema(...).strictness(...)`; default matches `@zeroship/db`. */
+  strictness?: TableStrictness;
+}
+
+/** Patch form for `setTableOptions`: absent fields mean "leave unchanged". */
+export interface TableRuntimeOptionsPatch {
+  /** Toggle soft-delete behaviour. */
+  softDelete?: boolean | null;
+  /** Toggle optimistic versioning behaviour. */
+  versioning?: boolean | null;
+  /** Change deploy-time validation strictness. */
+  strictness?: TableStrictness | null;
+}
+
 /** The optional `insert { onConflict }` upsert clause (PG-only). */
 export interface IrOnConflict {
   columns: string[];
@@ -351,7 +373,7 @@ export type GrantTarget =
  *  `dropView` is GONE (the intentional wire break) — the guard is now the uniform
  *  `existenceGuard?` token. */
 export type Op =
-  | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[]; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[]; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
@@ -372,6 +394,7 @@ export type Op =
   | { op: "alterColumnType"; table: string; column: string; type: ColType; using?: Expr | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "alterColumnNullability"; table: string; column: string; nullable: boolean; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "insert"; table: string; columns: string[]; rows: IrScalar[][]; onConflict?: IrOnConflict | null; schema?: string | null }

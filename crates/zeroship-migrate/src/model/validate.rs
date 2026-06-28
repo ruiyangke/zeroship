@@ -512,6 +512,7 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
+        Op::SetTableOptions { .. } => Ok(()),
         Op::CreateIndex { table, columns, r#where, .. } => {
             // The index elements and partial-index predicate. The live column set
             // is not known at load (the table pre-exists), so structural-only here.
@@ -2785,6 +2786,7 @@ mod tests {
                 },
             }],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -2969,6 +2971,7 @@ mod tests {
             columns: vec![],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfExists),
         }]);
@@ -2991,6 +2994,7 @@ mod tests {
             columns: vec![],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
@@ -3078,6 +3082,7 @@ mod tests {
                         operand: Box::new(Expr::col("first")),
                     }),
                 }],
+                runtime_options: Default::default(),
                 schema: None,
                 existence_guard: None,
             },
@@ -3153,6 +3158,7 @@ mod tests {
                     operand: Box::new(Expr::col("deleted_at")),
                 }),
             }],
+            runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
         }]);
@@ -3188,6 +3194,7 @@ mod tests {
                 },
             }],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -3218,6 +3225,7 @@ mod tests {
                 },
             }],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -3388,6 +3396,7 @@ mod tests {
             }],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -3454,6 +3463,7 @@ mod tests {
             }],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -3480,6 +3490,7 @@ mod tests {
             }],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);

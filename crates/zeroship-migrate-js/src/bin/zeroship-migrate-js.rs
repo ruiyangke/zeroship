@@ -97,8 +97,9 @@ enum Command {
     },
     /// **Migration-first P2b** — emit the typed `env.db` surface FROM the migration
     /// set (migrations are the source of truth; types are generated from the fold).
-    /// Writes `schema.runtime.json` (the RuntimeSchemaDescriptor) + `env.db.ts`
-    /// (a generated `@zeroship/db` `t.*()` schema MODULE) into `--out`.
+    /// Writes `schema.runtime.json` (the v1 RuntimeSchemaDescriptor) +
+    /// `env.db.ts` (a generated `@zeroship/db` `t.*()` schema MODULE) into
+    /// `--out`.
     GenTypes {
         /// The migrations directory holding the committed `.ir.json` set.
         #[arg(long, default_value = "./migrations")]

@@ -47,6 +47,7 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
         owner_app: "app_gap".to_string(),
         fields: vec![standalone_masked_field()],
         indexes: Vec::new(),
+    runtime_options: Default::default(),
     };
 
     // AUTHORED side: the declarative descriptor carries the mask.

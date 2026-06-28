@@ -136,6 +136,7 @@ fn live_with_column(table: &str, column: &str, data_type: &str) -> LiveSchema {
         }],
         indexes: vec![],
         constraints: vec![],
+        runtime_options: Default::default(),
         comment: None,
         stored_create_sql: None,
     };
@@ -747,6 +748,7 @@ fn ir_renamecolumn_pg_rejects_rename_to_existing_column() {
         ],
         indexes: vec![],
         constraints: vec![],
+        runtime_options: Default::default(),
         comment: None,
         stored_create_sql: None,
     };

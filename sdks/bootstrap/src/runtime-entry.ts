@@ -65,25 +65,48 @@ declare const globalThis: {
   // awaited by the shared dispatcher (`dispatcher.ts`) before running any
   // procedure. Keeps the DDL off the module-eval critical path. (ISS-66)
   __zsSchemaReady?: Promise<unknown>;
-  // **Migration-first cutover (P4b)** — the bundled RuntimeSchemaDescriptor
-  // (the migration fold's `Record<collection, Record<column, FieldDef>>`),
+  // **Migration-first cutover (P4b/P5 S2)** — the bundled RuntimeSchemaDescriptor
+  // (legacy field map or v1 `{ version, collections }`),
   // resolved from `manifest.runtime_descriptor` and injected by the runtime
   // (`crates/runtime/src/core/init.rs::setup_globals`). Present → the source
   // of truth for schema install; absent → fall back to `user.default.schema`.
-  __zsRuntimeDescriptor?: Record<string, Record<string, unknown>>;
+  __zsRuntimeDescriptor?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
-// **Migration-first cutover (P4b)** — prefer the bundled
-// RuntimeSchemaDescriptor (the migration fold's wire-FieldDef map) the runtime
-// injected as `globalThis.__zsRuntimeDescriptor`. When present it is the schema
-// source of truth; the declared `user.default.schema` is the TRANSITIONAL
-// fallback for apps that ship no migrations (P5 deletes the fallback).
+// **Migration-first cutover (P4b/P5 S2)** — prefer the bundled
+// RuntimeSchemaDescriptor the runtime injected as `globalThis.__zsRuntimeDescriptor`.
+// v1 carries per-collection fields/options/indexes; the declared
+// `user.default.schema` is the TRANSITIONAL fallback for apps that ship no
+// migrations (P5 S3 deletes the fallback).
 const descriptor = globalThis.__zsRuntimeDescriptor;
 const hasDescriptor =
   descriptor != null &&
   typeof descriptor === "object" &&
   Object.keys(descriptor).length > 0;
+function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (
+    value != null &&
+    typeof value === "object" &&
+    (value as { version?: unknown }).version === 1 &&
+    (value as { collections?: unknown }).collections != null &&
+    typeof (value as { collections?: unknown }).collections === "object"
+  ) {
+    const out: Record<string, unknown> = {};
+    for (const [name, collection] of Object.entries(
+      (value as { collections: Record<string, unknown> }).collections,
+    )) {
+      if (collection != null && typeof collection === "object") {
+        const fields = (collection as { fields?: unknown }).fields;
+        if (fields !== undefined) {
+          out[name] = fields;
+        }
+      }
+    }
+    return out;
+  }
+  return value;
+}
 const declaredSchema = (user && user.default && typeof user.default === "object")
   ? (user.default as { schema?: unknown }).schema
   : undefined;
@@ -98,11 +121,11 @@ const declaredSchemaForOptions =
   (user && user.default && typeof user.default === "object")
     ? ((user.default as { __zsDeclaredSchema?: unknown }).__zsDeclaredSchema ?? declaredSchema)
     : undefined;
-// The object passed as installSchema's first arg. In descriptor mode the
-// descriptor is also threaded through `options.descriptor` (the actual source
-// _installSchemaInner reads); passing it as the first arg too keeps the call
-// shape uniform and avoids a bogus empty-schema validation.
-const schema = hasDescriptor ? descriptor : declaredSchema;
+// The object passed as installSchema's first arg. In descriptor mode pass the
+// field map (legacy descriptor directly, v1 descriptor unwrapped) while threading
+// the full descriptor through `options.descriptor`, where _installSchemaInner
+// reads v1 options/indexes.
+const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : declaredSchema;
 if (schema && typeof schema === "object") {
   // Resolve the live env.db handle off the runtime's composite env
   // object. `__zs_env()` is the bootstrap-visible helper

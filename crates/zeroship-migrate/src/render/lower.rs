@@ -39,8 +39,8 @@ use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod, ExclusionOperator,
     ExistenceGuard, ForEach, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
     IrIndex, IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel,
-    RefAction, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TriggerAction, TriggerEvent,
-    SafeI64, TriggerStmt, VectorMetric, ViewQuery,
+    RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
+    TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
@@ -1631,7 +1631,14 @@ impl IrAuthor {
                 let stmt = render_comment_op(op, &eff_schema, self.dialect)?;
                 vec![decl.lower_vendor_statement(&stmt.name, stmt.up, None)]
             }
-            Op::CreateTable { name, columns, constraints, indexes, .. } => {
+            Op::CreateTable {
+                name,
+                columns,
+                constraints,
+                indexes,
+                runtime_options,
+                ..
+            } => {
                 // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
                 // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
                 // maps `IrDefault::Fn → None` — correct for the system-field path the
@@ -1640,7 +1647,7 @@ impl IrAuthor {
                 // synth default is the deferred Expr→SQL synth wave; until it lands, an
                 // author-supplied synth default is refused here rather than lost.
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
-                let desc = self.create_table_descriptor(name, columns);
+                let desc = self.create_table_descriptor(name, columns, runtime_options.as_ref());
                 let mut snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
                 self.apply_named_type_metadata(name, columns, &mut snap, named_types)?;
                 // **#174 createTable parity** — keep the CREATE path on the same
@@ -1694,6 +1701,7 @@ impl IrAuthor {
                 live.insert(name.clone());
                 migs
             }
+            Op::SetTableOptions { .. } => Vec::new(),
             Op::AddColumn {
                 table,
                 column,
@@ -2591,12 +2599,18 @@ impl IrAuthor {
     /// Map an IR `createTable` op to the [`CollectionDescriptor`] the shared
     /// snapshot-builder consumes. Pure structural translation — no default /
     /// sentinel rendering (that lives in the shared builder, §6.5).
-    fn create_table_descriptor(&self, name: &str, columns: &[IrColumn]) -> CollectionDescriptor {
+    fn create_table_descriptor(
+        &self,
+        name: &str,
+        columns: &[IrColumn],
+        runtime_options: Option<&TableRuntimeOptions>,
+    ) -> CollectionDescriptor {
         CollectionDescriptor {
             name: name.to_string(),
             owner_app: self.decl.owner_app().to_string(),
             fields: columns.iter().map(ir_column_to_field).collect(),
             indexes: Vec::new(),
+            runtime_options: runtime_options.cloned().unwrap_or_default(),
         }
     }
 
@@ -2910,6 +2924,7 @@ impl IrAuthor {
             owner_app: self.decl.owner_app().to_string(),
             fields: vec![field],
             indexes: Vec::new(),
+            runtime_options: Default::default(),
         };
         let snap = build_table_snapshot(&self.project_schema, &desc, self.dialect)?;
         let sibling_name = format!("{column}_masked");
@@ -3190,6 +3205,7 @@ impl IrAuthor {
                     columns: Vec::new(),
                     indexes: Vec::new(),
                     constraints: Vec::new(),
+                    runtime_options: Default::default(),
                     comment: None,
                     stored_create_sql: None,
                 };
@@ -4275,6 +4291,7 @@ fn dml_id_from_seed(tag: &str, seed: &[u8]) -> crate::model::migration::Migratio
 pub const fn op_kind_tag(op: &Op) -> &'static str {
     match op {
         Op::CreateTable { .. } => "createTable",
+        Op::SetTableOptions { .. } => "setTableOptions",
         Op::AddColumn { .. } => "addColumn",
         Op::CreateIndex { .. } => "createIndex",
         Op::DropTable { .. } => "dropTable",
@@ -4816,7 +4833,8 @@ mod tests {
                 columns: cols,
                 constraints: vec![],
                 indexes: vec![],
-                schema: None,
+                runtime_options: None,
+            schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -5729,6 +5747,7 @@ mod tests {
                     ..Default::default()
                 }],
                 indexes: vec![],
+                runtime_options: Default::default(),
             };
             let differ_snap = build_table_snapshot("app", &desc, dialect).expect("differ snapshot");
             let differ_col = differ_snap
@@ -5767,7 +5786,7 @@ mod tests {
 
             // IrAuthor's createTable snapshot (its real lowering seam: the private
             // descriptor mapping → shared builder).
-            let ir_desc = author.create_table_descriptor("notes", &user_cols);
+            let ir_desc = author.create_table_descriptor("notes", &user_cols, None);
             let ir_snap = build_table_snapshot("app", &ir_desc, dialect).expect("ir snapshot");
 
             // The differ's snapshot for the SAME user-facing table.
@@ -5781,6 +5800,7 @@ mod tests {
                     ..Default::default()
                 }],
                 indexes: vec![],
+                runtime_options: Default::default(),
             };
             let differ_snap =
                 build_table_snapshot("app", &differ_desc, dialect).expect("differ snapshot");
@@ -5840,7 +5860,8 @@ mod tests {
                     unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
                 constraints: vec![],
                 indexes: vec![],
-                schema: None,
+                runtime_options: None,
+            schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -6036,6 +6057,7 @@ mod tests {
                 columns: vec!["email".into()],
                 unique: true,
             }],
+            runtime_options: Default::default(),
         };
         let live = LiveSchema::for_sqlite_descriptors("prj", "app_a", &[desc])
             .expect("build SQLite live schema from descriptors");

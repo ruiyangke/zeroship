@@ -699,6 +699,7 @@ mod tests {
             columns: Vec::new(),
             indexes: Vec::new(),
             constraints: Vec::new(),
+            runtime_options: Default::default(),
             comment: None,
             stored_create_sql: None,
         }

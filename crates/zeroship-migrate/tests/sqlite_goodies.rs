@@ -107,6 +107,7 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
 
     let desired = desired_snapshot(PROJECT, &[mk()]).expect("desired");
@@ -169,6 +170,7 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[mk()])
         .expect("an innerProduct vector descriptor compiles (no author-time metric refusal)");
@@ -206,6 +208,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(PROJECT, &[mk()]).expect("desired");
     let plan = sqlite_author()
@@ -285,6 +288,7 @@ async fn fts_field_applies_cleanly_on_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     // DIALECT-AWARE desired: on SQLite the FTS index is the FTS5 vtable, not the PG
     // `__fts` GIN index. (Using the PG-default `desired_snapshot` here is exactly the

@@ -55,7 +55,7 @@ const TS = {
   Op: [
     "createTable", "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "alterColumnType", "alterColumnNullability", "renameColumn", "addConstraint",
-    "dropConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
+    "setTableOptions", "dropConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
     "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
     "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
@@ -111,6 +111,7 @@ const TS = {
   FuncArgMode: ["in", "out", "inout"].sort(),
   FuncLanguage: ["plpgsql", "sql"].sort(),
   FuncVolatility: ["volatile", "stable", "immutable"].sort(),
+  TableStrictness: ["strict", "lenient", "off"].sort(),
 };
 
 // **PR10 review F4** — the per-`Op` FIELD-presence map the hand-authored `ir.ts`
@@ -120,7 +121,7 @@ const TS = {
 // schema gains/loses a field on any op, THIS fails — forcing `ir.ts` to be
 // regenerated in lockstep. Sorted; the `op` discriminant is excluded.
 const TS_OP_FIELDS: Record<string, string[]> = {
-  createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "schema"].sort(),
+  createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "runtimeOptions", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // #173/#174 + generated/identity — addColumn carries the column facets that are
@@ -132,6 +133,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   alterColumnType: ["column", "existenceGuard", "schema", "table", "type", "using"].sort(),
   alterColumnNullability: ["column", "existenceGuard", "nullable", "schema", "table"].sort(),
   renameColumn: ["existenceGuard", "from", "schema", "table", "to", "type"].sort(),
+  setTableOptions: ["options", "schema", "table"].sort(),
   addConstraint: ["constraint", "existenceGuard", "schema", "table"].sort(),
   dropConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   // DML ops carry `schema` but NO `existenceGuard`.
@@ -271,6 +273,7 @@ test("closed string-enum tokens match the schema", () => {
     "FuncArgMode",
     "FuncLanguage",
     "FuncVolatility",
+    "TableStrictness",
   ] as const) {
     assert.deepEqual(enumTokens(schema.$defs[name]), (TS as any)[name], `${name} tokens drifted`);
   }

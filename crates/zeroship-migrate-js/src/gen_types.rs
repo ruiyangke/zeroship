@@ -12,9 +12,8 @@
 //! 2. folds-and-recovers per-collection wire-`FieldDef` maps
 //!    ([`zeroship_migrate::fold_to_field_defs`]);
 //! 3. emits TWO artifacts ([`render_artifacts`]):
-//!    - **`schema.runtime.json`** — the `RuntimeSchemaDescriptor`:
-//!      `Record<collection, Record<column, FieldDef>>` (formalises what
-//!      `normalizeSchema` produces at runtime);
+//!    - **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
+//!      `{ version: 1, collections: { [collection]: { fields, options, indexes }}}`;
 //!    - **`env.db.ts`** — a GENERATED module reconstructing a
 //!      `const schema = { … } as const` of `@zeroship/db` `t.*()` builder calls
 //!      (§5.2: the SDK type inference keys ONLY off `TypeBuilder`, so the emitter
@@ -27,6 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::Value;
 use zeroship_migrate::model::ir::{MigrationIr, Op};
 use zeroship_migrate::SqlDialect;
@@ -151,6 +151,254 @@ pub struct GeneratedArtifacts {
     pub env_dts: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RuntimeCollectionMetadata {
+    options: zeroship_migrate::TableRuntimeOptions,
+    indexes: Vec<RuntimeIndexDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeSchemaDescriptorV1 {
+    version: u8,
+    collections: BTreeMap<String, RuntimeCollectionDescriptorV1>,
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeCollectionDescriptorV1 {
+    fields: Value,
+    options: RuntimeOptionsDescriptor,
+    indexes: Vec<RuntimeIndexDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeOptionsDescriptor {
+    soft_delete: bool,
+    versioning: bool,
+    strictness: RuntimeStrictnessDescriptor,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RuntimeStrictnessDescriptor {
+    Strict,
+    Lenient,
+    Off,
+}
+
+impl From<zeroship_migrate::TableStrictness> for RuntimeStrictnessDescriptor {
+    fn from(value: zeroship_migrate::TableStrictness) -> Self {
+        match value {
+            zeroship_migrate::TableStrictness::Strict => Self::Strict,
+            zeroship_migrate::TableStrictness::Lenient => Self::Lenient,
+            zeroship_migrate::TableStrictness::Off => Self::Off,
+        }
+    }
+}
+
+impl From<&zeroship_migrate::TableRuntimeOptions> for RuntimeOptionsDescriptor {
+    fn from(value: &zeroship_migrate::TableRuntimeOptions) -> Self {
+        Self {
+            soft_delete: value.soft_delete,
+            versioning: value.versioning,
+            strictness: value.strictness.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeIndexDescriptor {
+    name: String,
+    fields: Vec<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    unique: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn plain_index_fields(columns: &[zeroship_migrate::IndexElement]) -> Option<Vec<String>> {
+    columns
+        .iter()
+        .map(|c| match c {
+            zeroship_migrate::IndexElement::Column { name } => Some(name.clone()),
+            zeroship_migrate::IndexElement::Expr { .. } => None,
+        })
+        .collect()
+}
+
+fn add_runtime_index(indexes: &mut Vec<RuntimeIndexDescriptor>, index: RuntimeIndexDescriptor) {
+    if let Some(existing) = indexes.iter_mut().find(|i| i.name == index.name) {
+        *existing = index;
+    } else {
+        indexes.push(index);
+    }
+}
+
+fn derived_unique_index_name(table: &str, field: &str) -> String {
+    format!("{table}_{field}_key")
+}
+
+fn record_plain_index(
+    metadata: &mut BTreeMap<String, RuntimeCollectionMetadata>,
+    table: &str,
+    columns: &[zeroship_migrate::IndexElement],
+    name: Option<&str>,
+    unique: Option<bool>,
+    using: Option<zeroship_migrate::IndexMethod>,
+    predicate: Option<&zeroship_migrate::model::expr::Expr>,
+) {
+    if using.is_some() || predicate.is_some() {
+        return;
+    }
+    let Some(fields) = plain_index_fields(columns) else {
+        return;
+    };
+    if fields.is_empty() {
+        return;
+    }
+    let index_name = name
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}_{}_idx", table, fields.join("_")));
+    add_runtime_index(
+        &mut metadata.entry(table.to_string()).or_default().indexes,
+        RuntimeIndexDescriptor {
+            name: index_name,
+            fields,
+            unique: unique.unwrap_or(false),
+        },
+    );
+}
+
+fn runtime_metadata_from_ops(ops: &[Op]) -> BTreeMap<String, RuntimeCollectionMetadata> {
+    let mut metadata: BTreeMap<String, RuntimeCollectionMetadata> = BTreeMap::new();
+
+    for op in ops {
+        match op {
+            Op::CreateTable {
+                name,
+                columns,
+                indexes,
+                runtime_options,
+                ..
+            } => {
+                metadata.insert(
+                    name.clone(),
+                    RuntimeCollectionMetadata {
+                        options: runtime_options.clone().unwrap_or_default(),
+                        indexes: Vec::new(),
+                    },
+                );
+                for column in columns {
+                    if column.unique.unwrap_or(false) {
+                        add_runtime_index(
+                            &mut metadata.entry(name.clone()).or_default().indexes,
+                            RuntimeIndexDescriptor {
+                                name: derived_unique_index_name(name, &column.name),
+                                fields: vec![column.name.clone()],
+                                unique: true,
+                            },
+                        );
+                    }
+                }
+                for index in indexes {
+                    record_plain_index(
+                        &mut metadata,
+                        name,
+                        &index.columns,
+                        index.name.as_deref(),
+                        index.unique,
+                        index.using,
+                        index.r#where.as_ref(),
+                    );
+                }
+            }
+            Op::SetTableOptions { table, options, .. } => {
+                let table_meta = metadata.entry(table.clone()).or_default();
+                if let Some(soft_delete) = options.soft_delete {
+                    table_meta.options.soft_delete = soft_delete;
+                }
+                if let Some(versioning) = options.versioning {
+                    table_meta.options.versioning = versioning;
+                }
+                if let Some(strictness) = options.strictness {
+                    table_meta.options.strictness = strictness;
+                }
+            }
+            Op::DropTable { table, .. } => {
+                metadata.remove(table);
+            }
+            Op::RenameTable { table, to, .. } => {
+                if let Some(table_meta) = metadata.remove(table) {
+                    metadata.insert(to.clone(), table_meta);
+                }
+            }
+            Op::CreateIndex { table, columns, name, unique, using, r#where, .. } => {
+                record_plain_index(
+                    &mut metadata,
+                    table,
+                    columns,
+                    name.as_deref(),
+                    *unique,
+                    *using,
+                    r#where.as_ref(),
+                );
+            }
+            Op::DropIndex { name, table, .. } => {
+                if let Some(table) = table {
+                    if let Some(table_meta) = metadata.get_mut(table) {
+                        table_meta.indexes.retain(|idx| idx.name != *name);
+                    }
+                } else {
+                    for table_meta in metadata.values_mut() {
+                        table_meta.indexes.retain(|idx| idx.name != *name);
+                    }
+                }
+            }
+            Op::DropColumn { table, column, .. } => {
+                if let Some(table_meta) = metadata.get_mut(table) {
+                    table_meta.indexes.retain(|idx| !idx.fields.iter().any(|f| f == column));
+                }
+            }
+            Op::RenameColumn { table, from, to, .. } => {
+                if let Some(table_meta) = metadata.get_mut(table) {
+                    for idx in &mut table_meta.indexes {
+                        for field in &mut idx.fields {
+                            if field == from {
+                                *field = to.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    metadata
+}
+
+fn render_runtime_descriptor_v1(defs: &BTreeMap<String, Value>, ops: &[Op]) -> Value {
+    let mut metadata = runtime_metadata_from_ops(ops);
+    let collections = defs
+        .iter()
+        .map(|(name, fields)| {
+            let meta = metadata.remove(name).unwrap_or_default();
+            (
+                name.clone(),
+                RuntimeCollectionDescriptorV1 {
+                    fields: fields.clone(),
+                    options: (&meta.options).into(),
+                    indexes: meta.indexes,
+                },
+            )
+        })
+        .collect();
+    serde_json::to_value(RuntimeSchemaDescriptorV1 { version: 1, collections })
+        .expect("runtime descriptor v1 serializes")
+}
+
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
 ///
 /// `project_schema` threads into the fold (FK `definition`s embed it; irrelevant to
@@ -166,8 +414,9 @@ pub fn render_artifacts(
     let defs = zeroship_migrate::fold_to_field_defs(ops, SqlDialect::Postgres, project_schema)
         .map_err(GenTypesError::Fold)?;
 
-    // (a) RuntimeSchemaDescriptor — the per-collection wire-FieldDef map verbatim.
-    let runtime_value = Value::Object(defs.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
+    // options and plain indexes.
+    let runtime_value = render_runtime_descriptor_v1(&defs, ops);
     let mut runtime_descriptor =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_descriptor.push('\n');

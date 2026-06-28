@@ -447,5 +447,6 @@ fn schema_to_descriptor(
         owner_app: app_id.to_string(),
         fields,
         indexes: index_descs,
+        runtime_options: Default::default(),
     })
 }

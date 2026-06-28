@@ -67,6 +67,7 @@ fn coll(name: &str, owner: &str, fields: Vec<FieldDescriptor>) -> CollectionDesc
         owner_app: owner.into(),
         fields,
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 

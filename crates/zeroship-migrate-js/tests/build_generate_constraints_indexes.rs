@@ -65,7 +65,8 @@ fn generate_synthesizes_plain_user_index() {
             IndexSnapshot::btree("members_email_idx", false, vec!["email".into()]),
         ],
         constraints: vec![],
-        comment: None,
+        runtime_options: Default::default(),
+            comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -129,6 +130,7 @@ fn generate_fails_closed_on_user_constraint() {
                 comment: None,
             },
         ],
+        runtime_options: Default::default(),
         comment: None,
         stored_create_sql: None,
     };
@@ -160,7 +162,8 @@ fn generate_fails_closed_on_non_btree_index() {
             ann,
         ],
         constraints: vec![],
-        comment: None,
+        runtime_options: Default::default(),
+            comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -191,6 +194,7 @@ fn generate_plain_table_still_works() {
             definition: "PRIMARY KEY (id)".into(),
             comment: None,
         }],
+        runtime_options: Default::default(),
         comment: None,
         stored_create_sql: None,
     };
