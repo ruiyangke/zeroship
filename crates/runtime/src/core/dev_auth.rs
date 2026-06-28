@@ -71,7 +71,7 @@ const ENV_DEV_AUTH_SECRET: &str = "ZEROSHIP_DEV_AUTH_SECRET";
 /// gateway-verified header body in production.
 #[must_use]
 pub fn resolve_dev_user_json(request_headers: &[(String, String)]) -> Option<String> {
-    if std::env::var(ENV_DEV).is_err() {
+    if std::env::var(ENV_DEV).ok().as_deref() != Some("1") {
         return None;
     }
     let secret = std::env::var(ENV_DEV_AUTH_SECRET).ok()?;

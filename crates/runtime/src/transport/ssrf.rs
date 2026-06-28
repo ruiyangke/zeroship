@@ -21,7 +21,7 @@
 //! the native fetch cutover; `globalThis.fetch` is now the native
 //! callback installed by `fetch_native::install_fetch_global`.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use cyper::resolve::Resolve;
 use futures::Stream;
@@ -30,6 +30,44 @@ use http::Uri;
 
 /// Maximum response body size: 10 MB.
 pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Development-only network relaxation gate.
+///
+/// The dev runtime sets `ZEROSHIP_DEV=1`. Any other value, including
+/// `0` or the empty string, is non-dev and must fail closed.
+#[must_use]
+pub fn dev_mode_enabled() -> bool {
+    std::env::var("ZEROSHIP_DEV")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+fn ipv4_from_segments(high: u16, low: u16) -> Ipv4Addr {
+    Ipv4Addr::new(
+        (high >> 8) as u8,
+        high as u8,
+        (low >> 8) as u8,
+        low as u8,
+    )
+}
+
+fn nat64_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    if s[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+        Some(ipv4_from_segments(s[6], s[7]))
+    } else {
+        None
+    }
+}
+
+fn ipv4_compatible_embedded_ipv4(v6: Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = v6.segments();
+    if s[..6] == [0, 0, 0, 0, 0, 0] && (s[6] != 0 || s[7] != 0) {
+        Some(ipv4_from_segments(s[6], s[7]))
+    } else {
+        None
+    }
+}
 
 /// True for IP addresses that must never be reachable from user fetch code.
 ///
@@ -54,6 +92,16 @@ pub fn is_blocked_ip(addr: IpAddr) -> bool {
                 || v4.octets()[0] >= 240           // 240.0.0.0/4 reserved + 255.255.255.255
         }
         IpAddr::V6(v6) => {
+            if let Some(v4) = nat64_embedded_ipv4(v6)
+                && is_blocked_ip(IpAddr::V4(v4))
+            {
+                return true;
+            }
+            if let Some(v4) = ipv4_compatible_embedded_ipv4(v6)
+                && is_blocked_ip(IpAddr::V4(v4))
+            {
+                return true;
+            }
             v6.is_loopback()                       // ::1
                 || v6.is_unspecified()             // ::
                 || v6.is_multicast()               // ff00::/8
@@ -85,8 +133,8 @@ pub fn validate_url(url: &str) -> Result<(), String> {
         scheme => return Err(format!("Blocked URL scheme: {scheme}")),
     }
 
-    // In dev mode, skip host/IP validation (allows localhost fetch to Vite)
-    if std::env::var("ZEROSHIP_DEV").is_ok() {
+    // In dev mode, skip host/IP validation (allows localhost fetch to Vite).
+    if dev_mode_enabled() {
         return Ok(());
     }
 
@@ -141,7 +189,7 @@ pub fn validate_url(url: &str) -> Result<(), String> {
 pub fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<SocketAddr, String> {
     use std::io::{Error, ErrorKind};
 
-    let dev_mode = std::env::var("ZEROSHIP_DEV").is_ok();
+    let dev_mode = dev_mode_enabled();
 
     // Strip IPv6 literal brackets before to_socket_addrs.
     let host_clean = host.trim_start_matches('[').trim_end_matches(']');
@@ -274,6 +322,26 @@ mod tests {
         // ::ffff:127.0.0.1 — v4-mapped form must be blocked
         let mapped: Ipv6Addr = "::ffff:7f00:1".parse().unwrap();
         assert!(is_blocked_ip(mapped.into()));
+    }
+
+    #[test]
+    fn blocks_nat64_embedded_blocked_v4() {
+        assert!(is_blocked_ip(
+            "64:ff9b::a9fe:a9fe".parse::<Ipv6Addr>().unwrap().into()
+        ));
+        assert!(is_blocked_ip(
+            "64:ff9b::0a00:0001".parse::<Ipv6Addr>().unwrap().into()
+        ));
+        assert!(is_blocked_ip(
+            "64:ff9b::7f00:0001".parse::<Ipv6Addr>().unwrap().into()
+        ));
+    }
+
+    #[test]
+    fn blocks_ipv4_compatible_embedded_blocked_v4() {
+        assert!(is_blocked_ip("::a9fe:a9fe".parse::<Ipv6Addr>().unwrap().into()));
+        assert!(is_blocked_ip("::0a00:0001".parse::<Ipv6Addr>().unwrap().into()));
+        assert!(is_blocked_ip("::7f00:0001".parse::<Ipv6Addr>().unwrap().into()));
     }
 
     #[test]

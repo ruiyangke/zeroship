@@ -13,17 +13,17 @@
 //! costs a small handful of idle connections per host — cheap and
 //! correct.
 //!
-//! In dev mode (`ZEROSHIP_DEV` set) the SSRF resolver is bypassed so
+//! In dev mode (`ZEROSHIP_DEV=1`) the SSRF resolver is bypassed so
 //! the Vite plugin's ModuleRunner can reach localhost:5173 etc.
 
-use crate::transport::ssrf::SsrfResolver;
+use crate::transport::ssrf::{dev_mode_enabled, SsrfResolver};
 
 /// Per-thread cyper client. Cloning is cheap (just bumps an Rc).
 pub fn shared_cyper_client() -> cyper::Client {
     thread_local! {
         static CLIENT: cyper::Client = {
             let builder = cyper::Client::builder();
-            if std::env::var("ZEROSHIP_DEV").is_ok() {
+            if dev_mode_enabled() {
                 builder.build()
             } else {
                 builder.custom_resolver(SsrfResolver).build()

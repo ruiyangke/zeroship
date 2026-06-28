@@ -359,6 +359,36 @@ return out.join("|");
 }
 
 #[test]
+fn non_affirmative_dev_env_does_not_relax_ssrf() {
+    let _lock = lock_env();
+    for dev_value in [Some("0".to_string()), Some(String::new())] {
+        let _env = EnvGuard::set(&[("ZEROSHIP_DEV", dev_value)]);
+        let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+            run_net_js(
+                r#"
+return await new Promise((resolve) => {
+  const s = new net.Socket();
+  s.on("error", (err) => resolve(`${err.code}:${err.message}`));
+  s.on("close", () => resolve("closed-without-error"));
+  s.connect(80, "169.254.169.254");
+  setTimeout(() => resolve("timeout"), 1000);
+});
+"#,
+                trusted(4, 1024 * 1024),
+                Duration::from_secs(2),
+            )
+            .await
+        });
+        assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+        assert!(
+            result.body.contains("ERR_NET_SSRF") || result.body.to_ascii_lowercase().contains("ssrf"),
+            "ZEROSHIP_DEV must not relax SSRF unless it is exactly 1; got: {}",
+            result.body
+        );
+    }
+}
+
+#[test]
 fn dns_timeout_fails_closed() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[
@@ -728,6 +758,70 @@ return await new Promise((resolve) => {{
 }
 
 #[test]
+fn pre_connect_write_queue_is_bounded_but_small_write_flushes() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let idle = spawn_tcp_server(ServerMode::Idle).await;
+        let echo = spawn_tcp_server(ServerMode::Echo).await;
+        run_net_js(
+            &format!(
+                r#"
+const refused = (() => {{
+  const s = new net.Socket();
+  s.on("error", () => {{}});
+  s.connect({}, "127.0.0.1");
+  const chunk = "x".repeat(300 * 1024);
+  const writes = [];
+  for (let i = 0; i < 5; i++) {{
+    const ok = s.write(chunk);
+    writes.push(ok);
+    if (!ok) break;
+  }}
+  s.destroy();
+  return writes.join(",");
+}})();
+
+const flushed = await new Promise((resolve) => {{
+  const s = new net.Socket();
+  let data = "";
+  s.on("data", (chunk) => {{ data += chunk.toString(); s.end(); }});
+  s.on("error", (err) => resolve(`error:${{err.code}}:${{err.message}}`));
+  s.on("close", () => resolve(data));
+  s.connect({}, "127.0.0.1");
+  const ok = s.write("small-before-connect");
+  if (!ok) resolve("small-write-refused");
+  setTimeout(() => resolve(`timeout:${{data}}`), 3000);
+}});
+
+return `writes=${{refused}}|flushed=${{flushed}}`;
+"#,
+                idle.port(),
+                echo.port()
+            ),
+            NetPolicy::allowlist(
+                vec![
+                    HostPort::new("127.0.0.1", idle.port()),
+                    HostPort::new("127.0.0.1", echo.port()),
+                ],
+                4,
+                8 * 1024 * 1024,
+            )
+            .unwrap(),
+            Duration::from_secs(5),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.contains("writes=true,true,true,false")
+            && result.body.contains("flushed=small-before-connect"),
+        "expected pending queue refusal and small write flush, got: {}",
+        result.body
+    );
+}
+
+#[test]
 fn egress_ceiling_destroys_socket_and_feeds_spend_meter() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
@@ -922,6 +1016,78 @@ return await new Promise((resolve) => {{
         "expected global socket cap rejection, got: {}",
         result.body
     );
+}
+
+#[test]
+fn reject_unauthorized_false_requires_affirmative_dev_env() {
+    let _lock = lock_env();
+    for dev_value in [Some("0".to_string()), Some(String::new())] {
+        let _env = EnvGuard::set(&[("ZEROSHIP_DEV", dev_value)]);
+        let denied = compio::runtime::Runtime::new().unwrap().block_on(async {
+            run_js_module(
+                wrap_module(
+                    r#"import tls from "node:tls";"#,
+                    r#"
+try {
+  tls.connect({
+    host: "127.0.0.1",
+    port: 443,
+    servername: "db.local.test",
+    rejectUnauthorized: false,
+  });
+  return "allowed";
+} catch (err) {
+  return `${err.code}:${err.message}`;
+}
+"#,
+                ),
+                trusted(4, 1024 * 1024),
+                Duration::from_secs(3),
+                None,
+            )
+            .await
+        });
+        assert_eq!(denied.status, 200, "unexpected status/body: {}", denied.body);
+        assert!(
+            denied
+                .body
+                .contains("ERR_TLS_REJECT_UNAUTHORIZED_DISABLED"),
+            "rejectUnauthorized:false must fail closed for non-affirmative dev env, got: {}",
+            denied.body
+        );
+    }
+
+    let allowed = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+        let addr = spawn_self_signed_tls_server().await;
+        run_js_module(
+            wrap_module(
+                r#"import tls from "node:tls";"#,
+                &format!(
+                    r#"
+return await new Promise((resolve) => {{
+  const s = tls.connect({{
+    host: "127.0.0.1",
+    port: {},
+    servername: "db.local.test",
+    rejectUnauthorized: false,
+  }});
+  s.on("secureConnect", () => {{ s.destroy(); resolve("secure"); }});
+  s.on("error", (err) => resolve(`${{err.code}}:${{err.message}}`));
+  setTimeout(() => resolve("timeout"), 3000);
+}});
+"#,
+                    addr.port()
+                ),
+            ),
+            allowlist("127.0.0.1", addr.port(), 4, 1024 * 1024),
+            Duration::from_secs(5),
+            None,
+        )
+        .await
+    });
+    assert_eq!(allowed.status, 200, "unexpected status/body: {}", allowed.body);
+    assert_eq!(allowed.body, "secure", "affirmative dev env should allow TLS verify disable");
 }
 
 #[test]

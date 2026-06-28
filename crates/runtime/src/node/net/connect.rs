@@ -136,13 +136,13 @@ pub(super) fn validate_tls_policy(reject_unauthorized: bool) -> Result<(), OpErr
     if reject_unauthorized {
         return Ok(());
     }
-    let allowed = std::env::var_os("ZEROSHIP_DEV").is_some();
+    let allowed = crate::transport::ssrf::dev_mode_enabled();
     if allowed {
         Ok(())
     } else {
         Err(OpError::node(
             "ERR_TLS_REJECT_UNAUTHORIZED_DISABLED",
-            "rejectUnauthorized:false is only allowed when ZEROSHIP_DEV is set",
+            "rejectUnauthorized:false is only allowed when ZEROSHIP_DEV=1",
         ))
     }
 }

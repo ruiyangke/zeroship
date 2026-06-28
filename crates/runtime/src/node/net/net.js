@@ -1,6 +1,7 @@
 (function () {
   const EventEmitter = globalThis.__zsEventEmitter;
   const NativeSocket = globalThis.__zsNativeSocket;
+  const PENDING_WRITE_BYTE_CAP = 1024 * 1024;
 
   function normalizeArgs(args) {
     let cb;
@@ -52,6 +53,7 @@
       this._timeoutId = null;
       this._encoding = null;
       this._pendingWriteQueue = [];
+      this._pendingWriteBytes = 0;
       this._pendingEnd = false;
 
       this.on("connect", () => {
@@ -88,6 +90,7 @@
           this._timeoutId = null;
         }
         this._pendingWriteQueue = [];
+        this._pendingWriteBytes = 0;
         this._pendingEnd = false;
       });
     }
@@ -123,14 +126,39 @@
       return ok;
     }
 
+    _pendingWriteSize(data, encoding) {
+      if (typeof data === "string") {
+        if (typeof Buffer !== "undefined" && Buffer && typeof Buffer.byteLength === "function") {
+          return Buffer.byteLength(data, encoding == null ? undefined : String(encoding));
+        }
+        return new TextEncoder().encode(data).byteLength;
+      }
+      if (data && typeof data.byteLength === "number") return data.byteLength;
+      if (data && data.buffer && typeof data.buffer.byteLength === "number") return data.buffer.byteLength;
+      return String(data).length;
+    }
+
+    _queuePendingWrite(data, encoding, cb) {
+      const n = this._pendingWriteSize(data, encoding);
+      if (this._pendingWriteBytes + n > PENDING_WRITE_BYTE_CAP) {
+        const err = new Error("node:net pending write buffer hard cap exceeded");
+        err.code = "ERR_NET_WRITE_CAP";
+        this.destroy(err);
+        this._deferCallback(cb);
+        return false;
+      }
+      this._pendingWriteBytes += n;
+      this._pendingWriteQueue.push([data, encoding, cb, n]);
+      return true;
+    }
+
     write(data, encoding, cb) {
       if (typeof encoding === "function") {
         cb = encoding;
         encoding = undefined;
       }
       if (this._isOpening()) {
-        this._pendingWriteQueue.push([data, encoding, cb]);
-        return true;
+        return this._queuePendingWrite(data, encoding, cb);
       }
       return this._writeNow(data, encoding, cb);
     }
@@ -139,6 +167,7 @@
       if (this._isOpening()) return;
       const queue = this._pendingWriteQueue;
       this._pendingWriteQueue = [];
+      this._pendingWriteBytes = 0;
       for (const item of queue) {
         this._writeNow(item[0], item[1], item[2]);
       }
@@ -159,7 +188,9 @@
       }
       if (typeof cb === "function") this.once("close", cb);
       if (this._isOpening()) {
-        if (data !== undefined && data !== null) this._pendingWriteQueue.push([data, encoding, undefined]);
+        if (data !== undefined && data !== null && !this._queuePendingWrite(data, encoding, undefined)) {
+          return this;
+        }
         this._pendingEnd = true;
         this.writable = false;
         this.writableEnded = true;
@@ -182,6 +213,7 @@
       this.readableDestroyed = true;
       this.writableDestroyed = true;
       this._pendingWriteQueue = [];
+      this._pendingWriteBytes = 0;
       this._pendingEnd = false;
       this._native.destroy();
       return this;
