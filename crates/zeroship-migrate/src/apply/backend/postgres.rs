@@ -52,12 +52,12 @@ impl MigrationBackend for PostgresBackend<'_> {
         true
     }
 
-    async fn acquire_project_lock(&self, project_id: &str) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::acquire_project_lock(self.conn, project_id).await
+    async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
+        crate::apply::executor::pg::acquire_project_lock(self.conn, &cfg.project_id).await
     }
 
-    async fn release_project_lock(&self, project_id: &str) -> Result<(), ApplyError> {
-        crate::apply::executor::pg::release_project_lock(self.conn, project_id).await
+    async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
+        crate::apply::executor::pg::release_project_lock(self.conn, &cfg.project_id).await
     }
 
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {

@@ -129,6 +129,11 @@ compio = { workspace = true }
 # (design §3 P2 gate — every confinement claim proven on a REAL temp-file
 # SQLite, never a shim). Auto-cleaning; workspace-pinned.
 tempfile = { workspace = true }
+# `mysql_jsdriver_e2e` reuses the runtime real-world node:net helpers. That
+# support module also defines TLS fixtures, so its transitive test-only imports
+# must be available here even though this suite only calls `ensure_mysql` and
+# `allowlist`.
+rcgen = "0.14"
 
 [lints]
 workspace = true

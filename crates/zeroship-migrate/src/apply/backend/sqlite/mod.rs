@@ -366,11 +366,11 @@ impl MigrationBackend for SqliteBackend {
     // writer, one flume queue. Cross-process is P5b (NOT built here). So the
     // lock methods are honest no-ops — structural serialization already holds.
 
-    async fn acquire_project_lock(&self, _project_id: &str) -> Result<(), ApplyError> {
+    async fn acquire_project_lock(&self, _cfg: &ExecutorConfig) -> Result<(), ApplyError> {
         Ok(())
     }
 
-    async fn release_project_lock(&self, _project_id: &str) -> Result<(), ApplyError> {
+    async fn release_project_lock(&self, _cfg: &ExecutorConfig) -> Result<(), ApplyError> {
         Ok(())
     }
 

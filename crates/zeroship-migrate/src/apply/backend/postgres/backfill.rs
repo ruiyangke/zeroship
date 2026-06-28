@@ -886,7 +886,7 @@ async fn run_one_batch(
             if let Err(rb) = conn.batch_execute("ROLLBACK").await {
                 tracing::warn!(error = %rb, "zeroship-migrate: ROLLBACK failed after a backfill progress error");
             }
-            return Err(BackfillError::Journal(JournalError::Db(e)));
+            return Err(BackfillError::Journal(JournalError::Db(e.into())));
         }
     }
 

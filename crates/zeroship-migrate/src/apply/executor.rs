@@ -869,7 +869,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // lock between sub-batches (PG advisory locks are session-re-entrant, so a
     // nested unlock would pop one level), letting a concurrent deploy interleave.
     if lock_mode == LockMode::Acquire {
-        backend.acquire_project_lock(&cfg.project_id).await?;
+        backend.acquire_project_lock(cfg).await?;
     }
     // Capture the session GUCs we will override so we can restore them on exit
     // — the executor's search_path / statement_timeout / lock_timeout must NOT
@@ -900,7 +900,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     if lock_mode == LockMode::AlreadyHeld {
         return result;
     }
-    let unlock = backend.release_project_lock(&cfg.project_id).await;
+    let unlock = backend.release_project_lock(cfg).await;
     // Surface the apply error first if there was one; otherwise surface any
     // unlock failure. (The lock auto-releases on session end regardless.)
     match result {
@@ -1173,7 +1173,7 @@ async fn apply_locked<B: MigrationBackend>(
     //     line-2 defense is the backend authorizer applied per statement at apply).
     // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
     // which for SQLite rejects `transaction:false` at the dialect boundary.
-    let guard = crate::guard::guard_for(&cfg.guard_config());
+    let guard = crate::guard::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution (H1). The guard runs per-migration inside the apply loop in the
@@ -2177,7 +2177,7 @@ pub(crate) async fn apply_transactional(
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a journal-insert error (M4)");
         }
-        return Err(ApplyError::Journal(JournalError::Db(e)));
+        return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
 
     // #2 fix: write the fresh-DB squash supersession edges in the SAME transaction
@@ -2330,7 +2330,7 @@ pub(crate) async fn apply_dml_transactional(
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a DML journal-insert error");
         }
-        return Err(ApplyError::Journal(JournalError::Db(e)));
+        return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
     // Fault seam (test-only): a simulated crash AFTER the journal INSERT but
     // BEFORE COMMIT — the INSERT is inside the uncommitted txn, so it rolls back
@@ -2365,7 +2365,7 @@ async fn insert_supersedes_edges(
             &[&squash_version, sup],
         )
         .await
-        .map_err(JournalError::Db)?;
+        .map_err(|e| JournalError::Db(e.into()))?;
     }
     Ok(())
 }
@@ -3045,7 +3045,7 @@ async fn rollback_with_backend<B: MigrationBackend>(
     // lock failure to `ApplyError::Db`; preserve rollback's `RollbackError::Db`
     // surface by converting.
     backend
-        .acquire_project_lock(&cfg.project_id)
+        .acquire_project_lock(cfg)
         .await
         .map_err(rollback_err_from_apply)?;
     let snapshot = backend.snapshot_session().await.ok();
@@ -3059,7 +3059,7 @@ async fn rollback_with_backend<B: MigrationBackend>(
         }
     }
     let unlock = backend
-        .release_project_lock(&cfg.project_id)
+        .release_project_lock(cfg)
         .await
         .map_err(rollback_err_from_apply);
     match result {
@@ -3470,7 +3470,7 @@ pub(crate) async fn rollback_one_transactional(
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a rolled_back-insert error");
         }
-        return Err(RollbackError::Journal(JournalError::Db(e)));
+        return Err(RollbackError::Journal(JournalError::Db(e.into())));
     }
 
     conn.batch_execute("COMMIT").await?;
