@@ -16,6 +16,8 @@ use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
 use zeroship_control::metering::{period_start_unix, Metering};
+use zeroship_control::pricing::{per_metric_units, total_units};
+use zeroship_control::pricing_store::PricingStore;
 use zeroship_control::Registry;
 use zeroship_core::types::{AppUsage, UsageReport};
 
@@ -316,6 +318,68 @@ async fn gateway_egress_report_aggregates_into_usage_aggregates() {
         metering.total(&app, period, "egress_bytes").await.unwrap(),
         1000,
         "worker egress recorded under its own metric (no double-count)",
+    );
+}
+
+#[compio::test]
+async fn native_socket_ingress_bills_once_with_net_ingress_attribution() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let metering = Metering::new(registry.clone());
+    let app = make_app(&client).await;
+    let period = period_start_unix(1_900_000_000);
+    let worker = format!("w-{}", Uuid::new_v4());
+
+    let mut custom = HashMap::new();
+    custom.insert("net_ingress_bytes".to_string(), 10_000);
+    metering
+        .ingest_at(
+            &report(
+                &worker,
+                1,
+                app,
+                AppUsage {
+                    ingress_bytes: 10_000,
+                    custom,
+                    ..Default::default()
+                },
+            ),
+            period,
+        )
+        .await
+        .expect("ingest native socket ingress");
+
+    let totals = metering.period_totals(&app, period).await.expect("period totals");
+    assert_eq!(totals.get("ingress_bytes").copied(), Some(10_000));
+    assert_eq!(
+        totals.get("net_ingress_bytes").copied(),
+        Some(10_000),
+        "net_ingress_bytes remains an attribution metric"
+    );
+
+    let weights = PricingStore::new(registry).weights().await.expect("weights");
+    let units = total_units(&weights, &totals).expect("price ingress totals");
+    assert_eq!(
+        units, 1,
+        "10 KiB of successful socket ingress is billable once via ingress_bytes, not again via \
+         net_ingress_bytes"
+    );
+    assert_eq!(
+        weights
+            .get("net_ingress_bytes")
+            .expect("net_ingress_bytes weight row remains for attribution")
+            .units_per_op,
+        0,
+        "net_ingress_bytes is present but unweighted"
+    );
+    assert_eq!(
+        per_metric_units("net_ingress_bytes", 10_000, &weights).expect("net ingress units"),
+        0,
+        "net_ingress_bytes must stay cataloged but attribution-only"
     );
 }
 

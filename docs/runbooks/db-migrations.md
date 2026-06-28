@@ -39,7 +39,7 @@ See `docs/proposals/2026-06-17-platform-migrations-flyway-mode-design.md`.
 db/migrations/
   V0001__extensions_schemas.sql        # citext + CREATE SCHEMA zeroship (the one platform schema)
   V0001__extensions_schemas.down.sql   # OPTIONAL reverse for the same version
-  …                                    # 56 versioned files today (V0001–V0057, 0045 is a gap)
+  …                                    # 58 versioned files today (V0001–V0059, 0045 is a gap)
   V0004__control.sql                   # the control-plane app/usage/env tables
   V0027__oauth_hydra_schema.sql        # the separate oauth_hydra schema + least-priv role for Hydra
 ```
