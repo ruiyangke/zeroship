@@ -620,7 +620,9 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 > - **Index `ifNotExists` over an expression / partial predicate** — `FailDrift`
 >   naming `expression`: the IR `createIndex` (a column-list) cannot render a
 >   byte-comparable `pg_get_expr` form, so equivalence is unprovable. A plain
->   column-list index compares `(unique, columns)` fully.
+>   column-list index compares `(unique, columns)` fully. This is guard-only:
+>   unguarded partial indexes render on Postgres and SQLite; MySQL refuses them
+>   fail-closed because it has no partial-index support.
 > - **SQLite type-affinity collision** — SQLite stores TEXT affinity for
 >   string/date/json/ref alike, so a same-name TEXT-affinity column whose SDK facet
 >   changed within one affinity is invisible to the catalog. The SQLite `ifNotExists`
@@ -1089,9 +1091,13 @@ runs.
 **What renders (the offline-renderable subset).** The DB-independent ops render
 their real SQL: `createTable` / `dropTable` / `addColumn` / `dropColumn` /
 `addForeignKey` / `addUnique` / `addCheck` / `dropConstraint` / `createIndex` /
-`dropIndex`, and one-shot `insert` / `update` / `delete` (the DML prints its
-placeholder template — `$n` on Postgres, `?n` on SQLite — with a bind-count note;
-bind values are bound natively, never interpolated into the SQL).
+`dropIndex` / `createSequence` / `alterSequence` / `dropSequence` / `comment`;
+Postgres also renders native exclusion constraints, while SQLite/MySQL refuse
+them fail-closed. Partial indexes render on Postgres and SQLite; MySQL refuses
+them fail-closed because it has no partial indexes. One-shot `insert` / `update` /
+`delete` also render (the DML prints its placeholder template — `$n` on Postgres,
+`?n` on SQLite — with a bind-count note; bind values are bound natively, never
+interpolated into the SQL).
 
 **The honest boundary — `-- [runtime-resolved]`.** Some ops cannot be faithfully
 rendered offline because their SQL depends on the **live database state**. The
