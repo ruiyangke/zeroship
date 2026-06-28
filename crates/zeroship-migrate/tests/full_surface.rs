@@ -240,6 +240,38 @@ fn default_date_now_symbol_equals_default_fn_now() {
 }
 
 #[test]
+fn non_native_function_value_fails_closed_in_v8_recorder() {
+    let insert = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            const f = () => 42;
+            table("t").insert({ rows: [ { v: f } ] });
+        }};
+    "#;
+    let err = record_err(insert, "bad_fn_insert");
+    assert!(
+        err.contains("function values are not valid here"),
+        "non-native function insert value must fail closed, got: {err}"
+    );
+    assert!(
+        err.contains("Date.now / Math.random / crypto.randomUUID"),
+        "message must steer to supported native symbols, got: {err}"
+    );
+
+    let default = r#"
+        import { table, t } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").create({ columns: { v: t.integer().default(() => 1) } });
+        }};
+    "#;
+    let err = record_err(default, "bad_fn_default");
+    assert!(
+        err.contains("function values are not valid here"),
+        "non-native function default must fail closed, got: {err}"
+    );
+}
+
+#[test]
 fn date_now_symbol_is_deterministic_across_records() {
     let src = r#"
         import { table } from "@zeroship/migrate";

@@ -1297,9 +1297,12 @@ mod tests {
             SCHEMA,
             SqlDialect::Postgres,
             "events",
-            &["created_at".into()],
+            &["created_at".into(), "id".into()],
             &[vec![IrValue::Expr(Expr::FnSynth {
                 r#fn: SynthFn::Now,
+                args: vec![],
+            }), IrValue::Expr(Expr::FnSynth {
+                r#fn: SynthFn::GenRandomUuid,
                 args: vec![],
             })]],
             None,
@@ -1307,7 +1310,55 @@ mod tests {
         .unwrap();
         assert_eq!(
             a.template,
-            "INSERT INTO \"app_proj\".\"events\" (\"created_at\") VALUES (now())"
+            "INSERT INTO \"app_proj\".\"events\" (\"created_at\", \"id\") VALUES (now(), gen_random_uuid())"
+        );
+        assert!(a.binds.is_empty(), "fnSynth insert value is DB-evaluated, not a bind");
+    }
+
+    #[test]
+    fn insert_renders_fnsynth_value_without_bind_mysql() {
+        let a = assemble_insert(
+            SCHEMA,
+            SqlDialect::Mysql,
+            "events",
+            &["created_at".into(), "id".into()],
+            &[vec![IrValue::Expr(Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args: vec![],
+            }), IrValue::Expr(Expr::FnSynth {
+                r#fn: SynthFn::GenRandomUuid,
+                args: vec![],
+            })]],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            a.template,
+            "INSERT INTO `app_proj`.`events` (`created_at`, `id`) VALUES (CURRENT_TIMESTAMP(6), UUID())"
+        );
+        assert!(a.binds.is_empty(), "fnSynth insert value is DB-evaluated, not a bind");
+    }
+
+    #[test]
+    fn insert_renders_fnsynth_value_without_bind_sqlite() {
+        let a = assemble_insert(
+            SCHEMA,
+            SqlDialect::Sqlite,
+            "events",
+            &["created_at".into(), "id".into()],
+            &[vec![IrValue::Expr(Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args: vec![],
+            }), IrValue::Expr(Expr::FnSynth {
+                r#fn: SynthFn::GenRandomUuid,
+                args: vec![],
+            })]],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"events\" (\"created_at\", \"id\") VALUES (CURRENT_TIMESTAMP, lower(hex(randomblob(16))))"
         );
         assert!(a.binds.is_empty(), "fnSynth insert value is DB-evaluated, not a bind");
     }

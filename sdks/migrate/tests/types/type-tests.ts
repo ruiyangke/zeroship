@@ -179,6 +179,15 @@ export function insertValueShapes(): void {
 
   // @ts-expect-error — a function is not a valid insert ScalarValue.
   table("users").insert({ rows: { name: () => "nope" } });
+
+  // @ts-expect-error — a Date.now-shaped function is still not a DML value.
+  table("users").insert({ rows: { count: () => 42 } });
+
+  // @ts-expect-error — a randomUUID-shaped function is still not a DML value.
+  table("users").insert({ rows: { id: () => "00000000-0000-4000-8000-000000000000" } });
+
+  // @ts-expect-error — column defaults do not accept arbitrary function values.
+  table("users").create({ columns: { count: t.integer().default(() => 1) } });
 }
 
 // ───────────────────────────────────────────────────────────────────────────

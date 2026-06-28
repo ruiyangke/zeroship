@@ -20,6 +20,7 @@
 use compio_postgres::Client;
 use zeroship_migrate::{
     apply::executor::LockMode,
+    frontend::record_migration_to_ir_unsandboxed,
     model::migration::MigrationId,
     provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema,
     MigrationBackend, MigrationEngine, SqlDialect,
@@ -87,6 +88,13 @@ fn registry(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
 }
 
+fn unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_secs() as i64
+}
+
 const APP: &str = "app_test";
 
 /// Author a `.ir.json` (the deploying app `APP`) → REAL load-gate + assembler
@@ -120,6 +128,39 @@ async fn author_and_apply(
         )
         .await
         .expect("apply the authored DML plan on PG")
+}
+
+async fn load_recorded_ir_and_apply(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    ir: &zeroship_migrate::MigrationIr,
+    reg: &std::collections::BTreeMap<String, String>,
+) {
+    let bytes = serde_json::to_string(ir).expect("recorded IR serializes");
+    let document = zeroship_migrate::model::load::load_ir_document(
+        &bytes,
+        APP,
+        zeroship_migrate::model::validate::Dialect::Postgres,
+        reg,
+        None,
+    )
+    .expect("load recorded IR through the PG gate");
+    let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
+    let plan = author
+        .lower_plan(&document, &LiveSchema::default())
+        .expect("render recorded fnSynth IR on PG");
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(
+            &plan.steps,
+            Approval::None,
+            &zeroship_migrate::PostgresBackend::new(conn),
+            cfg,
+            APP,
+            LockMode::Acquire,
+        )
+        .await
+        .expect("apply recorded fnSynth IR on PG");
 }
 
 #[compio::test]
@@ -227,6 +268,86 @@ async fn ir_bind_safety_on_pg() {
         .expect("table survived the injection attempt")
         .get(0);
     assert_eq!(label, hostile, "metacharacter value stored verbatim, not interpreted");
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    conn.batch_execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        .await
+        .expect("pgcrypto/gen_random_uuid is available");
+    setup(&conn, &cfg).await;
+
+    let create = r#"{"ir_version":1,"name":"create_events","ops":[
+        {"op":"createTable","name":"events","columns":[
+            {"name":"kind","type":"text"}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    let symbol_src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "seed_symbols", up() {
+            table("events").insert({ rows: [{
+                id: crypto.randomUUID,
+                created_at: Date.now,
+                updated_at: Date.now,
+                version: 1,
+                kind: "symbol"
+            }] });
+        }};
+    "#;
+    let explicit_src = r#"
+        import { table, cFn } from "@zeroship/migrate";
+        export default { name: "seed_symbols", up() {
+            table("events").insert({ rows: [{
+                id: cFn.genRandomUuid(),
+                created_at: cFn.now(),
+                updated_at: cFn.now(),
+                version: 1,
+                kind: "symbol"
+            }] });
+        }};
+    "#;
+    let recorded_at = unix_secs();
+    let symbol_ir = record_migration_to_ir_unsandboxed(symbol_src, APP, "pg_fnsynth_symbol")
+        .expect("record symbol-form fnSynth insert");
+    let explicit_ir = record_migration_to_ir_unsandboxed(explicit_src, APP, "pg_fnsynth_explicit")
+        .expect("record explicit cFn insert");
+    assert_eq!(
+        symbol_ir.ops, explicit_ir.ops,
+        "native symbol form and cFn form must record byte-identical ops"
+    );
+
+    compio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let apply_start = unix_secs();
+    load_recorded_ir_and_apply(&conn, &cfg, &symbol_ir, &registry(&[("events", APP)])).await;
+    let apply_end = unix_secs();
+
+    let s = q(&cfg.project_schema);
+    let row = conn
+        .query_one(
+            &format!("SELECT id, extract(epoch FROM created_at)::bigint FROM {s}.events WHERE kind = 'symbol'"),
+            &[],
+        )
+        .await
+        .expect("read fnSynth-applied row");
+    let id: String = row.get(0);
+    let created_epoch: i64 = row.get(1);
+
+    uuid::Uuid::parse_str(&id)
+        .unwrap_or_else(|e| panic!("id must be a DB-generated uuid, got {id:?}: {e}"));
+    assert!(
+        created_epoch >= recorded_at + 1,
+        "created_at must be evaluated at apply time, not record time: record={recorded_at}, stored={created_epoch}"
+    );
+    assert!(
+        (apply_start - 1..=apply_end + 5).contains(&created_epoch),
+        "created_at must land in the apply window: apply={apply_start}..{apply_end}, stored={created_epoch}"
+    );
 
     teardown(&conn, &cfg).await;
 }

@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zeroship_migrate::{
-    apply::executor::LockMode, Approval, ExecutorConfig, IrAuthor, IrLowerError, LiveSchema,
+    apply::executor::LockMode, frontend::record_migration_to_ir_unsandboxed, Approval, ExecutorConfig, IrAuthor, IrLowerError, LiveSchema,
     MigrationEngine, SqlDialect, SqliteBackend,
 };
 
@@ -56,6 +56,39 @@ fn exec_cfg() -> ExecutorConfig {
 
 fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+}
+
+fn unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_secs() as i64
+}
+
+fn parse_sqlite_current_timestamp(value: &str) -> i64 {
+    assert_eq!(value.len(), 19, "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
+    assert_eq!(&value[4..5], "-", "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
+    assert_eq!(&value[7..8], "-", "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
+    assert_eq!(&value[10..11], " ", "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
+    assert_eq!(&value[13..14], ":", "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
+    assert_eq!(&value[16..17], ":", "SQLite CURRENT_TIMESTAMP shape changed: {value:?}");
+
+    let year: i64 = value[0..4].parse().expect("timestamp year parses");
+    let month: i64 = value[5..7].parse().expect("timestamp month parses");
+    let day: i64 = value[8..10].parse().expect("timestamp day parses");
+    let hour: i64 = value[11..13].parse().expect("timestamp hour parses");
+    let minute: i64 = value[14..16].parse().expect("timestamp minute parses");
+    let second: i64 = value[17..19].parse().expect("timestamp second parses");
+
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 { adjusted_year } else { adjusted_year - 399 } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let month_index = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days_since_epoch = era * 146_097 + day_of_era - 719_468;
+
+    days_since_epoch * 86_400 + hour * 3_600 + minute * 60 + second
 }
 
 /// Lower a `.ir.json` on SQLite + apply its plan on the real backend, asserting
@@ -123,6 +156,31 @@ async fn lower_plan_and_apply(
         .apply_plan(&plan.steps, approval, be, &exec_cfg(), "deploy", LockMode::Acquire)
         .await
         .expect("apply the DML plan on SQLite")
+}
+
+async fn load_recorded_ir_and_apply(
+    be: &SqliteBackend,
+    ir: &zeroship_migrate::MigrationIr,
+    reg: &BTreeMap<String, String>,
+) {
+    let bytes = serde_json::to_string(ir).expect("recorded IR serializes");
+    let document = zeroship_migrate::model::load::load_ir_document(
+        &bytes,
+        APP,
+        zeroship_migrate::model::validate::Dialect::Sqlite,
+        reg,
+        None,
+    )
+    .expect("load recorded IR through the SQLite gate");
+    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
+    let plan = author
+        .lower_plan(&document, &LiveSchema::default())
+        .expect("render recorded fnSynth IR on SQLite");
+    let engine = MigrationEngine::new();
+    engine
+        .apply_plan(&plan.steps, Approval::None, be, &exec_cfg(), "deploy", LockMode::Acquire)
+        .await
+        .expect("apply recorded fnSynth IR on SQLite");
 }
 
 fn create_codes_table() -> &'static str {
@@ -194,6 +252,82 @@ async fn one_shot_insert_update_delete_apply_on_sqlite() {
     let rows = be.actor().query("SELECT code FROM codes ORDER BY code").await.expect("probe");
     assert_eq!(rows.len(), 1, "one row pruned");
     assert_eq!(rows[0], vec![Some("404".into())]);
+}
+
+#[compio::test]
+async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_sqlite() {
+    let p = paths("fnsynth_symbol");
+    let be = backend(&p);
+
+    let create = r#"{"ir_version":1,"name":"create_events","ops":[
+        {"op":"createTable","name":"events","columns":[
+            {"name":"kind","type":"text"}
+        ]}
+    ]}"#;
+    lower_and_apply(&be, create, &registry(&[]), Approval::None).await;
+
+    let symbol_src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "seed_symbols", up() {
+            table("events").insert({ rows: [{
+                id: crypto.randomUUID,
+                created_at: Date.now,
+                updated_at: Date.now,
+                version: 1,
+                kind: "symbol"
+            }] });
+        }};
+    "#;
+    let explicit_src = r#"
+        import { table, cFn } from "@zeroship/migrate";
+        export default { name: "seed_symbols", up() {
+            table("events").insert({ rows: [{
+                id: cFn.genRandomUuid(),
+                created_at: cFn.now(),
+                updated_at: cFn.now(),
+                version: 1,
+                kind: "symbol"
+            }] });
+        }};
+    "#;
+    let recorded_at = unix_secs();
+    let symbol_ir = record_migration_to_ir_unsandboxed(symbol_src, APP, "sqlite_fnsynth_symbol")
+        .expect("record symbol-form fnSynth insert");
+    let explicit_ir = record_migration_to_ir_unsandboxed(explicit_src, APP, "sqlite_fnsynth_explicit")
+        .expect("record explicit cFn insert");
+    assert_eq!(
+        symbol_ir.ops, explicit_ir.ops,
+        "native symbol form and cFn form must record byte-identical ops"
+    );
+
+    compio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let apply_start = unix_secs();
+    load_recorded_ir_and_apply(&be, &symbol_ir, &registry(&[("events", APP)])).await;
+    let apply_end = unix_secs();
+
+    let rows = be
+        .actor()
+        .query("SELECT id, created_at FROM events WHERE kind = 'symbol'")
+        .await
+        .expect("read fnSynth-applied row");
+    assert_eq!(rows.len(), 1, "one fnSynth row must be inserted");
+    let id = rows[0][0].as_deref().expect("id is non-null");
+    let created_epoch = parse_sqlite_current_timestamp(
+        rows[0][1]
+            .as_deref()
+            .expect("created_at is non-null"),
+    );
+
+    uuid::Uuid::parse_str(id)
+        .unwrap_or_else(|e| panic!("id must be a DB-generated uuid-ish value, got {id:?}: {e}"));
+    assert!(
+        created_epoch >= recorded_at + 1,
+        "created_at must be evaluated at apply time, not record time: record={recorded_at}, stored={created_epoch}"
+    );
+    assert!(
+        (apply_start - 1..=apply_end + 5).contains(&created_epoch),
+        "created_at must land in the apply window: apply={apply_start}..{apply_end}, stored={created_epoch}"
+    );
 }
 
 /// HIGH — `op.del(table, where, {limit})` must apply on SQLite. The bundled

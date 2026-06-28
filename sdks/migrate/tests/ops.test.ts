@@ -182,6 +182,53 @@ test("insert normalizes a bigint to {decimal} and Uint8Array to {bytes:base64}",
   assert.doesNotThrow(() => JSON.stringify(ops[0]));
 });
 
+test("non-native function values fail closed instead of recording as JSON null", () => {
+  const isInvalidFunction = (e: any) =>
+    e.code === "OP_INVALID" &&
+    /function values are not valid here/.test(e.message) &&
+    /Date\.now \/ Math\.random \/ crypto\.randomUUID/.test(e.message);
+
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ v: () => 42 }] } as any)),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () => record(() => table("t").create({ columns: { v: t.text().default((() => 1) as any) } })),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").insert({
+          rows: [{ id: 1 }],
+          onConflict: { columns: ["id"], doUpdate: { v: () => 42 } as any },
+        }),
+      ),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { v: (c) => c.fn.lower((() => "x") as any) } })),
+    isInvalidFunction,
+  );
+});
+
+test("supported native function symbols still record as fnSynth", () => {
+  const rows: Record<string, unknown> = {
+    at: Date.now,
+    random_id: Math.random,
+  };
+  if (globalThis.crypto?.randomUUID !== undefined) {
+    rows.uuid = globalThis.crypto.randomUUID;
+  }
+  const ops = record(() => table("t").insert({ rows: [rows] as any }));
+  const values = ops[0].rows[0];
+  assert.deepEqual(values[0], { node: "fnSynth", fn: "now", args: [] });
+  assert.deepEqual(values[1], { node: "fnSynth", fn: "genRandomUuid", args: [] });
+  if (globalThis.crypto?.randomUUID !== undefined) {
+    assert.deepEqual(values[2], { node: "fnSynth", fn: "genRandomUuid", args: [] });
+  }
+});
+
 test("a column default carries a bigint/Uint8Array through the same IrScalar carrier", () => {
   const ops = record(() =>
     table("t").create({

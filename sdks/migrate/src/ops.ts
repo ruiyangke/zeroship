@@ -128,6 +128,16 @@ function nativeFnSynthNode(value: unknown): Node | undefined {
   return fn === undefined ? undefined : { node: "fnSynth", fn, args: [] };
 }
 
+const INVALID_FUNCTION_VALUE_MESSAGE =
+  "function values are not valid here; only the supported native symbols " +
+  "Date.now / Math.random / crypto.randomUUID translate to DB-evaluated scalars";
+
+function rejectFunctionValue(value: unknown): void {
+  if (typeof value === "function") {
+    throw structuredError("OP_INVALID", INVALID_FUNCTION_VALUE_MESSAGE);
+  }
+}
+
 /** A handed-out, not-yet-terminated selector the recorder tracks (§5). */
 interface PendingSelector {
   selector: string;
@@ -614,6 +624,7 @@ function toIrScalar(value: unknown): unknown {
 function toIrValue(value: unknown): unknown {
   const synth = nativeFnSynthNode(value);
   if (synth !== undefined) return synth;
+  rejectFunctionValue(value);
   if (value instanceof ExprChainImpl) return value.__node;
   if (value && typeof value === "object" && typeof (value as Node).node === "string") return value as Node;
   return toIrScalar(value);
@@ -622,6 +633,7 @@ function toIrValue(value: unknown): unknown {
 function toIrDefault(value: ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" }): Node {
   const fn = nativeFnSynthName(value);
   if (fn !== undefined) return { fn: { fn } };
+  rejectFunctionValue(value);
   if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
   }
@@ -804,6 +816,7 @@ function chain(node: Node): ExprChainImpl {
 function exprArg(x: unknown): Node {
   const synth = nativeFnSynthNode(x);
   if (synth !== undefined) return synth;
+  rejectFunctionValue(x);
   if (x instanceof ExprChainImpl) return x.__node;
   if (x && typeof x === "object" && typeof (x as Node).node === "string") return x as Node;
   return { node: "literal", value: x as unknown };

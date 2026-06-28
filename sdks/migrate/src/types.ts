@@ -315,12 +315,21 @@ export type ScalarValue =
   | { decimal: string }
   | Uint8Array;
 
-/** A well-known native function SYMBOL that records as a DB-evaluated `fnSynth`.
- *  Calls are intentionally not special: `Date.now()` records the number it returns. */
-export type DbSynthSymbol = typeof Date.now | typeof Math.random | Crypto["randomUUID"];
+declare const dbSynthSymbolBrand: unique symbol;
 
-/** A DML value is either a typed scalar or a closed expression node. The bare
- *  native symbols above are normalized to `fnSynth(now/genRandomUuid)`. */
+/** Opaque marker for the exact native function identities the recorder accepts
+ *  at runtime (`Date.now`, `Math.random`, `crypto.randomUUID`). This is
+ *  intentionally NOT a structural function type: TypeScript cannot distinguish a
+ *  user-authored `() => number` from `typeof Date.now`, so the runtime performs
+ *  the identity check and fails closed on every other function value. Calls are
+ *  intentionally not special: `Date.now()` records the number it returns. */
+export type DbSynthSymbol = {
+  readonly [dbSynthSymbolBrand]: "Date.now" | "Math.random" | "crypto.randomUUID";
+};
+
+/** A DML value is either a typed scalar or a closed expression node. At runtime,
+ *  the exact native function identities above are normalized to
+ *  `fnSynth(now/genRandomUuid)`; all other functions are rejected. */
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
