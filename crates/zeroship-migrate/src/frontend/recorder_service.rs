@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::recorder_protocol::{ChildError, ChildRequest, ChildResponse};
+use super::recorder_protocol::{ChildError, ChildOperation, ChildRequest, ChildResponse};
 use super::sandbox::{pre_exec_netns, pre_exec_rlimits, ResourceBudget, SandboxPosture, SandboxReport};
 
 /// The §8.8 structured error the recorder surfaces (mapped from the child's
@@ -129,6 +129,27 @@ pub struct RecordRequest {
     pub schema_types_blob: Option<String>,
 }
 
+/// Inputs for one sandboxed schema evaluation.
+#[derive(Debug, Clone)]
+pub struct SchemaEvalRequest {
+    pub schema_source: String,
+    pub owner_app: String,
+    pub posture: SandboxPosture,
+    pub budget: ResourceBudget,
+    /// The landlock read-only allow-list. Schema source is piped in-memory, so this
+    /// is normally empty.
+    pub allow_read_paths: Vec<PathBuf>,
+}
+
+/// Successful sandboxed schema evaluation output.
+#[derive(Debug, Clone)]
+pub struct SchemaEvalResult {
+    /// The schema IR adapter envelope string (`{ ok, collections?, error? }`).
+    pub schema_ir_json: String,
+    /// Which sandbox layers actually engaged.
+    pub report: SandboxReport,
+}
+
 /// Read the calling process's network-namespace inode
 /// (`stat("/proc/self/ns/net").st_ino`). Used by the parent to capture its OWN netns
 /// inode pre-spawn so the child can prove (by inode INEQUALITY) that its
@@ -164,13 +185,18 @@ pub fn recorder_child_path() -> PathBuf {
     candidate
 }
 
-/// The SECURITY CORE: spawn a FRESH kernel-sandboxed child for ONE recording, wait
-/// under the wall-clock watchdog, and classify the result.
-///
-/// This is what gives per-invocation tenant isolation (a brand-new locked-down
-/// process every call — no pooling, no reuse) and what surfaces a denied syscall /
-/// budget overrun as the §8.8 structured error.
-pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, RecorderError> {
+/// Spawn a FRESH kernel-sandboxed child for ONE front-end evaluation, wait under
+/// the wall-clock watchdog, and classify the result.
+fn spawn_sandboxed_frontend(
+    operation: ChildOperation,
+    source: &str,
+    owner_app: &str,
+    name: &str,
+    posture: SandboxPosture,
+    budget: ResourceBudget,
+    allow_read_paths: &[PathBuf],
+    schema_types_blob: Option<&str>,
+) -> Result<(String, SandboxReport), RecorderError> {
     let child_bin = recorder_child_path();
     if !child_bin.exists() {
         return Err(RecorderError::Spawn(format!(
@@ -183,9 +209,6 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
     // unprivileged userns disabled; we still proceed (the child records what
     // engaged, and the hosted floor leans on seccomp). rlimits failing IS fatal for
     // the budget guarantee, so we abort the spawn if pre_exec returns Err for them.
-    let budget = req.budget;
-    let posture = req.posture;
-
     // The pre_exec closure runs in the forked child. netns first (at clone), then
     // rlimits + no_new_privs. We encode "did netns engage" by trying it and, on
     // failure, NOT failing the spawn (return Ok) — the child re-checks /proc. But
@@ -230,9 +253,10 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
 
     // Pipe the request envelope in-memory.
     let child_req = ChildRequest {
-        ts_source: req.ts_source.clone(),
-        owner_app: req.owner_app.clone(),
-        name: req.name.clone(),
+        operation,
+        ts_source: source.to_string(),
+        owner_app: owner_app.to_string(),
+        name: name.to_string(),
         hosted: posture == SandboxPosture::Hosted,
         // We requested netns (best-effort) + rlimits (mandatory). The child confirms
         // netns by comparing its own net-ns inode against the parent's (below) and
@@ -243,13 +267,12 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
         // took (vs the false-positive-prone interface-count check) (LOW #1).
         parent_netns_inode: read_netns_inode().unwrap_or(0),
         rlimit_engaged: true,
-        heap_limit_mb: req.budget.heap_limit_mb,
-        allow_read_paths: req
-            .allow_read_paths
+        heap_limit_mb: budget.heap_limit_mb,
+        allow_read_paths: allow_read_paths
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
-        schema_types_blob: req.schema_types_blob.clone(),
+        schema_types_blob: schema_types_blob.map(str::to_string),
     };
     let req_json = serde_json::to_string(&child_req)
         .map_err(|e| RecorderError::Spawn(format!("serialize child request: {e}")))?;
@@ -318,12 +341,9 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
 
     if resp.ok {
         let ir_json = resp.ir_json.ok_or_else(|| {
-            RecorderError::Spawn("recorder child reported ok but no ir_json".into())
+            RecorderError::Spawn("recorder child reported ok but no output json".into())
         })?;
-        Ok(RecordResult {
-            ir_json,
-            report: resp.report,
-        })
+        Ok((ir_json, resp.report))
     } else {
         match resp.error {
             Some(ChildError::EvalError(m)) => Err(RecorderError::EvalError(m)),
@@ -331,6 +351,48 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
             None => Err(RecorderError::Spawn("recorder child failed with no error".into())),
         }
     }
+}
+
+/// The SECURITY CORE: spawn a FRESH kernel-sandboxed child for ONE recording, wait
+/// under the wall-clock watchdog, and classify the result.
+///
+/// This is what gives per-invocation tenant isolation (a brand-new locked-down
+/// process every call — no pooling, no reuse) and what surfaces a denied syscall /
+/// budget overrun as the §8.8 structured error.
+pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, RecorderError> {
+    let (ir_json, report) = spawn_sandboxed_frontend(
+        ChildOperation::RecordMigration,
+        &req.ts_source,
+        &req.owner_app,
+        &req.name,
+        req.posture,
+        req.budget,
+        &req.allow_read_paths,
+        req.schema_types_blob.as_deref(),
+    )?;
+    Ok(RecordResult { ir_json, report })
+}
+
+/// Spawn a FRESH kernel-sandboxed child for ONE schema evaluation. This uses the
+/// same child binary, pre-exec budget, wall watchdog, and kernel layers as
+/// [`spawn_sandboxed_record`]; only the child entry adapter differs.
+pub fn spawn_sandboxed_schema_eval(
+    req: &SchemaEvalRequest,
+) -> Result<SchemaEvalResult, RecorderError> {
+    let (schema_ir_json, report) = spawn_sandboxed_frontend(
+        ChildOperation::EvalSchema,
+        &req.schema_source,
+        &req.owner_app,
+        "schema",
+        req.posture,
+        req.budget,
+        &req.allow_read_paths,
+        None,
+    )?;
+    Ok(SchemaEvalResult {
+        schema_ir_json,
+        report,
+    })
 }
 
 /// Map a child's terminating signal to the §8.8 structured error.

@@ -15,19 +15,9 @@
 //! code (§8.9).
 
 use crate::MigrationIr;
-use zeroship_runtime::{ModuleEntry, Runtime};
+use zeroship_runtime::Runtime;
 
-/// The op.* recorder adapter glue (the entry module). Imports the creator
-/// migration under `./__migration__.js` + the `@zeroship/migrate` DSL, invokes
-/// `up()`, drains the recorded ops, and stashes the `.ir.json` envelope on
-/// `globalThis.__zsOpIR`.
-const OP_RECORDER_JS: &str = include_str!("op_recorder.js");
-
-/// The minimal `@zeroship/migrate` op.* DSL — the named-import op-functions
-/// (`createTable`, `addColumn`, …) + the recording buffer + the `e.*` Expr-node
-/// helpers. The migration module's `import { … } from "@zeroship/migrate"`
-/// resolves to this.
-const MIGRATE_OPS_JS: &str = include_str!("migrate_ops.js");
+use super::embedding::{install_frontend_globals, module_graph, FrontendGlobals, FrontendProgram};
 
 /// An error from recording a migration module.
 #[derive(Debug, thiserror::Error)]
@@ -154,43 +144,14 @@ pub fn record_migration_to_ir_with_warnings(
     // only raise the AI loop's iteration cost.
     let warnings = lint_migration_determinism(migration_source)?;
 
-    let modules = vec![
-        ModuleEntry {
-            specifier: "op_recorder.js".into(),
-            source: OP_RECORDER_JS.to_string(),
-        },
-        ModuleEntry {
-            specifier: "__migration__.js".into(),
-            source: migration_source.to_string(),
-        },
-        ModuleEntry {
-            specifier: "@zeroship/migrate".into(),
-            source: MIGRATE_OPS_JS.to_string(),
-        },
-        // VENDOR — the privileged `@zeroship/migrate/pg` subpath is a thin
-        // re-export SHIM (NOT a second copy of migrate_ops.js): it `export { pg }
-        // from "@zeroship/migrate"`, so it shares the ONE recorder-state instance
-        // (a second module copy would carry its own `__active` and record into a
-        // dead buffer). The separate specifier makes the privileged surface
-        // lexically obvious in a migration's imports (vendor spec §2.0).
-        //
-        // Boundary (review #5): recording is not the trust gate. Confined
-        // deploy/load validation rejects every vendor op emitted here; operator
-        // paths must pass an explicit Platform/Trusted capability to validate and
-        // lower it. A JS-visible authoring flag would be spoofable inside the
-        // untrusted migration module, so do not bolt one onto this shim without a
-        // host-proven recorder protocol change.
-        ModuleEntry {
-            specifier: "@zeroship/migrate/pg".into(),
-            source: r#"export { pg } from "@zeroship/migrate";"#.to_string(),
-        },
-    ];
+    let modules = module_graph(FrontendProgram::RecordMigration {
+        source: migration_source,
+    });
 
     let runtime = Runtime::builder().build();
 
     let ir_json: Result<String, RecordError> = runtime.with_scope(|scope| {
-        zeroship_runtime::init::setup_globals(scope).map_err(RecordError::V8)?;
-        zeroship_runtime::init::install_text_encoding_streams(scope);
+        install_frontend_globals(scope, FrontendGlobals::Migration).map_err(RecordError::V8)?;
 
         // Expose ONLY the filename-derived name to the adapter. owner_app is
         // DELIBERATELY NOT a global: it is a tenant-identifying field folded into the
@@ -288,20 +249,6 @@ pub struct DeterminismFinding {
     pub reason: String,
 }
 
-/// The determinism-lint glue: import `lintDeterminism` from `@zeroship/migrate`,
-/// run it over the migration source the host stamps on `globalThis.__zsLintSrc`,
-/// and stash the JSON findings on `globalThis.__zsLintOut`.
-const DETERMINISM_LINT_JS: &str = r#"
-import { lintDeterminism } from "@zeroship/migrate";
-try {
-  const findings = lintDeterminism(globalThis.__zsLintSrc || "");
-  globalThis.__zsLintOut = JSON.stringify({ ok: true, findings });
-} catch (e) {
-  globalThis.__zsLintOut = JSON.stringify({ ok: false, error: (e && e.message) ? e.message : String(e) });
-}
-export default {};
-"#;
-
 /// Run the §4.3 determinism lint over a migration's SOURCE through the REAL V8
 /// `@zeroship/migrate` `lintDeterminism` (NOT a Rust re-implementation) — the
 /// faithful path the build/CLI uses to flag a non-deterministic accessor
@@ -315,32 +262,12 @@ pub fn lint_migration_determinism(
 ) -> Result<Vec<DeterminismFinding>, RecordError> {
     zeroship_runtime::init_v8();
 
-    let modules = vec![
-        ModuleEntry {
-            specifier: "determinism_lint.js".into(),
-            source: DETERMINISM_LINT_JS.to_string(),
-        },
-        ModuleEntry {
-            specifier: "@zeroship/migrate".into(),
-            source: MIGRATE_OPS_JS.to_string(),
-        },
-        // VENDOR — the privileged `@zeroship/migrate/pg` subpath is a thin
-        // re-export SHIM (NOT a second copy of migrate_ops.js): it `export { pg }
-        // from "@zeroship/migrate"`, so it shares the ONE recorder-state instance
-        // (a second module copy would carry its own `__active` and record into a
-        // dead buffer). The separate specifier makes the privileged surface
-        // lexically obvious in a migration's imports (vendor spec §2.0).
-        ModuleEntry {
-            specifier: "@zeroship/migrate/pg".into(),
-            source: r#"export { pg } from "@zeroship/migrate";"#.to_string(),
-        },
-    ];
+    let modules = module_graph(FrontendProgram::DeterminismLint);
 
     let runtime = Runtime::builder().build();
 
     let out_json: Result<String, RecordError> = runtime.with_scope(|scope| {
-        zeroship_runtime::init::setup_globals(scope).map_err(RecordError::V8)?;
-        zeroship_runtime::init::install_text_encoding_streams(scope);
+        install_frontend_globals(scope, FrontendGlobals::Migration).map_err(RecordError::V8)?;
 
         {
             let global = scope.get_current_context().global(scope);

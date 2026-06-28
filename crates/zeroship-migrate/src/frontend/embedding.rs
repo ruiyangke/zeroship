@@ -1,0 +1,129 @@
+//! Shared V8 embedding for the migrate JS front-end.
+//!
+//! Schema eval, the in-process recorder oracle, the determinism lint, and the
+//! sandboxed recorder child all load the same trusted adapter/DSL modules from
+//! this file. The entry module changes per operation, but the module universe
+//! and globals are owned here so subpath shims and host globals cannot drift.
+
+use zeroship_runtime::ModuleEntry;
+
+/// The op.* recorder adapter glue.
+const OP_RECORDER_JS: &str = include_str!("op_recorder.js");
+
+/// The schema IR lowering adapter glue.
+const IR_ADAPTER_JS: &str = include_str!("ir_adapter.js");
+
+/// The bundled `@zeroship/migrate` op.* DSL.
+const MIGRATE_OPS_JS: &str = include_str!("migrate_ops.js");
+
+/// The bundled `@zeroship/db` schema DSL.
+const ZEROSHIP_DB_DIST_JS: &str = include_str!("../../../../sdks/db/dist/index.js");
+
+/// `@zeroship/migrate/pg` is a subpath shim over the same recorder-state module.
+const MIGRATE_PG_SHIM_JS: &str = r#"export { pg } from "@zeroship/migrate";"#;
+
+/// Minimal `zeroship` facade required by the `@zeroship/db` bundle.
+const ZEROSHIP_FACADE_STUB_JS: &str = r#"
+export const env = Object.freeze({});
+export function waitUntil() {}
+export function getRequest() { return null; }
+export function getRequestContext() { return undefined; }
+export default {};
+"#;
+
+/// The determinism-lint entry module.
+const DETERMINISM_LINT_JS: &str = r#"
+import { lintDeterminism } from "@zeroship/migrate";
+try {
+  const findings = lintDeterminism(globalThis.__zsLintSrc || "");
+  globalThis.__zsLintOut = JSON.stringify({ ok: true, findings });
+} catch (e) {
+  globalThis.__zsLintOut = JSON.stringify({ ok: false, error: (e && e.message) ? e.message : String(e) });
+}
+export default {};
+"#;
+
+const EMPTY_MIGRATION_JS: &str = "export function up() {}\n";
+const EMPTY_SCHEMA_JS: &str = "export default { schema: {} };\n";
+
+/// Which front-end program is the graph entrypoint.
+#[derive(Debug, Clone, Copy)]
+pub enum FrontendProgram<'a> {
+    RecordMigration { source: &'a str },
+    EvalSchema { source: &'a str },
+    DeterminismLint,
+}
+
+/// The global installer profile a front-end operation needs.
+#[derive(Debug, Clone, Copy)]
+pub enum FrontendGlobals {
+    Migration,
+    Schema,
+}
+
+fn module(specifier: &str, source: &str) -> ModuleEntry {
+    ModuleEntry {
+        specifier: specifier.to_string(),
+        source: source.to_string(),
+    }
+}
+
+/// Build the canonical in-memory module graph for a migrate front-end operation.
+///
+/// Only the first entry is eagerly compiled by the runtime loader; the remaining
+/// entries form the shared source map. Keeping both adapters and both user-entry
+/// specifiers in this graph makes the import allow-list identical across eval,
+/// record, lint, and the sandboxed child.
+pub fn module_graph(program: FrontendProgram<'_>) -> Vec<ModuleEntry> {
+    let mut modules = Vec::with_capacity(10);
+
+    match program {
+        FrontendProgram::RecordMigration { source } => {
+            modules.push(module("op_recorder.js", OP_RECORDER_JS));
+            modules.push(module("__migration__.js", source));
+            modules.push(module("ir_adapter.js", IR_ADAPTER_JS));
+            modules.push(module("__schema__.js", EMPTY_SCHEMA_JS));
+        }
+        FrontendProgram::EvalSchema { source } => {
+            modules.push(module("ir_adapter.js", IR_ADAPTER_JS));
+            modules.push(module("__schema__.js", source));
+            modules.push(module("op_recorder.js", OP_RECORDER_JS));
+            modules.push(module("__migration__.js", EMPTY_MIGRATION_JS));
+        }
+        FrontendProgram::DeterminismLint => {
+            modules.push(module("determinism_lint.js", DETERMINISM_LINT_JS));
+            modules.push(module("op_recorder.js", OP_RECORDER_JS));
+            modules.push(module("__migration__.js", EMPTY_MIGRATION_JS));
+            modules.push(module("ir_adapter.js", IR_ADAPTER_JS));
+            modules.push(module("__schema__.js", EMPTY_SCHEMA_JS));
+        }
+    }
+
+    modules.push(module("@zeroship/migrate", MIGRATE_OPS_JS));
+    modules.push(module("@zeroship/migrate/pg", MIGRATE_PG_SHIM_JS));
+    modules.push(module("@zeroship/db", ZEROSHIP_DB_DIST_JS));
+    modules.push(module("zeroship", ZEROSHIP_FACADE_STUB_JS));
+
+    modules
+}
+
+/// Install the canonical globals for a migrate front-end operation.
+pub fn install_frontend_globals(
+    scope: &mut v8::PinScope,
+    globals: FrontendGlobals,
+) -> Result<(), String> {
+    zeroship_runtime::init::setup_globals(scope)?;
+    match globals {
+        FrontendGlobals::Migration => {
+            zeroship_runtime::init::install_text_encoding_streams(scope);
+        }
+        FrontendGlobals::Schema => {
+            zeroship_runtime::init::install_headers(scope);
+            zeroship_runtime::init::install_native_streams(scope);
+            zeroship_runtime::init::install_blob_native(scope);
+            zeroship_runtime::init::install_text_encoding_streams(scope);
+            zeroship_runtime::init::install_dom(scope);
+        }
+    }
+    Ok(())
+}

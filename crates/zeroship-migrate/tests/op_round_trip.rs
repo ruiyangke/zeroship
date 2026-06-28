@@ -33,8 +33,11 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use zeroship_migrate::model::ir::CanonicalOpList;
+use zeroship_migrate::frontend::{
+    record_migration_to_json, spawn_sandboxed_record, RecordRequest, ResourceBudget,
+    SandboxPosture,
+};
 use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
-use zeroship_migrate::frontend::record_migration_to_json;
 
 const OWNER: &str = "app_corpus";
 
@@ -69,6 +72,38 @@ fn anchor(ir: &MigrationIr) -> Checksum {
         &[],
         &ir.preconditions,
     )
+}
+
+fn record_via_child_to_json(mig_src: &str, stem: &str) -> String {
+    let req = RecordRequest {
+        ts_source: mig_src.to_string(),
+        owner_app: OWNER.to_string(),
+        name: stem.to_string(),
+        posture: SandboxPosture::Local,
+        budget: ResourceBudget::default(),
+        allow_read_paths: vec![],
+        schema_types_blob: None,
+    };
+    let res = spawn_sandboxed_record(&req)
+        .unwrap_or_else(|e| panic!("sandboxed child record {stem}: {e}"));
+    let env: serde_json::Value = serde_json::from_str(&res.ir_json)
+        .unwrap_or_else(|e| panic!("{stem}: child envelope is invalid JSON: {e}"));
+    assert_eq!(
+        env.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "{stem}: child envelope must be ok:true: {}",
+        res.ir_json
+    );
+    let ir_value = env
+        .get("ir")
+        .cloned()
+        .unwrap_or_else(|| panic!("{stem}: child envelope missing ir: {}", res.ir_json));
+    let ir: MigrationIr = serde_json::from_value(ir_value)
+        .unwrap_or_else(|e| panic!("{stem}: child IR violates MigrationIr: {e}"));
+    let mut json = serde_json::to_string_pretty(&ir)
+        .unwrap_or_else(|e| panic!("{stem}: serialize child IR: {e}"));
+    json.push('\n');
+    json
 }
 
 /// GATE 1 + 2: for every fixture, the JS-recorded `.ir.json` is byte-stable against
@@ -121,6 +156,26 @@ fn corpus_is_byte_stable_and_value_equal() {
             anchor(&from_golden).as_str(),
             "{stem}: Checksum::of_ir(JS-emitted) != Checksum::of_ir(Rust-recanonicalized golden) \
              — the JS builder and the Rust engine disagree on the op list (single-source drift)"
+        );
+    }
+}
+
+/// The sandboxed child and the in-process oracle must share the same module graph.
+/// This pins the vendor subpath too: `pg_vendor.mig.js` imports
+/// `@zeroship/migrate/pg`, which pre-change resolved in-process but not in the child.
+#[test]
+fn sandboxed_child_matches_in_process_corpus_including_pg_vendor_subpath() {
+    for stem in fixture_stems() {
+        let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
+            .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
+
+        let in_process = record_migration_to_json(&mig_src, OWNER, &stem)
+            .unwrap_or_else(|e| panic!("in-process record {stem}: {e}"));
+        let child = record_via_child_to_json(&mig_src, &stem);
+
+        assert_eq!(
+            child, in_process,
+            "{stem}: sandboxed child recorder drifted from in-process oracle"
         );
     }
 }
