@@ -393,6 +393,71 @@ fn denied_policy_cannot_resolve_node_net() {
 }
 
 #[test]
+fn unconnected_socket_wrappers_are_capped_and_reclaimed() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::Echo).await;
+        run_net_js(
+            &format!(
+                r#"
+const firstBatch = [];
+let capFailure = "";
+for (let i = 0; i < 64; i++) {{
+  try {{
+    firstBatch.push(new net.Socket());
+  }} catch (err) {{
+    capFailure = `${{i}}:${{err.code}}:${{err.message}}`;
+    break;
+  }}
+}}
+if (!capFailure) return "cap-not-hit";
+
+await Promise.all(firstBatch.map((s) => new Promise((resolve) => {{
+  s.on("close", resolve);
+  s.destroy();
+}})));
+
+let reclaimed = "not-checked";
+try {{
+  const s = new net.Socket();
+  s.destroy();
+  reclaimed = "reclaimed";
+}} catch (err) {{
+  reclaimed = `reclaim-failed:${{err.code}}`;
+}}
+
+const cycle = await new Promise((resolve) => {{
+  const s = new net.Socket();
+  let data = "";
+  s.on("connect", () => s.write("ok"));
+  s.on("data", (chunk) => {{ data += chunk.toString(); s.end(); }});
+  s.on("error", (err) => resolve(`cycle-error:${{err.code}}:${{err.message}}`));
+  s.on("close", () => resolve(`cycle-data=${{data}}`));
+  s.connect({}, "127.0.0.1");
+  setTimeout(() => resolve(`cycle-timeout:data=${{data}}`), 3000);
+}});
+
+return `${{capFailure}}|${{reclaimed}}|${{cycle}}`;
+"#,
+                addr.port()
+            ),
+            allowlist("127.0.0.1", addr.port(), 1, 1024 * 1024),
+            Duration::from_secs(5),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.contains("EMFILE")
+            && result.body.contains("reclaimed")
+            && result.body.contains("cycle-data=ok"),
+        "expected wrapper cap, reclaim, and normal connect cycle, got: {}",
+        result.body
+    );
+}
+
+#[test]
 fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);

@@ -33,7 +33,8 @@ impl NativeSocket {
             .get_slot::<SharedState>()
             .ok_or_else(|| OpError::error("NativeSocket: runtime state missing"))?
             .clone();
-        let socket_id = super::state::alloc_native_socket_id(&state);
+        let socket_id = super::state::alloc_native_socket_id(&state)
+            .map_err(|e| OpError::node("EMFILE", e))?;
         Ok(Self { socket_id, state })
     }
 

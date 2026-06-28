@@ -14,6 +14,10 @@ use crate::transport::byte_pump::{self, EventQueue, RecvBackpressure};
 use super::caps::release_socket_slot;
 use super::driver::WriteCmd;
 
+const SOCKET_WRAPPER_CAP_MULTIPLIER: u32 = 16;
+const SOCKET_WRAPPER_CAP_FLOOR: u32 = 16;
+const SOCKET_WRAPPER_CAP_CEILING: u32 = 4096;
+
 #[derive(Debug, Clone)]
 pub enum SocketEvent {
     Connect,
@@ -107,13 +111,27 @@ impl EventQueue<SocketEvent> for NativeSocketState {
     }
 }
 
-pub fn alloc_native_socket_id(state: &SharedState) -> u32 {
+fn socket_wrapper_cap(state: &SharedState) -> u32 {
+    let max_sockets = state.borrow().net_policy.max_sockets();
+    max_sockets
+        .saturating_mul(SOCKET_WRAPPER_CAP_MULTIPLIER)
+        .max(SOCKET_WRAPPER_CAP_FLOOR)
+        .min(SOCKET_WRAPPER_CAP_CEILING)
+}
+
+pub fn alloc_native_socket_id(state: &SharedState) -> Result<u32, String> {
+    let cap = socket_wrapper_cap(state);
     let mut s = state.borrow_mut();
+    if s.native_sockets.len() >= cap as usize {
+        return Err(format!(
+            "per-isolate node:net Socket wrapper cap exceeded ({cap})"
+        ));
+    }
     let id = s.next_native_socket_id;
     s.next_native_socket_id = id.checked_add(1).unwrap_or(1);
     s.native_sockets
         .insert(id, Rc::new(RefCell::new(NativeSocketState::new())));
-    id
+    Ok(id)
 }
 
 pub fn free_native_socket_state(state: &SharedState, socket_id: u32) {
