@@ -254,10 +254,15 @@ export interface SequenceOwnedBy {
 
 export interface CreateSequenceArgs {
   as?: ColumnDef | ColType;
+  /** JS-safe signed integer; must be non-zero. */
   increment?: number;
+  /** JS-safe signed integer. */
   start?: number;
+  /** JS-safe signed integer, or null for NO MINVALUE/default. */
   minValue?: number | null;
+  /** JS-safe signed integer, or null for NO MAXVALUE/default. */
   maxValue?: number | null;
+  /** Positive JS-safe integer. */
   cache?: number;
   cycle?: boolean;
   ownedBy?: SequenceOwnedBy | null;
@@ -265,10 +270,15 @@ export interface CreateSequenceArgs {
 }
 
 export interface AlterSequenceArgs {
+  /** JS-safe signed integer; must be non-zero. */
   increment?: number;
+  /** JS-safe signed integer, or null for bare RESTART. */
   restart?: number | null;
+  /** JS-safe signed integer, or null for NO MINVALUE/default. */
   minValue?: number | null;
+  /** JS-safe signed integer, or null for NO MAXVALUE/default. */
   maxValue?: number | null;
+  /** Positive JS-safe integer. */
   cache?: number;
   cycle?: boolean;
   ownedBy?: SequenceOwnedBy | null;
@@ -633,9 +643,10 @@ export type ExclusionAddArgs = ExclusionConstraintArgs & {
  *  - `foreignKeys` are single-local-column, referencing the target's `id` (the
  *    only shape the renderer emits today); a multi-column / non-`id` FK is a HARD
  *    error (later wave).
- *  - `checks` and a partial-index `where` are HARD deferred errors: the closed-AST
- *    expression needs the Wave-C `Expr`→SQL renderer (same deferral as stand-alone
- *    `.check(name).add({expr})` / `addConstraint(check)`).
+ *  - `checks` are HARD deferred errors: the closed-AST expression needs the Wave-C
+ *    `Expr`→SQL renderer (same deferral as stand-alone `.check(name).add({expr})`
+ *    / `addConstraint(check)`). Partial-index `where` renders on PostgreSQL and
+ *    SQLite; MySQL refuses it fail-closed because MySQL has no partial indexes.
  *  - `primaryKey` (composite) and a column's `.primaryKey()` are HARD errors at
  *    apply: the platform OWNS the synthetic `id TEXT PRIMARY KEY`, so a second PK
  *    is never satisfiable (both backends reject two PRIMARY KEYs). Use `t.id()` for
@@ -667,9 +678,8 @@ export interface CreateTableArgs {
     columns: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
-    /** DEFERRED at apply — a partial-index predicate is a closed-AST `expr`
-     *  awaiting the Wave-C `Expr`→SQL renderer; a `where` here is a HARD lower
-     *  error today, never a silent drop. */
+    /** Partial-index predicate. Renders on PostgreSQL and SQLite; MySQL refuses
+     *  it fail-closed because MySQL has no partial indexes. */
     where?: ExprFn;
   }>;
   ifNotExists?: boolean;

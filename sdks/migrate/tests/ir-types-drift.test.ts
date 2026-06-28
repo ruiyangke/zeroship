@@ -229,6 +229,26 @@ test("IrFlagsOverride field set matches the schema (#180)", () => {
   );
 });
 
+test("safe integer schema bounds match the hand-authored IR mirror", () => {
+  assert.deepEqual(
+    {
+      safeI64: {
+        minimum: schema.$defs.SafeI64.minimum,
+        maximum: schema.$defs.SafeI64.maximum,
+      },
+      safeU64: {
+        minimum: schema.$defs.SafeU64.minimum,
+        maximum: schema.$defs.SafeU64.maximum,
+      },
+    },
+    {
+      safeI64: { minimum: -9_007_199_254_740_991, maximum: 9_007_199_254_740_991 },
+      safeU64: { minimum: 0, maximum: 9_007_199_254_740_991 },
+    },
+    "SafeI64/SafeU64 bounds drifted from src/generated/ir.ts number aliases and SDK recorder validation",
+  );
+});
+
 test("closed string-enum tokens match the schema", () => {
   for (const name of [
     "BinaryOp",

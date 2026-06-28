@@ -145,3 +145,34 @@ test("sequence and exclusion recorder emits the canonical IR shape", () => {
   assert.equal(standalone.existenceGuard, "ifNotExists");
   assert.equal(standalone.constraint.kind.kind, "exclusion");
 });
+
+function assertInvalidSequenceOption(rec: Rec, author: (sequence: any) => void, pattern: RegExp) {
+  rec.begin();
+  assert.throws(() => author(rec.sequence), pattern);
+  assert.deepEqual(rec.drain(), []);
+}
+
+test("sequence recorder rejects invalid numeric options in public and engine copies", () => {
+  for (const rec of [PUBLIC, ENGINE]) {
+    assertInvalidSequenceOption(
+      rec,
+      (sequence) => sequence("bad_seq").create({ increment: 0 }),
+      /increment.*non-zero/,
+    );
+    assertInvalidSequenceOption(
+      rec,
+      (sequence) => sequence("bad_seq").alter({ cache: 0 }),
+      /cache.*positive/,
+    );
+    assertInvalidSequenceOption(
+      rec,
+      (sequence) => sequence("bad_seq").create({ minValue: 10, maxValue: 9 }),
+      /minValue.*<= maxValue/,
+    );
+    assertInvalidSequenceOption(
+      rec,
+      (sequence) => sequence("bad_seq").create({ start: Number.MAX_SAFE_INTEGER + 1 }),
+      /safe integer/,
+    );
+  }
+});

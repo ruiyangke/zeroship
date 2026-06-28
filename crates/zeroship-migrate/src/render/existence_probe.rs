@@ -216,6 +216,12 @@ fn decide_view(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardV
 }
 
 fn decide_sequence(name: &str, direction: GuardDir, live: &SchemaSnapshot) -> GuardVerdict {
+    // Sequence guards intentionally answer only the existence question requested
+    // by `ifExists` / `ifNotExists`. A guarded `createSequence` that finds an
+    // existing sequence therefore no-ops here; option equality is the structural
+    // drift layer's job (`SequenceSnapshot` carries the catalog options and
+    // `diff_snapshots` reports any mismatch). Keeping the guard presence-only
+    // avoids turning an existence probe into a partial schema validator.
     let present = live.sequences.contains_key(name);
     match direction {
         GuardDir::IfExists => {

@@ -148,6 +148,41 @@ function requireString(v, what) {
   }
 }
 
+function requireSafeI64(v, what) {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v)) {
+    throw structuredError("OP_INVALID", `${what} must be a JS safe integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireNullableSafeI64(v, what) {
+  if (v === null) return null;
+  return requireSafeI64(v, what);
+}
+
+function requireSequenceIncrement(v, what) {
+  const n = requireSafeI64(v, what);
+  if (n === 0) {
+    throw structuredError("OP_INVALID", `${what} must be non-zero`);
+  }
+  return n;
+}
+
+function requireSequenceCache(v, what) {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
+    throw structuredError("OP_INVALID", `${what} must be a positive JS safe integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireSequenceBounds(min, max, what) {
+  if (typeof min === "number" && typeof max === "number" && min > max) {
+    throw structuredError("OP_INVALID", `${what}: minValue must be <= maxValue`);
+  }
+}
+
 /** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
  *  spelling of the Rust `VectorMetric` enum (`cosine | l2 | innerProduct`). Mirrored
  *  here so `t.vector(n, { metric })` rejects an out-of-set metric with a friendly
@@ -819,17 +854,20 @@ function recordCreateSequence(name, args = {}) {
   if (args === null || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).create(args) needs an object");
   }
+  const minValue = requireNullableSafeI64(args.minValue, "sequence.create({ minValue })");
+  const maxValue = requireNullableSafeI64(args.maxValue, "sequence.create({ maxValue })");
+  requireSequenceBounds(minValue, maxValue, "sequence.create(args)");
   pushOrDeferUp(
     compact({
       op: "createSequence",
       name,
       schema: args.schema,
       as: args.as === undefined ? undefined : colTypeOf(args.as),
-      increment: args.increment,
-      start: args.start,
-      minValue: args.minValue,
-      maxValue: args.maxValue,
-      cache: args.cache,
+      increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
+      start: requireSafeI64(args.start, "sequence.create({ start })"),
+      minValue,
+      maxValue,
+      cache: requireSequenceCache(args.cache, "sequence.create({ cache })"),
       cycle: args.cycle,
       ownedBy: args.ownedBy,
     }),
@@ -841,16 +879,19 @@ function recordAlterSequence(name, args) {
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).alter(args) needs an object");
   }
+  const minValue = requireNullableSafeI64(args.minValue, "sequence.alter({ minValue })");
+  const maxValue = requireNullableSafeI64(args.maxValue, "sequence.alter({ maxValue })");
+  requireSequenceBounds(minValue, maxValue, "sequence.alter(args)");
   push(
     compact({
       op: "alterSequence",
       name,
       schema: args.schema,
-      increment: args.increment,
-      restart: args.restart,
-      minValue: args.minValue,
-      maxValue: args.maxValue,
-      cache: args.cache,
+      increment: requireSequenceIncrement(args.increment, "sequence.alter({ increment })"),
+      restart: requireNullableSafeI64(args.restart, "sequence.alter({ restart })"),
+      minValue,
+      maxValue,
+      cache: requireSequenceCache(args.cache, "sequence.alter({ cache })"),
       cycle: args.cycle,
       ownedBy: args.ownedBy,
     }),

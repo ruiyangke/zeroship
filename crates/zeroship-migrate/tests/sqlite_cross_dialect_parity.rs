@@ -35,7 +35,7 @@ use zeroship_migrate::{
     ExclusionElement, ExclusionMethod, ExclusionOperator, Expr, GeneratedCol, GuardConfig,
     IdentityCol, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
     IrFlagsOverride, IrIndex, IrLowerError, IrScalar, IrAuthor, LiveSchema, MigrationEngine,
-    MigrationIr, Op, RefAction, SequenceOwnedBy, SqliteBackend, CURRENT_IR_VERSION,
+    MigrationIr, Op, RefAction, SafeI64, SequenceOwnedBy, SqliteBackend, CURRENT_IR_VERSION,
 };
 use zeroship_migrate::{ExecutorConfig, SchemaScope};
 use zeroship_schema::query::SqlDialect;
@@ -582,8 +582,8 @@ fn sqlite_pg_only_facets_fail_closed() {
                     name: "invoice_seq".to_string(),
                     schema: None,
                     as_type: Some(ColType::BigInt),
-                    increment: Some(1),
-                    start: Some(1),
+                    increment: Some(SafeI64::new(1).unwrap()),
+                    start: Some(SafeI64::new(1).unwrap()),
                     min_value: None,
                     max_value: None,
                     cache: None,

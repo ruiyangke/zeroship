@@ -93,6 +93,9 @@ pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
 /// A column carries mutually-exclusive facets (`default` + `generated`,
 /// `identity` + `generated`, etc.).
 pub const CODE_COLUMN_FACET_CONFLICT: &str = "COLUMN_FACET_CONFLICT";
+/// A sequence carries a semantically invalid option (`increment = 0`,
+/// `cache < 1`, or `minValue > maxValue`).
+pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 /// **VENDOR (`@zeroship/migrate/pg`)** — a privileged vendor op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`pg.sql`) whose required
 /// [`VendorCapability`](crate::model::capability::VendorCapability) is NOT granted by the
@@ -406,6 +409,7 @@ pub fn validate_op_scoped(
     // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
     // here; Platform/Trusted (`Allowlist`/`None`) grant the operator preset.
     validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
+    validate_sequence_options(op, target_dialect, op_index, ts_location)?;
 
     // Constraint-embedded expressions validate against the given table scope.
     let check_constraint =
@@ -1177,6 +1181,104 @@ fn validate_op_schema_and_guard(
         }
     }
     Ok(())
+}
+
+fn sequence_option_error(
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    reason: String,
+    suggested_fix: String,
+) -> AuthoringError {
+    AuthoringError {
+        code: CODE_SEQUENCE_OPTION_INVALID.to_string(),
+        kind: None,
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(suggested_fix),
+    }
+}
+
+fn validate_sequence_numeric_options(
+    increment: Option<crate::model::ir::SafeI64>,
+    min_value: &Option<Option<crate::model::ir::SafeI64>>,
+    max_value: &Option<Option<crate::model::ir::SafeI64>>,
+    cache: Option<crate::model::ir::SafeU64>,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    if matches!(increment, Some(n) if n.get() == 0) {
+        return Err(sequence_option_error(
+            target_dialect,
+            op_index,
+            ts_location,
+            "sequence increment must not be 0".to_string(),
+            "use a non-zero sequence increment".to_string(),
+        ));
+    }
+    if matches!(cache, Some(n) if n.get() < 1) {
+        return Err(sequence_option_error(
+            target_dialect,
+            op_index,
+            ts_location,
+            "sequence cache must be at least 1".to_string(),
+            "set cache to 1 or a larger integer".to_string(),
+        ));
+    }
+    if let (Some(Some(min)), Some(Some(max))) = (min_value, max_value) {
+        if min.get() > max.get() {
+            return Err(sequence_option_error(
+                target_dialect,
+                op_index,
+                ts_location,
+                format!(
+                    "sequence minValue ({}) must be less than or equal to maxValue ({})",
+                    min.get(),
+                    max.get()
+                ),
+                "set minValue <= maxValue, or use null to request the PostgreSQL default bound"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_sequence_options(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+    match op {
+        Op::CreateSequence {
+            increment,
+            min_value,
+            max_value,
+            cache,
+            ..
+        }
+        | Op::AlterSequence {
+            increment,
+            min_value,
+            max_value,
+            cache,
+            ..
+        } => validate_sequence_numeric_options(
+            *increment,
+            min_value,
+            max_value,
+            *cache,
+            target_dialect,
+            op_index,
+            ts_location,
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn unsupported_trigger(
@@ -2684,6 +2786,10 @@ mod tests {
         }
     }
 
+    fn op_json(json: &str) -> Op {
+        serde_json::from_str(json).expect("test op JSON")
+    }
+
     // ── PR10: schema confinement + guard direction + schema-ident safety ────────
 
     /// CONFINED — an explicit `schema != project_schema` is REFUSED fail-closed at
@@ -2901,6 +3007,32 @@ mod tests {
         ]);
         assert!(validate_ir(&ir, Dialect::Postgres, &[]).is_ok());
         assert!(validate_ir(&ir, Dialect::Sqlite, &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_ir_rejects_sequence_increment_zero() {
+        let ir = ir_with(vec![op_json(r#"{"op":"createSequence","name":"s","increment":0}"#)]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
+        assert!(err.reason.contains("increment"));
+    }
+
+    #[test]
+    fn validate_ir_rejects_sequence_cache_zero() {
+        let ir = ir_with(vec![op_json(r#"{"op":"alterSequence","name":"s","cache":0}"#)]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
+        assert!(err.reason.contains("cache"));
+    }
+
+    #[test]
+    fn validate_ir_rejects_sequence_min_greater_than_max() {
+        let ir = ir_with(vec![op_json(
+            r#"{"op":"createSequence","name":"s","minValue":10,"maxValue":9}"#,
+        )]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
+        assert!(err.reason.contains("minValue"));
     }
 
     #[test]

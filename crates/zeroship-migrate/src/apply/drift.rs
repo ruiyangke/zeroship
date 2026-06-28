@@ -39,10 +39,12 @@ use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
-    index_elements_canonically_eq, index_predicates_canonically_eq, ColumnSnapshot,
+    index_elements_canonically_eq, index_predicates_canonically_eq,
+    normalize_sequence_max_value, normalize_sequence_min_value, ColumnSnapshot,
     ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
-    SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
+use crate::model::ir::{SafeI64, SafeU64, SequenceOwnedBy};
 
 // ---------------------------------------------------------------------------
 // B1 — checksum / tamper / orphan drift
@@ -80,6 +82,9 @@ pub enum DriftError {
     /// A journal read failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
+    /// A catalog value could not be represented in the structural snapshot.
+    #[error("drift snapshot error: {0}")]
+    Snapshot(String),
     /// A **dialect-neutral** backend error (non-Postgres
     /// [`MigrationBackend`](crate::apply::backend::MigrationBackend) impls). See
     /// [`crate::apply::executor::ApplyError::Backend`]. The Postgres impl never
@@ -625,10 +630,23 @@ pub async fn snapshot_schema(
 
     let seq_rows = conn
         .query(
-            "SELECT c.relname AS sequence_name, obj_description(c.oid, 'pg_class') AS comment \
+            "SELECT c.relname AS sequence_name, format_type(s.seqtypid, NULL::integer) AS data_type, \
+                    s.seqstart AS start_value, s.seqincrement AS increment_by, \
+                    s.seqmin AS min_value, s.seqmax AS max_value, s.seqcache AS cache_size, \
+                    s.seqcycle AS cycle, oc.relname AS owned_table, oa.attname AS owned_column, \
+                    obj_description(c.oid, 'pg_class') AS comment \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_sequence s ON s.seqrelid = c.oid \
+             LEFT JOIN pg_depend od \
+               ON od.classid = 'pg_class'::regclass \
+              AND od.objid = c.oid \
+              AND od.deptype = 'a' \
+             LEFT JOIN pg_class oc ON oc.oid = od.refobjid \
+             LEFT JOIN pg_namespace onsp ON onsp.oid = oc.relnamespace \
+             LEFT JOIN pg_attribute oa ON oa.attrelid = od.refobjid AND oa.attnum = od.refobjsubid \
              WHERE n.nspname = $1 AND c.relkind = 'S' \
+               AND (onsp.nspname IS NULL OR onsp.nspname = $1) \
                AND NOT EXISTS ( \
                  SELECT 1 FROM pg_depend d \
                  WHERE d.classid = 'pg_class'::regclass \
@@ -641,9 +659,33 @@ pub async fn snapshot_schema(
         .await?;
     let mut sequences = std::collections::BTreeMap::new();
     for r in &seq_rows {
+        let as_type = SequenceDataTypeSnapshot::from_pg_type_name(&r.get::<_, String>("data_type"));
+        let increment = SafeI64::new(r.get("increment_by")).map_err(DriftError::Snapshot)?;
+        let min_value = normalize_sequence_min_value(as_type, increment, r.get("min_value"))
+            .map_err(DriftError::Snapshot)?;
+        let max_value = normalize_sequence_max_value(as_type, increment, r.get("max_value"))
+            .map_err(DriftError::Snapshot)?;
+        let cache_raw: i64 = r.get("cache_size");
+        let cache = u64::try_from(cache_raw)
+            .map_err(|_| DriftError::Snapshot(format!("sequence cache size {cache_raw} is negative")))
+            .and_then(|n| SafeU64::new(n).map_err(DriftError::Snapshot))?;
+        let owned_table: Option<String> = r.try_get("owned_table").ok().flatten();
+        let owned_column: Option<String> = r.try_get("owned_column").ok().flatten();
+        let owned_by = match (owned_table, owned_column) {
+            (Some(table), Some(column)) => Some(SequenceOwnedBy { table, column }),
+            _ => None,
+        };
         sequences.insert(
             r.get("sequence_name"),
             SequenceSnapshot {
+                as_type,
+                increment,
+                min_value,
+                max_value,
+                start: SafeI64::new(r.get("start_value")).map_err(DriftError::Snapshot)?,
+                cache,
+                cycle: r.get("cycle"),
+                owned_by,
                 comment: r.try_get("comment").ok().flatten(),
             },
         );
@@ -757,15 +799,7 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
         let Some(act_seq) = actual.sequences.get(name) else {
             continue;
         };
-        if exp_seq.comment != act_seq.comment {
-            altered.push(AlteredObject {
-                table: name.clone(),
-                object: format!("sequence {name}"),
-                field: "comment".to_string(),
-                expected: exp_seq.comment.clone().unwrap_or_default(),
-                actual: act_seq.comment.clone().unwrap_or_default(),
-            });
-        }
+        diff_sequence_attrs(name, exp_seq, act_seq, &mut altered);
     }
     for (name, exp_v) in &expected.views {
         let Some(act_v) = actual.views.get(name) else {
@@ -837,6 +871,59 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
         unexpected_objects: unexpected,
         altered_objects: altered,
     }
+}
+
+fn format_sequence_bound(value: Option<SafeI64>) -> String {
+    value.map_or_else(|| "default".to_string(), |n| n.to_string())
+}
+
+fn format_sequence_owned_by(value: Option<&SequenceOwnedBy>) -> String {
+    value.map_or_else(String::new, |owned| format!("{}.{}", owned.table, owned.column))
+}
+
+fn diff_sequence_attrs(
+    name: &str,
+    expected: &SequenceSnapshot,
+    actual: &SequenceSnapshot,
+    altered: &mut Vec<AlteredObject>,
+) {
+    let mut push = |field: &str, expected: String, actual: String| {
+        if expected != actual {
+            altered.push(AlteredObject {
+                table: name.to_string(),
+                object: format!("sequence {name}"),
+                field: field.to_string(),
+                expected,
+                actual,
+            });
+        }
+    };
+
+    push("as", expected.as_type.to_string(), actual.as_type.to_string());
+    push("increment", expected.increment.to_string(), actual.increment.to_string());
+    push(
+        "min_value",
+        format_sequence_bound(expected.min_value),
+        format_sequence_bound(actual.min_value),
+    );
+    push(
+        "max_value",
+        format_sequence_bound(expected.max_value),
+        format_sequence_bound(actual.max_value),
+    );
+    push("start", expected.start.to_string(), actual.start.to_string());
+    push("cache", expected.cache.to_string(), actual.cache.to_string());
+    push("cycle", expected.cycle.to_string(), actual.cycle.to_string());
+    push(
+        "owned_by",
+        format_sequence_owned_by(expected.owned_by.as_ref()),
+        format_sequence_owned_by(actual.owned_by.as_ref()),
+    );
+    push(
+        "comment",
+        expected.comment.clone().unwrap_or_default(),
+        actual.comment.clone().unwrap_or_default(),
+    );
 }
 
 /// Compare the attributes of same-name children (columns/indexes/constraints

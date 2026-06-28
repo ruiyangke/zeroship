@@ -73,6 +73,12 @@ export type {
   UnaryOp,
 };
 
+/** Signed integer constrained by the engine schema to the JS safe-integer range. */
+export type SafeI64 = number;
+
+/** Unsigned integer constrained by the engine schema to the JS safe-integer range. */
+export type SafeU64 = number;
+
 /** A typed scalar (the §2.5 numeric domain): null / bool / safe-int / string /
  *  decimal-string / base64-bytes. */
 export type IrScalar =
@@ -383,11 +389,11 @@ export type Op =
       name: string;
       schema?: string | null;
       as?: ColType | null;
-      increment?: number | null;
-      start?: number | null;
-      minValue?: number | null;
-      maxValue?: number | null;
-      cache?: number | null;
+      increment?: SafeI64 | null;
+      start?: SafeI64 | null;
+      minValue?: SafeI64 | null;
+      maxValue?: SafeI64 | null;
+      cache?: SafeU64 | null;
       cycle?: boolean | null;
       ownedBy?: SequenceOwnedBy | null;
     }
@@ -395,11 +401,11 @@ export type Op =
       op: "alterSequence";
       name: string;
       schema?: string | null;
-      increment?: number | null;
-      restart?: number | null;
-      minValue?: number | null;
-      maxValue?: number | null;
-      cache?: number | null;
+      increment?: SafeI64 | null;
+      restart?: SafeI64 | null;
+      minValue?: SafeI64 | null;
+      maxValue?: SafeI64 | null;
+      cache?: SafeU64 | null;
       cycle?: boolean | null;
       ownedBy?: SequenceOwnedBy | null;
     }

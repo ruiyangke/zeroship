@@ -237,6 +237,41 @@ function requireString(v: unknown, what: string): asserts v is string {
   }
 }
 
+function requireSafeI64(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v)) {
+    throw structuredError("OP_INVALID", `${what} must be a JS safe integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireNullableSafeI64(v: unknown, what: string): number | null | undefined {
+  if (v === null) return null;
+  return requireSafeI64(v, what);
+}
+
+function requireSequenceIncrement(v: unknown, what: string): number | undefined {
+  const n = requireSafeI64(v, what);
+  if (n === 0) {
+    throw structuredError("OP_INVALID", `${what} must be non-zero`);
+  }
+  return n;
+}
+
+function requireSequenceCache(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
+    throw structuredError("OP_INVALID", `${what} must be a positive JS safe integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireSequenceBounds(min: number | null | undefined, max: number | null | undefined, what: string): void {
+  if (typeof min === "number" && typeof max === "number" && min > max) {
+    throw structuredError("OP_INVALID", `${what}: minValue must be <= maxValue`);
+  }
+}
+
 // ── (B) The IMMUTABLE chainable `t.*` lexicon (§4) ──
 
 /** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
@@ -874,17 +909,20 @@ function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void
   if (args === null || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).create(args) needs an object");
   }
+  const minValue = requireNullableSafeI64(args.minValue, "sequence.create({ minValue })");
+  const maxValue = requireNullableSafeI64(args.maxValue, "sequence.create({ maxValue })");
+  requireSequenceBounds(minValue, maxValue, "sequence.create(args)");
   pushOrDeferUp(
     compact({
       op: "createSequence",
       name,
       schema: args.schema,
       as: args.as === undefined ? undefined : colTypeOf(args.as),
-      increment: args.increment,
-      start: args.start,
-      minValue: args.minValue,
-      maxValue: args.maxValue,
-      cache: args.cache,
+      increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
+      start: requireSafeI64(args.start, "sequence.create({ start })"),
+      minValue,
+      maxValue,
+      cache: requireSequenceCache(args.cache, "sequence.create({ cache })"),
       cycle: args.cycle,
       ownedBy: args.ownedBy,
     }),
@@ -896,16 +934,19 @@ function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).alter(args) needs an object");
   }
+  const minValue = requireNullableSafeI64(args.minValue, "sequence.alter({ minValue })");
+  const maxValue = requireNullableSafeI64(args.maxValue, "sequence.alter({ maxValue })");
+  requireSequenceBounds(minValue, maxValue, "sequence.alter(args)");
   push(
     compact({
       op: "alterSequence",
       name,
       schema: args.schema,
-      increment: args.increment,
-      restart: args.restart,
-      minValue: args.minValue,
-      maxValue: args.maxValue,
-      cache: args.cache,
+      increment: requireSequenceIncrement(args.increment, "sequence.alter({ increment })"),
+      restart: requireNullableSafeI64(args.restart, "sequence.alter({ restart })"),
+      minValue,
+      maxValue,
+      cache: requireSequenceCache(args.cache, "sequence.alter({ cache })"),
       cycle: args.cycle,
       ownedBy: args.ownedBy,
     }),

@@ -234,6 +234,26 @@ fn delete_limit_above_2pow53_is_rejected() {
 }
 
 #[test]
+fn sequence_signed_value_above_2pow53_is_rejected() {
+    let json = r#"{"op":"createSequence","name":"s","increment":9007199254740992}"#;
+    let err = serde_json::from_str::<Op>(json).unwrap_err();
+    assert!(
+        err.to_string().contains(EXPR_INVALID_NUMERIC),
+        "sequence increment >= 2^53 must be rejected, got: {err}"
+    );
+}
+
+#[test]
+fn sequence_signed_value_below_negative_2pow53_is_rejected() {
+    let json = r#"{"op":"createSequence","name":"s","start":-9007199254740992}"#;
+    let err = serde_json::from_str::<Op>(json).unwrap_err();
+    assert!(
+        err.to_string().contains(EXPR_INVALID_NUMERIC),
+        "sequence start <= -2^53 must be rejected, got: {err}"
+    );
+}
+
+#[test]
 fn flags_timeout_ms_above_2pow53_is_rejected() {
     let json = r#"{"ir_version":1,"name":"n","ops":[],
         "flags":{"timeout_ms":9007199254740992}}"#;
@@ -242,6 +262,20 @@ fn flags_timeout_ms_above_2pow53_is_rejected() {
         err.to_string().contains(EXPR_INVALID_NUMERIC),
         "timeout_ms >= 2^53 must be rejected, got: {err}"
     );
+}
+
+#[test]
+fn sequence_signed_ints_below_2pow53_accepted() {
+    let json = r#"{"op":"createSequence","name":"s","increment":-9007199254740991,
+        "start":9007199254740991}"#;
+    let op: Op = serde_json::from_str(json).unwrap();
+    match op {
+        Op::CreateSequence { increment, start, .. } => {
+            assert_eq!(increment.expect("increment").get(), -9_007_199_254_740_991);
+            assert_eq!(start.expect("start").get(), 9_007_199_254_740_991);
+        }
+        _ => panic!("expected CreateSequence"),
+    }
 }
 
 #[test]
@@ -279,6 +313,26 @@ fn safe_u64_schema_carries_the_2pow53_upper_bound() {
         def.get("maximum").and_then(serde_json::Value::as_i64),
         Some(9_007_199_254_740_991),
         "SafeU64 schema must pin maximum:2^53-1 to match the Rust deserializer"
+    );
+}
+
+#[test]
+fn safe_i64_schema_carries_the_safe_integer_bounds() {
+    let schema = schemars::schema_for!(MigrationIr);
+    let value: serde_json::Value = serde_json::to_value(&schema).expect("schema -> value");
+    let def = value
+        .get("$defs")
+        .and_then(|d| d.get("SafeI64"))
+        .expect("schema must define $defs/SafeI64");
+    assert_eq!(
+        def.get("minimum").and_then(serde_json::Value::as_i64),
+        Some(-9_007_199_254_740_991),
+        "SafeI64 schema must pin minimum:-(2^53-1)"
+    );
+    assert_eq!(
+        def.get("maximum").and_then(serde_json::Value::as_i64),
+        Some(9_007_199_254_740_991),
+        "SafeI64 schema must pin maximum:2^53-1"
     );
 }
 

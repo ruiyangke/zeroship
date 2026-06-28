@@ -1091,6 +1091,7 @@ async fn apply_locked<B: MigrationBackend>(
         .map_err(|e| match e {
             crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
             crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+            crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
             crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
         })?;
     if let Some(d) = drift_report.checksum_drift.into_iter().next() {
@@ -2066,6 +2067,7 @@ pub(crate) async fn apply_transactional(
                 return Err(match e {
                     crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
                     crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
                     crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
                 });
             }
@@ -2394,6 +2396,7 @@ pub(crate) async fn apply_non_transactional(
                 return Err(match e {
                     crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db.into()),
                     crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
                     crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
                 });
             }

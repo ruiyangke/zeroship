@@ -14,8 +14,8 @@ use zeroship_migrate::{
     ColType, ColumnSnapshot, CommentTarget, ConstraintSnapshot, ExecutorConfig, Expr,
     IndexElement, IndexElementSnapshot, IndexSnapshot, IrAuthor, IrColumn, IrFlagsOverride,
     LiveSchema, Migration, MigrationFlags, MigrationId, MigrationIr, Op, RollbackRequest,
-    RollbackTarget, ScalarFn, SchemaScope, SchemaSnapshot, SqlDialect, StructuralDrift,
-    TableSnapshot, UnaryOp, CURRENT_IR_VERSION,
+    RollbackTarget, SafeI64, SafeU64, ScalarFn, SchemaScope, SchemaSnapshot, SequenceOwnedBy,
+    SqlDialect, StructuralDrift, TableSnapshot, UnaryOp, CURRENT_IR_VERSION,
 };
 
 const DEFAULT_DSN: &str =
@@ -109,6 +109,14 @@ fn ir_col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
         generated: None,
         identity: None,
     }
+}
+
+fn si(n: i64) -> SafeI64 {
+    SafeI64::new(n).expect("test sequence value is JS-safe")
+}
+
+fn su(n: u64) -> SafeU64 {
+    SafeU64::new(n).expect("test sequence cache is JS-safe")
 }
 
 fn ir_doc(name: &str, ops: Vec<Op>) -> MigrationIr {
@@ -1420,6 +1428,83 @@ async fn top_level_comment_metadata_reintrospects_and_drifts() {
     assert!(
         altered_contains(&changed_drift, "sequence event_seq", "comment"),
         "sequence comment drift must be detected: {changed_drift:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn sequence_options_round_trip_and_out_of_band_option_drift_is_reported() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    let sch = &cfg.project_schema;
+
+    let ops = vec![
+        Op::CreateTable {
+            name: "invoices".into(),
+            columns: vec![ir_col("amount", ColType::Int, false)],
+            constraints: vec![],
+            indexes: vec![],
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateSequence {
+            name: "invoice_seq".into(),
+            schema: None,
+            as_type: Some(ColType::Int),
+            increment: Some(si(3)),
+            start: Some(si(30)),
+            min_value: Some(Some(si(3))),
+            max_value: Some(Some(si(300))),
+            cache: Some(su(5)),
+            cycle: Some(false),
+            owned_by: Some(Some(SequenceOwnedBy {
+                table: "invoices".into(),
+                column: "id".into(),
+            })),
+        },
+        Op::AlterSequence {
+            name: "invoice_seq".into(),
+            schema: None,
+            increment: Some(si(-3)),
+            restart: None,
+            min_value: Some(Some(si(-300))),
+            max_value: Some(Some(si(300))),
+            cache: Some(su(7)),
+            cycle: Some(true),
+            owned_by: Some(None),
+        },
+    ];
+    let migrations = lower_ir_migrations(sch, "sequence_options_roundtrip", &ops);
+    apply(&conn, &cfg, &migrations, Approval::None, "actor")
+        .await
+        .expect("apply sequence option migration");
+
+    let expected = fold_ops(&ops, SqlDialect::Postgres, sch).expect("fold sequence options");
+    let actual = snapshot_schema(&conn, sch)
+        .await
+        .expect("snap sequence options");
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.is_clean(),
+        "authored sequence options must round-trip through live PG catalog: {drift:?}"
+    );
+
+    conn.batch_execute(&format!(
+        "ALTER SEQUENCE \"{sch}\".\"invoice_seq\" INCREMENT BY -4;"
+    ))
+    .await
+    .expect("mutate sequence increment out of band");
+    let changed = snapshot_schema(&conn, sch)
+        .await
+        .expect("snap changed sequence options");
+    let changed_drift = diff_snapshots(&expected, &changed);
+    assert!(
+        altered_contains(&changed_drift, "sequence invoice_seq", "increment"),
+        "sequence option drift must be detected: {changed_drift:?}"
     );
 
     drop_schemas(&conn, &cfg).await;
