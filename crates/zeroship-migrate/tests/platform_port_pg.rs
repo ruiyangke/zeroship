@@ -178,7 +178,7 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         }
         other => panic!("expected Migrate report, got {other:?}"),
     };
-    assert_eq!(applied, 56, "all 56 ported files applied (0045 is a gap)");
+    assert_eq!(applied, 57, "all 57 ported files applied (0045 is a gap)");
 
     // 2. Namespaces (the two the changelog provisions).
     assert!(namespace_exists(&conn, "zeroship").await, "zeroship schema");
@@ -210,6 +210,8 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         ("zeroship", "rate_limits"),
         ("zeroship", "sandboxes"),
         ("zeroship", "plans"),
+        ("zeroship", "app_net_grants"),
+        ("zeroship", "net_policy_catalog"),
         ("zeroship", "invoices"),
     ] {
         assert!(
@@ -238,10 +240,10 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         other => panic!("expected Migrate report, got {other:?}"),
     }
 
-    // 7. Status: all 56 applied, none pending.
+    // 7. Status: all 57 applied, none pending.
     match run_status(&cfg).await.expect("status reads journal") {
         RunReport::Status(status) => {
-            assert_eq!(status.applied.len(), 56, "56 applied");
+            assert_eq!(status.applied.len(), 57, "57 applied");
             assert!(status.pending.is_empty(), "nothing pending");
         }
         other => panic!("expected Status report, got {other:?}"),
@@ -265,14 +267,13 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
 //
 // This applies the whole ported set, then `run_rollback`'s the SINGLE most-recent
 // platform migration (V0057) via its real `.down.sql` under profile=Platform, and
-// asserts: the object V0057 created is GONE, the journal reflects the rollback
-// (RunReport::Rollback names V0057; status drops to 55 applied with V0057 pending),
+// asserts: the objects V0058 created are GONE, the journal reflects the rollback
+// (RunReport::Rollback names V0058; status drops to 56 applied with V0058 pending),
 // and the rolled-back migration RE-APPLIES forward cleanly (the down was faithful).
 //
-// V0057 is a self-contained reversible step: its up creates the creator-keyed
-// `zeroship.metering_exports` table (+ a guarded GRANT); its down REVOKEs +
-// `DROP TABLE`s it. So rolling back exactly one step removes `metering_exports`
-// without disturbing the rest of the schema.
+// V0058 is a self-contained reversible step: its up creates app net grants,
+// the net-policy catalog row/table, plan net limits, and the ingress metric;
+// its down removes those objects/rows without disturbing the rest of the schema.
 //
 // Drives the REAL `command::runner::run_rollback` (not a shim, not a spawned
 // process) so the compose `migrate` service's rollback path is guarded by the same
@@ -291,72 +292,84 @@ async fn ported_set_rolls_back_the_last_platform_migration_via_its_down_sql() {
     let cfg = platform_cfg(&meta, /* yes */ true);
     match run_migrate(&cfg).await.expect("ported set applies under Platform") {
         RunReport::Migrate(outcome) => {
-            assert_eq!(outcome.applied.len(), 56, "all 56 ported files applied");
+            assert_eq!(outcome.applied.len(), 57, "all 57 ported files applied");
         }
         other => panic!("expected Migrate report, got {other:?}"),
     }
-    // The object V0057's `up` creates must exist before we roll it back.
+    // The objects V0058's `up` creates must exist before we roll it back.
     assert!(
-        table_exists(&conn, "zeroship", "metering_exports").await,
-        "V0057 materialized zeroship.metering_exports"
+        table_exists(&conn, "zeroship", "app_net_grants").await,
+        "V0058 materialized zeroship.app_net_grants"
+    );
+    assert!(
+        table_exists(&conn, "zeroship", "net_policy_catalog").await,
+        "V0058 materialized zeroship.net_policy_catalog"
     );
 
-    // Roll back exactly the most-recently-applied migration (V0057) via its REAL
+    // Roll back exactly the most-recently-applied migration (V0058) via its REAL
     // `.down.sql`. `run_rollback(.., None, Some(1))` is the `down` one-step target.
     let report = run_rollback(&cfg, None, Some(1))
         .await
         .expect("the last platform migration rolls back via its .down.sql");
     match report {
         RunReport::Rollback(outcome) => {
-            // V0057 → version 57 → the derived `mig_…` id. Exactly one step undone.
-            let expected = zeroship_migrate::migration_id_for_version(57);
+            // V0058 → version 58 → the derived `mig_…` id. Exactly one step undone.
+            let expected = zeroship_migrate::migration_id_for_version(58);
             assert_eq!(
                 outcome.rolled_back,
                 vec![expected.as_str().to_string()],
-                "exactly V0057 was rolled back, via its real .down.sql"
+                "exactly V0058 was rolled back, via its real .down.sql"
             );
             assert!(
                 outcome.skipped_irreversible.is_empty(),
-                "V0057 is reversible — nothing force-skipped"
+                "V0058 is reversible — nothing force-skipped"
             );
         }
         other => panic!("expected Rollback report, got {other:?}"),
     }
 
-    // The dropped object is GONE on the REAL DB (the `.down.sql` actually ran).
+    // The dropped objects are GONE on the REAL DB (the `.down.sql` actually ran).
     assert!(
-        !table_exists(&conn, "zeroship", "metering_exports").await,
-        "rolling back V0057 dropped zeroship.metering_exports"
+        !table_exists(&conn, "zeroship", "app_net_grants").await,
+        "rolling back V0058 dropped zeroship.app_net_grants"
+    );
+    assert!(
+        !table_exists(&conn, "zeroship", "net_policy_catalog").await,
+        "rolling back V0058 dropped zeroship.net_policy_catalog"
     );
 
-    // The journal reflects the rollback: 55 applied, V0057 now pending again.
+    // The journal reflects the rollback: 56 applied, V0058 now pending again.
     match run_status(&cfg).await.expect("status reads the journal post-rollback") {
         RunReport::Status(status) => {
             assert_eq!(
                 status.applied.len(),
-                55,
-                "the journal shows 55 applied after rolling back V0057"
+                56,
+                "the journal shows 56 applied after rolling back V0058"
             );
             assert_eq!(
                 status.pending.len(),
                 1,
-                "V0057 is the single pending migration after its rollback"
+                "V0058 is the single pending migration after its rollback"
             );
         }
         other => panic!("expected Status report, got {other:?}"),
     }
 
-    // Roll-forward heals: re-applying re-runs ONLY V0057 (the down was faithful, so
-    // its up re-creates the table). Proves the ported down/up pair round-trips.
+    // Roll-forward heals: re-applying re-runs ONLY V0058 (the down was faithful, so
+    // its up re-creates the tables). Proves the ported down/up pair round-trips.
     match run_migrate(&cfg).await.expect("re-apply heals the rolled-back step") {
         RunReport::Migrate(outcome) => {
-            assert_eq!(outcome.applied.len(), 1, "only V0057 re-applied");
+            assert_eq!(outcome.applied.len(), 1, "only V0058 re-applied");
         }
         other => panic!("expected Migrate report, got {other:?}"),
     }
     assert!(
-        table_exists(&conn, "zeroship", "metering_exports").await,
-        "re-applying V0057 re-created zeroship.metering_exports"
+        table_exists(&conn, "zeroship", "app_net_grants").await,
+        "re-applying V0058 re-created zeroship.app_net_grants"
+    );
+    assert!(
+        table_exists(&conn, "zeroship", "net_policy_catalog").await,
+        "re-applying V0058 re-created zeroship.net_policy_catalog"
     );
 
     // Clean up the journal (leave the schemas; the next run resets them).

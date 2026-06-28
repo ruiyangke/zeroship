@@ -313,6 +313,119 @@ async fn admin_can_revoke_platform_role() {
 }
 
 #[compio::test]
+async fn admin_net_grant_endpoint_validates_lists_pending_and_revokes() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = build_test_state(&db_url, "net-grants").await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let owner = insert_user(&fx.state.control_pg, "net-grant-owner").await;
+    let app_record = fx
+        .state
+        .registry
+        .create_app(
+            &format!("net-grants-{}", Uuid::new_v4().simple()),
+            &zeroship_control::bootstrap_console::free_plan_id(),
+            &owner,
+        )
+        .await
+        .expect("create app");
+    let manifest = serde_json::json!({
+        "version": 1,
+        "net": {
+            "requests": [
+                { "host": "smtp.example.com", "port": 587, "reason": "send mail" },
+                { "host": "db.example.com", "port": 5432, "reason": "self-hosted db" }
+            ]
+        }
+    });
+    fx.state
+        .control_pg
+        .execute(
+            "UPDATE zeroship.apps SET manifest_json = $1 WHERE id = $2",
+            &[&manifest.to_string(), &app_record.id],
+        )
+        .await
+        .expect("set manifest");
+
+    let app = test::init_service(
+        web::App::new()
+            .state(fx.state.clone())
+            .configure(admin_handlers::configure),
+    )
+    .await;
+
+    let bad = test::TestRequest::post()
+        .uri(&format!("/admin/apps/{}/net-grants", app_record.id))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({
+            "host": "*.workers.dev",
+            "port": 443,
+            "note": "frontable wildcard must be rejected"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, bad).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let good = test::TestRequest::post()
+        .uri(&format!("/admin/apps/{}/net-grants", app_record.id))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({
+            "host": "SMTP.Example.COM.",
+            "port": 587,
+            "note": "mail relay"
+        }))
+        .to_request();
+    let resp = test::call_service(&app, good).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("grant body json");
+    assert_eq!(body["host"], "smtp.example.com");
+    assert_eq!(body["port"], 587);
+
+    let list = test::TestRequest::get()
+        .uri(&format!("/admin/apps/{}/net-grants", app_record.id))
+        .header("authorization", pat.bearer())
+        .to_request();
+    let resp = test::call_service(&app, list).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("grant list json");
+    assert_eq!(body["grants"].as_array().unwrap().len(), 1);
+    assert_eq!(body["requests"].as_array().unwrap().len(), 2);
+    let pending = body["pending_requests"].as_array().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["host"], "db.example.com");
+    assert_eq!(pending[0]["port"], 5432);
+
+    let revoke = test::TestRequest::post()
+        .uri(&format!("/admin/apps/{}/net-grants/revoke", app_record.id))
+        .header("authorization", pat.bearer())
+        .set_json(&serde_json::json!({
+            "host": "smtp.example.com",
+            "port": 587
+        }))
+        .to_request();
+    let resp = test::call_service(&app, revoke).await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let rows = fx
+        .state
+        .control_pg
+        .query(
+            "SELECT 1 FROM zeroship.app_net_grants WHERE app_id = $1",
+            &[&app_record.id],
+        )
+        .await
+        .expect("count grants");
+    assert!(rows.is_empty(), "revoke endpoint must delete the grant row");
+
+    cleanup_user(&fx.state.control_pg, owner).await;
+    pat.cleanup(&fx.state).await;
+}
+
+#[compio::test]
 async fn admin_can_audit_lock_app() {
     let Some(db_url) = db_url() else {
         eprintln!("[admin_handlers_test] AUTH_DB_URL not set - skipping");
