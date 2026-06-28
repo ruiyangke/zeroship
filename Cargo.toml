@@ -132,7 +132,7 @@ libc = "0.2"
 # `seccompiler` is Firecracker's audited seccomp-bpf compiler (default-deny
 # syscall filter); `landlock` is the ABI-aware Landlock LSM wrapper (read-only
 # filesystem ruleset, requires Linux >= 5.13). Both are pure-Rust, no C
-# toolchain. Used ONLY by `zeroship-migrate-js`'s recorder child + sandbox
+# toolchain. Used by `zeroship-migrate`'s V8 frontend recorder child + sandbox
 # module — the build-time analogue of the apply-time least-priv migrator role.
 seccompiler = "0.5"
 landlock = "0.4"
@@ -195,7 +195,6 @@ compio-redis = { path = "crates/compio-redis" }
 compio-s3 = { path = "crates/compio-s3" }
 zeroship-schema = { path = "crates/zeroship-schema" }
 zeroship-migrate = { path = "crates/zeroship-migrate" }
-zeroship-migrate-js = { path = "crates/zeroship-migrate-js" }
 zeroship-plugin-db = { path = "crates/plugin-db" }
 zeroship-plugin-storage = { path = "crates/plugin-storage" }
 zeroship-plugin-kv = { path = "crates/plugin-kv" }

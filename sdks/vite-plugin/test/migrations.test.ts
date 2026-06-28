@@ -449,7 +449,7 @@ describe("recordViaCli CLI-shelling (A4 record path)", () => {
 // Gated on `ZEROSHIP_MIGRATE_JS_BIN` (or the cargo default-target path). When the env
 // var is set the test HARD-FAILS rather than silent-skipping (faithful-e2e rule). CI
 // sets `ZEROSHIP_MIGRATE_JS_BIN=<repo>/target/debug/zeroship-migrate-js` after
-// `cargo build -p zeroship-migrate-js --bins`; the sibling
+// `cargo build -p zeroship-migrate --bins`; the sibling
 // `zeroship-migrate-recorder-child` must live next to it (standard cargo layout).
 describe("recordViaCli against the REAL zeroship-migrate-js binary (faithful e2e)", () => {
   const REAL_STEM = "20240617123000_real_notes";
@@ -493,12 +493,12 @@ describe("recordViaCli against the REAL zeroship-migrate-js binary (faithful e2e
       if (explicit) {
         throw new Error(
           `ZEROSHIP_MIGRATE_JS_BIN is set (${cliPath}) but the binary does not exist — ` +
-            "build it: cargo build -p zeroship-migrate-js --bins"
+            "build it: cargo build -p zeroship-migrate --bins"
         );
       }
       console.warn(
         `[skip] real-binary migration e2e: ${cliPath} not built ` +
-          "(build it: cargo build -p zeroship-migrate-js --bins, or set ZEROSHIP_MIGRATE_JS_BIN)"
+          "(build it: cargo build -p zeroship-migrate --bins, or set ZEROSHIP_MIGRATE_JS_BIN)"
       );
       return;
     }

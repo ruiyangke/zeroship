@@ -480,12 +480,12 @@ describe("gen-types against the REAL zeroship-migrate-js binary (faithful e2e)",
       if (explicit) {
         throw new Error(
           `ZEROSHIP_MIGRATE_JS_BIN is set (${cliPath}) but the binary does not exist — ` +
-            "build it: cargo build -p zeroship-migrate-js --bins"
+            "build it: cargo build -p zeroship-migrate --bins"
         );
       }
       console.warn(
         `[skip] real gen-types e2e: ${cliPath} not built ` +
-          "(cargo build -p zeroship-migrate-js --bins, or set ZEROSHIP_MIGRATE_JS_BIN)"
+          "(cargo build -p zeroship-migrate --bins, or set ZEROSHIP_MIGRATE_JS_BIN)"
       );
       return;
     }

@@ -43,12 +43,16 @@ fn dsn() -> String {
 
 const APP: &str = "app_doc_hero";
 
-/// Pull the FIRST fenced ```json block out of the doc — the hero `.ir.json`
-/// appendix. (The doc carries exactly one ```json block, the hero IR.)
+/// Pull the fenced ```json block from the hero `.ir.json` appendix.
 fn extract_hero_ir(md: &str) -> String {
+    let appendix = "## Appendix: the hero example as IR";
     let marker = "```json\n";
-    let start = md.find(marker).expect("doc must contain a ```json hero IR block");
-    let rest = &md[start + marker.len()..];
+    let appendix_start = md.find(appendix).expect("doc must contain the hero IR appendix");
+    let appendix_rest = &md[appendix_start..];
+    let start = appendix_rest
+        .find(marker)
+        .expect("hero appendix must contain a ```json hero IR block");
+    let rest = &appendix_rest[start + marker.len()..];
     let end = rest.find("```").expect("the ```json block must be closed");
     rest[..end].trim().to_string()
 }

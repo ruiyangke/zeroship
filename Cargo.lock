@@ -6953,9 +6953,12 @@ dependencies = [
  "futures",
  "hex",
  "indexmap 2.14.0",
+ "landlock",
+ "libc",
  "pg_query",
  "rusqlite",
  "schemars 1.2.1",
+ "seccompiler",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6964,31 +6967,9 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
- "zeroship-core",
- "zeroship-schema",
-]
-
-[[package]]
-name = "zeroship-migrate-js"
-version = "0.1.0"
-dependencies = [
- "clap",
- "compio",
- "compio-postgres",
- "landlock",
- "libc",
- "seccompiler",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "uuid",
  "v8",
  "zeroship-bundle",
  "zeroship-core",
- "zeroship-migrate",
  "zeroship-runtime",
  "zeroship-schema",
 ]
@@ -7192,7 +7173,6 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-control",
  "zeroship-migrate",
- "zeroship-migrate-js",
  "zeroship-plugin-db",
  "zstd",
 ]

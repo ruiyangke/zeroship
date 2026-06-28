@@ -2,7 +2,7 @@
 // `t.id({ prefix })`, `t.vector(n, { metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 // These were added to the engine
-// recorder (`crates/zeroship-migrate-js/src/migrate_ops.js`) + the IR + fold +
+// recorder (`crates/zeroship-migrate/src/frontend/migrate_ops.js`) + the IR + fold +
 // gen-types FIRST, but never to the PUBLIC `@zeroship/migrate` authoring surface
 // (`src/ops.ts` / `src/types.ts`). #178 closes that gap.
 //
@@ -32,7 +32,7 @@ import {
   __drain as engDrain,
   t as engT,
   table as engTable,
-} from "../../../crates/zeroship-migrate-js/src/migrate_ops.js";
+} from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
 
 type Rec = { begin: () => void; drain: () => any[]; t: any; table: any };
 

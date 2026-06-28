@@ -112,6 +112,7 @@ crates/
 ├── bundle/           .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
 ├── compio-postgres/  PostgreSQL driver (compio-native, replaces sqlx)
 ├── compio-redis/     Redis driver (cluster-aware, compio-native)
+├── zeroship-migrate/ Migration engine + native compio-postgres apply fast path + V8 JS authoring front-end
 ├── runtime/          V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── runtime-macros/   #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
 ├── plugin-db/        env.db.* native ops

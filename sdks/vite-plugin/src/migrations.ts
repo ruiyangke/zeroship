@@ -185,7 +185,7 @@ export const GEN_TYPES_OUT_DEFAULT = "generated/zeroship";
 
 /** The runtime schema descriptor artifact filename `gen-types` emits into
  *  `GEN_TYPES_OUT_DEFAULT`. MUST match the Rust
- *  `zeroship_migrate_js::gen_types::RUNTIME_DESCRIPTOR_FILE` — the `.zship`
+ *  `zeroship_migrate::frontend::gen_types::RUNTIME_DESCRIPTOR_FILE` — the `.zship`
  *  packer reads this file (when present) and carries it as the manifest's
  *  content-addressed `runtime_descriptor` blob (migration-first P4a). */
 export const RUNTIME_DESCRIPTOR_FILE = "schema.runtime.json";

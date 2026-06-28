@@ -13,7 +13,7 @@
 // structural tokens against the schema, so the manual file cannot silently drift.
 //
 // These types are ERGONOMICS for an advanced caller; the golden `.ir.json` corpus
-// + the `Checksum::of_ir` round-trip (in `crates/zeroship-migrate-js/tests`)
+// + the `Checksum::of_ir` round-trip (in `crates/zeroship-migrate/tests`)
 // remain the contract source of truth (§4.3 / PR3). Regenerate with:
 //
 //   pnpm --filter @zeroship/migrate gen:ir-types

@@ -21,7 +21,7 @@ back door to hand-written SQL.
 The TypeScript authoring surface lives in `sdks/migrate/src/` (the npm
 `@zeroship/migrate` package). Its engine-side twin — the recorder the Rust
 runtime evaluates in V8 to turn a migration into the frozen `.ir.json` wire
-artifact — lives in `crates/zeroship-migrate-js/src/migrate_ops.js`. Both emit
+artifact — lives in `crates/zeroship-migrate/src/frontend/migrate_ops.js`. Both emit
 the identical dialect-neutral op objects; the `.ir.json` shape is the frozen
 contract.
 
@@ -857,7 +857,7 @@ This envelope is enforced across **two layers**, not one:
 
 - The record-time JS grammar lint (`sdks/migrate/src/ops.ts:698-712`, the
   `splitPartGrammarLint`; mirrored at
-  `crates/zeroship-migrate-js/src/migrate_ops.js:1106-1127`) rejects only the
+  `crates/zeroship-migrate/src/frontend/migrate_ops.js:1106-1127`) rejects only the
   *dialect-neutral, clearly-malformed* shapes — a non-string or empty `delim`,
   and a non-integer or non-positive `n`. It does **not** check single-ASCII,
   multi-character, or the `1 ≤ n ≤ 8` bound (the recorder twin's own comment is

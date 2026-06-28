@@ -237,7 +237,7 @@ it (the field is additive-optional; confirm the `deny_unknown_fields` contract d
 
 ## 8. Recorder twin (lock-step)
 
-`crates/zeroship-migrate-js/src/migrate_ops.js` (the engine V8 recorder) mirrors the **same** fluent
+`crates/zeroship-migrate/src/frontend/migrate_ops.js` (the engine V8 recorder) mirrors the **same** fluent
 surface — the engine evaluates authored migrations through it, so it must expose `table()`/selectors/terminals
 identically and emit byte-identical ops. The JS↔Rust `of_ir` round-trip + variant-exhaustiveness gate stay
 green.

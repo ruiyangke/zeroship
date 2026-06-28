@@ -95,13 +95,14 @@ pub fn init_v8() {
 /// `--expose-gc`) plus `--single_threaded` and `new_single_threaded_default_platform`,
 /// so V8 runs all of its own background work inline on the calling thread.
 ///
-/// This exists for the build-time kernel-sandboxed recorder child
-/// (`zeroship-migrate-js`): seccomp's calling-thread-only `apply_filter` and
+/// This exists for the build-time kernel-sandboxed migrate recorder child:
+/// seccomp's calling-thread-only `apply_filter` and
 /// landlock's calling-thread-only `restrict_self` cannot reach a thread that already
 /// exists when the lockdown runs. The multi-threaded default platform spawns such
 /// threads at init; a single-threaded platform spawns NONE, so the in-process
 /// lockdown covers the only thread (landlock has no TSYNC equivalent, so this is the
-/// sound way to give it full coverage). See `zeroship-migrate-js/src/sandbox.rs`.
+/// sound way to give it full coverage). See
+/// `crates/zeroship-migrate/src/frontend/sandbox.rs`.
 ///
 /// MUST be chosen INSTEAD of [`init_v8`] for the whole process: both share one `Once`,
 /// so a process must call this BEFORE any path that calls `init_v8` (e.g.

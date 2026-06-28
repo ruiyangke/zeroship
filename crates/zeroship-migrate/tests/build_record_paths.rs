@@ -1,0 +1,218 @@
+//! PR4 deliverable A3 / test #3 — the two record paths + the §8.9.2
+//! recorder-unreachable FALLBACK:
+//!
+//! - A HOSTED thin client that returns a RETRYABLE `StructuredError`
+//!   (recorder-unreachable / 503-class) makes the build FALL BACK to LOCAL recording
+//!   — NOT a build failure — and still produces a committed `.ir.json` with the
+//!   correct typed-value checksum.
+//! - A HOSTED thin client that returns a NON-retryable authoring reject (422) IS
+//!   surfaced as a build error (no silent fallback).
+//! - The LOCAL record path and the HOSTED happy path produce the SAME typed-value
+//!   checksum (cross-path determinism, §8.9.2).
+//!
+//! Faithful: the LOCAL path drives the REAL sandboxed recorder child. The recorder
+//! child must be built (`cargo build -p zeroship-migrate --bins`); the test
+//! asserts the binary exists with a clear message.
+
+use std::fs;
+use std::path::Path;
+
+use zeroship_migrate::frontend::recorder_http::StructuredError;
+use zeroship_migrate::frontend::recorder_service::recorder_child_path;
+use zeroship_migrate::frontend::{
+    build_migrations, RecordPath, RecordVia, RecorderClient, ResourceBudget,
+};
+
+const OWNER: &str = "app_paths";
+
+const MIG_TS: &str = r#"
+import { table, t } from "@zeroship/migrate";
+export function up() {
+  table("widgets").create({
+    columns: {
+      id: t.uuid().notNull().primaryKey().default({ fn: "genRandomUuid" }),
+      title: t.text().notNull(),
+    },
+  });
+  table("widgets").column("qty").add({ type: t.integer() });
+}
+"#;
+
+fn assert_child_built() {
+    let bin = recorder_child_path();
+    assert!(
+        bin.exists(),
+        "recorder child binary missing at {} — run `cargo build -p zeroship-migrate --bins` first",
+        bin.display()
+    );
+}
+
+fn write_mig(dir: &Path, stem: &str, ts: &str) {
+    fs::write(dir.join(format!("{stem}.ts")), ts.as_bytes()).unwrap();
+}
+
+/// A hosted client that ALWAYS reports recorder-unreachable (retryable 503).
+struct UnreachableClient;
+impl RecorderClient for UnreachableClient {
+    fn record(
+        &self,
+        _ts: &str,
+        _app: &str,
+        _name: &str,
+        _blob: Option<&str>,
+    ) -> Result<String, StructuredError> {
+        Err(StructuredError {
+            code: "RECORDER_UNREACHABLE".into(),
+            message: "simulated recorder-unreachable".into(),
+            http_status: 503,
+            retryable: true,
+        })
+    }
+}
+
+/// A hosted client that reports a NON-retryable authoring reject (422).
+struct RejectClient;
+impl RecorderClient for RejectClient {
+    fn record(
+        &self,
+        _ts: &str,
+        _app: &str,
+        _name: &str,
+        _blob: Option<&str>,
+    ) -> Result<String, StructuredError> {
+        Err(StructuredError {
+            code: "RECORD_EVAL_ERROR".into(),
+            message: "simulated authoring reject (op outside recorder)".into(),
+            http_status: 422,
+            retryable: false,
+        })
+    }
+}
+
+#[test]
+fn hosted_unreachable_falls_back_to_local_not_a_build_failure() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_widgets";
+    write_mig(dir.path(), stem, MIG_TS);
+
+    let client = UnreachableClient;
+    let via = RecordVia::Hosted {
+        client: &client,
+        local_fallback_budget: ResourceBudget::default(),
+    };
+    let outcome = build_migrations(dir.path(), OWNER, &via)
+        .expect("recorder-unreachable must FALL BACK to local, not fail the build");
+    assert_eq!(outcome.migrations.len(), 1);
+    let m = &outcome.migrations[0];
+    assert_eq!(
+        m.record_path,
+        RecordPath::HostedFellBackToLocal,
+        "the build must record the fallback path"
+    );
+    // The committed `.ir.json` exists on disk.
+    assert!(dir.path().join(format!("{stem}.ir.json")).exists());
+    assert!(!m.checksum.is_empty(), "a typed-value checksum was folded");
+}
+
+#[test]
+fn hosted_non_retryable_reject_is_a_build_error_no_silent_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_widgets";
+    write_mig(dir.path(), stem, MIG_TS);
+
+    let client = RejectClient;
+    let via = RecordVia::Hosted {
+        client: &client,
+        local_fallback_budget: ResourceBudget::default(),
+    };
+    let err = build_migrations(dir.path(), OWNER, &via)
+        .expect_err("a non-retryable authoring reject must surface as a build error");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("RECORD_EVAL_ERROR"),
+        "the reject's code must surface; got: {msg}"
+    );
+    // No committed artifact was written for a rejected migration.
+    assert!(
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "a rejected migration must not write a committed artifact"
+    );
+}
+
+#[test]
+fn local_and_hosted_paths_yield_same_typed_value_checksum() {
+    assert_child_built();
+
+    // LOCAL record path.
+    let local_dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_widgets";
+    write_mig(local_dir.path(), stem, MIG_TS);
+    let local = build_migrations(
+        local_dir.path(),
+        OWNER,
+        &RecordVia::Local {
+            budget: ResourceBudget::default(),
+        },
+    )
+    .expect("local record path");
+    assert_eq!(local.migrations[0].record_path, RecordPath::Local);
+    let local_checksum = local.migrations[0].checksum.clone();
+
+    // HOSTED happy path: a client that drives the REAL sandboxed child (the same
+    // child the local path uses), so it is a faithful hosted round-trip.
+    struct LocalChildHostedClient;
+    impl RecorderClient for LocalChildHostedClient {
+        fn record(
+            &self,
+            ts: &str,
+            app: &str,
+            name: &str,
+            _blob: Option<&str>,
+        ) -> Result<String, StructuredError> {
+            use zeroship_migrate::frontend::recorder_service::{
+                spawn_sandboxed_record, RecordRequest,
+            };
+            use zeroship_migrate::frontend::{ResourceBudget, SandboxPosture};
+            let req = RecordRequest {
+                ts_source: ts.to_string(),
+                owner_app: app.to_string(),
+                name: name.to_string(),
+                posture: SandboxPosture::Hosted,
+                budget: ResourceBudget::default(),
+                allow_read_paths: vec![],
+                schema_types_blob: None,
+            };
+            spawn_sandboxed_record(&req)
+                .map(|r| r.ir_json)
+                .map_err(|e| (&e).into())
+        }
+    }
+
+    let hosted_dir = tempfile::tempdir().unwrap();
+    write_mig(hosted_dir.path(), stem, MIG_TS);
+    let client = LocalChildHostedClient;
+    let hosted = build_migrations(
+        hosted_dir.path(),
+        OWNER,
+        &RecordVia::Hosted {
+            client: &client,
+            local_fallback_budget: ResourceBudget::default(),
+        },
+    )
+    .expect("hosted record path");
+    assert_eq!(hosted.migrations[0].record_path, RecordPath::Hosted);
+    let hosted_checksum = hosted.migrations[0].checksum.clone();
+
+    assert_eq!(
+        local_checksum, hosted_checksum,
+        "the LOCAL and HOSTED record paths must yield the SAME typed-value checksum (§8.9.2)"
+    );
+
+    // The committed BYTES are also byte-identical across the two paths (canonical
+    // serialization + same owner stamp).
+    assert_eq!(
+        local.migrations[0].committed_bytes, hosted.migrations[0].committed_bytes,
+        "the committed .ir.json bytes are byte-stable across record paths"
+    );
+}

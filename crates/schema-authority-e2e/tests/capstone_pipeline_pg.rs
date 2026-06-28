@@ -4,7 +4,7 @@
 //!
 //! ```text
 //!  schema.js                                                          [INPUT]
-//!     │  P3  zeroship_migrate_js::generate_migration
+//!     │  P3  zeroship_migrate::frontend::generate_migration
 //!     │      (eval in V8 sandbox → descriptor IR → DeclarativeAuthor::diff
 //!     │       → render dbmate)                              ← REAL fn
 //!     ▼
@@ -234,7 +234,7 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
 
     // -------------------------------------------------------------------
     // SEAM 1 (P3): schema.js → IR → versioned migration file.
-    // REAL fn: zeroship_migrate_js::generate_migration
+    // REAL fn: zeroship_migrate::frontend::generate_migration
     //   (eval in V8 → CollectionDescriptor[] → desired_snapshot →
     //    DeclarativeAuthor::diff → render dbmate file).
     // The migration is QUALIFIED into schema "<app_id>" (project_schema), so the
@@ -242,7 +242,7 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     // -------------------------------------------------------------------
     let gen_dir = std::env::temp_dir().join(format!("p7-gen-{}", app_id.simple()));
     let owner_app = format!("app_{}", app_id.simple());
-    let outcome = zeroship_migrate_js::generate_migration(
+    let outcome = zeroship_migrate::frontend::generate_migration(
         SCHEMA_JS,
         &pg_url(),
         &schema,

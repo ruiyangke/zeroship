@@ -14,7 +14,7 @@ import {
   sequence as engSequence,
   t as engT,
   table as engTable,
-} from "../../../crates/zeroship-migrate-js/src/migrate_ops.js";
+} from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
 
 type Rec = {
   begin: () => void;

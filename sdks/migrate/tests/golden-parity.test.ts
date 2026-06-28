@@ -24,7 +24,7 @@ import { pg } from "../src/pg.js";
 import { __begin, __drain } from "../src/ops.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const fixturesDir = resolve(here, "../../../crates/zeroship-migrate-js/tests/op_fixtures");
+const fixturesDir = resolve(here, "../../../crates/zeroship-migrate/tests/op_fixtures");
 
 async function golden(stem: string): Promise<any> {
   return JSON.parse(await readFile(resolve(fixturesDir, `${stem}.ir.json`), "utf8"));

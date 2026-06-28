@@ -9,7 +9,7 @@
 //
 // This is intentionally published as a separate subpath and is not re-exported
 // from `@zeroship/migrate`. Each method records the same op payload shape as the
-// engine-embedded recorder twin (`crates/zeroship-migrate-js/src/migrate_ops.js`).
+// engine-embedded recorder twin (`crates/zeroship-migrate/src/frontend/migrate_ops.js`).
 
 import type { Expr, ExprChain, ExprFn } from "./types.js";
 import type {

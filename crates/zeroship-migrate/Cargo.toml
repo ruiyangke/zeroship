@@ -2,7 +2,7 @@
 name = "zeroship-migrate"
 version = "0.1.0"
 edition = "2021"
-description = "zeroship's versioned DB migration engine — migration types + SQL security guard (parse-time deny-list)"
+description = "zeroship's versioned DB migration engine — native Postgres fast path plus V8-backed JS authoring front-end"
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
@@ -39,10 +39,13 @@ zeroship-core = { workspace = true }
 # This is what gives the declarative differ FULL type capability
 # (vector/encrypted/mask/geoPoint/literal) by reuse — the engine builds an SDK
 # `def` from its FieldDescriptor and delegates the type/DDL spelling to this
-# crate. Leaf crate: no v8/runtime/crypto, so the engine's trust domain is
-# unchanged. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
+# crate. The engine's LIFECYCLE (journal/guard/executor/rollback/…) and its
 # snapshot-diff/introspection surface stay engine-owned and sit ON TOP of this.
 zeroship-schema = { workspace = true }
+# The JS-first authoring front-end is now part of this crate. Evaluating
+# `schema.js` and recording op.* migrations uses the platform V8 runtime
+# unconditionally; native compio-postgres remains the deploy/apply fast path.
+zeroship-runtime = { workspace = true }
 # The canonical version→id derivation (loader §6.2) builds a UUIDv7-SHAPED id
 # (numeric version in the high 48 bits) and base62-encodes it via
 # `zeroship_core::typed_id::uuid_to_base62`, which takes a `&uuid::Uuid`.
@@ -79,6 +82,21 @@ clap = { workspace = true }
 # The `zeroship-migrate.toml` project config for the CLI (DX parity). SYNC + leaf —
 # zero tokio. Only the bin reads it; the library trust domain is unchanged.
 toml = { workspace = true }
+# PR4 build step: deploy-bundle manifest entry type (`MigrationFileEntry`) plus
+# canonical content-addressed hash validation. The V8 front-end build path emits
+# bundle migration entries over committed `.ir.json` bytes.
+zeroship-bundle = { workspace = true }
+v8 = { workspace = true }
+# Raw syscalls for the kernel-sandboxed recorder child (rlimits, no-new-privs,
+# namespaces), matching the existing sandbox-agent raw-libc posture.
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Kernel sandbox for the V8 recorder child: seccomp-bpf default-deny plus a
+# Landlock read-only filesystem ruleset. Linux-only; other targets keep the
+# userland budget floor.
+seccompiler = { workspace = true }
+landlock = { workspace = true }
 
 # ---------------------------------------------------------------------------
 # The operator-side CLI binary (Phase 3, design §9). compio (NOT tokio): the
@@ -90,6 +108,18 @@ toml = { workspace = true }
 [[bin]]
 name = "zeroship-migrate"
 path = "src/bin/zeroship-migrate.rs"
+
+# The JS authoring CLI remains named `zeroship-migrate-js` so Vite/plugin and
+# PATH-based call sites keep resolving the same executable.
+[[bin]]
+name = "zeroship-migrate-js"
+path = "src/bin/zeroship-migrate-js.rs"
+
+# The kernel-sandboxed recorder child remains named exactly as before; the
+# parent sandbox resolves this sibling binary from Cargo's target dir.
+[[bin]]
+name = "zeroship-migrate-recorder-child"
+path = "src/bin/recorder-child.rs"
 
 [dev-dependencies]
 # Executor tests hit a REAL Postgres (faithful-e2e); the compio test macro
