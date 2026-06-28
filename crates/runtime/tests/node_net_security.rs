@@ -875,6 +875,56 @@ return await new Promise((resolve) => {{
 }
 
 #[test]
+fn socket_reads_feed_net_ingress_meter() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let app_id = Uuid::new_v4();
+    let meter = Arc::new(zeroship_metering::Meter::new());
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::Echo).await;
+        run_js_module(
+            wrap_module(
+                r#"import net from "node:net";"#,
+                &format!(
+                    r#"
+return await new Promise((resolve) => {{
+  const s = new net.Socket();
+  let received = "";
+  s.on("connect", () => s.write("hello"));
+  s.on("data", (chunk) => {{
+    received += chunk.toString();
+    s.destroy();
+    resolve(received);
+  }});
+  s.on("error", (err) => resolve(`error:${{err.code}}`));
+  s.connect({}, "127.0.0.1");
+  setTimeout(() => resolve(`timeout:${{received}}`), 3000);
+}});
+"#,
+                    addr.port()
+                ),
+            ),
+            allowlist("127.0.0.1", addr.port(), 4, 1024 * 1024),
+            Duration::from_secs(5),
+            Some((app_id, Arc::clone(&meter))),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert_eq!(result.body, "hello");
+    let usage: AppUsage = meter
+        .drain()
+        .remove(&app_id)
+        .expect("net ingress should feed the spend meter");
+    assert_eq!(usage.ingress_bytes, 5, "accepted socket reads feed fixed ingress metric");
+    assert_eq!(
+        usage.custom.get("net_ingress_bytes").copied(),
+        Some(5),
+        "net-specific ingress attribution metric should also be stamped"
+    );
+}
+
+#[test]
 fn egress_ceiling_resets_between_dispatches() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);

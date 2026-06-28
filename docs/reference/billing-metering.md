@@ -20,8 +20,9 @@ feed one process-wide `Meter`:
 2. **Native raw TCP** (`node:net`/`node:tls`) emits accepted outbound socket
    bytes through the same server-stamped `MeterHandle` into fixed
    `egress_bytes` (the spend-enforced metric the gateway path already uses)
-   and a `net_egress_bytes` attribution metric. The socket path also enforces
-   hard per-socket/per-app egress ceilings before billing is involved.
+   plus `net_egress_bytes`, and emits inbound socket bytes into
+   `ingress_bytes` plus `net_ingress_bytes`. The socket path also enforces hard
+   per-socket/per-app egress ceilings before billing is involved.
 3. **The trusted data primitives** (`env.db`, `env.kv`, `env.storage`) emit raw
    usage metrics at their op boundary, **in the success arm only** (a failed op
    is not billable), through a `MeterHandle` bound to the isolate's

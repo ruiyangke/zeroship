@@ -17,7 +17,7 @@ use crate::transport::byte_pump::{
     self, SelectAction, SocketStream, TcpReadHalf, TcpWriteHalf,
 };
 
-use super::caps::decrement_buffered_amount;
+use super::caps::{decrement_buffered_amount, record_net_ingress};
 #[cfg(feature = "runtime_tls")]
 use super::connect::CONNECT_TIMEOUT;
 use super::registry::{
@@ -246,6 +246,7 @@ async fn run_plain_reader_loop(
                 if let Some(socket) = lookup_native_socket_state(state, socket_id) {
                     socket.borrow_mut().bytes_read += n as u64;
                 }
+                record_net_ingress(state, n as u64);
                 mark_socket_activity(state);
                 push_event(state, socket_id, SocketEvent::Data(data));
             }
@@ -325,6 +326,7 @@ async fn run_tls_driver(
                 if let Some(socket) = lookup_native_socket_state(&state, socket_id) {
                     socket.borrow_mut().bytes_read += n as u64;
                 }
+                record_net_ingress(&state, n as u64);
                 mark_socket_activity(&state);
                 push_event(&state, socket_id, SocketEvent::Data(data));
             }

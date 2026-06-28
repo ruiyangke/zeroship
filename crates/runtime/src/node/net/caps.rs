@@ -267,6 +267,14 @@ fn record_net_egress(state: &SharedState, n: u64) {
     }
 }
 
+pub(super) fn record_net_ingress(state: &SharedState, n: u64) {
+    let meter = { state.borrow().meter.clone() };
+    if let Some(meter) = meter {
+        meter.record("ingress_bytes", n);
+        meter.record("net_ingress_bytes", n);
+    }
+}
+
 pub fn reserve_socket_slot(state: &SharedState, socket_id: u32) -> Result<(), String> {
     let max = state.borrow().net_policy.max_sockets();
     if max == 0 {
