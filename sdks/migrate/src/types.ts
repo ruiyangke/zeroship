@@ -317,15 +317,17 @@ export type ScalarValue =
 
 declare const dbSynthSymbolBrand: unique symbol;
 
-/** Opaque marker for the exact native function identities the recorder accepts
- *  at runtime (`Date.now`, `Math.random`, `crypto.randomUUID`). This is
- *  intentionally NOT a structural function type: TypeScript cannot distinguish a
- *  user-authored `() => number` from `typeof Date.now`, so the runtime performs
- *  the identity check and fails closed on every other function value. Calls are
+/** Best-effort marker for the native function identities the recorder accepts at
+ *  runtime (`Date.now`, `Math.random`, `crypto.randomUUID`). TypeScript cannot
+ *  structurally distinguish those symbols from arbitrary nullary functions with
+ *  the same return type, so this intentionally permits the native-compatible
+ *  signatures for authoring ergonomics. The runtime identity check is the
+ *  authoritative guard and fails closed on every other function value. Calls are
  *  intentionally not special: `Date.now()` records the number it returns. */
-export type DbSynthSymbol = {
-  readonly [dbSynthSymbolBrand]: "Date.now" | "Math.random" | "crypto.randomUUID";
-};
+export type DbSynthSymbol =
+  | (() => number)
+  | (() => string)
+  | { readonly [dbSynthSymbolBrand]: "Date.now" | "Math.random" | "crypto.randomUUID" };
 
 /** A DML value is either a typed scalar or a closed expression node. At runtime,
  *  the exact native function identities above are normalized to

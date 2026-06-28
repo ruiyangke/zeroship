@@ -193,7 +193,26 @@ test("non-native function values fail closed instead of recording as JSON null",
     isInvalidFunction,
   );
   assert.throws(
+    () => record(() => table("t").insert({ rows: [{ doc: { a: () => 42 } }] } as any)),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ tags: [() => 42] }] } as any)),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ doc: { a: Date.now } }] } as any)),
+    isInvalidFunction,
+  );
+  assert.throws(
     () => record(() => table("t").create({ columns: { v: t.text().default((() => 1) as any) } })),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").create({ columns: { v: t.json().default({ doc: { a: () => 1 } } as any) } }),
+      ),
     isInvalidFunction,
   );
   assert.throws(
@@ -207,7 +226,24 @@ test("non-native function values fail closed instead of recording as JSON null",
     isInvalidFunction,
   );
   assert.throws(
+    () =>
+      record(() =>
+        table("t").insert({
+          rows: [{ id: 1 }],
+          onConflict: { columns: ["id"], doUpdate: { doc: { a: () => 42 } } as any },
+        }),
+      ),
+    isInvalidFunction,
+  );
+  assert.throws(
     () => record(() => table("t").update({ set: { v: (c) => c.fn.lower((() => "x") as any) } })),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").update({ set: { v: (c) => c.fn.coalesce({ doc: { a: () => 1 } } as any, "x") } }),
+      ),
     isInvalidFunction,
   );
 });

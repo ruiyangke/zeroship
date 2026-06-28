@@ -177,17 +177,27 @@ export function insertValueShapes(): void {
   // @ts-expect-error — `count` must be a number per the caller-supplied generic.
   table("users").insert<MyRow>({ rows: { name: "ada", count: "not a number" } });
 
-  // @ts-expect-error — a function is not a valid insert ScalarValue.
-  table("users").insert({ rows: { name: () => "nope" } });
+  table("users").insert({
+    rows: { created_at: Date.now, random_id: Math.random, id: crypto.randomUUID },
+  });
+  table("users").create({
+    columns: {
+      created_at: t.timestamp().default(Date.now),
+      random_id: t.uuid().default(Math.random),
+      id: t.uuid().default(crypto.randomUUID),
+    },
+  });
 
-  // @ts-expect-error — a Date.now-shaped function is still not a DML value.
+  // TypeScript cannot distinguish this from Date.now; the runtime identity guard
+  // rejects it. This line intentionally typechecks.
   table("users").insert({ rows: { count: () => 42 } });
-
-  // @ts-expect-error — a randomUUID-shaped function is still not a DML value.
-  table("users").insert({ rows: { id: () => "00000000-0000-4000-8000-000000000000" } });
-
-  // @ts-expect-error — column defaults do not accept arbitrary function values.
   table("users").create({ columns: { count: t.integer().default(() => 1) } });
+
+  // @ts-expect-error — a function returning an object is not a native-compatible synth symbol.
+  table("users").insert({ rows: { bad: () => ({ nope: true }) } });
+
+  // @ts-expect-error — column defaults reject clearly wrong function return shapes.
+  table("users").create({ columns: { bad: t.json().default(() => ({ nope: true })) } });
 }
 
 // ───────────────────────────────────────────────────────────────────────────

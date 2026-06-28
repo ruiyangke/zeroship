@@ -605,14 +605,31 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(bin);
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function rejectNestedFunctionValues(value: unknown): void {
+  rejectFunctionValue(value);
+  if (Array.isArray(value)) {
+    for (const item of value) rejectNestedFunctionValues(item);
+  } else if (isPlainObject(value)) {
+    for (const item of Object.values(value)) rejectNestedFunctionValues(item);
+  }
+}
+
 /**
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
  * shape is exactly what Rust's `IrScalar` deserializer accepts (§3.5):
  *  - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify);
  *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
+ *  - JSON containers are scanned so function values fail closed at any depth;
  *  - everything else passes through verbatim.
  */
 function toIrScalar(value: unknown): unknown {
+  rejectNestedFunctionValues(value);
   if (typeof value === "bigint") return { decimal: value.toString() };
   if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
     return { decimal: String(value) };
@@ -819,7 +836,7 @@ function exprArg(x: unknown): Node {
   rejectFunctionValue(x);
   if (x instanceof ExprChainImpl) return x.__node;
   if (x && typeof x === "object" && typeof (x as Node).node === "string") return x as Node;
-  return { node: "literal", value: x as unknown };
+  return { node: "literal", value: toIrScalar(x) };
 }
 
 class ExprChainImpl implements ExprChainType {
