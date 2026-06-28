@@ -5,9 +5,9 @@
 //! adopts the same shape with the **descriptor IR**
 //! ([`crate::render::declarative::CollectionDescriptor`]) as the internal
 //! representation. This module is the **JS/TS front-end**: it evaluates a
-//! creator `schema.js` (the `@zeroship/db` `t.*` DSL) inside
-//! zeroship-runtime's V8 sandbox and lowers it to that IR, then drives the
-//! engine's declarative differ to emit a versioned migration file. It is the
+//! creator `schema.js` (the `@zeroship/db` `t.*` DSL) inside the sandboxed
+//! recorder child and lowers it to that IR, then drives the engine's
+//! declarative differ to emit a versioned migration file. It is the
 //! analog of Atlas's ORM/HCL providers — the zeroship "the tool natively
 //! speaks the app's schema" superpower.
 //!
@@ -20,7 +20,8 @@
 //!
 //! ## Public surfaces
 //!
-//! - [`eval::eval_schema_to_ir`] — eval a `schema.js` → `Vec<CollectionDescriptor>`.
+//! - [`eval::eval_schema_to_ir`] — eval a `schema.js` in the sandboxed recorder child
+//!   → `Vec<CollectionDescriptor>`.
 //! - [`build::build_migrations`] / [`build::build_one_migration`] — the PR4 build
 //!   path: record each `.ts` via the KERNEL-SANDBOXED recorder child
 //!   ([`recorder_service::spawn_sandboxed_record`]) → committed `.ir.json`. This is
@@ -37,6 +38,8 @@
 //! build path above.
 
 pub mod build;
+#[doc(hidden)]
+pub mod embedding;
 pub mod eval;
 pub mod gen_types;
 pub mod generate;
@@ -67,6 +70,7 @@ pub use record::{
 };
 pub use recorder_service::{
     recorder_child_path, spawn_sandboxed_record, Authorizer, ConcurrencyLimits, RecordRequest,
-    RecordResult, RecorderError, RecorderService,
+    RecordResult, RecorderError, RecorderService, SchemaEvalRequest, SchemaEvalResult,
+    spawn_sandboxed_schema_eval,
 };
 pub use sandbox::{ResourceBudget, SandboxPosture, SandboxReport};

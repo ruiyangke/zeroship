@@ -11,16 +11,28 @@ use serde::{Deserialize, Serialize};
 
 use super::sandbox::SandboxReport;
 
+/// Which untrusted JS front-end operation the child should run.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildOperation {
+    RecordMigration,
+    EvalSchema,
+}
+
 /// The request the parent pipes to the child's stdin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildRequest {
-    /// The untrusted migration `.ts`/`.js` source (bundled, self-contained). Travels
-    /// in-memory; never written to disk.
+    /// The child operation. Every operation uses the same sandbox and shared module
+    /// graph; only the entry adapter differs.
+    pub operation: ChildOperation,
+    /// The untrusted migration/schema `.ts`/`.js` source (bundled,
+    /// self-contained). Travels in-memory; never written to disk.
     pub ts_source: String,
-    /// The owner-app HINT stamped on the recorded IR (the engine server-stamps the
-    /// authoritative `owner_app` at deploy, §8.6).
+    /// The trusted owner-app subject. Recording stamps it on migration IR; schema
+    /// eval stamps it on every descriptor after deserialization.
     pub owner_app: String,
     /// The filename-derived migration name used when the module omits an explicit one.
+    /// Ignored for schema eval.
     pub name: String,
     /// HOSTED multi-tenant posture (kernel sandbox mandatory, refuse-to-run floor)
     /// vs LOCAL single-tenant (userland floor, kernel layers opportunistic).
@@ -58,10 +70,10 @@ pub struct ChildRequest {
 /// The result the child writes to its stdout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildResponse {
-    /// `true` iff `ir_json` is present and recording succeeded.
+    /// `true` iff `ir_json` is present and the operation succeeded.
     pub ok: bool,
-    /// The recorded `.ir.json` ENVELOPE string (the `ir_version`+`name`+`ops` shape
-    /// `op_recorder.js` emits), present iff `ok`.
+    /// Operation output JSON. For record this is the recorded `.ir.json` ENVELOPE;
+    /// for schema eval this is the schema IR adapter envelope.
     pub ir_json: Option<String>,
     /// The structured error (eval failure / sandbox refusal), present iff `!ok`.
     pub error: Option<ChildError>,

@@ -29,13 +29,18 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Condvar, Mutex};
 
-use zeroship_migrate::frontend::recorder_protocol::{ChildRequest, ChildResponse};
+use zeroship_migrate::frontend::embedding::{
+    install_frontend_globals, module_graph, FrontendGlobals, FrontendProgram,
+};
+use zeroship_migrate::frontend::recorder_protocol::{
+    ChildOperation, ChildRequest, ChildResponse,
+};
 use zeroship_migrate::frontend::sandbox::{
     apply_landlock, apply_seccomp, assert_recorder_single_threaded, init_recorder_v8,
     SandboxPosture, SandboxReport,
 };
 
-use zeroship_runtime::{ModuleEntry, Runtime};
+use zeroship_runtime::Runtime;
 
 /// A worker thread created BEFORE the in-process lockdown — the test analogue of a
 /// V8 background (GC/compiler/platform) worker thread that already exists when
@@ -134,9 +139,6 @@ fn spawn_prelock_thread() {
         })
         .expect("spawn prelock worker thread");
 }
-
-const OP_RECORDER_JS: &str = include_str!("../frontend/op_recorder.js");
-const MIGRATE_OPS_JS: &str = include_str!("../frontend/migrate_ops.js");
 
 fn main() {
     // Read the request envelope from stdin (the migration source never touches the
@@ -314,26 +316,23 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
         ));
     }
 
-    // ---- Load + evaluate the UNTRUSTED migration module + run up() ----
-    let untrusted = vec![
-        ModuleEntry {
-            specifier: "op_recorder.js".into(),
-            source: OP_RECORDER_JS.to_string(),
-        },
-        ModuleEntry {
-            specifier: "__migration__.js".into(),
-            source: req.ts_source.clone(),
-        },
-        // Re-list the DSL so the entry-module import resolves in this load batch.
-        ModuleEntry {
-            specifier: "@zeroship/migrate".into(),
-            source: MIGRATE_OPS_JS.to_string(),
-        },
-    ];
+    match req.operation {
+        ChildOperation::RecordMigration => run_record_migration(runtime, req, report),
+        ChildOperation::EvalSchema => run_schema_eval(runtime, req, report),
+    }
+}
+
+fn run_record_migration(
+    runtime: Runtime,
+    req: ChildRequest,
+    report: SandboxReport,
+) -> Result<ChildResponse, ChildResponse> {
+    let untrusted = module_graph(FrontendProgram::RecordMigration {
+        source: &req.ts_source,
+    });
 
     let ir_json: Result<String, String> = runtime.with_scope(|scope| {
-        zeroship_runtime::init::setup_globals(scope)?;
-        zeroship_runtime::init::install_text_encoding_streams(scope);
+        install_frontend_globals(scope, FrontendGlobals::Migration)?;
 
         {
             // Only the filename-derived NAME is exposed to JS (a benign fallback for
@@ -400,6 +399,47 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
     };
 
     Ok(ChildResponse::ok(ir_json, report))
+}
+
+fn run_schema_eval(
+    runtime: Runtime,
+    req: ChildRequest,
+    report: SandboxReport,
+) -> Result<ChildResponse, ChildResponse> {
+    let untrusted = module_graph(FrontendProgram::EvalSchema {
+        source: &req.ts_source,
+    });
+
+    let schema_json: Result<String, String> = runtime.with_scope(|scope| {
+        install_frontend_globals(scope, FrontendGlobals::Schema)?;
+
+        {
+            let global = scope.get_current_context().global(scope);
+            let k = v8::String::new(scope, "__zsOwnerApp")
+                .ok_or_else(|| "recorder child: __zsOwnerApp key alloc failed".to_string())?;
+            let v = v8::String::new(scope, req.owner_app.as_str()).ok_or_else(|| {
+                "recorder child: owner_app too large for a V8 string".to_string()
+            })?;
+            global.set(scope, k.into(), v.into());
+        }
+
+        zeroship_runtime::modules::load_modules(scope, &untrusted)?;
+        scope.perform_microtask_checkpoint();
+
+        let global = scope.get_current_context().global(scope);
+        let k = v8::String::new(scope, "__zsSchemaIR")
+            .ok_or_else(|| "recorder child: __zsSchemaIR key alloc failed".to_string())?;
+        let v = global
+            .get(scope, k.into())
+            .filter(|v| v.is_string())
+            .ok_or_else(|| "schema front-end produced no IR".to_string())?;
+        Ok(v.to_rust_string_lossy(scope))
+    });
+
+    match schema_json {
+        Ok(s) => Ok(ChildResponse::ok(s, report)),
+        Err(e) => Err(ChildResponse::eval_error(e, report)),
+    }
 }
 
 /// Inspect the `op_recorder.js` `{ ok, ir?, error? }` envelope and produce the final

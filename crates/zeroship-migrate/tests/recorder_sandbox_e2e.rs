@@ -34,10 +34,12 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use zeroship_migrate::frontend::recorder_protocol::ChildRequest;
-use zeroship_migrate::frontend::recorder_service::{recorder_child_path, spawn_sandboxed_record};
+use zeroship_migrate::frontend::recorder_protocol::{ChildOperation, ChildRequest};
+use zeroship_migrate::frontend::recorder_service::{
+    recorder_child_path, spawn_sandboxed_record, spawn_sandboxed_schema_eval,
+};
 use zeroship_migrate::frontend::{
-    RecordRequest, RecorderError, ResourceBudget, SandboxPosture,
+    RecordRequest, RecorderError, ResourceBudget, SandboxPosture, SchemaEvalRequest,
 };
 
 const HAPPY_MIGRATION: &str = r#"
@@ -90,6 +92,7 @@ fn netns_available() -> bool {
 /// drive the child binary themselves, controlling pre_exec/env precisely).
 fn child_request(src: &str, hosted: bool, netns: bool, rlimit: bool) -> String {
     let req = ChildRequest {
+        operation: ChildOperation::RecordMigration,
         ts_source: src.to_string(),
         owner_app: "app_e2e".into(),
         name: "e2e".into(),
@@ -394,6 +397,41 @@ fn wall_watchdog_bounds_a_cpu_idle_hang() {
     assert!(
         elapsed < std::time::Duration::from_secs(8),
         "wall watchdog must fire near the 1s budget, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn schema_eval_infinite_loop_is_bounded_by_same_child_budget() {
+    // `generate --schema` evaluates creator schema JS before live-DB introspection.
+    // That eval must be in the same sandboxed child as recording, so a top-level loop
+    // is killed by the parent wall watchdog instead of hanging the parent process.
+    let src = r#"
+        while (true) {}
+        export const schema = {};
+    "#;
+    let req = SchemaEvalRequest {
+        schema_source: src.to_string(),
+        owner_app: "app_schema_loop".into(),
+        posture: SandboxPosture::Local,
+        budget: ResourceBudget {
+            cpu_seconds: 1000,
+            address_space_bytes: 96 * 1024 * 1024 * 1024,
+            heap_limit_mb: 256,
+            wall_ms: 1_000,
+        },
+        allow_read_paths: vec![],
+    };
+    let start = std::time::Instant::now();
+    let err = spawn_sandboxed_schema_eval(&req).expect_err("schema loop must be bounded");
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(err, RecorderError::BudgetExceeded { .. }),
+        "schema loop must be BUILD_RECORDER_BUDGET_EXCEEDED, got {err:?}"
+    );
+    assert_eq!(err.code(), "BUILD_RECORDER_BUDGET_EXCEEDED");
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "schema loop must be killed by the tight wall budget, took {elapsed:?}"
     );
 }
 

@@ -85,6 +85,23 @@ fn named_schema_export_also_supported() {
 }
 
 #[test]
+fn schema_js_cannot_forge_owner_app() {
+    let src = r#"
+        import { t } from "@zeroship/db";
+        globalThis.__zsOwnerApp = "app_victim";
+        export const schema = {
+            items: { name: t.string().required() },
+        };
+    "#;
+    let ir = eval_schema_to_ir(src, "app_trusted").expect("schema eval");
+    assert_eq!(ir.len(), 1);
+    assert_eq!(
+        ir[0].owner_app, "app_trusted",
+        "owner_app must be stamped by Rust, not read from creator-mutated JS globals"
+    );
+}
+
+#[test]
 fn missing_schema_export_is_lowering_error() {
     let src = r#"export default { fetch() {} };"#;
     let err = eval_schema_to_ir(src, "app_x").unwrap_err();
