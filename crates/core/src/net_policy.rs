@@ -123,6 +123,34 @@ fn normalize_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Normalize an operator-editable frontable wildcard suffix catalog.
+///
+/// Suffixes use the same DNS-name normalization as allowlist hosts, are sorted
+/// for stable wire output, and are deduplicated after normalization.
+pub fn normalize_frontable_suffixes(raw: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(raw.len());
+    for suffix in raw {
+        let suffix = normalize_host(suffix);
+        if suffix.is_empty() {
+            return Err("suffix must not be empty".to_string());
+        }
+        if suffix.contains('*') {
+            return Err(format!("suffix {suffix:?} must not contain '*'"));
+        }
+        if !suffix.contains('.') {
+            return Err(format!("suffix {suffix:?} must contain at least two labels"));
+        }
+        if suffix.parse::<std::net::IpAddr>().is_ok() {
+            return Err(format!("suffix {suffix:?} must be a DNS name, not an IP"));
+        }
+        if !out.contains(&suffix) {
+            out.push(suffix);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 fn validate_wildcard_suffix(
     suffix: &str,
     catalog_suffixes: &[String],

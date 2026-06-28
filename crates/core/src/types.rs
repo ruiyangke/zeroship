@@ -50,6 +50,10 @@ pub struct AppNetPolicy {
     pub allow: Vec<NetAllowEntry>,
     pub max_sockets: u32,
     pub egress_ceiling_bytes: u64,
+    #[serde(default)]
+    pub frontable_wildcard_suffixes: Vec<String>,
+    #[serde(default)]
+    pub frontable_wildcard_suffixes_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

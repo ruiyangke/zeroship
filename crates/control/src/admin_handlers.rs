@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_auth::audit::{self as auth_audit, AuditEvent};
 use zeroship_authz::{Action, EntityCache, PolicySet, Resource};
-use zeroship_core::net_policy::{HostPort, FRONTABLE_WILDCARD_SUFFIXES};
+use zeroship_core::net_policy::{
+    normalize_frontable_suffixes, HostPort, FRONTABLE_WILDCARD_SUFFIXES,
+};
 
 use crate::auth_audit as control_auth_audit;
 use crate::authz_guard::AuthzGuard;
@@ -619,7 +621,7 @@ pub async fn put_frontable_suffixes(
         return resp;
     }
 
-    let suffixes = match normalize_suffixes(&body.suffixes) {
+    let suffixes = match normalize_frontable_suffixes(&body.suffixes) {
         Ok(suffixes) => suffixes,
         Err(err) => {
             return web::HttpResponse::BadRequest()
@@ -917,7 +919,7 @@ async fn load_frontable_suffix_catalog(
             });
         }
     };
-    match normalize_suffixes(&raw) {
+    match normalize_frontable_suffixes(&raw) {
         Ok(suffixes) => Ok(FrontableSuffixCatalog {
             suffixes,
             available: true,
@@ -933,30 +935,6 @@ async fn load_frontable_suffix_catalog(
             })
         }
     }
-}
-
-fn normalize_suffixes(raw: &[String]) -> Result<Vec<String>, String> {
-    let mut out = Vec::with_capacity(raw.len());
-    for suffix in raw {
-        let suffix = normalize_host_text(suffix);
-        if suffix.is_empty() {
-            return Err("suffix must not be empty".to_string());
-        }
-        if suffix.contains('*') {
-            return Err(format!("suffix {suffix:?} must not contain '*'"));
-        }
-        if !suffix.contains('.') {
-            return Err(format!("suffix {suffix:?} must contain at least two labels"));
-        }
-        if suffix.parse::<std::net::IpAddr>().is_ok() {
-            return Err(format!("suffix {suffix:?} must be a DNS name, not an IP"));
-        }
-        if !out.contains(&suffix) {
-            out.push(suffix);
-        }
-    }
-    out.sort();
-    Ok(out)
 }
 
 fn normalize_host_text(host: &str) -> String {

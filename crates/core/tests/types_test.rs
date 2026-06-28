@@ -533,12 +533,18 @@ fn app_version_info_serializes_with_manifest() {
             }],
             max_sockets: 4,
             egress_ceiling_bytes: 1024 * 1024,
+            frontable_wildcard_suffixes: vec!["shared.example.test".to_string()],
+            frontable_wildcard_suffixes_available: true,
         },
     };
     let json = serde_json::to_string(&info).unwrap();
     assert!(json.contains("\"manifest\""), "manifest is on the wire: {json}");
     assert!(json.contains(SHA_B), "worker module hash present: {json}");
     assert!(json.contains("\"net_policy\""), "net policy is on the wire: {json}");
+    assert!(
+        json.contains("\"frontable_wildcard_suffixes\""),
+        "worker-facing net policy carries the operator review catalog: {json}"
+    );
 
     let decoded: AppVersionInfo = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.env_version, 7);
@@ -547,6 +553,11 @@ fn app_version_info_serializes_with_manifest() {
     assert_eq!(worker.entry, "index.js");
     assert_eq!(worker.modules.get("index.js").map(String::as_str), Some(SHA_B));
     assert_eq!(decoded.net_policy.allow[0].host, "db.example.com");
+    assert_eq!(
+        decoded.net_policy.frontable_wildcard_suffixes,
+        vec!["shared.example.test".to_string()]
+    );
+    assert!(decoded.net_policy.frontable_wildcard_suffixes_available);
 }
 
 #[test]

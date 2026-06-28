@@ -354,7 +354,12 @@ pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
 
     let mut entries = Vec::with_capacity(app_net.allow.len());
     for entry in &app_net.allow {
-        match HostPort::try_new(entry.host.clone(), entry.port) {
+        match HostPort::try_new_with_frontable_suffixes(
+            entry.host.clone(),
+            entry.port,
+            &app_net.frontable_wildcard_suffixes,
+            app_net.frontable_wildcard_suffixes_available,
+        ) {
             Ok(host_port) => entries.push(host_port),
             Err(err) => {
                 tracing::error!(
@@ -675,6 +680,7 @@ mod tests {
                 }],
                 max_sockets: 8,
                 egress_ceiling_bytes: 2 * 1024 * 1024,
+                ..AppNetPolicy::default()
             },
         );
         match &policy {
@@ -710,6 +716,7 @@ mod tests {
                 ],
                 max_sockets: 4,
                 egress_ceiling_bytes: 1024 * 1024,
+                ..AppNetPolicy::default()
             },
         );
         assert!(
@@ -717,6 +724,29 @@ mod tests {
             "one malformed grant row must not brick the other reviewed hosts"
         );
         assert!(!policy.allows_host_port("anything.example.com", 443));
+    }
+
+    #[test]
+    fn net_policy_from_app_revalidates_operator_frontable_catalog() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                allow: vec![zeroship_core::types::NetAllowEntry {
+                    host: "*.shared.example.test".to_string(),
+                    port: 443,
+                }],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+                frontable_wildcard_suffixes: vec!["shared.example.test".to_string()],
+                frontable_wildcard_suffixes_available: true,
+            },
+        );
+        assert!(
+            matches!(policy, NetPolicy::Denied),
+            "a DB grant row with a catalog-frontable wildcard suffix must be skipped; \
+             with no remaining hosts the app is denied raw TCP"
+        );
     }
 
     #[test]
@@ -731,6 +761,7 @@ mod tests {
                 }],
                 max_sockets: u32::MAX,
                 egress_ceiling_bytes: u64::MAX,
+                ..AppNetPolicy::default()
             },
         );
         assert!(
@@ -769,6 +800,7 @@ mod tests {
                         }],
                         max_sockets: 6,
                         egress_ceiling_bytes: 1024 * 1024,
+                        ..AppNetPolicy::default()
                     },
                     None,
                     None,

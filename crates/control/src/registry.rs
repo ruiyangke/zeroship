@@ -6,6 +6,7 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
+use zeroship_core::net_policy::normalize_frontable_suffixes;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo, NetAllowEntry,
     RouteEntry, RouteMap, VersionMap, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
@@ -542,6 +543,7 @@ impl Registry {
                 &[],
             )
             .await?;
+        let frontable_catalog = load_frontable_suffix_catalog(&conn).await;
         let mut grants: HashMap<Uuid, Vec<NetAllowEntry>> = HashMap::new();
         for row in &grant_rows {
             let app_id: Uuid = row.get("app_id");
@@ -577,6 +579,8 @@ impl Registry {
                     allow,
                     max_sockets: caps.max_sockets,
                     egress_ceiling_bytes: caps.egress_ceiling_bytes,
+                    frontable_wildcard_suffixes: frontable_catalog.suffixes.clone(),
+                    frontable_wildcard_suffixes_available: frontable_catalog.available,
                 }
             };
             let manifest = manifest_json.as_deref().and_then(|j| {
@@ -749,6 +753,65 @@ impl Registry {
     // raw-additive `record_usage`/`get_usage` over `zeroship.app_usage`
     // (no idempotency, no period, no custom metrics) are gone — pre-launch,
     // no deprecated aliases.
+}
+
+#[derive(Debug, Clone, Default)]
+struct FrontableSuffixCatalog {
+    suffixes: Vec<String>,
+    available: bool,
+}
+
+/// Load the operator-editable frontable wildcard catalog for worker-side
+/// revalidation. Missing/corrupt catalog data is not a version-load failure; it
+/// marks the catalog unavailable so wildcard entries fail closed in the worker.
+async fn load_frontable_suffix_catalog(conn: &Client) -> FrontableSuffixCatalog {
+    let rows = match conn
+        .query(
+            "SELECT value_json FROM zeroship.net_policy_catalog \
+             WHERE key = 'frontable_wildcard_suffixes'",
+            &[],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "registry: frontable suffix catalog lookup failed; wildcard net grants fail closed"
+            );
+            return FrontableSuffixCatalog::default();
+        }
+    };
+    let Some(row) = rows.first() else {
+        tracing::error!(
+            "registry: frontable suffix catalog row missing; wildcard net grants fail closed"
+        );
+        return FrontableSuffixCatalog::default();
+    };
+    let value: serde_json::Value = row.get("value_json");
+    let raw = match serde_json::from_value::<Vec<String>>(value) {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "registry: frontable suffix catalog row invalid; wildcard net grants fail closed"
+            );
+            return FrontableSuffixCatalog::default();
+        }
+    };
+    match normalize_frontable_suffixes(&raw) {
+        Ok(suffixes) => FrontableSuffixCatalog {
+            suffixes,
+            available: true,
+        },
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "registry: frontable suffix catalog contains invalid suffix; wildcard net grants fail closed"
+            );
+            FrontableSuffixCatalog::default()
+        }
+    }
 }
 
 /// Derive an app's [`AppRuntimeLimits`] from its plan-catalog
