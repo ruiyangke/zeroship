@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use zeroship_core::types::AppRuntimeLimits;
+use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_plugin_storage::StorageBackendConfig;
-use zeroship_runtime::ModuleEntry;
+use zeroship_runtime::{HostPort, ModuleEntry, NetPolicy};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
@@ -247,6 +247,7 @@ pub fn load_app(
     app_id: Uuid,
     bundle_bytes: &[u8],
     app_limits: AppRuntimeLimits,
+    app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
 ) -> bool {
@@ -296,6 +297,7 @@ pub fn load_app(
         }
 
         let limits = runtime_limits_from_app(&app_limits);
+        let net_policy = net_policy_from_app(&app_id, &app_net_policy);
         // Pass `app_id` so the runtime's RPC fast path can register
         // every in-flight `AbortController` with `crate::rpc::abort`,
         // keyed by `(app_id, request_id)`. `evict_lru` walks that
@@ -306,6 +308,7 @@ pub fn load_app(
             .limits(limits)
             .plugins(plugins)
             .app_id(app_id)
+            .net_policy(net_policy)
             // **Migration-first cutover (P4b)** — hand the bundled
             // `RuntimeSchemaDescriptor` JSON (resolved from
             // `manifest.runtime_descriptor`'s blob by the caller) to the
@@ -341,6 +344,48 @@ pub fn runtime_limits_from_app(limits: &AppRuntimeLimits) -> RuntimeLimits {
         cpu_limit: limits.cpu_limit_ms.map(std::time::Duration::from_millis),
         wall_timeout: limits.wall_timeout_ms.map(std::time::Duration::from_millis),
         heap_limit_bytes: limits.heap_limit_mb.map(|mb| (mb as usize) * 1024 * 1024),
+    }
+}
+
+pub fn net_policy_from_app(app_id: &Uuid, app_net: &AppNetPolicy) -> NetPolicy {
+    if app_net.allow.is_empty() {
+        return NetPolicy::Denied;
+    }
+
+    let mut entries = Vec::with_capacity(app_net.allow.len());
+    for entry in &app_net.allow {
+        match HostPort::try_new(entry.host.clone(), entry.port) {
+            Ok(host_port) => entries.push(host_port),
+            Err(err) => {
+                tracing::error!(
+                    app_id = %app_id,
+                    host = %entry.host,
+                    port = entry.port,
+                    error = %err,
+                    "worker: net grant entry rejected at load; skipping this host"
+                );
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return NetPolicy::Denied;
+    }
+
+    match NetPolicy::allowlist(
+        entries,
+        app_net.max_sockets,
+        app_net.egress_ceiling_bytes,
+    ) {
+        Ok(policy) => policy,
+        Err(err) => {
+            tracing::error!(
+                app_id = %app_id,
+                error = %err,
+                "worker: net grant set rejected at load; denying raw TCP"
+            );
+            NetPolicy::Denied
+        }
     }
 }
 
@@ -386,7 +431,7 @@ pub fn all_app_ids() -> Vec<Uuid> {
 // running isolate has actually materialized it" (SEC-7).
 
 /// What a cached isolate was loaded against: the deploy hash (code) and
-/// the env version (vars/secrets). `sync::needs_reload` compares both
+/// the env version (vars/secrets). `sync::needs_reload` compares these
 /// with the control plane's current `AppVersionInfo` to decide whether
 /// the isolate must be swapped.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -397,6 +442,8 @@ pub struct LoadedMeta {
     /// Control-plane monotonic env counter the isolate's env was
     /// hydrated against.
     pub env_version: i64,
+    /// Worker-facing raw-TCP policy snapshot the isolate was built with.
+    pub net_policy: AppNetPolicy,
 }
 
 thread_local! {
@@ -607,6 +654,135 @@ mod tests {
         })
         .join()
         .expect("degrade guard thread panicked");
+    }
+
+    #[test]
+    fn net_policy_from_app_defaults_to_denied_when_no_grants() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(&app_id, &AppNetPolicy::default());
+        assert!(matches!(policy, NetPolicy::Denied));
+    }
+
+    #[test]
+    fn net_policy_from_app_builds_reviewed_allowlist_from_grants() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                allow: vec![zeroship_core::types::NetAllowEntry {
+                    host: "DB.Example.COM.".to_string(),
+                    port: 5432,
+                }],
+                max_sockets: 8,
+                egress_ceiling_bytes: 2 * 1024 * 1024,
+            },
+        );
+        match &policy {
+            NetPolicy::Allowlist {
+                max_sockets,
+                egress_ceiling_bytes,
+                ..
+            } => {
+                assert_eq!(*max_sockets, 8);
+                assert_eq!(*egress_ceiling_bytes, 2 * 1024 * 1024);
+                assert!(policy.allows_host_port("db.example.com", 5432));
+                assert!(!policy.allows_host_port("other.example.com", 5432));
+            }
+            other => panic!("expected Allowlist, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn net_policy_from_app_skips_bad_entries_and_keeps_good_ones() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                allow: vec![
+                    zeroship_core::types::NetAllowEntry {
+                        host: "*".to_string(),
+                        port: 443,
+                    },
+                    zeroship_core::types::NetAllowEntry {
+                        host: "smtp.example.com".to_string(),
+                        port: 587,
+                    },
+                ],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+            },
+        );
+        assert!(
+            policy.allows_host_port("smtp.example.com", 587),
+            "one malformed grant row must not brick the other reviewed hosts"
+        );
+        assert!(!policy.allows_host_port("anything.example.com", 443));
+    }
+
+    #[test]
+    fn net_policy_from_app_cannot_produce_trusted() {
+        let app_id = Uuid::new_v4();
+        let policy = net_policy_from_app(
+            &app_id,
+            &AppNetPolicy {
+                allow: vec![zeroship_core::types::NetAllowEntry {
+                    host: "db.example.com".to_string(),
+                    port: 5432,
+                }],
+                max_sockets: u32::MAX,
+                egress_ceiling_bytes: u64::MAX,
+            },
+        );
+        assert!(
+            !matches!(policy, NetPolicy::Trusted { .. }),
+            "creator AppNetPolicy has no representation for runtime Trusted"
+        );
+    }
+
+    #[test]
+    fn load_app_applies_net_policy_to_runtime_builder() {
+        std::thread::spawn(|| {
+            let Ok(runtime) = compio::runtime::Runtime::new() else {
+                eprintln!("skipping (cannot create compio runtime)");
+                return;
+            };
+
+            runtime.block_on(async {
+                let app_id = Uuid::new_v4();
+                init_cache(
+                    4,
+                    KernelConfig {
+                        db_url: None,
+                        kv_url: None,
+                        storage_backend: None,
+                        meter: Arc::new(zeroship_metering::Meter::new()),
+                    },
+                );
+                assert!(load_app(
+                    app_id,
+                    br#"export default { fetch() { return new Response("ok"); } }"#,
+                    AppRuntimeLimits::default(),
+                    AppNetPolicy {
+                        allow: vec![zeroship_core::types::NetAllowEntry {
+                            host: "db.example.com".to_string(),
+                            port: 5432,
+                        }],
+                        max_sockets: 6,
+                        egress_ceiling_bytes: 1024 * 1024,
+                    },
+                    None,
+                    None,
+                ));
+                let runtime = get_runtime(&app_id).expect("runtime loaded");
+                let state = runtime.state();
+                let state = state.borrow();
+                assert!(state.net_policy.allows_host_port("db.example.com", 5432));
+                assert!(!state.net_policy.allows_host_port("db.example.com", 5433));
+                assert_eq!(state.net_policy.max_sockets(), 6);
+            });
+        })
+        .join()
+        .expect("load_app net policy test thread panicked");
     }
 
     #[test]

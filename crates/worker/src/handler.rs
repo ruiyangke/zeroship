@@ -616,6 +616,7 @@ mod tests {
                 app_id,
                 source,
                 AppRuntimeLimits::default(),
+                zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None
             ));
@@ -735,6 +736,7 @@ mod tests {
                 app_id,
                 source,
                 AppRuntimeLimits::default(),
+                zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None
             ));
@@ -922,6 +924,7 @@ mod tests {
                 app_id,
                 source,
                 AppRuntimeLimits::default(),
+                zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None
             ));
@@ -1241,6 +1244,7 @@ async fn load_on_demand(
         *app_id,
         &bytes,
         app_version.runtime.clone(),
+        app_version.net_policy.clone(),
         app_version.deploy_hash.as_deref(),
         descriptor_json.as_deref(),
     ) {
@@ -1257,6 +1261,7 @@ async fn load_on_demand(
     cache::set_loaded_meta(*app_id, cache::LoadedMeta {
         deploy_hash: app_version.deploy_hash.clone(),
         env_version: app_version.env_version,
+        net_policy: app_version.net_policy,
     });
     tracing::info!(
         app_id = %app_id,

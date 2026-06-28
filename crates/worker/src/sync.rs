@@ -192,7 +192,8 @@ async fn reconcile_loop(config: Arc<WorkerConfig>, shared: SharedVersions, envs:
 ///
 /// - the deploy hash changed (new code),
 /// - the runtime limits changed (CPU / wall / heap),
-/// - the env version changed (var/secret rotation).
+/// - the env version changed (var/secret rotation),
+/// - the raw-TCP net policy changed (grant/revoke/cap edit).
 ///
 /// The env arm is SEC-7: a pure env bump (dashboard secret rotation, no
 /// redeploy) must reload the isolate. The runtime materializes the `env`
@@ -221,7 +222,8 @@ pub fn needs_reload(
     };
     let limits_changed = local_limits != Some(cache::runtime_limits_from_app(&info.runtime));
     let env_changed = loaded.map(|m| m.env_version) != Some(info.env_version);
-    hash_changed || limits_changed || env_changed
+    let net_policy_changed = loaded.map(|m| &m.net_policy) != Some(&info.net_policy);
+    hash_changed || limits_changed || env_changed || net_policy_changed
 }
 
 async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &SharedEnvs) -> Result<(), String> {
@@ -333,6 +335,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 *local_id,
                                 &bytes,
                                 info.runtime.clone(),
+                                info.net_policy.clone(),
                                 info.deploy_hash.as_deref(),
                                 descriptor_json.as_deref(),
                             ) {
@@ -342,6 +345,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 cache::set_loaded_meta(*local_id, cache::LoadedMeta {
                                     deploy_hash: info.deploy_hash.clone(),
                                     env_version: info.env_version,
+                                    net_policy: info.net_policy.clone(),
                                 });
                                 tracing::info!(
                                     app_id = %local_id,
@@ -536,7 +540,7 @@ mod tests {
     use ntex::web::{self, test};
     use sha2::{Digest, Sha256};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
-    use zeroship_core::types::AppRuntimeLimits;
+    use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits, NetAllowEntry};
 
     use super::*;
 
@@ -557,6 +561,7 @@ mod tests {
             runtime,
             env_version,
             manifest: None,
+            net_policy: AppNetPolicy::default(),
         }
     }
 
@@ -564,6 +569,7 @@ mod tests {
         cache::LoadedMeta {
             deploy_hash: deploy_hash.map(str::to_string),
             env_version,
+            net_policy: AppNetPolicy::default(),
         }
     }
 
@@ -623,6 +629,28 @@ mod tests {
             Some(matching_limits(&AppRuntimeLimits::default())),
             &info
         ));
+    }
+
+    #[test]
+    fn needs_reload_true_when_net_policy_changes() {
+        let info = version_info(Some("h1"), 7, AppRuntimeLimits::default());
+        let loaded = cache::LoadedMeta {
+            deploy_hash: Some("h1".to_string()),
+            env_version: 7,
+            net_policy: AppNetPolicy {
+                allow: vec![NetAllowEntry {
+                    host: "db.example.com".to_string(),
+                    port: 5432,
+                }],
+                max_sockets: 4,
+                egress_ceiling_bytes: 1024 * 1024,
+            },
+        };
+        assert!(
+            needs_reload(Some(&loaded), Some(matching_limits(&info.runtime)), &info),
+            "revoking the last net grant changes AppVersionInfo.net_policy to \
+             default-deny and must rebuild the isolate on the next reconcile tick"
+        );
     }
 
     /// Isolate cached but no per-thread record of what it was loaded
@@ -722,12 +750,20 @@ mod tests {
 
             // Load the app the way the worker does, recording that the
             // isolate was hydrated against env version 1.
-            assert!(crate::cache::load_app(app_id, source, AppRuntimeLimits::default(), None, None));
+            assert!(crate::cache::load_app(
+                app_id,
+                source,
+                AppRuntimeLimits::default(),
+                AppNetPolicy::default(),
+                None,
+                None,
+            ));
             crate::cache::set_loaded_meta(
                 app_id,
                 crate::cache::LoadedMeta {
                     deploy_hash: Some("deploy-h1".to_string()),
                     env_version: 1,
+                    net_policy: AppNetPolicy::default(),
                 },
             );
 
@@ -814,6 +850,7 @@ mod tests {
                     runtime: AppRuntimeLimits::default(),
                     env_version: 2,
                     manifest: Some(manifest),
+                    net_policy: AppNetPolicy::default(),
                 },
             );
             reconcile_once(&config, &versions, &envs).await.expect("reconcile");
