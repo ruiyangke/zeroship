@@ -264,11 +264,58 @@ pub fn load_app(
         source: source.to_string(),
     }];
 
+    let plugins = create_plugins();
+    let meter = METER.with(|m| m.borrow().clone());
+    let mut env_vars = HashMap::new();
+    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    // **T6** — inject the per-app deploy/schema-version token so plugin-db's
+    // deploy-keyed introspection cache (crypto/mask/column metadata) keys off
+    // the real `deploy_hash` and invalidates on a redeploy. `mint_db` reads
+    // this out of the isolate's `env_vars` and stamps it into the per-isolate
+    // DB context. Omitted when the control plane reported no deploy hash;
+    // plugin-db then defaults to the `"cold_start"` token.
+    if let Some(dh) = deploy_hash {
+        env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
+    }
+
+    let limits = runtime_limits_from_app(&app_limits);
+    let net_policy = net_policy_from_app(&app_id, &app_net_policy);
+    // Pass `app_id` so the runtime's RPC fast path can register
+    // every in-flight `AbortController` with `crate::rpc::abort`,
+    // keyed by `(app_id, request_id)`. `evict_lru` walks that
+    // registry on eviction.
+    let mut builder = Runtime::builder()
+        .modules(modules)
+        .env_vars(env_vars)
+        .limits(limits)
+        .plugins(plugins)
+        .app_id(app_id)
+        .net_policy(net_policy)
+        // **Migration-first cutover (P4b)** — hand the bundled
+        // `RuntimeSchemaDescriptor` JSON (resolved from
+        // `manifest.runtime_descriptor`'s blob by the caller) to the
+        // runtime, which exposes it as `globalThis.__zsRuntimeDescriptor`.
+        .runtime_descriptor(runtime_descriptor.map(str::to_string));
+    if let Some(meter) = meter {
+        builder = builder.meter(meter);
+    }
+    let runtime = builder.build();
+    runtime
+        .initialize(env)
+        .map_err(|e| format!("failed to initialize app runtime: {e}"))?;
+
+    // Exit isolate so other isolates can be created/entered on this thread.
+    // The handler will enter/exit around each call_fetch_handler call.
+    // (Warmup removed — `call_fetch_handler` does lazy init via
+    // `ensure_initialized` on the first request.)
+    runtime.exit_isolate();
+
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         let cache = cache.as_mut().unwrap();
 
-        // Evict LRU if at capacity.
+        // Only mutate the cache after the new runtime has initialized. A
+        // corrupt descriptor during reload must not evict the last-good isolate.
         if cache.isolates.len() >= cache.max_size && !cache.isolates.contains_key(&app_id) {
             if !evict_lru(cache) {
                 tracing::warn!(
@@ -280,56 +327,8 @@ pub fn load_app(
             }
         }
 
-        // Remove old runtime if exists
-        cache.isolates.remove(&app_id);
-
-        let plugins = create_plugins();
-        let meter = METER.with(|m| m.borrow().clone());
-        let mut env_vars = HashMap::new();
-        env_vars.insert("APP_ID".to_string(), app_id.to_string());
-        // **T6** — inject the per-app deploy/schema-version token so plugin-db's
-        // deploy-keyed introspection cache (crypto/mask/column metadata) keys off
-        // the real `deploy_hash` and invalidates on a redeploy. `mint_db` reads
-        // this out of the isolate's `env_vars` and stamps it into the per-isolate
-        // DB context. Omitted when the control plane reported no deploy hash;
-        // plugin-db then defaults to the `"cold_start"` token.
-        if let Some(dh) = deploy_hash {
-            env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
-        }
-
-        let limits = runtime_limits_from_app(&app_limits);
-        let net_policy = net_policy_from_app(&app_id, &app_net_policy);
-        // Pass `app_id` so the runtime's RPC fast path can register
-        // every in-flight `AbortController` with `crate::rpc::abort`,
-        // keyed by `(app_id, request_id)`. `evict_lru` walks that
-        // registry on eviction.
-        let mut builder = Runtime::builder()
-            .modules(modules)
-            .env_vars(env_vars)
-            .limits(limits)
-            .plugins(plugins)
-            .app_id(app_id)
-            .net_policy(net_policy)
-            // **Migration-first cutover (P4b)** — hand the bundled
-            // `RuntimeSchemaDescriptor` JSON (resolved from
-            // `manifest.runtime_descriptor`'s blob by the caller) to the
-            // runtime, which exposes it as `globalThis.__zsRuntimeDescriptor`.
-            .runtime_descriptor(runtime_descriptor.map(str::to_string));
-        if let Some(meter) = meter {
-            builder = builder.meter(meter);
-        }
-        let runtime = builder.build();
-        runtime
-            .initialize(env)
-            .map_err(|e| format!("failed to initialize app runtime: {e}"))?;
-
-        // Exit isolate so other isolates can be created/entered on this thread.
-        // The handler will enter/exit around each call_fetch_handler call.
-        // (Warmup removed — `call_fetch_handler` does lazy init via
-        // `ensure_initialized` on the first request.)
-        runtime.exit_isolate();
-
-        // Start pump task for async V8 ops (timers, fetch, streams).
+        // Start pump task for async V8 ops (timers, fetch, streams) only after
+        // capacity is available and the runtime is about to become reachable.
         runtime.start_pump();
         cache.isolates.insert(
             app_id,
@@ -563,6 +562,32 @@ mod tests {
 
     fn entry(runtime: Runtime, last_used: Instant) -> IsolateEntry {
         IsolateEntry { runtime, last_used }
+    }
+
+    async fn fetch_body(runtime: &Runtime) -> (u16, String) {
+        let env = EnvSnapshot::empty();
+        let ctx = zeroship_runtime::RequestCtx::new(zeroship_runtime::CancelFlag::new());
+        runtime.enter_isolate();
+        let outcome =
+            runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
+        runtime.exit_isolate();
+
+        match outcome {
+            zeroship_runtime::FetchOutcome::Response { status, body, .. } => (status, body),
+            zeroship_runtime::FetchOutcome::Pending { rx, .. } => {
+                let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("fetch response timed out")
+                    .expect("pending fetch delivered DispatchError");
+                match settled {
+                    zeroship_runtime::SettledFetch::Response { status, body, .. } => {
+                        (status, body)
+                    }
+                    _ => panic!("expected settled response"),
+                }
+            }
+            _ => panic!("expected buffered fetch response"),
+        }
     }
 
     /// Slice 1a regression guard: every Runtime the worker builds must
@@ -821,6 +846,117 @@ mod tests {
         })
         .join()
         .expect("load_app net policy test thread panicked");
+    }
+
+    #[test]
+    fn load_app_preserves_last_good_isolate_when_descriptor_validation_fails() {
+        std::thread::spawn(|| {
+            let Ok(runtime) = compio::runtime::Runtime::new() else {
+                eprintln!("skipping (cannot create compio runtime)");
+                return;
+            };
+
+            runtime.block_on(async {
+                zeroship_runtime::init::init_v8();
+                let app_id = Uuid::new_v4();
+                init_cache(
+                    4,
+                    KernelConfig {
+                        db_url: None,
+                        kv_url: None,
+                        storage_backend: None,
+                        meter: Arc::new(zeroship_metering::Meter::new()),
+                    },
+                );
+
+                load_app(
+                    app_id,
+                    br#"export default { fetch() { return new Response("last-good"); } }"#,
+                    AppRuntimeLimits::default(),
+                    AppNetPolicy::default(),
+                    Some("deploy-good"),
+                    None,
+                    &EnvSnapshot::empty(),
+                )
+                .expect("initial app loads");
+
+                let before = get_runtime(&app_id).expect("initial runtime cached");
+                assert_eq!(fetch_body(&before).await, (200, "last-good".to_string()));
+
+                let err = load_app(
+                    app_id,
+                    br#"export default { fetch() { return new Response("bad-new"); } }"#,
+                    AppRuntimeLimits::default(),
+                    AppNetPolicy::default(),
+                    Some("deploy-bad"),
+                    Some(
+                        r#"{"version":1,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
+                    ),
+                    &EnvSnapshot::empty(),
+                )
+                .expect_err("corrupt descriptor must fail the reload");
+                assert!(
+                    err.contains("manifest.runtime_descriptor") && err.contains("indexes"),
+                    "error should surface descriptor validation, got: {err}"
+                );
+
+                let after = get_runtime(&app_id).expect("last-good runtime must remain cached");
+                assert_eq!(
+                    fetch_body(&after).await,
+                    (200, "last-good".to_string()),
+                    "failed reload must keep serving the previous isolate"
+                );
+            });
+        })
+        .join()
+        .expect("last-good preserve test thread panicked");
+    }
+
+    #[test]
+    fn first_load_with_corrupt_descriptor_hard_errors_without_cached_isolate() {
+        std::thread::spawn(|| {
+            let Ok(runtime) = compio::runtime::Runtime::new() else {
+                eprintln!("skipping (cannot create compio runtime)");
+                return;
+            };
+
+            runtime.block_on(async {
+                zeroship_runtime::init::init_v8();
+                let app_id = Uuid::new_v4();
+                init_cache(
+                    4,
+                    KernelConfig {
+                        db_url: None,
+                        kv_url: None,
+                        storage_backend: None,
+                        meter: Arc::new(zeroship_metering::Meter::new()),
+                    },
+                );
+
+                let err = load_app(
+                    app_id,
+                    br#"export default { fetch() { return new Response("bad-first"); } }"#,
+                    AppRuntimeLimits::default(),
+                    AppNetPolicy::default(),
+                    Some("deploy-bad"),
+                    Some(
+                        r#"{"version":1,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
+                    ),
+                    &EnvSnapshot::empty(),
+                )
+                .expect_err("first corrupt descriptor load must hard-error");
+                assert!(
+                    err.contains("manifest.runtime_descriptor") && err.contains("indexes"),
+                    "error should surface descriptor validation, got: {err}"
+                );
+                assert!(
+                    get_runtime(&app_id).is_none(),
+                    "first failed load has no previous isolate to preserve"
+                );
+            });
+        })
+        .join()
+        .expect("first-load corrupt descriptor test thread panicked");
     }
 
     #[test]

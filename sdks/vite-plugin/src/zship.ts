@@ -23,7 +23,7 @@ import {
   gzipSync,
   zstdCompressSync,
 } from "node:zlib";
-import { promisify } from "node:util";
+import { promisify, TextDecoder } from "node:util";
 import { create as tarCreate } from "tar";
 import mime from "mime";
 
@@ -34,6 +34,7 @@ import {
 } from "./migrations.js";
 
 const brotliCompressAsync = promisify(brotliCompress);
+const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 // ── Types matching crates/core/src/types.rs ────────────────────────────────
 
@@ -917,9 +918,17 @@ function validateManifest(
 }
 
 function validateRuntimeDescriptorBytes(bytes: Buffer): void {
+  let text: string;
+  try {
+    text = strictUtf8Decoder.decode(bytes);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`zship: runtime_descriptor is not valid UTF-8: ${message}`);
+  }
+
   let value: unknown;
   try {
-    value = JSON.parse(bytes.toString("utf8"));
+    value = JSON.parse(text);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`zship: runtime_descriptor is not valid JSON: ${message}`);

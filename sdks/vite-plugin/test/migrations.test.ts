@@ -245,6 +245,44 @@ describe("op.* runtime schema descriptor bundling (P4a)", () => {
     }
   });
 
+  test("schema.runtime.json with invalid UTF-8 bytes fails at pack time", async () => {
+    const stem = "20240617123000_notes";
+    const descriptor = Buffer.concat([
+      Buffer.from(
+        `{"version":1,"collections":{"notes":{"fields":{"title":{"type":"stri`,
+        "utf8",
+      ),
+      Buffer.from([0xff]),
+      Buffer.from(
+        `ng"}},"options":{"softDelete":false,"versioning":false},"indexes":[]}}}`,
+        "utf8",
+      ),
+    ]);
+    const fx = await makeFixture({
+      "dist/server/index.js":
+        "export default { fetch(){ return new Response('ok'); } }\n",
+      "dist/index.html": "<!doctype html><html></html>\n",
+      [`migrations/${stem}.ts`]: "export function up() {}\n",
+      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
+      "generated/zeroship/schema.runtime.json": descriptor,
+    });
+    try {
+      await assert.rejects(
+        () =>
+          emitZship({
+            root: fx.root,
+            distDir: "dist",
+            silent: true,
+            builtAt: "2026-06-24T00:00:00Z",
+            userHasDefaultFetch: false,
+          }),
+        /runtime_descriptor.*UTF-8|schema\.runtime\.json.*UTF-8/i,
+      );
+    } finally {
+      await fx.cleanup();
+    }
+  });
+
   test("custom genTypesOut dir is honoured by the packer", async () => {
     const fx = await makeFixture({
       "dist/server/index.js":

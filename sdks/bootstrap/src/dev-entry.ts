@@ -192,15 +192,16 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     // **Migration-first cutover (P5 S4)** — dev installs from the generated
     // RuntimeSchemaDescriptor the Vite dev server injects. An absent descriptor
     // is a schema-less app.
-    const descriptor = (globalThis as unknown as {
-      __zsRuntimeDescriptor?: Record<string, unknown>;
-    }).__zsRuntimeDescriptor;
-    const hasDescriptor =
-      descriptor != null &&
-      typeof descriptor === "object" &&
-      Object.keys(descriptor).length > 0;
+    const descriptorGlobal = globalThis as unknown as {
+      __zsRuntimeDescriptor?: unknown;
+    };
+    const hasDescriptor = Object.prototype.hasOwnProperty.call(
+      descriptorGlobal,
+      "__zsRuntimeDescriptor",
+    );
+    const descriptor = descriptorGlobal.__zsRuntimeDescriptor;
     const runtimeDescriptorFields = (
-      value: Record<string, unknown> | undefined,
+      value: unknown,
     ): Record<string, unknown> => {
       if (
         value != null &&
@@ -246,66 +247,60 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       return;
     }
 
-    try {
-      const envDb = options.getEnvDb();
-      if (!envDb) {
-        logError(
-          `[zeroship:dev] schema registration skipped: env.db not available — ` +
-            `is the DbPlugin registered on this runtime?`,
-        );
-        schemaInstalled = true;
-        return;
-      }
-      // Use the caller-supplied loader when available so the install
-      // path runs through the SAME module-loader (Vite's ModuleRunner
-      // in dev) that loaded the user's `t.*` builders. Identity-
-      // matched TypeBuilder is required for `instanceof` checks in
-      // validateRefTargets / normalizeSchema to recognise user-side
-      // type builders. Falls back to the bundled `installSchema` when
-      // no loader is provided (e.g. unit tests).
-      const installSchema = options.getInstallSchema
-        ? await options.getInstallSchema()
-        : bundledInstallSchema;
-      // **P9 §8** — resolve the `__platform` handle via the captured
-      // resolver (the global may already be deleted by the production
-      // runtime-entry; the module-local capture survives). Hand it to
-      // `installSchema` so `registerModel` routes through `__platform`.
-      const platform =
-        typeof platformResolver === "function" ? platformResolver(envDb) : undefined;
-      const { ready } = installSchema(
-        schema as Parameters<typeof installSchema>[0],
-        envDb as Parameters<typeof installSchema>[1],
-        {
-          platform,
-          // **P5 S3** — descriptor mode is the only runtime schema source.
-          descriptor: hasDescriptor ? descriptor : undefined,
-        } as Parameters<typeof installSchema>[2],
+    const envDb = options.getEnvDb();
+    if (!envDb) {
+      logError(
+        `[zeroship:dev] schema registration skipped: env.db not available — ` +
+          `is the DbPlugin registered on this runtime?`,
       );
-      schemaReady = (async () => {
-        await ready;
-        const policyMod = options.getDbInternal
-          ? await options.getDbInternal()
-          : await import("@zeroship/db/internal") as DbInternalModule;
-        const pending = typeof policyMod._flushPendingMaskPolicy === "function"
-          ? policyMod._flushPendingMaskPolicy()
-          : null;
-        if (pending) {
-          const setMaskPolicy = (platform as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
-          if (typeof setMaskPolicy === "function") {
-            await (setMaskPolicy as (
-              this: typeof platform,
-              p: Record<string, readonly string[]>,
-            ) => Promise<unknown>).call(platform, pending);
-          }
-        }
-      })();
-      log(`[zeroship:dev] registered schema from runtime descriptor`);
-    } catch (e) {
-      const err = e as { message?: string };
-      logError(`[zeroship:dev] schema registration failed: ${err?.message ?? e}`);
-    } finally {
       schemaInstalled = true;
+      return;
     }
+    // Use the caller-supplied loader when available so the install
+    // path runs through the SAME module-loader (Vite's ModuleRunner
+    // in dev) that loaded the user's `t.*` builders. Identity-
+    // matched TypeBuilder is required for `instanceof` checks in
+    // validateRefTargets / normalizeSchema to recognise user-side
+    // type builders. Falls back to the bundled `installSchema` when
+    // no loader is provided (e.g. unit tests).
+    const installSchema = options.getInstallSchema
+      ? await options.getInstallSchema()
+      : bundledInstallSchema;
+    // **P9 §8** — resolve the `__platform` handle via the captured
+    // resolver (the global may already be deleted by the production
+    // runtime-entry; the module-local capture survives). Hand it to
+    // `installSchema` so `registerModel` routes through `__platform`.
+    const platform =
+      typeof platformResolver === "function" ? platformResolver(envDb) : undefined;
+    const { ready } = installSchema(
+      schema as Parameters<typeof installSchema>[0],
+      envDb as Parameters<typeof installSchema>[1],
+      {
+        platform,
+        // **P5 S3** — descriptor mode is the only runtime schema source.
+        descriptor: hasDescriptor ? descriptor : undefined,
+      } as Parameters<typeof installSchema>[2],
+    );
+    schemaReady = (async () => {
+      await ready;
+      const policyMod = options.getDbInternal
+        ? await options.getDbInternal()
+        : await import("@zeroship/db/internal") as DbInternalModule;
+      const pending = typeof policyMod._flushPendingMaskPolicy === "function"
+        ? policyMod._flushPendingMaskPolicy()
+        : null;
+      if (pending) {
+        const setMaskPolicy = (platform as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
+        if (typeof setMaskPolicy === "function") {
+          await (setMaskPolicy as (
+            this: typeof platform,
+            p: Record<string, readonly string[]>,
+          ) => Promise<unknown>).call(platform, pending);
+        }
+      }
+    })();
+    log(`[zeroship:dev] registered schema from runtime descriptor`);
+    schemaInstalled = true;
   }
 
   async function dispatchRpcAsync(name: string, input: unknown, ctx: unknown): Promise<unknown> {
