@@ -501,6 +501,50 @@ export default {
 }
 
 #[test]
+fn corrupt_runtime_descriptor_json_fails_isolate_init() {
+    init_v8();
+
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: "export default { fetch(){ return new Response('ok'); } }".into(),
+    }];
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .runtime_descriptor(Some("{not json".to_string()))
+        .build();
+
+    let err = runtime
+        .initialize(&EnvSnapshot::empty())
+        .expect_err("invalid descriptor JSON must fail isolate init");
+    assert!(
+        err.contains("manifest.runtime_descriptor is not valid JSON"),
+        "error should name corrupt runtime descriptor JSON, got: {err}"
+    );
+}
+
+#[test]
+fn non_v1_runtime_descriptor_fails_isolate_init() {
+    init_v8();
+
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: "export default { fetch(){ return new Response('ok'); } }".into(),
+    }];
+    let runtime = Runtime::builder()
+        .modules(modules)
+        .runtime_descriptor(Some(r#"{"version":2,"collections":{}}"#.to_string()))
+        .build();
+
+    let err = runtime
+        .initialize(&EnvSnapshot::empty())
+        .expect_err("non-v1 descriptor must fail isolate init");
+    assert!(
+        err.contains("RuntimeSchemaDescriptor v1"),
+        "error should name the required descriptor version, got: {err}"
+    );
+}
+
+#[test]
 fn bootstrap_module_lacks_legacy_schema_init_symbols() {
     // Stage 4 cleanup: the synthetic SSR entry no longer publishes
     // `__zsSchemaInit`. The runtime bootstrap doesn't either — its

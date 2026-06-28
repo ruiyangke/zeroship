@@ -612,14 +612,16 @@ mod tests {
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            assert!(crate::cache::load_app(
+            crate::cache::load_app(
                 app_id,
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
-                None
-            ));
+                None,
+                &EnvSnapshot::empty(),
+            )
+            .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
@@ -732,14 +734,16 @@ mod tests {
                     meter: meter.clone(),
                 },
             );
-            assert!(crate::cache::load_app(
+            crate::cache::load_app(
                 app_id,
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
-                None
-            ));
+                None,
+                &EnvSnapshot::empty(),
+            )
+            .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
@@ -920,14 +924,16 @@ mod tests {
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
             );
-            assert!(crate::cache::load_app(
+            crate::cache::load_app(
                 app_id,
                 source,
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
-                None
-            ));
+                None,
+                &EnvSnapshot::empty(),
+            )
+            .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             crate::sync::put_env_from_json(
@@ -1235,21 +1241,37 @@ async fn load_on_demand(
     if let Err(e) = crate::sync::put_env_from_json(envs, *app_id, &env_json, app_version.env_version) {
         return Err(format!("env parse failed: {e}"));
     }
+    let env_entry = crate::sync::get_env(envs, app_id)
+        .ok_or_else(|| "env cache missing after env insert".to_string())?;
     // Resolve the bundled RuntimeSchemaDescriptor (if any) so the runtime
-    // sources the schema from the migration fold. Absent → schema-less app.
-    let descriptor_json =
-        crate::sync::runtime_descriptor_json(manifest, &config.blob_store, app_id).await;
-    if !cache::load_app(
+    // sources the schema from the migration fold. Absent with no migrations →
+    // schema-less app; expected-but-missing/corrupt descriptors are load errors.
+    let descriptor_json = match crate::sync::runtime_descriptor_json(
+        manifest,
+        &config.blob_store,
+        app_id,
+    )
+    .await
+    {
+        Ok(json) => json,
+        Err(e) => {
+            crate::sync::remove_env(envs, app_id);
+            return Err(format!("descriptor load failed: {e}"));
+        }
+    };
+    cache::load_app(
         *app_id,
         &bytes,
         app_version.runtime.clone(),
         app_version.net_policy.clone(),
         app_version.deploy_hash.as_deref(),
         descriptor_json.as_deref(),
-    ) {
+        &env_entry.snapshot,
+    )
+    .map_err(|e| {
         crate::sync::remove_env(envs, app_id);
-        return Err("failed to parse bundle".into());
-    }
+        format!("failed to load bundle: {e}")
+    })?;
     // Record what this isolate was loaded against so the reconcile loop
     // can detect future swaps: the deploy_hash (the canonical manifest
     // hash, NOT the per-blob bundle hash) and the env version the env we

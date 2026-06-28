@@ -201,30 +201,45 @@ export function devEntry(options: DevEntryOptions): DevEntry {
       Object.keys(descriptor).length > 0;
     const runtimeDescriptorFields = (
       value: Record<string, unknown> | undefined,
-    ): Record<string, unknown> | undefined => {
+    ): Record<string, unknown> => {
       if (
         value != null &&
         typeof value === "object" &&
         (value as { version?: unknown }).version === 1 &&
         (value as { collections?: unknown }).collections != null &&
-        typeof (value as { collections?: unknown }).collections === "object"
+        typeof (value as { collections?: unknown }).collections === "object" &&
+        !Array.isArray((value as { collections?: unknown }).collections)
       ) {
         const out: Record<string, unknown> = {};
         for (const [name, collection] of Object.entries(
           (value as { collections: Record<string, unknown> }).collections,
         )) {
-          if (collection != null && typeof collection === "object") {
-            const fields = (collection as { fields?: unknown }).fields;
-            if (fields !== undefined) {
-              out[name] = fields;
-            }
+          if (collection == null || typeof collection !== "object" || Array.isArray(collection)) {
+            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} must be an object`);
           }
+          const c = collection as Record<string, unknown>;
+          if (c.fields == null || typeof c.fields !== "object" || Array.isArray(c.fields)) {
+            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} requires object field "fields"`);
+          }
+          if (c.options == null || typeof c.options !== "object" || Array.isArray(c.options)) {
+            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} requires object field "options"`);
+          }
+          const options = c.options as Record<string, unknown>;
+          if (typeof options.softDelete !== "boolean" || typeof options.versioning !== "boolean") {
+            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} options requires boolean "softDelete" and "versioning"`);
+          }
+          if (!Array.isArray(c.indexes)) {
+            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} requires array field "indexes"`);
+          }
+          out[name] = c.fields;
         }
         return out;
       }
-      return undefined;
+      throw new Error(
+        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v1 object with { version: 1, collections }",
+      );
     };
-    const schema = hasDescriptor ? (runtimeDescriptorFields(descriptor) ?? {}) : undefined;
+    const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
 
     if (!schema) {
       schemaInstalled = true;

@@ -189,7 +189,7 @@ pub fn record_migration_to_ir_with_warnings(
     let runtime = Runtime::builder().build();
 
     let ir_json: Result<String, RecordError> = runtime.with_scope(|scope| {
-        zeroship_runtime::init::setup_globals(scope);
+        zeroship_runtime::init::setup_globals(scope).map_err(RecordError::V8)?;
         zeroship_runtime::init::install_text_encoding_streams(scope);
 
         // Expose ONLY the filename-derived name to the adapter. owner_app is
@@ -339,7 +339,7 @@ pub fn lint_migration_determinism(
     let runtime = Runtime::builder().build();
 
     let out_json: Result<String, RecordError> = runtime.with_scope(|scope| {
-        zeroship_runtime::init::setup_globals(scope);
+        zeroship_runtime::init::setup_globals(scope).map_err(RecordError::V8)?;
         zeroship_runtime::init::install_text_encoding_streams(scope);
 
         {

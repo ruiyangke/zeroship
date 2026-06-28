@@ -144,7 +144,7 @@ pub fn eval_schema_to_ir(
         // Install the WinterCG globals the DSL module's dist may touch at
         // eval time (TextEncoder, structuredClone, URL, …). These are the
         // SAME installers the runtime uses for app boot — sandbox parity.
-        zeroship_runtime::init::setup_globals(scope);
+        zeroship_runtime::init::setup_globals(scope).map_err(EvalError::V8)?;
         zeroship_runtime::init::install_headers(scope);
         zeroship_runtime::init::install_native_streams(scope);
         zeroship_runtime::init::install_blob_native(scope);

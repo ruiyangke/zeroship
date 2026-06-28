@@ -331,8 +331,9 @@ describe("installSchema — P4b migration-first descriptor source", () => {
   // to installSchema via `options.descriptor`. These
   // pin: (a) collections + registerModel come FROM the descriptor (not the
   // declared t.* object), with platform system fields passing through the
-  // normaliser fence; (b) an absent / unreadable descriptor installs nothing
-  // instead of falling back to the declared schema.
+  // normaliser fence; (b) an absent descriptor installs nothing instead of
+  // falling back to the declared schema; (c) a present but non-v1 descriptor
+  // is a hard boot error.
   function makeMockNative(calls: Array<{ name: string; schema: Record<string, unknown> }>) {
     return {
       registerModel(name: string, schema: Record<string, unknown>) {
@@ -409,17 +410,22 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     assert.deepEqual(calls.map((c) => c.name), []);
   });
 
-  test("installs no collections when the descriptor is not v1-shaped", async () => {
+  test("throws when the descriptor is not v1-shaped", () => {
     const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
     const native = makeMockNative(calls);
-    const { ready } = installSchema(
-      { todos: { title: t.string().required() } },
-      native,
-      { descriptor: {} } as never,
+    assert.throws(
+      () =>
+        installSchema(
+          { todos: { title: t.string().required() } },
+          native,
+          { descriptor: {} } as never,
+        ),
+      (err: unknown) => {
+        assert.equal((err as { code?: string }).code, "INVALID_RUNTIME_DESCRIPTOR");
+        assert.match((err as Error).message, /RuntimeSchemaDescriptor/);
+        return true;
+      },
     );
-    await ready;
-    const handle = native as unknown as Record<string, unknown>;
-    assert.equal(handle.todos, undefined, "unreadable descriptor -> no declared fallback");
     assert.deepEqual(calls.map((c) => c.name), []);
   });
 
@@ -525,7 +531,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     assert.equal(res.error?.code, "OPTIMISTIC_CONCURRENCY");
   });
 
-  test("does not recover legacy descriptor options from declaredSchemas", async () => {
+  test("does not recover legacy descriptor options from declaredSchemas", () => {
     const ops: Array<{ name: string; op: string }> = [];
     const native = makeOpRecordingNative(ops);
     const descriptor = {
@@ -534,23 +540,22 @@ describe("installSchema — P4b migration-first descriptor source", () => {
         title: { type: "string", required: true },
       },
     };
-    const { ready } = installSchema(
-      descriptor as never,
-      native,
-      {
-        descriptor,
-        declaredSchemas: {
-          posts: schema({ title: t.string().required() }).softDelete(),
-        },
-      } as never,
-    );
-    await ready;
-
-    const handle = native as unknown as Record<string, unknown>;
-    assert.equal(
-      handle.posts,
-      undefined,
-      "legacy field-only descriptor plus declaredSchemas side channel must no longer install a collection",
+    assert.throws(
+      () =>
+        installSchema(
+          descriptor as never,
+          native,
+          {
+            descriptor,
+            declaredSchemas: {
+              posts: schema({ title: t.string().required() }).softDelete(),
+            },
+          } as never,
+        ),
+      (err: unknown) => {
+        assert.equal((err as { code?: string }).code, "INVALID_RUNTIME_DESCRIPTOR");
+        return true;
+      },
     );
     assert.deepEqual(ops, []);
   });

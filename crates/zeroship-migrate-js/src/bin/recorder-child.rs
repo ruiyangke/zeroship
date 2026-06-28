@@ -332,7 +332,7 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
     ];
 
     let ir_json: Result<String, String> = runtime.with_scope(|scope| {
-        zeroship_runtime::init::setup_globals(scope);
+        zeroship_runtime::init::setup_globals(scope)?;
         zeroship_runtime::init::install_text_encoding_streams(scope);
 
         {

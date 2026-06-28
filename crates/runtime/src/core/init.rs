@@ -1098,7 +1098,7 @@ pub fn load_polyfills_and_modules(
     modules: &[crate::modules::ModuleEntry],
     _plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
 ) -> Result<v8::Global<v8::Value>, String> {
-    setup_globals(scope);
+    setup_globals(scope)?;
 
     // Order matters here:
     //
@@ -1861,7 +1861,7 @@ fn set_interval_callback(
 /// Each free-function V8 callback is named `{fn}_callback` and lives
 /// alongside the helper it wraps; native classes come from
 /// `#[v8_class]` impl blocks via their per-class `install` fn.
-pub fn setup_globals(scope: &mut v8::PinScope) {
+pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
     let global = scope.get_current_context().global(scope);
 
     // global = globalThis (Node.js compat — many npm packages reference `global`)
@@ -2045,8 +2045,9 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // resolves its blob and stamps the JSON onto `RuntimeState`. We parse it
     // here and expose the resulting v1 `{ version, collections }` descriptor as
     // a global so `@zeroship/bootstrap`'s entry sources the schema from the
-    // migration fold. Absent (`None`) means schema-less app.
-    // S6 promotes parse failure to a hard boot error; S4 logs and skips install.
+    // migration fold. Absent (`None`) means schema-less app. A present but
+    // corrupt/non-v1 descriptor is a hard boot error, never a schema-less
+    // fallback.
     {
         let descriptor_json = {
             let state: crate::state::SharedState = scope
@@ -2057,18 +2058,15 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
             json
         };
         if let Some(json) = descriptor_json {
-            match v8::String::new(scope, &json).and_then(|s| v8::json::parse(scope, s)) {
-                Some(parsed) if parsed.is_object() => {
-                    let key = v8::String::new(scope, "__zsRuntimeDescriptor").unwrap();
-                    global.set(scope, key.into(), parsed);
-                }
-                _ => {
-                    tracing::warn!(
-                        "runtime: failed to parse manifest.runtime_descriptor JSON; \
-                         schema descriptor unavailable"
-                    );
-                }
-            }
+            validate_runtime_descriptor_json(&json)?;
+            let parsed = v8::String::new(scope, &json)
+                .and_then(|s| v8::json::parse(scope, s))
+                .ok_or_else(|| {
+                    "runtime: failed to inject manifest.runtime_descriptor after JSON validation"
+                        .to_string()
+                })?;
+            let key = v8::String::new(scope, "__zsRuntimeDescriptor").unwrap();
+            global.set(scope, key.into(), parsed);
         }
     }
 
@@ -2352,6 +2350,136 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
     // `load_polyfills_and_modules` immediately after fetch.js runs.
     // The class itself lives in `crate::headers`; it replaces the JS
     // polyfill that used to ship in `embed/fetch.js`. WPT pass: 98/0/1.
+    Ok(())
+}
+
+fn validate_runtime_descriptor_json(json: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| format!("runtime: manifest.runtime_descriptor is not valid JSON: {e}"))?;
+    validate_runtime_descriptor_value(&value)
+}
+
+fn validate_runtime_descriptor_value(value: &serde_json::Value) -> Result<(), String> {
+    let Some(root) = value.as_object() else {
+        return Err("runtime: manifest.runtime_descriptor must be a JSON object".into());
+    };
+    if root.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(
+            "runtime: manifest.runtime_descriptor must be RuntimeSchemaDescriptor v1 \
+             (expected version: 1)"
+                .into(),
+        );
+    }
+    let Some(collections) = root
+        .get("collections")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Err(
+            "runtime: manifest.runtime_descriptor v1 requires object field `collections`"
+                .into(),
+        );
+    };
+
+    for (name, collection) in collections {
+        let Some(collection) = collection.as_object() else {
+            return Err(format!(
+                "runtime: manifest.runtime_descriptor collection {name:?} must be an object"
+            ));
+        };
+        let Some(fields) = collection
+            .get("fields")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Err(format!(
+                "runtime: manifest.runtime_descriptor collection {name:?} requires object field `fields`"
+            ));
+        };
+        for (field_name, field) in fields {
+            let Some(field) = field.as_object() else {
+                return Err(format!(
+                    "runtime: manifest.runtime_descriptor collection {name:?} field {field_name:?} must be an object"
+                ));
+            };
+            if !field.get("type").is_some_and(serde_json::Value::is_string) {
+                return Err(format!(
+                    "runtime: manifest.runtime_descriptor collection {name:?} field {field_name:?} requires string field `type`"
+                ));
+            }
+        }
+
+        let Some(options) = collection
+            .get("options")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Err(format!(
+                "runtime: manifest.runtime_descriptor collection {name:?} requires object field `options`"
+            ));
+        };
+        if !options
+            .get("softDelete")
+            .is_some_and(serde_json::Value::is_boolean)
+        {
+            return Err(format!(
+                "runtime: manifest.runtime_descriptor collection {name:?} options requires boolean field `softDelete`"
+            ));
+        }
+        if !options
+            .get("versioning")
+            .is_some_and(serde_json::Value::is_boolean)
+        {
+            return Err(format!(
+                "runtime: manifest.runtime_descriptor collection {name:?} options requires boolean field `versioning`"
+            ));
+        }
+        if let Some(strictness) = options.get("strictness") {
+            match strictness.as_str() {
+                Some("strict" | "lenient" | "off") => {}
+                _ => {
+                    return Err(format!(
+                        "runtime: manifest.runtime_descriptor collection {name:?} options.strictness must be \"strict\", \"lenient\", or \"off\""
+                    ));
+                }
+            }
+        }
+
+        let Some(indexes) = collection.get("indexes").and_then(serde_json::Value::as_array) else {
+            return Err(format!(
+                "runtime: manifest.runtime_descriptor collection {name:?} requires array field `indexes`"
+            ));
+        };
+        for (i, index) in indexes.iter().enumerate() {
+            let Some(index) = index.as_object() else {
+                return Err(format!(
+                    "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}] must be an object"
+                ));
+            };
+            if !index.get("name").is_some_and(serde_json::Value::is_string) {
+                return Err(format!(
+                    "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}] requires string field `name`"
+                ));
+            }
+            let Some(index_fields) = index.get("fields").and_then(serde_json::Value::as_array)
+            else {
+                return Err(format!(
+                    "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}] requires array field `fields`"
+                ));
+            };
+            if !index_fields.iter().all(serde_json::Value::is_string) {
+                return Err(format!(
+                    "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}].fields must contain only strings"
+                ));
+            }
+            if let Some(unique) = index.get("unique") {
+                if !unique.is_boolean() {
+                    return Err(format!(
+                        "runtime: manifest.runtime_descriptor collection {name:?} indexes[{i}].unique must be boolean when present"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Install native `Headers` on `globalThis`. Called from

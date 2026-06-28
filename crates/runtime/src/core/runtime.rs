@@ -265,6 +265,17 @@ impl Runtime {
         self.modules.as_ref().as_slice()
     }
 
+    /// Initialize the module graph without invoking the app's `fetch` handler.
+    ///
+    /// The worker calls this at load time so corrupt boot artifacts (including
+    /// a present-but-invalid `manifest.runtime_descriptor`) reject the load
+    /// instead of producing a stored schema-less isolate that fails later.
+    pub fn initialize(&self, env: &crate::EnvSnapshot) -> Result<(), String> {
+        self.inner
+            .borrow_mut()
+            .initialize_modules(self.modules.as_slice(), env)
+    }
+
     /// Multi-tenant identity, if the builder was supplied one.
     /// Used by `crate::rpc::abort` to key the in-flight controller
     /// registry by `(app_id, request_id)`.
@@ -1509,6 +1520,19 @@ impl RuntimeInner {
         }
     }
 
+    pub(crate) fn initialize_modules(
+        &mut self,
+        modules: &[ModuleEntry],
+        env: &crate::EnvSnapshot,
+    ) -> Result<(), String> {
+        self.state.borrow_mut().set_env_snapshot(env);
+        self.ensure_initialized(modules);
+        match &self.init_error {
+            Some(err) => Err(format!("module init failed: {err}")),
+            None => Ok(()),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // CPU timer arm/disarm
     // -----------------------------------------------------------------------
@@ -1619,18 +1643,16 @@ impl RuntimeInner {
         // `env_json` for the degraded fallback path in `zs_env_callback`
         // (only reached if `ensure_initialized` has not yet completed,
         // which shouldn't happen under the normal dispatch flow).
-        self.state.borrow_mut().set_env_snapshot(env);
-
-        self.ensure_initialized(modules);
+        let init_result = self.initialize_modules(modules, env);
 
         if self.fetch_handler_fn.is_none() {
             // If module init failed (parse/runtime error) we have a real
             // diagnostic; surface it as 500 so the deployer sees the cause
             // rather than the symptom. Fall through to 404 only when the
             // module loaded but didn't export `default.fetch`.
-            if let Some(err) = &self.init_error {
+            if let Err(err) = init_result {
                 let payload = serde_json::json!({
-                    "message": format!("module init failed: {err}"),
+                    "message": err,
                     "name": "Error",
                 });
                 return crate::FetchOutcome::Response {

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_plugin_storage::StorageBackendConfig;
-use zeroship_runtime::{HostPort, ModuleEntry, NetPolicy};
+use zeroship_runtime::{EnvSnapshot, HostPort, ModuleEntry, NetPolicy};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
@@ -250,12 +250,13 @@ pub fn load_app(
     app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
-) -> bool {
+    env: &EnvSnapshot,
+) -> Result<(), String> {
     let source = match std::str::from_utf8(bundle_bytes) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(app_id = %app_id, error = %e, "worker: bundle is not UTF-8");
-            return false;
+            return Err(format!("bundle is not UTF-8: {e}"));
         }
     };
     let modules: Vec<ModuleEntry> = vec![ModuleEntry {
@@ -275,7 +276,7 @@ pub fn load_app(
                     max_size = cache.max_size,
                     "worker: isolate cache full and every isolate is leased; load deferred"
                 );
-                return false;
+                return Err("isolate cache full and every isolate is leased; load deferred".into());
             }
         }
 
@@ -318,6 +319,9 @@ pub fn load_app(
             builder = builder.meter(meter);
         }
         let runtime = builder.build();
+        runtime
+            .initialize(env)
+            .map_err(|e| format!("failed to initialize app runtime: {e}"))?;
 
         // Exit isolate so other isolates can be created/entered on this thread.
         // The handler will enter/exit around each call_fetch_handler call.
@@ -335,7 +339,7 @@ pub fn load_app(
             },
         );
 
-        true
+        Ok(())
     })
 }
 
@@ -789,7 +793,7 @@ mod tests {
                         meter: Arc::new(zeroship_metering::Meter::new()),
                     },
                 );
-                assert!(load_app(
+                load_app(
                     app_id,
                     br#"export default { fetch() { return new Response("ok"); } }"#,
                     AppRuntimeLimits::default(),
@@ -804,7 +808,9 @@ mod tests {
                     },
                     None,
                     None,
-                ));
+                    &EnvSnapshot::empty(),
+                )
+                .expect("app loads");
                 let runtime = get_runtime(&app_id).expect("runtime loaded");
                 let state = runtime.state();
                 let state = state.borrow();

@@ -35,36 +35,46 @@ pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<St
 /// content-addressed blob; we read it via `BlobStore` so the runtime can
 /// expose it as `globalThis.__zsRuntimeDescriptor`.
 ///
-/// Returns `None` when:
-///   - the manifest carries no `runtime_descriptor` (app ships no
-///     migrations — the bootstrap entry installs no schema), or
-///   - the blob read / UTF-8 decode fails (schema-less for now; S6 promotes
-///     corrupt descriptors to hard load errors).
+/// Returns `Ok(None)` only when the manifest has no migrations and no
+/// descriptor (schema-less app). A manifest with migrations but no descriptor,
+/// a missing descriptor blob, or non-UTF-8 descriptor bytes is a hard load
+/// error; silently booting schema-less would hide a broken build/deploy.
 pub(crate) async fn runtime_descriptor_json(
     manifest: &Manifest,
     blob_store: &Arc<dyn BlobStore>,
     app_id: &Uuid,
-) -> Option<String> {
-    let hash = manifest.runtime_descriptor.as_ref()?.hash.clone();
+) -> Result<Option<String>, String> {
+    let Some(desc) = manifest.runtime_descriptor.as_ref() else {
+        if manifest.migrations.is_empty() {
+            return Ok(None);
+        }
+        return Err(format!(
+            "manifest has {} migration(s) but no runtime_descriptor",
+            manifest.migrations.len()
+        ));
+    };
+    let hash = desc.hash.clone();
     match blob_store.get_blob(&hash).await {
         Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
-            Ok(s) => Some(s),
+            Ok(s) => Ok(Some(s)),
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     app_id = %app_id,
+                    descriptor_hash = %hash,
                     error = %e,
-                    "worker-sync: runtime_descriptor blob is not UTF-8; loading schema-less app"
+                    "worker-sync: runtime_descriptor blob is not UTF-8; refusing to load app"
                 );
-                None
+                Err(format!("runtime_descriptor blob {hash} is not UTF-8: {e}"))
             }
         },
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 app_id = %app_id,
+                descriptor_hash = %hash,
                 error = %e,
-                "worker-sync: runtime_descriptor blob fetch failed; loading schema-less app"
+                "worker-sync: runtime_descriptor blob fetch failed; refusing to load app"
             );
-            None
+            Err(format!("runtime_descriptor blob {hash} fetch failed: {e}"))
         }
     }
 }
@@ -325,33 +335,48 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             // any) so the runtime sources the schema from the
                             // migration fold. Absent → schema-less app.
                             let descriptor_json = match info.manifest.as_ref() {
-                                Some(m) => {
-                                    runtime_descriptor_json(m, &config.blob_store, local_id).await
-                                }
+                                Some(m) => match runtime_descriptor_json(m, &config.blob_store, local_id).await {
+                                    Ok(json) => json,
+                                    Err(e) => {
+                                        tracing::warn!(app_id = %local_id, error = %e, "worker-sync: descriptor load failed");
+                                        continue;
+                                    }
+                                },
                                 None => None,
                             };
-                            if cache::load_app(
+                            let Some(env_entry) = get_env(envs, local_id) else {
+                                tracing::warn!(app_id = %local_id, "worker-sync: env cache missing before app load");
+                                continue;
+                            };
+                            match cache::load_app(
                                 *local_id,
                                 &bytes,
                                 info.runtime.clone(),
                                 info.net_policy.clone(),
                                 info.deploy_hash.as_deref(),
                                 descriptor_json.as_deref(),
+                                &env_entry.snapshot,
                             ) {
-                                // Record what the fresh isolate was loaded
-                                // against — the reload decision above keys
-                                // off this on the next cycle.
-                                cache::set_loaded_meta(*local_id, cache::LoadedMeta {
-                                    deploy_hash: info.deploy_hash.clone(),
-                                    env_version: info.env_version,
-                                    net_policy: info.net_policy.clone(),
-                                });
-                                tracing::info!(
-                                    app_id = %local_id,
-                                    plan_id = %info.plan_id,
-                                    blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
-                                    "worker-sync: app updated"
-                                );
+                                Ok(()) => {
+                                    // Record what the fresh isolate was loaded
+                                    // against — the reload decision above keys
+                                    // off this on the next cycle.
+                                    cache::set_loaded_meta(*local_id, cache::LoadedMeta {
+                                        deploy_hash: info.deploy_hash.clone(),
+                                        env_version: info.env_version,
+                                        net_policy: info.net_policy.clone(),
+                                    });
+                                    tracing::info!(
+                                        app_id = %local_id,
+                                        plan_id = %info.plan_id,
+                                        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+                                        "worker-sync: app updated"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(app_id = %local_id, error = %e, "worker-sync: app load failed");
+                                    continue;
+                                }
                             }
                         }
                         Err(e) => {
@@ -538,7 +563,9 @@ mod tests {
     use ntex::http::StatusCode;
     use ntex::web::{self, test};
     use sha2::{Digest, Sha256};
-    use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+    use zeroship_bundle::{
+        BlobStore, LocalDiskBlobStore, Manifest, MigrationFileEntry, RuntimeDescriptorEntry,
+    };
     use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits, NetAllowEntry};
 
     use super::*;
@@ -675,6 +702,88 @@ mod tests {
         path
     }
 
+    fn one_migration() -> MigrationFileEntry {
+        MigrationFileEntry {
+            name: "V0001__create_notes.sql".to_string(),
+            hash: "b".repeat(64),
+        }
+    }
+
+    #[test]
+    fn runtime_descriptor_absent_without_migrations_is_schema_less() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+        runtime.block_on(async {
+            let root = tmpdir("descriptor-schema-less");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
+            let app_id = Uuid::new_v4();
+            let manifest = Manifest::default();
+
+            let descriptor = runtime_descriptor_json(&manifest, &blob_store, &app_id)
+                .await
+                .expect("schema-less manifest must resolve cleanly");
+            assert_eq!(descriptor, None);
+            std::fs::remove_dir_all(root).ok();
+        });
+    }
+
+    #[test]
+    fn runtime_descriptor_missing_for_migrations_is_load_error() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+        runtime.block_on(async {
+            let root = tmpdir("descriptor-missing-slot");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
+            let app_id = Uuid::new_v4();
+            let mut manifest = Manifest::default();
+            manifest.migrations = vec![one_migration()];
+
+            let err = runtime_descriptor_json(&manifest, &blob_store, &app_id)
+                .await
+                .expect_err("migrations without descriptor must fail load");
+            assert!(
+                err.contains("migration") && err.contains("runtime_descriptor"),
+                "error should name missing descriptor for migrations, got: {err}"
+            );
+            std::fs::remove_dir_all(root).ok();
+        });
+    }
+
+    #[test]
+    fn runtime_descriptor_blob_fetch_failure_is_load_error() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+        runtime.block_on(async {
+            let root = tmpdir("descriptor-missing-blob");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
+            let app_id = Uuid::new_v4();
+            let descriptor_hash = "c".repeat(64);
+            let mut manifest = Manifest::default();
+            manifest.migrations = vec![one_migration()];
+            manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
+                hash: descriptor_hash.clone(),
+            });
+
+            let err = runtime_descriptor_json(&manifest, &blob_store, &app_id)
+                .await
+                .expect_err("missing descriptor blob must fail load");
+            assert!(
+                err.contains(&descriptor_hash) && err.contains("fetch failed"),
+                "error should name missing descriptor blob, got: {err}"
+            );
+            std::fs::remove_dir_all(root).ok();
+        });
+    }
+
     fn dispatch_req(app_id: &Uuid) -> ntex::http::Request {
         let envelope = serde_json::json!({
             "method": "GET",
@@ -748,25 +857,6 @@ mod tests {
             let blob_hash = hex::encode(Sha256::digest(source));
             blob_store.put_blob(&blob_hash, source).await.expect("seed blob");
 
-            // Load the app the way the worker does, recording that the
-            // isolate was hydrated against env version 1.
-            assert!(crate::cache::load_app(
-                app_id,
-                source,
-                AppRuntimeLimits::default(),
-                AppNetPolicy::default(),
-                None,
-                None,
-            ));
-            crate::cache::set_loaded_meta(
-                app_id,
-                crate::cache::LoadedMeta {
-                    deploy_hash: Some("deploy-h1".to_string()),
-                    env_version: 1,
-                    net_policy: AppNetPolicy::default(),
-                },
-            );
-
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
             put_env_from_json(
                 &envs,
@@ -775,6 +865,28 @@ mod tests {
                 1,
             )
             .expect("insert env v1");
+            let env_v1 = get_env(&envs, &app_id).expect("env v1 cached");
+
+            // Load the app the way the worker does, recording that the
+            // isolate was hydrated against env version 1.
+            crate::cache::load_app(
+                app_id,
+                source,
+                AppRuntimeLimits::default(),
+                AppNetPolicy::default(),
+                None,
+                None,
+                &env_v1.snapshot,
+            )
+            .expect("app loads");
+            crate::cache::set_loaded_meta(
+                app_id,
+                crate::cache::LoadedMeta {
+                    deploy_hash: Some("deploy-h1".to_string()),
+                    env_version: 1,
+                    net_policy: AppNetPolicy::default(),
+                },
+            );
 
             let logs = crate::logs::new_store();
             let config = Arc::new(crate::WorkerConfig {

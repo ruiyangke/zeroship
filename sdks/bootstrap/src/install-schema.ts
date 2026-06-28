@@ -140,38 +140,109 @@ export type NormalizedSchema = Record<string, FieldDef>;
 type RuntimeStrictness = "strict" | "lenient" | "off";
 type RuntimeCollectionDescriptorV1 = {
   fields: Record<string, FieldDef>;
-  options?: {
-    softDelete?: boolean;
-    versioning?: boolean;
+  options: {
+    softDelete: boolean;
+    versioning: boolean;
     strictness?: RuntimeStrictness;
   };
-  indexes?: readonly NamedIndexSpec[];
+  indexes: readonly NamedIndexSpec[];
 };
 export type RuntimeSchemaDescriptor = {
   version: 1;
   collections: Record<string, RuntimeCollectionDescriptorV1>;
 };
 
-function runtimeDescriptorV1(
+function assertRuntimeDescriptorV1(
   descriptor: RuntimeSchemaDescriptor | undefined,
 ): { version: 1; collections: Record<string, RuntimeCollectionDescriptorV1> } | null {
+  if (descriptor === undefined) return null;
   if (
-    descriptor !== undefined &&
-    descriptor !== null &&
-    typeof descriptor === "object" &&
-    (descriptor as { version?: unknown }).version === 1 &&
-    typeof (descriptor as { collections?: unknown }).collections === "object" &&
-    (descriptor as { collections?: unknown }).collections !== null
+    descriptor === null ||
+    typeof descriptor !== "object" ||
+    (descriptor as { version?: unknown }).version !== 1 ||
+    typeof (descriptor as { collections?: unknown }).collections !== "object" ||
+    (descriptor as { collections?: unknown }).collections === null
   ) {
-    return descriptor as { version: 1; collections: Record<string, RuntimeCollectionDescriptorV1> };
+    throw Object.assign(
+      new Error(
+        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v1 object with { version: 1, collections }",
+      ),
+      { code: "INVALID_RUNTIME_DESCRIPTOR" as const },
+    );
   }
-  return null;
+
+  const collections = (descriptor as { collections: Record<string, unknown> }).collections;
+  for (const [name, raw] of Object.entries(collections)) {
+    if (raw === null || typeof raw !== "object") {
+      throw invalidRuntimeDescriptor(`collection ${JSON.stringify(name)} must be an object`);
+    }
+    const collection = raw as Record<string, unknown>;
+    if (collection.fields === null || typeof collection.fields !== "object" || Array.isArray(collection.fields)) {
+      throw invalidRuntimeDescriptor(`collection ${JSON.stringify(name)} requires object field "fields"`);
+    }
+    for (const [fieldName, field] of Object.entries(collection.fields as Record<string, unknown>)) {
+      if (
+        field === null ||
+        typeof field !== "object" ||
+        typeof (field as { type?: unknown }).type !== "string"
+      ) {
+        throw invalidRuntimeDescriptor(
+          `collection ${JSON.stringify(name)} field ${JSON.stringify(fieldName)} requires object FieldDef with string "type"`,
+        );
+      }
+    }
+    if (collection.options === null || typeof collection.options !== "object" || Array.isArray(collection.options)) {
+      throw invalidRuntimeDescriptor(`collection ${JSON.stringify(name)} requires object field "options"`);
+    }
+    const options = collection.options as Record<string, unknown>;
+    if (typeof options.softDelete !== "boolean" || typeof options.versioning !== "boolean") {
+      throw invalidRuntimeDescriptor(
+        `collection ${JSON.stringify(name)} options requires boolean "softDelete" and "versioning"`,
+      );
+    }
+    if (
+      options.strictness !== undefined &&
+      options.strictness !== "strict" &&
+      options.strictness !== "lenient" &&
+      options.strictness !== "off"
+    ) {
+      throw invalidRuntimeDescriptor(
+        `collection ${JSON.stringify(name)} options.strictness must be "strict", "lenient", or "off"`,
+      );
+    }
+    if (!Array.isArray(collection.indexes)) {
+      throw invalidRuntimeDescriptor(`collection ${JSON.stringify(name)} requires array field "indexes"`);
+    }
+    for (const [i, index] of collection.indexes.entries()) {
+      if (index === null || typeof index !== "object") {
+        throw invalidRuntimeDescriptor(`collection ${JSON.stringify(name)} indexes[${i}] must be an object`);
+      }
+      const idx = index as Record<string, unknown>;
+      if (typeof idx.name !== "string" || !Array.isArray(idx.fields) || !idx.fields.every((f) => typeof f === "string")) {
+        throw invalidRuntimeDescriptor(
+          `collection ${JSON.stringify(name)} indexes[${i}] requires string "name" and string[] "fields"`,
+        );
+      }
+      if (idx.unique !== undefined && typeof idx.unique !== "boolean") {
+        throw invalidRuntimeDescriptor(`collection ${JSON.stringify(name)} indexes[${i}].unique must be boolean`);
+      }
+    }
+  }
+
+  return descriptor as { version: 1; collections: Record<string, RuntimeCollectionDescriptorV1> };
+}
+
+function invalidRuntimeDescriptor(detail: string): Error & { code: "INVALID_RUNTIME_DESCRIPTOR" } {
+  return Object.assign(
+    new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: ${detail}`),
+    { code: "INVALID_RUNTIME_DESCRIPTOR" as const },
+  );
 }
 
 function runtimeDescriptorFields(
   descriptor: RuntimeSchemaDescriptor | undefined,
 ): Record<string, Record<string, FieldDef>> | null {
-  const v1 = runtimeDescriptorV1(descriptor);
+  const v1 = assertRuntimeDescriptorV1(descriptor);
   if (v1 !== null) {
     const out: Record<string, Record<string, FieldDef>> = {};
     for (const [name, collection] of Object.entries(v1.collections)) {
@@ -1067,12 +1138,11 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const native = env;
   const namingStrategy = options?.naming ?? naming.snakeCase;
 
-  // **Migration-first cutover (P5 S3)** — descriptor v1 is the only runtime
-  // schema source. The declared first argument is ignored; a missing or
-  // unreadable descriptor installs no collections (S6 turns corrupt descriptors
-  // into hard boot errors).
+  // **Migration-first cutover (P5 S6)** — descriptor v1 is the only runtime
+  // schema source. The declared first argument is ignored. An absent descriptor
+  // installs no collections; a present but non-v1 descriptor is a hard error.
   const descriptor = options?.descriptor;
-  const descriptorV1 = runtimeDescriptorV1(descriptor);
+  const descriptorV1 = assertRuntimeDescriptorV1(descriptor);
   const descriptorFields = runtimeDescriptorFields(descriptor);
   const source: T =
     descriptorFields !== null

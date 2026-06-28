@@ -167,10 +167,10 @@ pub struct Manifest {
     /// reads this descriptor instead — making the migration set the SOLE source
     /// of schema truth.
     ///
-    /// **P4a is purely additive: nothing reads this slot yet.** It only gives the
-    /// `.zship` the capacity to carry the descriptor so P4b can flip the runtime
-    /// read path. `None` (the default; `skip_serializing_if`) when the app ships
-    /// no migrations / no descriptor — pack still succeeds.
+    /// `None` (the default; `skip_serializing_if`) is valid only when the app
+    /// ships no migrations. A manifest with `migrations[]` but no descriptor is
+    /// internally inconsistent: the migration fold should have produced this
+    /// artifact, and booting schema-less would hide a broken build/deploy.
     ///
     /// `validate()` enforces the blob-hash format only; the descriptor's JSON
     /// shape is the producer's (`gen-types`) and consumer's (P4b runtime) contract,
@@ -607,11 +607,20 @@ impl Manifest {
                 ));
             }
         }
-        // Runtime schema descriptor (migration-first cutover): the
-        // `schema.runtime.json` blob is content-addressed exactly like a
-        // migration body, so the only wire-format invariant is the hash format.
-        // The descriptor's JSON shape is the producer/consumer contract, not
-        // this struct's — `validate()` does not parse it.
+        // Runtime schema descriptor (migration-first cutover): an app that
+        // ships migrations must also ship the folded runtime descriptor. Apps
+        // with no migrations remain validly schema-less.
+        if !self.migrations.is_empty() && self.runtime_descriptor.is_none() {
+            return Err(
+                "manifest.migrations is non-empty but runtime_descriptor is missing; \
+                 apps with migrations must carry schema.runtime.json"
+                    .into(),
+            );
+        }
+        // The `schema.runtime.json` blob is content-addressed exactly like a
+        // migration body, so this layer enforces descriptor presence and hash
+        // format. The descriptor's JSON shape is checked by the runtime when it
+        // injects `__zsRuntimeDescriptor`.
         if let Some(desc) = &self.runtime_descriptor {
             if !is_sha256_hex(&desc.hash) {
                 return Err(format!(
@@ -918,10 +927,17 @@ mod migration_validation_tests {
                 hash: "b".repeat(64),
             },
         ];
+        m.runtime_descriptor = Some(RuntimeDescriptorEntry {
+            hash: "c".repeat(64),
+        });
         m.validate().expect("valid migrations accepted");
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.migrations, m.migrations, "migrations round-trip in order");
+        assert_eq!(
+            back.runtime_descriptor, m.runtime_descriptor,
+            "runtime descriptor round-trips with migrations"
+        );
     }
 
     #[test]
@@ -1005,6 +1021,20 @@ mod migration_validation_tests {
         // A manifest without `runtime_descriptor` deserializes to None.
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert!(back.runtime_descriptor.is_none());
+    }
+
+    #[test]
+    fn migrations_require_runtime_descriptor() {
+        let mut m = base();
+        m.migrations = vec![MigrationFileEntry {
+            name: "V0001__create_users.sql".into(),
+            hash: "a".repeat(64),
+        }];
+        let err = m.validate().unwrap_err();
+        assert!(
+            err.contains("runtime_descriptor") && err.contains("migrations"),
+            "migration-bearing manifest must require a runtime descriptor, got {err}"
+        );
     }
 
     #[test]

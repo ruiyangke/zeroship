@@ -52,6 +52,20 @@ const COMMITTED_IR = `{
 }
 `;
 
+const RUNTIME_DESCRIPTOR = `{
+  "version": 1,
+  "collections": {
+    "notes": {
+      "fields": {
+        "title": { "type": "string" }
+      },
+      "options": { "softDelete": false, "versioning": false, "strictness": "strict" },
+      "indexes": []
+    }
+  }
+}
+`;
+
 describe("op.* migration discovery + bundling (A4)", () => {
   test("discoverMigrations: committed .ir.json hash equals on-disk sha256 (verbatim)", async () => {
     const stem = "20240617123000_notes";
@@ -104,6 +118,7 @@ describe("op.* migration discovery + bundling (A4)", () => {
       "dist/index.html": "<!doctype html><html></html>\n",
       [`migrations/${stem}.ts`]: "export function up() {}\n",
       [`migrations/${stem}.ir.json`]: COMMITTED_IR,
+      "generated/zeroship/schema.runtime.json": RUNTIME_DESCRIPTOR,
     });
     try {
       const onDisk = await fs.readFile(join(fx.root, "migrations", `${stem}.ir.json`));
@@ -156,26 +171,14 @@ describe("op.* migration discovery + bundling (A4)", () => {
   });
 });
 
-// Migration-first P4a — the runtime schema descriptor (`schema.runtime.json`)
-// the packer reads from the gen-types output dir and carries as the manifest's
-// content-addressed `runtime_descriptor` blob. Purely additive: nothing reads
-// it yet (P4b flips the runtime).
+// Migration-first descriptor bundling — the runtime schema descriptor
+// (`schema.runtime.json`) the packer reads from the gen-types output dir and
+// carries as the manifest's content-addressed `runtime_descriptor` blob.
+// Migration-bearing apps must carry it; no-migration apps remain schema-less.
 describe("op.* runtime schema descriptor bundling (P4a)", () => {
   // The exact JSON gen-types' schema.runtime.json holds:
   // RuntimeSchemaDescriptor v1.
-  const DESCRIPTOR = `{
-  "version": 1,
-  "collections": {
-    "notes": {
-      "fields": {
-        "title": { "type": "string" }
-      },
-      "options": { "softDelete": false, "versioning": false, "strictness": "strict" },
-      "indexes": []
-    }
-  }
-}
-`;
+  const DESCRIPTOR = RUNTIME_DESCRIPTOR;
 
   test("emitZship carries runtime_descriptor + stages the descriptor blob", async () => {
     const stem = "20240617123000_notes";
@@ -216,7 +219,7 @@ describe("op.* runtime schema descriptor bundling (P4a)", () => {
     }
   });
 
-  test("no schema.runtime.json → runtime_descriptor undefined, pack still succeeds", async () => {
+  test("migrations without schema.runtime.json fail the build", async () => {
     const stem = "20240617123000_notes";
     const fx = await makeFixture({
       "dist/server/index.js":
@@ -227,17 +230,15 @@ describe("op.* runtime schema descriptor bundling (P4a)", () => {
       // No generated/zeroship/schema.runtime.json on disk.
     });
     try {
-      const res = await emitZship({
-        root: fx.root,
-        distDir: "dist",
-        silent: true,
-        builtAt: "2026-06-24T00:00:00Z",
-        userHasDefaultFetch: false,
-      });
-      assert.equal(
-        res.manifest.runtime_descriptor,
-        undefined,
-        "absent descriptor must leave the slot undefined"
+      await assert.rejects(
+        () => emitZship({
+          root: fx.root,
+          distDir: "dist",
+          silent: true,
+          builtAt: "2026-06-24T00:00:00Z",
+          userHasDefaultFetch: false,
+        }),
+        /migrations?.*runtime schema descriptor|schema\.runtime\.json/
       );
     } finally {
       await fx.cleanup();
@@ -570,6 +571,7 @@ describe("build.ts migration sub-option forwarding (P4a LOW-1)", () => {
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
       [`migrations/${STUB_STEM}.ts`]: "export function up() {}\n",
+      "generated/zeroship/schema.runtime.json": RUNTIME_DESCRIPTOR,
       "stub-cli.js": STUB_BODY,
     });
     const cliPath = join(fx.root, "stub-cli.js");
@@ -612,6 +614,7 @@ describe("build.ts migration sub-option forwarding (P4a LOW-1)", () => {
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
       [`migrations/${STUB_STEM}.ts`]: "export function up() {}\n",
+      "generated/zeroship/schema.runtime.json": RUNTIME_DESCRIPTOR,
       "stub-cli.js": STUB_BODY,
     });
     const cliPath = join(fx.root, "stub-cli.js");

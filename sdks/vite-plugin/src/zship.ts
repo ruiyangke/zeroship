@@ -500,18 +500,25 @@ export async function emitZship(
     //     `gen-types` emits `<genTypesOut>/schema.runtime.json` by folding the
     //     migration set; the packer reads it VERBATIM, stages it as a content
     //     blob (deduped by hash, exactly like a migration), and records
-    //     `manifest.runtime_descriptor = { hash }`. Absent (no migrations / not
-    //     yet generated) → the slot is left undefined; pack still succeeds and
-    //     the runtime installs no schema.
+    //     `manifest.runtime_descriptor = { hash }`. Absent is valid only when
+    //     the app ships no migrations; migrations without a descriptor are an
+    //     invalid build because the runtime must not silently boot schema-less.
     const genTypesOut = options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT;
     const descriptorPath = resolve(root, genTypesOut, RUNTIME_DESCRIPTOR_FILE);
     let descriptorBytes: Buffer | undefined;
     try {
       descriptorBytes = await fs.readFile(descriptorPath);
     } catch {
-      descriptorBytes = undefined; // no descriptor → leave the slot undefined
+      if (migEntries.length > 0) {
+        throw new Error(
+          `zship: found ${migEntries.length} migration(s) but missing runtime schema descriptor at ` +
+            `${descriptorPath}; run gen-types before packing`
+        );
+      }
+      descriptorBytes = undefined; // no migrations + no descriptor → schema-less app
     }
     if (descriptorBytes != null) {
+      validateRuntimeDescriptorBytes(descriptorBytes);
       const hash = sha256Hex(descriptorBytes);
       manifest.runtime_descriptor = { hash };
       if (!blobsByHash.has(hash)) blobsByHash.set(hash, descriptorBytes);
@@ -885,6 +892,11 @@ function validateManifest(
       );
     }
   }
+  if ((m.migrations?.length ?? 0) > 0 && m.runtime_descriptor == null) {
+    throw new Error(
+      "zship: manifest has migrations but no runtime_descriptor; apps with migrations must carry schema.runtime.json"
+    );
+  }
   // The runtime schema descriptor blob (migration-first P4a) — hash must be
   // valid sha256 hex AND have a staged blob. Mirrors the Rust
   // `crates/bundle/src/{manifest,unpack}.rs` descriptor checks.
@@ -899,6 +911,95 @@ function validateManifest(
       throw new Error(
         `zship: runtime_descriptor hash ${h} has no corresponding blob`
       );
+    }
+    validateRuntimeDescriptorBytes(blobsByHash.get(h)!);
+  }
+}
+
+function validateRuntimeDescriptorBytes(bytes: Buffer): void {
+  let value: unknown;
+  try {
+    value = JSON.parse(bytes.toString("utf8"));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`zship: runtime_descriptor is not valid JSON: ${message}`);
+  }
+  validateRuntimeDescriptorValue(value);
+}
+
+function validateRuntimeDescriptorValue(value: unknown): void {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    (value as { version?: unknown }).version !== 1 ||
+    (value as { collections?: unknown }).collections === null ||
+    typeof (value as { collections?: unknown }).collections !== "object" ||
+    Array.isArray((value as { collections?: unknown }).collections)
+  ) {
+    throw new Error(
+      "zship: runtime_descriptor must be RuntimeSchemaDescriptor v1 with { version: 1, collections }"
+    );
+  }
+  for (const [name, rawCollection] of Object.entries(
+    (value as { collections: Record<string, unknown> }).collections
+  )) {
+    if (rawCollection === null || typeof rawCollection !== "object" || Array.isArray(rawCollection)) {
+      throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)} must be an object`);
+    }
+    const collection = rawCollection as Record<string, unknown>;
+    if (collection.fields === null || typeof collection.fields !== "object" || Array.isArray(collection.fields)) {
+      throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)} requires object field "fields"`);
+    }
+    for (const [fieldName, field] of Object.entries(collection.fields as Record<string, unknown>)) {
+      if (
+        field === null ||
+        typeof field !== "object" ||
+        typeof (field as { type?: unknown }).type !== "string"
+      ) {
+        throw new Error(
+          `zship: runtime_descriptor collection ${JSON.stringify(name)} field ${JSON.stringify(fieldName)} requires object FieldDef with string "type"`
+        );
+      }
+    }
+    if (collection.options === null || typeof collection.options !== "object" || Array.isArray(collection.options)) {
+      throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)} requires object field "options"`);
+    }
+    const options = collection.options as Record<string, unknown>;
+    if (typeof options.softDelete !== "boolean" || typeof options.versioning !== "boolean") {
+      throw new Error(
+        `zship: runtime_descriptor collection ${JSON.stringify(name)} options requires boolean "softDelete" and "versioning"`
+      );
+    }
+    if (
+      options.strictness !== undefined &&
+      options.strictness !== "strict" &&
+      options.strictness !== "lenient" &&
+      options.strictness !== "off"
+    ) {
+      throw new Error(
+        `zship: runtime_descriptor collection ${JSON.stringify(name)} options.strictness must be "strict", "lenient", or "off"`
+      );
+    }
+    if (!Array.isArray(collection.indexes)) {
+      throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)} requires array field "indexes"`);
+    }
+    for (const [i, index] of collection.indexes.entries()) {
+      if (index === null || typeof index !== "object") {
+        throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)} indexes[${i}] must be an object`);
+      }
+      const idx = index as Record<string, unknown>;
+      if (
+        typeof idx.name !== "string" ||
+        !Array.isArray(idx.fields) ||
+        !idx.fields.every((f) => typeof f === "string")
+      ) {
+        throw new Error(
+          `zship: runtime_descriptor collection ${JSON.stringify(name)} indexes[${i}] requires string "name" and string[] "fields"`
+        );
+      }
+      if (idx.unique !== undefined && typeof idx.unique !== "boolean") {
+        throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)} indexes[${i}].unique must be boolean`);
+      }
     }
   }
 }
