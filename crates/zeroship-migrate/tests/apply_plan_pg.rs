@@ -26,6 +26,7 @@
 //! + the real journal.
 
 use compio_postgres::Client;
+use zeroship_migrate::test_support::acquire_fault_injection_test_lock;
 use zeroship_migrate::{
     model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId},
     provision_migrator, apply::role::deprovision_migrator, Approval, AppliedPlan, BackfillSpec,
@@ -174,6 +175,7 @@ fn q(schema: &str) -> String {
 
 #[compio::test]
 async fn single_step_ddl_plan_applies_like_a_migration() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -236,6 +238,7 @@ async fn single_step_ddl_plan_applies_like_a_migration() {
 
 #[compio::test]
 async fn two_ddl_step_plan_applies_in_order() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -283,6 +286,7 @@ async fn two_ddl_step_plan_applies_in_order() {
 
 #[compio::test]
 async fn standalone_dml_step_applies_and_is_idempotent() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -408,6 +412,7 @@ async fn standalone_dml_step_applies_and_is_idempotent() {
 
 #[compio::test]
 async fn ddl_backfill_ddl_interleave_applies_in_order() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -482,6 +487,7 @@ async fn ddl_backfill_ddl_interleave_applies_in_order() {
 
 #[compio::test]
 async fn multi_backfill_plan_runs_each_in_order() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -698,6 +704,7 @@ fn generated_flyway_dirs_always_lower_to_single_step_plans() {
 
 #[compio::test]
 async fn golden_trace_declarative_refusal_and_idempotent_reapply() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     use zeroship_migrate::plan::author::{AuthorRequest, Column, DeterministicAuthor, MigrationAuthor};
 
     let conn = pg().await;
@@ -914,6 +921,7 @@ async fn fuzz_fingerprint(
 
 #[compio::test]
 async fn crash_fuzz_resume_from_any_subistep_boundary_converges() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
 
     for seed in 0u64..3 {
@@ -1026,6 +1034,7 @@ async fn crash_fuzz_resume_from_any_subistep_boundary_converges() {
 
 #[compio::test]
 async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -1137,6 +1146,7 @@ async fn destructive_dml_is_refused_without_approval_and_applies_nothing() {
 
 #[compio::test]
 async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     use zeroship_migrate::{ApplyError, MigrationBackend};
 
     let conn = pg().await;
@@ -1255,6 +1265,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_without_approval() {
 
 #[compio::test]
 async fn run_dml_step_seam_refuses_destructive_dml_outside_version_scope() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     use zeroship_migrate::{ApplyError, ApprovalScope, MigrationBackend};
 
     let conn = pg().await;
@@ -1382,6 +1393,7 @@ async fn run_dml_step_seam_refuses_destructive_dml_outside_version_scope() {
 
 #[compio::test]
 async fn dml_first_plan_holds_the_project_lock_for_the_whole_deploy() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -1552,6 +1564,7 @@ async fn dml_first_plan_holds_the_project_lock_for_the_whole_deploy() {
 
 #[compio::test]
 async fn apply_plan_online_rename_defers_contract_to_pending_contract() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -1693,6 +1706,7 @@ async fn journal_checksum(conn: &Client, cfg: &ExecutorConfig, version: &str) ->
 
 #[compio::test]
 async fn dml_journal_checksum_binds_the_declaring_owner_app() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
@@ -1776,6 +1790,7 @@ async fn dml_journal_checksum_binds_the_declaring_owner_app() {
 // `ensure_journal` bootstraps the meta schema so the Dml-first plan succeeds.
 #[compio::test]
 async fn dml_first_plan_against_fresh_db_bootstraps_the_journal() {
+    let _fault_lock = acquire_fault_injection_test_lock();
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await; // creates project schema + migrator role — NOT the journal
