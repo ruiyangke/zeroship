@@ -1328,12 +1328,12 @@ Per `feedback_faithful_e2e_tests` (run the REAL path, no shims):
 
 - **T1 — fresh full apply (real PG).** Load all ported `V<NNNN>__` files and
   `engine.apply` them under the Platform profile against a clean Postgres
-  (the `:5440` dev DB). Assert: every file applies, the resulting schema matches
-  the Liquibase-built schema object-for-object (introspect `pg_namespace`,
-  `pg_class`, `pg_proc`, `pg_policy`, `pg_roles` for `zeroship_*`/`oauth_hydra`),
-  RLS is `FORCE`d on the four tenant tables, and the journal has one row per file.
-  This is the §11 Phase-6 gate and the faithful replacement for the Liquibase
-  `migrate` service.
+  (the `:5440` dev DB). Assert: every file applies, the live platform schema
+  inventory materializes, RLS is `FORCE`d on the four tenant tables, and the
+  journal has one row per file. The old Liquibase object-for-object equivalence
+  gate was completed during the f48c8a38 cutover and retired when
+  `db/changelog/` was deleted; ongoing regression coverage is against the live
+  `db/migrations/` source plus rollback of the real `.down.sql` files.
 - **T2 — Confined-default-unchanged regression (§6.4, H3).** Re-run the entire
   existing `tests/guard_security.rs` fixture set under `GuardConfig::confined(...)`
   and assert verdicts are identical to the pre-change baseline. **Explicitly
