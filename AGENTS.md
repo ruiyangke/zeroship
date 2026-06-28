@@ -40,7 +40,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `crates/zeroship-migrate/` · `sdks/migrate/` |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
-| **zeroship deploy contract** (`default = { schema?, fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
+| **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/runtime/src/` (search `WebSocket`) |
@@ -191,15 +191,15 @@ per-app injection vehicle the plugins stamp from the server-injected `app_id`).
 ### SDK packages (`@zeroship/*` npm scope)
 
 ```javascript
-import { t, schema } from "@zeroship/db";
 import { env } from "zeroship";
 import { auth } from "@zeroship/auth";
 import { storage } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
 import { query, mutation } from "@zeroship/rpc/server";
 
-// Declare your schema once via the `export default { schema }` convention;
-// the platform installs typed Collection wrappers on `env.db` at app boot.
+// Author schema changes as committed op.* migrations. The toolchain folds
+// migrations into generated/zeroship/env.db.ts + schema.runtime.json, and
+// runtime boot installs typed Collection wrappers on `env.db` from that fold.
 // Handlers then write `env.db.users.find(...)` directly.
 ```
 
@@ -209,9 +209,9 @@ SDK packages call the `env.*` native primitives internally. Validation, query bu
 
 `@zeroship/bootstrap` is the coordination package the runtime crate and Vite plugin both consume. It owns:
 
-- `installSchema(schema, env.db)` — orchestrator behind `export default { schema }`
+- `installSchema(schema, env.db, { descriptor })` — framework-internal installer for the generated RuntimeSchemaDescriptor
 - `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / stream framing)
-- `normalizeUserModule` — namespace → `{ schema, fetch, rpc }` shape
+- `normalizeUserModule` — namespace → `{ fetch, rpc, userDefault }` shape
 - `createFetchHandler` — WinterCG fetch wrapper routing `/__zeroship/v1/<id>` through the dispatcher
 - `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s
 - `dev-entry.ts` — dev-mode equivalent the Vite plugin's dev-bootstrap delegates to
@@ -236,9 +236,9 @@ Default to npm package. Native primitives are forever.
 Stable contracts, live in `docs/reference/`:
 
 - `api-design-guidelines.md` — 10 principles for AI-friendly APIs
-- `zeroship-standard.md` — the deploy contract: `default = { schema?, fetch?, rpc? }`, dispatch, raw-JS deploys
+- `zeroship-standard.md` — the deploy contract: `default = { fetch?, rpc? }`, dispatch, raw-JS deploys
 - `control.md` — `@zeroship/control`: framework-neutral client for control-plane app, auth, deploy, and env endpoints
-- `db.md` — `@zeroship/db`: `default.schema` discovery, CRUD, aggregation, naming strategy
+- `db.md` — `@zeroship/db`: generated `env.db` typing, CRUD, aggregation, naming strategy
 - `kv.md` — `@zeroship/kv`: ephemeral key-value surface, TTL, atomic counters, `setIfAbsent`, paginated `list`
 - `rpc.md` — `@zeroship/rpc`: server wrappers, generated and manual clients, transport, transformers, retries
 - `auth.md` — platform-managed auth, gateway JWT, OAuth, consent

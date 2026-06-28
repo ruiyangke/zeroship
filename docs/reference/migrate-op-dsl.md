@@ -1014,16 +1014,16 @@ apply-relevant change.
 
 Migration-first: the op.* migration set is the source of truth for the schema, and
 the typed `env.db` surface is **generated from it** rather than from a separate
-`export default { schema }` object. The `zeroship-migrate-js gen-types` subcommand
-loads the committed `.ir.json` set in version order, **folds** it into a
+declared schema object on the app entry. The `zeroship-migrate-js gen-types`
+subcommand loads the committed `.ir.json` set in version order, **folds** it into a
 per-collection field map (the same fold the engine uses internally), and emits two
 artifacts:
 
 - **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
   `{ version, collections: { [name]: { fields, options, indexes } } }`. It is
   content-addressed into the `.zship` artifact (a manifest `runtime_descriptor`
-  blob) so the runtime can read the schema without re-evaluating a declared schema
-  object.
+  blob) so the runtime can read the schema without re-evaluating a schema
+  authoring module.
 - **`env.db.ts`** — a generated `@zeroship/db` schema **module** reconstructing
   `const schema = { … t.text() … } as const` of `t.*()` builder calls (the SDK type
   inference keys only off the builder-call value expressions, so the emitter emits

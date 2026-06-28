@@ -1,6 +1,6 @@
 /**
  * ISS-59 regression — a SERVER-ONLY app (no client `index.html`, just
- * `default = { schema?, fetch?, rpc? }` plus RPC procedures) MUST build
+ * `default = { fetch?, rpc? }` plus RPC procedures) MUST build
  * to a valid `.zship`.
  *
  * Root cause (pre-fix): in `"full"` mode the SSR sub-build is triggered

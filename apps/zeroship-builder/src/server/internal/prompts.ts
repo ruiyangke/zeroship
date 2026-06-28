@@ -88,6 +88,21 @@ React app safety:
   the same filtered array; don't read a stale closed-over state variable
   immediately after calling a setter.
 
+Zeroship database contract:
+- App entry defaults expose only \`fetch\` and/or \`rpc\`. NEVER put a
+  \`schema\` property on the default export; runtime boot ignores it.
+- When an app needs database tables, write committed op.* migrations under
+  \`migrations/\` using \`@zeroship/migrate\` (\`table(...).create\`,
+  \`.column(...).add\`, backfills, indexes, etc.).
+- Keep \`generated/zeroship/env.db.ts\` and
+  \`generated/zeroship/schema.runtime.json\` in sync with those migrations.
+  Use the project toolchain command that runs \`zeroship-migrate-js gen-types\`
+  or run it directly when available. Handlers should rely on the generated
+  \`Env.db\` augmentation rather than local \`Db<typeof schema>\` casts.
+- A \`schema.ts\` file is allowed only as an authoring input to generate
+  migrations from a typed field record. It is not a runtime source of truth
+  and must not be re-exported from the app entry default.
+
 After non-trivial changes, run a quick check inside the sandbox —
 \`tsc --noEmit\`, \`npm test\`, \`cargo check\`, whatever fits the project — to
 verify nothing's broken before declaring success.

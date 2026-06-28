@@ -128,8 +128,8 @@ function toResultError(e: unknown): Error {
  * callers inherit the safe default and degrade to `PlainObject` per
  * relation.
  *
- * Use `model()` or declare the schema via `export default { schema }`
- * and access through `env.db.<name>` — do not construct directly.
+ * Use `model()` in tests/shared packages, or access app collections through the
+ * generated `env.db.<name>` surface — do not construct directly.
  */
 export class Collection<
   S = PlainObject,

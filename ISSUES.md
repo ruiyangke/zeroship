@@ -438,7 +438,7 @@ ISS-66.** Original (now-fixed) detail below.
 
 
 The runtime's `runtime-entry.js` (`sdks/bootstrap/dist/runtime-entry.js:50`, embedded via
-`include_str!`) does `await import("@zeroship/bootstrap/install-schema")` to install the `default.schema`
+`include_str!`) does `await import("@zeroship/bootstrap/install-schema")` to install the declared schema
 collections. On the **production worker** the module loader can't resolve it — it's inlined by the vite
 build under `noExternal` (so not separately addressable) and it's not a native module, so the
 dynamic-import host callback (`crates/runtime/src/core/dynamic_import.rs:158`) rejects with

@@ -180,9 +180,9 @@ async fn exec_register_model(
     // runtime auto-migrate — the retired `run_sqlite_pipeline` is gone. The split
     // is now only in WHEN the engine runs: PG schema is engine-owned at DEPLOY;
     // SQLite dev applies at first-`registerModel` (cold path) on the developer's
-    // own local file. `default.schema` / `installSchema` stay PG-UNUSED for DDL
-    // (PG runtime metadata comes from introspection) but remain SQLite-CONSUMED
-    // right here as the descriptor source the engine diffs against live state.
+    // own local file. `installSchema` stays PG-UNUSED for DDL (PG runtime metadata
+    // comes from introspection) but remains SQLite-CONSUMED right here as the
+    // descriptor source the engine diffs against live state.
     match (backend.as_postgres(), backend.as_sqlite()) {
         // PG: NO runtime DDL — the engine (P6 deploy-apply) is the PG schema
         // authority. This path no-ops the apply; the dispatch caller stamps
@@ -193,8 +193,8 @@ async fn exec_register_model(
         // **Migration-first cutover (P4b/P5 S2).** The `schema` value this arm
         // receives (and that the dispatch caller stamps into `cache_schema`)
         // now originates from the bundled `RuntimeSchemaDescriptor` (the
-        // migration fold's runtime descriptor), not the declared
-        // `default.schema` t.* object: the runtime injects the descriptor as
+        // migration fold's runtime descriptor), not the old declared t.* object:
+        // the runtime injects the descriptor as
         // `globalThis.__zsRuntimeDescriptor` and `installSchema` runs the
         // `registerModel` chain off it. So the declared-only hints the PG CRUD
         // passes read out of the cache (`t.id(prefix)` idPrefix, encrypted /

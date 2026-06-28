@@ -13,7 +13,7 @@
 //   * reads it back via `env.db` (→ platform-emitted `db_reads`),
 //   * returns a fixed, measurable response body (so egress_bytes is non-zero).
 //
-// The probe declares a `default.schema` so `env.db` is installed at app boot.
+// The probe drives env.db so the platform emits DB usage metrics.
 
 import { env } from "zeroship";
 import { schema, t } from "@zeroship/db";

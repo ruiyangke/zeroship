@@ -40,7 +40,7 @@ catalogs.
 | 5 | [env.storage / @zeroship/storage](#5-envstorage--zeroshipstorage) | 24 | Object-store CRUD over LocalFs; S3 backend declared but unimplemented. |
 | 6 | [Auth (env.auth + IdP + SDK)](#6-auth-envauth--idp--sdk) | 47 | Full OIDC/OAuth identity platform: login UI, federation, 2FA, sessions, GDPR, relay, SDK. |
 | 7 | [RPC / server functions](#7-rpc--server-functions) | 47 | Typed server-function stack: discovery, transport, transformers, retries, fail-closed auth. |
-| 8 | [Deploy contract / bootstrap](#8-deploy-contract--bootstrap) | 19 | The `default = { schema?, fetch?, rpc? }` contract and the framework-internal bootstrap. |
+| 8 | [Deploy contract / bootstrap](#8-deploy-contract--bootstrap) | 19 | The `default = { fetch?, rpc? }` contract and the framework-internal bootstrap. |
 | 9 | [Gateway](#9-gateway) | 41 | Edge layer: manifest dispatch, multi-arm auth, rate/concurrency limits, CHWBL routing. |
 | 10 | [Control plane](#10-control-plane-cratescontrol) | 38 | Creator/admin API: app CRUD, deploy ingest, env/secrets, route feeds, billing, admin. |
 | 11 | [Authorization (Cedar)](#11-authorization-cedar) | 32 | Cedar policy engine + control-plane AuthzGuard; P10/P11/P12 are documented but unbuilt. |
@@ -447,7 +447,7 @@ subscriptions. The gateway enforces fail-closed auth (default `user` for all `rp
 ## 8. Deploy contract / bootstrap
 
 How a zeroship app module is loaded and dispatched. It centers on a standard default-export
-shape (`{ schema?, fetch?, rpc?, fetchFast? }`), which the runtime bootstrap
+shape (`{ fetch?, rpc? }`), which the runtime bootstrap
 (`crates/runtime/src/core/init.rs` + `sdks/bootstrap/`) wraps around every user module before
 V8 evaluates it. The bootstrap package is framework-internal: the runtime crate `include_str!`s
 its compiled dist files and the Vite plugin imports it for dev. User code must not import it.

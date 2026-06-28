@@ -6,7 +6,8 @@
 //!
 //!     const sdk = await import("@zeroship/bootstrap/install-schema");
 //!
-//! whenever the app declares a `default.schema` and `env.db` is present.
+//! whenever the bundle carries a runtime schema descriptor and `env.db` is
+//! present.
 //! On the production worker the user's `.zship` bundle is a single
 //! self-contained `index.js` that does NOT contain that module (vite
 //! tree-shakes the framework-internal installSchema out), and it is not a

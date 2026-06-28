@@ -2,8 +2,8 @@
 
 Design zeroship APIs so generated code matches the current app model:
 
-- app entry points use the [zeroship standard](../reference/zeroship-standard.md) default export (`schema`, `fetch`, `rpc`, optional `fetchFast`)
-- database access hangs off `env.db` after bootstrap installs schema wrappers
+- app entry points use the [zeroship standard](../reference/zeroship-standard.md) default export (`fetch`, `rpc`)
+- database access hangs off typed `env.db`, generated from committed migrations
 - auth is an explicit SDK call (`auth.getUser()` / `auth.requireUser()`)
 
 The goal is still the same: one obvious way to do the common thing, with names that read naturally in generated code.
@@ -25,19 +25,11 @@ const { data: user } = await env.db.users.get(id);
 
 ### 2. Match the zeroship entry contract
 
-Use the current default-export shape instead of ad-hoc lifecycle names.
+Use the current default-export shape instead of ad-hoc lifecycle names. Schema
+changes belong in migrations, not in the app entry default export.
 
 ```ts
-import { schema, t } from "@zeroship/db";
-
 export default {
-  schema: schema({
-    users: {
-      email: t.string().required().unique(),
-      name: t.string().required(),
-    },
-  }),
-
   async fetch(request, env, ctx) {
     return Response.json({ ok: true });
   },
@@ -73,7 +65,9 @@ const { data, error } = await env.db.users.insert({
 });
 ```
 
-The typed `env.db` surface is installed by [sdks/bootstrap/src/install-schema.ts](../../sdks/bootstrap/src/install-schema.ts).
+The typed `env.db` surface is generated from the migration fold into
+`generated/zeroship/env.db.ts` and installed at runtime from
+`schema.runtime.json`.
 
 ### 5. Use names that read like English
 

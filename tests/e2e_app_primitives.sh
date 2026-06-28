@@ -26,7 +26,7 @@
 #     session. There is NO `--dev-insecure` shortcut to mint an app session,
 #     so authenticated env.db RPC through the gateway is not headlessly
 #     reachable without standing up Hydra. (gateway-auth gap)
-#   * SCHEMA-INIT bug — any app exporting `default.schema` (every env.db app)
+#   * SCHEMA-INIT bug — any app exporting a declared schema (every env.db app)
 #     fails module init on the production worker: the runtime's embedded
 #     runtime-entry does `await import("@zeroship/bootstrap/install-schema")`,
 #     which the worker's module loader cannot resolve (not in the bundle's

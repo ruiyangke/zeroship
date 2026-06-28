@@ -109,9 +109,9 @@ impl DbPlatform {
     /// [`register_model_dispatch`] pipeline is unchanged — only the JS
     /// carrier relocated behind the capability handle.
     ///
-    /// `declared` (H1) is the FULL set of collection names the app declared in
-    /// `default.schema` — `installSchema` passes `Object.keys(schemas)` on
-    /// every per-collection call. The dev SQLite drop pass uses it to tell a
+    /// `declared` (H1) is the FULL set of collection names the descriptor
+    /// declares — `installSchema` passes `Object.keys(schemas)` on every
+    /// per-collection call. The dev SQLite drop pass uses it to tell a
     /// not-yet-registered sibling (declared, must NOT be dropped) from a
     /// genuinely-removed collection (not declared, a real drop candidate). It
     /// is inert on PG (registerModel issues no DDL there). Optional: omitted

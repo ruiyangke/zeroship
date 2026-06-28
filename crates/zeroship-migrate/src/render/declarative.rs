@@ -568,7 +568,7 @@ pub struct IndexDescriptor {
 pub struct CollectionDescriptor {
     /// The collection (table) name.
     pub name: String,
-    /// The **declaring** app (`app_…`) — the app whose `export default { schema }`
+    /// The **declaring** app (`app_…`) — the app whose schema authoring input
     /// declared this table. Per the project-umbrella model (design §4) a project
     /// db schema is the UNION of all member apps' descriptors, and the declaring
     /// app **owns** that table's migrations: only the owner may CREATE/ALTER/DROP
@@ -1328,7 +1328,7 @@ fn non_unique_index_name(table: &str, col: &str) -> String {
 /// collections) PLUS the per-table ownership map (design §4).
 ///
 /// A project = one db = one project schema, and that schema is the UNION of all
-/// member apps' `export default { schema }` declarations. [`desired_snapshot`]
+/// member apps' schema authoring declarations. [`desired_snapshot`]
 /// builds this: identical re-declarations of a table by two apps merge to one
 /// table (idempotent); a conflicting re-declaration is a hard
 /// [`DeclarativeError::ConflictingDeclaration`].

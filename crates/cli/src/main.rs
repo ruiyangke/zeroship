@@ -258,11 +258,10 @@ fn cmd_serve(args: &[String]) {
 /// vite-plugin emits these; this command is a thin curl wrapper that
 /// posts the bytes to `POST /api/apps/{id}/deploy`.
 //
-// Schema discovery (Stage 5c): the runtime reads `default.schema`
-// off the loaded entry module — no manifest-side resolver. A raw
-// `.js` deploy with `export default { schema: {...} }` is enough; no
-// JS-side resolver wiring required even if this CLI grows a
-// `zeroship build` command later.
+// Schema discovery is migration-first: the runtime reads the generated
+// descriptor carried by the `.zship`, not a schema object off the entry module.
+// A raw `.js` deploy with database tables needs committed migrations plus the
+// generated descriptor before it can install typed `env.db`.
 fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
         "Usage: zeroship deploy <path-to-.zship> --app=<name-or-id> [--control=http://localhost:9090] [--token=<PAT>]",

@@ -14,7 +14,7 @@ The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bu
 - `deploy_hash`
 - `worker`
 - `resources`
-- `schemas`
+- `schemas` (JSON schemas referenced by resource input/output metadata)
 - `aliases`
 - `transformer`
 - `assets`
@@ -23,7 +23,9 @@ The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bu
 - `sourcemaps`
 - `net`
 - `metadata`
-- `exports` (deprecated compatibility field)
+- `exports` (deprecated compatibility field; ignored)
+- `migrations`
+- `runtime_descriptor`
 
 `worker`, when present, is:
 
@@ -36,7 +38,12 @@ The top-level manifest struct in [crates/bundle/src/manifest.rs](../../crates/bu
 }
 ```
 
-`resources` is the routing source of truth. `assets` holds build-time static assets; `runtime_assets` holds runtime-emitted assets; `asset_version` is the change counter the gateway uses to know when to resync runtime assets.
+`resources` is the routing source of truth. `migrations` carries committed
+op.* migration artifacts, and `runtime_descriptor` points to the generated
+`schema.runtime.json` blob folded from those migrations. `assets` holds
+build-time static assets; `runtime_assets` holds runtime-emitted assets;
+`asset_version` is the change counter the gateway uses to know when to resync
+runtime assets.
 
 ## Network Requests
 
@@ -63,7 +70,8 @@ host/port pairs remain denied until a grant row exists.
 ## Deprecated field
 
 `exports` is still part of the wire struct, but the runtime no longer uses it
-for schema discovery. New code should rely on `default.schema` instead. See
+for schema discovery. New code relies on committed migrations plus the generated
+`runtime_descriptor` blob (`schema.runtime.json`) instead. See
 `sdks/bootstrap/src/runtime-entry.ts` and `crates/bundle/src/manifest.rs`.
 
 ## RPC resources

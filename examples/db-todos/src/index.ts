@@ -3,8 +3,7 @@
 // db-todos — real-world example exercising @zeroship/db v2 surfaces.
 //
 // What this file demonstrates:
-//   • export default { schema } convention — multi-collection schema
-//     declared once; the platform installs typed wrappers on env.db
+//   • multi-collection DB model with typed wrappers on env.db
 //   • t.ref("users")  — typed cross-table relations + native FK
 //   • .unique() / .index() — materialised as real backend indexes
 //   • Validation: required / min / max / enum / pattern (existing SDK)

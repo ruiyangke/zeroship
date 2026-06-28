@@ -3,7 +3,7 @@
 // db-chat server module.
 //
 // What this file demonstrates:
-//   • export default { schema } with three related collections + t.ref FKs
+//   • a three-collection DB model with t.ref FKs
 //   • query/mutation/action wrappers from @zeroship/rpc/server
 //   • Result<T> unwrapping before returning through the RPC wire
 //   • channel-scoped queries that the React example can refresh
@@ -17,7 +17,7 @@ import { query, mutation, action } from "@zeroship/rpc/server";
 import { runQuery, runMutation } from "@zeroship/server";
 
 // ---------------------------------------------------------------------------
-// Schema — the `export default { schema }` convention
+// Schema model used by this older example's local Db<> typing.
 // ---------------------------------------------------------------------------
 
 const dbSchema = {

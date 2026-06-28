@@ -4,8 +4,8 @@
 //!
 //! Migration-first (`docs/proposals/2026-06-25-migration-first-schema.md` §2.1)
 //! makes the op.* migration set the SOLE source of truth and (P5) deletes
-//! `export default { schema }`. So the typed `env.db.ts` MUST be emitted from the
-//! migrations, not from a declared schema object. This module:
+//! declared schema from the app entry contract. So the typed `env.db.ts` MUST be
+//! emitted from the migrations, not from a declared schema object. This module:
 //!
 //! 1. loads the committed `.ir.json` set in version order ([`load_dir_ops`]),
 //!    concatenating their `Op` lists;

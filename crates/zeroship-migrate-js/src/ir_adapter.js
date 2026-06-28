@@ -23,10 +23,8 @@
 import * as userSchemaMod from "./__schema__.js";
 import { TypeBuilder } from "@zeroship/db";
 
-// Resolve the schema map from the creator module. Two accepted shapes,
-// mirroring the deploy contract's discovery order:
-//   1. `export default { schema: { <collection>: { ...fields } } }`
-//   2. `export const schema = { <collection>: { ...fields } }`
+// Resolve the schema map from an optional authoring module. This is a
+// migration-generation input, not the deploy contract.
 function resolveSchemaMap(mod) {
   const def = mod && mod.default;
   if (def && typeof def === "object" && def.schema && typeof def.schema === "object") {
@@ -36,7 +34,7 @@ function resolveSchemaMap(mod) {
     return mod.schema;
   }
   throw new Error(
-    "schema front-end: the module exports neither `default.schema` nor a named `schema` object",
+    "schema front-end: the module exports no schema authoring object",
   );
 }
 

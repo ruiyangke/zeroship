@@ -14,9 +14,14 @@ pnpm dev
 - **.zeroship/** — local dev state (SQLite data, uploaded files). Git-ignored.
 - **src/index.ts** — server functions (marked `"use server"`). React UI calls
   these like regular functions; the plugin turns them into RPC.
-- **migrations/** — committed op.* schema migrations.
-- **generated/zeroship/env.db.ts** — generated `env.db` typing from those migrations.
+- **migrations/** — committed op.* schema migrations; this is the schema source.
+- **generated/zeroship/env.db.ts** — generated `env.db` typing from the migration fold.
+- **generated/zeroship/schema.runtime.json** — generated runtime descriptor shipped in the bundle.
 - **src/App.tsx** — React client.
+
+App code does not export a schema object. Add or change tables by editing
+migrations, then regenerate/check the generated artifacts through the Vite
+plugin build or `zeroship-migrate-js gen-types`.
 
 ## What's wired
 

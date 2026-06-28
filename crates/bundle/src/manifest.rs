@@ -123,12 +123,11 @@ pub struct Manifest {
     /// Build-time export discovery.
     ///
     /// **Deprecated as of Stage 5c (ZS-standard refactor).** The runtime
-    /// no longer reads any field here — schema discovery now reads
-    /// `default.schema` directly off the loaded entry module
-    /// (`crates/runtime/src/bootstrap/db_init.js`). The Vite plugin no
-    /// longer writes the field. Kept on the wire so older archives
-    /// (with `exports.schema` set) still deserialize cleanly during
-    /// upgrade; a future stage removes the field entirely.
+    /// no longer reads any field here; schema install now uses the generated
+    /// runtime descriptor carried by `runtime_descriptor`. The Vite plugin no
+    /// longer writes this field. Kept on the wire so older archives that carried
+    /// `exports` still deserialize cleanly during local upgrade; a future stage
+    /// removes the field entirely.
     ///
     /// Additive on the wire: an old manifest without `exports`
     /// deserializes unchanged, and a fresh build omits the field
@@ -162,10 +161,9 @@ pub struct Manifest {
     /// This is the `schema.runtime.json` artifact `gen-types` emits by folding
     /// the migration set — a `Record<collection, Record<column, FieldDef>>` that
     /// formalises what the runtime's `normalizeSchema` produces. In the
-    /// migration-first cutover (`docs/proposals/2026-06-25-migration-first-schema.md`)
-    /// the runtime stops reading `default.schema` off the user module (P4b) and
-    /// reads this descriptor instead — making the migration set the SOLE source
-    /// of schema truth.
+    /// migration-first cutover, the runtime reads this descriptor instead of any
+    /// schema declared on the user module, making the migration set the SOLE
+    /// source of schema truth.
     ///
     /// `None` (the default; `skip_serializing_if`) is valid only when the app
     /// ships no migrations. A manifest with `migrations[]` but no descriptor is
@@ -367,21 +365,19 @@ impl ScopeDef {
 
 /// Build-time export discovery — **deprecated as of Stage 5c.**
 ///
-/// The runtime no longer reads any field here. Schema discovery now
-/// reads `default.schema` directly off the loaded entry module
-/// (`crates/runtime/src/bootstrap/db_init.js`). The Vite plugin no
-/// longer writes this struct. The type is retained on the wire so
-/// older `.zship` archives that included it still deserialize
-/// cleanly during graceful upgrade; a future stage removes it.
+/// The runtime no longer reads any field here. Schema install now uses
+/// `Manifest::runtime_descriptor`, produced from the migration fold. The Vite
+/// plugin no longer writes this struct. The type is retained on the wire so
+/// older `.zship` archives that included it still deserialize cleanly during
+/// local upgrade; a future stage removes it.
 ///
 /// Wire shape stays permissive — both fields are optional and
 /// serialize to nothing when empty.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ManifestExports {
-    /// **Deprecated as of Stage 5c — runtime reads `default.schema`
-    /// off the entry.** Kept for graceful upgrade of older archives;
-    /// future stage removes. Historically: bundle-relative POSIX
-    /// path of the module whose default export held the DB schema.
+    /// **Deprecated as of Stage 5c.** Kept for older archives; future stage
+    /// removes. Historically: bundle-relative POSIX path of the module whose
+    /// default export held the DB schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
 

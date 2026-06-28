@@ -54,13 +54,13 @@ There is **no dependency cycle**: `zeroship-runtime` depends on neither
 
 ## Type story (Drizzle-style — already works, no codegen)
 
-Types are inferred from `schema.ts` by `@zeroship/db`'s TypeScript generics
-(`Row<S>` / `InferSchema<S>` / `InferInsertSchema<S>`), which derive the
-row/insert types directly from the `t.*` field-record. This is a pure
-compile-time derivation — `env.db.<collection>.find()` stays strongly typed
-with **no separate codegen step** and independent of whether `default.schema`
-is consumed at runtime (its removal is P5). Encrypted/masked/vector facets
-reflect in the inferred types. **No gap to build this phase.**
+Types can be inferred from a `schema.ts` authoring input by `@zeroship/db`'s
+TypeScript generics (`Row<S>` / `InferSchema<S>` / `InferInsertSchema<S>`), which
+derive the row/insert types directly from the `t.*` field-record. At app level,
+the migration fold is now authoritative: `gen-types` emits
+`generated/zeroship/env.db.ts` plus `schema.runtime.json`, and runtime boot uses
+that descriptor instead of a declared schema on the entry module. Encrypted,
+masked, and vector facets reflect in the generated types.
 
 ## The `op.*` recorder + the anti-drift corpus (PR1, design §2.5)
 

@@ -16,8 +16,7 @@ import { schema, t, type Db } from "@zeroship/db";
 import { env } from "zeroship";
 import { procedure } from "@zeroship/rpc/server";
 
-// Schema declared via the `export default { schema }` convention; the
-// platform installs typed Collection wrappers on `env.db` at app boot.
+// Local schema model used by this older example's Db<> typing.
 export const dbSchema = {
   // ---------------------------------------------------------------------------
   // Core

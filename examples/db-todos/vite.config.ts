@@ -3,9 +3,8 @@ import react from "@vitejs/plugin-react";
 import { zeroship } from "@zeroship/vite-plugin";
 
 export default defineConfig({
-  // Stage 5c — schema is read off `default.schema` of the entry by
-  // the runtime bootstrap. No plugin option needed: the entry exports
-  // `default = { schema, fetch, rpc }` and that's the wire contract.
+  // Migration-first builds read committed migrations and generated
+  // descriptor artifacts. No schema plugin option is needed.
   //
   // `react()` powers the client SPA in `src/`; `zeroship()` discovers
   // the server procedures in `src/index.ts` and bundles them for the dev

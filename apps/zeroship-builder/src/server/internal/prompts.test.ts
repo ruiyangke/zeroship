@@ -38,4 +38,12 @@ describe("BUILDER_SYSTEM — prompt ↔ tool-name alignment", () => {
   it("states there is no platform deploy in the console", () => {
     expect(BUILDER_SYSTEM).toMatch(/no deploy/i);
   });
+
+  it("uses the migration-first database contract", () => {
+    expect(BUILDER_SYSTEM).toMatch(/op\.\* migrations/i);
+    expect(BUILDER_SYSTEM).toMatch(/generated\/zeroship\/env\.db\.ts/);
+    expect(BUILDER_SYSTEM).toMatch(/schema\.runtime\.json/);
+    expect(BUILDER_SYSTEM).toMatch(/App entry defaults expose only `fetch` and\/or `rpc`/);
+    expect(BUILDER_SYSTEM).toMatch(/NEVER put a\s+`schema`\s+property on the default export/);
+  });
 });

@@ -53,9 +53,9 @@
 
 use crate::core::init::ZEROSHIP_MODULE_JS;
 
-/// Compiled `installSchema` — the framework-internal helper behind the
-/// `export default { schema }` convention. Same dist file the bootstrap
-/// package emits via `pnpm build`; statically imports `@zeroship/db/internal`.
+/// Compiled `installSchema` — the framework-internal helper that installs the
+/// generated runtime schema descriptor. Same dist file the bootstrap package
+/// emits via `pnpm build`; statically imports `@zeroship/db/internal`.
 const INSTALL_SCHEMA_JS: &str =
     include_str!("../../../../sdks/bootstrap/dist/install-schema.js");
 

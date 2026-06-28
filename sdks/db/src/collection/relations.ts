@@ -70,7 +70,7 @@ export async function loadRelations(
         throw Object.assign(
           new Error(
             `find/get: with: { ${field}: true } — this Collection was created via model() without a parent db, ` +
-              `so sibling collections cannot be resolved. Declare the schema via "export default { schema }" to enable relation loading.`,
+              `so sibling collections cannot be resolved. Use the generated env.db surface to enable relation loading.`,
           ),
           { code: "WITH_NO_PARENT_DB" as const },
         );

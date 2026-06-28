@@ -1,7 +1,7 @@
 /**
  * `installSchema` — the framework-internal helper that the synthetic
  * SSR entry and dev-bootstrap call to register schemas declared via
- * `export default { schema }`. This test pins the behaviours that
+ * the old declared-schema entry path. This test pins the behaviours that
  * matter independently of the surrounding wiring:
  *
  * 1. The supplied `env` (the native handle) is unconditionally

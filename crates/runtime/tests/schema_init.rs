@@ -167,13 +167,11 @@ fn init_script_no_ops_without_db_plugin() {
 }
 
 #[test]
-fn init_script_no_ops_when_default_schema_missing() {
-    // Even with an `env.db` namespace present, absence of
-    // `user.default.schema` short-circuits the init script before the
-    // dynamic import. The test's synthetic-entry shim emits its own
-    // `default = { fetch, rpc }` (no `schema:` key), so the gate at
-    // `typeof user.default.schema === "object"` falls through and the
-    // bootstrap finishes evaluation cleanly without trying to import
+fn init_script_no_ops_when_runtime_descriptor_missing() {
+    // Even with an `env.db` namespace present, absence of a runtime
+    // descriptor short-circuits the init script before the dynamic import.
+    // The test's synthetic-entry shim emits its own `default = { fetch, rpc }`,
+    // so bootstrap finishes evaluation cleanly without trying to import
     // `@zeroship/db`.
     init_v8();
     let user_src = r#"

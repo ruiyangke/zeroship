@@ -72,9 +72,8 @@ pub enum EvalError {
     /// top level, unresolved import, …). Carries the runtime's error string.
     #[error("schema.js evaluation failed: {0}")]
     V8(String),
-    /// The adapter ran but reported a lowering error (e.g. the module
-    /// exports neither `default.schema` nor a named `schema`, or a field is
-    /// not a `t.*` builder).
+    /// The adapter ran but reported a lowering error (e.g. the module does not
+    /// expose a schema authoring map, or a field is not a `t.*` builder).
     #[error("schema lowering failed: {0}")]
     Lowering(String),
     /// The adapter did not leave the expected `globalThis.__zsSchemaIR`
@@ -104,7 +103,7 @@ struct IrEnvelope {
 /// [`CollectionDescriptor::owner_app`] (the project-umbrella ownership
 /// subject). `schema_source` is the bundled JS — it may
 /// `import { t, schema } from "@zeroship/db"` (resolved to the embedded
-/// DSL) and `export default { schema }` or `export const schema`.
+/// DSL) and expose a schema map for the authoring front-end to lower.
 ///
 /// # Errors
 /// See [`EvalError`].

@@ -4,7 +4,7 @@
 //
 // The plugin emits one virtual module — `virtual:zeroship/_server-entry`
 // — that imports the user's entry and normalises its exports into the
-// `default = { schema?, fetch?, rpc? }` shape consumed by the runtime.
+// `default = { fetch?, rpc? }` shape consumed by the runtime.
 //
 // `default.rpc` is a PLAIN OBJECT (dict-shape: `{ wireId: handler }`).
 // Dispatch (input validation, capability frame, stream framing,

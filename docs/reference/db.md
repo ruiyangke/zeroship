@@ -189,30 +189,33 @@ take the first 4 ASCII alphanumerics. An empty result falls back to
 | `users`      | `user`      | `user_01HXY3Z9PQR2…`    |
 | `categories` | `cate`      | `cate_01HXY3Z9PQR2…`    |
 
-**Override — `id: t.id("prefix")`.** Declare the prefix explicitly by
-naming the always-present system `id` column with `t.id(...)`:
+**Override — `id: t.id({ prefix })`.** Declare the prefix explicitly in the
+migration that creates the table:
 
 ```ts
-import { schema, t } from "@zeroship/db";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  schema: {
-    posts: schema({
-      id:    t.id("blog"),          // rows get ids like blog_<22 base62 chars>
-      title: t.string().required(),
-    }),
+  name: "create_posts",
+  up() {
+    table("posts").create({
+      columns: {
+        id: t.id({ prefix: "blog" }), // rows get ids like blog_<22 base62 chars>
+        title: t.text().notNull(),
+      },
+    });
   },
 };
 ```
 
-`id: t.id("blog")` is a **prefix declaration** for the system `id`
+`id: t.id({ prefix: "blog" })` is a **prefix declaration** for the system `id`
 column — it does not emit a second column, and it is the only sanctioned
 way to name `id` in a schema (you otherwise never declare `id`). The
 prefix must match `^[a-z][a-z0-9_]*$`.
 
 **`usr` is reserved.** It is the platform user-id prefix, so
-`t.id("usr")` is rejected (and the auto-derivation will never produce it
-either — e.g. a collection named `usrs` derives `usrs`, not `usr`).
+`t.id({ prefix: "usr" })` is rejected (and the auto-derivation will never
+produce it either — e.g. a collection named `usrs` derives `usrs`, not `usr`).
 
 **Ordering.** The UUIDv7 body is encoded as a fixed-width base62 string
 using the runtime's ordered alphabet, so lexicographic `id` order
@@ -222,38 +225,39 @@ newest-first feeds and `.sort({ id: 1 })` for oldest-first pagination.
 `CURRENT_TIMESTAMP` has second-level granularity and can tie under quick
 dev inserts.
 
-### Per-collection options via `schema()`
+### Per-collection options
 
 ```ts
-import { schema, t } from "@zeroship/db";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  schema: {
-    todos: schema({
-      title: t.string().required(),
-      done:  t.boolean().default(false),
-    })
-      .strictness("strict")
-      .index("by_done", ["done"]),
+  name: "create_todos",
+  up() {
+    table("todos").create({
+      columns: {
+        title: t.text().notNull(),
+        done: t.boolean().default(false),
+      },
+      strictness: "strict",
+      indexes: [{ name: "by_done", columns: ["done"] }],
+    });
   },
 };
 ```
 
-- `schema({...}).softDelete()` — not required for normal CRUD. The
+- `softDelete: true` — not required for normal CRUD. The
   runtime creates `deleted_at` on every table, `delete()` soft-deletes,
   and read paths hide deleted rows through the system-fields layer.
-- `schema({...}).withVersioning()` — not required to create or bump the
+- `versioning: true` — not required to create or bump the
   physical `version` field. The runtime creates `version` on every table
   and treats `update({ id, version: N }, ...)` as a CAS guard. The SDK
   flag currently controls the higher-level `OptimisticLockError`
   mapping for wrapper-side CAS helpers while this pre-launch surface is
   being simplified.
-- `schema({...}).strictness("strict" | "lenient" | "off")` — deploy-time
-  data-validation policy. Both shorthand collections (`users: { ... }`)
-  and `schema({...})` default to `strict`; switch to the builder form if
-  you need `lenient` or `off`. The builder lives in `sdks/db/src/types.ts`
-  and the deploy-time gate lives in
-  `crates/plugin-db/src/orchestrator/register_model/validate.rs`.
+- `strictness: "strict" | "lenient" | "off"` — deploy-time data-validation
+  policy. The default is `strict`; set this in the migration if you need
+  `lenient` or `off`. The authoring types live in `sdks/migrate/src/types.ts`
+  and the deploy-time gate lives in the migration engine and DB plugin.
 
 ### Named indexes
 
@@ -262,15 +266,22 @@ the queries you intend to run and the SDK warns you when a filter walks
 the table without hitting one.
 
 ```ts
+import { table, t } from "@zeroship/migrate";
+
 export default {
-  schema: {
-    todos: schema({
-      userId: t.ref("users"),
-      done:   t.boolean().default(false),
-      email:  t.string(),
-    })
-      .index("by_email",       ["email"])
-      .index("by_user_done",   ["userId", "done"]),
+  name: "create_todos_indexes",
+  up() {
+    table("todos").create({
+      columns: {
+        userId: t.ref("users"),
+        done: t.boolean().default(false),
+        email: t.text(),
+      },
+      indexes: [
+        { name: "by_email", columns: ["email"] },
+        { name: "by_user_done", columns: ["userId", "done"] },
+      ],
+    });
   },
 };
 ```
@@ -643,14 +654,17 @@ flat scan — see "Backend coverage" below for the dev-scale ceiling.
 Declare a column with `t.vector(dims, opts?)`:
 
 ```ts
-import { t } from "@zeroship/db";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  schema: {
-    docs: {
-      title:     t.string().required(),
-      embedding: t.vector(1536, { metric: "cosine" }), // dims in 1..=16000
-    },
+  name: "create_docs",
+  up() {
+    table("docs").create({
+      columns: {
+        title: t.text().notNull(),
+        embedding: t.vector(1536, { metric: "cosine" }), // dims in 1..=16000
+      },
+    });
   },
 };
 ```
@@ -687,16 +701,20 @@ returns rows joined back to the base collection by `rowid`, with
 
 ### Full-text search
 
-Mark text columns with `.fts(language?)`:
+Mark text columns with `.fts(language?)`. This facet currently comes through the
+optional `schema.ts` authoring front-end; the toolchain compiles that schema
+module into migrations, generated types, and the runtime descriptor. Do not
+export it from the app entry default export.
 
 ```ts
-export default {
-  schema: {
-    posts: {
-      title: t.string().required().fts("english"),
-      body:  t.string().required().fts("english"),
-      lang:  t.string().enum("en", "fr", "de").default("en"),
-    },
+// schema.ts — authoring input only
+import { t } from "@zeroship/db";
+
+export const schema = {
+  posts: {
+    title: t.string().required().fts("english"),
+    body: t.string().required().fts("english"),
+    lang: t.string().enum("en", "fr", "de").default("en"),
   },
 };
 ```
@@ -739,12 +757,17 @@ ordering is stable, but values are NOT comparable across backends.
 Declare a geo column with `t.geoPoint()`:
 
 ```ts
+import { table, t } from "@zeroship/migrate";
+
 export default {
-  schema: {
-    stores: {
-      name: t.string().required(),
-      loc:  t.geoPoint(),                   // {lat, lng}
-    },
+  name: "create_stores",
+  up() {
+    table("stores").create({
+      columns: {
+        name: t.text().notNull(),
+        loc: t.geoPoint(), // {lat, lng}
+      },
+    });
   },
 };
 ```
@@ -1231,25 +1254,28 @@ and the column-derivation key is never consulted.
 ### Schema declaration
 
 ```ts
-import { t, schema } from "@zeroship/db";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  schema: {
-    users: schema({
-      name:  t.string().required(),
-      email: t.encrypted({ wraps: t.string() })
-              .mask({ kind: "email", classification: "pii" }),
-      ssn:   t.encrypted({ wraps: t.string() })
-              .mask({ kind: "last4", classification: "spi" }),
-      dob:   t.encrypted({ wraps: t.string() })
-              .mask({ kind: "dateYear", classification: "phi" }),
-    }),
+  name: "create_users_sensitive_fields",
+  up() {
+    table("users").create({
+      columns: {
+        name: t.text().notNull(),
+        email: t.encrypted({ of: t.text() })
+          .mask({ kind: "email", classification: "pii" }),
+        ssn: t.encrypted({ of: t.text() })
+          .mask({ kind: "last4", classification: "spi" }),
+        dob: t.encrypted({ of: t.text() })
+          .mask({ kind: "dateYear", classification: "phi" }),
+      },
+    });
   },
 };
 ```
 
-`t.encrypted({...})` without `.mask({...})` is shorthand for
-`.mask({ kind: "full", classification: "pii" })`. `t.string().mask({
+`t.encrypted({ of })` without `.mask({...})` is shorthand for
+`.mask({ kind: "full", classification: "pii" })`. `t.text().mask({
 kind: "full", classification: "public" })` (mask without encryption)
 is also valid — masking is the read-side; encryption is the
 storage-side; they're independent.
@@ -1358,17 +1384,12 @@ isolate sees the same policy on boot.
 ```ts
 import { defineMaskPolicy } from "@zeroship/db";
 
-export default {
-  schema: { /* ... */ },
-  async startup(env) {
-    await defineMaskPolicy(env.db, {
-      admin:    ["public", "pii", "spi", "phi", "pci", "internal"],
-      support:  ["public", "pii"],
-      end_user: ["public"],
-      // `auto` (the system actor) has uniform access UNLESS listed.
-    });
-  },
-};
+await defineMaskPolicy(env.db, {
+  admin: ["public", "pii", "spi", "phi", "pci", "internal"],
+  support: ["public", "pii"],
+  end_user: ["public"],
+  // `auto` (the system actor) has uniform access UNLESS listed.
+});
 ```
 
 Policy is keyed by app id — app A's policy never leaks to app B's

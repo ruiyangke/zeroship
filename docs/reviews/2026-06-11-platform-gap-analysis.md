@@ -12,7 +12,7 @@ What's genuinely built and solid: the V8/compio runtime + sandbox boundary, the 
 primitives (`env.{db,kv,storage,auth}`) wired in the worker, the `.zship` deploy pipeline +
 content-addressed blob ingest, gateway manifest dispatch + CHWBL, the full auth IdP
 (password/OAuth/magic-link/sessions/GDPR-erase), structured logging, the Liquibase migration
-mechanism, and the deploy contract (`default = {schema?, fetch?, rpc?}`). The runtime can run
+mechanism, and the deploy contract (`default = {fetch?, rpc?}`). The runtime can run
 a real app.
 
 What's missing clusters into four areas, in priority order: **(0) the monetization engine

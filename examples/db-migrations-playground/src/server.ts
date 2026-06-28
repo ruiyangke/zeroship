@@ -21,8 +21,7 @@ import { action, mutation, query } from "@zeroship/rpc/server";
 // are present + nullable so reads see whichever shape exists during the
 // migration window.
 //
-// Declared via the `export default { schema }` convention; the platform
-// installs typed Collection wrappers on `env.db` at app boot.
+// Local schema model used by this older playground's Db<> typing.
 // ---------------------------------------------------------------------------
 
 const dbSchema = {
