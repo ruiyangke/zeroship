@@ -1,6 +1,11 @@
 //! `zeroship-migrate` — zeroship's versioned DB migration engine for **creator
 //! project databases** (design `docs/proposals/2026-06-16-db-migration-engine-design.md`).
 //!
+//! The crate also carries the JS-first authoring front-end under [`frontend`]:
+//! V8-backed schema evaluation, op.* recording, type generation, and the
+//! `zeroship-migrate-js` authoring CLI. The deploy/apply fast path still runs
+//! through the native compio-postgres backend.
+//!
 //! This crate implements the **security core** + the **migration unit** (the
 //! migration data types §2.1 and the parse-time SQL security guard §1.4
 //! deny-list / §1.5 cross-schema confinement), and the **Postgres executor**
@@ -67,6 +72,7 @@ pub mod conn;
 pub mod engine;
 #[doc(hidden)]
 pub mod fault;
+pub mod frontend;
 pub mod guard;
 pub mod model;
 pub mod ops;

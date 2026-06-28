@@ -1,0 +1,261 @@
+{
+  "ir_version": 6,
+  "name": "pg_vendor",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createExtension",
+      "name": "citext",
+      "ifNotExists": true
+    },
+    {
+      "op": "dropExtension",
+      "name": "citext",
+      "ifExists": true
+    },
+    {
+      "op": "createSchema",
+      "name": "zeroship",
+      "ifNotExists": true
+    },
+    {
+      "op": "dropSchema",
+      "name": "zeroship",
+      "ifExists": true,
+      "cascade": true
+    },
+    {
+      "op": "createRole",
+      "name": "zeroship_auth",
+      "login": true,
+      "password": "zeroship_auth",
+      "bypassRls": true,
+      "setSearchPath": [
+        "zeroship",
+        "public"
+      ],
+      "ifNotExists": true
+    },
+    {
+      "op": "alterRole",
+      "name": "zeroship_auth",
+      "setSearchPath": [
+        "zeroship",
+        "public"
+      ]
+    },
+    {
+      "op": "dropRole",
+      "name": "zeroship_auth",
+      "ifExists": true
+    },
+    {
+      "op": "dropOwnedBy",
+      "roles": [
+        "zeroship_auth"
+      ]
+    },
+    {
+      "op": "grant",
+      "privileges": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "users"
+        ],
+        "schema": "zeroship"
+      },
+      "to": [
+        "zeroship_auth"
+      ]
+    },
+    {
+      "op": "revoke",
+      "privileges": [
+        "update",
+        "delete",
+        "truncate"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "audit_events"
+        ],
+        "schema": "zeroship"
+      },
+      "from": [
+        "public"
+      ]
+    },
+    {
+      "op": "enableRls",
+      "table": "app_secrets",
+      "schema": "zeroship"
+    },
+    {
+      "op": "forceRls",
+      "table": "app_secrets",
+      "schema": "zeroship"
+    },
+    {
+      "op": "createPolicy",
+      "name": "tenant_isolation",
+      "table": "app_secrets",
+      "schema": "zeroship",
+      "forCmd": "all",
+      "using": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zeroship.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      },
+      "withCheck": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zeroship.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      }
+    },
+    {
+      "op": "dropPolicy",
+      "name": "tenant_isolation",
+      "table": "app_secrets",
+      "schema": "zeroship",
+      "ifExists": true
+    },
+    {
+      "op": "disableRls",
+      "table": "app_secrets",
+      "schema": "zeroship"
+    },
+    {
+      "op": "noForceRls",
+      "table": "app_secrets",
+      "schema": "zeroship"
+    },
+    {
+      "op": "createFunction",
+      "name": "audit_events_block_tamper",
+      "schema": "zeroship",
+      "returns": "trigger",
+      "language": "plpgsql",
+      "replace": true,
+      "body": "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;"
+    },
+    {
+      "op": "createTrigger",
+      "name": "audit_events_block_update",
+      "table": "audit_events",
+      "schema": "zeroship",
+      "timing": "before",
+      "events": [
+        "update",
+        "delete"
+      ],
+      "forEach": "row",
+      "action": {
+        "kind": "executeFunction",
+        "name": "audit_events_block_tamper"
+      },
+      "when": {
+        "node": "unaryOp",
+        "op": "isNotNull",
+        "operand": {
+          "node": "colRef",
+          "name": "app_id"
+        }
+      }
+    },
+    {
+      "op": "createTrigger",
+      "name": "audit_events_append_only",
+      "table": "audit_events",
+      "schema": "zeroship",
+      "timing": "before",
+      "events": [
+        "update"
+      ],
+      "forEach": "row",
+      "action": {
+        "kind": "body",
+        "statements": [
+          {
+            "stmt": "raise",
+            "level": "abort",
+            "message": "append-only",
+            "errcode": "P0001"
+          }
+        ]
+      }
+    },
+    {
+      "op": "dropTrigger",
+      "name": "audit_events_block_update",
+      "table": "audit_events",
+      "schema": "zeroship",
+      "ifExists": true
+    },
+    {
+      "op": "dropFunction",
+      "name": "audit_events_block_tamper",
+      "schema": "zeroship",
+      "ifExists": true
+    },
+    {
+      "op": "pgRaw",
+      "sql": "SELECT set_config('zeroship.tenant_app', $1, false)",
+      "binds": [
+        "app_demo"
+      ]
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

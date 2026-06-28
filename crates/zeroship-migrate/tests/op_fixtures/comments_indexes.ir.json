@@ -1,0 +1,208 @@
+{
+  "ir_version": 6,
+  "name": "comments_indexes",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createEnum",
+      "name": "user_status",
+      "values": [
+        "active",
+        "disabled"
+      ]
+    },
+    {
+      "op": "createSequence",
+      "name": "users_seq"
+    },
+    {
+      "op": "createTable",
+      "name": "users",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "active",
+          "type": "bool",
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": true
+            }
+          }
+        },
+        {
+          "name": "status",
+          "type": {
+            "enum": {
+              "name": "user_status"
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {
+          "name": "users_email_uq",
+          "kind": {
+            "kind": "unique",
+            "columns": [
+              "email"
+            ]
+          }
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "op": "createIndex",
+      "table": "users",
+      "columns": [
+        {
+          "kind": "column",
+          "name": "email"
+        },
+        {
+          "kind": "expr",
+          "expr": {
+            "node": "fnCall",
+            "fn": "lower",
+            "args": [
+              {
+                "node": "colRef",
+                "name": "email"
+              }
+            ]
+          }
+        }
+      ],
+      "name": "users_email_lower_idx",
+      "where": {
+        "node": "unaryOp",
+        "op": "isTrue",
+        "operand": {
+          "node": "colRef",
+          "name": "active"
+        }
+      }
+    },
+    {
+      "op": "createView",
+      "name": "active_users",
+      "columns": [
+        "id",
+        "email"
+      ],
+      "query": {
+        "kind": "structured",
+        "select": {
+          "from": {
+            "name": "users"
+          },
+          "projection": [
+            {
+              "kind": "colRef",
+              "name": "id"
+            },
+            {
+              "kind": "colRef",
+              "name": "email"
+            }
+          ],
+          "where": {
+            "node": "unaryOp",
+            "op": "isTrue",
+            "operand": {
+              "node": "colRef",
+              "name": "active"
+            }
+          }
+        }
+      }
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "table",
+        "name": "users"
+      },
+      "comment": "End-user accounts"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "column",
+        "table": "users",
+        "name": "email"
+      },
+      "comment": "Login email"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "constraint",
+        "table": "users",
+        "name": "users_email_uq"
+      },
+      "comment": "Email uniqueness"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "index",
+        "name": "users_email_lower_idx"
+      },
+      "comment": "Case-insensitive email lookup"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "view",
+        "name": "active_users"
+      },
+      "comment": "Currently active users"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "type",
+        "name": "user_status"
+      },
+      "comment": "Allowed user states"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "sequence",
+        "name": "users_seq"
+      },
+      "comment": "Synthetic user sequence"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "function",
+        "name": "normalize_email"
+      },
+      "comment": "Unambiguous function comment"
+    },
+    {
+      "op": "comment",
+      "target": {
+        "kind": "table",
+        "name": "users"
+      }
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

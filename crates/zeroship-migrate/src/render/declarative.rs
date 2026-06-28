@@ -1906,7 +1906,7 @@ fn is_system_field_index(table: &str, index_name: &str) -> bool {
 /// for `table` automatically — the implicit PRIMARY-KEY index (`<table>_pkey`) or
 /// one of the three system-field indexes (`deleted_at`/`updated_at`/`created_by`).
 ///
-/// The op.* `generate` synthesizer (`zeroship-migrate-js`) uses this to know which
+/// The op.* `generate` synthesizer (the V8 frontend) uses this to know which
 /// desired-snapshot indexes it must NOT re-emit as standalone `createIndex` ops:
 /// they are already materialised by `lower_create_table`, so emitting them again
 /// would churn (a duplicate CREATE) and break re-diff-to-zero. Every OTHER

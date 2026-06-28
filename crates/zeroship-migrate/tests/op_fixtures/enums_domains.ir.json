@@ -1,0 +1,84 @@
+{
+  "ir_version": 6,
+  "name": "enums_domains",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createEnum",
+      "name": "plan_tier",
+      "values": [
+        "free",
+        "pro"
+      ]
+    },
+    {
+      "op": "createDomain",
+      "name": "billing_period",
+      "as": "int",
+      "check": {
+        "node": "binOp",
+        "op": "ge",
+        "lhs": {
+          "node": "colRef",
+          "name": "VALUE"
+        },
+        "rhs": {
+          "node": "literal",
+          "value": 1
+        }
+      },
+      "default": {
+        "literal": {
+          "value": 1
+        }
+      },
+      "notNull": true
+    },
+    {
+      "op": "createTable",
+      "name": "subscriptions",
+      "columns": [
+        {
+          "name": "tier",
+          "type": {
+            "enum": {
+              "name": "plan_tier"
+            }
+          },
+          "nullable": false
+        },
+        {
+          "name": "period",
+          "type": {
+            "domain": {
+              "name": "billing_period"
+            }
+          }
+        }
+      ],
+      "constraints": [],
+      "indexes": []
+    },
+    {
+      "op": "createEnum",
+      "name": "legacy_tier",
+      "values": [
+        "legacy"
+      ]
+    },
+    {
+      "op": "dropEnum",
+      "name": "legacy_tier",
+      "existenceGuard": "ifExists"
+    },
+    {
+      "op": "dropDomain",
+      "name": "legacy_period",
+      "existenceGuard": "ifExists"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

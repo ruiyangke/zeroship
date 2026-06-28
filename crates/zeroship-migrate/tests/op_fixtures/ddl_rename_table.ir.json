@@ -1,0 +1,23 @@
+{
+  "ir_version": 6,
+  "name": "ddl_rename_table",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "renameTable",
+      "table": "accounts",
+      "to": "members"
+    },
+    {
+      "op": "renameTable",
+      "table": "orders",
+      "to": "purchases",
+      "schema": "reporting",
+      "existenceGuard": "ifExists"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

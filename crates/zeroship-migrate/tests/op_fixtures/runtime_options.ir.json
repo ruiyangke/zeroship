@@ -1,0 +1,73 @@
+{
+  "ir_version": 6,
+  "name": "runtime_options",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "posts",
+      "columns": [
+        {
+          "name": "title",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "author_id",
+          "type": "uuid",
+          "nullable": false
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": "draft"
+            }
+          }
+        }
+      ],
+      "constraints": [],
+      "indexes": [],
+      "runtimeOptions": {
+        "softDelete": true,
+        "versioning": true,
+        "strictness": "lenient"
+      }
+    },
+    {
+      "op": "createIndex",
+      "table": "posts",
+      "columns": [
+        {
+          "kind": "column",
+          "name": "author_id"
+        },
+        {
+          "kind": "column",
+          "name": "status"
+        }
+      ],
+      "name": "posts_author_status_idx"
+    },
+    {
+      "op": "setTableOptions",
+      "table": "posts",
+      "options": {
+        "versioning": false
+      }
+    },
+    {
+      "op": "setTableOptions",
+      "table": "posts",
+      "options": {
+        "strictness": "off"
+      }
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

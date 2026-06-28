@@ -1,0 +1,61 @@
+{
+  "ir_version": 6,
+  "name": "views",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createView",
+      "name": "active_users",
+      "schema": "app",
+      "columns": [
+        "id",
+        "email"
+      ],
+      "query": {
+        "kind": "structured",
+        "select": {
+          "from": {
+            "name": "users"
+          },
+          "projection": [
+            {
+              "kind": "colRef",
+              "name": "id"
+            },
+            {
+              "kind": "colRef",
+              "name": "email"
+            }
+          ],
+          "where": {
+            "node": "unaryOp",
+            "op": "isNull",
+            "operand": {
+              "node": "colRef",
+              "name": "deleted_at"
+            }
+          }
+        }
+      },
+      "replace": true
+    },
+    {
+      "op": "createView",
+      "name": "recent_users",
+      "query": {
+        "kind": "raw",
+        "sql": "SELECT id, email FROM users WHERE deleted_at IS NULL"
+      }
+    },
+    {
+      "op": "dropView",
+      "name": "old_users",
+      "schema": "app",
+      "existenceGuard": "ifExists"
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

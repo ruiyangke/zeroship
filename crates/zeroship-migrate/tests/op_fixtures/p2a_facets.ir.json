@@ -1,0 +1,61 @@
+{
+  "ir_version": 6,
+  "name": "p2a_facets",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "posts",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": {
+            "fn": {
+              "fn": "genRandomUuid"
+            }
+          },
+          "idPrefix": "post"
+        },
+        {
+          "name": "title",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "embedding",
+          "type": {
+            "vector": {
+              "vector": 1536
+            }
+          },
+          "vectorMetric": "cosine"
+        },
+        {
+          "name": "secondary_embedding",
+          "type": {
+            "vector": {
+              "vector": 768
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {
+          "kind": {
+            "kind": "pk",
+            "columns": [
+              "id"
+            ]
+          }
+        }
+      ],
+      "indexes": []
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

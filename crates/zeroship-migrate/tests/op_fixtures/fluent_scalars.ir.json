@@ -1,0 +1,84 @@
+{
+  "ir_version": 6,
+  "name": "fluent_scalars",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "ledger",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": {
+            "fn": {
+              "fn": "genRandomUuid"
+            }
+          }
+        },
+        {
+          "name": "seq",
+          "type": {
+            "decimal": {
+              "precision": 38,
+              "scale": 0
+            }
+          },
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": {
+                "decimal": "9007199254740993"
+              }
+            }
+          }
+        },
+        {
+          "name": "salt",
+          "type": "bytea",
+          "default": {
+            "literal": {
+              "value": {
+                "bytes": "AQID/w=="
+              }
+            }
+          }
+        }
+      ],
+      "constraints": [
+        {
+          "kind": {
+            "kind": "pk",
+            "columns": [
+              "id"
+            ]
+          }
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "op": "insert",
+      "table": "ledger",
+      "columns": [
+        "seq",
+        "salt"
+      ],
+      "rows": [
+        [
+          {
+            "decimal": "9007199254740993"
+          },
+          {
+            "bytes": "ABAgQID/"
+          }
+        ]
+      ]
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}

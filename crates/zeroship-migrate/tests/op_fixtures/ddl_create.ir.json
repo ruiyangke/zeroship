@@ -1,0 +1,66 @@
+{
+  "ir_version": 6,
+  "name": "ddl_create",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "orders",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uuid",
+          "nullable": false,
+          "default": {
+            "fn": {
+              "fn": "genRandomUuid"
+            }
+          }
+        },
+        {
+          "name": "total",
+          "type": "int",
+          "nullable": false,
+          "default": {
+            "literal": {
+              "value": 0
+            }
+          }
+        },
+        {
+          "name": "note",
+          "type": "text"
+        }
+      ],
+      "constraints": [],
+      "indexes": []
+    },
+    {
+      "op": "createIndex",
+      "table": "orders",
+      "columns": [
+        {
+          "kind": "column",
+          "name": "total"
+        }
+      ],
+      "name": "orders_total_idx"
+    },
+    {
+      "op": "addColumn",
+      "table": "orders",
+      "column": "status",
+      "type": "text",
+      "nullable": false,
+      "default": {
+        "literal": {
+          "value": "new"
+        }
+      }
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}
