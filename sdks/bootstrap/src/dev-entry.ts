@@ -7,10 +7,10 @@
  * evaluations) and the `envDb` getter (so the dev entry doesn't
  * hard-code the runtime's `__zs_env()` indirection). This module owns:
  *
- *   1. Lazy schema install via `installSchema(schema, env.db)` on first
- *      request. Going top-level-await on the user import would block
- *      dev startup on potentially-failing user code; lazy is the right
- *      tradeoff for dev.
+ *   1. Lazy descriptor install via `installSchema(schema, env.db)` on first
+ *      request when dev has injected `__zsRuntimeDescriptor`. Going
+ *      top-level-await on the user import would block dev startup on
+ *      potentially-failing user code; lazy is the right tradeoff for dev.
  *   2. Per-call normalization via `normalizeUserModule(mod, registry)`
  *      so HMR replacements land naturally — the registry captures the
  *      transform's `__register` side-effects and merges last
@@ -188,24 +188,11 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     await schemaRegistration;
   }
 
-  async function registerSchema(mod: unknown): Promise<void> {
-    const defaultExport =
-      (mod && typeof mod === "object" && (mod as { default?: unknown }).default) || null;
-    const declaredSchema =
-      (defaultExport &&
-        typeof defaultExport === "object" &&
-        (defaultExport as { schema?: unknown }).schema &&
-        typeof (defaultExport as { schema?: unknown }).schema === "object")
-        ? (defaultExport as { schema: unknown }).schema
-        : undefined;
-
-    // **Migration-first cutover (P4b/P5 S2)** — prefer the bundled
-    // RuntimeSchemaDescriptor if the runtime injected one as
-    // `globalThis.__zsRuntimeDescriptor`. In self-contained dev (Vite +
-    // SQLite) no descriptor is bundled, so this is normally absent and the
-    // declared `default.schema` remains the source (which the SQLite-dev
-    // engine then diffs against live state). Honored here for symmetry with
-    // the production runtime-entry so a descriptor, if present, wins.
+  async function registerSchema(_mod: unknown): Promise<void> {
+    // **Migration-first cutover (P5 S3)** — dev also installs from the generated
+    // RuntimeSchemaDescriptor only. S4 wires the Vite dev server to inject that
+    // descriptor consistently; until then an absent descriptor is treated as a
+    // schema-less app rather than falling back to `default.schema`.
     const descriptor = (globalThis as unknown as {
       __zsRuntimeDescriptor?: Record<string, unknown>;
     }).__zsRuntimeDescriptor;
@@ -236,9 +223,9 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         }
         return out;
       }
-      return value;
+      return undefined;
     };
-    const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : declaredSchema;
+    const schema = hasDescriptor ? (runtimeDescriptorFields(descriptor) ?? {}) : undefined;
 
     if (!schema) {
       schemaInstalled = true;
@@ -276,15 +263,8 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         envDb as Parameters<typeof installSchema>[1],
         {
           platform,
-          // **P4b** — in descriptor mode this is the source of truth.
+          // **P5 S3** — descriptor mode is the only runtime schema source.
           descriptor: hasDescriptor ? descriptor : undefined,
-          // **P4b review fix (MED)** — recover collection-LEVEL options
-          // (softDelete / versioning / indexes) the field-only descriptor
-          // cannot encode. Inert in self-contained dev (no descriptor is
-          // bundled), present for parity with the production runtime-entry.
-          declaredSchemas: hasDescriptor
-            ? (declaredSchema as Record<string, unknown> | undefined)
-            : undefined,
         } as Parameters<typeof installSchema>[2],
       );
       schemaReady = (async () => {
@@ -305,7 +285,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
           }
         }
       })();
-      log(`[zeroship:dev] registered schema from default-export`);
+      log(`[zeroship:dev] registered schema from runtime descriptor`);
     } catch (e) {
       const err = e as { message?: string };
       logError(`[zeroship:dev] schema registration failed: ${err?.message ?? e}`);

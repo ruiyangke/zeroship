@@ -238,7 +238,18 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
     };
 
     const { ready } = withResolver(env, handle, () =>
-      installSchema({ users: { name: t.string().required() } }, env),
+      installSchema({} as never, env, {
+        descriptor: {
+          version: 1,
+          collections: {
+            users: {
+              fields: { name: { type: "string", required: true } },
+              options: { softDelete: false, versioning: false, strictness: "strict" },
+              indexes: [],
+            },
+          },
+        },
+      } as never),
     );
     await ready;
 
@@ -257,9 +268,21 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
       setMaskPolicy: async () => ({}),
     };
     const { ready } = installSchema(
-      { posts: { title: t.string().required() } },
+      {} as never,
       env,
-      { platform: handle },
+      {
+        platform: handle,
+        descriptor: {
+          version: 1,
+          collections: {
+            posts: {
+              fields: { title: { type: "string", required: true } },
+              options: { softDelete: false, versioning: false, strictness: "strict" },
+              indexes: [],
+            },
+          },
+        },
+      } as never,
     );
     await ready;
     assert.deepEqual(platformCalls, ["posts"]);
@@ -277,7 +300,18 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
     const prev = g.__zsDbPlatform;
     delete g.__zsDbPlatform;
     try {
-      const { ready } = installSchema({ items: { name: t.string().required() } }, env);
+      const { ready } = installSchema({} as never, env, {
+        descriptor: {
+          version: 1,
+          collections: {
+            items: {
+              fields: { name: { type: "string", required: true } },
+              options: { softDelete: false, versioning: false, strictness: "strict" },
+              indexes: [],
+            },
+          },
+        },
+      } as never);
       await ready;
     } finally {
       if (prev !== undefined) g.__zsDbPlatform = prev;
@@ -288,13 +322,12 @@ describe("@zeroship/bootstrap __platform routing (P9 PR 4)", () => {
 
 describe("installSchema — P4b migration-first descriptor source", () => {
   // The bundled RuntimeSchemaDescriptor (`schema.runtime.json`,
-  // Record<collection, Record<column, FieldDef>>) becomes the schema source
-  // of truth when handed to installSchema via `options.descriptor`. These
+  // v1 `{ version, collections }`) is the schema source of truth when handed
+  // to installSchema via `options.descriptor`. These
   // pin: (a) collections + registerModel come FROM the descriptor (not the
   // declared t.* object), with platform system fields passing through the
-  // normaliser fence; (b) an absent / empty descriptor falls back to the
-  // declared schema. Each FAILS pre-P4b (the `descriptor` option did not
-  // exist; installSchema always sourced from the first argument).
+  // normaliser fence; (b) an absent / unreadable descriptor installs nothing
+  // instead of falling back to the declared schema.
   function makeMockNative(calls: Array<{ name: string; schema: Record<string, unknown> }>) {
     return {
       registerModel(name: string, schema: Record<string, unknown>) {
@@ -313,10 +346,17 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     // system fields included). DIFFERENT collection name than the declared
     // object so the source is unambiguous.
     const descriptor = {
-      posts: {
-        id: { type: "id", idPrefix: "post" },
-        title: { type: "string", required: true },
-        created_at: { type: "date" },
+      version: 1,
+      collections: {
+        posts: {
+          fields: {
+            id: { type: "id", idPrefix: "post" },
+            title: { type: "string", required: true },
+            created_at: { type: "date" },
+          },
+          options: { softDelete: false, versioning: false, strictness: "strict" },
+          indexes: [],
+        },
       },
     };
     const { ready } = installSchema(
@@ -351,7 +391,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     );
   });
 
-  test("falls back to the declared schema when no descriptor is supplied", async () => {
+  test("installs no collections when no descriptor is supplied", async () => {
     const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
     const native = makeMockNative(calls);
     const { ready } = installSchema(
@@ -360,11 +400,11 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     );
     await ready;
     const handle = native as unknown as Record<string, unknown>;
-    assert.ok(handle.todos, "declared `todos` planted in the no-descriptor fallback");
-    assert.deepEqual(calls.map((c) => c.name), ["todos"]);
+    assert.equal(handle.todos, undefined, "declared `todos` is ignored without a descriptor");
+    assert.deepEqual(calls.map((c) => c.name), []);
   });
 
-  test("falls back to the declared schema when the descriptor is an empty object", async () => {
+  test("installs no collections when the descriptor is not v1-shaped", async () => {
     const calls: Array<{ name: string; schema: Record<string, unknown> }> = [];
     const native = makeMockNative(calls);
     const { ready } = installSchema(
@@ -374,16 +414,9 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     );
     await ready;
     const handle = native as unknown as Record<string, unknown>;
-    assert.ok(handle.todos, "empty descriptor -> declared fallback");
-    assert.deepEqual(calls.map((c) => c.name), ["todos"]);
+    assert.equal(handle.todos, undefined, "unreadable descriptor -> no declared fallback");
+    assert.deepEqual(calls.map((c) => c.name), []);
   });
-
-  // **Review fix (MED).** Legacy RuntimeSchemaDescriptors are pure field maps
-  // and cannot carry collection-level options (`softDelete` / `versioning`).
-  // Source the fields off the descriptor but recover those options from the
-  // matching declared SchemaBuilder, else apps that ship a legacy descriptor AND
-  // declare `.softDelete()`/`.versioning()` silently lose runtime behaviour.
-  // These two pin the transitional merge until P5 S3 deletes the fallback.
 
   // A native env.db whose `collection(name)` records which mutating op it
   // routed to (soft delete → `update`; hard delete → `delete`).
@@ -411,10 +444,10 @@ describe("installSchema — P4b migration-first descriptor source", () => {
 
   test("reads collection options and indexes directly from descriptor v1", async () => {
     const ops: Array<{ name: string; op: string }> = [];
-    const calls: Array<{ name: string; indexes: unknown }> = [];
+    const calls: Array<{ name: string; schema: Record<string, unknown>; indexes: unknown }> = [];
     const native = {
-      registerModel(name: string, _schema: Record<string, unknown>, indexes?: unknown) {
-        calls.push({ name, indexes });
+      registerModel(name: string, schema: Record<string, unknown>, indexes?: unknown) {
+        calls.push({ name, schema, indexes });
         return Promise.resolve();
       },
       transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
@@ -447,7 +480,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       },
     };
     const { ready } = installSchema(
-      { ignored: { name: t.string() } } as never,
+      {} as never,
       native,
       { descriptor } as never,
     );
@@ -456,6 +489,12 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     assert.deepEqual(calls, [
       {
         name: "posts",
+        schema: {
+          id: { type: "id", idPrefix: "post" },
+          title: { type: "string", required: true },
+          status: { type: "string", required: true },
+          _meta: { strictness: "lenient" },
+        },
         indexes: [{ name: "posts_title_status_idx", fields: ["title", "status"] }],
       },
     ]);
@@ -481,7 +520,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     assert.equal(res.error?.code, "OPTIMISTIC_CONCURRENCY");
   });
 
-  test("preserves the declared collection's softDelete option in descriptor mode", async () => {
+  test("does not recover legacy descriptor options from declaredSchemas", async () => {
     const ops: Array<{ name: string; op: string }> = [];
     const native = makeOpRecordingNative(ops);
     const descriptor = {
@@ -490,9 +529,6 @@ describe("installSchema — P4b migration-first descriptor source", () => {
         title: { type: "string", required: true },
       },
     };
-    // Mirror the prod call shape (runtime-entry): the descriptor is the
-    // first arg AND `options.descriptor`; the declared SchemaBuilder map rides
-    // `options.declaredSchemas` purely so collection-level options survive.
     const { ready } = installSchema(
       descriptor as never,
       native,
@@ -505,63 +541,12 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     );
     await ready;
 
-    const handle = native as unknown as Record<string, { delete(id: string): Promise<unknown> }>;
-    await handle.posts.delete("post_abc");
-
-    // Soft delete routes the removal through a native `update` (stamping
-    // deleted_at), NOT a hard `delete`. Pre-fix the option was dropped, so the
-    // collection issued a hard `delete` and this assertion fails.
-    assert.deepEqual(
-      ops,
-      [{ name: "posts", op: "update" }],
-      "softDelete from the declared schema must survive into descriptor mode (soft delete → native update, not delete)",
-    );
-  });
-
-  test("preserves the declared collection's versioning option in descriptor mode", async () => {
-    const ops: Array<{ name: string; op: string }> = [];
-    const native = makeOpRecordingNative(ops);
-    const descriptor = {
-      docs: {
-        id: { type: "id", idPrefix: "doc" },
-        title: { type: "string", required: true },
-      },
-    };
-    const { ready } = installSchema(
-      descriptor as never,
-      native,
-      {
-        descriptor,
-        declaredSchemas: {
-          docs: schema({ title: t.string().required() }).withVersioning(),
-        },
-      } as never,
-    );
-    await ready;
-
-    const handle = native as unknown as Record<
-      string,
-      {
-        update(
-          idOrFilter: unknown,
-          patch: unknown,
-        ): Promise<{ data: unknown; error: { code?: string } | null }>;
-      }
-    >;
-    // A CAS update whose native side returns null must raise OptimisticLockError
-    // — but ONLY when versioning is live. Pre-fix the option was dropped, so the
-    // version was treated as a plain filter field, the null result became a
-    // benign `ok(null)` (error === null), and this assertion fails.
-    const res = await handle.docs.update({ id: "doc_1", version: 1 }, { title: "x" });
-    assert.notEqual(
-      res.error,
-      null,
-      "stale CAS update must fail (error set) when versioning is preserved",
-    );
+    const handle = native as unknown as Record<string, unknown>;
     assert.equal(
-      res.error?.code,
-      "OPTIMISTIC_CONCURRENCY",
-      `versioning from the declared schema must survive into descriptor mode (got ${JSON.stringify(res.error)})`,
+      handle.posts,
+      undefined,
+      "legacy field-only descriptor plus declaredSchemas side channel must no longer install a collection",
     );
+    assert.deepEqual(ops, []);
   });
 });

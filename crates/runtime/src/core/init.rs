@@ -1240,11 +1240,9 @@ pub fn load_polyfills_and_modules(
     // class above is the sole provider; building with
     // `--no-default-features` (polyfill mode) is no longer supported.
 
-    // Stage 5c: schema auto-discovery no longer reads a manifest-injected
-    // path. The bootstrap's inlined `db_init.js` reads `user.default.schema`
-    // directly off the loaded entry module (see `bootstrap/db_init.js`).
-    // Raw `.js` deploys with `export default { schema: {...} }` work
-    // without any plugin-side resolver.
+    // P5 S3: schema install is descriptor-only. Apps that ship migrations get
+    // `manifest.runtime_descriptor`; schema-less apps get no descriptor and the
+    // bootstrap installs no env.db collections.
 
     // Wrap the user's module graph in the bootstrap entry.
     //
@@ -2042,16 +2040,14 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
         global.set(scope, key.into(), f.into());
     }
 
-    // __zsRuntimeDescriptor — the migration-first cutover (P4b). When the
+    // __zsRuntimeDescriptor — the migration-first cutover (P5 S3). When the
     // deployed `.zship` carries a `manifest.runtime_descriptor`, the worker
     // resolves its blob and stamps the JSON onto `RuntimeState`. We parse it
-    // here and expose the resulting `Record<collection, Record<column,
-    // FieldDef>>` object as a global so `@zeroship/bootstrap`'s entry sources
-    // the schema from the migration fold instead of `user.default.schema`.
-    // Absent (`None`) for apps that ship no migrations — the bootstrap entry
-    // then falls back to the declared `default.schema` (a transitional path;
-    // P5 deletes the fallback). A parse failure is logged and skipped so a
-    // corrupt descriptor degrades to the fallback rather than bricking boot.
+    // here and expose the resulting v1 `{ version, collections }` descriptor as
+    // a global so `@zeroship/bootstrap`'s entry sources the schema from the
+    // migration fold. Absent (`None`) means schema-less app.
+    // S6 promotes parse failure to a hard boot error; S3 logs and skips install,
+    // but never falls back to `default.schema`.
     {
         let descriptor_json = {
             let state: crate::state::SharedState = scope
@@ -2070,7 +2066,7 @@ pub fn setup_globals(scope: &mut v8::PinScope) {
                 _ => {
                     tracing::warn!(
                         "runtime: failed to parse manifest.runtime_descriptor JSON; \
-                         falling back to default.schema"
+                         schema descriptor unavailable"
                     );
                 }
             }

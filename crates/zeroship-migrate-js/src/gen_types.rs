@@ -237,7 +237,11 @@ fn add_runtime_index(indexes: &mut Vec<RuntimeIndexDescriptor>, index: RuntimeIn
 }
 
 fn derived_unique_index_name(table: &str, field: &str) -> String {
-    format!("{table}_{field}_key")
+    zeroship_migrate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
+}
+
+fn derived_plain_index_name(table: &str, fields: &[String]) -> String {
+    zeroship_migrate::plan::author::cap_ident_name(&format!("{table}_{}_idx", fields.join("_")))
 }
 
 fn record_plain_index(
@@ -260,7 +264,7 @@ fn record_plain_index(
     }
     let index_name = name
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{}_{}_idx", table, fields.join("_")));
+        .unwrap_or_else(|| derived_plain_index_name(table, &fields));
     add_runtime_index(
         &mut metadata.entry(table.to_string()).or_default().indexes,
         RuntimeIndexDescriptor {

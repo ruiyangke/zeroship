@@ -1,15 +1,14 @@
 //! Stage 5c schema auto-discovery — runtime-side init.
 //!
 //! Covers:
-//!   - The bootstrap's inlined `db_init.js` reads `user.default.schema`
-//!     directly off the loaded entry module — no manifest-injected path.
+//!   - The bootstrap's inlined runtime entry installs schema only from
+//!     `manifest.runtime_descriptor`.
 //!   - When no DbPlugin is registered (`__zs_env()?.db` is absent)
 //!     the init script silently no-ops — required so dev runs without
 //!     `DATABASE_URL` still boot.
-//!   - When the runtime ships an `installSchema`-shaped module and an
-//!     `env.db` namespace, the init script's discovery path fires and
-//!     consumes `user.default.schema`, calling `installSchema(schema, env)`
-//!     with the live `env.db` handle.
+//!   - When the runtime ships an `installSchema`-shaped module, an `env.db`
+//!     namespace, and a descriptor, the init script calls
+//!     `installSchema(descriptorFields, env)` with the live `env.db` handle.
 //!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
 
 mod common;
@@ -226,19 +225,11 @@ export default {
 }
 
 #[test]
-fn init_script_runs_install_schema_when_db_plugin_present() {
-    // Drive the init script's positive path: the user module exports
-    // `default.schema`, the runtime provides an `env.db` namespace, and
-    // a stub `@zeroship/db` module makes the dynamic import resolve. The
-    // stub `installSchema` captures the schema value it was handed; we
-    // read it back through a probe handler.
-    //
-    // End-to-end pre-condition for production: when the DbPlugin is
-    // registered AND the entry exports `default.schema`, the runtime
-    // calls `installSchema(schema, env.db)` on the entry's
-    // `default.schema` BEFORE any request is served. The path no
-    // longer goes through a manifest-injected hint — the schema lives
-    // on `user.default`.
+fn init_script_runs_install_schema_when_descriptor_and_db_plugin_present() {
+    // Drive the descriptor-only positive path: the runtime provides an `env.db`
+    // namespace and stamps a bundled RuntimeSchemaDescriptor onto the isolate.
+    // The stub `installSchema` captures the schema value it was handed; we read
+    // it back through a probe handler.
     init_v8();
 
     let user_src = r#"
@@ -265,18 +256,15 @@ async function _zsFetch(request) {
 export default {
     fetch: _zsFetch,
     rpc: (name, input) => _procedures[name](input),
-    // Stage 5c — the runtime reads schema right off this key. No
-    // manifest plumbing involved.
-    schema: { todos: { id: { type: "id" } } },
 };
 "#;
 
     // Stage 7: the bootstrap dynamically imports
     // `@zeroship/bootstrap/install-schema` (the framework-internal
     // package that owns installSchema post-refactor). Stub it as a
-    // bundle module so the dynamic import resolves. The stub captures
-    // the schema keys it was handed; verifying installSchema was CALLED
-    // (with the right schema) is the assertion that matters here.
+    // bundle module so the dynamic import resolves. The stub captures the
+    // schema keys it was handed; verifying installSchema was CALLED from the
+    // descriptor is the assertion that matters here.
     let stub_bootstrap = r#"
 export function installSchema(schema, _env) {
     globalThis.__zsCapturedSchema = JSON.stringify({
@@ -308,9 +296,12 @@ import "@zeroship/db/internal";
         ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
     ];
 
+    let descriptor = r#"{"version":1,"collections":{"posts":{"fields":{"id":{"type":"id","idPrefix":"post"},"title":{"type":"string","required":true}},"options":{"softDelete":false,"versioning":false,"strictness":"strict"},"indexes":[]}}}"#;
+
     let runtime = Runtime::builder()
         .modules(modules)
         .plugin(DummyDbPlugin)
+        .runtime_descriptor(Some(descriptor.to_string()))
         .build();
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
@@ -329,11 +320,8 @@ import "@zeroship/db/internal";
         }
         _ => panic!("expected sync Response"),
     };
-    // The probe returns whatever `__zsCapturedSchema` is. If discovery
-    // ran, it's a JSON string with `keys: ["todos"]`. If it didn't run,
-    // the probe returns null.
-    assert!(body.contains(r#"\"keys\":[\"todos\"]"#),
-        "expected captured schema with 'todos' key, got: {body}");
+    assert!(body.contains(r#"\"keys\":[\"posts\"]"#),
+        "expected captured descriptor schema with 'posts' key, got: {body}");
 }
 
 #[test]
@@ -345,13 +333,12 @@ fn init_script_sources_schema_from_runtime_descriptor_when_present() {
     // bootstrap's `runtime-entry` must then install the schema FROM the
     // descriptor — IGNORING `user.default.schema`.
     //
-    // We give the user a DIFFERENT declared schema (`{ todos }`) than the
-    // injected descriptor (`{ posts }`), stub `installSchema` to capture the
-    // collection keys it was handed, and assert it saw `["posts"]` (the
-    // descriptor) — not `["todos"]` (the declared object).
+    // We give the user a throwing `default.schema` getter and inject a descriptor
+    // (`{ posts }`). The runtime entry must not read the declared schema at all;
+    // it should install from the descriptor and pass no declared side channel.
     //
-    // RED before P4b: neither the global injection nor the runtime-entry's
-    // descriptor read existed, so the captured keys would be `["todos"]`.
+    // RED before S3: runtime-entry still read `default.schema` to build the
+    // declared-schema fallback, so module init trips the throwing getter.
     init_v8();
 
     let user_src = r#"
@@ -375,25 +362,22 @@ async function _zsFetch(request) {
     const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
     return await _zsRpcAndRespond(id, undefined);
 }
-export default {
+const defaultExport = {
     fetch: _zsFetch,
     rpc: (name, input) => _procedures[name](input),
-    // Declared schema — MUST be ignored in favour of the injected descriptor.
-    schema: { todos: { id: { type: "id" } } },
 };
+Object.defineProperty(defaultExport, "schema", {
+    get() { throw new Error("default.schema must not be read when a descriptor is present"); },
+});
+export default defaultExport;
 "#;
 
     let stub_bootstrap = r#"
 export function installSchema(schema, _env, _options) {
     globalThis.__zsCapturedSchema = JSON.stringify({
         keys: Object.keys(schema),
-        // The declared schema still rides `options.declaredSchemas` until S3
-        // deletes the fallback. Descriptor v1 itself carries options/indexes;
-        // capture declared keys to prove runtime-entry still threads the
-        // transitional fallback without making it the field source.
-        declaredKeys: (_options && _options.declaredSchemas)
-            ? Object.keys(_options.declaredSchemas)
-            : [],
+        optionKeys: _options ? Object.keys(_options) : [],
+        hasDeclaredSchemas: !!(_options && Object.prototype.hasOwnProperty.call(_options, "declaredSchemas")),
     });
     return { collections: {}, ready: Promise.resolve() };
 }
@@ -443,22 +427,18 @@ import "@zeroship/db/internal";
     // collections (`posts`), NOT the declared `todos`.
     assert!(body.contains(r#"\"keys\":[\"posts\"]"#),
         "expected installSchema sourced from the descriptor (posts), got: {body}");
-    // The declared `todos` schema is NOT the field source. It is still threaded
-    // through `options.declaredSchemas` as the transitional legacy fallback until
-    // S3 deletes declared-schema fallback support.
-    assert!(body.contains(r#"\"declaredKeys\":[\"todos\"]"#),
-        "the declared `todos` schema must reach installSchema via options.declaredSchemas \
-         (transitional fallback), got: {body}");
+    assert!(body.contains(r#"\"optionKeys\":[\"platform\",\"descriptor\"]"#),
+        "expected runtime-entry to pass only platform+descriptor options, got: {body}");
+    assert!(body.contains(r#"\"hasDeclaredSchemas\":false"#),
+        "declaredSchemas must not be passed to installSchema, got: {body}");
 }
 
 #[test]
-fn init_script_falls_back_to_default_schema_without_descriptor() {
-    // **Migration-first cutover (P4b) — the transitional fallback.** An app
-    // that ships NO migrations carries no `manifest.runtime_descriptor`, so the
-    // runtime injects no `globalThis.__zsRuntimeDescriptor`. The bootstrap
-    // entry must then fall back to the declared `user.default.schema` and still
-    // install it — keeping no-migration apps working during the cutover (P5
-    // deletes this fallback).
+fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
+    // **Migration-first cutover (P5 S3).** An app that ships no descriptor is
+    // treated as schema-less by the runtime entry. Even if a stale
+    // `default.schema` exists, the bootstrap must not read it or import
+    // `@zeroship/bootstrap/install-schema`.
     init_v8();
 
     let user_src = r#"
@@ -488,29 +468,12 @@ export default {
     schema: { todos: { id: { type: "id" } } },
 };
 "#;
-    let stub_bootstrap = r#"
-export function installSchema(schema, _env, _options) {
-    globalThis.__zsCapturedSchema = JSON.stringify({ keys: Object.keys(schema) });
-    return { collections: {}, ready: Promise.resolve() };
-}
-"#;
-    let stub_db_internal = r#"
-export function _flushPendingMaskPolicy() { return null; }
-"#;
-    let pre_init = r#"
-import "@zeroship/bootstrap/install-schema";
-import "@zeroship/db/internal";
-"#;
-
-    let user_with_preinit = format!("{pre_init}\n{user_src}");
     let modules = vec![
-        ModuleEntry { specifier: "index.js".into(), source: user_with_preinit },
-        ModuleEntry { specifier: "@zeroship/bootstrap/install-schema".into(), source: stub_bootstrap.into() },
-        ModuleEntry { specifier: "@zeroship/db/internal".into(), source: stub_db_internal.into() },
+        ModuleEntry { specifier: "index.js".into(), source: user_src.into() },
     ];
 
-    // No descriptor on the builder — the global stays unset; fall back to
-    // default.schema.
+    // No descriptor on the builder — the global stays unset and the stale
+    // default.schema must be ignored.
     let runtime = Runtime::builder()
         .modules(modules)
         .plugin(DummyDbPlugin)
@@ -533,8 +496,8 @@ import "@zeroship/db/internal";
         }
         _ => panic!("expected sync Response"),
     };
-    assert!(body.contains(r#"\"keys\":[\"todos\"]"#),
-        "without a descriptor, installSchema must source the declared default.schema (todos): {body}");
+    assert!(body.contains(r#""json":null"#),
+        "without a descriptor, runtime-entry must install nothing and ignore default.schema: {body}");
 }
 
 #[test]

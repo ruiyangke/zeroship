@@ -268,3 +268,61 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
         })
     );
 }
+
+#[test]
+fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
+    let table = "posts_with_an_extremely_long_runtime_descriptor_table_name".to_string();
+    let owner = "owner_identifier_column_with_extra_descriptor_length".to_string();
+    let status = "publication_status_column_with_extra_descriptor_length".to_string();
+    let slug = "slug_unique_column_with_extra_descriptor_length".to_string();
+    let natural = format!("{table}_{}_idx", [owner.clone(), status.clone()].join("_"));
+    let unique_natural = format!("{table}_{slug}_key");
+    assert!(natural.len() > 63, "fixture must exercise identifier capping");
+    assert!(unique_natural.len() > 63, "fixture must exercise unique-name capping");
+    let expected = zeroship_migrate::plan::author::cap_ident_name(&natural);
+    let expected_unique = zeroship_migrate::plan::author::cap_ident_name(&unique_natural);
+    let mut unique_slug = col(&slug, ColType::Text);
+    unique_slug.unique = Some(true);
+
+    let ops = vec![
+        Op::CreateTable {
+            name: table.clone(),
+            columns: vec![
+                col(&owner, ColType::Text),
+                col(&status, ColType::Text),
+                unique_slug,
+            ],
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateIndex {
+            table: table.clone(),
+            columns: vec![
+                IndexElement::Column { name: owner.clone() },
+                IndexElement::Column { name: status.clone() },
+            ],
+            name: None,
+            unique: Some(false),
+            using: None,
+            r#where: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+    ];
+
+    let artifacts = render_artifacts(&ops, "public").expect("render");
+    let value: serde_json::Value =
+        serde_json::from_str(&artifacts.runtime_descriptor).expect("runtime descriptor is JSON");
+    let indexes = value["collections"][table.as_str()]["indexes"]
+        .as_array()
+        .expect("indexes array");
+    assert_eq!(indexes.len(), 2);
+    assert_eq!(indexes[0]["name"], expected_unique);
+    assert_eq!(indexes[1]["name"], expected);
+    assert!(indexes[0]["name"].as_str().unwrap().len() <= 63);
+    assert!(indexes[1]["name"].as_str().unwrap().len() <= 63);
+}

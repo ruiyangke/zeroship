@@ -1,10 +1,9 @@
 /**
- * `installSchema` — framework-internal helper behind the
- * `export default { schema }` convention. Stage 7 of the refactor moved
+ * `installSchema` — framework-internal helper behind the runtime schema
+ * descriptor install path. Stage 7 of the refactor moved
  * this out of `@zeroship/db` into `@zeroship/bootstrap` so the same
  * implementation backs both the runtime crate's bootstrap and the Vite
- * plugin's dev path. User code MUST NOT call this — declare a schema on
- * the entry's `default` and the platform installs it.
+ * plugin's dev path. User code MUST NOT call this.
  *
  * Behaviour (mirrors the previous `@zeroship/db::installSchema`):
  *   - Walks the schema map and runs `registerModel` in topological order
@@ -130,16 +129,14 @@ export function resolveDbPlatform(
 export type NormalizedSchema = Record<string, FieldDef>;
 
 /**
- * **Migration-first cutover (P4b)** — the bundled runtime schema source.
+ * **Migration-first cutover (P5 S3)** — the bundled runtime schema source.
  *
  * The migration fold emits `schema.runtime.json` and the runtime carries it in
  * `manifest.runtime_descriptor`. v1 is `{ version: 1, collections: { ... } }`:
  * each collection carries already-resolved wire `FieldDef`s (snake_case
  * columns, system fields included), runtime options, and plain named indexes.
- * The legacy field-only map remains readable during this cutover stage; S3
- * deletes the declared-schema fallback after every producer emits v1.
+ * v1 is the sole runtime schema source.
  */
-type RuntimeSchemaDescriptorLegacy = Record<string, Record<string, FieldDef>>;
 type RuntimeStrictness = "strict" | "lenient" | "off";
 type RuntimeCollectionDescriptorV1 = {
   fields: Record<string, FieldDef>;
@@ -150,12 +147,10 @@ type RuntimeCollectionDescriptorV1 = {
   };
   indexes?: readonly NamedIndexSpec[];
 };
-export type RuntimeSchemaDescriptor =
-  | RuntimeSchemaDescriptorLegacy
-  | {
-      version: 1;
-      collections: Record<string, RuntimeCollectionDescriptorV1>;
-    };
+export type RuntimeSchemaDescriptor = {
+  version: 1;
+  collections: Record<string, RuntimeCollectionDescriptorV1>;
+};
 
 function runtimeDescriptorV1(
   descriptor: RuntimeSchemaDescriptor | undefined,
@@ -183,14 +178,6 @@ function runtimeDescriptorFields(
       out[name] = collection.fields;
     }
     return out;
-  }
-  if (
-    descriptor !== undefined &&
-    descriptor !== null &&
-    typeof descriptor === "object" &&
-    Object.keys(descriptor).length > 0
-  ) {
-    return descriptor as RuntimeSchemaDescriptorLegacy;
   }
   return null;
 }
@@ -1001,27 +988,14 @@ export interface InstallSchemaOptions {
   platform?: DbPlatformHandle;
 
   /**
-   * **Migration-first cutover (P4b)** — the bundled
+   * **Migration-first cutover (P5 S3)** — the bundled
    * {@link RuntimeSchemaDescriptor}, resolved from `manifest.runtime_descriptor`
    * and injected by the runtime as `globalThis.__zsRuntimeDescriptor`. v1 carries
-   * `{ fields, options, indexes }` per collection. When present (a non-empty
-   * object) it is the schema SOURCE OF TRUTH: `installSchema` plants Collection
-   * wrappers and runs the `registerModel` chain off it, IGNORING the declared
-   * `schemas` (t.* object) first argument. Absent → `installSchema` falls back to
-   * `schemas` (the transitional path; P5 S3 removes the declared source).
+   * `{ fields, options, indexes }` per collection and is the schema SOURCE OF
+   * TRUTH. The first `schemas` argument is no longer consulted for fields or
+   * collection options; absent descriptor means schema-less install.
    */
   descriptor?: RuntimeSchemaDescriptor;
-
-  /**
-   * The declared `default.schema` (the `t.*` {@link SchemaBuilder} map), carried
-   * ALONGSIDE a legacy field-only descriptor so collection-level options
-   * (`softDelete` / `versioning` / declared indexes) can still be recovered. v1
-   * descriptors carry those options directly; this side channel remains only for
-   * the transitional legacy reader and is removed in P5 S3. Ignored when no
-   * descriptor is present — the declared map is then the first `schemas` argument
-   * and its builders are read directly.
-   */
-  declaredSchemas?: Record<string, unknown>;
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
@@ -1042,8 +1016,8 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
 let _installInFlight = false;
 
 /**
- * Framework-internal helper that backs the `export default { schema }`
- * convention. Returns `{ collections, ready }` — callers MUST await
+ * Framework-internal helper that installs the runtime schema descriptor.
+ * Returns `{ collections, ready }` — callers MUST await
  * `ready` before dispatching handlers.
  */
 export function installSchema<const T extends Record<string, SchemaInput>>(
@@ -1093,16 +1067,17 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const native = env;
   const namingStrategy = options?.naming ?? naming.snakeCase;
 
-  // **Migration-first cutover (P4b/P5 S2)** — pick the schema source. v1
-  // descriptors carry `{ version, collections }`; legacy descriptors are the old
-  // field-only map. Both lower to the same `source` field map for this stage.
+  // **Migration-first cutover (P5 S3)** — descriptor v1 is the only runtime
+  // schema source. The declared first argument is ignored; a missing or
+  // unreadable descriptor installs no collections (S6 turns corrupt descriptors
+  // into hard boot errors).
   const descriptor = options?.descriptor;
   const descriptorV1 = runtimeDescriptorV1(descriptor);
   const descriptorFields = runtimeDescriptorFields(descriptor);
   const source: T =
     descriptorFields !== null
       ? (descriptorFields as unknown as T)
-      : schemas;
+      : ({} as T);
 
   const collections = {} as { [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T> };
 
@@ -1130,7 +1105,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // per-collection `registerModel` so the dev SQLite drop pass can tell a
   // not-yet-registered sibling (declared) from a genuinely-removed collection
   // (absent here). Computed once; stable across the topo-ordered chain.
-  // Sourced from the descriptor when present (P4b), else the declared schema.
+  // Sourced only from the descriptor.
   const declaredCollectionNames: readonly string[] = Object.keys(source);
 
   // **P9 PR 3** — capture the *native* `Db.transaction(callback, opts)`
@@ -1158,42 +1133,23 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
   validateRefTargets(source);
 
-  // P5 S2: v1 descriptors carry collection-level options directly. Legacy
-  // field-only descriptors still merge options from the declared SchemaBuilder;
-  // that fallback remains intact until S3.
-  const declaredSchemas = options?.declaredSchemas;
+  // P5 S3: v1 descriptors carry collection-level options directly. Strictness
+  // is sent to the native register path as `schema._meta.strictness`.
   const collectionOptionsFor = (
     name: string,
-    rawSchema: unknown,
-  ): { softDelete: boolean; versioning: boolean; indexes: readonly NamedIndexSpec[] } => {
+  ): {
+    softDelete: boolean;
+    versioning: boolean;
+    strictness?: RuntimeStrictness;
+    indexes: readonly NamedIndexSpec[];
+  } => {
     const fromDescriptor = descriptorV1?.collections[name];
     if (fromDescriptor !== undefined) {
       return {
         softDelete: fromDescriptor.options?.softDelete ?? false,
         versioning: fromDescriptor.options?.versioning ?? false,
+        strictness: fromDescriptor.options?.strictness,
         indexes: fromDescriptor.indexes ?? [],
-      };
-    }
-    if (rawSchema instanceof SchemaBuilder) {
-      return {
-        softDelete: rawSchema.options.softDelete,
-        versioning: rawSchema.options.versioning,
-        indexes: rawSchema.indexes,
-      };
-    }
-    // Descriptor mode: `rawSchema` is a wire field-map (the descriptor IS the
-    // first `schemas` argument too, so it carries no collection-level options).
-    // Recover them from the declared SchemaBuilder of the same name, threaded
-    // via `options.declaredSchemas`.
-    const declared =
-      declaredSchemas != null && typeof declaredSchemas === "object"
-        ? declaredSchemas[name]
-        : undefined;
-    if (declared instanceof SchemaBuilder) {
-      return {
-        softDelete: declared.options.softDelete,
-        versioning: declared.options.versioning,
-        indexes: declared.indexes,
       };
     }
     return { softDelete: false, versioning: false, indexes: [] };
@@ -1202,7 +1158,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   for (const [name, rawSchema] of Object.entries(source)) {
     const isBuilder = rawSchema instanceof SchemaBuilder;
     const fields = isBuilder ? rawSchema.fields : rawSchema;
-    const opts = collectionOptionsFor(name, rawSchema);
+    const opts = collectionOptionsFor(name);
     (collections as Record<string, Collection<unknown, string, T>>)[name] =
       model(
         name,
@@ -1229,17 +1185,19 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     for (const [key, def] of Object.entries(normalized)) {
       dbSchema[namingStrategy.toColumn(key)] = def as ZeroshipDbFieldDef;
     }
-    // v1 descriptor mode carries indexes directly; legacy descriptor mode
-    // recovers them from the declared schema until S3 removes that fallback.
-    // On PG these are benign — migrations own DDL — but the dev-SQLite
-    // register feed and the unindexed-filter warning both read them.
-    const declaredIndexes: readonly NamedIndexSpec[] =
-      collectionOptionsFor(name, rawSchema).indexes;
+    // v1 descriptor mode carries indexes directly. On PG these are benign —
+    // migrations own DDL — but the dev-SQLite register feed and the
+    // unindexed-filter warning both read them.
+    const opts = collectionOptionsFor(name);
+    const declaredIndexes: readonly NamedIndexSpec[] = opts.indexes;
     const wireIndexes: ZeroshipDbNamedIndex[] = declaredIndexes.map((idx) => ({
       name: idx.name,
       fields: idx.fields.map((f) => namingStrategy.toColumn(f)),
       ...(idx.unique ? { unique: true } : {}),
     }));
+    if (opts.strictness !== undefined) {
+      (dbSchema as Record<string, unknown>)._meta = { strictness: opts.strictness };
+    }
     chain = chain.then(() => {
       // **P9 PR 4** — register through the `__platform` handle (or the
       // mock fallback); see `registerTarget` above.

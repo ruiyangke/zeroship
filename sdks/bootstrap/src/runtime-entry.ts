@@ -1,4 +1,4 @@
-// Runtime-owned DB schema auto-discovery (production path).
+// Runtime-owned DB schema descriptor install (production path).
 //
 // Compiled to `dist/runtime-entry.js` and `include_str!`d by the
 // runtime crate's `crates/runtime/src/core/init.rs`, spliced into the
@@ -37,10 +37,8 @@
 //   - `__zs_env()?.db` missing → no DbPlugin registered on this runtime.
 //     `installSchema` would throw "env.db not available"; skip silently
 //     to support dev runs without DATABASE_URL.
-//   - `user.default.schema` not a plain object → skip; covers
-//     RPC-only / fetch-only apps and the dev-bootstrap (whose own
-//     `default` carries `{ fetch, rpc }` only — schema installs lazily
-//     on first request via the dev-entry's path).
+//   - `globalThis.__zsRuntimeDescriptor` absent → schema-less app; skip
+//     silently and install no env.db collections.
 //
 // Errors from the synchronous `installSchema` call (validation, naming
 // collisions) re-raise — module evaluation rejects, the runtime surfaces
@@ -52,7 +50,6 @@
 // for the same pattern.
 export {};
 
-declare const user: { default?: { schema?: unknown; __zsDeclaredSchema?: unknown } };
 declare const globalThis: {
   __zs_env?: () => { db?: unknown } | undefined;
   // **P9 §8** — the capability-handle resolver the runtime installs.
@@ -65,20 +62,17 @@ declare const globalThis: {
   // awaited by the shared dispatcher (`dispatcher.ts`) before running any
   // procedure. Keeps the DDL off the module-eval critical path. (ISS-66)
   __zsSchemaReady?: Promise<unknown>;
-  // **Migration-first cutover (P4b/P5 S2)** — the bundled RuntimeSchemaDescriptor
-  // (legacy field map or v1 `{ version, collections }`),
-  // resolved from `manifest.runtime_descriptor` and injected by the runtime
-  // (`crates/runtime/src/core/init.rs::setup_globals`). Present → the source
-  // of truth for schema install; absent → fall back to `user.default.schema`.
+  // **Migration-first cutover (P5 S3)** — the bundled RuntimeSchemaDescriptor
+  // v1 `{ version, collections }`, resolved from `manifest.runtime_descriptor`
+  // and injected by the runtime (`crates/runtime/src/core/init.rs::setup_globals`).
+  // Present → the source of truth for schema install; absent → schema-less app.
   __zsRuntimeDescriptor?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
-// **Migration-first cutover (P4b/P5 S2)** — prefer the bundled
+// **Migration-first cutover (P5 S3)** — use only the bundled
 // RuntimeSchemaDescriptor the runtime injected as `globalThis.__zsRuntimeDescriptor`.
-// v1 carries per-collection fields/options/indexes; the declared
-// `user.default.schema` is the TRANSITIONAL fallback for apps that ship no
-// migrations (P5 S3 deletes the fallback).
+// v1 carries per-collection fields/options/indexes.
 const descriptor = globalThis.__zsRuntimeDescriptor;
 const hasDescriptor =
   descriptor != null &&
@@ -105,28 +99,13 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
     }
     return out;
   }
-  return value;
+  return undefined;
 }
-const declaredSchema = (user && user.default && typeof user.default === "object")
-  ? (user.default as { schema?: unknown }).schema
-  : undefined;
-// **P4b review fix (MED)** — the ORIGINAL declared schema (the t.*
-// SchemaBuilder map), needed to recover collection-LEVEL options
-// (softDelete / versioning / indexes) the field-only descriptor cannot
-// encode. A Vite-built app's synthetic SSR entry OVERWRITES `default.schema`
-// with the descriptor, so it also forwards the untouched declared map as
-// `default.__zsDeclaredSchema`; raw-JS deploys never overwrite it, so
-// `default.schema` IS the declared map. Prefer the explicit carrier.
-const declaredSchemaForOptions =
-  (user && user.default && typeof user.default === "object")
-    ? ((user.default as { __zsDeclaredSchema?: unknown }).__zsDeclaredSchema ?? declaredSchema)
-    : undefined;
-// The object passed as installSchema's first arg. In descriptor mode pass the
-// field map (legacy descriptor directly, v1 descriptor unwrapped) while threading
-// the full descriptor through `options.descriptor`, where _installSchemaInner
-// reads v1 options/indexes.
-const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : declaredSchema;
-if (schema && typeof schema === "object") {
+// The object passed as installSchema's first arg is only the descriptor's field
+// map. If the descriptor is present but not v1-shaped, install no collections
+// here; S6 promotes corrupt descriptors to hard boot errors.
+const schema = hasDescriptor ? (runtimeDescriptorFields(descriptor) ?? {}) : undefined;
+if (hasDescriptor && schema && typeof schema === "object") {
   // Resolve the live env.db handle off the runtime's composite env
   // object. `__zs_env()` is the bootstrap-visible helper
   // (`crates/runtime/src/core/init.rs::zs_env_callback`) that returns
@@ -144,7 +123,7 @@ if (schema && typeof schema === "object") {
       installSchema?: (
         schema: unknown,
         env: unknown,
-        options?: { platform?: unknown; descriptor?: unknown; declaredSchemas?: unknown },
+        options?: { platform?: unknown; descriptor?: unknown },
       ) => { collections: unknown; ready: Promise<void> };
     };
     if (typeof sdk.installSchema === "function") {
@@ -166,17 +145,9 @@ if (schema && typeof schema === "object") {
       // shared dispatcher awaits it before the first procedure runs.
       const { ready } = sdk.installSchema(schema, envDb, {
         platform: plat,
-        // **P4b** — in descriptor mode this is the source of truth;
-        // _installSchemaInner reads it and ignores the first arg.
+        // **P5 S3** — the descriptor is the source of truth; _installSchemaInner
+        // reads it and ignores the first arg for options.
         descriptor: hasDescriptor ? descriptor : undefined,
-        // **P4b review fix (MED)** — the field-only descriptor cannot encode
-        // collection-LEVEL options (softDelete / versioning / indexes). Thread
-        // the declared `default.schema` (t.* SchemaBuilder map) alongside so
-        // `_installSchemaInner` recovers those options per collection while the
-        // declared schema still coexists (P5 deletes this carrier).
-        declaredSchemas: hasDescriptor
-          ? (declaredSchemaForOptions as Record<string, unknown> | undefined)
-          : undefined,
       });
 
       globalThis.__zsSchemaReady = (async () => {
