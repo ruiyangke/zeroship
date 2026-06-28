@@ -205,9 +205,10 @@ pub enum BuildError {
         /// The freshly re-recorded typed-value checksum.
         recorded: String,
     },
-    /// The record-twice determinism probe found host-clock/RNG-dependent IR output.
+    /// The determinism probe observed host-clock/RNG invocation, or the secondary
+    /// record-twice check found host-clock/RNG-dependent IR output.
     #[error(
-        "determinism error in {stem}.ts: nondeterministic authoring JS changes recorded IR using {accessors} at {differing_path}; \
+        "determinism error in {stem}.ts: nondeterministic authoring JS uses {accessors} at {differing_path}; \
          use DB-evaluated c.fn.* scalars instead"
     )]
     Nondeterministic {
@@ -218,7 +219,7 @@ pub enum BuildError {
         /// First differing IR path/field.
         differing_path: String,
         /// Advisory structured lint findings. These are hints only; the hard error
-        /// comes from recorded IR divergence.
+        /// comes from probe-observed invocation or recorded IR divergence.
         findings: Vec<super::record::DeterminismFinding>,
     },
     /// The packed-hash invariant (A2) was violated: a `MigrationFileEntry.hash`
@@ -276,8 +277,9 @@ impl<'a> RecordVia<'a> {
 /// falls back to local recording.
 pub trait RecorderClient {
     /// Record one `.ts` via the hosted recorder. Returns the recorder ENVELOPE
-    /// `ir_json` string on success, or a [`StructuredError`] (whose `retryable`
-    /// bit drives the local-fallback decision) on failure.
+    /// `ir_json` string on success (`{ ok, ir, nondeterminismUsed }`), or a
+    /// [`StructuredError`] (whose `retryable` bit drives the local-fallback
+    /// decision) on failure.
     fn record(
         &self,
         ts_source: &str,
@@ -459,18 +461,26 @@ fn typed_checksum(ir: &MigrationIr, stem: &str) -> Result<String, BuildError> {
     .to_string())
 }
 
-/// Parse a recorder ENVELOPE `ir_json` string (`{ ok, ir: {...} }`) and stamp the
-/// authoritative `owner_app`, leaving the inner IR as raw JSON so the determinism
-/// gate can compare probe A/B before typed deserialization rejects invalid scalars.
-fn stamped_ir_value_from_envelope(
+struct ParsedRecordEnvelope {
+    ir_value: serde_json::Value,
+    nondeterminism_used: Vec<String>,
+}
+
+/// Parse a recorder ENVELOPE `ir_json` string
+/// (`{ ok, ir: {...}, nondeterminismUsed: [...] }`) and stamp the authoritative
+/// `owner_app`, leaving the inner IR as raw JSON so the determinism gate can
+/// compare probe A/B before typed deserialization rejects invalid scalars.
+fn parsed_record_envelope(
     ir_json: &str,
     owner_app: &str,
     stem: &str,
-) -> Result<serde_json::Value, BuildError> {
+) -> Result<ParsedRecordEnvelope, BuildError> {
     #[derive(serde::Deserialize)]
     struct Env {
         #[serde(default)]
         ir: Option<serde_json::Value>,
+        #[serde(rename = "nondeterminismUsed")]
+        nondeterminism_used: Option<Vec<String>>,
     }
     let env: Env = serde_json::from_str(ir_json).map_err(|e| BuildError::CorruptArtifact {
         stem: stem.to_string(),
@@ -493,7 +503,16 @@ fn stamped_ir_value_from_envelope(
             );
         }
     }
-    Ok(ir_value)
+    let nondeterminism_used =
+        env.nondeterminism_used
+            .ok_or_else(|| BuildError::CorruptArtifact {
+                stem: stem.to_string(),
+                message: "recorder envelope missing `nondeterminismUsed`".into(),
+            })?;
+    Ok(ParsedRecordEnvelope {
+        ir_value,
+        nondeterminism_used,
+    })
 }
 
 fn canonicalize_ir_value(
@@ -651,21 +670,38 @@ fn record_one(
         ts_dir,
         Some(DeterminismProbeSeed::B),
     )?;
-    let value_a = stamped_ir_value_from_envelope(&envelope_a, owner_app, &m.stem)?;
-    let value_b = stamped_ir_value_from_envelope(&envelope_b, owner_app, &m.stem)?;
-    if value_a != value_b {
+    let parsed_a = parsed_record_envelope(&envelope_a, owner_app, &m.stem)?;
+    let parsed_b = parsed_record_envelope(&envelope_b, owner_app, &m.stem)?;
+    let nondeterminism_used = super::record::merge_nondeterminism_used(
+        &parsed_a.nondeterminism_used,
+        &parsed_b.nondeterminism_used,
+    );
+    if !nondeterminism_used.is_empty() {
+        let findings = advisory_determinism_findings(&ts_source);
+        return Err(BuildError::Nondeterministic {
+            stem: m.stem.clone(),
+            accessors: super::record::nondeterminism_used_summary(&nondeterminism_used),
+            differing_path: "$.nondeterminismUsed".to_string(),
+            findings,
+        });
+    }
+
+    if parsed_a.ir_value != parsed_b.ir_value {
         let findings = advisory_determinism_findings(&ts_source);
         return Err(BuildError::Nondeterministic {
             stem: m.stem.clone(),
             accessors: super::record::accessor_summary(&findings),
-            differing_path: super::record::first_json_difference_path(&value_a, &value_b)
+            differing_path: super::record::first_json_difference_path(
+                &parsed_a.ir_value,
+                &parsed_b.ir_value,
+            )
                 .unwrap_or_else(|| "$".to_string()),
             findings,
         });
     }
 
-    let (bytes, ir_a) = canonicalize_ir_value(value_a, &m.stem)?;
-    let (_bytes_b, ir_b) = canonicalize_ir_value(value_b, &m.stem)?;
+    let (bytes, ir_a) = canonicalize_ir_value(parsed_a.ir_value, &m.stem)?;
+    let (_bytes_b, ir_b) = canonicalize_ir_value(parsed_b.ir_value, &m.stem)?;
     let checksum_a = super::record::determinism_checksum(&ir_a);
     let checksum_b = super::record::determinism_checksum(&ir_b);
     if checksum_a != checksum_b {
