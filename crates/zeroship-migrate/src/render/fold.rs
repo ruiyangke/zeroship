@@ -55,8 +55,9 @@ use crate::render::declarative::{
 };
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
-    ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
-    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexSnapshot, NamedTypeSnapshot,
+    RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
+    SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
@@ -406,6 +407,9 @@ pub fn fold_ops(
     let mut sequences: BTreeMap<String, SequenceSnapshot> = BTreeMap::new();
     let mut named_types = NamedTypeRegistry::default();
     let mut named_type_snapshots: BTreeMap<String, NamedTypeSnapshot> = BTreeMap::new();
+    let mut roles: BTreeMap<String, RoleSnapshot> = BTreeMap::new();
+    let mut schemas: BTreeMap<String, SchemaObjectSnapshot> = BTreeMap::new();
+    let mut extensions: BTreeMap<String, ExtensionSnapshot> = BTreeMap::new();
 
     for op in ops {
         match op {
@@ -980,21 +984,57 @@ pub fn fold_ops(
                     comment.clone(),
                 )?;
             }
-            // VENDOR (`@zeroship/migrate/pg`) — roles/grants/RLS/policies/triggers/
-            // functions/extensions/schemas/`pg.sql` are NOT table structure (vendor
-            // spec §4.6): they have no place in a table `SchemaSnapshot`, exactly
-            // like DML. Excluded from the structural fold (a no-contribution arm).
-            // The table-scoped vendor ops (RLS enable, policy, trigger ON a table)
-            // are orthogonal table FACETS — they do not change the table's
-            // column/constraint/index snapshot — so they contribute nothing here
-            // either. Vendor-object drift is a separate, later introspection concern.
-            Op::CreateSchema { .. }
-            | Op::DropSchema { .. }
-            | Op::CreateExtension { .. }
-            | Op::DropExtension { .. }
-            | Op::CreateRole { .. }
-            | Op::AlterRole { .. }
-            | Op::DropRole { .. }
+            // VENDOR privileged objects with modeled attributes contribute typed
+            // catalog facts to the fold. The apply-time native/probed
+            // IF-NOT-EXISTS decision remains presence-based; this snapshot compare
+            // is the safety net that catches a same-name object with divergent
+            // attributes after a skip.
+            Op::CreateSchema { name, authorization, .. } => {
+                schemas.insert(name.clone(), SchemaObjectSnapshot {
+                    owner: authorization.clone(),
+                });
+            }
+            Op::DropSchema { name, .. } => {
+                schemas.remove(name);
+            }
+            Op::CreateExtension { name, schema, .. } => {
+                extensions.insert(name.clone(), ExtensionSnapshot {
+                    schema: schema.clone(),
+                });
+            }
+            Op::DropExtension { name, .. } => {
+                extensions.remove(name);
+            }
+            Op::CreateRole {
+                name,
+                login,
+                bypass_rls,
+                create_role,
+                create_db,
+                superuser,
+                in_role,
+                ..
+            } => {
+                let mut member_of = in_role.clone().unwrap_or_default();
+                member_of.sort();
+                member_of.dedup();
+                roles.insert(name.clone(), RoleSnapshot {
+                    login: login.unwrap_or(false),
+                    superuser: superuser.unwrap_or(false),
+                    create_db: create_db.unwrap_or(false),
+                    create_role: create_role.unwrap_or(false),
+                    bypass_rls: bypass_rls.unwrap_or(false),
+                    member_of,
+                    ..RoleSnapshot::default()
+                });
+            }
+            Op::DropRole { name, .. } => {
+                roles.remove(name);
+            }
+            // Remaining vendor ops either change unmodeled facets (role settings,
+            // grants/RLS/policies/triggers/functions) or are raw statements, so
+            // they do not contribute to this structural snapshot.
+            Op::AlterRole { .. }
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
@@ -1017,6 +1057,9 @@ pub fn fold_ops(
         views,
         named_types: named_type_snapshots,
         sequences,
+        roles,
+        schemas,
+        extensions,
     })
 }
 

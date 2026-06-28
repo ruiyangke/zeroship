@@ -174,9 +174,10 @@ pub use model::migration::{
     MigrationId, OnlinePhase, MIGRATION_PREFIX,
 };
 pub use model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot,
-    IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
-    SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, GeneratedColumnSnapshot,
+    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, RoleSnapshot,
+    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
+    TableSnapshot, ViewSnapshot,
 };
 // The `op.*` portable IR (§2.1/§2.3/§2.5): the migration document, the closed
 // `Op` enum, the constrained numeric scalar, and the canonical op-list the

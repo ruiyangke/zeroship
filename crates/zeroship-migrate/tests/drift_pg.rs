@@ -72,6 +72,25 @@ async fn drop_schemas(conn: &Client, cfg: &ExecutorConfig) {
         .await;
 }
 
+async fn cleanup_vendor_attribute_objects(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    ext_schema: &str,
+    roles: &[&str],
+) {
+    let mut sql = format!(
+        "DROP EXTENSION IF EXISTS hstore CASCADE; \
+         DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+         DROP SCHEMA IF EXISTS \"{}\" CASCADE; \
+         DROP SCHEMA IF EXISTS \"{}\" CASCADE;",
+        ext_schema, cfg.project_schema, cfg.pg.meta_schema
+    );
+    for role in roles {
+        sql.push_str(&format!(" DROP ROLE IF EXISTS \"{role}\";"));
+    }
+    let _ = conn.batch_execute(&sql).await;
+}
+
 fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
     Migration {
         version,
@@ -1508,6 +1527,132 @@ async fn sequence_options_round_trip_and_out_of_band_option_drift_is_reported() 
     );
 
     drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn vendor_privileged_object_attributes_round_trip_and_drift() {
+    let conn = pg().await;
+    // Extensions are database-global by name. Serialize this regression's
+    // hstore install/drop sequence without touching the shared :5440 server.
+    conn.batch_execute("SELECT pg_advisory_lock(216005)")
+        .await
+        .expect("take vendor attribute advisory lock");
+
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    let role = format!("zsr_{tok}");
+    let parent_role = format!("zsr_parent_{tok}");
+    let other_owner = format!("zsr_owner_{tok}");
+    let ext_schema = format!("ext_{tok}");
+    cleanup_vendor_attribute_objects(
+        &conn,
+        &cfg,
+        &ext_schema,
+        &[&role, &parent_role, &other_owner],
+    )
+    .await;
+
+    let sch = &cfg.project_schema;
+    let ops = vec![
+        Op::CreateRole {
+            name: parent_role.clone(),
+            login: None,
+            password: None,
+            bypass_rls: None,
+            create_role: None,
+            create_db: None,
+            superuser: None,
+            in_role: None,
+            set_search_path: None,
+            if_not_exists: Some(true),
+        },
+        Op::CreateRole {
+            name: role.clone(),
+            login: Some(true),
+            password: None,
+            bypass_rls: Some(false),
+            create_role: Some(false),
+            create_db: Some(false),
+            superuser: Some(false),
+            in_role: Some(vec![parent_role.clone()]),
+            set_search_path: None,
+            if_not_exists: Some(true),
+        },
+        Op::CreateRole {
+            name: other_owner.clone(),
+            login: None,
+            password: None,
+            bypass_rls: None,
+            create_role: None,
+            create_db: None,
+            superuser: None,
+            in_role: None,
+            set_search_path: None,
+            if_not_exists: Some(true),
+        },
+        Op::CreateSchema {
+            name: sch.clone(),
+            if_not_exists: Some(true),
+            authorization: Some(role.clone()),
+        },
+        Op::CreateExtension {
+            name: "hstore".into(),
+            if_not_exists: Some(true),
+            schema: Some(sch.clone()),
+        },
+    ];
+    let migrations = lower_ir_migrations(sch, "vendor_privileged_attributes", &ops);
+    for migration in &migrations {
+        conn.batch_execute(&migration.up)
+            .await
+            .unwrap_or_else(|e| panic!("apply {}: {e}", migration.name));
+    }
+
+    let expected = fold_ops(&ops, SqlDialect::Postgres, sch).expect("fold vendor attrs");
+    let actual = snapshot_schema(&conn, sch)
+        .await
+        .expect("snapshot vendor attrs");
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.is_clean(),
+        "authored privileged object attributes must round-trip through live PG catalog: {drift:?}"
+    );
+
+    conn.batch_execute(&format!(
+        "CREATE SCHEMA \"{ext_schema}\"; \
+         ALTER ROLE \"{role}\" BYPASSRLS; \
+         ALTER SCHEMA \"{sch}\" OWNER TO \"{other_owner}\"; \
+         ALTER EXTENSION hstore SET SCHEMA \"{ext_schema}\";"
+    ))
+    .await
+    .expect("mutate privileged object attributes out of band");
+    let changed = snapshot_schema(&conn, sch)
+        .await
+        .expect("snapshot changed vendor attrs");
+    let changed_drift = diff_snapshots(&expected, &changed);
+    assert!(
+        altered_contains(&changed_drift, &format!("role {role}"), "bypass_rls"),
+        "role BYPASSRLS drift must be detected: {changed_drift:?}"
+    );
+    assert!(
+        altered_contains(&changed_drift, &format!("schema {sch}"), "owner"),
+        "schema owner drift must be detected: {changed_drift:?}"
+    );
+    assert!(
+        altered_contains(&changed_drift, "extension hstore", "schema"),
+        "extension placement drift must be detected: {changed_drift:?}"
+    );
+
+    cleanup_vendor_attribute_objects(
+        &conn,
+        &cfg,
+        &ext_schema,
+        &[&role, &parent_role, &other_owner],
+    )
+    .await;
+    conn.batch_execute("SELECT pg_advisory_unlock(216005)")
+        .await
+        .expect("release vendor attribute advisory lock");
 }
 
 #[compio::test]

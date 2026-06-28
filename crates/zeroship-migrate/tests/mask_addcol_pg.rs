@@ -149,6 +149,9 @@ async fn apply_doc(
 /// Blank CHECK definitions before the structural compare (introspection noise — same
 /// canonicalization the keystone oracle uses).
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
+    snap.roles.clear();
+    snap.schemas.clear();
+    snap.extensions.clear();
     for t in snap.tables.values_mut() {
         for c in &mut t.constraints {
             if c.kind == "CHECK" {
