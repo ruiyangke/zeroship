@@ -746,7 +746,10 @@ fn render_mysql_trigger_stmt(
                         },
                     ));
                 }
-                let vals: Result<Vec<_>, _> = row.iter().map(crate::render::dml::inline_literal).collect();
+                let vals: Result<Vec<_>, _> = row
+                    .iter()
+                    .map(|value| crate::render::dml::render_value_inline(value, SqlDialect::Mysql))
+                    .collect();
                 groups.push(format!("({})", vals?.join(", ")));
             }
             Ok(format!(

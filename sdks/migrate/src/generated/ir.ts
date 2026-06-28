@@ -159,6 +159,10 @@ export type Expr =
   | { node: "fnSynth"; fn: SynthFn; args: Expr[] }
   | { node: "cast"; operand: Expr; target: CastTarget };
 
+/** A DML cell in an insert row or `onConflict.doUpdate`: either a typed scalar
+ *  literal or a closed expression AST such as `fnSynth(now)`. */
+export type IrValue = IrScalar | Expr;
+
 /** One `(condition, result)` branch of an `Expr` `case`. */
 export interface CaseBranch {
   condition: Expr;
@@ -286,7 +290,7 @@ export interface TableRuntimeOptionsPatch {
 /** The optional `insert { onConflict }` upsert clause (PG-only). */
 export interface IrOnConflict {
   columns: string[];
-  doUpdate?: { [column: string]: IrScalar } | null;
+  doUpdate?: { [column: string]: IrValue } | null;
 }
 
 /** A batched-backfill / batched-update knob. */
@@ -304,7 +308,7 @@ export type TriggerAction =
 /** §A2/§3.2 — one structured trigger body statement. Reuses the DML payload
  *  shapes where possible and adds the closed `Raise` node. */
 export type TriggerStmt =
-  | { stmt: "insert"; table: string; columns: string[]; rows: IrScalar[][]; schema?: string | null }
+  | { stmt: "insert"; table: string; columns: string[]; rows: IrValue[][]; schema?: string | null }
   | { stmt: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; schema?: string | null }
   | { stmt: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
   | { stmt: "select"; expr: Expr }
@@ -397,7 +401,7 @@ export type Op =
   | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "insert"; table: string; columns: string[]; rows: IrScalar[][]; onConflict?: IrOnConflict | null; schema?: string | null }
+  | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }
   | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
   | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null }

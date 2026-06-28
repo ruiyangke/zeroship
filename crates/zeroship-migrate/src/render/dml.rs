@@ -75,7 +75,7 @@ use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
 use crate::model::expr::{BinaryOp, Expr, ScalarFn, SynthFn, UnaryOp};
-use crate::model::ir::IrScalar;
+use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
 
 /// A failure assembling a DML op into a statement (template + binds, or a backfill
@@ -585,6 +585,13 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
     }
 }
 
+fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlError> {
+    match value {
+        IrValue::Scalar(s) => Ok(ctx.push_bind(scalar_to_bind(s))),
+        IrValue::Expr(e) => render_expr_bound(e, ctx),
+    }
+}
+
 /// Render a unary op around an already-rendered operand.
 fn render_unary(op: UnaryOp, operand: &str) -> String {
     match op {
@@ -605,6 +612,13 @@ pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<Str
     render_expr_inline_with_col(expr, dialect, &|name| {
         quote_ident_for_dialect("column", name, dialect)
     })
+}
+
+pub(crate) fn render_value_inline(value: &IrValue, dialect: SqlDialect) -> Result<String, DmlError> {
+    match value {
+        IrValue::Scalar(s) => inline_literal(s),
+        IrValue::Expr(e) => render_expr_inline(e, dialect),
+    }
 }
 
 pub(crate) fn render_expr_inline_with_col<F>(
@@ -714,7 +728,7 @@ pub struct OnConflict {
     /// The conflict-target columns (`ON CONFLICT (cols)`).
     pub columns: Vec<String>,
     /// `Some` SET assignments ⇒ `DO UPDATE SET …`; `None` ⇒ `DO NOTHING`.
-    pub do_update: Option<BTreeMap<String, IrScalar>>,
+    pub do_update: Option<BTreeMap<String, IrValue>>,
 }
 
 /// The assembled one-shot DML statement: the placeholder template + ordered binds.
@@ -739,7 +753,7 @@ pub fn assemble_insert(
     dialect: SqlDialect,
     table: &str,
     columns: &[String],
-    rows: &[Vec<IrScalar>],
+    rows: &[Vec<IrValue>],
     on_conflict: Option<&OnConflict>,
 ) -> Result<AssembledDml, DmlError> {
     if columns.is_empty() {
@@ -772,8 +786,9 @@ pub fn assemble_insert(
                 ),
             });
         }
-        let placeholders: Vec<String> =
-            row.iter().map(|s| ctx.push_bind(scalar_to_bind(s))).collect();
+        let placeholders: Result<Vec<String>, DmlError> =
+            row.iter().map(|v| render_value_bound(v, &mut ctx)).collect();
+        let placeholders = placeholders?;
         value_groups.push(format!("({})", placeholders.join(", ")));
     }
 
@@ -815,7 +830,7 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
             let mut assigns = Vec::with_capacity(set.len());
             for (col, val) in set {
                 let qc = quote_ident_for_dialect("column", col, ctx.dialect)?;
-                let ph = ctx.push_bind(scalar_to_bind(val));
+                let ph = render_value_bound(val, ctx)?;
                 assigns.push(format!("{qc} = {ph}"));
             }
             Ok(format!(" {target} DO UPDATE SET {}", assigns.join(", ")))
@@ -1146,6 +1161,9 @@ mod tests {
     fn lit_int(i: i64) -> Expr {
         Expr::lit(IrScalar::Int(i))
     }
+    fn val(s: IrScalar) -> IrValue {
+        IrValue::Scalar(s)
+    }
 
     // ── identifier safety ───────────────────────────────────────────────────
 
@@ -1156,7 +1174,7 @@ mod tests {
             SqlDialect::Postgres,
             "other_schema.victims",
             &["a".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             None,
         )
         .unwrap_err();
@@ -1176,7 +1194,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["a".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             None,
         )
         .unwrap_err();
@@ -1192,7 +1210,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["a".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             None,
         )
         .unwrap_err();
@@ -1210,7 +1228,7 @@ mod tests {
             SqlDialect::Postgres,
             "members",
             &["id".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             None,
         )
         .unwrap();
@@ -1232,7 +1250,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["a".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             None,
         )
         .unwrap();
@@ -1246,7 +1264,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["a\"); DROP TABLE users; --".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             None,
         )
         .unwrap_err();
@@ -1262,7 +1280,7 @@ mod tests {
             SqlDialect::Postgres,
             "status_codes",
             &["code".into(), "label".into()],
-            &[vec![IrScalar::Int(200), IrScalar::Str("ok".into())]],
+            &[vec![val(IrScalar::Int(200)), val(IrScalar::Str("ok".into()))]],
             None,
         )
         .unwrap();
@@ -1274,13 +1292,34 @@ mod tests {
     }
 
     #[test]
+    fn insert_renders_fnsynth_value_without_bind_pg() {
+        let a = assemble_insert(
+            SCHEMA,
+            SqlDialect::Postgres,
+            "events",
+            &["created_at".into()],
+            &[vec![IrValue::Expr(Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args: vec![],
+            })]],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"app_proj\".\"events\" (\"created_at\") VALUES (now())"
+        );
+        assert!(a.binds.is_empty(), "fnSynth insert value is DB-evaluated, not a bind");
+    }
+
+    #[test]
     fn insert_uses_question_placeholders_on_sqlite() {
         let a = assemble_insert(
             SCHEMA,
             SqlDialect::Sqlite,
             "t",
             &["a".into(), "b".into()],
-            &[vec![IrScalar::Int(1), IrScalar::Null]],
+            &[vec![val(IrScalar::Int(1)), val(IrScalar::Null)]],
             None,
         )
         .unwrap();
@@ -1295,7 +1334,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["a".into()],
-            &[vec![IrScalar::Int(1)], vec![IrScalar::Int(2)]],
+            &[vec![val(IrScalar::Int(1))], vec![val(IrScalar::Int(2))]],
             None,
         )
         .unwrap();
@@ -1313,7 +1352,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["a".into()],
-            &[vec![IrScalar::Str(hostile.into())]],
+            &[vec![val(IrScalar::Str(hostile.into()))]],
             None,
         )
         .unwrap();
@@ -1330,7 +1369,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["a".into(), "b".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             None,
         )
         .unwrap_err();
@@ -1343,14 +1382,14 @@ mod tests {
     fn insert_on_conflict_renders_on_pg() {
         let oc = OnConflict {
             columns: vec!["code".into()],
-            do_update: Some(BTreeMap::from([("label".to_string(), IrScalar::Str("dup".into()))])),
+            do_update: Some(BTreeMap::from([("label".to_string(), val(IrScalar::Str("dup".into())))])),
         };
         let a = assemble_insert(
             SCHEMA,
             SqlDialect::Postgres,
             "status_codes",
             &["code".into(), "label".into()],
-            &[vec![IrScalar::Int(1), IrScalar::Str("ok".into())]],
+            &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
             Some(&oc),
         )
         .unwrap();
@@ -1373,7 +1412,7 @@ mod tests {
             SqlDialect::Postgres,
             "t",
             &["code".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             Some(&oc),
         )
         .unwrap();
@@ -1388,7 +1427,7 @@ mod tests {
             SqlDialect::Sqlite,
             "t",
             &["code".into()],
-            &[vec![IrScalar::Int(1)]],
+            &[vec![val(IrScalar::Int(1))]],
             Some(&oc),
         )
         .unwrap_err();

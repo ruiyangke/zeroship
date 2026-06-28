@@ -45,7 +45,6 @@ use crate::model::ir::Op;
 use crate::plan::loader;
 use crate::{Checksum, MigrationFlags, MigrationIr};
 
-use super::embedding::DeterminismProbeSeed;
 use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use super::recorder_http::StructuredError;
 use super::recorder_service::{spawn_sandboxed_record, RecordRequest, RecorderError};
@@ -205,23 +204,6 @@ pub enum BuildError {
         /// The freshly re-recorded typed-value checksum.
         recorded: String,
     },
-    /// The determinism probe observed host-clock/RNG invocation, or the secondary
-    /// record-twice check found host-clock/RNG-dependent IR output.
-    #[error(
-        "determinism error in {stem}.ts: nondeterministic authoring JS uses {accessors} at {differing_path}; \
-         use DB-evaluated c.fn.* scalars instead"
-    )]
-    Nondeterministic {
-        /// The migration stem.
-        stem: String,
-        /// Comma-separated accessor summary when the advisory source lint can name it.
-        accessors: String,
-        /// First differing IR path/field.
-        differing_path: String,
-        /// Advisory structured lint findings. These are hints only; the hard error
-        /// comes from probe-observed invocation or recorded IR divergence.
-        findings: Vec<super::record::DeterminismFinding>,
-    },
     /// The packed-hash invariant (A2) was violated: a `MigrationFileEntry.hash`
     /// does not equal the sha256 of the committed `.ir.json` bytes on disk (the
     /// packer re-emitted instead of copying).
@@ -277,7 +259,7 @@ impl<'a> RecordVia<'a> {
 /// falls back to local recording.
 pub trait RecorderClient {
     /// Record one `.ts` via the hosted recorder. Returns the recorder ENVELOPE
-    /// `ir_json` string on success (`{ ok, ir, nondeterminismUsed }`), or a
+    /// `ir_json` string on success (`{ ok, ir }`), or a
     /// [`StructuredError`] (whose `retryable` bit drives the local-fallback
     /// decision) on failure.
     fn record(
@@ -286,7 +268,6 @@ pub trait RecorderClient {
         app_id: &str,
         name: &str,
         schema_types_blob: Option<&str>,
-        determinism_probe_seed: Option<DeterminismProbeSeed>,
     ) -> Result<String, StructuredError>;
 }
 
@@ -320,9 +301,7 @@ pub struct BuiltMigration {
     pub checksum: String,
     /// How this file's `.ir.json` was produced.
     pub record_path: RecordPath,
-    /// Determinism warnings retained for old telemetry shape. Detected
-    /// nondeterminism is now a hard build error, so successful fresh records carry
-    /// an empty vector.
+    /// Advisory determinism warnings surfaced from the source regex lint.
     pub warnings: Vec<super::record::DeterminismFinding>,
 }
 
@@ -461,26 +440,18 @@ fn typed_checksum(ir: &MigrationIr, stem: &str) -> Result<String, BuildError> {
     .to_string())
 }
 
-struct ParsedRecordEnvelope {
-    ir_value: serde_json::Value,
-    nondeterminism_used: Vec<String>,
-}
-
 /// Parse a recorder ENVELOPE `ir_json` string
-/// (`{ ok, ir: {...}, nondeterminismUsed: [...] }`) and stamp the authoritative
-/// `owner_app`, leaving the inner IR as raw JSON so the determinism gate can
-/// compare probe A/B before typed deserialization rejects invalid scalars.
+/// (`{ ok, ir: {...} }`) and stamp the authoritative `owner_app`, leaving the
+/// inner IR as raw JSON before typed deserialization rejects invalid scalars.
 fn parsed_record_envelope(
     ir_json: &str,
     owner_app: &str,
     stem: &str,
-) -> Result<ParsedRecordEnvelope, BuildError> {
+) -> Result<serde_json::Value, BuildError> {
     #[derive(serde::Deserialize)]
     struct Env {
         #[serde(default)]
         ir: Option<serde_json::Value>,
-        #[serde(rename = "nondeterminismUsed")]
-        nondeterminism_used: Option<Vec<String>>,
     }
     let env: Env = serde_json::from_str(ir_json).map_err(|e| BuildError::CorruptArtifact {
         stem: stem.to_string(),
@@ -503,16 +474,7 @@ fn parsed_record_envelope(
             );
         }
     }
-    let nondeterminism_used =
-        env.nondeterminism_used
-            .ok_or_else(|| BuildError::CorruptArtifact {
-                stem: stem.to_string(),
-                message: "recorder envelope missing `nondeterminismUsed`".into(),
-            })?;
-    Ok(ParsedRecordEnvelope {
-        ir_value,
-        nondeterminism_used,
-    })
+    Ok(ir_value)
 }
 
 fn canonicalize_ir_value(
@@ -548,7 +510,6 @@ fn record_local_envelope(
     stem: &str,
     ts_dir: &Path,
     budget: ResourceBudget,
-    determinism_probe_seed: Option<DeterminismProbeSeed>,
 ) -> Result<String, BuildError> {
     let req = RecordRequest {
         ts_source: ts_source.to_string(),
@@ -558,7 +519,6 @@ fn record_local_envelope(
         budget,
         allow_read_paths: vec![ts_dir.to_path_buf()],
         schema_types_blob: None,
-        determinism_probe_seed,
     };
     let result = spawn_sandboxed_record(&req).map_err(|e| recorder_error_to_build(&e, stem))?;
     Ok(result.ir_json)
@@ -582,7 +542,6 @@ fn record_envelope_once(
     via: &RecordVia<'_>,
     ts_source: &str,
     ts_dir: &Path,
-    determinism_probe_seed: Option<DeterminismProbeSeed>,
 ) -> Result<(String, RecordPath), BuildError> {
     match via {
         RecordVia::Local { budget } => {
@@ -593,7 +552,6 @@ fn record_envelope_once(
                 &m.stem,
                 ts_dir,
                 *budget,
-                determinism_probe_seed,
             )?;
             Ok((envelope, RecordPath::Local))
         }
@@ -605,7 +563,6 @@ fn record_envelope_once(
             owner_app,
             &m.desc,
             None,
-            determinism_probe_seed,
         ) {
             Ok(envelope) => Ok((envelope, RecordPath::Hosted)),
             Err(se) if se.retryable => {
@@ -618,7 +575,6 @@ fn record_envelope_once(
                     &m.stem,
                     ts_dir,
                     *local_fallback_budget,
-                    determinism_probe_seed,
                 )?;
                 Ok((envelope, RecordPath::HostedFellBackToLocal))
             }
@@ -634,18 +590,9 @@ fn record_envelope_once(
     }
 }
 
-fn combine_record_paths(a: RecordPath, b: RecordPath) -> RecordPath {
-    if a == RecordPath::HostedFellBackToLocal || b == RecordPath::HostedFellBackToLocal {
-        RecordPath::HostedFellBackToLocal
-    } else {
-        a
-    }
-}
-
-/// Record one discovered `.ts` via the selected path twice with divergent
-/// deterministic clock/RNG globals, compare the recorded IR, then return the
-/// committed bytes + IR + which path produced it. Implements the §8.9.2
-/// hosted→local fallback for each recording pass.
+/// Record one discovered `.ts` via the selected path, then return the committed
+/// bytes + IR + which path produced it. Implements the §8.9.2 hosted→local
+/// fallback for the recording pass.
 fn record_one(
     m: &DiscoveredMigration,
     owner_app: &str,
@@ -654,72 +601,11 @@ fn record_one(
     let ts_source = read_ts_source_bounded(&m.ts_path)?;
     let ts_dir = m.ts_path.parent().unwrap_or_else(|| Path::new("."));
 
-    let (envelope_a, path_a) = record_envelope_once(
-        m,
-        owner_app,
-        via,
-        &ts_source,
-        ts_dir,
-        Some(DeterminismProbeSeed::A),
-    )?;
-    let (envelope_b, path_b) = record_envelope_once(
-        m,
-        owner_app,
-        via,
-        &ts_source,
-        ts_dir,
-        Some(DeterminismProbeSeed::B),
-    )?;
-    let parsed_a = parsed_record_envelope(&envelope_a, owner_app, &m.stem)?;
-    let parsed_b = parsed_record_envelope(&envelope_b, owner_app, &m.stem)?;
-    let nondeterminism_used = super::record::merge_nondeterminism_used(
-        &parsed_a.nondeterminism_used,
-        &parsed_b.nondeterminism_used,
-    );
-    if !nondeterminism_used.is_empty() {
-        let findings = advisory_determinism_findings(&ts_source);
-        return Err(BuildError::Nondeterministic {
-            stem: m.stem.clone(),
-            accessors: super::record::nondeterminism_used_summary(&nondeterminism_used),
-            differing_path: "$.nondeterminismUsed".to_string(),
-            findings,
-        });
-    }
+    let (envelope, path) = record_envelope_once(m, owner_app, via, &ts_source, ts_dir)?;
+    let parsed = parsed_record_envelope(&envelope, owner_app, &m.stem)?;
+    let (bytes, ir) = canonicalize_ir_value(parsed, &m.stem)?;
 
-    if parsed_a.ir_value != parsed_b.ir_value {
-        let findings = advisory_determinism_findings(&ts_source);
-        return Err(BuildError::Nondeterministic {
-            stem: m.stem.clone(),
-            accessors: super::record::accessor_summary(&findings),
-            differing_path: super::record::first_json_difference_path(
-                &parsed_a.ir_value,
-                &parsed_b.ir_value,
-            )
-                .unwrap_or_else(|| "$".to_string()),
-            findings,
-        });
-    }
-
-    let (bytes, ir_a) = canonicalize_ir_value(parsed_a.ir_value, &m.stem)?;
-    let (_bytes_b, ir_b) = canonicalize_ir_value(parsed_b.ir_value, &m.stem)?;
-    let checksum_a = super::record::determinism_checksum(&ir_a);
-    let checksum_b = super::record::determinism_checksum(&ir_b);
-    if checksum_a != checksum_b {
-        let findings = advisory_determinism_findings(&ts_source);
-        return Err(BuildError::Nondeterministic {
-            stem: m.stem.clone(),
-            accessors: super::record::accessor_summary(&findings),
-            differing_path: "$.checksum".to_string(),
-            findings,
-        });
-    }
-
-    Ok((
-        bytes,
-        ir_a,
-        combine_record_paths(path_a, path_b),
-        ts_source,
-    ))
+    Ok((bytes, ir, path, ts_source))
 }
 
 fn read_ts_source_bounded(path: &Path) -> Result<String, BuildError> {
@@ -759,10 +645,6 @@ fn read_ts_source_bounded(path: &Path) -> Result<String, BuildError> {
         path: path.to_path_buf(),
         message: e.utf8_error().to_string(),
     })
-}
-
-fn advisory_determinism_findings(ts_source: &str) -> Vec<super::record::DeterminismFinding> {
-    super::record::lint_migration_determinism(ts_source).unwrap_or_default()
 }
 
 fn warn_on_advisory_determinism_lint(
@@ -879,9 +761,8 @@ fn build_discovered(
             let checksum = checksum_of_committed(&bytes, &m.stem)?;
             (bytes, checksum, RecordPath::CommittedVerbatim, Vec::new())
         } else {
-            // Record fresh, enforce determinism by comparing seeded IR recordings,
-            // then write the committed artifact. The regex source lint is advisory
-            // only and must never gate the build.
+            // Record fresh once, then write the committed artifact. The regex
+            // source lint is advisory only and must never gate the build.
             let (bytes, ir, path, ts_source) = record_one(m, owner_app, via)?;
             let checksum = typed_checksum(&ir, &m.stem)?;
             let warnings = warn_on_advisory_determinism_lint(&m.stem, &ts_source);

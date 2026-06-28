@@ -146,7 +146,7 @@ export interface ColumnDef {
   /** A structured default — a typed scalar literal OR a nullary synth scalar
    *  (`{ fn: "now" | "genRandomUuid" }`). NEVER raw SQL (property A). Returns a
    *  fresh def. */
-  default(value: ScalarValue | { fn: "now" | "genRandomUuid" }): ColumnDef;
+  default(value: ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" }): ColumnDef;
   /** Re-target as a foreign-key reference (a plain-string target table). Returns
    *  a fresh def. */
   ref(targetTable: string): ColumnDef;
@@ -315,9 +315,17 @@ export type ScalarValue =
   | { decimal: string }
   | Uint8Array;
 
-/** A loose insert row — a `Record<string, ScalarValue>`. NEVER auto-bound to the
+/** A well-known native function SYMBOL that records as a DB-evaluated `fnSynth`.
+ *  Calls are intentionally not special: `Date.now()` records the number it returns. */
+export type DbSynthSymbol = typeof Date.now | typeof Math.random | Crypto["randomUUID"];
+
+/** A DML value is either a typed scalar or a closed expression node. The bare
+ *  native symbols above are normalized to `fnSynth(now/genRandomUuid)`. */
+export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
+
+/** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
-export type Row = Record<string, ScalarValue>;
+export type Row = Record<string, DmlValue>;
 
 // ── The fluent expression builder (§3.6 / `(c) => Expr`) ──
 
@@ -374,8 +382,8 @@ export interface FnNamespace {
   case(branches: [unknown, unknown][], elseVal?: unknown): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
   splitPart(col: unknown, delim: string, n: number): ExprChain;
-  /** DB-evaluated apply-time scalars (the structured replacement for a frozen
-   *  `Date.now()` / UUID literal). */
+  /** DB-evaluated apply-time scalars, equivalent to the supported bare native
+   *  symbols (`Date.now`, `Math.random`, `crypto.randomUUID`). */
   now(): ExprChain;
   genRandomUuid(): ExprChain;
 }

@@ -45,6 +45,7 @@ import type {
   CreateTriggerArgs,
   CreateTableArgs,
   CreateViewArgs,
+  DbSynthSymbol,
   DelArgs,
   DomainHandle,
   DeterminismFinding,
@@ -105,6 +106,27 @@ import type { Classification, MaskKind, VectorMetric } from "./generated/ir.js";
 type Node = Record<string, unknown>;
 
 // ── The ambient recorder (§3.1 / §5) ──
+
+const nativeDateNow = typeof Date !== "undefined" ? Date.now : undefined;
+const nativeMathRandom = typeof Math !== "undefined" ? Math.random : undefined;
+const nativeCryptoRandomUUID =
+  typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function"
+    ? globalThis.crypto.randomUUID
+    : undefined;
+
+function nativeFnSynthName(value: unknown): "now" | "genRandomUuid" | undefined {
+  if (value === nativeDateNow) return "now";
+  if (value === nativeMathRandom) return "genRandomUuid";
+  if (nativeCryptoRandomUUID !== undefined && value === nativeCryptoRandomUUID) {
+    return "genRandomUuid";
+  }
+  return undefined;
+}
+
+function nativeFnSynthNode(value: unknown): Node | undefined {
+  const fn = nativeFnSynthName(value);
+  return fn === undefined ? undefined : { node: "fnSynth", fn, args: [] };
+}
 
 /** A handed-out, not-yet-terminated selector the recorder tracks (§5). */
 interface PendingSelector {
@@ -441,7 +463,7 @@ class ColumnDefImpl implements ColumnDefType {
   notNull(): ColumnDefImpl {
     return this.with({ nullable: false });
   }
-  default(value: ScalarValue | { fn: "now" | "genRandomUuid" }): ColumnDefImpl {
+  default(value: ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" }): ColumnDefImpl {
     return this.with({ default: toIrDefault(value) });
   }
   ref(targetTable: string): ColumnDefImpl {
@@ -582,11 +604,24 @@ function bytesToBase64(bytes: Uint8Array): string {
  */
 function toIrScalar(value: unknown): unknown {
   if (typeof value === "bigint") return { decimal: value.toString() };
+  if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
+    return { decimal: String(value) };
+  }
   if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
   return value;
 }
 
-function toIrDefault(value: ScalarValue | { fn: "now" | "genRandomUuid" }): Node {
+function toIrValue(value: unknown): unknown {
+  const synth = nativeFnSynthNode(value);
+  if (synth !== undefined) return synth;
+  if (value instanceof ExprChainImpl) return value.__node;
+  if (value && typeof value === "object" && typeof (value as Node).node === "string") return value as Node;
+  return toIrScalar(value);
+}
+
+function toIrDefault(value: ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" }): Node {
+  const fn = nativeFnSynthName(value);
+  if (fn !== undefined) return { fn: { fn } };
   if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
   }
@@ -767,6 +802,8 @@ function chain(node: Node): ExprChainImpl {
 }
 
 function exprArg(x: unknown): Node {
+  const synth = nativeFnSynthNode(x);
+  if (synth !== undefined) return synth;
   if (x instanceof ExprChainImpl) return x.__node;
   if (x && typeof x === "object" && typeof (x as Node).node === "string") return x as Node;
   return { node: "literal", value: x as unknown };
@@ -1552,7 +1589,7 @@ function normalizeInsertRows<R extends Row = Row>(
   const columns = arr.length > 0 ? Object.keys(arr[0]) : [];
   const positional = arr.map((r) =>
     columns.map((col) =>
-      Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar((r as Row)[col]) : null,
+      Object.prototype.hasOwnProperty.call(r, col) ? toIrValue((r as Row)[col]) : null,
     ),
   );
   return { columns, rows: positional };
@@ -1578,7 +1615,7 @@ function normalizeOnConflict(
   if (oc === undefined) return undefined;
   if (oc.doUpdate === undefined) return { columns: oc.columns } as Node;
   const doUpdate: Record<string, unknown> = {};
-  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrScalar(oc.doUpdate[col]);
+  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrValue(oc.doUpdate[col]);
   return { columns: oc.columns, doUpdate } as Node;
 }
 
@@ -2297,10 +2334,10 @@ export function view(name: string, opts: ViewOptions = {}): ViewHandle {
 // ── (C) Determinism lint ──
 
 const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
-  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "c.fn.now()" },
-  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "c.fn.genRandomUuid() or a DB-evaluated value" },
-  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "c.fn.genRandomUuid()" },
-  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "c.fn.now()" },
+  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or c.fn.now()" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or c.fn.genRandomUuid()" },
+  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()" },
+  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or c.fn.now()" },
 ];
 
 /**

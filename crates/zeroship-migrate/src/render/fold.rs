@@ -3629,7 +3629,7 @@ mod tests {
             Op::Insert {
                 table: "users".to_string(),
                 columns: vec!["name".to_string()],
-                rows: vec![vec![IrScalar::Str("alice".to_string())]],
+                rows: vec![vec![IrScalar::Str("alice".to_string()).into()]],
                 on_conflict: None,
                 schema: None,
             },

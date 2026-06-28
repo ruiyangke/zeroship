@@ -520,7 +520,7 @@ mod tests {
         let err = load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None).unwrap_err();
         match err {
             IrLoadError::Deserialize(msg) => {
-                assert!(msg.contains(crate::model::ir::EXPR_INVALID_NUMERIC), "got: {msg}");
+                assert!(msg.contains("IrValue"), "got: {msg}");
             }
             other => panic!("expected Deserialize, got: {other}"),
         }

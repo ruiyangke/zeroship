@@ -827,7 +827,7 @@
           ]
         },
         {
-          "description": "`INSERT INTO … VALUES …` with typed scalar rows.",
+          "description": "`INSERT INTO … VALUES …` with typed scalar/closed-expression rows.",
           "type": "object",
           "properties": {
             "table": {
@@ -842,12 +842,12 @@
               }
             },
             "rows": {
-              "description": "Rows, each a positional list of typed scalars.",
+              "description": "Rows, each a positional list of typed scalar/closed-expression values.",
               "type": "array",
               "items": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/IrScalar"
+                  "$ref": "#/$defs/IrValue"
                 }
               }
             },
@@ -4163,8 +4163,21 @@
         }
       ]
     },
+    "IrValue": {
+      "description": "A DML value in an insert row or `onConflict.doUpdate`: either the existing typed\nscalar wire shape or a closed expression AST such as `FnSynth(now)`.",
+      "anyOf": [
+        {
+          "description": "A typed scalar literal. The wire shape is exactly [`IrScalar`]'s existing\nscalar representation, preserving committed scalar rows byte-for-byte.",
+          "$ref": "#/$defs/IrScalar"
+        },
+        {
+          "description": "A closed expression AST. This admits DB-evaluated synth scalars without\nopening a raw SQL path.",
+          "$ref": "#/$defs/Expr"
+        }
+      ]
+    },
     "IrOnConflict": {
-      "description": "**PR6a** — the optional `insert { onConflict }` upsert clause (§3.4 / §9). A\nCLOSED carrier: the conflict-target columns + an optional `doUpdate` map of\n`column → typed scalar` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a\nraw SQL string (property A). **PostgreSQL-only** — the lowering renders it on\nPG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a\ndistinct IR type so the wire shape is closed + schemars-expressible and a\nhand-crafted `.ir.json` cannot smuggle an arbitrary clause.",
+      "description": "**PR6a** — the optional `insert { onConflict }` upsert clause (§3.4 / §9). A\nCLOSED carrier: the conflict-target columns + an optional `doUpdate` map of\n`column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a\nraw SQL string (property A). **PostgreSQL-only** — the lowering renders it on\nPG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a\ndistinct IR type so the wire shape is closed + schemars-expressible and a\nhand-crafted `.ir.json` cannot smuggle an arbitrary clause.",
       "type": "object",
       "properties": {
         "columns": {
@@ -4175,13 +4188,13 @@
           }
         },
         "doUpdate": {
-          "description": "`Some` ⇒ `DO UPDATE SET <col = scalar, …>`; absent ⇒ `DO NOTHING`. The\nassignment values are typed scalars (the §2.5 numeric domain), bound\nnatively at assembly — never inlined.",
+          "description": "`Some` ⇒ `DO UPDATE SET <col = value, …>`; absent ⇒ `DO NOTHING`. Scalar\nassignments are native binds; expression assignments are closed ASTs rendered\nthrough the shared DML renderer.",
           "type": [
             "object",
             "null"
           ],
           "additionalProperties": {
-            "$ref": "#/$defs/IrScalar"
+            "$ref": "#/$defs/IrValue"
           }
         }
       },
@@ -4869,7 +4882,7 @@
       "description": "A closed SQLite trigger body statement. DML-shaped variants reuse the existing\nDML payload fields where they make sense inside a trigger body; `Raise` is the\nclosed replacement for raw trigger-body error text.",
       "oneOf": [
         {
-          "description": "`INSERT INTO … VALUES …` with typed scalar rows.",
+          "description": "`INSERT INTO … VALUES …` with typed scalar/closed-expression rows.",
           "type": "object",
           "properties": {
             "table": {
@@ -4884,12 +4897,12 @@
               }
             },
             "rows": {
-              "description": "Rows, each a positional list of typed scalars.",
+              "description": "Rows, each a positional list of typed scalar/closed-expression values.",
               "type": "array",
               "items": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/$defs/IrScalar"
+                  "$ref": "#/$defs/IrValue"
                 }
               }
             },

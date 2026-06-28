@@ -1209,7 +1209,7 @@ impl CommentTarget {
 
 /// **PR6a** — the optional `insert { onConflict }` upsert clause (§3.4 / §9). A
 /// CLOSED carrier: the conflict-target columns + an optional `doUpdate` map of
-/// `column → typed scalar` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a
+/// `column → DML value` assignment (absent `doUpdate` ⇒ `DO NOTHING`). NEVER a
 /// raw SQL string (property A). **PostgreSQL-only** — the lowering renders it on
 /// PG and HARD-REJECTS it on SQLite (`dialect_scope = PgOnly`). Modelled as a
 /// distinct IR type so the wire shape is closed + schemars-expressible and a
@@ -1219,11 +1219,11 @@ impl CommentTarget {
 pub struct IrOnConflict {
     /// The conflict-target columns (`ON CONFLICT (cols)`).
     pub columns: Vec<String>,
-    /// `Some` ⇒ `DO UPDATE SET <col = scalar, …>`; absent ⇒ `DO NOTHING`. The
-    /// assignment values are typed scalars (the §2.5 numeric domain), bound
-    /// natively at assembly — never inlined.
+    /// `Some` ⇒ `DO UPDATE SET <col = value, …>`; absent ⇒ `DO NOTHING`. Scalar
+    /// assignments are native binds; expression assignments are closed ASTs rendered
+    /// through the shared DML renderer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub do_update: Option<BTreeMap<String, IrScalar>>,
+    pub do_update: Option<BTreeMap<String, IrValue>>,
 }
 
 /// A batched-backfill / batched-update knob.
@@ -1451,14 +1451,14 @@ pub enum TriggerAction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "stmt", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum TriggerStmt {
-    /// `INSERT INTO … VALUES …` with typed scalar rows.
+    /// `INSERT INTO … VALUES …` with typed scalar/closed-expression rows.
     Insert {
         /// Target table.
         table: String,
         /// Column list.
         columns: Vec<String>,
-        /// Rows, each a positional list of typed scalars.
-        rows: Vec<Vec<IrScalar>>,
+        /// Rows, each a positional list of typed scalar/closed-expression values.
+        rows: Vec<Vec<IrValue>>,
         /// Optional schema qualifier. On SQLite, non-main schemas are refused at
         /// the normal lower schema gate before render.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2193,14 +2193,14 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `INSERT INTO … VALUES …` with typed scalar rows.
+    /// `INSERT INTO … VALUES …` with typed scalar/closed-expression rows.
     Insert {
         /// Target table.
         table: String,
         /// Column list.
         columns: Vec<String>,
-        /// Rows, each a positional list of typed scalars.
-        rows: Vec<Vec<IrScalar>>,
+        /// Rows, each a positional list of typed scalar/closed-expression values.
+        rows: Vec<Vec<IrValue>>,
         /// **PR6a** — the optional upsert clause (`ON CONFLICT …`). PostgreSQL-only:
         /// PG renders it natively; on a SQLite target it is a hard authoring error
         /// (`dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`, §9) — there is
@@ -3319,6 +3319,31 @@ impl JsonSchema for IrScalar {
     }
 }
 
+/// A DML value in an insert row or `onConflict.doUpdate`: either the existing typed
+/// scalar wire shape or a closed expression AST such as `FnSynth(now)`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum IrValue {
+    /// A typed scalar literal. The wire shape is exactly [`IrScalar`]'s existing
+    /// scalar representation, preserving committed scalar rows byte-for-byte.
+    Scalar(IrScalar),
+    /// A closed expression AST. This admits DB-evaluated synth scalars without
+    /// opening a raw SQL path.
+    Expr(Expr),
+}
+
+impl From<IrScalar> for IrValue {
+    fn from(value: IrScalar) -> Self {
+        IrValue::Scalar(value)
+    }
+}
+
+impl From<Expr> for IrValue {
+    fn from(value: Expr) -> Self {
+        IrValue::Expr(value)
+    }
+}
+
 /// A borrowed view over a migration's ordered op-list, the input to
 /// [`Checksum::of_ir`](crate::model::migration::Checksum::of_ir).
 ///
@@ -3556,7 +3581,7 @@ mod tests {
         let json = r#"{"op":"insert","table":"t","columns":["a"],"rows":[[1.5]]}"#;
         let err = serde_json::from_str::<Op>(json).unwrap_err();
         assert!(
-            err.to_string().contains(EXPR_INVALID_NUMERIC),
+            err.to_string().contains("IrValue"),
             "a fractional Insert scalar must be rejected at deserialize, got: {err}"
         );
     }
@@ -3565,7 +3590,7 @@ mod tests {
     fn insert_row_with_2pow53_scalar_is_rejected() {
         let json = r#"{"op":"insert","table":"t","columns":["a"],"rows":[[9007199254740992]]}"#;
         let err = serde_json::from_str::<Op>(json).unwrap_err();
-        assert!(err.to_string().contains(EXPR_INVALID_NUMERIC), "got: {err}");
+        assert!(err.to_string().contains("IrValue"), "got: {err}");
     }
 
     #[test]
@@ -3574,8 +3599,14 @@ mod tests {
         let op: Op = serde_json::from_str(json).unwrap();
         match op {
             Op::Insert { rows, .. } => {
-                assert_eq!(rows[0][0], IrScalar::Int(9_007_199_254_740_991));
-                assert_eq!(rows[0][1], IrScalar::Decimal("1.5".to_string()));
+                assert_eq!(
+                    rows[0][0],
+                    IrValue::Scalar(IrScalar::Int(9_007_199_254_740_991))
+                );
+                assert_eq!(
+                    rows[0][1],
+                    IrValue::Scalar(IrScalar::Decimal("1.5".to_string()))
+                );
             }
             _ => panic!("expected Insert"),
         }
@@ -4065,7 +4096,7 @@ mod tests {
         let ins = Op::Insert {
             table: "t".into(),
             columns: vec!["a".into()],
-            rows: vec![vec![IrScalar::Int(1)]],
+            rows: vec![vec![IrScalar::Int(1).into()]],
             on_conflict: None,
             schema: Some("app2".into()),
         };
