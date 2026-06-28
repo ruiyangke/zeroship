@@ -54,11 +54,11 @@
 //! ## Baseline vs degraded floor (design §8.9)
 //!
 //! [`SandboxReport`] records which layers actually engaged. The HOSTED multi-tenant
-//! recorder **refuses to run** ([`SandboxPosture::require_hosted_floor`]) unless at
-//! least seccomp OR netns engaged — there is NO unconstrained-Node fallback. The
-//! LOCAL single-tenant recorder runs the developer's own code under the
-//! userland-budget floor (rlimits + the resolver) and applies the kernel layers
-//! opportunistically.
+//! recorder **refuses to run** ([`SandboxPosture::require_hosted_floor`]) unless
+//! Landlock is enforced AND at least seccomp OR netns engaged — there is NO
+//! seccomp-only filesystem downgrade for hosted recorder execution. The LOCAL
+//! single-tenant recorder runs the developer's own code under the userland-budget
+//! floor (rlimits + the resolver) and applies the kernel layers opportunistically.
 
 #![allow(unsafe_code)] // raw syscalls (setrlimit/unshare/prctl), mirroring sandbox-agent::dropuser
 
@@ -167,10 +167,10 @@ fn count_self_threads() -> Result<usize, String> {
 pub enum SandboxPosture {
     /// HOSTED multi-tenant: the recorder evaluates ONE tenant's `.ts` on shared
     /// platform infrastructure. The kernel sandbox is MANDATORY — the child refuses
-    /// to run with neither seccomp nor netns engaged (no unconstrained-Node
-    /// fallback). landlock is required on the platform image by construction but
-    /// the hard floor is seccomp+netns (so a landlock-less platform misconfig
-    /// degrades to the §8.9 floor rather than running unconstrained).
+    /// to run unless landlock is enforced and at least one execution/network
+    /// boundary (seccomp or netns) engaged. A landlock-less hosted platform refuses
+    /// rather than degrading to seccomp-only, because seccomp/netns do not cover
+    /// read-only filesystem secrets.
     Hosted,
     /// LOCAL single-tenant / self-host: the developer's OWN `.ts` at their own trust
     /// level. The userland-budget floor (rlimits + resolver) is the baseline; the
@@ -201,10 +201,19 @@ pub struct SandboxReport {
 }
 
 impl SandboxReport {
-    /// The hosted multi-tenant refuse-to-run floor (design §8.9): at least seccomp
-    /// OR netns must have engaged. Returns `Err(reason)` if neither did — the
-    /// recorder MUST abort rather than evaluate untrusted JS unconstrained.
+    /// The hosted multi-tenant refuse-to-run floor (design §8.9): landlock must be
+    /// enforced, and at least seccomp OR netns must have engaged. Returns
+    /// `Err(reason)` if the floor is not met — the recorder MUST abort rather than
+    /// evaluate untrusted JS with a read-only host filesystem exposure.
     pub fn require_hosted_floor(&self) -> Result<(), String> {
+        if !self.landlock {
+            return Err(
+                "hosted recorder refuses to run: landlock is not enforced \
+                 (hosted requires an active Landlock filesystem boundary; no \
+                 seccomp-only filesystem downgrade)"
+                    .into(),
+            );
+        }
         if self.seccomp || self.netns {
             Ok(())
         } else {
@@ -265,7 +274,8 @@ impl Default for ResourceBudget {
 /// child manages to open reaches nowhere. Async-signal-safe (one `unshare`).
 ///
 /// On failure (e.g. `unprivileged_userns_clone=0`), returns the OS error so the
-/// caller can record netns as not-engaged; the hosted floor then leans on seccomp.
+/// caller can record netns as not-engaged; the hosted floor still requires
+/// Landlock and then leans on seccomp.
 ///
 /// # Safety
 /// MUST be called only from `Command::pre_exec` (in the forked child). Calling it in
@@ -338,6 +348,11 @@ pub fn apply_landlock(allow_read: &[PathBuf]) -> Result<bool, String> {
         RulesetCreatedAttr, RulesetStatus, ABI,
     };
 
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ZS_RECORDER_FORCE_LANDLOCK_UNAVAILABLE").is_some() {
+        return Ok(false);
+    }
+
     // ABI::V1 is the floor (Linux 5.13). `from_all` over the running ABI grants the
     // widest read set the kernel knows; we then add ONLY read rules — never a write
     // access — so the ruleset is read-only by construction.
@@ -396,7 +411,7 @@ pub fn apply_landlock(_allow_read: &[PathBuf]) -> Result<bool, String> {
 /// `WTERMSIG == SIGSYS`.
 ///
 /// Returns `Ok(())` on install; `Err` if seccomp is unavailable (the caller records
-/// it not-engaged; the hosted floor then requires netns).
+/// it not-engaged; the hosted floor still requires Landlock and then requires netns).
 #[cfg(target_os = "linux")]
 pub fn apply_seccomp() -> Result<(), String> {
     use seccompiler::{

@@ -14,9 +14,9 @@
 //!      syscall directly from native code, never consulting the resolver).
 //!   2. RLIMIT_CPU / wall-watchdog / RLIMIT_AS bound an infinite loop / alloc bomb =>
 //!      `BUILD_RECORDER_BUDGET_EXCEEDED`.
-//!   3. On a landlock-less posture the degraded floor (seccomp + netns) STILL kills
-//!      the subprocess/network cases; the hosted recorder REFUSES to start with
-//!      neither seccomp nor netns.
+//!   3. On a landlock-less posture the local degraded floor still kills
+//!      subprocess/network cases via seccomp/netns, but the hosted recorder REFUSES
+//!      without active Landlock.
 //!   4. Per-invocation isolation: two concurrent record calls get SEPARATE sandbox
 //!      children, no fs/state bleed.
 //!
@@ -497,12 +497,64 @@ fn hosted_refuses_to_run_with_neither_seccomp_nor_netns() {
 }
 
 #[test]
+fn hosted_refuses_when_landlock_forced_unavailable_even_with_seccomp() {
+    // Force only Landlock unavailable while still giving seccomp its no_new_privs
+    // precondition through pre_exec_rlimits. Hosted must fail closed instead of
+    // accepting a seccomp-only filesystem posture.
+    let bin = recorder_child_path();
+    assert!(bin.exists());
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(&bin);
+    cmd.env("ZS_RECORDER_FORCE_LANDLOCK_UNAVAILABLE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    unsafe {
+        cmd.pre_exec(|| {
+            zeroship_migrate::frontend::sandbox::pre_exec_rlimits(ResourceBudget::default())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(child_request(HAPPY_MIGRATION, true, false, true).as_bytes())
+        .ok();
+    let out = {
+        use std::io::Read;
+        let mut s = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut s).ok();
+        s
+    };
+    child.wait().ok();
+    let resp: zeroship_migrate::frontend::recorder_protocol::ChildResponse =
+        serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("parse resp: {e}; raw={out}"));
+    assert!(!resp.ok, "hosted recorder must refuse without landlock: {out}");
+    assert!(
+        resp.report.seccomp,
+        "this regression must prove seccomp-only is insufficient; report={:?}",
+        resp.report
+    );
+    assert!(!resp.report.landlock, "landlock must be forced unavailable");
+    match resp.error {
+        Some(zeroship_migrate::frontend::recorder_protocol::ChildError::SandboxRefused(
+            reason,
+        )) => {
+            assert!(reason.to_lowercase().contains("landlock"), "reason: {reason}");
+        }
+        other => panic!("expected SandboxRefused, got {other:?}"),
+    }
+}
+
+#[test]
 fn local_posture_runs_under_userland_floor_even_without_kernel_layers() {
     // The LOCAL single-tenant posture runs the developer's own code under the
     // userland-budget floor when kernel layers are absent (no refuse-to-run).
     let bin = recorder_child_path();
     let mut child = Command::new(&bin)
         .env("ZS_RECORDER_DISABLE_SECCOMP", "1")
+        .env("ZS_RECORDER_FORCE_LANDLOCK_UNAVAILABLE", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -527,6 +579,7 @@ fn local_posture_runs_under_userland_floor_even_without_kernel_layers() {
         resp.ok,
         "local posture must still record under the userland floor: {out}"
     );
+    assert!(!resp.report.landlock, "landlock must be forced unavailable");
 }
 
 // ===========================================================================
