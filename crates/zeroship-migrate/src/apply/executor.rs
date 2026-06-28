@@ -869,7 +869,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     // lock between sub-batches (PG advisory locks are session-re-entrant, so a
     // nested unlock would pop one level), letting a concurrent deploy interleave.
     if lock_mode == LockMode::Acquire {
-        backend.acquire_project_lock(&cfg.project_id).await?;
+        backend.acquire_project_lock(cfg).await?;
     }
     // Capture the session GUCs we will override so we can restore them on exit
     // — the executor's search_path / statement_timeout / lock_timeout must NOT
@@ -900,7 +900,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     if lock_mode == LockMode::AlreadyHeld {
         return result;
     }
-    let unlock = backend.release_project_lock(&cfg.project_id).await;
+    let unlock = backend.release_project_lock(cfg).await;
     // Surface the apply error first if there was one; otherwise surface any
     // unlock failure. (The lock auto-releases on session end regardless.)
     match result {
@@ -3045,7 +3045,7 @@ async fn rollback_with_backend<B: MigrationBackend>(
     // lock failure to `ApplyError::Db`; preserve rollback's `RollbackError::Db`
     // surface by converting.
     backend
-        .acquire_project_lock(&cfg.project_id)
+        .acquire_project_lock(cfg)
         .await
         .map_err(rollback_err_from_apply)?;
     let snapshot = backend.snapshot_session().await.ok();
@@ -3059,7 +3059,7 @@ async fn rollback_with_backend<B: MigrationBackend>(
         }
     }
     let unlock = backend
-        .release_project_lock(&cfg.project_id)
+        .release_project_lock(cfg)
         .await
         .map_err(rollback_err_from_apply);
     match result {
