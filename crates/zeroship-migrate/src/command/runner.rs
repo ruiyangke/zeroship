@@ -210,12 +210,13 @@ pub enum RunError {
     },
     /// The DB URL selects a database engine this CLI does not support. An HONEST
     /// refusal, not a panic — only the known engine set is accepted.
-    #[error("unsupported database engine (supported: postgres, sqlite, mysql render-only)")]
+    #[error("unsupported database engine (supported: postgres, sqlite; mysql plan preview)")]
     UnsupportedEngine,
-    /// MySQL exists as a render-only dialect in this phase. Any command that would
-    /// touch a real MySQL database fails closed until a backend/driver phase lands.
+    /// CLI live MySQL execution is not wired in this command path yet. The MySQL
+    /// backend exists for the platform-owned JS-driver apply path; the CLI still
+    /// refuses MySQL DSNs until it has an explicit driver contract.
     #[error(
-        "live MySQL execution is not implemented: MySQL is render-only in this phase \
+        "CLI live MySQL execution is not implemented in this command path \
          (use `plan --sql --engine mysql` for offline SQL preview)"
     )]
     MysqlLiveExecUnimplemented,

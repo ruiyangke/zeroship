@@ -1173,7 +1173,7 @@ async fn apply_locked<B: MigrationBackend>(
     //     line-2 defense is the backend authorizer applied per statement at apply).
     // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
     // which for SQLite rejects `transaction:false` at the dialect boundary.
-    let guard = crate::guard::guard_for(&cfg.guard_config());
+    let guard = crate::guard::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution (H1). The guard runs per-migration inside the apply loop in the
