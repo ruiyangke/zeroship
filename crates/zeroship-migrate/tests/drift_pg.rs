@@ -8,10 +8,14 @@ use std::collections::BTreeMap;
 
 use compio_postgres::Client;
 use zeroship_migrate::model::migration::Checksum;
+use zeroship_migrate::model::ir::{SelectAst, SelectItem, TableRef, ViewQuery};
 use zeroship_migrate::{
-    apply, check_checksum_drift, diff_snapshots, rollback, snapshot_schema, Approval, ColumnSnapshot,
-    ConstraintSnapshot, ExecutorConfig, IndexElementSnapshot, IndexSnapshot, Migration,
-    MigrationFlags, MigrationId, RollbackRequest, RollbackTarget, SchemaSnapshot, TableSnapshot,
+    apply, check_checksum_drift, diff_snapshots, fold_ops, rollback, snapshot_schema, Approval,
+    ColType, ColumnSnapshot, CommentTarget, ConstraintSnapshot, ExecutorConfig, Expr,
+    IndexElement, IndexElementSnapshot, IndexSnapshot, IrAuthor, IrColumn, IrFlagsOverride,
+    LiveSchema, Migration, MigrationFlags, MigrationId, MigrationIr, Op, RollbackRequest,
+    RollbackTarget, ScalarFn, SchemaScope, SchemaSnapshot, SqlDialect, StructuralDrift,
+    TableSnapshot, UnaryOp, CURRENT_IR_VERSION,
 };
 
 const DEFAULT_DSN: &str =
@@ -90,6 +94,68 @@ fn mig(version: MigrationId, name: &str, up: &str) -> Migration {
         preconditions: Vec::new(),
         existence_guard: None,
     }
+}
+
+fn ir_col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
+    IrColumn {
+        name: name.to_string(),
+        ty,
+        nullable: Some(nullable),
+        default: None,
+        unique: None,
+        id_prefix: None,
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: None,
+    }
+}
+
+fn ir_doc(name: &str, ops: Vec<Op>) -> MigrationIr {
+    MigrationIr {
+        ir_version: CURRENT_IR_VERSION,
+        name: name.to_string(),
+        owner_app: "app_test".to_string(),
+        ops,
+        flags: IrFlagsOverride::default(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        checksum: None,
+    }
+}
+
+fn lower_ir_migrations(schema: &str, name: &str, ops: &[Op]) -> Vec<Migration> {
+    let author = IrAuthor::new(schema, "app_test", SqlDialect::Postgres)
+        .with_schema_scope(SchemaScope::Allowlist(vec![schema.to_string()]));
+    author
+        .lower(&ir_doc(name, ops.to_vec()), &LiveSchema::default())
+        .expect("lower authored IR to migrations")
+}
+
+fn idx_col(name: &str) -> IndexElement {
+    IndexElement::Column { name: name.to_string() }
+}
+
+fn lower_email_expr() -> Expr {
+    Expr::FnCall {
+        r#fn: ScalarFn::Lower,
+        args: vec![Expr::col("email")],
+    }
+}
+
+fn active_true_expr() -> Expr {
+    Expr::UnaryOp {
+        op: UnaryOp::IsTrue,
+        operand: Box::new(Expr::col("active")),
+    }
+}
+
+fn altered_contains(drift: &StructuralDrift, object: &str, field: &str) -> bool {
+    drift
+        .altered_objects
+        .iter()
+        .any(|a| a.object == object && a.field == field)
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,17 +1118,55 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
     ensure_project_schema(&conn, &cfg).await;
 
     let sch = &cfg.project_schema;
-    conn.batch_execute(&format!(
-        "CREATE TABLE \"{sch}\".\"users\" (email text, active boolean);
-         CREATE INDEX users_active_idx ON \"{sch}\".\"users\" (active) WHERE active IS TRUE;
-         CREATE INDEX users_email_lower_idx ON \"{sch}\".\"users\" (email, lower(email))
-             WHERE active IS TRUE;"
-    ))
-    .await
-    .expect("seed partial/expression indexes");
+    let ops = vec![
+        Op::CreateTable {
+            name: "users".into(),
+            columns: vec![
+                ir_col("email", ColType::Text, true),
+                ir_col("active", ColType::Bool, true),
+            ],
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateIndex {
+            table: "users".into(),
+            columns: vec![idx_col("active")],
+            name: Some("users_active_idx".into()),
+            unique: None,
+            using: None,
+            r#where: Some(active_true_expr()),
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateIndex {
+            table: "users".into(),
+            columns: vec![
+                idx_col("email"),
+                IndexElement::Expr {
+                    expr: lower_email_expr(),
+                },
+            ],
+            name: Some("users_email_lower_idx".into()),
+            unique: None,
+            using: None,
+            r#where: Some(active_true_expr()),
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+    ];
+    let migrations = lower_ir_migrations(sch, "partial_expression_indexes", &ops);
+    apply(&conn, &cfg, &migrations, Approval::None, "actor")
+        .await
+        .expect("apply authored partial/expression indexes");
 
-    let snap = snapshot_schema(&conn, sch).await.expect("snap");
-    let users = snap.tables.get("users").expect("users table");
+    let expected =
+        fold_ops(&ops, SqlDialect::Postgres, sch).expect("fold authored partial/expression ops");
+    let actual = snapshot_schema(&conn, sch).await.expect("snap");
+    let users = actual.tables.get("users").expect("users table");
     let partial = users
         .indexes
         .iter()
@@ -1095,8 +1199,26 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
         "expression index predicate recovered: {expr:?}"
     );
 
-    let drift = diff_snapshots(&snap, &snap);
-    assert!(drift.is_clean(), "partial/expression indexes phantom-drifted: {drift:?}");
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.is_clean(),
+        "authored fold and catalog should agree on canonical partial/expression indexes: {drift:?}"
+    );
+
+    conn.batch_execute(&format!(
+        "DROP INDEX \"{sch}\".\"users_active_idx\";
+         CREATE INDEX users_active_idx ON \"{sch}\".\"users\" (active) WHERE active IS FALSE;"
+    ))
+    .await
+    .expect("change partial index predicate out of band");
+    let changed = snapshot_schema(&conn, sch)
+        .await
+        .expect("snap changed predicate");
+    let changed_drift = diff_snapshots(&expected, &changed);
+    assert!(
+        altered_contains(&changed_drift, "index users_active_idx", "predicate"),
+        "a genuinely changed partial-index predicate must drift: {changed_drift:?}"
+    );
 
     drop_schemas(&conn, &cfg).await;
 }
@@ -1171,6 +1293,133 @@ async fn comment_metadata_reintrospects_and_clears_without_false_drift() {
             .find(|c| c.name == "email")
             .and_then(|c| c.comment.as_deref()),
         None
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn top_level_comment_metadata_reintrospects_and_drifts() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    let ops = vec![
+        Op::CreateTable {
+            name: "users".into(),
+            columns: vec![
+                ir_col("email", ColType::Text, true),
+                ir_col("active", ColType::Bool, true),
+            ],
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateView {
+            name: "active_users".into(),
+            schema: None,
+            columns: None,
+            query: ViewQuery::Structured {
+                select: SelectAst {
+                    from: TableRef {
+                        name: "users".into(),
+                        schema: None,
+                        alias: None,
+                    },
+                    projection: vec![SelectItem::ColRef {
+                        table: None,
+                        name: "email".into(),
+                        alias: None,
+                    }],
+                    joins: Vec::new(),
+                    r#where: Some(active_true_expr()),
+                    order_by: None,
+                    limit: None,
+                },
+            },
+            replace: None,
+            materialized: None,
+        },
+        Op::CreateEnum {
+            name: "mood".into(),
+            schema: None,
+            values: vec!["happy".into(), "sad".into()],
+        },
+        Op::CreateSequence {
+            name: "event_seq".into(),
+            schema: None,
+            as_type: None,
+            increment: None,
+            start: None,
+            min_value: None,
+            max_value: None,
+            cache: None,
+            cycle: None,
+            owned_by: None,
+        },
+        Op::Comment {
+            target: CommentTarget::View {
+                schema: None,
+                name: "active_users".into(),
+            },
+            comment: Some("Active user projection".into()),
+        },
+        Op::Comment {
+            target: CommentTarget::Type {
+                schema: None,
+                name: "mood".into(),
+            },
+            comment: Some("Mood enum".into()),
+        },
+        Op::Comment {
+            target: CommentTarget::Sequence {
+                schema: None,
+                name: "event_seq".into(),
+            },
+            comment: Some("Event ids".into()),
+        },
+    ];
+    let migrations = lower_ir_migrations(sch, "top_level_comments", &ops);
+    apply(&conn, &cfg, &migrations, Approval::None, "actor")
+        .await
+        .expect("apply top-level comments");
+
+    let expected = fold_ops(&ops, SqlDialect::Postgres, sch).expect("fold top-level comments");
+    let actual = snapshot_schema(&conn, sch)
+        .await
+        .expect("snap top-level comments");
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.is_clean(),
+        "authored fold and catalog should agree on view/type/sequence comments: {drift:?}"
+    );
+
+    conn.batch_execute(&format!(
+        "COMMENT ON VIEW \"{sch}\".\"active_users\" IS NULL;
+         COMMENT ON TYPE \"{sch}\".\"mood\" IS 'Changed mood enum';
+         COMMENT ON SEQUENCE \"{sch}\".\"event_seq\" IS NULL;"
+    ))
+    .await
+    .expect("change top-level comments out of band");
+    let changed = snapshot_schema(&conn, sch)
+        .await
+        .expect("snap changed top-level comments");
+    let changed_drift = diff_snapshots(&expected, &changed);
+    assert!(
+        altered_contains(&changed_drift, "view active_users", "comment"),
+        "view comment drift must be detected: {changed_drift:?}"
+    );
+    assert!(
+        altered_contains(&changed_drift, "type mood", "comment"),
+        "type comment drift must be detected: {changed_drift:?}"
+    );
+    assert!(
+        altered_contains(&changed_drift, "sequence event_seq", "comment"),
+        "sequence comment drift must be detected: {changed_drift:?}"
     );
 
     drop_schemas(&conn, &cfg).await;

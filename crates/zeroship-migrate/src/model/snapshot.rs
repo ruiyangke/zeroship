@@ -200,6 +200,24 @@ fn canonical_index_sql_text(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+pub(crate) fn index_elements_canonically_eq(
+    left: &[IndexElementSnapshot],
+    right: &[IndexElementSnapshot],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| match (a, b) {
+            (IndexElementSnapshot::Column(a), IndexElementSnapshot::Column(b)) => a == b,
+            (IndexElementSnapshot::Expr(a), IndexElementSnapshot::Expr(b)) => {
+                canonical_index_sql_text(a) == canonical_index_sql_text(b)
+            }
+            _ => false,
+        })
+}
+
+pub(crate) fn index_predicates_canonically_eq(left: Option<&str>, right: Option<&str>) -> bool {
+    left.map(canonical_index_sql_text) == right.map(canonical_index_sql_text)
+}
+
 /// One index of a table, as introspected from `pg_catalog`.
 ///
 /// `opclass` is **emission-only** (like `ColumnSnapshot::default` /
@@ -239,17 +257,12 @@ impl PartialEq for IndexSnapshot {
         self.name == other.name
             && self.unique == other.unique
             && self.columns == other.columns
-            && self.elements.len() == other.elements.len()
-            && self.elements.iter().zip(&other.elements).all(|(a, b)| match (a, b) {
-                (IndexElementSnapshot::Column(a), IndexElementSnapshot::Column(b)) => a == b,
-                (IndexElementSnapshot::Expr(a), IndexElementSnapshot::Expr(b)) => {
-                    canonical_index_sql_text(a) == canonical_index_sql_text(b)
-                }
-                _ => false,
-            })
+            && index_elements_canonically_eq(&self.elements, &other.elements)
             && self.access_method == other.access_method
-            && self.predicate.as_deref().map(canonical_index_sql_text)
-                == other.predicate.as_deref().map(canonical_index_sql_text)
+            && index_predicates_canonically_eq(
+                self.predicate.as_deref(),
+                other.predicate.as_deref(),
+            )
             && self.comment == other.comment
     }
 }
