@@ -30,7 +30,7 @@ use zeroship_control::{
     api, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
-use zeroship_core::types::AppRuntimeLimits;
+use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -215,6 +215,10 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str, assignable: bool) -> Plan 
             cpu_limit_ms: Some(30_000),
             wall_timeout_ms: Some(30_000),
             heap_limit_mb: Some(256),
+        },
+        net: AppNetPolicyLimits {
+            max_sockets: 32,
+            egress_ceiling_bytes: 256 * 1024 * 1024,
         },
         archived: false,
         assignable_by_creator: assignable,

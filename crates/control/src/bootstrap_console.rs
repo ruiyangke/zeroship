@@ -312,7 +312,10 @@ pub fn console_plan_id() -> String {
 /// Returns `[free, pro, unlimited]`.
 fn builtin_plans() -> Vec<Plan> {
     use crate::pricing::PlanPrice;
-    use zeroship_core::types::{AppRuntimeLimits, FREE_TIER_RUNTIME_LIMITS};
+    use zeroship_core::types::{
+        AppNetPolicyLimits, AppRuntimeLimits, FREE_TIER_NET_POLICY_LIMITS,
+        FREE_TIER_RUNTIME_LIMITS,
+    };
 
     // Free: spend_limit == base (0) ⇒ quota-capped, no card (the spend engine
     // treats limit==0 as the free-tier cap). A small `included_units` of free CU
@@ -329,6 +332,7 @@ fn builtin_plans() -> Vec<Plan> {
             spend_limit_default_cents: 0,
         },
         runtime: FREE_TIER_RUNTIME_LIMITS,
+        net: FREE_TIER_NET_POLICY_LIMITS,
         archived: false,
         // MAJOR-4: the free tier is a PUBLIC tier a creator may self-assign.
         assignable_by_creator: true,
@@ -349,6 +353,10 @@ fn builtin_plans() -> Vec<Plan> {
             cpu_limit_ms: Some(30_000),
             wall_timeout_ms: Some(30_000),
             heap_limit_mb: Some(256),
+        },
+        net: AppNetPolicyLimits {
+            max_sockets: 32,
+            egress_ceiling_bytes: 256 * 1024 * 1024,
         },
         archived: false,
         // MAJOR-4: the pro tier is a PUBLIC pay-go tier a creator may self-assign.
@@ -371,6 +379,10 @@ fn builtin_plans() -> Vec<Plan> {
             cpu_limit_ms: None,
             wall_timeout_ms: None,
             heap_limit_mb: None,
+        },
+        net: AppNetPolicyLimits {
+            max_sockets: 256,
+            egress_ceiling_bytes: 1024 * 1024 * 1024,
         },
         archived: false,
         // MAJOR-4: the unlimited/enterprise tier is OPERATOR-only — a creator

@@ -1645,6 +1645,7 @@ pub struct PlanDto {
     pub name: String,
     pub price: crate::pricing::PlanPrice,
     pub runtime: zeroship_core::types::AppRuntimeLimits,
+    pub net: zeroship_core::types::AppNetPolicyLimits,
     #[serde(default)]
     pub archived: bool,
     /// MAJOR-4: whether a creator (app_owner) may self-assign this plan. Surfaced
@@ -1660,6 +1661,7 @@ impl From<crate::plan_catalog::Plan> for PlanDto {
             name: p.name,
             price: p.price,
             runtime: p.runtime,
+            net: p.net,
             archived: p.archived,
             assignable_by_creator: p.assignable_by_creator,
         }
@@ -1677,6 +1679,8 @@ pub struct UpsertPlanBody {
     pub name: String,
     pub price: crate::pricing::PlanPrice,
     pub runtime: zeroship_core::types::AppRuntimeLimits,
+    #[serde(default)]
+    pub net: zeroship_core::types::AppNetPolicyLimits,
     #[serde(default)]
     pub archived: Option<bool>,
     /// MAJOR-4: operator-controlled flag — may a creator self-assign this plan?
@@ -1753,6 +1757,7 @@ pub async fn upsert_plan(
         name: body.name,
         price: body.price,
         runtime: body.runtime,
+        net: body.net,
         // Placeholder — the upsert uses the `archived` arg, not this field;
         // `None` ⇒ preserve existing (a PUT without `archived` can't un-archive).
         archived: archived.unwrap_or(false),
@@ -1782,6 +1787,8 @@ pub async fn upsert_plan(
                     "included_units": written.price.included_units,
                     "fx_pico_cents_per_unit": written.price.fx_pico_cents_per_unit,
                     "spend_limit_default_cents": written.price.spend_limit_default_cents,
+                    "net_max_sockets": written.net.max_sockets,
+                    "net_egress_ceiling_bytes": written.net.egress_ceiling_bytes,
                     "archived": written.archived,
                 }),
             )

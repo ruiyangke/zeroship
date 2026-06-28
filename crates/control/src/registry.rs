@@ -7,8 +7,8 @@ use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
 use zeroship_core::types::{
-    AppRecord, AppRuntimeLimits, AppVersionInfo, RouteEntry, RouteMap, VersionMap,
-    FREE_TIER_RUNTIME_LIMITS,
+    AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo, NetAllowEntry,
+    RouteEntry, RouteMap, VersionMap, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
 };
 
 // ---------------------------------------------------------------------------
@@ -529,12 +529,35 @@ impl Registry {
         let rows = conn
             .query(
                 "SELECT a.id, a.deploy_hash, a.plan_id, a.env_version, a.manifest_json, \
-                        p.runtime_limits_json \
+                        p.runtime_limits_json, p.net_policy_limits_json \
                  FROM zeroship.apps a \
                  LEFT JOIN zeroship.plans p ON p.id = a.plan_id",
                 &[],
             )
             .await?;
+        let grant_rows = conn
+            .query(
+                "SELECT app_id, host, port FROM zeroship.app_net_grants \
+                 ORDER BY app_id, host, port",
+                &[],
+            )
+            .await?;
+        let mut grants: HashMap<Uuid, Vec<NetAllowEntry>> = HashMap::new();
+        for row in &grant_rows {
+            let app_id: Uuid = row.get("app_id");
+            let host: String = row.get("host");
+            let port_i32: i32 = row.get("port");
+            let Ok(port) = u16::try_from(port_i32) else {
+                tracing::error!(
+                    app_id = %app_id,
+                    host = %host,
+                    port = port_i32,
+                    "registry: app_net_grants row has out-of-range port; skipping"
+                );
+                continue;
+            };
+            grants.entry(app_id).or_default().push(NetAllowEntry { host, port });
+        }
         let mut map = HashMap::new();
         for row in &rows {
             let id: Uuid = row.get("id");
@@ -543,6 +566,19 @@ impl Registry {
             let env_version: i64 = row.get("env_version");
             let manifest_json: Option<String> = row.get("manifest_json");
             let runtime_limits_json: Option<serde_json::Value> = row.get("runtime_limits_json");
+            let net_policy_limits_json: Option<serde_json::Value> =
+                row.get("net_policy_limits_json");
+            let allow = grants.remove(&id).unwrap_or_default();
+            let net_policy = if allow.is_empty() {
+                AppNetPolicy::default()
+            } else {
+                let caps = net_policy_limits_from_catalog(net_policy_limits_json.as_ref(), &id);
+                AppNetPolicy {
+                    allow,
+                    max_sockets: caps.max_sockets,
+                    egress_ceiling_bytes: caps.egress_ceiling_bytes,
+                }
+            };
             let manifest = manifest_json.as_deref().and_then(|j| {
                 match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
                     Ok(m) => Some(m),
@@ -562,6 +598,7 @@ impl Registry {
                 plan_id,
                 env_version,
                 manifest,
+                net_policy,
             });
         }
         Ok(map)
@@ -736,6 +773,29 @@ fn runtime_limits_from_catalog(
             }
         },
         None => FREE_TIER_RUNTIME_LIMITS,
+    }
+}
+
+/// Derive creator raw-TCP caps from the plan catalog. Hosts come from
+/// `app_net_grants`; this only controls socket count and per-dispatch egress
+/// ceiling. Missing/corrupt catalog values fall back to the free-tier caps.
+fn net_policy_limits_from_catalog(
+    json: Option<&serde_json::Value>,
+    app_id: &Uuid,
+) -> AppNetPolicyLimits {
+    match json {
+        Some(j) => match serde_json::from_value::<AppNetPolicyLimits>(j.clone()) {
+            Ok(limits) => limits,
+            Err(e) => {
+                tracing::warn!(
+                    app_id = %app_id,
+                    error = %e,
+                    "registry: plan net_policy_limits_json parse failure — using free-tier fallback"
+                );
+                FREE_TIER_NET_POLICY_LIMITS
+            }
+        },
+        None => FREE_TIER_NET_POLICY_LIMITS,
     }
 }
 

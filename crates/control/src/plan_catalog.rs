@@ -14,7 +14,9 @@
 //! JSONB ([`AppRuntimeLimits`]).
 
 use compio_postgres::Row;
-use zeroship_core::types::{AppRuntimeLimits, FREE_TIER_RUNTIME_LIMITS};
+use zeroship_core::types::{
+    AppNetPolicyLimits, AppRuntimeLimits, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
+};
 
 use crate::pricing::PlanPrice;
 use crate::registry::{Registry, RegistryError};
@@ -29,6 +31,7 @@ pub struct Plan {
     pub name: String,
     pub price: PlanPrice,
     pub runtime: AppRuntimeLimits,
+    pub net: AppNetPolicyLimits,
     pub archived: bool,
     /// MAJOR-4: whether an app_owner (creator) principal may self-assign this
     /// plan via `PUT /api/apps/:id/plan`. The public tiers (`free`, `pro`) are
@@ -63,7 +66,8 @@ impl PlanCatalog {
         let rows = conn
             .query(
                 "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                        runtime_limits_json, spend_limit_default_cents, archived, \
+                        runtime_limits_json, net_policy_limits_json, \
+                        spend_limit_default_cents, archived, \
                         assignable_by_creator \
                  FROM zeroship.plans WHERE id = $1",
                 &[&id],
@@ -87,7 +91,8 @@ impl PlanCatalog {
         let rows = conn
             .query(
                 "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                        runtime_limits_json, spend_limit_default_cents, archived, \
+                        runtime_limits_json, net_policy_limits_json, \
+                        spend_limit_default_cents, archived, \
                         assignable_by_creator \
                  FROM zeroship.plans ORDER BY id",
                 &[],
@@ -119,7 +124,7 @@ impl PlanCatalog {
     ///   - `Some(b)` — set `archived = b` explicitly (the only way to UN-archive
     ///     is `Some(false)`; un-archiving must be deliberate).
     ///   - `None` — PRESERVE the existing row's `archived` on conflict
-    ///     (`COALESCE($8, plans.archived)`); a brand-new row defaults to
+    ///     (`COALESCE($9, plans.archived)`); a brand-new row defaults to
     ///     `false`. This is what a PUT without an `archived` field maps to, so a
     ///     name/price edit can't silently resurrect an archived plan.
     ///
@@ -136,6 +141,8 @@ impl PlanCatalog {
 
         let runtime_limits_json = serde_json::to_value(&plan.runtime)
             .map_err(|e| RegistryError::InvalidInput(format!("runtime_limits_json: {e}")))?;
+        let net_policy_limits_json = serde_json::to_value(&plan.net)
+            .map_err(|e| RegistryError::InvalidInput(format!("net_policy_limits_json: {e}")))?;
         // `base_fee` and `spend_limit_default` have no explicit ceiling in
         // `validate()` but cannot exceed i64::MAX after that check on realistic
         // inputs; the try_from below is retained as a final guard and now warns
@@ -172,27 +179,30 @@ impl PlanCatalog {
         let conn = self.registry.conn().await?;
         let rows = conn
             .query(
-                // INSERT defaults a new row's archived to COALESCE($8, false);
-                // ON CONFLICT preserves the existing value when $8 is NULL
-                // (COALESCE($8, plans.archived)) so a PUT without `archived`
+                // INSERT defaults a new row's archived to COALESCE($9, false);
+                // ON CONFLICT preserves the existing value when $9 is NULL
+                // (COALESCE($9, plans.archived)) so a PUT without `archived`
                 // never un-archives.
                 "INSERT INTO zeroship.plans \
                    (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                    runtime_limits_json, spend_limit_default_cents, archived, \
+                    runtime_limits_json, net_policy_limits_json, \
+                    spend_limit_default_cents, archived, \
                     assignable_by_creator, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, false), $9, NOW()) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, false), $10, NOW()) \
                  ON CONFLICT (id) DO UPDATE SET \
                     name = EXCLUDED.name, \
                     base_fee_cents = EXCLUDED.base_fee_cents, \
                     included_units = EXCLUDED.included_units, \
                     fx_pico_cents_per_unit = EXCLUDED.fx_pico_cents_per_unit, \
                     runtime_limits_json = EXCLUDED.runtime_limits_json, \
+                    net_policy_limits_json = EXCLUDED.net_policy_limits_json, \
                     spend_limit_default_cents = EXCLUDED.spend_limit_default_cents, \
-                    archived = COALESCE($8, zeroship.plans.archived), \
+                    archived = COALESCE($9, zeroship.plans.archived), \
                     assignable_by_creator = EXCLUDED.assignable_by_creator, \
                     updated_at = NOW() \
                  RETURNING id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                           runtime_limits_json, spend_limit_default_cents, archived, \
+                           runtime_limits_json, net_policy_limits_json, \
+                           spend_limit_default_cents, archived, \
                            assignable_by_creator",
                 &[
                     &plan.id,
@@ -201,6 +211,7 @@ impl PlanCatalog {
                     &included_units,
                     &fx_pico,
                     &runtime_limits_json,
+                    &net_policy_limits_json,
                     &spend_default,
                     &archived,
                     &plan.assignable_by_creator,
@@ -228,9 +239,10 @@ impl PlanCatalog {
 }
 
 /// Decode a `plans` row into a [`Plan`]. The price model is scalar (CU pricing);
-/// `runtime_limits_json` is the only JSONB column. `fx_pico_cents_per_unit` is
-/// nullable (NULL ⇒ the plan inherits the global `pricing_config` default — the
-/// engine/reconciler resolve `None` before pricing).
+/// `runtime_limits_json` and `net_policy_limits_json` are the JSONB tier-limit
+/// columns. `fx_pico_cents_per_unit` is nullable (NULL ⇒ the plan inherits the
+/// global `pricing_config` default — the engine/reconciler resolve `None`
+/// before pricing).
 ///
 /// MAJOR-2 (poison tolerance FOR PRICING): a corrupt `runtime_limits_json` does
 /// NOT fail the decode. Pricing only needs the scalar price columns
@@ -249,6 +261,7 @@ fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
     let fx_pico: Option<i64> = row.get("fx_pico_cents_per_unit");
     let spend_default: i64 = row.get("spend_limit_default_cents");
     let runtime_limits_json: serde_json::Value = row.get("runtime_limits_json");
+    let net_policy_limits_json: serde_json::Value = row.get("net_policy_limits_json");
     let id: String = row.get("id");
 
     let runtime: AppRuntimeLimits = serde_json::from_value(runtime_limits_json).unwrap_or_else(|e| {
@@ -260,6 +273,15 @@ fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
         );
         FREE_TIER_RUNTIME_LIMITS
     });
+    let net: AppNetPolicyLimits =
+        serde_json::from_value(net_policy_limits_json).unwrap_or_else(|e| {
+            tracing::warn!(
+                plan_id = %id,
+                error = %e,
+                "plan_catalog: net_policy_limits_json parse failure — using free-tier net caps"
+            );
+            FREE_TIER_NET_POLICY_LIMITS
+        });
 
     Ok(Plan {
         id,
@@ -271,6 +293,7 @@ fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
             spend_limit_default_cents: spend_default.max(0) as u64,
         },
         runtime,
+        net,
         archived: row.get("archived"),
         assignable_by_creator: row.get("assignable_by_creator"),
     })

@@ -18,7 +18,7 @@ use uuid::Uuid;
 use zeroship_control::plan_catalog::{Plan, PlanCatalog};
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
 use zeroship_control::Registry;
-use zeroship_core::types::AppRuntimeLimits;
+use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
 
 fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
@@ -66,6 +66,10 @@ async fn seed_plan(catalog: &PlanCatalog, name: &str) -> Plan {
             cpu_limit_ms: Some(30_000),
             wall_timeout_ms: Some(30_000),
             heap_limit_mb: Some(256),
+        },
+        net: AppNetPolicyLimits {
+            max_sockets: 32,
+            egress_ceiling_bytes: 256 * 1024 * 1024,
         },
         archived: false,
         assignable_by_creator: false,
@@ -241,6 +245,69 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
     assert_eq!(info.runtime.cpu_limit_ms, Some(12_345), "from the catalog row, not a name table");
     assert_eq!(info.runtime.wall_timeout_ms, Some(23_456));
     assert_eq!(info.runtime.heap_limit_mb, Some(177));
+}
+
+#[compio::test]
+async fn get_versions_projects_app_net_grants_with_plan_caps() {
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let client = pg(&url).await;
+    let registry = Registry::new(&url).await.expect("registry");
+    let catalog = PlanCatalog::new(registry.clone());
+    let owner = make_user(&client).await;
+
+    let mut plan = seed_plan(&catalog, "net-caps").await;
+    plan.net = AppNetPolicyLimits {
+        max_sockets: 9,
+        egress_ceiling_bytes: 42 * 1024 * 1024,
+    };
+    catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert net caps");
+
+    let name = format!("net-grant-{}", Uuid::new_v4().simple());
+    let app = registry
+        .create_app(&name, &plan.id, &owner)
+        .await
+        .expect("create");
+
+    let versions = registry.get_versions().await.expect("get_versions no grants");
+    assert_eq!(
+        versions.get(&app.id).expect("app").net_policy,
+        zeroship_core::types::AppNetPolicy::default(),
+        "no grant rows must project literal default-deny"
+    );
+
+    client
+        .execute(
+            "INSERT INTO zeroship.app_net_grants (app_id, host, port, granted_by, note) \
+             VALUES ($1, 'db.example.com', 5432, 'test-operator', 'test grant')",
+            &[&app.id],
+        )
+        .await
+        .expect("insert grant");
+
+    let versions = registry.get_versions().await.expect("get_versions with grant");
+    let net = &versions.get(&app.id).expect("app").net_policy;
+    assert_eq!(net.allow.len(), 1);
+    assert_eq!(net.allow[0].host, "db.example.com");
+    assert_eq!(net.allow[0].port, 5432);
+    assert_eq!(net.max_sockets, 9, "caps come from the plan catalog row");
+    assert_eq!(net.egress_ceiling_bytes, 42 * 1024 * 1024);
+
+    client
+        .execute(
+            "DELETE FROM zeroship.app_net_grants WHERE app_id = $1 AND host = 'db.example.com' AND port = 5432",
+            &[&app.id],
+        )
+        .await
+        .expect("delete grant");
+    let versions = registry.get_versions().await.expect("get_versions after revoke");
+    assert_eq!(
+        versions.get(&app.id).expect("app").net_policy,
+        zeroship_core::types::AppNetPolicy::default(),
+        "revoking the last grant returns to default-deny on the next version read"
+    );
 }
 
 #[compio::test]
