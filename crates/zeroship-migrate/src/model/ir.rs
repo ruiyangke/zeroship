@@ -1599,6 +1599,84 @@ pub struct FuncArg {
     pub mode: Option<FuncArgMode>,
 }
 
+/// Validate the conservative PG type-reference subset admitted in function
+/// signatures. This is intentionally a type *reference* grammar, not a SQL
+/// fragment grammar: no whitespace, no semicolons, no clauses such as `SECURITY
+/// DEFINER`, and at most one schema qualifier.
+#[must_use]
+pub fn is_valid_pg_type_ref(input: &str) -> bool {
+    if input.is_empty() || input.trim() != input || input.chars().any(char::is_whitespace) {
+        return false;
+    }
+
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+    let mut segments = 0;
+    loop {
+        let Some(first) = bytes.get(pos).copied() else {
+            return false;
+        };
+        if !is_ident_start(first) {
+            return false;
+        }
+        pos += 1;
+        while bytes.get(pos).is_some_and(|b| is_ident_continue(*b)) {
+            pos += 1;
+        }
+        segments += 1;
+        if bytes.get(pos) == Some(&b'.') {
+            if segments >= 2 {
+                return false;
+            }
+            pos += 1;
+            continue;
+        }
+        break;
+    }
+
+    if bytes.get(pos) == Some(&b'(') {
+        pos += 1;
+        if !consume_digits(bytes, &mut pos) {
+            return false;
+        }
+        if bytes.get(pos) == Some(&b',') {
+            pos += 1;
+            if !consume_digits(bytes, &mut pos) {
+                return false;
+            }
+        }
+        if bytes.get(pos) != Some(&b')') {
+            return false;
+        }
+        pos += 1;
+    }
+
+    while bytes.get(pos) == Some(&b'[') {
+        if bytes.get(pos + 1) != Some(&b']') {
+            return false;
+        }
+        pos += 2;
+    }
+
+    pos == bytes.len()
+}
+
+fn consume_digits(bytes: &[u8], pos: &mut usize) -> bool {
+    let start = *pos;
+    while bytes.get(*pos).is_some_and(u8::is_ascii_digit) {
+        *pos += 1;
+    }
+    *pos > start
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_ident_continue(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 /// The closed view-body query model: either the cross-dialect structured SELECT
 /// subset or the operator-gated raw SELECT escape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2822,17 +2900,9 @@ impl Op {
             // VENDOR — these operate on the schema/role/database NAMESPACE itself
             // (the `name`/`roles` is NOT a schema qualifier), so no qualifier.
             //
-            // NOTE (vendor review LOW-6): `Grant`/`Revoke` return `None` even though
-            // a `GrantTarget::Table { schema }` carries an INNER target schema. That
-            // inner schema is therefore NOT surfaced to the PR10 cross-schema
-            // allowlist gate — a grant's target-schema is gated by the CAPABILITY
-            // flag (`allow_grant`, refused entirely under Confined) + the
-            // least-privilege migrator role at apply, not by the `schema()`
-            // allowlist walk. This is sound under the operator-trusted Platform
-            // posture (grants are an operator act over the allowlisted platform
-            // schemas), but it is recorded here so a reviewer knows the grant TARGET
-            // schema is not re-checked against `SchemaScope::Allowlist`. Surfacing it
-            // is a deferred hardening (would need a multi-schema return shape).
+            // `GrantTarget::Table { schema }` carries an INNER target schema rather
+            // than an op-level qualifier; validate_op_schema_and_guard checks that
+            // target schema explicitly.
             Op::CreateSchema { .. }
             | Op::DropSchema { .. }
             | Op::DropExtension { .. }

@@ -244,46 +244,27 @@ impl VendorCapabilities {
     /// [`SchemaScope`](crate::model::policy::SchemaScope) the loader threads (vendor spec
     /// §3.2). The scope is produced ONLY by the operator-gated `GuardConfig` ctors,
     /// so it is a faithful, non-spoofable trust signal:
-    /// - `None` ⇒ **Trusted** (the public dbmate posture) ⇒ [`operator`](Self::operator).
+    /// - `None` ⇒ omitted/default public capability ⇒ [`confined`](Self::confined).
     /// - `Some(Single(_))` ⇒ **Confined** (the creator/AI posture) ⇒ [`confined`](Self::confined).
     /// - `Some(Allowlist(list))` ⇒ **Platform** ⇒ [`operator`](Self::operator) with
     ///   `schemas = list`.
+    /// - `Some(Unconfined)` ⇒ **Trusted** ⇒ [`operator`](Self::operator) with no
+    ///   validate-time cross-schema confinement.
     ///
-    /// Only `confined()` produces `Single`; only `platform()`/`trusted()` produce
-    /// `Allowlist`/`None` — so this mapping is exact, by construction
-    /// (`guard.rs` `schema_scope`).
-    ///
-    /// # GUARD-RAIL — `None ⇒ operator` is intentional, NOT fail-open
-    ///
-    /// `None` maps to the FULL [`operator`](Self::operator) capability set
-    /// because `None` is produced EXCLUSIVELY by a **Trusted** `GuardConfig`
-    /// (`GuardConfig::schema_scope` returns `None` only for `TrustProfile::Trusted`,
-    /// `guard.rs`), and a Trusted config requires an `OperatorCapability` token
-    /// minted through an operator-side named seam — never from a creator-reachable
-    /// path. Every CREATOR entry threads `Some(Single(_))`
-    /// explicitly: `IrAuthor::load_and_lower` pins
-    /// `Some(SchemaScope::Single(project_schema))` (`render::lower`), and
-    /// `load_and_lower_guarded` derives the scope from a `GuardConfig::confined`
-    /// the submit ingress forces (`submit.rs`) ⇒ `Some(Single)`. So no
-    /// creator-reachable call ever passes `None` here.
-    ///
-    /// This is pinned by an end-to-end test (`vendor_via_creator_load_path_is_denied`
-    /// in `render::lower`): a vendor op loaded through the Confined creator entry is
-    /// refused `VENDOR_OP_DENIED`, proving the creator path's scope is `Single`,
-    /// never the `None` that would grant operator caps. A FUTURE caller that
-    /// hands `None` to the validate layer for a creator IR would be granting full
-    /// vendor caps — so `None` MUST stay an operator-only, `OperatorCapability`-gated
-    /// signal; do not introduce a non-Trusted `None` producer.
+    /// `None` is intentionally least-privilege so future public callers cannot
+    /// accidentally enable vendor ops by omitting a capability. Operator paths get
+    /// `Allowlist`/`Unconfined` from `GuardConfig` constructors that require an
+    /// [`OperatorCapability`] token.
     #[must_use]
     pub fn from_scope(scope: Option<&SchemaScope>) -> Self {
         match scope {
-            None => Self::operator(),
-            Some(SchemaScope::Single(_)) => Self::confined(),
+            None | Some(SchemaScope::Single(_)) => Self::confined(),
             Some(SchemaScope::Allowlist(list)) => {
                 let mut caps = Self::operator();
                 caps.schemas = list.clone();
                 caps
             }
+            Some(SchemaScope::Unconfined) => Self::operator(),
         }
     }
 
@@ -379,8 +360,12 @@ mod tests {
         ])));
         assert!(platform.grants(VendorCapability::Role));
         assert_eq!(platform.schemas, vec!["zeroship".to_string(), "public".to_string()]);
-        // Trusted (None) → all caps.
-        let trusted = VendorCapabilities::from_scope(None);
+        // Omitted/default public capability (None) → confined, not operator.
+        let defaulted = VendorCapabilities::from_scope(None);
+        assert!(!defaulted.grants(VendorCapability::RawSql));
+        assert!(!defaulted.grants(VendorCapability::RawViewBody));
+        // Explicit Trusted (Unconfined) → all caps.
+        let trusted = VendorCapabilities::from_scope(Some(&SchemaScope::Unconfined));
         assert!(trusted.grants(VendorCapability::RawSql));
         assert!(trusted.grants(VendorCapability::RawViewBody));
     }

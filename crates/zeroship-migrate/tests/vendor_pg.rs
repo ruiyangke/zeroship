@@ -306,7 +306,11 @@ fn render_create_function_embeds_body_verbatim() {
     let op = Op::CreateFunction {
         name: "audit_events_block_tamper".into(),
         schema: Some("zeroship".into()),
-        args: None,
+        args: Some(vec![zeroship_migrate::model::ir::FuncArg {
+            name: Some("user id".into()),
+            ty: "text".into(),
+            mode: None,
+        }]),
         returns: "trigger".into(),
         language: FuncLanguage::Plpgsql,
         replace: Some(true),
@@ -314,9 +318,71 @@ fn render_create_function_embeds_body_verbatim() {
         body: "BEGIN RAISE EXCEPTION 'append-only'; END;".into(),
     };
     let up = render_up(&op);
-    assert!(up.starts_with(r#"CREATE OR REPLACE FUNCTION "zeroship"."audit_events_block_tamper"() RETURNS trigger LANGUAGE plpgsql AS $zsfn$"#), "got: {up}");
+    assert!(up.starts_with(r#"CREATE OR REPLACE FUNCTION "zeroship"."audit_events_block_tamper"("user id" text) RETURNS trigger LANGUAGE plpgsql AS $zsfn$"#), "got: {up}");
     // The raw body is embedded verbatim (the one genuine escape, §2.6).
     assert!(up.contains("BEGIN RAISE EXCEPTION 'append-only'; END;"), "got: {up}");
+}
+
+#[test]
+fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
+    let platform = SchemaScope::Allowlist(vec!["zeroship".into(), "myschema".into()]);
+    let mut op = Op::CreateFunction {
+        name: "f".into(),
+        schema: Some("zeroship".into()),
+        args: Some(vec![zeroship_migrate::model::ir::FuncArg {
+            name: Some("payload".into()),
+            ty: "text".into(),
+            mode: None,
+        }]),
+        returns: "void".into(),
+        language: FuncLanguage::Sql,
+        replace: None,
+        volatility: None,
+        body: "SELECT 1".into(),
+    };
+
+    for returns in ["void SECURITY DEFINER", "void; DROP ROLE x", "void SET search_path=public"] {
+        if let Op::CreateFunction { returns: r, .. } = &mut op {
+            *r = returns.into();
+        }
+        let err = validate_ir_scoped(&ir_with(vec![op.clone()]), Dialect::Postgres, &[], Some(&platform))
+            .expect_err("unsafe return type fragment must be rejected");
+        assert_eq!(err.code, CODE_UNSUPPORTED, "got {err:?}");
+    }
+
+    if let Op::CreateFunction { returns, args, .. } = &mut op {
+        *returns = "numeric(10,2)[]".into();
+        args.as_mut().unwrap()[0].ty = "int[] SECURITY DEFINER".into();
+    }
+    let err = validate_ir_scoped(&ir_with(vec![op.clone()]), Dialect::Postgres, &[], Some(&platform))
+        .expect_err("unsafe arg type fragment must be rejected");
+    assert_eq!(err.code, CODE_UNSUPPORTED, "got {err:?}");
+
+    let bad_drop = Op::DropFunction {
+        name: "f".into(),
+        schema: Some("zeroship".into()),
+        arg_types: Some(vec!["text SET search_path=public".into()]),
+        if_exists: Some(true),
+    };
+    let err = validate_ir_scoped(&ir_with(vec![bad_drop]), Dialect::Postgres, &[], Some(&platform))
+        .expect_err("unsafe dropFunction arg type fragment must be rejected");
+    assert_eq!(err.code, CODE_UNSUPPORTED, "got {err:?}");
+
+    if let Op::CreateFunction { returns, args, .. } = &mut op {
+        *returns = "myschema.mytype".into();
+        args.as_mut().unwrap()[0].ty = "numeric(10,2)".into();
+    }
+    validate_ir_scoped(&ir_with(vec![op]), Dialect::Postgres, &[], Some(&platform))
+        .expect("legal type refs pass");
+
+    let ok_drop = Op::DropFunction {
+        name: "f".into(),
+        schema: Some("zeroship".into()),
+        arg_types: Some(vec!["text".into(), "int[]".into(), "myschema.mytype".into()]),
+        if_exists: Some(true),
+    };
+    validate_ir_scoped(&ir_with(vec![ok_drop]), Dialect::Postgres, &[], Some(&platform))
+        .expect("legal dropFunction type refs pass");
 }
 
 #[test]
@@ -388,10 +454,46 @@ fn platform_allowlist_permits_vendor_ops() {
 }
 
 #[test]
-fn trusted_none_scope_permits_vendor_ops() {
-    // None scope (the Trusted dbmate posture) maps onto the operator preset.
+fn grant_revoke_table_target_schema_is_checked_at_validate_time() {
+    let platform = SchemaScope::Allowlist(vec!["zeroship".into()]);
+    let grant = Op::Grant {
+        privileges: vec![Privilege::Select],
+        on: GrantTarget::Table {
+            names: vec!["users".into()],
+            schema: Some("other_app".into()),
+        },
+        to: vec!["app_reader".into()],
+        with_grant_option: None,
+    };
+    let err = validate_ir_scoped(&ir_with(vec![grant]), Dialect::Postgres, &[], Some(&platform))
+        .expect_err("out-of-allowlist grant table target must be rejected at validate");
+    assert_eq!(err.code, zeroship_migrate::model::validate::CODE_CROSS_SCHEMA, "got {err:?}");
+
+    let revoke = Op::Revoke {
+        privileges: vec![Privilege::Select],
+        on: GrantTarget::Table {
+            names: vec!["users".into()],
+            schema: Some("other_app".into()),
+        },
+        from: vec!["app_reader".into()],
+    };
+    let err = validate_ir_scoped(&ir_with(vec![revoke]), Dialect::Postgres, &[], Some(&platform))
+        .expect_err("out-of-allowlist revoke table target must be rejected at validate");
+    assert_eq!(err.code, zeroship_migrate::model::validate::CODE_CROSS_SCHEMA, "got {err:?}");
+}
+
+#[test]
+fn none_scope_rejects_vendor_ops_explicit_unconfined_permits_them() {
+    // RED pre-fix: None mapped onto the operator preset, so this public/defaulted
+    // path accepted raw vendor IR.
     let ir = ir_with(vendor_samples());
-    validate_ir_scoped(&ir, Dialect::Postgres, &[], None).expect("trusted permits vendor ops");
+    let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], None)
+        .expect_err("omitted/default capability must reject vendor ops");
+    assert_eq!(err.code, CODE_VENDOR_OP_DENIED, "got: {err:?}");
+
+    let trusted = SchemaScope::Unconfined;
+    validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&trusted))
+        .expect("explicit Trusted/Unconfined capability permits vendor ops");
 }
 
 #[test]

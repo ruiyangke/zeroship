@@ -34,7 +34,7 @@ use crate::render::declarative::{
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::expr::Expr;
-use crate::guard::{guard_for, GuardConfig, GuardError};
+use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
 use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod, ExclusionOperator,
     ExistenceGuard, ForEach, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
@@ -43,6 +43,7 @@ use crate::model::ir::{
     SafeI64, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
+use crate::model::policy::TrustProfile;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, TableSnapshot,
 };
@@ -2479,6 +2480,7 @@ impl IrAuthor {
         live: &LiveSchema,
     ) -> Result<(Vec<PlanStep>, Vec<GuardedFragment>), IrGuardedLowerError> {
         let guard = guard_for(guard_cfg);
+        let raw_island_guard = SqlGuard::new(guard_cfg.clone());
         let guard_scope = guard_cfg.schema_scope();
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
@@ -2531,11 +2533,37 @@ impl IrAuthor {
                 // DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
                 // is one whole statement, never broken mid-literal.
                 for stmt in &statements {
-                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
-                        op_index,
-                        op_kind,
-                        source,
-                    })?;
+                    if guard_cfg.trust() == TrustProfile::Trusted {
+                        match op {
+                            Op::PgRaw { .. } => raw_island_guard
+                                .check_raw_island_sql_backstop(stmt)
+                                .map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })?,
+                            Op::CreateFunction { body, .. } => raw_island_guard
+                                .check_raw_island_body_backstop(body, stmt)
+                                .map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })?,
+                            _ => {
+                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                    op_index,
+                                    op_kind,
+                                    source,
+                                })?;
+                            }
+                        }
+                    } else {
+                        guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                            op_index,
+                            op_kind,
+                            source,
+                        })?;
+                    }
                     fragments.push(GuardedFragment {
                         op_index,
                         op_kind,
