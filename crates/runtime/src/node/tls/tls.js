@@ -53,17 +53,27 @@
     }
   }
 
+  function createSecureContext(options = {}) {
+    if (!options || typeof options !== "object") {
+      throw new TypeError("tls.createSecureContext options must be an object");
+    }
+    rejectClientAuthOptions(options);
+    return { ca: normalizeCa(options.ca) };
+  }
+
   function normalizeOptions(options) {
     if (!options || typeof options !== "object") {
       throw new TypeError("tls.connect options must be an object");
     }
     rejectClientAuthOptions(options);
+    const secureContext = options.secureContext || undefined;
     const socket = options.socket || undefined;
     const host = String(options.host || options.hostname || "localhost");
     const port = Number(options.port);
     const servername = String(options.servername || options.host || options.hostname || "localhost");
     const rejectUnauthorized = options.rejectUnauthorized !== false;
-    const ca = normalizeCa(options.ca);
+    const ca = normalizeCa(options.ca) || normalizeCa(secureContext && secureContext.ca);
+    const verifyIdentity = typeof options.checkServerIdentity !== "function";
 
     if (!socket) {
       if (!Number.isInteger(port) || port <= 0 || port > 65535) {
@@ -71,7 +81,7 @@
       }
     }
 
-    return { socket, host, port, servername, rejectUnauthorized, ca };
+    return { socket, host, port, servername, rejectUnauthorized, ca, verifyIdentity };
   }
 
   class TLSSocket extends Socket {
@@ -129,6 +139,7 @@
         opts.servername,
         opts.rejectUnauthorized,
         opts.ca,
+        opts.verifyIdentity,
       );
       return this;
     }
@@ -142,7 +153,12 @@
     socket.pending = true;
     socket.readyState = "opening";
     socket._native.validateTls(opts.rejectUnauthorized);
-    socket._native.startTls(opts.servername, opts.rejectUnauthorized, opts.ca);
+    socket._native.startTls(
+      opts.servername,
+      opts.rejectUnauthorized,
+      opts.ca,
+      opts.verifyIdentity,
+    );
     return socket;
   }
 
@@ -157,7 +173,7 @@
     return new TLSSocket().connect(opts, cb);
   }
 
-  const ns = { TLSSocket, connect };
+  const ns = { TLSSocket, connect, createSecureContext };
   ns.default = ns;
   return ns;
 })();

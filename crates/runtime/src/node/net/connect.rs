@@ -223,6 +223,7 @@ pub(super) fn spawn_tls_connect_task(
         let connector_opts = crate::transport::tls::TlsConnectorOptions {
             reject_unauthorized: opts.reject_unauthorized,
             ca_pem: opts.ca_pem.clone(),
+            verify_identity: opts.verify_identity,
         };
         let connector = match crate::transport::tls::build_tls_connector(&connector_opts) {
             Ok(connector) => connector,

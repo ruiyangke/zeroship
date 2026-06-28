@@ -47,10 +47,12 @@ pub use capability::{
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
 pub use postgres::PostgresBackend;
+#[cfg(debug_assertions)]
+pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
 pub use mysql::{
     deprovision_mysql_migrator_account, mysql_migration_lock_name,
     provision_mysql_migrator_account, provision_mysql_migrator_account_with_password,
-    JsDriverConn, JsDriverError, MysqlBackend, MysqlMigratorAccount,
+    JsDriverConn, JsDriverError, MysqlBackend, MysqlGuardedFragment, MysqlMigratorAccount,
     MysqlMigratorAccountError, MysqlSessionSnapshot, RowSet,
 };
 

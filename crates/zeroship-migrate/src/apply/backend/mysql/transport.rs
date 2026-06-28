@@ -13,7 +13,7 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const TRUSTED_DRIVER_MAX_SOCKETS: u32 = 4;
 const TRUSTED_DRIVER_EGRESS_CEILING: u64 = 64 * 1024 * 1024;
 
-const MYSQL_DRIVER_ENTRY: &str = r#"
+const MYSQL_DRIVER_ENTRY_PREFIX: &str = r#"
 import mysql from "mysql2/promise";
 
 function remoteError(err) {
@@ -25,16 +25,43 @@ function remoteError(err) {
 }
 
 async function main() {
-  const conn = await mysql.createConnection(__zsDriverDsn());
+  let conn = null;
+  let startupErr = null;
+  try {
+    conn = await mysql.createConnection(__zsDriverDsn());
+  } catch (err) {
+    startupErr = err;
+  }
   for (;;) {
     const cmd = await __zsNextCommand();
     try {
+      if (startupErr) {
+        throw startupErr;
+      }
       if (cmd.kind === "exec") {
         await conn.execute(cmd.sql, cmd.binds ?? []);
         __zsResolve(cmd.id, { ok: [] });
       } else if (cmd.kind === "query_json") {
         const [rows] = await conn.execute(cmd.sql, cmd.binds ?? []);
         __zsResolve(cmd.id, { ok: rows });
+"#;
+
+#[cfg(debug_assertions)]
+const MYSQL_DRIVER_TEST_CLOSE_BRANCH: &str = r#"
+      } else if (cmd.kind === "__zs_close_for_test") {
+        const stream = conn?.connection?.stream;
+        if (stream && typeof stream.destroy === "function") {
+          stream.destroy();
+        } else if (conn?.connection && typeof conn.connection.destroy === "function") {
+          conn.connection.destroy();
+        } else {
+          await conn.end();
+        }
+        __zsResolve(cmd.id, { ok: [] });
+        break;
+"#;
+
+const MYSQL_DRIVER_ENTRY_SUFFIX: &str = r#"
       } else {
         throw new Error(`unknown JS driver command kind: ${cmd.kind}`);
       }
@@ -45,11 +72,23 @@ async function main() {
 }
 
 void main().catch((err) => {
-  __zsResolve(0, { err: remoteError(err) });
+  console.error("fatal JS driver loop error:", err?.stack ?? err);
 });
 
 export default {};
 "#;
+
+#[cfg(debug_assertions)]
+fn mysql_driver_entry() -> String {
+    format!(
+        "{MYSQL_DRIVER_ENTRY_PREFIX}{MYSQL_DRIVER_TEST_CLOSE_BRANCH}{MYSQL_DRIVER_ENTRY_SUFFIX}"
+    )
+}
+
+#[cfg(not(debug_assertions))]
+fn mysql_driver_entry() -> String {
+    format!("{MYSQL_DRIVER_ENTRY_PREFIX}{MYSQL_DRIVER_ENTRY_SUFFIX}")
+}
 
 const ECHO_DRIVER_ENTRY: &str = r#"
 const session = {
@@ -255,9 +294,10 @@ impl JsDriverConn {
         net_policy: NetPolicy,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
+        let entry_source = mysql_driver_entry();
         Self::open_with_entry(
             dsn_json,
-            MYSQL_DRIVER_ENTRY,
+            &entry_source,
             net_policy,
             command_timeout,
         )
@@ -417,6 +457,17 @@ impl JsDriverConn {
             self.poisoned = Some(message);
         }
         drop(self.runtime.take());
+    }
+
+    #[cfg(debug_assertions)]
+    pub async fn close_for_test(&mut self, message: impl Into<String>) -> Result<(), JsDriverError> {
+        let message = message.into();
+        let result = self
+            .command("__zs_close_for_test", "", Vec::new())
+            .await
+            .map(|_| ());
+        self.poison_and_teardown(message);
+        result
     }
 
     fn open_with_entry(

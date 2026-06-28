@@ -89,10 +89,12 @@ pub use analysis::{analyze, classify};
 
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
+#[cfg(debug_assertions)]
+pub use apply::backend::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
 pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
     JsDriverConn, JsDriverError, MigrationBackend, MigrationResult, MysqlBackend,
-    MysqlMigratorAccount, MysqlMigratorAccountError, MysqlSessionSnapshot,
+    MysqlGuardedFragment, MysqlMigratorAccount, MysqlMigratorAccountError, MysqlSessionSnapshot,
     OnlineSchemaChange, PgSessionSnapshot, PostgresBackend, RowSet, SeedError,
     ShadowConfig, ShadowDryRun, deprovision_mysql_migrator_account,
     mysql_migration_lock_name, provision_mysql_migrator_account,
