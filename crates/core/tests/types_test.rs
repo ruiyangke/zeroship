@@ -3,8 +3,8 @@ use zeroship_bundle::{
     ProcedureKind, RedirectAction, ResourceEntry, StaticAction, WorkerCode,
 };
 use zeroship_core::types::{
-    AccountState, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent, RouteEntry, SpendState,
-    UsageReport,
+    AccountState, AppNetPolicy, AppRuntimeLimits, AppUsage, AppVersionInfo, ControlEvent,
+    NetAllowEntry, RouteEntry, SpendState, UsageReport,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -526,10 +526,19 @@ fn app_version_info_serializes_with_manifest() {
             }),
             ..Manifest::default()
         }),
+        net_policy: AppNetPolicy {
+            allow: vec![NetAllowEntry {
+                host: "db.example.com".into(),
+                port: 5432,
+            }],
+            max_sockets: 4,
+            egress_ceiling_bytes: 1024 * 1024,
+        },
     };
     let json = serde_json::to_string(&info).unwrap();
     assert!(json.contains("\"manifest\""), "manifest is on the wire: {json}");
     assert!(json.contains(SHA_B), "worker module hash present: {json}");
+    assert!(json.contains("\"net_policy\""), "net policy is on the wire: {json}");
 
     let decoded: AppVersionInfo = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.env_version, 7);
@@ -537,6 +546,7 @@ fn app_version_info_serializes_with_manifest() {
     let worker = decoded.manifest.unwrap().worker.unwrap();
     assert_eq!(worker.entry, "index.js");
     assert_eq!(worker.modules.get("index.js").map(String::as_str), Some(SHA_B));
+    assert_eq!(decoded.net_policy.allow[0].host, "db.example.com");
 }
 
 #[test]
@@ -547,6 +557,7 @@ fn app_version_info_omits_missing_manifest() {
         runtime: AppRuntimeLimits::default(),
         env_version: 0,
         manifest: None,
+        net_policy: AppNetPolicy::default(),
     };
     let json = serde_json::to_string(&info).unwrap();
     assert!(
@@ -570,6 +581,7 @@ fn app_version_info_accepts_legacy_payload_without_manifest() {
     let info: AppVersionInfo = serde_json::from_str(json).unwrap();
     assert!(info.manifest.is_none());
     assert_eq!(info.env_version, 3);
+    assert_eq!(info.net_policy, AppNetPolicy::default());
 }
 
 // -- AssetEntry variants (Tier 4b: pre-compressed encoding variants) -----

@@ -16,6 +16,8 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+pub use zeroship_core::net_policy::{HostPort, ReviewedAllowlist};
+
 /// Process-wide fallback cap. Operators can lower it via
 /// `ZEROSHIP_NET_GLOBAL_MAX_SOCKETS`; tests use that hook to exercise
 /// the global-cap branch without opening thousands of fds.
@@ -96,141 +98,6 @@ impl NetPolicy {
         }
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewedAllowlist {
-    entries: Vec<HostPort>,
-}
-
-impl ReviewedAllowlist {
-    /// Construct an operator/control-plane reviewed allowlist.
-    ///
-    /// This is intentionally not a JS/user-code surface. It validates every
-    /// entry before a runtime ever sees it, rejecting broad wildcards and
-    /// wildcard entries that front shared infrastructure.
-    pub fn operator_reviewed(entries: Vec<HostPort>) -> Result<Self, String> {
-        for entry in &entries {
-            entry.validate_reviewed()?;
-        }
-        Ok(Self { entries })
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &HostPort> {
-        self.entries.iter()
-    }
-
-    pub fn as_slice(&self) -> &[HostPort] {
-        &self.entries
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostPort {
-    host: String,
-    port: u16,
-}
-
-impl HostPort {
-    pub fn new(host: impl Into<String>, port: u16) -> Self {
-        Self::try_new(host, port).expect("invalid node:net allowlist entry")
-    }
-
-    pub fn try_new(host: impl Into<String>, port: u16) -> Result<Self, String> {
-        let host = normalize_host(&host.into());
-        let entry = Self { host, port };
-        entry.validate_reviewed()?;
-        Ok(entry)
-    }
-
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
-    }
-
-    pub fn matches(&self, host: &str, port: u16) -> bool {
-        if self.port != port {
-            return false;
-        }
-        let host = normalize_host(host);
-        if let Some(suffix) = self.host.strip_prefix("*.") {
-            return host.len() > suffix.len()
-                && host.ends_with(suffix)
-                && host.as_bytes()[host.len() - suffix.len() - 1] == b'.';
-        }
-        self.host == host
-    }
-
-    fn validate_reviewed(&self) -> Result<(), String> {
-        if self.port == 0 {
-            return Err("allowlist port must be between 1 and 65535".to_string());
-        }
-        if self.host.is_empty() {
-            return Err("allowlist host must not be empty".to_string());
-        }
-        if self.host == "*" {
-            return Err("bare '*' is not a valid node:net allowlist host".to_string());
-        }
-        let star_count = self.host.bytes().filter(|b| *b == b'*').count();
-        if star_count > 0 && !self.host.starts_with("*.") {
-            return Err(format!(
-                "wildcard allowlist host '{}' must use the '*.example.com' form",
-                self.host
-            ));
-        }
-        if let Some(suffix) = self.host.strip_prefix("*.") {
-            validate_wildcard_suffix(suffix)?;
-        }
-        Ok(())
-    }
-}
-
-fn normalize_host(host: &str) -> String {
-    host.trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
-}
-
-fn validate_wildcard_suffix(suffix: &str) -> Result<(), String> {
-    if suffix.is_empty() || !suffix.contains('.') {
-        return Err("wildcard allowlist suffix must contain at least two labels".to_string());
-    }
-    if suffix.parse::<std::net::IpAddr>().is_ok() {
-        return Err("wildcard allowlist suffix must be a DNS name, not an IP".to_string());
-    }
-    if FRONTABLE_WILDCARD_SUFFIXES
-        .iter()
-        .any(|blocked| suffix == *blocked || suffix.ends_with(&format!(".{blocked}")))
-    {
-        return Err(format!(
-            "wildcard allowlist suffix '{suffix}' fronts shared infrastructure"
-        ));
-    }
-    Ok(())
-}
-
-/// Operator-curated suffixes where a wildcard would authorize arbitrary
-/// third-party tenants behind shared infrastructure. Exact host entries remain
-/// possible for reviewed destinations; broad wildcards are refused.
-const FRONTABLE_WILDCARD_SUFFIXES: &[&str] = &[
-    "workers.dev",
-    "pages.dev",
-    "vercel.app",
-    "netlify.app",
-    "herokuapp.com",
-    "fly.dev",
-    "railway.app",
-    "render.com",
-    "onrender.com",
-    "neon.tech",
-    "supabase.co",
-    "amazonaws.com",
-    "cloudfront.net",
-];
 
 pub(crate) fn try_acquire_global_socket() -> Result<(), String> {
     let cap = configured_global_max_sockets();

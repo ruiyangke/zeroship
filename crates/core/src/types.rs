@@ -40,6 +40,44 @@ pub const FREE_TIER_RUNTIME_LIMITS: AppRuntimeLimits = AppRuntimeLimits {
     heap_limit_mb: Some(64),
 };
 
+/// Worker-facing raw TCP policy for creator isolates.
+///
+/// Empty `allow` means `Denied`. Non-empty means the worker may construct a
+/// reviewed allowlist using the supplied host:port entries and plan-level caps.
+/// `Trusted` is intentionally not representable on this wire type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppNetPolicy {
+    pub allow: Vec<NetAllowEntry>,
+    pub max_sockets: u32,
+    pub egress_ceiling_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetAllowEntry {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Plan-catalog tier limits for creator outbound raw TCP.
+///
+/// Hosts live in `app_net_grants`; plans only determine "how much".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppNetPolicyLimits {
+    pub max_sockets: u32,
+    pub egress_ceiling_bytes: u64,
+}
+
+impl Default for AppNetPolicyLimits {
+    fn default() -> Self {
+        FREE_TIER_NET_POLICY_LIMITS
+    }
+}
+
+pub const FREE_TIER_NET_POLICY_LIMITS: AppNetPolicyLimits = AppNetPolicyLimits {
+    max_sockets: 4,
+    egress_ceiling_bytes: 10 * 1024 * 1024,
+};
+
 /// Worker-facing metadata for an app version/config snapshot.
 ///
 /// `PartialEq`/`Eq` are intentionally NOT derived: `manifest`'s recursive
@@ -65,6 +103,12 @@ pub struct AppVersionInfo {
     /// `worker = None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<Manifest>,
+    /// Creator outbound raw-TCP policy produced by the control plane.
+    /// Defaults to `Denied` when absent. The worker can only translate this
+    /// into `Denied` or a reviewed `Allowlist`; `Trusted` is reserved for
+    /// operator-internal runtimes.
+    #[serde(default)]
+    pub net_policy: AppNetPolicy,
 }
 
 /// Per-app spend-enforcement state, derived by the control-plane spend engine
