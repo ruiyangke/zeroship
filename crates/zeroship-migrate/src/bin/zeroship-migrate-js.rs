@@ -169,6 +169,7 @@ impl RecorderClient for HttpRecorderClient {
         _app_id: &str,
         _name: &str,
         _schema_types_blob: Option<&str>,
+        _determinism_probe_seed: Option<zeroship_migrate::frontend::DeterminismProbeSeed>,
     ) -> Result<String, StructuredError> {
         // The CLI does not embed an HTTP client (zero-tokio; the platform's hosted
         // recorder is reached by the control plane, not this dev CLI). Surface a

@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use super::embedding::DeterminismProbeSeed;
 use super::recorder_protocol::{
     ChildError, ChildOperation, ChildRequest, ChildResponse, MAX_TS_SOURCE_BYTES,
 };
@@ -148,6 +149,8 @@ pub struct RecordRequest {
     pub allow_read_paths: Vec<PathBuf>,
     /// The optional §8.9.2 type-only schema-types blob (in-memory recorder context).
     pub schema_types_blob: Option<String>,
+    /// Optional build-time determinism probe seed for this recording pass.
+    pub determinism_probe_seed: Option<DeterminismProbeSeed>,
 }
 
 /// Inputs for one sandboxed schema evaluation.
@@ -217,6 +220,7 @@ fn spawn_sandboxed_frontend(
     budget: ResourceBudget,
     allow_read_paths: &[PathBuf],
     schema_types_blob: Option<&str>,
+    determinism_probe_seed: Option<DeterminismProbeSeed>,
 ) -> Result<(String, SandboxReport), RecorderError> {
     let field = match operation {
         ChildOperation::RecordMigration => "ts_source",
@@ -303,6 +307,7 @@ fn spawn_sandboxed_frontend(
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
         schema_types_blob: schema_types_blob.map(str::to_string),
+        determinism_probe_seed,
     };
     let req_json = serde_json::to_string(&child_req)
         .map_err(|e| RecorderError::Spawn(format!("serialize child request: {e}")))?;
@@ -408,6 +413,7 @@ pub fn spawn_sandboxed_record(req: &RecordRequest) -> Result<RecordResult, Recor
         req.budget,
         &req.allow_read_paths,
         req.schema_types_blob.as_deref(),
+        req.determinism_probe_seed,
     )?;
     Ok(RecordResult { ir_json, report })
 }
@@ -426,6 +432,7 @@ pub fn spawn_sandboxed_schema_eval(
         req.posture,
         req.budget,
         &req.allow_read_paths,
+        None,
         None,
     )?;
     Ok(SchemaEvalResult {
@@ -614,6 +621,7 @@ impl RecorderService {
         ts_source: &str,
         name: &str,
         schema_types_blob: Option<&str>,
+        determinism_probe_seed: Option<DeterminismProbeSeed>,
     ) -> Result<RecordResult, RecorderError> {
         // §8.6 ownership cross-check — fail-closed.
         self.authorizer
@@ -630,6 +638,7 @@ impl RecorderService {
             budget: self.budget,
             allow_read_paths: vec![], // source is in-memory; deny all fs reads
             schema_types_blob: schema_types_blob.map(|s| s.to_string()),
+            determinism_probe_seed,
         };
         spawn_sandboxed_record(&req)
         // _guard drops here → slot released.

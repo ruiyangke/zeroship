@@ -2254,8 +2254,9 @@ function scalarBind(v) {
 // (C) Determinism lint. Flag the JS nondeterminism accessors (`Date.now()` /
 // `Math.random()` / `crypto.randomUUID()` / `new Date()`), steering authors to
 // the DB-evaluated `c.fn.now()` / `c.fn.genRandomUuid()` (`FnSynth`) scalars. A
-// AST-free SOURCE scan. A finding is a hard build/record error: the build cannot
-// commit an artifact whose recorded IR/checksum changes run-to-run.
+// AST-free SOURCE scan. Findings are advisory only; the Rust build/record gate
+// records twice with divergent seeded nondeterministic globals and compares the
+// recorded IR/checksum for the authoritative hard error.
 // ===========================================================================
 
 const NONDETERMINISM_PATTERNS = [
@@ -2271,7 +2272,8 @@ const NONDETERMINISM_PATTERNS = [
  *
  * SCOPE — intentional coarse whole-source scan: it OVER-flags (a clock accessor
  * in a comment / a non-op helper trips it) and NEVER under-flags. The record/build
- * path surfaces these as hard determinism errors.
+ * path surfaces these only as warnings; hard determinism errors come from the
+ * record-twice IR comparison.
  */
 export function lintDeterminism(source) {
   if (typeof source !== "string") return [];
