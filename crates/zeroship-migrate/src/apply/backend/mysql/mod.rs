@@ -41,7 +41,9 @@ pub struct MysqlBackend {
     conn: RefCell<JsDriverConn>,
 }
 
-const MYSQL_MIGRATOR_USER: &str = "zs_migrator";
+const MYSQL_MIGRATOR_USER_PREFIX: &str = "zs_mig_";
+const MYSQL_MIGRATOR_USER_MAX_CHARS: usize = 32;
+const MYSQL_MIGRATOR_USER_HEX_CHARS: usize = 25;
 const MYSQL_MIGRATOR_HOST: &str = "%";
 const MYSQL_LOCK_PREFIX: &str = "zs_mig_";
 const MYSQL_LOCK_HEX_CHARS: usize = 56;
@@ -126,6 +128,17 @@ pub fn mysql_migration_lock_name(project_id: &str) -> String {
     )
 }
 
+pub fn mysql_migrator_account_user(project_id: &str) -> String {
+    let digest = Sha256::digest(project_id.as_bytes());
+    let suffix = hex::encode(digest);
+    let user = format!(
+        "{MYSQL_MIGRATOR_USER_PREFIX}{}",
+        &suffix[..MYSQL_MIGRATOR_USER_HEX_CHARS.min(suffix.len())]
+    );
+    debug_assert!(user.len() <= MYSQL_MIGRATOR_USER_MAX_CHARS);
+    user
+}
+
 fn mysql_get_lock_timeout_seconds(timeout: Duration) -> String {
     let millis = if timeout.is_zero() {
         0
@@ -149,11 +162,11 @@ fn mysql_quote_string_lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-fn mysql_migrator_account_sql() -> String {
+fn mysql_account_sql(user: &str, host: &str) -> String {
     format!(
         "{}@{}",
-        mysql_quote_string_lit(MYSQL_MIGRATOR_USER),
-        mysql_quote_string_lit(MYSQL_MIGRATOR_HOST)
+        mysql_quote_string_lit(user),
+        mysql_quote_string_lit(host)
     )
 }
 
@@ -174,7 +187,8 @@ pub async fn provision_mysql_migrator_account_with_password(
     password: impl Into<String>,
 ) -> Result<MysqlMigratorAccount, MysqlMigratorAccountError> {
     let password = password.into();
-    let account = mysql_migrator_account_sql();
+    let user = mysql_migrator_account_user(&cfg.project_id);
+    let account = mysql_account_sql(&user, MYSQL_MIGRATOR_HOST);
     let password_lit = mysql_quote_string_lit(&password);
 
     admin
@@ -216,7 +230,7 @@ pub async fn provision_mysql_migrator_account_with_password(
     }
 
     Ok(MysqlMigratorAccount {
-        user: MYSQL_MIGRATOR_USER.to_string(),
+        user,
         host: MYSQL_MIGRATOR_HOST.to_string(),
         password,
     })
@@ -224,11 +238,13 @@ pub async fn provision_mysql_migrator_account_with_password(
 
 pub async fn deprovision_mysql_migrator_account(
     admin: &MysqlBackend,
+    cfg: &ExecutorConfig,
 ) -> Result<(), MysqlMigratorAccountError> {
+    let user = mysql_migrator_account_user(&cfg.project_id);
     admin
         .exec(&format!(
             "DROP USER IF EXISTS {}",
-            mysql_migrator_account_sql()
+            mysql_account_sql(&user, MYSQL_MIGRATOR_HOST)
         ))
         .await?;
     Ok(())
@@ -1186,6 +1202,36 @@ mod tests {
             name,
             mysql_migration_lock_name(&(long + "_other")),
             "different project ids should hash to different lock names"
+        );
+    }
+
+    #[test]
+    fn mysql_migrator_account_user_hashes_project_id_to_mysql_limit() {
+        let long = format!("prj_{}", "tenant_with_a_very_long_project_identifier_".repeat(8));
+        let cases = ["", "prj_short", "prj_symbols_!@#$%^&*()", long.as_str()];
+
+        for project_id in cases {
+            let user = mysql_migrator_account_user(project_id);
+            assert!(
+                user.starts_with(MYSQL_MIGRATOR_USER_PREFIX),
+                "migrator user: {user}"
+            );
+            assert!(
+                user.len() <= MYSQL_MIGRATOR_USER_MAX_CHARS,
+                "MySQL user names are capped at 32 chars, got {}: {user}",
+                user.len()
+            );
+            assert_eq!(
+                user.len(),
+                MYSQL_MIGRATOR_USER_PREFIX.len() + MYSQL_MIGRATOR_USER_HEX_CHARS,
+                "migrator user should use its own 32-char cap, not the GET_LOCK cap"
+            );
+        }
+
+        assert_ne!(
+            mysql_migrator_account_user("project-a"),
+            mysql_migrator_account_user("project-b"),
+            "different project ids should hash to different account names"
         );
     }
 
