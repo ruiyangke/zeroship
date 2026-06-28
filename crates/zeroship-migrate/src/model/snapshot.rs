@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::ir::IdentityCol;
+use crate::model::ir::{ColType, IdentityCol, SafeI64, SafeU64, SequenceOwnedBy};
 
 /// One column of a table, as introspected from `information_schema.columns`.
 ///
@@ -376,13 +376,173 @@ impl PartialEq for ViewSnapshot {
 }
 impl Eq for ViewSnapshot {}
 
-/// A deterministic snapshot of a standalone sequence. This is intentionally
-/// existence-only for now; option-level sequence drift can be added once live
-/// introspection and offline fold both carry the same normalized attributes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Sequence integer data types Postgres can report for a sequence. The portable
+/// IR can author `integer`/`bigint`; `smallint` is catalog-visible so the snapshot
+/// keeps it distinct and drift-comparable instead of collapsing it into `int`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SequenceDataTypeSnapshot {
+    /// PostgreSQL `smallint`.
+    SmallInt,
+    /// PostgreSQL `integer`.
+    Int,
+    /// PostgreSQL `bigint`.
+    #[default]
+    BigInt,
+    /// A future/unsupported catalog type. Kept closed so it can never be mistaken
+    /// for an authored portable type.
+    Unsupported,
+}
+
+impl std::fmt::Display for SequenceDataTypeSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::SmallInt => "smallint",
+            Self::Int => "integer",
+            Self::BigInt => "bigint",
+            Self::Unsupported => "unsupported",
+        })
+    }
+}
+
+impl SequenceDataTypeSnapshot {
+    /// Convert an authored sequence `AS` type into the snapshot's closed catalog
+    /// enum. `None` is PostgreSQL's default `bigint`.
+    pub(crate) fn from_sequence_col_type(as_type: Option<&ColType>) -> Result<Self, &'static str> {
+        match as_type {
+            None | Some(ColType::BigInt) => Ok(Self::BigInt),
+            Some(ColType::Int) => Ok(Self::Int),
+            Some(_) => Err("sequence AS type must be int or bigInt"),
+        }
+    }
+
+    /// Convert the PostgreSQL catalog spelling into the snapshot's closed enum.
+    pub(crate) fn from_pg_type_name(name: &str) -> Self {
+        match name {
+            "smallint" | "int2" => Self::SmallInt,
+            "integer" | "int4" => Self::Int,
+            "bigint" | "int8" => Self::BigInt,
+            _ => Self::Unsupported,
+        }
+    }
+
+    fn bounds(self) -> (i64, i64) {
+        match self {
+            Self::SmallInt => (i16::MIN as i64, i16::MAX as i64),
+            Self::Int => (i32::MIN as i64, i32::MAX as i64),
+            Self::BigInt | Self::Unsupported => (i64::MIN, i64::MAX),
+        }
+    }
+}
+
+fn sequence_default_min_value(as_type: SequenceDataTypeSnapshot, increment: SafeI64) -> i64 {
+    if increment.get() < 0 {
+        as_type.bounds().0
+    } else {
+        1
+    }
+}
+
+fn sequence_default_max_value(as_type: SequenceDataTypeSnapshot, increment: SafeI64) -> i64 {
+    if increment.get() < 0 {
+        -1
+    } else {
+        as_type.bounds().1
+    }
+}
+
+fn normalize_sequence_bound(
+    default: i64,
+    value: i64,
+) -> Result<Option<SafeI64>, String> {
+    if value == default {
+        Ok(None)
+    } else {
+        SafeI64::new(value).map(Some)
+    }
+}
+
+/// Normalize a sequence minimum value against PostgreSQL's default/`NO MINVALUE`
+/// semantics.
+pub(crate) fn normalize_sequence_min_value(
+    as_type: SequenceDataTypeSnapshot,
+    increment: SafeI64,
+    value: i64,
+) -> Result<Option<SafeI64>, String> {
+    normalize_sequence_bound(sequence_default_min_value(as_type, increment), value)
+}
+
+/// Normalize a sequence maximum value against PostgreSQL's default/`NO MAXVALUE`
+/// semantics.
+pub(crate) fn normalize_sequence_max_value(
+    as_type: SequenceDataTypeSnapshot,
+    increment: SafeI64,
+    value: i64,
+) -> Result<Option<SafeI64>, String> {
+    normalize_sequence_bound(sequence_default_max_value(as_type, increment), value)
+}
+
+/// PostgreSQL's default start value for an omitted `START WITH`: the minimum for
+/// ascending sequences and the maximum for descending sequences, after applying
+/// explicit non-default bounds if present.
+pub(crate) fn sequence_default_start_value(
+    as_type: SequenceDataTypeSnapshot,
+    increment: SafeI64,
+    min_value: Option<SafeI64>,
+    max_value: Option<SafeI64>,
+) -> Result<SafeI64, String> {
+    if increment.get() < 0 {
+        match max_value {
+            Some(v) => Ok(v),
+            None => SafeI64::new(sequence_default_max_value(as_type, increment)),
+        }
+    } else {
+        match min_value {
+            Some(v) => Ok(v),
+            None => SafeI64::new(sequence_default_min_value(as_type, increment)),
+        }
+    }
+}
+
+/// A deterministic snapshot of a standalone sequence. Numeric bounds are
+/// normalized to the IR semantics: `min_value`/`max_value = None` means the
+/// PostgreSQL default (`NO MINVALUE` / `NO MAXVALUE`) for the data type and
+/// increment direction, while an explicit value is constrained to [`SafeI64`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequenceSnapshot {
+    /// Sequence integer type.
+    pub as_type: SequenceDataTypeSnapshot,
+    /// Increment step.
+    pub increment: SafeI64,
+    /// Explicit minimum value, or the normalized default.
+    pub min_value: Option<SafeI64>,
+    /// Explicit maximum value, or the normalized default.
+    pub max_value: Option<SafeI64>,
+    /// Start value.
+    pub start: SafeI64,
+    /// Cache size.
+    pub cache: SafeU64,
+    /// Whether the sequence cycles.
+    pub cycle: bool,
+    /// Optional `OWNED BY table.column` target.
+    pub owned_by: Option<SequenceOwnedBy>,
     /// User-authored catalog comment on this sequence.
     pub comment: Option<String>,
+}
+
+impl Default for SequenceSnapshot {
+    fn default() -> Self {
+        Self {
+            as_type: SequenceDataTypeSnapshot::BigInt,
+            increment: SafeI64::new(1).expect("1 is a safe integer"),
+            min_value: None,
+            max_value: None,
+            start: SafeI64::new(1).expect("1 is a safe integer"),
+            cache: SafeU64::new(1).expect("1 is a safe integer"),
+            cycle: false,
+            owned_by: None,
+            comment: None,
+        }
+    }
 }
 
 /// A deterministic snapshot of a project schema's structure.

@@ -1293,43 +1293,58 @@
             },
             "increment": {
               "description": "Optional increment.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "start": {
               "description": "Optional start value.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "minValue": {
               "description": "Optional minimum value. `null` means `NO MINVALUE`; absent omits the\nclause.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "maxValue": {
               "description": "Optional maximum value. `null` means `NO MAXVALUE`; absent omits the\nclause.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "cache": {
               "description": "Optional cache size.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeU64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "cycle": {
               "description": "Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).",
@@ -1377,43 +1392,58 @@
             },
             "increment": {
               "description": "Optional increment.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "restart": {
               "description": "Optional restart. `null` means bare `RESTART`; a value renders\n`RESTART WITH n`; absent omits the clause.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "minValue": {
               "description": "Optional minimum value. `null` means `NO MINVALUE`; absent omits the\nclause.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "maxValue": {
               "description": "Optional maximum value. `null` means `NO MAXVALUE`; absent omits the\nclause.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeI64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "cache": {
               "description": "Optional cache size.",
-              "type": [
-                "integer",
-                "null"
-              ],
-              "format": "int64"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/SafeU64"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "cycle": {
               "description": "Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).",
@@ -4388,6 +4418,12 @@
           "const": "desc"
         }
       ]
+    },
+    "SafeI64": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
     },
     "SequenceOwnedBy": {
       "description": "Optional sequence ownership target (`OWNED BY table.column`).",

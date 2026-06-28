@@ -138,6 +138,19 @@ pub struct IrVersionError {
 pub struct SafeU64(u64);
 
 impl SafeU64 {
+    /// Build a [`SafeU64`] from an internal integer, enforcing the same `< 2^53`
+    /// bound as JSON deserialization.
+    pub fn new(n: u64) -> Result<Self, String> {
+        if n >= MAX_EXACT_INT as u64 {
+            return Err(format!(
+                "{EXPR_INVALID_NUMERIC}: structural integer {n} has magnitude >= 2^53; \
+                 it would round in a JS number — keep counts/limits below the JS \
+                 safe-integer boundary"
+            ));
+        }
+        Ok(SafeU64(n))
+    }
+
     /// The wrapped value (guaranteed `< 2^53`).
     #[must_use]
     pub fn get(self) -> u64 {
@@ -173,6 +186,12 @@ impl From<SafeU64> for u64 {
     }
 }
 
+impl std::fmt::Display for SafeU64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 impl<'de> Deserialize<'de> for SafeU64 {
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         use serde::de::Error as _;
@@ -186,14 +205,76 @@ impl<'de> Deserialize<'de> for SafeU64 {
                  integer (no fraction/exponent/sign)"
             ))
         })?;
-        if n >= MAX_EXACT_INT as u64 {
-            return Err(D::Error::custom(format!(
+        SafeU64::new(n).map_err(D::Error::custom)
+    }
+}
+
+/// A signed author-supplied STRUCTURAL integer constrained to the JS safe-integer
+/// range `|n| < 2^53` at DESERIALIZE. Sequence values can be negative, so the
+/// unsigned [`SafeU64`] wrapper used for counts/timeouts is not sufficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct SafeI64(i64);
+
+impl SafeI64 {
+    /// Build a [`SafeI64`] from an internal integer, enforcing the same
+    /// JS-safe-integer bound as JSON deserialization.
+    pub fn new(n: i64) -> Result<Self, String> {
+        if n <= -MAX_EXACT_INT || n >= MAX_EXACT_INT {
+            return Err(format!(
                 "{EXPR_INVALID_NUMERIC}: structural integer {n} has magnitude >= 2^53; \
-                 it would round in a JS number — keep counts/limits below the JS \
+                 it would round in a JS number — keep sequence values below the JS \
                  safe-integer boundary"
-            )));
+            ));
         }
-        Ok(SafeU64(n))
+        Ok(SafeI64(n))
+    }
+
+    /// The wrapped value (guaranteed `|n| < 2^53`).
+    #[must_use]
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl JsonSchema for SafeI64 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SafeI64".into()
+    }
+
+    fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "integer",
+            "format": "int64",
+            "minimum": -MAX_EXACT_INT + 1,
+            "maximum": MAX_EXACT_INT - 1
+        })
+    }
+}
+
+impl From<SafeI64> for i64 {
+    fn from(v: SafeI64) -> Self {
+        v.0
+    }
+}
+
+impl std::fmt::Display for SafeI64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<'de> Deserialize<'de> for SafeI64 {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let v = serde_json::Value::deserialize(de)?;
+        let n = v.as_i64().ok_or_else(|| {
+            D::Error::custom(format!(
+                "{EXPR_INVALID_NUMERIC}: structural integer {v} must be an integer \
+                 (no fraction/exponent)"
+            ))
+        })?;
+        SafeI64::new(n).map_err(D::Error::custom)
     }
 }
 
@@ -2140,10 +2221,10 @@ pub enum Op {
         as_type: Option<ColType>,
         /// Optional increment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        increment: Option<i64>,
+        increment: Option<SafeI64>,
         /// Optional start value.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        start: Option<i64>,
+        start: Option<SafeI64>,
         /// Optional minimum value. `null` means `NO MINVALUE`; absent omits the
         /// clause.
         #[serde(
@@ -2151,7 +2232,7 @@ pub enum Op {
             deserialize_with = "deserialize_present_nullable",
             skip_serializing_if = "Option::is_none"
         )]
-        min_value: Option<Option<i64>>,
+        min_value: Option<Option<SafeI64>>,
         /// Optional maximum value. `null` means `NO MAXVALUE`; absent omits the
         /// clause.
         #[serde(
@@ -2159,10 +2240,10 @@ pub enum Op {
             deserialize_with = "deserialize_present_nullable",
             skip_serializing_if = "Option::is_none"
         )]
-        max_value: Option<Option<i64>>,
+        max_value: Option<Option<SafeI64>>,
         /// Optional cache size.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache: Option<i64>,
+        cache: Option<SafeU64>,
         /// Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cycle: Option<bool>,
@@ -2184,7 +2265,7 @@ pub enum Op {
         schema: Option<String>,
         /// Optional increment.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        increment: Option<i64>,
+        increment: Option<SafeI64>,
         /// Optional restart. `null` means bare `RESTART`; a value renders
         /// `RESTART WITH n`; absent omits the clause.
         #[serde(
@@ -2192,7 +2273,7 @@ pub enum Op {
             deserialize_with = "deserialize_present_nullable",
             skip_serializing_if = "Option::is_none"
         )]
-        restart: Option<Option<i64>>,
+        restart: Option<Option<SafeI64>>,
         /// Optional minimum value. `null` means `NO MINVALUE`; absent omits the
         /// clause.
         #[serde(
@@ -2200,7 +2281,7 @@ pub enum Op {
             deserialize_with = "deserialize_present_nullable",
             skip_serializing_if = "Option::is_none"
         )]
-        min_value: Option<Option<i64>>,
+        min_value: Option<Option<SafeI64>>,
         /// Optional maximum value. `null` means `NO MAXVALUE`; absent omits the
         /// clause.
         #[serde(
@@ -2208,10 +2289,10 @@ pub enum Op {
             deserialize_with = "deserialize_present_nullable",
             skip_serializing_if = "Option::is_none"
         )]
-        max_value: Option<Option<i64>>,
+        max_value: Option<Option<SafeI64>>,
         /// Optional cache size.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        cache: Option<i64>,
+        cache: Option<SafeU64>,
         /// Optional cycle flag (`true` → `CYCLE`, `false` → `NO CYCLE`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cycle: Option<bool>,

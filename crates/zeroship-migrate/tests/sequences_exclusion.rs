@@ -7,6 +7,7 @@ use zeroship_migrate::{
     fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
     ExclusionMethod, ExclusionOperator, Expr, IndexElement, IrConstraint, IrConstraintKind,
     IrScalar, LiveSchema, MigrationIr, Op, ScalarFn, SequenceOwnedBy, UnaryOp,
+    SafeI64, SafeU64,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -34,16 +35,24 @@ fn lower(ops: Vec<Op>, dialect: SqlDialect, live: &BTreeSet<String>) -> Vec<zero
         .expect("lower")
 }
 
+fn si(n: i64) -> SafeI64 {
+    SafeI64::new(n).expect("test sequence value is JS-safe")
+}
+
+fn su(n: u64) -> SafeU64 {
+    SafeU64::new(n).expect("test sequence cache is JS-safe")
+}
+
 fn create_sequence_op() -> Op {
     Op::CreateSequence {
         name: "invoice_seq".into(),
         schema: None,
         as_type: Some(ColType::BigInt),
-        increment: Some(5),
-        start: Some(100),
+        increment: Some(si(5)),
+        start: Some(si(100)),
         min_value: None,
         max_value: None,
-        cache: Some(10),
+        cache: Some(su(10)),
         cycle: Some(true),
         owned_by: Some(Some(SequenceOwnedBy {
             table: "invoices".into(),
@@ -68,11 +77,11 @@ fn postgres_renders_create_alter_drop_sequence() {
         vec![Op::AlterSequence {
             name: "invoice_seq".into(),
             schema: None,
-            increment: Some(7),
-            restart: Some(Some(200)),
-            min_value: Some(Some(1)),
-            max_value: Some(Some(999)),
-            cache: Some(20),
+            increment: Some(si(7)),
+            restart: Some(Some(si(200))),
+            min_value: Some(Some(si(1))),
+            max_value: Some(Some(si(999))),
+            cache: Some(su(20)),
             cycle: Some(false),
             owned_by: Some(None),
         }],
@@ -95,6 +104,30 @@ fn postgres_renders_create_alter_drop_sequence() {
         &BTreeSet::new(),
     );
     assert_eq!(drop[0].up, r#"DROP SEQUENCE IF EXISTS "app"."invoice_seq""#);
+}
+
+#[test]
+fn postgres_renders_valid_descending_sequence() {
+    let create = lower(
+        vec![Op::CreateSequence {
+            name: "descending_seq".into(),
+            schema: None,
+            as_type: Some(ColType::Int),
+            increment: Some(si(-5)),
+            start: Some(si(100)),
+            min_value: Some(Some(si(-100))),
+            max_value: Some(Some(si(100))),
+            cache: Some(su(1)),
+            cycle: Some(false),
+            owned_by: None,
+        }],
+        SqlDialect::Postgres,
+        &BTreeSet::new(),
+    );
+    assert_eq!(
+        create[0].up,
+        r#"CREATE SEQUENCE "app"."descending_seq" AS integer INCREMENT BY -5 START WITH 100 MINVALUE -100 MAXVALUE 100 CACHE 1 NO CYCLE"#
+    );
 }
 
 #[test]
@@ -374,6 +407,33 @@ fn mysql_fail_closes_on_expression_index_elements() {
     assert!(matches!(
         err,
         IrLowerError::UnsupportedOp("createIndex expression elements are not supported on MySQL")
+    ));
+}
+
+#[test]
+fn mysql_fail_closes_on_partial_index_predicate() {
+    let live = BTreeSet::from(["users".to_string()]);
+    let err = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Mysql)
+        .lower(
+            &ir(vec![Op::CreateIndex {
+                table: "users".into(),
+                columns: vec![idx_col("active")],
+                name: Some("users_active_idx".into()),
+                unique: None,
+                using: None,
+                r#where: Some(active_true_expr()),
+                concurrently: None,
+                schema: None,
+                existence_guard: None,
+            }]),
+            &LiveSchema::from(&live),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        IrLowerError::UnsupportedOp(
+            "createIndex partial predicates require partial-index support; MySQL does not support partial indexes"
+        )
     ));
 }
 

@@ -40,7 +40,7 @@ use crate::model::ir::{
     ExistenceGuard, ForEach, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
     IrIndex, IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel,
     RefAction, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TriggerAction, TriggerEvent,
-    TriggerStmt, VectorMetric, ViewQuery,
+    SafeI64, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
@@ -2775,7 +2775,7 @@ impl IrAuthor {
             let access = ix.using.map_or("btree", index_method_access);
             if !self.dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
                 return Err(IrLowerError::UnsupportedOp(
-                    "createTable non-btree index `using` on SQLite (later wave)",
+                    "createTable non-btree index `using` requires non-btree index-method support (unsupported on SQLite/MySQL)",
                 ));
             }
             let mut snap_idx = create_index_snapshot(
@@ -3576,7 +3576,7 @@ fn render_sequence_optional_bound(
     sql: &mut String,
     value_kw: &'static str,
     none_kw: &'static str,
-    value: &Option<Option<i64>>,
+    value: &Option<Option<SafeI64>>,
 ) {
     if let Some(value) = value {
         sql.push(' ');
@@ -4316,6 +4316,11 @@ pub(crate) fn create_index_snapshot(
     {
         return Err(IrLowerError::UnsupportedOp(
             "createIndex expression elements are not supported on MySQL",
+        ));
+    }
+    if predicate.is_some() && !dialect.supports(Capability::PartialIndexPredicate) {
+        return Err(IrLowerError::UnsupportedOp(
+            "createIndex partial predicates require partial-index support; MySQL does not support partial indexes",
         ));
     }
     let mut plain_columns = Vec::new();

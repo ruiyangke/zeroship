@@ -54,13 +54,14 @@ use crate::render::declarative::{
     CollectionDescriptor, DeclarativeError,
 };
 use crate::model::snapshot::{
+    normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
     ColumnSnapshot, ConstraintSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
-    SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
     ColType, CommentTarget, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op,
-    RefAction,
+    RefAction, SafeI64, SafeU64, SequenceOwnedBy,
 };
 use crate::render::lower::{
     create_index_snapshot, derived_constraint_name, derived_exclusion_constraint_name,
@@ -233,6 +234,113 @@ fn fold_lower_error(e: IrLowerError) -> FoldError {
     FoldError::Render(e.to_string())
 }
 
+fn safe_i64_one() -> SafeI64 {
+    SafeI64::new(1).expect("1 is a safe integer")
+}
+
+fn safe_u64_one() -> SafeU64 {
+    SafeU64::new(1).expect("1 is a safe integer")
+}
+
+fn fold_sequence_bound(
+    as_type: SequenceDataTypeSnapshot,
+    increment: SafeI64,
+    value: &Option<Option<SafeI64>>,
+    normalize: fn(SequenceDataTypeSnapshot, SafeI64, i64) -> Result<Option<SafeI64>, String>,
+) -> Result<Option<SafeI64>, FoldError> {
+    match value {
+        None | Some(None) => Ok(None),
+        Some(Some(n)) => normalize(as_type, increment, n.get()).map_err(FoldError::Render),
+    }
+}
+
+struct CreateSequenceFoldInput<'a> {
+    as_type: Option<&'a ColType>,
+    increment: Option<SafeI64>,
+    start: Option<SafeI64>,
+    min_value: &'a Option<Option<SafeI64>>,
+    max_value: &'a Option<Option<SafeI64>>,
+    cache: Option<SafeU64>,
+    cycle: Option<bool>,
+    owned_by: &'a Option<Option<SequenceOwnedBy>>,
+}
+
+fn fold_create_sequence_snapshot(
+    input: CreateSequenceFoldInput<'_>,
+) -> Result<SequenceSnapshot, FoldError> {
+    let as_type = SequenceDataTypeSnapshot::from_sequence_col_type(input.as_type)
+        .map_err(FoldError::Unsupported)?;
+    let increment = input.increment.unwrap_or_else(safe_i64_one);
+    let min_value = fold_sequence_bound(
+        as_type,
+        increment,
+        input.min_value,
+        normalize_sequence_min_value,
+    )?;
+    let max_value = fold_sequence_bound(
+        as_type,
+        increment,
+        input.max_value,
+        normalize_sequence_max_value,
+    )?;
+    let start = match input.start {
+        Some(start) => start,
+        None => sequence_default_start_value(as_type, increment, min_value, max_value)
+            .map_err(FoldError::Render)?,
+    };
+    Ok(SequenceSnapshot {
+        as_type,
+        increment,
+        min_value,
+        max_value,
+        start,
+        cache: input.cache.unwrap_or_else(safe_u64_one),
+        cycle: input.cycle.unwrap_or(false),
+        owned_by: input.owned_by.clone().flatten(),
+        comment: None,
+    })
+}
+
+fn apply_alter_sequence_snapshot(
+    seq: &mut SequenceSnapshot,
+    increment: Option<SafeI64>,
+    min_value: &Option<Option<SafeI64>>,
+    max_value: &Option<Option<SafeI64>>,
+    cache: Option<SafeU64>,
+    cycle: Option<bool>,
+    owned_by: &Option<Option<SequenceOwnedBy>>,
+) -> Result<(), FoldError> {
+    if let Some(increment) = increment {
+        seq.increment = increment;
+    }
+    if min_value.is_some() {
+        seq.min_value = fold_sequence_bound(
+            seq.as_type,
+            seq.increment,
+            min_value,
+            normalize_sequence_min_value,
+        )?;
+    }
+    if max_value.is_some() {
+        seq.max_value = fold_sequence_bound(
+            seq.as_type,
+            seq.increment,
+            max_value,
+            normalize_sequence_max_value,
+        )?;
+    }
+    if let Some(cache) = cache {
+        seq.cache = cache;
+    }
+    if let Some(cycle) = cycle {
+        seq.cycle = cycle;
+    }
+    if let Some(owned_by) = owned_by {
+        seq.owned_by = owned_by.clone();
+    }
+    Ok(())
+}
+
 /// Rewrite every INCOMING FK `definition` in OTHER tables to follow a table
 /// rename — the offline mirror of what live PG does on `ALTER TABLE … RENAME TO`.
 ///
@@ -351,16 +459,55 @@ pub fn fold_ops(
                 named_types.drop_domain(name);
                 named_type_snapshots.remove(name);
             }
-            Op::CreateSequence { name, .. } => {
+            Op::CreateSequence {
+                name,
+                as_type,
+                increment,
+                start,
+                min_value,
+                max_value,
+                cache,
+                cycle,
+                owned_by,
+                ..
+            } => {
                 if sequences.contains_key(name) {
                     return Err(FoldError::DuplicateSequence(name.clone()));
                 }
-                sequences.insert(name.clone(), SequenceSnapshot::default());
+                let snapshot = fold_create_sequence_snapshot(CreateSequenceFoldInput {
+                    as_type: as_type.as_ref(),
+                    increment: *increment,
+                    start: *start,
+                    min_value,
+                    max_value,
+                    cache: *cache,
+                    cycle: *cycle,
+                    owned_by,
+                })?;
+                sequences.insert(name.clone(), snapshot);
             }
-            Op::AlterSequence { name, .. } => {
-                if !sequences.contains_key(name) {
-                    return Err(FoldError::MissingSequence(name.clone()));
-                }
+            Op::AlterSequence {
+                name,
+                increment,
+                min_value,
+                max_value,
+                cache,
+                cycle,
+                owned_by,
+                ..
+            } => {
+                let seq = sequences
+                    .get_mut(name)
+                    .ok_or_else(|| FoldError::MissingSequence(name.clone()))?;
+                apply_alter_sequence_snapshot(
+                    seq,
+                    *increment,
+                    min_value,
+                    max_value,
+                    *cache,
+                    *cycle,
+                    owned_by,
+                )?;
             }
             Op::DropSequence { name, .. } => {
                 if sequences.remove(name).is_none() {
