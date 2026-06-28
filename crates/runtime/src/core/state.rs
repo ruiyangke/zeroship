@@ -394,6 +394,14 @@ fn parse_env_snapshot(json: &str) -> (BTreeMap<String, String>, BTreeMap<String,
 /// Never send across threads — kept on the isolate thread.
 #[allow(missing_debug_implementations)]
 pub struct RuntimeState {
+    /// Trusted JS-driver command channel for platform-owned migrate isolates.
+    ///
+    /// This is opt-in by construction: normal worker/CLI creator runtimes leave
+    /// it `None`, so the driver globals are never installed on the creator
+    /// `env`/global surface. The migrate crate seeds it only for its dedicated
+    /// Trusted driver Runtime.
+    pub js_driver: Option<JsDriverState>,
+
     /// Pending Promise resolvers keyed by op-id.
     pub pending_resolvers: HashMap<u32, v8::Global<v8::PromiseResolver>>,
     /// Monotonically increasing op-id counter.
@@ -695,6 +703,8 @@ impl RuntimeState {
         meter: Option<zeroship_metering::MeterHandle>,
     ) -> Self {
         Self {
+            js_driver: None,
+
             pending_resolvers: HashMap::new(),
             next_op_id: 1,
 
@@ -828,6 +838,31 @@ impl RuntimeState {
                 continue;
             }
             return sid;
+        }
+    }
+}
+
+/// Command mailbox for a platform-authored JS driver loop.
+///
+/// The state is intentionally generic JSON at the runtime boundary. Migrate's
+/// `JsDriverConn` owns the typed protocol and result decoding; the runtime only
+/// resolves the parked `__zsNextCommand()` promise and relays
+/// `__zsResolve(id, payload)` back to Rust.
+#[allow(missing_debug_implementations)]
+pub struct JsDriverState {
+    pub dsn_json: String,
+    pub command_queue: VecDeque<String>,
+    pub next_command_resolver: Option<v8::Global<v8::PromiseResolver>>,
+    pub result_senders: HashMap<u64, crate::channel::ResultSender<String>>,
+}
+
+impl JsDriverState {
+    pub fn new(dsn_json: String) -> Self {
+        Self {
+            dsn_json,
+            command_queue: VecDeque::new(),
+            next_command_resolver: None,
+            result_senders: HashMap::new(),
         }
     }
 }

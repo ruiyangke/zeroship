@@ -38,6 +38,7 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
+pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
@@ -46,6 +47,7 @@ pub use capability::{
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
 pub use postgres::PostgresBackend;
+pub use mysql::{JsDriverConn, JsDriverError, MysqlBackend, MysqlSessionSnapshot, RowSet};
 
 use std::future::Future;
 use std::pin::Pin;

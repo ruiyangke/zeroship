@@ -91,7 +91,8 @@ pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
 pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
-    MigrationBackend, MigrationResult, OnlineSchemaChange, PgSessionSnapshot, PostgresBackend,
+    JsDriverConn, JsDriverError, MigrationBackend, MigrationResult, MysqlBackend,
+    MysqlSessionSnapshot, OnlineSchemaChange, PgSessionSnapshot, PostgresBackend, RowSet,
     SeedError, ShadowConfig, ShadowDryRun,
 };
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};

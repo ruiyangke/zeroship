@@ -492,6 +492,7 @@ pub struct RuntimeBuilder {
     app_id: Option<uuid::Uuid>,
     meter: Option<Arc<zeroship_metering::Meter>>,
     net_policy: NetPolicy,
+    js_driver_dsn_json: Option<String>,
     /// Idle-GC threshold override (ms). `None` → `DEFAULT_IDLE_GC_AFTER`.
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
     /// scheduling knob, not a per-request cap.
@@ -593,6 +594,16 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Seed the Trusted JS-driver command channel for the migrate runtime.
+    ///
+    /// This is not a creator-app capability. Normal worker/CLI runtimes do not
+    /// call this builder method, leaving `RuntimeState::js_driver` empty and
+    /// the `__zsDriver*` globals absent.
+    pub fn js_driver_dsn_json(mut self, dsn_json: String) -> Self {
+        self.js_driver_dsn_json = Some(dsn_json);
+        self
+    }
+
     /// Idle-GC threshold in milliseconds. After this much quiet time the
     /// per-isolate ticker fires a low-memory hint so V8 reclaims the
     /// high-water-mark working set. Default `30000` (30s); see
@@ -630,6 +641,7 @@ impl RuntimeBuilder {
             app_id,
             self.meter,
             self.net_policy,
+            self.js_driver_dsn_json,
             idle_gc_after,
             self.runtime_descriptor,
         );
@@ -864,6 +876,7 @@ impl RuntimeInner {
         app_id: Option<uuid::Uuid>,
         meter: Option<Arc<zeroship_metering::Meter>>,
         net_policy: NetPolicy,
+        js_driver_dsn_json: Option<String>,
         idle_gc_after: Duration,
         runtime_descriptor: Option<String>,
     ) -> Self {
@@ -977,6 +990,9 @@ impl RuntimeInner {
             meter_handle,
         )));
         state.borrow_mut().set_net_policy(net_policy);
+        if let Some(dsn_json) = js_driver_dsn_json {
+            state.borrow_mut().js_driver = Some(crate::state::JsDriverState::new(dsn_json));
+        }
         // **Migration-first cutover (P4b)** — stash the bundled descriptor so
         // `setup_globals` can expose it as `globalThis.__zsRuntimeDescriptor`.
         state.borrow_mut().runtime_descriptor = runtime_descriptor;
@@ -1195,6 +1211,10 @@ impl RuntimeInner {
                         || !s.spawned_timers.is_empty()
                         || !s.ready_timers.is_empty()
                         || !s.forwarder_resumes.is_empty()
+                        || s.js_driver.as_ref().is_some_and(|driver| {
+                            driver.next_command_resolver.is_some()
+                                && !driver.command_queue.is_empty()
+                        })
                 };
 
                 if needs_drain {
@@ -1202,6 +1222,7 @@ impl RuntimeInner {
                     rt.enter_isolate();
                     rt.drain_new_tasks_into(&mut work);
                     rt.service_forwarder_resumes();
+                    rt.service_js_driver_commands(&mut work);
                     rt.exit_isolate();
                 }
                 // `runtime` (strong Rc) dropped here — not held across the
@@ -2156,6 +2177,48 @@ impl RuntimeInner {
                 crate::streams::response_forwarder::resume_read(scope, &state, stream_id);
             }
         });
+    }
+
+    /// Resolve parked Trusted JS-driver command promises from the Rust mailbox.
+    ///
+    /// The migrate crate uses this only in a dedicated Trusted runtime. Normal
+    /// creator runtimes leave `RuntimeState::js_driver` empty, so this hook is a
+    /// no-op and the associated globals are never installed.
+    fn service_js_driver_commands(&mut self, work: &mut AsyncWork) {
+        loop {
+            let next = {
+                let mut s = self.state.borrow_mut();
+                let Some(driver) = s.js_driver.as_mut() else {
+                    return;
+                };
+                let Some(resolver) = driver.next_command_resolver.take() else {
+                    return;
+                };
+                let Some(command_json) = driver.command_queue.pop_front() else {
+                    driver.next_command_resolver = Some(resolver);
+                    return;
+                };
+                (resolver, command_json)
+            };
+
+            let (resolver, command_json) = next;
+            enter_v8!(self, |scope| {
+                let resolver = v8::Local::new(scope, &resolver);
+                let value = v8::String::new(scope, &command_json)
+                    .and_then(|json| v8::json::parse(scope, json))
+                    .unwrap_or_else(|| {
+                        let msg = v8::String::new(
+                            scope,
+                            "__zsNextCommand: invalid command JSON from Rust",
+                        )
+                        .unwrap();
+                        v8::Exception::error(scope, msg)
+                    });
+                resolver.resolve(scope, value);
+            });
+
+            self.drain_new_tasks_into(work);
+        }
     }
 
     /// Handle an async event from the pump (op completed or timer fired).
