@@ -1,16 +1,16 @@
-//! Stage 5a — embedded RPC dispatcher (`__zsDispatch`) tests.
+//! Stage 5a — embedded RPC dispatcher tests.
 //!
 //! Covers both dispatch shapes the runtime now accepts on
 //! `user.default.rpc`:
 //!
 //!   - Dict-shape `{ [wireId]: handler }` (Stage 5a, new). The
-//!     bootstrap wraps the dict in `globalThis.__zsDispatch` which owns:
+//!     bootstrap wraps the dict in an internal dispatcher which owns:
 //!       * input validation via `fn.config.input.parse()`
-//!       * capability frame via `__zsEnterKind` / `__zsExitKind`
+//!       * capability frame via hidden native kind callbacks
 //!       * AsyncIterator stream framing (`__zsOutputIsString`)
 //!       * dev-only output validation via `__zsValidateOutput`
 //!   - Function-shape `(name, input, ctx) => ...` (legacy back-compat).
-//!     The bootstrap uses the function directly; `__zsDispatch` does
+//!     The bootstrap uses the function directly; the internal dispatcher does
 //!     NOT run.
 //!
 //! Tests drive the kernel via `call_fetch_handler` against the spec
@@ -146,47 +146,30 @@ fn dict_shape_dispatches_basic_handler() {
     assert_eq!(inner, r#"{"ok":true,"got":42}"#);
 }
 
-// ── 2. Dict-shape applies fn.config.kind for capability frame ──────────────
+// ── 2. Dict-shape hides dispatcher/kind globals ────────────────────────────
 
 #[test]
-fn dict_shape_applies_capability_frame() {
-    // The dispatcher reads `fn.config.kind` and invokes
-    // `__zsEnterKind(kind)` / `__zsExitKind(token)` around the handler.
-    // We mock both natives and verify the kind string + balanced
-    // enter/exit calls.
+fn dict_shape_hides_dispatcher_and_kind_globals() {
     let runtime = build_runtime(
         r#"
-        globalThis.__zsCapTrace = [];
-        globalThis.__zsEnterKind = function(kind) {
-            globalThis.__zsCapTrace.push("enter:" + kind);
-            return 7; // arbitrary token
-        };
-        globalThis.__zsExitKind = function(token) {
-            globalThis.__zsCapTrace.push("exit:" + token);
-        };
-
-        const q = (input) => ({ visited: true });
-        q.config = { kind: "query" };
-
-        const peek = () => globalThis.__zsCapTrace.join(",");
-        peek.config = {}; // no kind → no frame around the peek itself
+        const peek = () => ({
+            dispatch: typeof globalThis.__zsDispatch,
+            enter: typeof globalThis.__zsEnterKind,
+            exit: typeof globalThis.__zsExitKind,
+            clear: typeof globalThis.__zsClearKind,
+        });
+        peek.config = { kind: "action" };
 
         export default {
-            rpc: { q, peek },
+            rpc: { peek },
         };
         "#,
     );
-    let (status, _) = dispatch(&runtime, "q", r#"{"json":null}"#);
-    assert_eq!(status, 200);
-    let (status2, body2) = dispatch(&runtime, "peek", r#"{"json":null}"#);
-    assert_eq!(status2, 200);
-    let trace = unwrap_json_envelope(&body2);
-    // The "q" call must have produced enter:query,exit:7. The peek call
-    // itself adds nothing (no `kind`).
-    assert!(
-        trace.contains("enter:query") && trace.contains("exit:7"),
-        "expected enter:query + exit:7 in trace, got: {}",
-        trace
+    let (status, body) = dispatch(&runtime, "peek", r#"{"json":null}"#);
+    assert_eq!(status, 200, "body: {}", body);
+    assert_eq!(
+        unwrap_json_envelope(&body),
+        r#"{"dispatch":"undefined","enter":"undefined","exit":"undefined","clear":"undefined"}"#,
     );
 }
 
@@ -251,79 +234,38 @@ fn function_shape_back_compat() {
     assert_eq!(inner2, r#"{"name":"beta","input":[1,2]}"#);
 }
 
-// ── 7. AsyncIterator handler tagged correctly ──────────────────────────────
+// ── 7. Dispatcher globals are not creator-callable ─────────────────────────
 
 #[test]
-fn dict_shape_tags_string_async_iterator() {
-    // When the handler returns an AsyncIterator AND cfg.output is a
-    // Zod string schema, dispatcher sets `__zsOutputIsString = true`
-    // on the iterator. The stream encoder (slow path) reads that flag
-    // to pick the AI-SDK `0:` (text) lane vs the `2:` (object) lane.
-    //
-    // We probe the tag directly: a separate handler invokes
-    // `__zsDispatch` against a wrapped iterator and reads back the
-    // tag attribute the dispatcher attached. This isolates the
-    // dispatcher's tagging logic from the slow-path encoder (which
-    // sits in the bootstrap's fetch handler, not the dispatcher).
+fn dict_shape_dispatch_global_is_not_installed() {
     let runtime = build_runtime(
         r#"
-        async function* makeIter() { yield 1; yield 2; }
-        const streamingHandler = (input) => makeIter();
-        streamingHandler.config = {
-            output: { _def: { typeName: "ZodString" } },
-        };
-
-        // Probe handler — synchronously dispatches the streaming
-        // handler through __zsDispatch and inspects the returned
-        // iterator's tag. Returns true iff the dispatcher attached
-        // `__zsOutputIsString` for a Zod string output schema.
-        const probe = async () => {
-            const dict = { streamingHandler };
-            const iter = await globalThis.__zsDispatch(
-                dict, "streamingHandler", undefined, {},
-            );
-            return {
-                tagged: iter.__zsOutputIsString === true,
-                hasNext: typeof iter.next === "function",
-            };
-        };
+        const probe = () => typeof globalThis.__zsDispatch;
 
         export default { rpc: { probe } };
         "#,
     );
     let (status, body) = dispatch(&runtime, "probe", r#"{"json":null}"#);
     assert_eq!(status, 200, "body: {}", body);
-    let inner = unwrap_json_envelope(&body);
-    assert_eq!(inner, r#"{"tagged":true,"hasNext":true}"#);
+    assert_eq!(unwrap_json_envelope(&body), r#""undefined""#);
 }
 
 #[test]
-fn dict_shape_does_not_tag_non_string_iterator() {
-    // Negative path: an AsyncIterator with a non-string (or no) output
-    // schema must NOT have __zsOutputIsString set. The encoder then
-    // falls back to per-value typeof to pick the lane.
+fn dict_shape_kind_globals_are_not_installed() {
     let runtime = build_runtime(
         r#"
-        async function* makeIter() { yield "a"; yield "b"; }
-        const streamingHandler = (input) => makeIter();
-        // No output schema attached.
-        streamingHandler.config = { kind: "stream" };
-
-        const probe = async () => {
-            const dict = { streamingHandler };
-            const iter = await globalThis.__zsDispatch(
-                dict, "streamingHandler", undefined, {},
-            );
-            return { tagged: iter.__zsOutputIsString === true };
-        };
+        const probe = () => [
+            typeof globalThis.__zsEnterKind,
+            typeof globalThis.__zsExitKind,
+            typeof globalThis.__zsClearKind,
+        ].join("/");
 
         export default { rpc: { probe } };
         "#,
     );
     let (status, body) = dispatch(&runtime, "probe", r#"{"json":null}"#);
     assert_eq!(status, 200, "body: {}", body);
-    let inner = unwrap_json_envelope(&body);
-    assert_eq!(inner, r#"{"tagged":false}"#);
+    assert_eq!(unwrap_json_envelope(&body), r#""undefined/undefined/undefined""#);
 }
 
 // ── 8. Error envelope includes code + status + details ─────────────────────
@@ -372,29 +314,19 @@ fn dict_shape_unknown_method_404() {
     assert_eq!(parsed["code"], "NOT_FOUND", "body: {}", body);
 }
 
-// ── 10. Idempotent install ─────────────────────────────────────────────────
+// ── 10. Creator cannot reinstall dispatch global ───────────────────────────
 
 #[test]
-fn dispatch_install_is_idempotent() {
-    // The dispatcher's IIFE guards against double install. We probe at
-    // call time (user-module top-level runs BEFORE the bootstrap's
-    // rpc_dispatch.js, so we can't snapshot `before` at top level).
-    // The handler captures the live `__zsDispatch`, re-runs the install
-    // IIFE verbatim, and confirms identity preserved.
+fn creator_defined_dispatch_global_does_not_affect_runtime_dispatch() {
     let runtime = build_runtime(
         r#"
+        globalThis.__zsDispatch = function forged() {
+            throw new Error("forged dispatch should not run");
+        };
         const check = () => {
-            const before = globalThis.__zsDispatch;
-            // Re-run a copy of the install IIFE — the guard must
-            // short-circuit so `__zsDispatch` is not overwritten.
-            (function installZsDispatch(g) {
-                if (typeof g.__zsDispatch === "function") return;
-                g.__zsDispatch = function shouldNotInstall() {};
-            })(globalThis);
-            const after = globalThis.__zsDispatch;
             return {
-                installed: typeof before === "function",
-                same: before === after,
+                visible: typeof globalThis.__zsDispatch,
+                ok: true,
             };
         };
 
@@ -405,6 +337,6 @@ fn dispatch_install_is_idempotent() {
     assert_eq!(status, 200, "body: {}", body);
     assert_eq!(
         unwrap_json_envelope(&body),
-        r#"{"installed":true,"same":true}"#,
+        r#"{"visible":"function","ok":true}"#,
     );
 }

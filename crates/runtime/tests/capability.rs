@@ -1,10 +1,9 @@
 //! B3 runtime capability enforcement — JS-side smoke tests.
 //!
 //! Covers:
-//!   - `__zsEnterKind` + `__zsExitKind` natives installed on globalThis
+//!   - kind-transition globals hidden from creator code
 //!   - `fetch()` rejected with `capability_violation` when active kind
 //!     is `mutation` (or `query`).
-//!   - Nested enter/exit restores the outer kind.
 //!   - Action handlers can call fetch normally.
 //!
 //! The db-write refusal lives in
@@ -77,71 +76,10 @@ fn dispatch_zs_for_capability(
     (status, json)
 }
 
-/// SSR-entry shim that mirrors the runtime's `__zsDispatch` capability
-/// frame logic: reads `fn.config.kind`, calls `__zsEnterKind` before
-/// invocation, exits on settle (sync, then, catch). Worn as
-/// function-shape `default.rpc` (the advanced / back-compat path —
-/// `docs/reference/zeroship-standard.md`) so the shim is auditable in one
-/// place; dict-shape deploys get the same behaviour via the runtime
-/// dispatcher.
-const SSR_SHIM: &str = r#"
-function _shimRpc(name, input, ctx) {
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {
-        throw Object.assign(new Error("Method not found: " + name), { status: 404 });
-    }
-    const cfg = fn.config;
-    const kind = (cfg && typeof cfg.kind === "string" && cfg.kind) || undefined;
-    const ek = globalThis.__zsEnterKind;
-    const xk = globalThis.__zsExitKind;
-    const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
-    try {
-        const out = fn(input, ctx);
-        if (out && typeof out.then === "function") {
-            return out.then(
-                (v) => { if (tok >= 0) xk(tok); return v; },
-                (e) => { if (tok >= 0) xk(tok); throw e; },
-            );
-        }
-        if (tok >= 0) xk(tok);
-        return out;
-    } catch (e) {
-        if (tok >= 0) xk(tok);
-        throw e;
-    }
-}
-async function _zsRpcAndRespond(name, input) {
-    try {
-        const result = await _shimRpc(name, input);
-        return new Response(JSON.stringify({ json: result === undefined ? null : result }),
-            { status: 200, headers: { "content-type": "application/json" } });
-    } catch (err) {
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
-        if (err && typeof err.code === "string") body.code = err.code;
-        // capability_violation envelope: the structured fields live
-        // under `details` (the dispatcher's canonical shape).
-        if (err && err.details !== undefined) body.details = err.details;
-        if (err && typeof err.wrapper === "string") body.wrapper = err.wrapper;
-        if (err && typeof err.violated === "string") body.violated = err.violated;
-        if (err && typeof err.remediation === "string") body.remediation = err.remediation;
-        return new Response(JSON.stringify(body), {
-            status, headers: { "content-type": "application/json" },
-        });
-    }
-}
-async function _zsFetch(request) {
-    const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    const text = await request.text();
-    let input;
-    if (text) {
-        const env = JSON.parse(text);
-        input = env && typeof env === "object" && "json" in env ? env.json : env;
-    }
-    return await _zsRpcAndRespond(id, input);
-}
-export default { fetch: _zsFetch, rpc: _shimRpc };
+/// Export the procedure dictionary directly so the runtime-owned bootstrap
+/// dispatcher reads `fn.config.kind` and installs the capability frame.
+const DICT_RPC_EXPORT: &str = r#"
+export default { rpc: _procedures };
 "#;
 
 /// A `mutation()` handler that calls `fetch()` must be refused with
@@ -159,7 +97,7 @@ function doMut(_input, _ctx) {
 doMut.config = { kind: "mutation" };
 const _procedures = { doMut };
 "#;
-    let src = format!("{user_code}\n{SSR_SHIM}");
+    let src = format!("{user_code}\n{DICT_RPC_EXPORT}");
     let (status, body) = dispatch_zs_for_capability(&src, "doMut");
 
     assert_eq!(status, 500, "capability_violation surfaces as 500");
@@ -192,7 +130,7 @@ function doQ(_input, _ctx) {
 doQ.config = { kind: "query" };
 const _procedures = { doQ };
 "#;
-    let src = format!("{user_code}\n{SSR_SHIM}");
+    let src = format!("{user_code}\n{DICT_RPC_EXPORT}");
     let (status, body) = dispatch_zs_for_capability(&src, "doQ");
 
     assert_eq!(status, 500);
@@ -223,7 +161,7 @@ async function doAct(_input, _ctx) {
 doAct.config = { kind: "action" };
 const _procedures = { doAct };
 "#;
-    let src = format!("{user_code}\n{SSR_SHIM}");
+    let src = format!("{user_code}\n{DICT_RPC_EXPORT}");
     let (status, body) = dispatch_zs_for_capability(&src, "doAct");
 
     assert_eq!(status, 200, "action() handler reached past the capability gate; body={body}");
@@ -248,60 +186,40 @@ const _procedures = { doAct };
     );
 }
 
-/// Nested enter/exit: an action wraps a mutation. The outer kind is
-/// `action` (fetch allowed); when JS pushes `mutation`, fetch is
-/// refused; after pop, fetch is allowed again. We don't actually call
-/// fetch successfully here (no live server) — we only check the
-/// gate flips in/out by invoking it inside the inner frame and
-/// catching the capability_violation rejection.
+/// The native kind callbacks must not be creator-callable. The bootstrap's
+/// internal bridge captures them and deletes their string-named globals before
+/// `__user__.js` evaluates.
 #[test]
-fn b3_runtime_nested_enter_exit_marker_stack() {
+fn b3_runtime_kind_globals_hidden_from_creator_scope() {
     let user_code = r#"
-async function doNested(_input, _ctx) {
-    // We're inside action() now (kind="action", set by the shim).
-    // Push a synthetic 'mutation' frame manually and confirm fetch is
-    // refused inside it, then confirm it is NOT refused after pop.
-    const tok = globalThis.__zsEnterKind("mutation");
-    let innerRejection = null;
-    try {
-        await fetch("http://localhost:1/never");
-        innerRejection = "no-reject";
-    } catch (e) {
-        innerRejection = e && e.code === "capability_violation"
-            ? "capability_violation"
-            : ("other:" + (e?.message ?? String(e)));
-    }
-    globalThis.__zsExitKind(tok);
-
-    // Outer frame restored to 'action'. fetch is allowed — it'll fail
-    // on the network layer but the error is NOT capability_violation.
-    let outerOutcome = null;
-    try {
-        await fetch("http://127.0.0.1:1/never");
-        outerOutcome = "ok";
-    } catch (e) {
-        outerOutcome = e && e.code === "capability_violation"
-            ? "still-blocked"
-            : "network-error";
-    }
-    return { innerRejection, outerOutcome };
+function inspectGlobals(_input, _ctx) {
+    return {
+        enter: typeof globalThis.__zsEnterKind,
+        exit: typeof globalThis.__zsExitKind,
+        clear: typeof globalThis.__zsClearKind,
+    };
 }
-doNested.config = { kind: "action" };
-const _procedures = { doNested };
+inspectGlobals.config = { kind: "action" };
+const _procedures = { inspectGlobals };
 "#;
-    let src = format!("{user_code}\n{SSR_SHIM}");
-    let (status, body) = dispatch_zs_for_capability(&src, "doNested");
+    let src = format!("{user_code}\n{DICT_RPC_EXPORT}");
+    let (status, body) = dispatch_zs_for_capability(&src, "inspectGlobals");
 
-    assert_eq!(status, 200, "nested marker test reached completion; body={body}");
+    assert_eq!(status, 200, "global visibility test reached completion; body={body}");
     let json = body.get("json").unwrap_or(&body);
     assert_eq!(
-        json.get("innerRejection").and_then(|v| v.as_str()),
-        Some("capability_violation"),
-        "inner frame (mutation) must refuse fetch; envelope = {json}"
+        json.get("enter").and_then(|v| v.as_str()),
+        Some("undefined"),
+        "enter global must be hidden; envelope = {json}"
     );
     assert_eq!(
-        json.get("outerOutcome").and_then(|v| v.as_str()),
-        Some("network-error"),
-        "outer frame (action) must allow fetch through to network; envelope = {json}"
+        json.get("exit").and_then(|v| v.as_str()),
+        Some("undefined"),
+        "exit global must be hidden; envelope = {json}"
+    );
+    assert_eq!(
+        json.get("clear").and_then(|v| v.as_str()),
+        Some("undefined"),
+        "clear global must be hidden; envelope = {json}"
     );
 }

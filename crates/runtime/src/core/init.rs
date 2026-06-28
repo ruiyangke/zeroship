@@ -320,68 +320,154 @@ pub(crate) const DB_INIT_JS: &str = include_str!(
     "../../../../sdks/bootstrap/dist/runtime-entry.js"
 );
 
-/// Embedded RPC dispatcher. Installs `globalThis.__zsDispatch` — the
-/// runtime-owned dispatch entry point used when `user.default.rpc` is a
-/// dict-shape object (Stage 5a of the ZS-standard refactor). The IIFE
-/// is idempotent: a second evaluation (isolate refresh) is a no-op so
-/// the live function keeps serving in-flight requests.
+/// Internal capability bridge module source.
 ///
-/// Source of truth: `sdks/bootstrap/src/dispatcher.ts`. The dev path
-/// imports the same module for its side effect (see
-/// `sdks/bootstrap/src/dev-entry.ts`), so production (`include_str!`
-/// of `dist/dispatcher.js`) and dev (ESM import via the Vite plugin's
-/// dev-bootstrap) wire up the SAME `__zsDispatch` function.
-///
-/// Spliced into [`BOOTSTRAP_JS`] BEFORE [`DB_INIT_JS`] so a schema-load
-/// failure can't prevent dispatcher install.
-pub(crate) const RPC_DISPATCH_JS: &str = include_str!(
-    "../../../../sdks/bootstrap/dist/dispatcher.js"
-);
+/// This module is imported before `./__user__.js`, so it captures the native
+/// kind callbacks and deletes their string-named globals before creator code
+/// can observe or retain them. The import specifier is generated once per
+/// process (see [`BOOTSTRAP_KIND_BRIDGE_SPEC`]) and is not part of the creator
+/// module graph contract.
+const KIND_BRIDGE_JS: &str = r##"
+const enterKind = globalThis.__zsEnterKind;
+const exitKind = globalThis.__zsExitKind;
+
+try { delete globalThis.__zsEnterKind; } catch (_e) {}
+try { delete globalThis.__zsExitKind; } catch (_e) {}
+try { delete globalThis.__zsClearKind; } catch (_e) {}
+
+function isAsyncIterator(x) {
+    return x != null && typeof x === "object"
+        && typeof x[Symbol.asyncIterator] === "function"
+        && typeof x.next === "function";
+}
+
+function isParseable(s) {
+    return s != null && typeof s === "object" && typeof s.parse === "function";
+}
+
+function zodIssues(err) {
+    if (err && Array.isArray(err.issues)) return err.issues;
+    if (err && Array.isArray(err.errors)) return err.errors;
+    return [];
+}
+
+function isZodStringSchema(s) {
+    if (!s || typeof s !== "object") return false;
+    const def = s._def ?? s.def;
+    if (!def) return false;
+    if (def.typeName === "ZodString") return true;
+    if (def.type === "string") return true;
+    return false;
+}
+
+function mkErr(message, status, code, details) {
+    const e = new Error(message);
+    e.status = status;
+    e.code = code;
+    if (details !== undefined) e.details = details;
+    return e;
+}
+
+function enter(kind) {
+    return kind && typeof enterKind === "function" ? enterKind(kind) : -1;
+}
+
+function exit(token) {
+    if (token >= 0 && typeof exitKind === "function") exitKind(token);
+}
+
+export async function __zsDispatchRpc(rpc, name, input, ctx) {
+    if (rpc == null || typeof rpc !== "object") {
+        throw mkErr("RPC registry is not an object", 500, "INTERNAL");
+    }
+    const fn = rpc[name];
+    if (typeof fn !== "function") {
+        throw mkErr("Method not found: " + name, 404, "NOT_FOUND");
+    }
+
+    const schemaReady = globalThis.__zsSchemaReady;
+    if (schemaReady && typeof schemaReady.then === "function") {
+        await schemaReady;
+    }
+
+    const cfg = fn.config;
+    let validated = input;
+    if (cfg && isParseable(cfg.input)) {
+        try {
+            validated = cfg.input.parse(input);
+        } catch (e) {
+            throw mkErr("Invalid input", 400, "INVALID_ARGUMENT", { issues: zodIssues(e) });
+        }
+    }
+
+    const kind = cfg && typeof cfg.kind === "string" ? cfg.kind : undefined;
+    const token = enter(kind);
+    try {
+        const result = await fn(validated, ctx);
+        if (isAsyncIterator(result)) {
+            if (cfg && isZodStringSchema(cfg.output)) {
+                try { result.__zsOutputIsString = true; } catch (_e) {}
+            }
+            return result;
+        }
+        if (cfg && isParseable(cfg.output) && globalThis.__zsValidateOutput) {
+            try {
+                cfg.output.parse(result);
+            } catch (e) {
+                throw mkErr("Invalid handler output", 500, "INTERNAL", { issues: zodIssues(e) });
+            }
+        }
+        return result;
+    } finally {
+        exit(token);
+    }
+}
+"##;
+
+pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
+    LazyLock::new(|| format!("__zs_kind_bridge_{}.js", uuid::Uuid::new_v4().simple()));
 
 /// Runtime-injected bootstrap module source. Built once at first use by
-/// splicing [`RPC_DISPATCH_JS`] and [`DB_INIT_JS`] into the otherwise-
-/// static bootstrap template.
+/// splicing [`DB_INIT_JS`] into the otherwise-static bootstrap template.
 ///
-/// The template is split into prefix (`BOOTSTRAP_PREFIX_JS` — just the
-/// `import * as user` line) and main (`BOOTSTRAP_MAIN_JS` — everything
-/// else) so the init scripts run AFTER `user` is bound but BEFORE the
-/// `default.fetch` / `default.rpc` resolution. Order matters:
-///   1. [`RPC_DISPATCH_JS`] runs FIRST — installs `__zsDispatch` before
-///      the runtime-entry's top-level await can throw and abort module
-///      evaluation. Dispatcher install must survive a schema failure
-///      so the worker can still surface the error via the RPC wire.
+/// The template is split into prefix (imports the internal kind bridge before
+/// `./__user__.js`) and main so the init script runs AFTER `user` is bound but
+/// BEFORE the `default.fetch` / `default.rpc` resolution. Order matters:
+///   1. The internal kind bridge evaluates before creator code and removes the
+///      forgeable string-named kind callbacks from `globalThis`.
 ///   2. [`DB_INIT_JS`] runs next — its top-level await on
 ///      `import("@zeroship/bootstrap/install-schema")` resolves through
 ///      V8's microtask checkpoint, `installSchema(schema, env.db)`
 ///      plants typed Collection wrappers on env.db, and the returned
 ///      `ready` promise is awaited so module evaluation gates on DDL
 ///      settling.
-/// By the time the kernel reads `default.fetch` / `default.rpc` off the
-/// user namespace, `__zsDispatch` is installed AND the schema is live
-/// on `env.db`.
+/// By the time the kernel reads `default.fetch` / `default.rpc` off the user
+/// namespace, the dispatcher bridge is captured privately and the schema is
+/// live on `env.db`.
 pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
+    let prefix = bootstrap_prefix_js();
     let mut s = String::with_capacity(
-        BOOTSTRAP_PREFIX_JS.len()
-            + RPC_DISPATCH_JS.len()
+        prefix.len()
             + DB_INIT_JS.len()
             + BOOTSTRAP_MAIN_JS.len()
             + 4,
     );
-    s.push_str(BOOTSTRAP_PREFIX_JS);
-    s.push_str(RPC_DISPATCH_JS);
+    s.push_str(&prefix);
     s.push_str(DB_INIT_JS);
     s.push_str(BOOTSTRAP_MAIN_JS);
     s
 });
 
-/// Bootstrap prefix — pulled out so [`DB_INIT_JS`] can be spliced in
-/// between this and [`BOOTSTRAP_MAIN_JS`]. The `import * as user` MUST
-/// stay here so the init script's `user.default.schema` read sees the
-/// bound namespace.
-const BOOTSTRAP_PREFIX_JS: &str = r##"
+fn bootstrap_prefix_js() -> String {
+    format!(
+        r#"
+import {{ __zsDispatchRpc }} from "./{}";
 import * as user from "./__user__.js";
 
-"##;
+"#,
+        &*BOOTSTRAP_KIND_BRIDGE_SPEC
+    )
+}
 
 const BOOTSTRAP_MAIN_JS: &str = r##"
 // Vercel AI-SDK Data Stream Protocol encoder.
@@ -583,7 +669,7 @@ async function dispatchSubscription(methodName, input, ws) {
             );
         }
         // Stage 5a: accept function-shape (legacy) OR dict-shape
-        // `default.rpc`. Dict-shape rides through `__zsDispatch`, which
+        // `default.rpc`. Dict-shape rides through the internal dispatcher, which
         // returns the handler's value unchanged — so an AsyncIterator
         // handler still surfaces as an iterator for `_zsRunSubscriptionGen`.
         let rpcInvoker;
@@ -591,7 +677,7 @@ async function dispatchSubscription(methodName, input, ws) {
             rpcInvoker = user.default.rpc;
         } else if (user.default.rpc != null && typeof user.default.rpc === "object") {
             const rpcDict = user.default.rpc;
-            rpcInvoker = (name, input) => globalThis.__zsDispatch(rpcDict, name, input);
+            rpcInvoker = (name, input) => __zsDispatchRpc(rpcDict, name, input);
         } else {
             throw Object.assign(
                 new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
@@ -763,7 +849,7 @@ const USER_FETCH_FAST = (user && user.default && typeof user.default.fetchFast =
 //
 // Two shapes accepted (see `docs/reference/zeroship-standard.md`):
 //   - plain object (dict-shape, `{ [wireId]: handler }`): the canonical
-//     contract. Wrapped in `globalThis.__zsDispatch` so the runtime
+//     contract. Wrapped in the internal dispatcher so the runtime
 //     owns input validation, capability frame, stream framing, and
 //     dev-only output validation. The Vite plugin's
 //     synthetic entry and `examples/raw-rpc.js`-style raw deploys both
@@ -787,7 +873,7 @@ if (user && user.default && user.default.rpc != null) {
             // the SSE encoder (`sseFromAsyncGen` / `createFetchHandler`)
             // wraps the iterator into a streaming Response.
             //
-            // If we let `__zsDispatch` (an async function) handle these,
+            // If we let the async internal dispatcher handle these,
             // it wraps the iterator in a Promise; the kernel's promise-
             // settle path then sees `Promise<AsyncIterator>` and surfaces
             // the "AsyncIterator from a Promise — unsupported" error.
@@ -797,7 +883,7 @@ if (user && user.default && user.default.rpc != null) {
             if (_kind === "stream" || _kind === "subscription") {
                 return _fn(input, ctx);
             }
-            return globalThis.__zsDispatch(_rpc, name, input, ctx);
+            return __zsDispatchRpc(_rpc, name, input, ctx);
         };
     }
 }
@@ -1096,7 +1182,7 @@ fn wrap_with_bootstrap(
         return Vec::new();
     }
 
-    let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 2);
+    let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 3);
 
     // entry 0: bootstrap becomes the new entrypoint under "index.js".
     out.push(ModuleEntry {
@@ -1104,7 +1190,15 @@ fn wrap_with_bootstrap(
         source: BOOTSTRAP_JS.clone(),
     });
 
-    // entry 1: user's original entry, renamed to "__user__.js". Its own
+    // entry 1: internal kind bridge. The bootstrap imports this before
+    // "__user__.js" so it can remove forgeable kind globals before creator
+    // code evaluates.
+    out.push(ModuleEntry {
+        specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
+        source: KIND_BRIDGE_JS.into(),
+    });
+
+    // entry 2: user's original entry, renamed to "__user__.js". Its own
     // declared specifier (usually "index.js") is discarded — the bootstrap
     // imports `./__user__.js` by exact name.
     let user_entry = &modules[0];
@@ -1117,7 +1211,7 @@ fn wrap_with_bootstrap(
         source: user_entry.source.clone(),
     });
 
-    // entry 2: the zeroship facade module. Lives in the module graph
+    // entry 3: the zeroship facade module. Lives in the module graph
     // alongside the user's modules so `import ... from "zeroship"`
     // resolves via the normal lookup path.
     out.push(ModuleEntry {

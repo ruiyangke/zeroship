@@ -421,26 +421,13 @@ function attempt(label, fn) {{
     }}
 }}
 
-function attemptQuery(label, fn) {{
-    const tok = globalThis.__zsEnterKind("query");
-    try {{
-        return attempt(label, fn);
-    }} finally {{
-        globalThis.__zsExitKind(tok);
-    }}
-}}
-
 return [
     attempt("net-allowlist", () => net.connect({{ host: "127.0.0.1", port: {} }})),
     attempt("tls-allowlist", () => tls.connect({{ host: "127.0.0.1", port: {}, servername: "db.local.test" }})),
-    attemptQuery("net-query", () => net.connect({{ host: "127.0.0.1", port: {} }})),
-    attemptQuery("tls-query", () => tls.connect({{ host: "127.0.0.1", port: {}, servername: "db.local.test" }})),
 ].join("|");
 "#,
                     blocked_port,
-                    blocked_port,
-                    allowed.port(),
-                    allowed.port()
+                    blocked_port
                 ),
             ),
             allowlist(allowed, 8),
@@ -449,7 +436,7 @@ return [
         .await
     });
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
-    for label in ["net-allowlist", "tls-allowlist", "net-query", "tls-query"] {
+    for label in ["net-allowlist", "tls-allowlist"] {
         assert!(
             result.body.contains(&format!("{label}:capability_violation")),
             "expected synchronous capability violation for {label}, got: {}",

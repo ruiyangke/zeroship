@@ -224,6 +224,33 @@ async fn run_net_js(body: &str, policy: NetPolicy, max_wait: Duration) -> JsResu
     .await
 }
 
+async fn dispatch_rpc_js(
+    module_src: String,
+    rpc_id: &str,
+    policy: NetPolicy,
+    max_wait: Duration,
+) -> JsResult {
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".to_string(),
+        source: module_src,
+    }];
+    let runtime = Runtime::builder().modules(modules).net_policy(policy).build();
+    runtime.start_pump();
+
+    let env = EnvSnapshot::empty();
+    let ctx = RequestCtx::new(CancelFlag::new());
+    let url = format!("http://localhost/__zeroship/v1/{rpc_id}");
+    let outcome = runtime.call_fetch_handler(
+        "POST",
+        &url,
+        &[("content-type".into(), "application/json".into())],
+        r#"{"json":null}"#,
+        &env,
+        ctx,
+    );
+    drive_fetch_outcome(outcome, max_wait).await
+}
+
 async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsResult {
     match outcome {
         FetchOutcome::Response { status, body, .. } => JsResult { status, body },
@@ -495,48 +522,162 @@ try {{
 }
 
 #[test]
+fn kind_transition_globals_are_hidden_and_query_cannot_forge_action() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let (query, action) = compio::runtime::Runtime::new().unwrap().block_on(async {
+        let addr = spawn_tcp_server(ServerMode::Echo).await;
+        let module = format!(
+            r#"
+import net from "node:net";
+
+async function attemptQuery() {{
+  const enterType = typeof globalThis.__zsEnterKind;
+  const clearType = typeof globalThis.__zsClearKind;
+  try {{
+    if (typeof globalThis.__zsEnterKind === "function") {{
+      globalThis.__zsEnterKind("action");
+    }}
+    const s = new net.Socket();
+    return await new Promise((resolve) => {{
+      s.on("connect", () => {{ s.destroy(); resolve(`query:types=${{enterType}}/${{clearType}};connected`); }});
+      s.on("error", (err) => resolve(`query:types=${{enterType}}/${{clearType}};error:${{err.code}}:${{err.message}}`));
+      s.connect({}, "127.0.0.1");
+      setTimeout(() => resolve(`query:types=${{enterType}}/${{clearType}};timeout`), 3000);
+    }});
+  }} catch (err) {{
+    return `query:types=${{enterType}}/${{clearType}};throw:${{err.code}}:${{err.message}}`;
+  }}
+}}
+attemptQuery.config = {{ kind: "query" }};
+
+async function attemptAction() {{
+  const enterType = typeof globalThis.__zsEnterKind;
+  const clearType = typeof globalThis.__zsClearKind;
+  const s = new net.Socket();
+  return await new Promise((resolve) => {{
+    s.on("connect", () => {{ s.destroy(); resolve(`action:types=${{enterType}}/${{clearType}};connected`); }});
+    s.on("error", (err) => resolve(`action:types=${{enterType}}/${{clearType}};error:${{err.code}}:${{err.message}}`));
+    s.connect({}, "127.0.0.1");
+    setTimeout(() => resolve(`action:types=${{enterType}}/${{clearType}};timeout`), 3000);
+  }});
+}}
+attemptAction.config = {{ kind: "action" }};
+
+export default {{ rpc: {{ attemptQuery, attemptAction }} }};
+"#,
+            addr.port(),
+            addr.port()
+        );
+        let policy = allowlist("127.0.0.1", addr.port(), 8, 1024 * 1024);
+        let query = dispatch_rpc_js(
+            module.clone(),
+            "attemptQuery",
+            policy.clone(),
+            Duration::from_secs(5),
+        )
+        .await;
+        let action = dispatch_rpc_js(module, "attemptAction", policy, Duration::from_secs(5)).await;
+        (query, action)
+    });
+    assert_eq!(query.status, 200, "unexpected query status/body: {}", query.body);
+    assert_eq!(
+        action.status, 200,
+        "unexpected action status/body: {}",
+        action.body
+    );
+    assert!(
+        query.body.contains("types=undefined/undefined")
+            && query.body.contains("capability_violation"),
+        "expected hidden globals and query denial, got: {}",
+        query.body
+    );
+    assert!(
+        action.body.contains("types=undefined/undefined")
+            && action.body.contains("action:")
+            && action.body.contains("connected"),
+        "expected hidden globals and action success, got: {}",
+        action.body
+    );
+}
+
+#[test]
 fn query_and_mutation_connect_hit_capability_violation_but_action_can_connect() {
     let _lock = lock_env();
     let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
-    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+    let (query, mutation, action) = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
-        run_net_js(
-            &format!(
-                r#"
-async function attempt(kind) {{
-  const tok = globalThis.__zsEnterKind(kind);
+        let module = format!(
+            r#"
+import net from "node:net";
+
+function denied(kind) {{
+  const s = new net.Socket();
   try {{
-    const s = new net.Socket();
     s.connect({}, "127.0.0.1");
-    if (kind === "action") {{
-      return await new Promise((resolve) => {{
-        s.on("connect", () => {{ s.destroy(); resolve("action:connected"); }});
-        s.on("error", (err) => resolve("action:error:" + err.code));
-      }});
-    }}
-    return kind + ":allowed";
+    return `${{kind}}:allowed`;
   }} catch (err) {{
     return `${{kind}}:${{err.code}}:${{err.message}}`;
-  }} finally {{
-    globalThis.__zsExitKind(tok);
   }}
 }}
-return [await attempt("query"), await attempt("mutation"), await attempt("action")].join("|");
+
+function queryProc() {{ return denied("query"); }}
+queryProc.config = {{ kind: "query" }};
+function mutationProc() {{ return denied("mutation"); }}
+mutationProc.config = {{ kind: "mutation" }};
+function actionProc() {{
+  const s = new net.Socket();
+  return new Promise((resolve) => {{
+    s.on("connect", () => {{ s.destroy(); resolve("action:connected"); }});
+    s.on("error", (err) => resolve("action:error:" + err.code));
+    s.connect({}, "127.0.0.1");
+    setTimeout(() => resolve("action:timeout"), 3000);
+  }});
+}}
+actionProc.config = {{ kind: "action" }};
+
+export default {{ rpc: {{ queryProc, mutationProc, actionProc }} }};
 "#,
-                addr.port()
-            ),
-            allowlist("127.0.0.1", addr.port(), 8, 1024 * 1024),
+            addr.port(),
+            addr.port()
+        );
+        let policy = allowlist("127.0.0.1", addr.port(), 8, 1024 * 1024);
+        let query = dispatch_rpc_js(
+            module.clone(),
+            "queryProc",
+            policy.clone(),
             Duration::from_secs(5),
         )
-        .await
+        .await;
+        let mutation = dispatch_rpc_js(
+            module.clone(),
+            "mutationProc",
+            policy.clone(),
+            Duration::from_secs(5),
+        )
+        .await;
+        let action = dispatch_rpc_js(module, "actionProc", policy, Duration::from_secs(5)).await;
+        (query, mutation, action)
     });
-    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert_eq!(query.status, 200, "unexpected query status/body: {}", query.body);
+    assert_eq!(
+        mutation.status, 200,
+        "unexpected mutation status/body: {}",
+        mutation.body
+    );
+    assert_eq!(
+        action.status, 200,
+        "unexpected action status/body: {}",
+        action.body
+    );
     assert!(
-        result.body.contains("query:capability_violation")
-            && result.body.contains("mutation:capability_violation")
-            && result.body.contains("action:connected"),
-        "expected query/mutation denial and action success, got: {}",
-        result.body
+        query.body.contains("query:capability_violation")
+            && mutation.body.contains("mutation:capability_violation")
+            && action.body.contains("action:connected"),
+        "expected query/mutation denial and action success, got query={} mutation={} action={}",
+        query.body,
+        mutation.body,
+        action.body
     );
 }
 
