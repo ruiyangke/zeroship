@@ -196,6 +196,58 @@ pub fn render_ir_json_sql(
     dialect: SqlDialect,
     opts: &PreviewOpts,
 ) -> Result<String, String> {
+    let (name, rendered) = render_ir_json_rendered(bytes, dialect, opts)?;
+    let mut out = String::new();
+    // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
+    // a single un-lowerable op would otherwise make `lower_plan` abort).
+    let _ = writeln!(out, "-- ============================================================");
+    let _ = writeln!(
+        out,
+        "-- plan {:?}  {}",
+        name,
+        DialectCaption::Lowered(dialect).header_suffix()
+    );
+    let _ = writeln!(out, "-- ============================================================");
+    write_rendered(&mut out, &rendered);
+    let statements = rendered.iter().filter(|r| r.statement).count();
+    let runtime = rendered.iter().filter(|r| r.runtime_resolved).count();
+    let _ = writeln!(
+        out,
+        "\n-- preview: {statements} statement(s) rendered, {runtime} runtime-resolved"
+    );
+    Ok(out)
+}
+
+/// Load + lower an `.ir.json` artifact through the SAME tolerant path used by
+/// [`render_ir_json_sql`], returning only executable statement text.
+///
+/// This is the DB-free lint seam: callers can feed these statements to the
+/// advisory analyzers without scraping SQL back out of the human preview, while
+/// runtime-resolved labels and comments stay out of the analyzer input.
+///
+/// # Errors
+///
+/// Returns an error when the IR document cannot be parsed or structurally
+/// validated for offline rendering.
+pub fn render_ir_json_sql_statements(
+    bytes: &str,
+    dialect: SqlDialect,
+    opts: &PreviewOpts,
+) -> Result<(String, Vec<String>), String> {
+    let (name, rendered) = render_ir_json_rendered(bytes, dialect, opts)?;
+    let statements = rendered
+        .into_iter()
+        .filter(|r| r.statement)
+        .map(|r| r.text)
+        .collect();
+    Ok((name, statements))
+}
+
+fn render_ir_json_rendered(
+    bytes: &str,
+    dialect: SqlDialect,
+    opts: &PreviewOpts,
+) -> Result<(String, Vec<Rendered>), String> {
     // Parse the IR document WITHOUT the ownership/registry gate (this is an offline
     // operator preview, not a deploy): `serde` the wire shape, then validate its
     // structure. We deliberately do NOT call `load_ir_document` — that gate stamps
@@ -221,26 +273,7 @@ pub fn render_ir_json_sql(
 
     let live = LiveSchema::default();
     let rendered = render_ir_ops(&author, &ir, &live);
-
-    let mut out = String::new();
-    // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
-    // a single un-lowerable op would otherwise make `lower_plan` abort).
-    let _ = writeln!(out, "-- ============================================================");
-    let _ = writeln!(
-        out,
-        "-- plan {:?}  {}",
-        ir.name,
-        DialectCaption::Lowered(dialect).header_suffix()
-    );
-    let _ = writeln!(out, "-- ============================================================");
-    write_rendered(&mut out, &rendered);
-    let statements = rendered.iter().filter(|r| r.statement).count();
-    let runtime = rendered.iter().filter(|r| r.runtime_resolved).count();
-    let _ = writeln!(
-        out,
-        "\n-- preview: {statements} statement(s) rendered, {runtime} runtime-resolved"
-    );
-    Ok(out)
+    Ok((ir.name, rendered))
 }
 
 /// Per-op lowering for the `.ir.json` path: lower each op in isolation so a single

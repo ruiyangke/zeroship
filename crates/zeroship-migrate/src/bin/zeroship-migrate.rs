@@ -278,6 +278,29 @@ enum Command {
         #[arg(long, value_enum)]
         dialect: Option<EngineArg>,
     },
+    /// Run the advisory analyzers over the migration artifacts in `--dir`, without
+    /// opening a DB connection. Default exit is 0 (advisories are informational).
+    /// `--deny-warnings` exits non-zero on Warning-severity advisories; `--deny
+    /// RULE[,RULE...]` exits non-zero on those stable analyzer rule ids.
+    Lint {
+        /// Analyze rendered creator `.ir.json` statements for this dialect (`pg` |
+        /// `sqlite` | `mysql`). Default: the `--engine` override if present, else
+        /// `pg`. Raw `.sql` artifacts are analyzed verbatim, same as `plan`.
+        #[arg(long, value_enum)]
+        dialect: Option<EngineArg>,
+        /// Emit a machine-readable array of
+        /// `{ migration, rule, severity, message, suggestion }`.
+        #[arg(long)]
+        json: bool,
+        /// Exit non-zero when any Warning-severity advisory is present. Notices do
+        /// not fail this gate.
+        #[arg(long)]
+        deny_warnings: bool,
+        /// Comma-separated stable analyzer rule ids that should make lint fail
+        /// when present, regardless of severity.
+        #[arg(long, value_name = "RULE[,RULE...]")]
+        deny: Option<String>,
+    },
     /// Roll back applied migrations via their `down` (gated; requires `--yes`).
     /// `--to <version>` unwinds everything after that numeric version; `--steps
     /// <N>` unwinds the N most-recent. Neither ⇒ roll back ALL.
@@ -507,23 +530,106 @@ const fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Print non-blocking advisories for a set of `(version, advisories)` pairs (the
-/// `--lint` output). Header-then-lines; never affects the exit code.
-fn print_lint(pairs: &[(String, Vec<zeroship_migrate::analyze::Advisory>)]) {
-    let total: usize = pairs.iter().map(|(_, a)| a.len()).sum();
-    if total == 0 {
+#[derive(Debug, serde::Serialize)]
+struct LintFinding {
+    migration: String,
+    rule: String,
+    severity: zeroship_migrate::Severity,
+    message: String,
+    suggestion: Option<String>,
+}
+
+/// Print advisory lint in the standalone command's human format. The legacy
+/// post-`migrate --lint` side-effect reuses this formatter; its exit semantics stay
+/// unchanged in `main`.
+fn print_lint(pairs: &[(String, Vec<zeroship_migrate::Advisory>)]) {
+    let (warnings, notices) = lint_counts(pairs);
+    if warnings == 0 && notices == 0 {
         println!("lint: no advisories");
-        return;
-    }
-    println!("lint: {total} advisor(y/ies)");
-    for (version, advs) in pairs {
-        for a in advs {
-            print!("  [{version}] {:?} {}: {}", a.severity, a.rule, a.message);
-            if let Some(s) = &a.suggestion {
-                print!(" (suggest: {s})");
+    } else {
+        println!("lint:");
+        for (migration, advisories) in pairs {
+            if advisories.is_empty() {
+                continue;
             }
-            println!();
+            println!("  {migration}:");
+            for severity in [
+                zeroship_migrate::Severity::Warning,
+                zeroship_migrate::Severity::Notice,
+            ] {
+                for advisory in advisories.iter().filter(|a| a.severity == severity) {
+                    println!(
+                        "    {} {}  {}",
+                        severity_label(advisory.severity),
+                        advisory.rule,
+                        advisory.message
+                    );
+                    if let Some(suggestion) = &advisory.suggestion {
+                        println!("      suggestion: {suggestion}");
+                    }
+                }
+            }
         }
+    }
+    println!(
+        "summary: {warnings} {}, {notices} {}",
+        plural(warnings, "warning"),
+        plural(notices, "notice")
+    );
+}
+
+fn print_lint_json(pairs: &[(String, Vec<zeroship_migrate::Advisory>)]) {
+    let findings = lint_findings(pairs);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&findings).expect("lint findings serialize")
+    );
+}
+
+fn lint_findings(pairs: &[(String, Vec<zeroship_migrate::Advisory>)]) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    for (migration, advisories) in pairs {
+        for advisory in advisories {
+            findings.push(LintFinding {
+                migration: migration.clone(),
+                rule: advisory.rule.to_string(),
+                severity: advisory.severity,
+                message: advisory.message.clone(),
+                suggestion: advisory.suggestion.clone(),
+            });
+        }
+    }
+    findings
+}
+
+fn lint_counts(pairs: &[(String, Vec<zeroship_migrate::Advisory>)]) -> (usize, usize) {
+    let warnings = pairs
+        .iter()
+        .flat_map(|(_, advisories)| advisories)
+        .filter(|a| a.severity == zeroship_migrate::Severity::Warning)
+        .count();
+    let notices = pairs
+        .iter()
+        .flat_map(|(_, advisories)| advisories)
+        .filter(|a| a.severity == zeroship_migrate::Severity::Notice)
+        .count();
+    (warnings, notices)
+}
+
+const fn severity_label(severity: zeroship_migrate::Severity) -> &'static str {
+    match severity {
+        zeroship_migrate::Severity::Warning => "Warning",
+        zeroship_migrate::Severity::Notice => "Notice",
+    }
+}
+
+fn plural(count: usize, singular: &str) -> &'static str {
+    match singular {
+        "warning" if count == 1 => "warning",
+        "warning" => "warnings",
+        "notice" if count == 1 => "notice",
+        "notice" => "notices",
+        _ => "items",
     }
 }
 
@@ -647,6 +753,61 @@ fn run_new(dir: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct OfflineArtifacts {
+    ir_files: Vec<PathBuf>,
+    has_sql: bool,
+}
+
+const fn preview_dialect(chosen: Option<EngineArg>) -> zeroship_schema::query::SqlDialect {
+    match chosen {
+        Some(EngineArg::Sqlite) => zeroship_schema::query::SqlDialect::Sqlite,
+        Some(EngineArg::Mysql) => zeroship_schema::query::SqlDialect::Mysql,
+        // `--dialect pg`, `--engine pg`, or unset all render/analyze the PG leg
+        // (the default operator target). NO DSN probe.
+        _ => zeroship_schema::query::SqlDialect::Postgres,
+    }
+}
+
+fn preview_opts() -> zeroship_migrate::PreviewOpts {
+    zeroship_migrate::PreviewOpts {
+        default_schema: DEFAULT_GENERIC_SCHEMA.to_string(),
+        owner_app: "app_preview".to_string(),
+    }
+}
+
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn discover_offline_artifacts(dir: &Path, command: &str) -> Result<OfflineArtifacts, String> {
+    let read = std::fs::read_dir(dir)
+        .map_err(|e| format!("{command}: read dir {}: {e}", dir.display()))?;
+    let mut ir_files: Vec<PathBuf> = Vec::new();
+    let mut has_sql = false;
+    for entry in read {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let lower_name = name.to_ascii_lowercase();
+        if lower_name.ends_with(".ir.json") {
+            ir_files.push(path);
+        } else if lower_name.ends_with(".sql") && !lower_name.ends_with(".down.sql") {
+            has_sql = true;
+        }
+    }
+    ir_files.sort();
+
+    if !has_sql && ir_files.is_empty() {
+        return Err(format!(
+            "{command}: no `.sql` or `.ir.json` artifacts found in {}",
+            dir.display()
+        ));
+    }
+
+    Ok(OfflineArtifacts { ir_files, has_sql })
+}
+
 /// `plan --sql` — the OFFLINE per-dialect SQL plan preview (PR14). Loads `.sql`
 /// (Flyway/dbmate) and/or `.ir.json` (creator) artifacts from `dir`, renders the
 /// exact SQL the engine WOULD run via the pure, DB-free
@@ -662,65 +823,23 @@ fn run_plan_preview(
     chosen: Option<EngineArg>,
     _layer: &FileEnvLayer,
 ) -> ExitCode {
-    use zeroship_migrate::render::sql_preview::{render_ir_json_sql, render_set_sql, PreviewOpts};
-    use zeroship_schema::query::SqlDialect;
+    use zeroship_migrate::render::sql_preview::{render_ir_json_sql, render_set_sql};
 
-    let dialect = match chosen {
-        Some(EngineArg::Sqlite) => SqlDialect::Sqlite,
-        Some(EngineArg::Mysql) => SqlDialect::Mysql,
-        // `--dialect pg`, `--engine pg`, or unset all render the PG leg (the default
-        // operator target). NO DSN probe.
-        _ => SqlDialect::Postgres,
-    };
-    // The general/Trusted operator preview renders unqualified ops into `public`
-    // (dbmate's home schema, `DEFAULT_GENERIC_SCHEMA`); a flag/profile could widen
-    // this, but it is NEVER derived from a DB.
-    let opts = PreviewOpts {
-        default_schema: DEFAULT_GENERIC_SCHEMA.to_string(),
-        owner_app: "app_preview".to_string(),
-    };
-
-    // Discover artifacts. `.ir.json` (creator) files render via the offline IR
-    // lower; everything else (`.sql`, Flyway/dbmate) loads via `load_dir`. We render
-    // the two seams separately, in a stable filename order, so a mixed dir previews
-    // both. An EMPTY dir is an honest non-zero refusal (nothing to preview).
-    let read = match std::fs::read_dir(dir) {
-        Ok(r) => r,
+    let dialect = preview_dialect(chosen);
+    let opts = preview_opts();
+    let artifacts = match discover_offline_artifacts(dir, "plan") {
+        Ok(a) => a,
         Err(e) => {
-            eprintln!("zeroship-migrate: plan: read dir {}: {e}", dir.display());
+            eprintln!("zeroship-migrate: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let mut ir_files: Vec<PathBuf> = Vec::new();
-    let mut has_sql = false;
-    for entry in read {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.ends_with(".ir.json") {
-            ir_files.push(path);
-        } else if name.ends_with(".sql") && !name.ends_with(".down.sql") {
-            has_sql = true;
-        }
-    }
-    ir_files.sort();
-
-    if !has_sql && ir_files.is_empty() {
-        eprintln!(
-            "zeroship-migrate: plan: no `.sql` or `.ir.json` artifacts found in {}",
-            dir.display()
-        );
-        return ExitCode::FAILURE;
-    }
 
     let mut output = String::new();
 
     // The `.sql` (Flyway/dbmate) leg: `load_dir` lowers each to a single-step plan
     // (no DB), then the set renderer formats them.
-    if has_sql {
+    if artifacts.has_sql {
         match zeroship_migrate::plan::loader::load_dir(dir) {
             Ok(plans) => {
                 output.push_str(&render_set_sql(&plans, dialect, &opts));
@@ -733,7 +852,7 @@ fn run_plan_preview(
     }
 
     // The `.ir.json` (creator) leg: load + lower each offline, per dialect.
-    for path in &ir_files {
+    for path in &artifacts.ir_files {
         let bytes = match std::fs::read_to_string(path) {
             Ok(b) => b,
             Err(e) => {
@@ -755,6 +874,113 @@ fn run_plan_preview(
 
     print!("{output}");
     ExitCode::SUCCESS
+}
+
+fn run_lint_command(
+    dir: &Path,
+    chosen: Option<EngineArg>,
+    json: bool,
+    deny_warnings: bool,
+    deny: Option<&str>,
+) -> ExitCode {
+    let dialect = preview_dialect(chosen);
+    let opts = preview_opts();
+    let pairs = match lint_offline_artifacts(dir, dialect, &opts) {
+        Ok(pairs) => pairs,
+        Err(e) => {
+            eprintln!("zeroship-migrate: lint: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        print_lint_json(&pairs);
+    } else {
+        print_lint(&pairs);
+    }
+
+    if lint_denied(&pairs, deny_warnings, deny) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn lint_offline_artifacts(
+    dir: &Path,
+    dialect: zeroship_schema::query::SqlDialect,
+    opts: &zeroship_migrate::PreviewOpts,
+) -> Result<Vec<(String, Vec<zeroship_migrate::Advisory>)>, String> {
+    let artifacts = discover_offline_artifacts(dir, "lint")?;
+    let mut pairs = Vec::new();
+
+    if artifacts.has_sql {
+        let plans = zeroship_migrate::plan::loader::load_dir(dir)
+            .map_err(|e| format!("load `.sql` artifacts: {e}"))?;
+        for plan in &plans {
+            let migration = plan
+                .single_step_migration()
+                .map_err(|e| format!("load `.sql` artifacts: {e}"))?;
+            pairs.push((
+                migration.version.as_str().to_string(),
+                zeroship_migrate::analyze_migration(migration),
+            ));
+        }
+    }
+
+    for path in &artifacts.ir_files {
+        let bytes = std::fs::read_to_string(path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let (name, statements) =
+            zeroship_migrate::render_ir_json_sql_statements(&bytes, dialect, opts)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        let migration = if name.is_empty() {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("<ir>")
+                .to_string()
+        } else {
+            name
+        };
+        let mut advisories = Vec::new();
+        for statement in statements {
+            advisories.extend(analyze_rendered_statement(&statement));
+        }
+        pairs.push((migration, advisories));
+    }
+
+    Ok(pairs)
+}
+
+fn analyze_rendered_statement(statement: &str) -> Vec<zeroship_migrate::Advisory> {
+    zeroship_migrate::RawSqlAuthor::new(DEFAULT_GENERIC_SCHEMA, "app_preview")
+        .wrap("lint_rendered_statement", statement, None)
+        .map_or_else(
+            |_| zeroship_migrate::analyze(statement),
+            |migration| zeroship_migrate::analyze_migration(&migration),
+        )
+}
+
+fn lint_denied(
+    pairs: &[(String, Vec<zeroship_migrate::Advisory>)],
+    deny_warnings: bool,
+    deny: Option<&str>,
+) -> bool {
+    let deny_rules = deny
+        .map(|rules| {
+            rules
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_ascii_uppercase)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+
+    pairs.iter().flat_map(|(_, advisories)| advisories).any(|a| {
+        (deny_warnings && a.severity == zeroship_migrate::Severity::Warning)
+            || deny_rules.contains(&a.rule.to_ascii_uppercase())
+    })
 }
 
 /// The Postgres `dump` schema body: shell `pg_dump --schema-only` against the DSN.
@@ -875,6 +1101,14 @@ async fn main() -> ExitCode {
         return run_plan_preview(&dir, chosen, &layer);
     }
 
+    // `lint` is OFFLINE (no DB): run the advisory analyzers over the same artifact
+    // set `plan` previews. Dispatch BEFORE building a DSN-bearing RunConfig.
+    if let Command::Lint { dialect, json, deny_warnings, deny } = &cli.command {
+        let dir = effective_dir(&cli, &layer);
+        let chosen = dialect.or(cli.engine);
+        return run_lint_command(&dir, chosen, *json, *deny_warnings, deny.as_deref());
+    }
+
     let cfg = match run_config(&cli, &layer) {
         Ok(c) => c,
         Err(e) => {
@@ -967,7 +1201,8 @@ async fn main() -> ExitCode {
         | Command::Wait { .. }
         | Command::Dump
         | Command::Load
-        | Command::Plan { .. } => {
+        | Command::Plan { .. }
+        | Command::Lint { .. } => {
             unreachable!()
         }
     };

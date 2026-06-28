@@ -235,7 +235,8 @@ pub use render::step::{tables_touched_by, BindValue, DialectScope, PlanStep, Ren
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
 // fabricated.
 pub use render::sql_preview::{
-    render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
+    render_ir_json_sql, render_ir_json_sql_statements, render_plan_sql, render_set_sql,
+    PreviewOpts, RUNTIME_RESOLVED,
 };
 pub use apply::precondition::{evaluate as evaluate_precondition, PreconditionError};
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
