@@ -47,5 +47,5 @@ fn evaluate<'s>(
 }
 
 fn export_names() -> &'static [&'static str] {
-    &["TLSSocket", "connect", "default"]
+    &["TLSSocket", "connect", "createSecureContext", "default"]
 }

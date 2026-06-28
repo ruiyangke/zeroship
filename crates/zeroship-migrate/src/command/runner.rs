@@ -210,12 +210,13 @@ pub enum RunError {
     },
     /// The DB URL selects a database engine this CLI does not support. An HONEST
     /// refusal, not a panic — only the known engine set is accepted.
-    #[error("unsupported database engine (supported: postgres, sqlite, mysql render-only)")]
+    #[error("unsupported database engine (supported: postgres, sqlite; mysql plan preview)")]
     UnsupportedEngine,
-    /// MySQL exists as a render-only dialect in this phase. Any command that would
-    /// touch a real MySQL database fails closed until a backend/driver phase lands.
+    /// CLI live MySQL execution is not wired in this command path yet. The MySQL
+    /// backend exists for the platform-owned JS-driver apply path; the CLI still
+    /// refuses MySQL DSNs until it has an explicit driver contract.
     #[error(
-        "live MySQL execution is not implemented: MySQL is render-only in this phase \
+        "CLI live MySQL execution is not implemented in this command path \
          (use `plan --sql --engine mysql` for offline SQL preview)"
     )]
     MysqlLiveExecUnimplemented,
@@ -1397,7 +1398,7 @@ async fn pg_net_applied_trailer(
             &[],
         )
         .await
-        .map_err(crate::apply::journal::JournalError::Db)?;
+        .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
     Ok(rows
         .iter()
         .map(|r| TrailerEntry {
@@ -1660,7 +1661,7 @@ async fn run_load_pg(
         &[&cfg.project_id],
     )
     .await
-    .map_err(crate::apply::journal::JournalError::Db)?;
+    .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
     let result = run_load_pg_locked(&conn, &exec_cfg, ddl, entries).await;
     let unlock = conn
         .execute(
@@ -1669,7 +1670,7 @@ async fn run_load_pg(
         )
         .await;
     let outcome = result?;
-    unlock.map_err(crate::apply::journal::JournalError::Db)?;
+    unlock.map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
     Ok(RunReport::Load(outcome))
 }
 
@@ -1773,7 +1774,7 @@ async fn load_pg_user_tables(
             &[&exec_cfg.project_schema],
         )
         .await
-        .map_err(crate::apply::journal::JournalError::Db)?;
+        .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
     Ok(rows.first().map(|r| r.get::<_, i64>("n")).unwrap_or(0))
 }
 
@@ -1792,7 +1793,7 @@ async fn load_pg_net_applied(
     let row = conn
         .query("SELECT to_regclass($1) IS NOT NULL AS present", &[&qualified])
         .await
-        .map_err(crate::apply::journal::JournalError::Db)?;
+        .map_err(|e| crate::apply::journal::JournalError::Db(e.into()))?;
     let present = row.first().map(|r| r.get::<_, bool>("present")).unwrap_or(false);
     if !present {
         return Ok(Vec::new());

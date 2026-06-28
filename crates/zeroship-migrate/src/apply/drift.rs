@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 
 use compio_postgres::Client;
 
+use crate::apply::executor::BackendError;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
@@ -77,21 +78,27 @@ pub struct OrphanJournal {
 /// Error from a drift query.
 #[derive(Debug, thiserror::Error)]
 pub enum DriftError {
-    /// A database error.
+    /// A database/driver error whose concrete backend type remains
+    /// downcastable through [`BackendError`].
     #[error("drift db error: {0}")]
-    Db(#[from] compio_postgres::Error),
+    Db(#[from] BackendError),
     /// A journal read failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
     /// A catalog value could not be represented in the structural snapshot.
     #[error("drift snapshot error: {0}")]
     Snapshot(String),
-    /// A **dialect-neutral** backend error (non-Postgres
-    /// [`MigrationBackend`](crate::apply::backend::MigrationBackend) impls). See
-    /// [`crate::apply::executor::ApplyError::Backend`]. The Postgres impl never
-    /// constructs this arm.
+    /// A **dialect-neutral** backend error whose message is already the intended
+    /// operator-facing text. Structured driver failures belong in
+    /// [`DriftError::Db`].
     #[error("drift backend error: {0}")]
     Backend(String),
+}
+
+impl From<compio_postgres::Error> for DriftError {
+    fn from(error: compio_postgres::Error) -> Self {
+        Self::Db(error.into())
+    }
 }
 
 /// The result of [`check_checksum_drift`]: the per-version checksum mismatches

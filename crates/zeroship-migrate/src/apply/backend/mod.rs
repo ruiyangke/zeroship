@@ -38,6 +38,7 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
+pub mod mysql;
 pub mod postgres;
 pub mod sqlite;
 
@@ -46,6 +47,14 @@ pub use capability::{
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
 pub use postgres::PostgresBackend;
+#[cfg(test)]
+pub use mysql::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
+pub use mysql::{
+    deprovision_mysql_migrator_account, mysql_migration_lock_name,
+    provision_mysql_migrator_account, provision_mysql_migrator_account_with_password,
+    JsDriverConn, JsDriverError, MysqlBackend, MysqlGuardedFragment, MysqlMigratorAccount,
+    MysqlMigratorAccountError, MysqlSessionSnapshot, RowSet,
+};
 
 use std::future::Future;
 use std::pin::Pin;
@@ -186,11 +195,13 @@ pub trait MigrationBackend {
 
     // -- connection / session I/O -------------------------------------------
 
-    /// Acquire the project apply-serialization lock (PG `pg_advisory_lock`).
-    async fn acquire_project_lock(&self, project_id: &str) -> Result<(), ApplyError>;
+    /// Acquire the project apply-serialization lock (PG `pg_advisory_lock`;
+    /// MySQL `GET_LOCK`).
+    async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError>;
 
-    /// Release the project apply-serialization lock (PG `pg_advisory_unlock`).
-    async fn release_project_lock(&self, project_id: &str) -> Result<(), ApplyError>;
+    /// Release the project apply-serialization lock (PG `pg_advisory_unlock`;
+    /// MySQL `RELEASE_LOCK`).
+    async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError>;
 
     /// Snapshot the session settings the apply will override, for restore on exit.
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError>;
@@ -313,9 +324,10 @@ pub trait MigrationBackend {
     /// its actor. The connection / `pg_advisory_lock` never cross this surface.
     ///
     /// # Errors
-    /// [`ApplyError::Db`] (PG) or [`ApplyError::Backend`] (non-PG) on a write
-    /// failure; the dialect-neutral [`crate::apply::executor::ApplyError`] is what crosses
-    /// the trait.
+    /// [`ApplyError::Db`] on a structured driver/write failure, or
+    /// [`ApplyError::Backend`] for an intentionally textual dialect-level
+    /// failure; the dialect-neutral [`crate::apply::executor::ApplyError`] is
+    /// what crosses the trait.
     async fn record_squash(
         &self,
         cfg: &ExecutorConfig,

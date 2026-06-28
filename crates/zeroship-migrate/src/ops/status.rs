@@ -142,7 +142,7 @@ pub async fn status(
     // commit between the two reads can't produce a split bucket view.
     conn.batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
-        .map_err(|e| StatusError::Journal(JournalError::Db(e)))?;
+        .map_err(|e| StatusError::Journal(JournalError::Db(e.into())))?;
     let snapshot = read_status_snapshot(conn, cfg, migrations).await;
     // Always close the txn; a read-only snapshot has nothing to roll back, but we
     // must not leak an open transaction onto the shared session.

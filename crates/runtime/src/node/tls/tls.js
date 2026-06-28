@@ -1,6 +1,7 @@
 (function () {
   const Socket = globalThis.__zsNetSocket;
   const pemDecoder = new TextDecoder("utf-8", { fatal: true });
+  const normalizedOptionsMarker = Symbol("zeroship.tls.normalizedOptions");
 
   function tlsError(code, message) {
     const err = new Error(message);
@@ -30,7 +31,8 @@
   function normalizeCa(ca) {
     if (ca == null) return undefined;
     if (Array.isArray(ca)) {
-      return ca.map(normalizeCa).filter((v) => v != null && v !== "").join("\n");
+      const joined = ca.map(normalizeCa).filter((v) => v != null && v !== "").join("\n");
+      return joined === "" ? undefined : joined;
     }
     if (typeof ca === "string") return assertPemCa(ca);
     if (ca instanceof ArrayBuffer) {
@@ -53,17 +55,30 @@
     }
   }
 
+  function createSecureContext(options = {}) {
+    if (!options || typeof options !== "object") {
+      throw new TypeError("tls.createSecureContext options must be an object");
+    }
+    rejectClientAuthOptions(options);
+    return { ca: normalizeCa(options.ca) };
+  }
+
   function normalizeOptions(options) {
     if (!options || typeof options !== "object") {
       throw new TypeError("tls.connect options must be an object");
     }
+    if (options[normalizedOptionsMarker]) return options;
     rejectClientAuthOptions(options);
+    const secureContext = options.secureContext || undefined;
     const socket = options.socket || undefined;
     const host = String(options.host || options.hostname || "localhost");
     const port = Number(options.port);
     const servername = String(options.servername || options.host || options.hostname || "localhost");
     const rejectUnauthorized = options.rejectUnauthorized !== false;
-    const ca = normalizeCa(options.ca);
+    const optionCa = normalizeCa(options.ca);
+    const contextCa = normalizeCa(secureContext && secureContext.ca);
+    const ca = optionCa == null ? contextCa : optionCa;
+    const verifyIdentity = typeof options.checkServerIdentity !== "function";
 
     if (!socket) {
       if (!Number.isInteger(port) || port <= 0 || port > 65535) {
@@ -71,7 +86,16 @@
       }
     }
 
-    return { socket, host, port, servername, rejectUnauthorized, ca };
+    return {
+      socket,
+      host,
+      port,
+      servername,
+      rejectUnauthorized,
+      ca,
+      verifyIdentity,
+      [normalizedOptionsMarker]: true,
+    };
   }
 
   class TLSSocket extends Socket {
@@ -129,6 +153,7 @@
         opts.servername,
         opts.rejectUnauthorized,
         opts.ca,
+        opts.verifyIdentity,
       );
       return this;
     }
@@ -142,7 +167,12 @@
     socket.pending = true;
     socket.readyState = "opening";
     socket._native.validateTls(opts.rejectUnauthorized);
-    socket._native.startTls(opts.servername, opts.rejectUnauthorized, opts.ca);
+    socket._native.startTls(
+      opts.servername,
+      opts.rejectUnauthorized,
+      opts.ca,
+      opts.verifyIdentity,
+    );
     return socket;
   }
 
@@ -157,7 +187,7 @@
     return new TLSSocket().connect(opts, cb);
   }
 
-  const ns = { TLSSocket, connect };
+  const ns = { TLSSocket, connect, createSecureContext };
   ns.default = ns;
   return ns;
 })();

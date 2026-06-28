@@ -98,6 +98,7 @@ impl NativeSocket {
         servername: String,
         reject_unauthorized: bool,
         ca_pem: Option<String>,
+        verify_identity: bool,
     ) -> Result<(), OpError> {
         let target = authorize_connect(
             scope,
@@ -124,6 +125,7 @@ impl NativeSocket {
                 servername,
                 reject_unauthorized,
                 ca_pem,
+                verify_identity,
             },
         );
         Ok(())
@@ -138,6 +140,7 @@ impl NativeSocket {
         servername: String,
         reject_unauthorized: bool,
         ca_pem: Option<String>,
+        verify_identity: bool,
     ) -> Result<(), OpError> {
         authorize_start_tls(scope, reject_unauthorized)?;
         super::state::queue_start_tls(
@@ -147,6 +150,7 @@ impl NativeSocket {
                 servername,
                 reject_unauthorized,
                 ca_pem,
+                verify_identity,
             },
         )
         .map_err(|e| OpError::node("ERR_TLS_HANDSHAKE", e))

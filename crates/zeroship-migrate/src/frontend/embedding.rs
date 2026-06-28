@@ -19,6 +19,9 @@ const MIGRATE_OPS_JS: &str = include_str!("migrate_ops.js");
 /// The bundled `@zeroship/db` schema DSL.
 const ZEROSHIP_DB_DIST_JS: &str = include_str!("../../../../sdks/db/dist/index.js");
 
+/// The vendored `mysql2/promise` bundle for the Trusted JS-driver isolate.
+const MYSQL2_PROMISE_BUNDLE_JS: &str = include_str!("vendor/mysql2-3.14.1.bundle.mjs");
+
 /// `@zeroship/migrate/pg` is a subpath shim over the same recorder-state module.
 const MIGRATE_PG_SHIM_JS: &str = r#"export { pg } from "@zeroship/migrate";"#;
 
@@ -105,6 +108,18 @@ pub fn module_graph(program: FrontendProgram<'_>) -> Vec<ModuleEntry> {
     modules.push(module("zeroship", ZEROSHIP_FACADE_STUB_JS));
 
     modules
+}
+
+/// Build the module graph for the platform-owned Trusted JS-driver isolate.
+///
+/// `entry_source` is the long-lived command-loop driver entry. The mysql2
+/// bundle is registered under the package specifier the entry imports:
+/// `import mysql from "mysql2/promise"`.
+pub(crate) fn js_driver_module_graph(entry_source: &str) -> Vec<ModuleEntry> {
+    vec![
+        module("js_driver_entry.js", entry_source),
+        module("mysql2/promise", MYSQL2_PROMISE_BUNDLE_JS),
+    ]
 }
 
 /// Install the canonical globals for a migrate front-end operation.

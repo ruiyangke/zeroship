@@ -386,7 +386,7 @@ fn denial(e: &GuardError) -> (String, String) {
         ),
         GuardError::MysqlRawSqlRejected => (
             "mysql_raw_sql_rejected".to_string(),
-            "raw SQL not accepted on the render-only MySQL path".to_string(),
+            "raw SQL not accepted on the MySQL path".to_string(),
         ),
     }
 }

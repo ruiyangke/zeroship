@@ -879,10 +879,11 @@ fn unpack_input_options(
         || v8::Local::<v8::ArrayBuffer>::try_from(input).is_ok()
     {
         let bytes = buffer::extract_input(scope, input, None)?;
+        let format = infer_key_bytes_format(&bytes);
         return Ok(KeyInputOptions {
             key: bytes,
             jwk_obj: None,
-            format: InputFormat::Der,
+            format,
             key_type: InputType::Auto,
             passphrase: None,
         });
@@ -929,7 +930,8 @@ fn unpack_input_options(
     }
     let key_value = obj.get(scope, key_attr.into()).unwrap();
 
-    let format = match format_str.as_deref() {
+    let infer_buffer_format = format_str.is_none() && !key_value.is_string();
+    let mut format = match format_str.as_deref() {
         None => {
             if key_value.is_string() {
                 InputFormat::Pem
@@ -967,6 +969,9 @@ fn unpack_input_options(
     } else {
         buffer::extract_input(scope, key_value, encoding_str.as_deref())?
     };
+    if infer_buffer_format {
+        format = infer_key_bytes_format(&bytes);
+    }
 
     Ok(KeyInputOptions {
         key: bytes,
@@ -975,6 +980,19 @@ fn unpack_input_options(
         key_type,
         passphrase,
     })
+}
+
+fn infer_key_bytes_format(bytes: &[u8]) -> InputFormat {
+    let bytes = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .map(|idx| &bytes[idx..])
+        .unwrap_or(&[]);
+    if bytes.starts_with(b"-----BEGIN ") {
+        InputFormat::Pem
+    } else {
+        InputFormat::Der
+    }
 }
 
 fn read_optional_str(

@@ -1165,7 +1165,7 @@ async fn apply_bundle_ir_migrations(
     // means the whole IR deploy serializes against any concurrent same-project
     // deploy/rollback, while a DIFFERENT project (different key) never blocks.
     backend
-        .acquire_project_lock(&exec_cfg.project_id)
+        .acquire_project_lock(&exec_cfg)
         .await
         .map_err(|e| DeployMigrateError::from(EngineError::from(e)))?;
 
@@ -1561,7 +1561,7 @@ async fn apply_bundle_ir_migrations(
     // RELEASE the whole-deploy project lock on EVERY path (PR9a MED). Surface the
     // loop's error first; a release failure is only logged (the lock auto-releases
     // on session end regardless), mirroring `apply_declarative`'s release-or-warn.
-    if let Err(e) = backend.release_project_lock(&exec_cfg.project_id).await {
+    if let Err(e) = backend.release_project_lock(&exec_cfg).await {
         tracing::warn!(
             error = %e,
             project = %exec_cfg.project_id,

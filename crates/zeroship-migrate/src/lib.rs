@@ -89,10 +89,16 @@ pub use analysis::{analyze, classify};
 
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
+#[cfg(test)]
+pub use apply::backend::{MysqlFragmentDecision, MysqlFragmentEvent, MysqlFragmentHookAction};
 pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
-    MigrationBackend, MigrationResult, OnlineSchemaChange, PgSessionSnapshot, PostgresBackend,
-    SeedError, ShadowConfig, ShadowDryRun,
+    JsDriverConn, JsDriverError, MigrationBackend, MigrationResult, MysqlBackend,
+    MysqlGuardedFragment, MysqlMigratorAccount, MysqlMigratorAccountError, MysqlSessionSnapshot,
+    OnlineSchemaChange, PgSessionSnapshot, PostgresBackend, RowSet, SeedError,
+    ShadowConfig, ShadowDryRun, deprovision_mysql_migrator_account,
+    mysql_migration_lock_name, provision_mysql_migrator_account,
+    provision_mysql_migrator_account_with_password,
 };
 pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::backend::postgres::online::PgOnline;

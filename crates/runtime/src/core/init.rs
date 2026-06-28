@@ -1522,6 +1522,148 @@ fn performance_now_callback(
 }
 
 // ===========================================================================
+// Trusted JS-driver command channel primitives
+// ===========================================================================
+
+fn parse_js_driver_json<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    json: &str,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let source = v8::String::new(scope, json)?;
+    v8::json::parse(scope, source)
+}
+
+/// `__zsDriverDsn()` — returns the Rust-injected driver connection config.
+///
+/// Trusted-isolate-only platform primitive. It is installed only when the
+/// migrate crate builds a dedicated driver Runtime with `js_driver_dsn_json`;
+/// creator worker/CLI runtimes never seed that state, so the global is absent.
+fn zs_driver_dsn_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let dsn_json = {
+        let s = state.borrow();
+        let Some(driver) = s.js_driver.as_ref() else {
+            rv.set(v8::null(scope).into());
+            return;
+        };
+        driver.dsn_json.clone()
+    };
+    match parse_js_driver_json(scope, &dsn_json) {
+        Some(value) => rv.set(value),
+        None => {
+            let msg = v8::String::new(scope, "__zsDriverDsn: invalid driver DSN JSON").unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+        }
+    }
+}
+
+/// `__zsNextCommand()` — returns a Promise resolved by the Rust command mailbox.
+///
+/// Trusted-isolate-only platform primitive for the migrate driver Runtime.
+fn zs_driver_next_command_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+
+    let resolver = match v8::PromiseResolver::new(scope) {
+        Some(resolver) => resolver,
+        None => {
+            let msg = v8::String::new(scope, "__zsNextCommand: PromiseResolver::new failed")
+                .unwrap();
+            scope.throw_exception(v8::Exception::error(scope, msg));
+            return;
+        }
+    };
+    let promise = resolver.get_promise(scope);
+
+    let command_or_error = {
+        let mut s = state.borrow_mut();
+        match s.js_driver.as_mut() {
+            Some(driver) if driver.next_command_resolver.is_some() => {
+                Some(Err("__zsNextCommand called while another waiter is parked".to_string()))
+            }
+            Some(driver) => match driver.command_queue.pop_front() {
+                Some(command_json) => Some(Ok(command_json)),
+                None => {
+                    driver.next_command_resolver = Some(v8::Global::new(scope, resolver));
+                    None
+                }
+            },
+            None => Some(Err("__zsNextCommand called without JS driver state".to_string())),
+        }
+    };
+
+    if let Some(result) = command_or_error {
+        match result {
+            Ok(command_json) => match parse_js_driver_json(scope, &command_json) {
+                Some(value) => {
+                    resolver.resolve(scope, value);
+                }
+                None => {
+                    let msg = v8::String::new(scope, "__zsNextCommand: invalid command JSON")
+                        .unwrap();
+                    resolver.reject(scope, v8::Exception::error(scope, msg));
+                }
+            },
+            Err(message) => {
+                let msg = v8::String::new(scope, &message).unwrap();
+                resolver.reject(scope, v8::Exception::error(scope, msg));
+            }
+        }
+    }
+
+    rv.set(promise.into());
+}
+
+/// `__zsResolve(id, payload)` — posts a JSON-stringified result to Rust.
+///
+/// Trusted-isolate-only platform primitive for the migrate driver Runtime.
+fn zs_driver_resolve_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _rv: v8::ReturnValue,
+) {
+    let id = match args.get(0).integer_value(scope) {
+        Some(id) if id >= 0 => id as u64,
+        _ => return,
+    };
+    let payload = args.get(1);
+    let payload_json = if payload.is_undefined() {
+        "null".to_string()
+    } else {
+        v8::json::stringify(scope, payload)
+            .map(|s| s.to_rust_string_lossy(scope))
+            .unwrap_or_else(|| "null".to_string())
+    };
+
+    let state: SharedState = scope
+        .get_slot::<SharedState>()
+        .expect("RuntimeState not in isolate slot")
+        .clone();
+    let sender = {
+        let mut s = state.borrow_mut();
+        s.js_driver
+            .as_mut()
+            .and_then(|driver| driver.result_senders.remove(&id))
+    };
+    if let Some(sender) = sender {
+        sender.send(payload_json);
+    }
+}
+
+// ===========================================================================
 // __zs_env — return the current frozen env snapshot
 // ===========================================================================
 
@@ -2027,6 +2169,30 @@ pub fn setup_globals(scope: &mut v8::PinScope) -> Result<(), String> {
         let f = v8::Function::new(scope, zs_env_callback).unwrap();
         let key = v8::String::new(scope, "__zs_env").unwrap();
         global.set(scope, key.into(), f.into());
+    }
+
+    // Trusted JS-driver command channel. These platform primitives are installed
+    // only for the dedicated migrate driver Runtime. Worker/CLI creator runtimes
+    // leave `RuntimeState::js_driver` as `None`, so the globals are absent from
+    // Confined creator code.
+    {
+        let state: crate::state::SharedState = scope
+            .get_slot::<crate::state::SharedState>()
+            .expect("RuntimeState not in isolate slot")
+            .clone();
+        if state.borrow().js_driver.is_some() {
+            let dsn_key = v8::String::new(scope, "__zsDriverDsn").unwrap();
+            let dsn_fn = v8::Function::new(scope, zs_driver_dsn_callback).unwrap();
+            global.set(scope, dsn_key.into(), dsn_fn.into());
+
+            let next_key = v8::String::new(scope, "__zsNextCommand").unwrap();
+            let next_fn = v8::Function::new(scope, zs_driver_next_command_callback).unwrap();
+            global.set(scope, next_key.into(), next_fn.into());
+
+            let resolve_key = v8::String::new(scope, "__zsResolve").unwrap();
+            let resolve_fn = v8::Function::new(scope, zs_driver_resolve_callback).unwrap();
+            global.set(scope, resolve_key.into(), resolve_fn.into());
+        }
     }
 
     // __zsDbPlatform — the P9 §8 capability-handle resolver. Reads the

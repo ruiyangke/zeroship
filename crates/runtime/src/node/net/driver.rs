@@ -35,6 +35,7 @@ pub struct TlsOptions {
     pub servername: String,
     pub reject_unauthorized: bool,
     pub ca_pem: Option<String>,
+    pub verify_identity: bool,
 }
 
 #[derive(Debug)]
@@ -502,15 +503,17 @@ async fn start_tls_on_tcp(
     let connector_opts = crate::transport::tls::TlsConnectorOptions {
         reject_unauthorized: opts.reject_unauthorized,
         ca_pem: opts.ca_pem.clone(),
+        verify_identity: opts.verify_identity,
     };
     let connector = match crate::transport::tls::build_tls_connector(&connector_opts) {
         Ok(connector) => connector,
         Err(e) => {
+            let code = super::connect::tls_connector_error_code(&e);
             push_error_and_close(
                 state,
                 socket_id,
                 format!("TLS connector failed: {e}"),
-                "ERR_TLS_HANDSHAKE",
+                code,
             );
             return None;
         }

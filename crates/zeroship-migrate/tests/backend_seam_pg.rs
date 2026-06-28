@@ -166,11 +166,11 @@ async fn pg_backend_lock_acquire_release_through_trait() {
     let backend = PostgresBackend::new(&conn);
 
     backend
-        .acquire_project_lock(&cfg.project_id)
+        .acquire_project_lock(&cfg)
         .await
         .expect("acquire via seam");
     backend
-        .release_project_lock(&cfg.project_id)
+        .release_project_lock(&cfg)
         .await
         .expect("release via seam");
 }

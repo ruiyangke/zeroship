@@ -203,11 +203,11 @@ pub async fn squash<B: MigrationBackend>(
 
     // Privileged: serialize against all migration activity, exactly like apply.
     backend
-        .acquire_project_lock(&cfg.project_id)
+        .acquire_project_lock(cfg)
         .await
         .map_err(apply_to_squash)?;
     let result = squash_locked(backend, cfg, squash_migration, applied_by).await;
-    let unlock = backend.release_project_lock(&cfg.project_id).await;
+    let unlock = backend.release_project_lock(cfg).await;
     match result {
         Ok(o) => unlock.map(|_| o).map_err(apply_to_squash),
         Err(e) => Err(e),
