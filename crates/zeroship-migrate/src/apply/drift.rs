@@ -35,12 +35,13 @@ use std::collections::BTreeMap;
 
 use compio_postgres::Client;
 
-use crate::conn::ExecutorConfig;
 use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
+use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot,
-    SchemaSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
+    index_elements_canonically_eq, index_predicates_canonically_eq, ColumnSnapshot,
+    ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
+    SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -732,6 +733,15 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
                 actual: act_ty.kind.clone(),
             });
         }
+        if exp_ty.comment != act_ty.comment {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("type {name}"),
+                field: "comment".to_string(),
+                expected: exp_ty.comment.clone().unwrap_or_default(),
+                actual: act_ty.comment.clone().unwrap_or_default(),
+            });
+        }
     }
     for name in expected.sequences.keys() {
         if !actual.sequences.contains_key(name) {
@@ -741,6 +751,20 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
     for name in actual.sequences.keys() {
         if !expected.sequences.contains_key(name) {
             unexpected.push(format!("sequence {name}"));
+        }
+    }
+    for (name, exp_seq) in &expected.sequences {
+        let Some(act_seq) = actual.sequences.get(name) else {
+            continue;
+        };
+        if exp_seq.comment != act_seq.comment {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("sequence {name}"),
+                field: "comment".to_string(),
+                expected: exp_seq.comment.clone().unwrap_or_default(),
+                actual: act_seq.comment.clone().unwrap_or_default(),
+            });
         }
     }
     for (name, exp_v) in &expected.views {
@@ -754,6 +778,15 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
                 field: "materialized".to_string(),
                 expected: exp_v.materialized.to_string(),
                 actual: act_v.materialized.to_string(),
+            });
+        }
+        if exp_v.comment != act_v.comment {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("view {name}"),
+                field: "comment".to_string(),
+                expected: exp_v.comment.clone().unwrap_or_default(),
+                actual: act_v.comment.clone().unwrap_or_default(),
             });
         }
     }
@@ -853,7 +886,12 @@ fn diff_attrs(
                 &ec.nullable.to_string(),
                 &ac.nullable.to_string(),
             );
-            push(&obj, "comment", ec.comment.as_deref().unwrap_or(""), ac.comment.as_deref().unwrap_or(""));
+            push(
+                &obj,
+                "comment",
+                ec.comment.as_deref().unwrap_or(""),
+                ac.comment.as_deref().unwrap_or(""),
+            );
         }
     }
 
@@ -868,12 +906,14 @@ fn diff_attrs(
             let obj = format!("index {}", ei.name);
             push(&obj, "unique", &ei.unique.to_string(), &ai.unique.to_string());
             push(&obj, "columns", &ei.columns.join(","), &ai.columns.join(","));
-            push(
-                &obj,
-                "elements",
-                &format_index_elements(&ei.elements),
-                &format_index_elements(&ai.elements),
-            );
+            if !index_elements_canonically_eq(&ei.elements, &ai.elements) {
+                push(
+                    &obj,
+                    "elements",
+                    &format_index_elements(&ei.elements),
+                    &format_index_elements(&ai.elements),
+                );
+            }
             // Access-method drift (#index-method-drift): a same-name index whose
             // `pg_am` kind changed out-of-band — e.g. someone dropped the ANN
             // ivfflat and re-created a plain btree under the same name, or vice
@@ -884,10 +924,21 @@ fn diff_attrs(
             if !ei.access_method.is_empty() {
                 push(&obj, "access_method", &ei.access_method, &ai.access_method);
             }
-            if let Some(exp_pred) = &ei.predicate {
-                push(&obj, "predicate", exp_pred, ai.predicate.as_deref().unwrap_or(""));
+            if !index_predicates_canonically_eq(ei.predicate.as_deref(), ai.predicate.as_deref())
+            {
+                push(
+                    &obj,
+                    "predicate",
+                    ei.predicate.as_deref().unwrap_or(""),
+                    ai.predicate.as_deref().unwrap_or(""),
+                );
             }
-            push(&obj, "comment", ei.comment.as_deref().unwrap_or(""), ai.comment.as_deref().unwrap_or(""));
+            push(
+                &obj,
+                "comment",
+                ei.comment.as_deref().unwrap_or(""),
+                ai.comment.as_deref().unwrap_or(""),
+            );
         }
     }
 
@@ -908,7 +959,12 @@ fn diff_attrs(
             {
                 push(&obj, "definition", &ec.definition, &ac.definition);
             }
-            push(&obj, "comment", ec.comment.as_deref().unwrap_or(""), ac.comment.as_deref().unwrap_or(""));
+            push(
+                &obj,
+                "comment",
+                ec.comment.as_deref().unwrap_or(""),
+                ac.comment.as_deref().unwrap_or(""),
+            );
         }
     }
 }
