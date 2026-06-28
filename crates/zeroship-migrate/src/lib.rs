@@ -72,6 +72,8 @@ pub mod model;
 pub mod ops;
 pub mod plan;
 pub mod render;
+#[doc(hidden)]
+pub mod test_support;
 
 pub use analysis::{analyze, classify};
 
