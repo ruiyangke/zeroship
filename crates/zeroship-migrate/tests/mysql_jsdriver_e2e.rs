@@ -187,7 +187,12 @@ fn migrator_backend_for(
         allowlist(&live.dsn.host, live.dsn.port, 8, 16 * 1024 * 1024),
         Duration::from_secs(45),
     )
-    .expect("open live mysql2 JS driver backend as zs_migrator")
+    .unwrap_or_else(|err| {
+        panic!(
+            "open live mysql2 JS driver backend as {}: {err}",
+            account.user
+        )
+    })
 }
 
 struct MysqlSchemaGuard {
@@ -258,7 +263,7 @@ fn run_isolated_mysql(
 
 async fn setup(live: &LiveMysql, cfg: &ExecutorConfig) -> (MysqlBackend, MysqlMigratorAccount) {
     let backend = backend_for(live);
-    let _ = deprovision_mysql_migrator_account(&backend).await;
+    let _ = deprovision_mysql_migrator_account(&backend, cfg).await;
     let _ = backend
         .exec(&format!("DROP SCHEMA IF EXISTS {}", qi(&cfg.project_schema)))
         .await;
@@ -290,9 +295,14 @@ async fn teardown(backend: &MysqlBackend, cfg: &ExecutorConfig) -> Result<(), St
         .exec(&format!("DROP SCHEMA IF EXISTS {}", qi(&cfg.pg.meta_schema)))
         .await
         .map_err(|err| format!("drop meta schema {} failed: {err}", cfg.pg.meta_schema))?;
-    deprovision_mysql_migrator_account(backend)
+    deprovision_mysql_migrator_account(backend, cfg)
         .await
-        .map_err(|err| format!("drop zs_migrator failed: {err}"))?;
+        .map_err(|err| {
+            format!(
+                "drop MySQL migrator account for {} failed: {err}",
+                cfg.project_id
+            )
+        })?;
     Ok(())
 }
 
@@ -327,15 +337,17 @@ fn prewarm_mysql_migrator_auth_cache(
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "zs_migrator auth-cache prewarm failed: {}\nstdout:\n{}\nstderr:\n{}",
+        "{} auth-cache prewarm failed: {}\nstdout:\n{}\nstderr:\n{}",
+        account.user,
         output.status,
         stdout,
         stderr
     );
     let current_user = stdout.trim();
     assert!(
-        current_user.starts_with("zs_migrator@"),
-        "prewarm must authenticate as zs_migrator, got {current_user:?}"
+        current_user.starts_with(&format!("{}@", account.user)),
+        "prewarm must authenticate as {}, got {current_user:?}",
+        account.user
     );
     println!(
         "mysql_jsdriver_e2e prewarmed caching_sha2 auth cache as {current_user}"
@@ -555,6 +567,7 @@ fn spawn_lock_first_apply_helper(
         .env("ZS_MYSQL_LOCK_HELPER_PROJECT_ID", &cfg.project_id)
         .env("ZS_MYSQL_LOCK_HELPER_PROJECT_SCHEMA", &cfg.project_schema)
         .env("ZS_MYSQL_LOCK_HELPER_META_SCHEMA", &cfg.pg.meta_schema)
+        .env("ZS_MYSQL_LOCK_HELPER_USER", &account.user)
         .env("ZS_MYSQL_LOCK_HELPER_PASSWORD", &account.password)
         .env("MIGRATE_REQUIRE_MYSQL", "1")
         .stdout(Stdio::piped())
@@ -591,6 +604,21 @@ fn assert_mysql_access_denied(err: JsDriverError, context: &str) {
             );
         }
         other => panic!("expected MySQL access-denied error for {context}, got {other:?}"),
+    }
+}
+
+fn assert_mysql_access_denied_1142(err: JsDriverError, context: &str) {
+    match err {
+        JsDriverError::Remote {
+            code: 1142,
+            sqlstate,
+            message,
+        } => {
+            println!(
+                "mysql_jsdriver_e2e confinement denied {context}: code=1142 sqlstate={sqlstate} message={message}"
+            );
+        }
+        other => panic!("expected MySQL 1142 access-denied error for {context}, got {other:?}"),
     }
 }
 
@@ -671,6 +699,130 @@ fn live_teardown_guard_drops_schemas_after_panic() {
             rows.rows
         );
     });
+}
+
+#[test]
+fn per_project_migrator_accounts_are_isolated() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    let cfg_a = cfg_for(&token("iso_a"));
+    let cfg_b = cfg_for(&token("iso_b"));
+    let mut cleanup_a = MysqlSchemaGuard::new(live.clone(), cfg_a.clone());
+    let mut cleanup_b = MysqlSchemaGuard::new(live.clone(), cfg_b.clone());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let (backend_a, account_a) = setup(&live, &cfg_a).await;
+            let (backend_b, account_b) = setup(&live, &cfg_b).await;
+
+            assert_ne!(
+                account_a.user, account_b.user,
+                "distinct projects must not share one MySQL migrator account"
+            );
+
+            let admin = backend_for(&live);
+            let account_rows = query(
+                &admin,
+                "SELECT User FROM mysql.user
+                  WHERE User IN (?, ?)
+                  ORDER BY User",
+                &[
+                    zeroship_migrate::render::step::BindValue::Text(account_a.user.clone()),
+                    zeroship_migrate::render::step::BindValue::Text(account_b.user.clone()),
+                ],
+            )
+            .await;
+            assert_eq!(
+                rows_len(&account_rows),
+                2,
+                "both per-project accounts must coexist in mysql.user: {:?}",
+                account_rows.rows
+            );
+
+            backend_a
+                .exec(&format!(
+                    "CREATE TABLE {}.{} (id INT NOT NULL)",
+                    qi(&cfg_a.project_schema),
+                    qi("a_owned_after_b_provision")
+                ))
+                .await
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "{} lost its in-scope grants after {} was provisioned: {err}",
+                        account_a.user, account_b.user
+                    )
+                });
+            assert!(
+                table_exists(&backend_a, &cfg_a.project_schema, "a_owned_after_b_provision").await,
+                "project A account should materialize in-scope DDL"
+            );
+
+            let cross_schema = match backend_a
+                .exec(&format!(
+                    "CREATE TABLE {}.{} (id INT NOT NULL)",
+                    qi(&cfg_b.project_schema),
+                    qi("a_forbidden_on_b")
+                ))
+                .await
+            {
+                Ok(()) => panic!(
+                    "{} must not be able to create objects in {}",
+                    account_a.user, cfg_b.project_schema
+                ),
+                Err(err) => err,
+            };
+            assert_mysql_access_denied_1142(
+                cross_schema,
+                "project A account DDL on project B schema",
+            );
+
+            let reprovisioned_a = provision_mysql_migrator_account(&admin, &cfg_a)
+                .await
+                .expect("re-provision project A migrator account");
+            assert_eq!(
+                reprovisioned_a.user, account_a.user,
+                "re-provisioning a project must keep the same derived account name"
+            );
+            prewarm_mysql_migrator_auth_cache(&live, &cfg_a, &reprovisioned_a);
+            let backend_a_reprovisioned = migrator_backend_for(&live, &cfg_a, &reprovisioned_a);
+            backend_a_reprovisioned
+                .exec(&format!(
+                    "CREATE TABLE {}.{} (id INT NOT NULL)",
+                    qi(&cfg_a.project_schema),
+                    qi("a_owned_after_a_reprovision")
+                ))
+                .await
+                .expect("project A should keep its grants after A re-provision");
+
+            backend_b
+                .exec(&format!(
+                    "CREATE TABLE {}.{} (id INT NOT NULL)",
+                    qi(&cfg_b.project_schema),
+                    qi("b_owned_after_a_reprovision")
+                ))
+                .await
+                .expect("project B should keep its grants after A re-provision");
+
+            println!(
+                "mysql_jsdriver_e2e per-project migrator isolation assertions ran on real :3307: {} and {}",
+                account_a.user, account_b.user
+            );
+        });
+    }));
+    let cleanup_a_result = cleanup_a.cleanup_now();
+    let cleanup_b_result = cleanup_b.cleanup_now();
+    if let Err(panic) = result {
+        if let Err(err) = cleanup_a_result {
+            eprintln!("FAILED mysql_jsdriver_e2e project A isolation cleanup after panic: {err}");
+        }
+        if let Err(err) = cleanup_b_result {
+            eprintln!("FAILED mysql_jsdriver_e2e project B isolation cleanup after panic: {err}");
+        }
+        std::panic::resume_unwind(panic);
+    }
+    cleanup_a_result.expect("drop isolated MySQL e2e project A schema/account");
+    cleanup_b_result.expect("drop isolated MySQL e2e project B schema/account");
 }
 
 #[test]
@@ -801,7 +953,7 @@ fn mysql_advisory_lock_first_apply_helper() {
     cfg.pg.meta_schema = std::env::var("ZS_MYSQL_LOCK_HELPER_META_SCHEMA")
         .expect("helper meta schema env");
     let account = MysqlMigratorAccount {
-        user: "zs_migrator".to_string(),
+        user: std::env::var("ZS_MYSQL_LOCK_HELPER_USER").expect("helper migrator user env"),
         host: "%".to_string(),
         password: std::env::var("ZS_MYSQL_LOCK_HELPER_PASSWORD")
             .expect("helper migrator password env"),
@@ -918,15 +1070,16 @@ fn live_migrator_account_confines_privileges_and_reset_role_is_noop() {
     let Some(live) = live_mysql_or_skip() else { return };
     let default_database = live.dsn.database.clone();
 
-    run_isolated_mysql(&live, "confine", |backend, cfg, _account| Box::pin(async move {
+    run_isolated_mysql(&live, "confine", |backend, cfg, account| Box::pin(async move {
         let before = query(backend, "SELECT CURRENT_USER() AS current_user_name", &[]).await;
         let before_user = field(&before.rows[0], "current_user_name")
             .as_str()
             .expect("CURRENT_USER should be a string")
             .to_string();
         assert!(
-            before_user.starts_with("zs_migrator@"),
-            "migration connection must authenticate as zs_migrator, got {before_user}"
+            before_user.starts_with(&format!("{}@", account.user)),
+            "migration connection must authenticate as {}, got {before_user}",
+            account.user
         );
 
         backend.reset_role_best_effort().await;
@@ -946,26 +1099,40 @@ fn live_migrator_account_confines_privileges_and_reset_role_is_noop() {
                 qi("in_scope_allowed")
             ))
             .await
-            .expect("in-scope project DDL should be allowed for zs_migrator");
+            .unwrap_or_else(|err| {
+                panic!(
+                    "in-scope project DDL should be allowed for {}: {err}",
+                    account.user
+                )
+            });
         assert!(
             table_exists(backend, &cfg.project_schema, "in_scope_allowed").await,
             "in-scope project DDL should materialize"
         );
 
-        let create_user = backend
+        let create_user = match backend
             .exec("CREATE USER 'zs_forbidden_e2e'@'%' IDENTIFIED BY 'nope'")
             .await
-            .expect_err("zs_migrator must not be able to create users");
+        {
+            Ok(()) => panic!("{} must not be able to create users", account.user),
+            Err(err) => err,
+        };
         assert_mysql_access_denied(create_user, "CREATE USER");
 
-        let cross_schema = backend
+        let cross_schema = match backend
             .exec(&format!(
                 "CREATE TABLE {}.{} (id INT NOT NULL)",
                 qi(&default_database),
                 qi("zs_forbidden_cross_schema")
             ))
             .await
-            .expect_err("zs_migrator must not be able to create outside project schema");
+        {
+            Ok(()) => panic!(
+                "{} must not be able to create outside project schema",
+                account.user
+            ),
+            Err(err) => err,
+        };
         assert_mysql_access_denied(cross_schema, "cross-schema CREATE TABLE");
 
         println!(
