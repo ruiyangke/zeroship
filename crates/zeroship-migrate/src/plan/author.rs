@@ -156,7 +156,7 @@ pub(crate) const PG_MAX_IDENT_BYTES: usize = 63;
 /// can never desync `up`/`down`/on-disk (which would cause CREATE/DROP churn —
 /// the emitted full name ≠ the server-truncated live name on a re-diff). Mirrors
 /// the sanitize/truncate discipline of [`crate::apply::role::migrator_role_name`].
-pub(crate) fn cap_ident_name(natural: &str) -> String {
+pub fn cap_ident_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
     if natural.len() <= PG_MAX_IDENT_BYTES {
         return natural.to_string();
