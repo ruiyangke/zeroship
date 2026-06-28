@@ -32,6 +32,7 @@
 
 use compio_postgres::Client;
 
+use crate::apply::executor::BackendError;
 use crate::conn::ExecutorConfig;
 
 /// A journal phase (design §2.2).
@@ -329,14 +330,13 @@ pub struct AppliedEntry {
 /// Error from a journal operation.
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
-    /// A database error.
+    /// A database/driver error whose concrete backend type remains
+    /// downcastable through [`BackendError`].
     #[error("journal db error: {0}")]
-    Db(#[from] compio_postgres::Error),
-    /// A **dialect-neutral** journal backend error — used by non-Postgres
-    /// [`MigrationBackend`](crate::apply::backend::MigrationBackend) impls (e.g.
-    /// `SqliteBackend`) whose journal lives in SQLite, not Postgres, so they
-    /// cannot produce a `compio_postgres::Error`. The payload is the backend's
-    /// own error string. The Postgres journal helpers never construct this arm.
+    Db(#[from] BackendError),
+    /// A **dialect-neutral** journal backend error whose message is already the
+    /// intended operator-facing text. Structured driver failures belong in
+    /// [`JournalError::Db`].
     #[error("journal backend error: {0}")]
     Backend(String),
     /// A journal row carried an unrecognized `phase` value.
@@ -357,6 +357,12 @@ pub enum JournalError {
     /// rather than interpolate it. Maps [`crate::render::dml::IdentQuoteError`].
     #[error("journal render: {0}")]
     IdentQuote(#[from] crate::render::dml::IdentQuoteError),
+}
+
+impl From<compio_postgres::Error> for JournalError {
+    fn from(error: compio_postgres::Error) -> Self {
+        Self::Db(error.into())
+    }
 }
 
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in

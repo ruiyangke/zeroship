@@ -183,6 +183,17 @@ struct RemoteReply {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct MysqlDsnNetTarget {
+    host: String,
+    #[serde(default = "default_mysql_port")]
+    port: u16,
+}
+
+const fn default_mysql_port() -> u16 {
+    3306
+}
+
 pub struct JsDriverConn {
     runtime: Option<Runtime>,
     next_id: u64,
@@ -220,11 +231,8 @@ impl JsDriverConn {
         dsn_json: String,
         command_timeout: Duration,
     ) -> Result<Self, JsDriverError> {
-        Self::open_mysql_dsn_json_with_policy(
-            dsn_json,
-            NetPolicy::trusted(TRUSTED_DRIVER_MAX_SOCKETS, TRUSTED_DRIVER_EGRESS_CEILING),
-            command_timeout,
-        )
+        let policy = mysql_dsn_net_policy(&dsn_json)?;
+        Self::open_mysql_dsn_json_with_policy(dsn_json, policy, command_timeout)
     }
 
     pub fn open_mysql_dsn_json_allowlisted(
@@ -437,6 +445,20 @@ impl JsDriverConn {
     }
 }
 
+fn mysql_dsn_net_policy(dsn_json: &str) -> Result<NetPolicy, JsDriverError> {
+    let target: MysqlDsnNetTarget = serde_json::from_str(dsn_json).map_err(|e| {
+        JsDriverError::transport(format!("invalid MySQL DSN JSON for net policy: {e}"))
+    })?;
+    let host_port = HostPort::try_new(target.host, target.port)
+        .map_err(|e| JsDriverError::transport(format!("invalid MySQL net policy: {e}")))?;
+    NetPolicy::allowlist(
+        vec![host_port],
+        TRUSTED_DRIVER_MAX_SOCKETS,
+        TRUSTED_DRIVER_EGRESS_CEILING,
+    )
+    .map_err(|e| JsDriverError::transport(format!("invalid MySQL net policy: {e}")))
+}
+
 fn bind_to_json(bind: &BindValue) -> Value {
     match bind {
         BindValue::Null => Value::Null,
@@ -477,6 +499,35 @@ mod tests {
                 ..
             } if sqlstate == "HY000"
         ));
+    }
+
+    #[test]
+    fn default_mysql_dsn_policy_allows_only_dsn_host_port() {
+        let policy = mysql_dsn_net_policy(
+            &serde_json::json!({
+                "host": "Db.Local.Test",
+                "port": 4406,
+                "user": "root",
+                "database": "zeroship_e2e",
+            })
+            .to_string(),
+        )
+        .expect("dsn host:port should derive an allowlist policy");
+
+        assert!(policy.allows_host_port("db.local.test", 4406));
+        assert!(!policy.allows_host_port("db.local.test", 3306));
+        assert!(!policy.allows_host_port("other.local.test", 4406));
+        assert_eq!(policy.max_sockets(), TRUSTED_DRIVER_MAX_SOCKETS);
+        assert_eq!(
+            policy.egress_ceiling_bytes(),
+            Some(TRUSTED_DRIVER_EGRESS_CEILING)
+        );
+        let NetPolicy::Allowlist { entries, .. } = policy else {
+            panic!("default MySQL DSN opener must derive an allowlist policy");
+        };
+        assert_eq!(entries.as_slice().len(), 1);
+        assert_eq!(entries.as_slice()[0].host(), "db.local.test");
+        assert_eq!(entries.as_slice()[0].port(), 4406);
     }
 
     #[test]

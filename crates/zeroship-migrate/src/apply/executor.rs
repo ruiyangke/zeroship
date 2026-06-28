@@ -2177,7 +2177,7 @@ pub(crate) async fn apply_transactional(
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a journal-insert error (M4)");
         }
-        return Err(ApplyError::Journal(JournalError::Db(e)));
+        return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
 
     // #2 fix: write the fresh-DB squash supersession edges in the SAME transaction
@@ -2330,7 +2330,7 @@ pub(crate) async fn apply_dml_transactional(
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %version, "zeroship-migrate: ROLLBACK failed after a DML journal-insert error");
         }
-        return Err(ApplyError::Journal(JournalError::Db(e)));
+        return Err(ApplyError::Journal(JournalError::Db(e.into())));
     }
     // Fault seam (test-only): a simulated crash AFTER the journal INSERT but
     // BEFORE COMMIT — the INSERT is inside the uncommitted txn, so it rolls back
@@ -2365,7 +2365,7 @@ async fn insert_supersedes_edges(
             &[&squash_version, sup],
         )
         .await
-        .map_err(JournalError::Db)?;
+        .map_err(|e| JournalError::Db(e.into()))?;
     }
     Ok(())
 }
@@ -3470,7 +3470,7 @@ pub(crate) async fn rollback_one_transactional(
         if let Err(rb) = conn.batch_execute("ROLLBACK").await {
             tracing::warn!(error = %rb, version = %m.version.as_str(), "zeroship-migrate: ROLLBACK failed after a rolled_back-insert error");
         }
-        return Err(RollbackError::Journal(JournalError::Db(e)));
+        return Err(RollbackError::Journal(JournalError::Db(e.into())));
     }
 
     conn.batch_execute("COMMIT").await?;
