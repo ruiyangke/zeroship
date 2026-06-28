@@ -919,11 +919,11 @@ fn rollback_db(error: JsDriverError) -> RollbackError {
 }
 
 fn journal_backend(error: JsDriverError) -> JournalError {
-    JournalError::Backend(error.to_string())
+    JournalError::Db(transport::backend_error(error))
 }
 
 fn drift_backend(error: JsDriverError) -> DriftError {
-    DriftError::Backend(error.to_string())
+    DriftError::Db(transport::backend_error(error))
 }
 
 #[cfg(test)]
@@ -958,5 +958,46 @@ mod tests {
                 "CREATE INDEX `idx` ON `t` (`v`)".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn mysql_journal_and_drift_driver_errors_remain_downcastable() {
+        let journal = journal_backend(JsDriverError::Remote {
+            code: 1146,
+            sqlstate: "42S02".to_string(),
+            message: "table does not exist".to_string(),
+        });
+        let JournalError::Db(journal_db) = journal else {
+            panic!("expected journal backend errors to route through JournalError::Db");
+        };
+        assert!(matches!(
+            journal_db.downcast_ref::<JsDriverError>(),
+            Some(JsDriverError::Remote {
+                code: 1146,
+                sqlstate,
+                ..
+            }) if sqlstate == "42S02"
+        ));
+
+        let drift = drift_backend(JsDriverError::Remote {
+            code: 1054,
+            sqlstate: "42S22".to_string(),
+            message: "unknown column".to_string(),
+        });
+        let DriftError::Db(drift_db) = drift else {
+            panic!("expected drift backend errors to route through DriftError::Db");
+        };
+        let apply = ApplyError::Db(drift_db);
+        let ApplyError::Db(apply_db) = apply else {
+            panic!("expected drift db error to map to ApplyError::Db");
+        };
+        assert!(matches!(
+            apply_db.downcast_ref::<JsDriverError>(),
+            Some(JsDriverError::Remote {
+                code: 1054,
+                sqlstate,
+                ..
+            }) if sqlstate == "42S22"
+        ));
     }
 }

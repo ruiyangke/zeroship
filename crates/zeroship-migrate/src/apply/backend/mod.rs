@@ -315,9 +315,10 @@ pub trait MigrationBackend {
     /// its actor. The connection / `pg_advisory_lock` never cross this surface.
     ///
     /// # Errors
-    /// [`ApplyError::Db`] (PG) or [`ApplyError::Backend`] (non-PG) on a write
-    /// failure; the dialect-neutral [`crate::apply::executor::ApplyError`] is what crosses
-    /// the trait.
+    /// [`ApplyError::Db`] on a structured driver/write failure, or
+    /// [`ApplyError::Backend`] for an intentionally textual dialect-level
+    /// failure; the dialect-neutral [`crate::apply::executor::ApplyError`] is
+    /// what crosses the trait.
     async fn record_squash(
         &self,
         cfg: &ExecutorConfig,

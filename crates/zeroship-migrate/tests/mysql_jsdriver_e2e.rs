@@ -3,6 +3,8 @@
 #[path = "../../runtime/tests/support/node_realworld.rs"]
 mod node_realworld;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -11,8 +13,8 @@ use zeroship_migrate::render::step::PlanStep;
 use zeroship_migrate::{
     diff_snapshots, fold_ops, ApplyError, Approval, Checksum, ChecksumInput,
     EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, Migration,
-    MigrationBackend, MigrationEngine, MigrationFlags, MigrationId, MigrationIr,
-    MysqlBackend, RowSet, SqlDialect, CURRENT_IR_VERSION,
+    JsDriverError, MigrationBackend, MigrationEngine, MigrationFlags, MigrationId,
+    MigrationIr, MysqlBackend, RowSet, SqlDialect, CURRENT_IR_VERSION,
 };
 
 use node_realworld::{allowlist, ensure_mysql, lock_env, EnvGuard, LOCALHOST};
@@ -80,6 +82,7 @@ fn parse_mysql_dsn(raw: &str) -> MysqlDsn {
 fn live_mysql_or_skip() -> Option<LiveMysql> {
     let raw = configured_dsn();
     let dsn = parse_mysql_dsn(&raw);
+    let require = std::env::var("MIGRATE_REQUIRE_MYSQL").is_ok_and(|v| v == "1");
     if raw == DEFAULT_DSN {
         match std::panic::catch_unwind(ensure_mysql) {
             Ok(server) => {
@@ -93,9 +96,13 @@ fn live_mysql_or_skip() -> Option<LiveMysql> {
                 })
             }
             Err(_) => {
-                eprintln!(
-                    "SKIP mysql_jsdriver_e2e: default MySQL {LOCALHOST}:3307 unreachable and ensure_mysql() could not start it"
+                let message = format!(
+                    "default MySQL {LOCALHOST}:3307 unreachable and ensure_mysql() could not start it"
                 );
+                if require {
+                    panic!("MIGRATE_REQUIRE_MYSQL=1: {message}");
+                }
+                eprintln!("SKIPPED (NOT RUN) mysql_jsdriver_e2e: {message}");
                 None
             }
         }
@@ -109,10 +116,14 @@ fn live_mysql_or_skip() -> Option<LiveMysql> {
             source: "MYSQL_JS_DRIVER_E2E_DSN".to_string(),
         })
     } else {
-        eprintln!(
-            "SKIP mysql_jsdriver_e2e: MYSQL_JS_DRIVER_E2E_DSN target {}:{} is unreachable",
+        let message = format!(
+            "MYSQL_JS_DRIVER_E2E_DSN target {}:{} is unreachable",
             dsn.host, dsn.port
         );
+        if require {
+            panic!("MIGRATE_REQUIRE_MYSQL=1: {message}");
+        }
+        eprintln!("SKIPPED (NOT RUN) mysql_jsdriver_e2e: {message}");
         None
     }
 }
@@ -141,18 +152,85 @@ fn cfg_for(tok: &str) -> ExecutorConfig {
     cfg
 }
 
-fn backend_for(live: &LiveMysql) -> MysqlBackend {
+fn backend_for_result(live: &LiveMysql) -> Result<MysqlBackend, JsDriverError> {
     MysqlBackend::open_mysql_dsn_json_with_policy(
         live.dsn.json(),
         allowlist(&live.dsn.host, live.dsn.port, 8, 16 * 1024 * 1024),
         Duration::from_secs(45),
     )
-    .expect("open live mysql2 JS driver backend")
 }
 
-async fn setup(live: &LiveMysql, label: &str) -> (MysqlBackend, ExecutorConfig) {
-    let backend = backend_for(live);
+fn backend_for(live: &LiveMysql) -> MysqlBackend {
+    backend_for_result(live).expect("open live mysql2 JS driver backend")
+}
+
+struct MysqlSchemaGuard {
+    live: LiveMysql,
+    cfg: Option<ExecutorConfig>,
+}
+
+impl MysqlSchemaGuard {
+    fn new(live: LiveMysql, cfg: ExecutorConfig) -> Self {
+        Self {
+            live,
+            cfg: Some(cfg),
+        }
+    }
+
+    fn cleanup_now(&mut self) -> Result<(), String> {
+        let Some(cfg) = self.cfg.clone() else {
+            return Ok(());
+        };
+        compio::runtime::Runtime::new()
+            .map_err(|err| format!("create cleanup runtime failed: {err}"))?
+            .block_on(async {
+                let backend = backend_for_result(&self.live)
+                    .map_err(|err| format!("open cleanup backend failed: {err}"))?;
+                teardown(&backend, &cfg).await
+            })?;
+        self.cfg = None;
+        Ok(())
+    }
+}
+
+impl Drop for MysqlSchemaGuard {
+    fn drop(&mut self) {
+        if let Err(err) = self.cleanup_now() {
+            eprintln!(
+                "FAILED mysql_jsdriver_e2e cleanup for panic-safe schema guard: {err}"
+            );
+        }
+    }
+}
+
+fn run_isolated_mysql(
+    live: &LiveMysql,
+    label: &str,
+    body: impl for<'a> FnOnce(
+        &'a MysqlBackend,
+        &'a ExecutorConfig,
+    ) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
+) {
     let cfg = cfg_for(&token(label));
+    let mut cleanup = MysqlSchemaGuard::new(live.clone(), cfg.clone());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let backend = setup(live, &cfg).await;
+            body(&backend, &cfg).await;
+        });
+    }));
+    let cleanup_result = cleanup.cleanup_now();
+    if let Err(panic) = result {
+        if let Err(err) = cleanup_result {
+            eprintln!("FAILED mysql_jsdriver_e2e cleanup after panic: {err}");
+        }
+        std::panic::resume_unwind(panic);
+    }
+    cleanup_result.expect("drop isolated MySQL e2e schemas");
+}
+
+async fn setup(live: &LiveMysql, cfg: &ExecutorConfig) -> MysqlBackend {
+    let backend = backend_for(live);
     let _ = backend
         .exec(&format!("DROP SCHEMA IF EXISTS {}", qi(&cfg.project_schema)))
         .await;
@@ -167,16 +245,19 @@ async fn setup(live: &LiveMysql, label: &str) -> (MysqlBackend, ExecutorConfig) 
         "mysql_jsdriver_e2e using project schema {} and meta schema {} ({})",
         cfg.project_schema, cfg.pg.meta_schema, live.source
     );
-    (backend, cfg)
+    backend
 }
 
-async fn teardown(backend: &MysqlBackend, cfg: &ExecutorConfig) {
-    let _ = backend
+async fn teardown(backend: &MysqlBackend, cfg: &ExecutorConfig) -> Result<(), String> {
+    backend
         .exec(&format!("DROP SCHEMA IF EXISTS {}", qi(&cfg.project_schema)))
-        .await;
-    let _ = backend
+        .await
+        .map_err(|err| format!("drop project schema {} failed: {err}", cfg.project_schema))?;
+    backend
         .exec(&format!("DROP SCHEMA IF EXISTS {}", qi(&cfg.pg.meta_schema)))
-        .await;
+        .await
+        .map_err(|err| format!("drop meta schema {} failed: {err}", cfg.pg.meta_schema))?;
+    Ok(())
 }
 
 fn fixture_ir() -> MigrationIr {
@@ -287,13 +368,70 @@ fn field<'a>(row: &'a serde_json::Map<String, Value>, key: &str) -> &'a Value {
 }
 
 #[test]
+fn live_teardown_guard_drops_schemas_after_panic() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    let cfg = cfg_for(&token("panic"));
+    let mut cleanup = MysqlSchemaGuard::new(live.clone(), cfg.clone());
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {
+        eprintln!("mysql_jsdriver_e2e intentional cleanup probe panic captured");
+    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let backend = setup(&live, &cfg).await;
+            backend
+                .exec(&format!("CREATE SCHEMA {}", qi(&cfg.pg.meta_schema)))
+                .await
+                .expect("create meta schema for panic-cleanup probe");
+            backend
+                .exec(&format!(
+                    "CREATE TABLE {}.{} (id INT NOT NULL)",
+                    qi(&cfg.project_schema),
+                    qi("panic_probe")
+                ))
+                .await
+                .expect("create project table for panic-cleanup probe");
+            panic!("intentional mysql_jsdriver_e2e cleanup probe panic");
+        });
+    }));
+    std::panic::set_hook(previous_hook);
+    assert!(result.is_err(), "cleanup probe must exercise an unwind");
+    cleanup
+        .cleanup_now()
+        .expect("panic-safe cleanup should drop test schemas");
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let backend = backend_for(&live);
+        let rows = query(
+            &backend,
+            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA
+              WHERE SCHEMA_NAME IN (?, ?)
+              ORDER BY SCHEMA_NAME",
+            &[
+                zeroship_migrate::render::step::BindValue::Text(cfg.project_schema.clone()),
+                zeroship_migrate::render::step::BindValue::Text(cfg.pg.meta_schema.clone()),
+            ],
+        )
+        .await;
+        assert_eq!(
+            rows_len(&rows),
+            0,
+            "panic-safe cleanup left zse2a schemas behind: {:?}",
+            rows.rows
+        );
+    });
+}
+
+#[test]
 fn live_apply_creates_table_and_index_over_mysql2_node_net() {
     let _lock = lock_env();
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    compio::runtime::Runtime::new().unwrap().block_on(async {
-        let (backend, cfg) = setup(&live, "apply").await;
+    run_isolated_mysql(&live, "apply", |backend, cfg| Box::pin(async move {
         let (_ir, migrations) = fixture_migrations(&cfg.project_schema);
         let outcome = apply_fixture(&backend, &cfg, &migrations).await;
         assert_eq!(outcome.applied, migration_versions(&migrations));
@@ -319,9 +457,7 @@ fn live_apply_creates_table_and_index_over_mysql2_node_net() {
         assert_eq!(rows_len(&table_rows), 1, "users table must exist");
         assert_eq!(rows_len(&index_rows), 1, "users_email_idx must exist");
         println!("mysql_jsdriver_e2e apply assertions ran on real information_schema");
-
-        teardown(&backend, &cfg).await;
-    });
+    }));
 }
 
 #[test]
@@ -330,8 +466,7 @@ fn live_journal_records_completed_and_second_apply_skips() {
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    compio::runtime::Runtime::new().unwrap().block_on(async {
-        let (backend, cfg) = setup(&live, "journal").await;
+    run_isolated_mysql(&live, "journal", |backend, cfg| Box::pin(async move {
         let (_ir, migrations) = fixture_migrations(&cfg.project_schema);
         apply_fixture(&backend, &cfg, &migrations).await;
 
@@ -391,9 +526,7 @@ fn live_journal_records_completed_and_second_apply_skips() {
             "second apply must not re-journal/re-execute"
         );
         println!("mysql_jsdriver_e2e journal skip assertions ran");
-
-        teardown(&backend, &cfg).await;
-    });
+    }));
 }
 
 #[test]
@@ -402,8 +535,7 @@ fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visi
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    compio::runtime::Runtime::new().unwrap().block_on(async {
-        let (backend, cfg) = setup(&live, "phase").await;
+    run_isolated_mysql(&live, "phase", |backend, cfg| Box::pin(async move {
         let up = format!(
             "CREATE TABLE {}.{} (id INT NOT NULL);\nCREATE INDEX {} ON {}.{} (id)",
             qi(&cfg.project_schema),
@@ -441,8 +573,8 @@ fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visi
                 &GuardConfig::confined_mysql(cfg.project_schema.clone()),
                 None,
                 Approval::None,
-                &backend,
-                &cfg,
+                backend,
+                cfg,
                 "mysql-jsdriver-e2e",
             )
             .await
@@ -488,9 +620,7 @@ fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visi
         assert_eq!(rows_len(&completed), 0, "completed marker must not be written");
         assert_eq!(rows_len(&table), 1, "first DDL fragment auto-committed before journal completion");
         println!("mysql_jsdriver_e2e two-phase failure assertions ran");
-
-        teardown(&backend, &cfg).await;
-    });
+    }));
 }
 
 #[test]
@@ -499,8 +629,7 @@ fn live_snapshot_roundtrips_and_redeploy_is_noop() {
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    compio::runtime::Runtime::new().unwrap().block_on(async {
-        let (backend, cfg) = setup(&live, "snapshot").await;
+    run_isolated_mysql(&live, "snapshot", |backend, cfg| Box::pin(async move {
         let (ir, migrations) = fixture_migrations(&cfg.project_schema);
         apply_fixture(&backend, &cfg, &migrations).await;
 
@@ -535,7 +664,5 @@ fn live_snapshot_roundtrips_and_redeploy_is_noop() {
         assert!(redeploy.is_noop(), "same migration set should redeploy as skip: {redeploy:?}");
         assert_eq!(sorted_versions(redeploy.skipped), migration_versions(&migrations));
         println!("mysql_jsdriver_e2e snapshot + redeploy assertions ran");
-
-        teardown(&backend, &cfg).await;
-    });
+    }));
 }
