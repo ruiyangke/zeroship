@@ -18,6 +18,7 @@ use crate::MigrationIr;
 use zeroship_runtime::Runtime;
 
 use super::embedding::{install_frontend_globals, module_graph, FrontendGlobals, FrontendProgram};
+use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 
 /// An error from recording a migration module.
 #[derive(Debug, thiserror::Error)]
@@ -39,19 +40,32 @@ pub enum RecordError {
     /// JS builder may NOT emit a shape the Rust IR cannot represent (§2.5).
     #[error("recorded .ir.json does not match the frozen IR contract: {0}")]
     Contract(String),
+    /// The source exceeded the shared recorder source cap.
+    #[error("{field} is {actual} bytes; the recorder accepts at most {limit} bytes")]
+    SourceTooLarge {
+        /// The source field.
+        field: &'static str,
+        /// The accepted byte limit.
+        limit: usize,
+        /// The observed byte count.
+        actual: usize,
+    },
+    /// The determinism lint detected a host-clock/RNG accessor in authoring JS.
+    #[error(
+        "nondeterministic authoring JS uses {accessors}; use DB-evaluated c.fn.* scalars instead"
+    )]
+    Nondeterministic {
+        /// Comma-separated accessor summary.
+        accessors: String,
+        /// The structured lint findings.
+        findings: Vec<DeterminismFinding>,
+    },
 }
 
-/// A recorded migration plus the §4.3 determinism WARNINGS surfaced on it.
+/// A recorded migration plus the determinism lint outcome.
 ///
-/// Per §4.3 the syntactic clock/RNG lint is a **best-effort pre-commit catch**,
-/// NOT a hard reject: a non-deterministic accessor (`Date.now()`/`Math.random()`/
-/// `crypto.randomUUID()`/`new Date()`) is surfaced as a structured warning the AI
-/// loop self-corrects on (§8.8) — recording still succeeds (a build-once committed
-/// artifact already neutralizes post-deploy non-determinism, so blanket-rejecting
-/// would only raise iteration cost, §4.3). The strict *reject* the design reserves
-/// is the narrower type-aware check (a non-literal bound to a time/uuid column),
-/// not this whole-source scan. Callers (the build/CLI/recorder service) render the
-/// `warnings` alongside the produced `.ir.json`.
+/// Detected nondeterminism is now a hard error. This wrapper keeps the older test
+/// oracle shape but successful recordings carry an empty `warnings` vector.
 #[derive(Debug, Clone)]
 pub struct RecordOutcome {
     /// The recorded, frozen-contract-validated migration IR.
@@ -71,7 +85,7 @@ struct OpIrEnvelope {
     ir: Option<serde_json::Value>,
 }
 
-/// **UNSANDBOXED, in-process — NOT the build path. Hidden from the public API.**
+/// **UNSANDBOXED, in-process — for the test oracle / trusted-input use ONLY.**
 ///
 /// Record a self-contained migration module's `up()` op list into a typed
 /// [`MigrationIr`] (§2.5 — the JS half of the anti-drift gate).
@@ -83,9 +97,9 @@ struct OpIrEnvelope {
 /// exact §8.9 threat the kernel-sandboxed recorder child closes. The PR4 build/CLI
 /// path NEVER calls this: it records via [`super::recorder_service::spawn_sandboxed_record`]
 /// (the kernel-isolated child). This twin exists ONLY as the in-crate golden /
-/// round-trip test oracle (`op_round_trip`, `full_surface`) and is therefore
-/// `#[doc(hidden)]` + crate-`pub(crate)`-equivalent in intent — a library consumer
-/// must record through the sandboxed child, never here.
+/// round-trip test oracle (`op_round_trip`, `full_surface`) and trusted-input
+/// diagnostics. Production and CLI recording MUST go through
+/// [`super::recorder_service::spawn_sandboxed_record`].
 ///
 /// `owner_app` stamps the recorded `owner_app` HINT (the engine server-stamps the
 /// authoritative one at deploy, §8.6). `name` is the filename-derived label used
@@ -93,56 +107,45 @@ struct OpIrEnvelope {
 ///
 /// Returns the recorded `MigrationIr` (already validated against the frozen wire
 /// contract by `serde` — an out-of-contract op fails [`RecordError::Contract`]).
-/// The §4.3 determinism warnings (if any) are DISCARDED on this surface; use
-/// [`record_migration_to_ir_with_warnings`] to receive them.
+/// Detected nondeterminism is a hard [`RecordError::Nondeterministic`].
 ///
 /// # Errors
 /// See [`RecordError`].
 #[doc(hidden)]
-pub fn record_migration_to_ir(
+pub fn record_migration_to_ir_unsandboxed(
     migration_source: &str,
     owner_app: &str,
     name: &str,
 ) -> Result<MigrationIr, RecordError> {
-    Ok(record_migration_to_ir_with_warnings(migration_source, owner_app, name)?.ir)
+    Ok(record_migration_to_ir_with_warnings_unsandboxed(migration_source, owner_app, name)?.ir)
 }
 
-/// **UNSANDBOXED, in-process — NOT the build path. Hidden from the public API.**
-/// See [`record_migration_to_ir`]'s safety note (the §8.9 in-process-eval threat):
+/// **UNSANDBOXED, in-process — for the test oracle / trusted-input use ONLY.**
+/// See [`record_migration_to_ir_unsandboxed`]'s safety note (the §8.9
+/// in-process-eval threat):
 /// the PR4 build/CLI path records via the kernel-sandboxed child, never here.
 ///
-/// Record a migration's `up()` into a typed [`MigrationIr`] AND surface the §4.3
-/// determinism warnings on it (the wired pre-commit catch — §4.3/§8.8).
+/// Record a migration's `up()` into a typed [`MigrationIr`] after the determinism
+/// lint proves the source clean.
 ///
-/// This is the same record path as [`record_migration_to_ir`], but it runs the REAL
-/// V8 `lintDeterminism` over the migration SOURCE and returns its findings as
-/// [`RecordOutcome::warnings`] alongside the produced IR. Recording is NOT
-/// fail-closed on a finding: per §4.3 the syntactic clock/RNG lint is a best-effort
-/// flag the AI loop self-corrects on (the build-once committed artifact already
-/// makes post-deploy non-determinism unreachable, §5.1), so a `Date.now()` is
-/// surfaced as a warning rather than blocking the artifact. The build/CLI/recorder
-/// service render these warnings next to the committed `.ir.json` (§8.8).
+/// This is the same record path as [`record_migration_to_ir_unsandboxed`], but it
+/// keeps the historical [`RecordOutcome`] wrapper used by tests. Detected
+/// `Date.now()`/`Math.random()`/`crypto.randomUUID()`/`new Date()` accessors are a
+/// hard [`RecordError::Nondeterministic`]; lint infrastructure failure is also a
+/// hard error. On success `RecordOutcome::warnings` is empty.
 ///
 /// # Errors
-/// See [`RecordError`]. A determinism finding is a WARNING, not an error.
+/// See [`RecordError`].
 #[doc(hidden)]
-pub fn record_migration_to_ir_with_warnings(
+pub fn record_migration_to_ir_with_warnings_unsandboxed(
     migration_source: &str,
     owner_app: &str,
     name: &str,
 ) -> Result<RecordOutcome, RecordError> {
+    reject_oversized_source("ts_source", migration_source)?;
     zeroship_runtime::init_v8();
 
-    // §4.3 pre-commit catch — the WIRED determinism lint. The record/build path runs
-    // the REAL V8 `lintDeterminism` over the migration SOURCE and surfaces a
-    // non-deterministic accessor (`Date.now()`/`Math.random()`/`crypto.randomUUID()`/
-    // `new Date()`) as a structured warning the AI loop self-corrects on (steer to
-    // `c.fn.now()`/`c.fn.genRandomUuid()`). It is intentionally NOT fail-closed:
-    // §4.3 reserves the hard reject for the narrower type-aware check (a non-literal
-    // bound to a time/uuid column), since the build-once committed artifact (§5.1)
-    // already neutralizes post-deploy non-determinism and blanket-rejecting would
-    // only raise the AI loop's iteration cost.
-    let warnings = lint_migration_determinism(migration_source)?;
+    enforce_deterministic_source(migration_source)?;
 
     let modules = module_graph(FrontendProgram::RecordMigration {
         source: migration_source,
@@ -209,11 +212,15 @@ pub fn record_migration_to_ir_with_warnings(
         .map_err(|e| RecordError::Recording(e.to_string()))?;
     let ir = serde_json::from_str::<MigrationIr>(&bytes)
         .map_err(|e| RecordError::Contract(e.to_string()))?;
-    Ok(RecordOutcome { ir, warnings })
+    Ok(RecordOutcome {
+        ir,
+        warnings: Vec::new(),
+    })
 }
 
-/// **UNSANDBOXED, in-process — NOT the build path. Hidden from the public API.**
-/// See [`record_migration_to_ir`]'s safety note (the §8.9 in-process-eval threat):
+/// **UNSANDBOXED, in-process — for the test oracle / trusted-input use ONLY.**
+/// See [`record_migration_to_ir_unsandboxed`]'s safety note (the §8.9
+/// in-process-eval threat):
 /// the PR4 build/CLI path records via the kernel-sandboxed child, never here.
 ///
 /// Record a migration module and emit its canonical `.ir.json` STRING (the
@@ -223,12 +230,12 @@ pub fn record_migration_to_ir_with_warnings(
 /// # Errors
 /// See [`RecordError`].
 #[doc(hidden)]
-pub fn record_migration_to_json(
+pub fn record_migration_to_json_unsandboxed(
     migration_source: &str,
     owner_app: &str,
     name: &str,
 ) -> Result<String, RecordError> {
-    let ir = record_migration_to_ir(migration_source, owner_app, name)?;
+    let ir = record_migration_to_ir_unsandboxed(migration_source, owner_app, name)?;
     let mut s = serde_json::to_string_pretty(&ir)
         .map_err(|e| RecordError::Recording(e.to_string()))?;
     s.push('\n');
@@ -249,6 +256,37 @@ pub struct DeterminismFinding {
     pub reason: String,
 }
 
+fn reject_oversized_source(field: &'static str, source: &str) -> Result<(), RecordError> {
+    let actual = source.len();
+    if actual > MAX_TS_SOURCE_BYTES {
+        Err(RecordError::SourceTooLarge {
+            field,
+            limit: MAX_TS_SOURCE_BYTES,
+            actual,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn enforce_deterministic_source(migration_source: &str) -> Result<(), RecordError> {
+    let findings = lint_migration_determinism(migration_source)?;
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let accessors = findings
+        .iter()
+        .map(|f| f.accessor.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(RecordError::Nondeterministic {
+        accessors,
+        findings,
+    })
+}
+
 /// Run the §4.3 determinism lint over a migration's SOURCE through the REAL V8
 /// `@zeroship/migrate` `lintDeterminism` (NOT a Rust re-implementation) — the
 /// faithful path the build/CLI uses to flag a non-deterministic accessor
@@ -260,6 +298,7 @@ pub struct DeterminismFinding {
 pub fn lint_migration_determinism(
     migration_source: &str,
 ) -> Result<Vec<DeterminismFinding>, RecordError> {
+    reject_oversized_source("ts_source", migration_source)?;
     zeroship_runtime::init_v8();
 
     let modules = module_graph(FrontendProgram::DeterminismLint);
@@ -271,8 +310,8 @@ pub fn lint_migration_determinism(
 
         {
             let global = scope.get_current_context().global(scope);
-            let k = v8::String::new(scope, "__zsLintSrc").unwrap();
-            let v = v8::String::new(scope, migration_source).unwrap();
+            let k = v8::String::new(scope, "__zsLintSrc").ok_or(RecordError::NoIr)?;
+            let v = v8::String::new(scope, migration_source).ok_or(RecordError::NoIr)?;
             global.set(scope, k.into(), v.into());
         }
 
@@ -280,7 +319,7 @@ pub fn lint_migration_determinism(
         scope.perform_microtask_checkpoint();
 
         let global = scope.get_current_context().global(scope);
-        let k = v8::String::new(scope, "__zsLintOut").unwrap();
+        let k = v8::String::new(scope, "__zsLintOut").ok_or(RecordError::NoIr)?;
         let v = global
             .get(scope, k.into())
             .filter(|v| v.is_string())

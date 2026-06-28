@@ -7,7 +7,7 @@
 //!   real SQLite temp-file backend (LOCAL record path).
 //! - The scaffold is deterministic by construction: it contains `c.fn.now()` /
 //!   `{ fn: "now" }` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
-//!   `crypto.randomUUID()`, and recording it surfaces ZERO determinism warnings.
+//!   `crypto.randomUUID()`, and recording it has ZERO determinism findings.
 //!
 //! Faithful: the REAL sandboxed recorder child + the REAL engine apply on SQLite.
 
@@ -100,14 +100,14 @@ fn scaffold_is_deterministic_by_construction_and_records_zero_warnings() {
     assert!(!code.contains("crypto.randomUUID()"), "body:\n{code}");
     assert!(!code.contains("new Date("), "body:\n{code}");
 
-    // Recording the SCAFFOLD surfaces ZERO determinism warnings (the scaffold is
+    // Recording the SCAFFOLD has ZERO determinism findings (the scaffold is
     // deterministic by construction).
     write(dir.path(), "20240617140000_seed_table.ts", &ts);
     let outcome = build_migrations(dir.path(), APP, &via()).expect("build the scaffold");
     let m = &outcome.migrations[0];
     assert!(
         m.warnings.is_empty(),
-        "the scaffold must record ZERO determinism warnings; got {:?}",
+        "the scaffold must record ZERO determinism findings; got {:?}",
         m.warnings
     );
 }

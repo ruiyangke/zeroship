@@ -17,10 +17,11 @@
 use std::fs;
 use std::path::Path;
 
+use zeroship_migrate::frontend::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use zeroship_migrate::frontend::recorder_http::StructuredError;
 use zeroship_migrate::frontend::recorder_service::recorder_child_path;
 use zeroship_migrate::frontend::{
-    build_migrations, RecordPath, RecordVia, RecorderClient, ResourceBudget,
+    build_migrations, BuildError, RecordPath, RecordVia, RecorderClient, ResourceBudget,
 };
 
 const OWNER: &str = "app_paths";
@@ -137,6 +138,71 @@ fn hosted_non_retryable_reject_is_a_build_error_no_silent_fallback() {
     assert!(
         !dir.path().join(format!("{stem}.ir.json")).exists(),
         "a rejected migration must not write a committed artifact"
+    );
+}
+
+#[test]
+fn local_build_rejects_oversized_source_before_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_big";
+    let mut huge = " ".repeat(MAX_TS_SOURCE_BYTES + 1);
+    huge.push_str(MIG_TS);
+    write_mig(dir.path(), stem, &huge);
+
+    let started = std::time::Instant::now();
+    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect_err("oversized local source must be rejected before recording");
+    let elapsed = started.elapsed();
+
+    match err {
+        BuildError::SourceTooLarge { limit, actual, .. } => {
+            assert_eq!(limit, MAX_TS_SOURCE_BYTES);
+            assert!(
+                actual > MAX_TS_SOURCE_BYTES as u64,
+                "actual size must exceed the cap; got {actual}"
+            );
+        }
+        other => panic!("expected SourceTooLarge, got {other:?}"),
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "oversized source should fail at metadata/capped-read time, took {elapsed:?}"
+    );
+    assert!(
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "oversized source must not write a committed artifact"
+    );
+}
+
+#[test]
+fn build_rejects_nondeterministic_date_now_as_hard_error() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_dirty";
+    let dirty = r#"
+        import { table } from "@zeroship/migrate";
+        export function up() {
+          table("events").insert({ rows: [ { created_at: Date.now() } ] });
+        }
+    "#;
+    write_mig(dir.path(), stem, dirty);
+
+    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect_err("Date.now() must be a hard determinism build error");
+    match err {
+        BuildError::Nondeterministic {
+            accessors,
+            findings,
+            ..
+        } => {
+            assert!(accessors.contains("Date.now"), "accessors: {accessors}");
+            assert!(findings.iter().any(|f| f.accessor.contains("Date.now")));
+        }
+        other => panic!("expected Nondeterministic, got {other:?}"),
+    }
+    assert!(
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "nondeterministic source must not write a committed artifact"
     );
 }
 

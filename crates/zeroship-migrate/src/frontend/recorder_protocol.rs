@@ -11,6 +11,21 @@ use serde::{Deserialize, Serialize};
 
 use super::sandbox::SandboxReport;
 
+/// Max accepted migration/schema source size for every recorder ingress path.
+///
+/// A migration/schema source is human/AI-authored code; even very large generated
+/// op.* migrations are far below this. Keep this single constant shared by HTTP,
+/// local build reads, parent-to-child requests, child stdin validation, and schema
+/// eval so those paths cannot drift.
+pub const MAX_TS_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Max accepted stdin envelope size for the child process.
+///
+/// The envelope can include one capped source plus an optional capped
+/// `schema_types_blob`, plus JSON framing and small metadata. The child reads only
+/// this many bytes plus one sentinel byte before deciding the request is too large.
+pub const MAX_CHILD_STDIN_BYTES: usize = (MAX_TS_SOURCE_BYTES * 2) + (64 * 1024);
+
 /// Which untrusted JS front-end operation the child should run.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +104,16 @@ pub enum ChildError {
     /// The migration module evaluation failed (syntax error, throw, op-function
     /// outside a recorder, …). Carries the V8/recorder error string.
     EvalError(String),
+    /// The child rejected an oversized source/request before evaluating JS.
+    RequestTooLarge {
+        /// Which field or envelope was too large.
+        field: String,
+        /// The accepted byte limit.
+        limit: usize,
+        /// The observed byte count. For a capped stdin read this may be the first
+        /// byte past the limit, not the full hostile stream length.
+        actual: usize,
+    },
     /// The hosted recorder refused to run because the kernel sandbox floor was not
     /// met (neither seccomp nor netns engaged). NOT an authoring error — an
     /// environment refusal.
@@ -110,6 +135,24 @@ impl ChildResponse {
             ok: false,
             ir_json: None,
             error: Some(ChildError::EvalError(message)),
+            report,
+        }
+    }
+
+    pub fn request_too_large(
+        field: impl Into<String>,
+        limit: usize,
+        actual: usize,
+        report: SandboxReport,
+    ) -> Self {
+        ChildResponse {
+            ok: false,
+            ir_json: None,
+            error: Some(ChildError::RequestTooLarge {
+                field: field.into(),
+                limit,
+                actual,
+            }),
             report,
         }
     }

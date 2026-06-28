@@ -11,7 +11,7 @@
 //! Three gates, per the normative §2.5 (mechanisms 1–3):
 //!
 //! 1. **Golden corpus byte-stability.** Each `op_fixtures/<name>.mig.js` is recorded
-//!    by the REAL V8 `op.*` recorder ([`record_migration_to_json`]) and its
+//!    by the REAL V8 `op.*` recorder ([`record_migration_to_json_unsandboxed`]) and its
 //!    `.ir.json` is gated against the committed `op_fixtures/<name>.ir.json`. Run
 //!    `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip` to
 //!    regenerate after an intentional shape change, then commit the goldens.
@@ -34,7 +34,7 @@ use std::path::PathBuf;
 
 use zeroship_migrate::model::ir::CanonicalOpList;
 use zeroship_migrate::frontend::{
-    record_migration_to_json, spawn_sandboxed_record, RecordRequest, ResourceBudget,
+    record_migration_to_json_unsandboxed, spawn_sandboxed_record, RecordRequest, ResourceBudget,
     SandboxPosture,
 };
 use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
@@ -116,7 +116,7 @@ fn corpus_is_byte_stable_and_value_equal() {
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
 
         // Record through the REAL V8 op.* recorder → canonical `.ir.json` string.
-        let recorded = record_migration_to_json(&mig_src, OWNER, &stem)
+        let recorded = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("record {stem}: {e}"));
 
         let golden_path = fixtures_dir().join(format!("{stem}.ir.json"));
@@ -169,7 +169,7 @@ fn sandboxed_child_matches_in_process_corpus_including_pg_vendor_subpath() {
         let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
 
-        let in_process = record_migration_to_json(&mig_src, OWNER, &stem)
+        let in_process = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("in-process record {stem}: {e}"));
         let child = record_via_child_to_json(&mig_src, &stem);
 
@@ -220,7 +220,7 @@ fn every_op_variant_has_a_fixture() {
     for stem in fixture_stems() {
         let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
-        let recorded = record_migration_to_json(&mig_src, OWNER, &stem)
+        let recorded = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("record {stem}: {e}"));
         let ir: MigrationIr = serde_json::from_str(&recorded).expect("recorded IR");
         for op in &ir.ops {

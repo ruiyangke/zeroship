@@ -25,7 +25,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::recorder_protocol::{ChildError, ChildOperation, ChildRequest, ChildResponse};
+use super::recorder_protocol::{
+    ChildError, ChildOperation, ChildRequest, ChildResponse, MAX_TS_SOURCE_BYTES,
+};
 use super::sandbox::{pre_exec_netns, pre_exec_rlimits, ResourceBudget, SandboxPosture, SandboxReport};
 
 /// The §8.8 structured error the recorder surfaces (mapped from the child's
@@ -46,6 +48,16 @@ pub enum RecorderError {
     /// The migration `.ts` evaluation reported an authoring error (op outside
     /// recorder, throw, etc.).
     EvalError(String),
+    /// A recorder input exceeded the shared source/blob size cap.
+    RequestTooLarge {
+        /// Which field was too large (`ts_source`, `schema_source`,
+        /// `schema_types_blob`, or `request`).
+        field: String,
+        /// The accepted byte limit.
+        limit: usize,
+        /// The observed byte count.
+        actual: usize,
+    },
     /// The hosted recorder refused to run (kernel floor not met — neither seccomp
     /// nor netns). Maps to a 503/environment refusal, NOT an authoring reject.
     SandboxRefused(String),
@@ -74,6 +86,7 @@ impl RecorderError {
             RecorderError::BudgetExceeded { .. } => "BUILD_RECORDER_BUDGET_EXCEEDED",
             RecorderError::KilledBySeccomp => "BUILD_RECORDER_SANDBOX_VIOLATION",
             RecorderError::EvalError(_) => "RECORD_EVAL_ERROR",
+            RecorderError::RequestTooLarge { .. } => "RECORDER_REQUEST_TOO_LARGE",
             RecorderError::SandboxRefused(_) => "RECORDER_SANDBOX_UNAVAILABLE",
             RecorderError::EnvironmentKilled(_) => "RECORDER_UNREACHABLE",
             RecorderError::Unauthorized(_) => "RECORDER_UNAUTHORIZED",
@@ -93,6 +106,14 @@ impl std::fmt::Display for RecorderError {
                 write!(f, "recorder child killed by seccomp (denied syscall, SIGSYS)")
             }
             RecorderError::EvalError(m) => write!(f, "migration evaluation failed: {m}"),
+            RecorderError::RequestTooLarge {
+                field,
+                limit,
+                actual,
+            } => write!(
+                f,
+                "{field} is {actual} bytes; the recorder accepts at most {limit} bytes"
+            ),
             RecorderError::SandboxRefused(m) => write!(f, "recorder refused to run: {m}"),
             RecorderError::EnvironmentKilled(m) => {
                 write!(f, "recorder child killed by an environment event: {m}")
@@ -197,6 +218,15 @@ fn spawn_sandboxed_frontend(
     allow_read_paths: &[PathBuf],
     schema_types_blob: Option<&str>,
 ) -> Result<(String, SandboxReport), RecorderError> {
+    let field = match operation {
+        ChildOperation::RecordMigration => "ts_source",
+        ChildOperation::EvalSchema => "schema_source",
+    };
+    reject_oversized_source(field, source, MAX_TS_SOURCE_BYTES)?;
+    if let Some(blob) = schema_types_blob {
+        reject_oversized_source("schema_types_blob", blob, MAX_TS_SOURCE_BYTES)?;
+    }
+
     let child_bin = recorder_child_path();
     if !child_bin.exists() {
         return Err(RecorderError::Spawn(format!(
@@ -347,6 +377,15 @@ fn spawn_sandboxed_frontend(
     } else {
         match resp.error {
             Some(ChildError::EvalError(m)) => Err(RecorderError::EvalError(m)),
+            Some(ChildError::RequestTooLarge {
+                field,
+                limit,
+                actual,
+            }) => Err(RecorderError::RequestTooLarge {
+                field,
+                limit,
+                actual,
+            }),
             Some(ChildError::SandboxRefused(m)) => Err(RecorderError::SandboxRefused(m)),
             None => Err(RecorderError::Spawn("recorder child failed with no error".into())),
         }
@@ -431,6 +470,23 @@ fn classify_signal(sig: i32, _stdout_empty: bool) -> RecorderError {
         other => RecorderError::BudgetExceeded {
             which: format!("signal-{other}"),
         },
+    }
+}
+
+fn reject_oversized_source(
+    field: &str,
+    source: &str,
+    limit: usize,
+) -> Result<(), RecorderError> {
+    let actual = source.len();
+    if actual > limit {
+        Err(RecorderError::RequestTooLarge {
+            field: field.to_string(),
+            limit,
+            actual,
+        })
+    } else {
+        Ok(())
     }
 }
 

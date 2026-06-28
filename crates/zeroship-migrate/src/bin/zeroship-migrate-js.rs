@@ -16,11 +16,13 @@
 //! delegates to the library. compio (NOT tokio): `#[compio::main]`.
 
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::SystemTime;
 
 use clap::{Parser, Subcommand};
+use zeroship_migrate::frontend::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use zeroship_migrate::frontend::recorder_http::StructuredError;
 use zeroship_migrate::frontend::{
     assert_packed_hash_matches_committed, build_migrations, build_one_migration, generate_ops,
@@ -444,6 +446,29 @@ fn refuse_clobber<'a>(targets: &[&'a Path], force: bool) -> Result<(), &'a Path>
     Ok(())
 }
 
+fn read_schema_source_bounded(path: &Path) -> Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_TS_SOURCE_BYTES as u64 {
+        return Err(format!(
+            "schema_source is {} bytes; the recorder accepts at most {} bytes",
+            meta.len(),
+            MAX_TS_SOURCE_BYTES
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut limited = file.take((MAX_TS_SOURCE_BYTES as u64) + 1);
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    limited.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_TS_SOURCE_BYTES {
+        return Err(format!(
+            "schema_source is {} bytes; the recorder accepts at most {} bytes",
+            bytes.len(),
+            MAX_TS_SOURCE_BYTES
+        ));
+    }
+    String::from_utf8(bytes).map_err(|e| e.utf8_error().to_string())
+}
+
 async fn cmd_generate(
     schema: &Path,
     database_url: &str,
@@ -453,7 +478,7 @@ async fn cmd_generate(
     dir: &Path,
     force: bool,
 ) -> ExitCode {
-    let source = match std::fs::read_to_string(schema) {
+    let source = match read_schema_source_bounded(schema) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("generate: cannot read {}: {e}", schema.display());

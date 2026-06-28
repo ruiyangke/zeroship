@@ -2254,8 +2254,8 @@ function scalarBind(v) {
 // (C) Determinism lint. Flag the JS nondeterminism accessors (`Date.now()` /
 // `Math.random()` / `crypto.randomUUID()` / `new Date()`), steering authors to
 // the DB-evaluated `c.fn.now()` / `c.fn.genRandomUuid()` (`FnSynth`) scalars. A
-// best-effort, AST-free SOURCE scan; the authoritative determinism guarantee is
-// the build-once committed artifact, this is the pre-commit catch.
+// AST-free SOURCE scan. A finding is a hard build/record error: the build cannot
+// commit an artifact whose recorded IR/checksum changes run-to-run.
 // ===========================================================================
 
 const NONDETERMINISM_PATTERNS = [
@@ -2270,8 +2270,8 @@ const NONDETERMINISM_PATTERNS = [
  * array of `{ code, accessor, suggested_fix, reason }` findings (empty ⇒ clean).
  *
  * SCOPE — intentional coarse whole-source scan: it OVER-flags (a clock accessor
- * in a comment / a non-op helper trips it) and NEVER under-flags. The record path
- * surfaces these as WARNINGS, never a hard reject.
+ * in a comment / a non-op helper trips it) and NEVER under-flags. The record/build
+ * path surfaces these as hard determinism errors.
  */
 export function lintDeterminism(source) {
   if (typeof source !== "string") return [];
