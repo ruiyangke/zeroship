@@ -395,7 +395,7 @@ impl MigrationEngine {
         // (single-actor serialization is the lock). The single-acquire / single-release
         // H10 discipline is unchanged.
         backend
-            .acquire_project_lock(&exec_cfg.project_id)
+            .acquire_project_lock(exec_cfg)
             .await
             .map_err(EngineError::from)?;
 
@@ -405,7 +405,7 @@ impl MigrationEngine {
 
         // Release on EVERY path. Surface the deploy error first; a release failure
         // is logged (the lock auto-releases on session end regardless).
-        if let Err(e) = backend.release_project_lock(&exec_cfg.project_id).await {
+        if let Err(e) = backend.release_project_lock(exec_cfg).await {
             tracing::warn!(
                 error = %e,
                 project = %exec_cfg.project_id,
@@ -840,7 +840,7 @@ impl MigrationEngine {
         let we_hold_lock = lock_mode == LockMode::Acquire;
         if we_hold_lock {
             backend
-                .acquire_project_lock(&exec_cfg.project_id)
+                .acquire_project_lock(exec_cfg)
                 .await
                 .map_err(EngineError::Apply)?;
         }
@@ -856,7 +856,7 @@ impl MigrationEngine {
             // Release the lock we own, surfacing the body's error first. The lock
             // auto-releases on session end regardless, so a release failure after a
             // body error is not masked-but-lost data; we still log it.
-            let unlock = backend.release_project_lock(&exec_cfg.project_id).await;
+            let unlock = backend.release_project_lock(exec_cfg).await;
             return match result {
                 Ok(o) => unlock.map(|()| o).map_err(|e| {
                     DeclarativeApplyError::Plain(EngineError::Apply(e))

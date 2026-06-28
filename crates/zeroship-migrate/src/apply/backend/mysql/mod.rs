@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
 use super::{CrossDeployObligations, MigrationBackend};
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
@@ -38,6 +39,28 @@ pub struct MysqlSessionSnapshot {
 #[derive(Debug)]
 pub struct MysqlBackend {
     conn: RefCell<JsDriverConn>,
+}
+
+const MYSQL_MIGRATOR_USER: &str = "zs_migrator";
+const MYSQL_MIGRATOR_HOST: &str = "%";
+const MYSQL_LOCK_PREFIX: &str = "zs_mig_";
+const MYSQL_LOCK_HEX_CHARS: usize = 56;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlMigratorAccount {
+    pub user: String,
+    pub host: String,
+    pub password: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MysqlMigratorAccountError {
+    #[error("mysql migrator account db error: {0}")]
+    Db(#[from] JsDriverError),
+    #[error("mysql migrator account journal bootstrap failed: {0}")]
+    Journal(#[from] JournalError),
+    #[error("mysql migrator account identifier error: {0}")]
+    IdentQuote(#[from] crate::render::dml::IdentQuoteError),
 }
 
 impl MysqlBackend {
@@ -94,6 +117,123 @@ impl MysqlBackend {
     }
 }
 
+pub fn mysql_migration_lock_name(project_id: &str) -> String {
+    let digest = Sha256::digest(project_id.as_bytes());
+    let suffix = hex::encode(digest);
+    format!(
+        "{MYSQL_LOCK_PREFIX}{}",
+        &suffix[..MYSQL_LOCK_HEX_CHARS.min(suffix.len())]
+    )
+}
+
+fn mysql_get_lock_timeout_seconds(timeout: Duration) -> String {
+    let millis = if timeout.is_zero() {
+        0
+    } else {
+        timeout.as_millis().max(1)
+    };
+    format!("{}.{:03}", millis / 1000, millis % 1000)
+}
+
+fn mysql_lock_timeout_error(lock_name: &str, timeout_seconds: &str) -> ApplyError {
+    ApplyError::Db(transport::backend_error(JsDriverError::Remote {
+        code: 1205,
+        sqlstate: "HY000".to_string(),
+        message: format!(
+            "timed out waiting for MySQL migration advisory lock {lock_name} after {timeout_seconds}s"
+        ),
+    }))
+}
+
+fn mysql_quote_string_lit(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn mysql_migrator_account_sql() -> String {
+    format!(
+        "{}@{}",
+        mysql_quote_string_lit(MYSQL_MIGRATOR_USER),
+        mysql_quote_string_lit(MYSQL_MIGRATOR_HOST)
+    )
+}
+
+fn mysql_generated_password() -> String {
+    format!("zs_{}", uuid::Uuid::new_v4().simple())
+}
+
+pub async fn provision_mysql_migrator_account(
+    admin: &MysqlBackend,
+    cfg: &ExecutorConfig,
+) -> Result<MysqlMigratorAccount, MysqlMigratorAccountError> {
+    provision_mysql_migrator_account_with_password(admin, cfg, mysql_generated_password()).await
+}
+
+pub async fn provision_mysql_migrator_account_with_password(
+    admin: &MysqlBackend,
+    cfg: &ExecutorConfig,
+    password: impl Into<String>,
+) -> Result<MysqlMigratorAccount, MysqlMigratorAccountError> {
+    let password = password.into();
+    let account = mysql_migrator_account_sql();
+    let password_lit = mysql_quote_string_lit(&password);
+
+    admin
+        .exec(&format!(
+            "CREATE USER IF NOT EXISTS {account} IDENTIFIED BY {password_lit}"
+        ))
+        .await?;
+    admin
+        .exec(&format!("ALTER USER {account} IDENTIFIED BY {password_lit}"))
+        .await?;
+    admin
+        .exec(&format!(
+            "REVOKE ALL PRIVILEGES, GRANT OPTION FROM {account}"
+        ))
+        .await?;
+
+    ensure_journal_mysql(admin, cfg).await?;
+
+    let project = mysql_quote_ident(&cfg.project_schema)?;
+    admin
+        .exec(&format!(
+            "GRANT CREATE, ALTER, DROP, INDEX, REFERENCES, CREATE VIEW, SHOW VIEW, \
+                    TRIGGER, CREATE ROUTINE, ALTER ROUTINE, EVENT
+               ON {project}.* TO {account}"
+        ))
+        .await?;
+
+    for table in [
+        "schema_migrations",
+        "schema_migrations_inflight",
+        "schema_migrations_supersedes",
+    ] {
+        let table = mysql_meta_table(cfg, table)?;
+        admin
+            .exec(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {account}"
+            ))
+            .await?;
+    }
+
+    Ok(MysqlMigratorAccount {
+        user: MYSQL_MIGRATOR_USER.to_string(),
+        host: MYSQL_MIGRATOR_HOST.to_string(),
+        password,
+    })
+}
+
+pub async fn deprovision_mysql_migrator_account(
+    admin: &MysqlBackend,
+) -> Result<(), MysqlMigratorAccountError> {
+    admin
+        .exec(&format!(
+            "DROP USER IF EXISTS {}",
+            mysql_migrator_account_sql()
+        ))
+        .await?;
+    Ok(())
+}
+
 impl MigrationBackend for MysqlBackend {
     type SessionSnapshot = MysqlSessionSnapshot;
 
@@ -105,15 +245,55 @@ impl MigrationBackend for MysqlBackend {
         false
     }
 
-    async fn acquire_project_lock(&self, _project_id: &str) -> Result<(), ApplyError> {
-        // E2b wires MySQL GET_LOCK. E2a keeps the lock capability as an explicit
-        // no-op so the live single-process apply path can exercise the rest of
-        // the backend without pretending to have confinement/serialization.
-        Ok(())
+    async fn acquire_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
+        let lock_name = mysql_migration_lock_name(&cfg.project_id);
+        let timeout = mysql_get_lock_timeout_seconds(cfg.pg.lock_timeout);
+        let rows = self
+            .query_json(
+                "SELECT GET_LOCK(?, CAST(? AS DECIMAL(10,3))) AS acquired",
+                &[
+                    BindValue::Text(lock_name.clone()),
+                    BindValue::Decimal(timeout.clone()),
+                ],
+            )
+            .await
+            .map_err(apply_db)?;
+        let row = rows.rows.first().ok_or_else(|| {
+            ApplyError::Backend("mysql GET_LOCK returned no row".to_string())
+        })?;
+        match value_to_string(row.get("acquired")).as_deref() {
+            Some("1") => Ok(()),
+            Some("0") => Err(mysql_lock_timeout_error(&lock_name, &timeout)),
+            Some(other) => Err(ApplyError::Backend(format!(
+                "mysql GET_LOCK returned unexpected value {other:?} for {lock_name}"
+            ))),
+            None => Err(ApplyError::Backend(format!(
+                "mysql GET_LOCK returned NULL for {lock_name}"
+            ))),
+        }
     }
 
-    async fn release_project_lock(&self, _project_id: &str) -> Result<(), ApplyError> {
-        Ok(())
+    async fn release_project_lock(&self, cfg: &ExecutorConfig) -> Result<(), ApplyError> {
+        let lock_name = mysql_migration_lock_name(&cfg.project_id);
+        let rows = self
+            .query_json(
+                "SELECT RELEASE_LOCK(?) AS released",
+                &[BindValue::Text(lock_name.clone())],
+            )
+            .await
+            .map_err(apply_db)?;
+        let row = rows.rows.first().ok_or_else(|| {
+            ApplyError::Backend("mysql RELEASE_LOCK returned no row".to_string())
+        })?;
+        match value_to_string(row.get("released")).as_deref() {
+            Some("1") => Ok(()),
+            Some(other) => Err(ApplyError::Backend(format!(
+                "mysql RELEASE_LOCK returned {other:?} for {lock_name}; lock was not held by this session"
+            ))),
+            None => Err(ApplyError::Backend(format!(
+                "mysql RELEASE_LOCK returned NULL for {lock_name}"
+            ))),
+        }
     }
 
     async fn snapshot_session(&self) -> Result<Self::SessionSnapshot, ApplyError> {
@@ -418,15 +598,18 @@ async fn ensure_journal_mysql(
     cfg: &ExecutorConfig,
 ) -> Result<(), JournalError> {
     let meta = mysql_quote_ident(&cfg.pg.meta_schema)?;
-    backend
-        .exec(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
-        .await
-        .map_err(journal_backend)?;
+    if !mysql_schema_exists(backend, &cfg.pg.meta_schema).await? {
+        backend
+            .exec(&format!("CREATE SCHEMA IF NOT EXISTS {meta}"))
+            .await
+            .map_err(journal_backend)?;
+    }
 
     let migrations = mysql_meta_table(cfg, "schema_migrations")?;
-    backend
-        .exec(&format!(
-            "CREATE TABLE IF NOT EXISTS {migrations} (
+    if !mysql_table_exists(backend, &cfg.pg.meta_schema, "schema_migrations").await? {
+        backend
+            .exec(&format!(
+                "CREATE TABLE IF NOT EXISTS {migrations} (
                 event_seq BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 event_kind VARCHAR(32) NOT NULL,
                 version VARCHAR(128) NOT NULL,
@@ -442,38 +625,76 @@ async fn ensure_journal_mysql(
                 CHECK (phase IS NULL OR phase IN ('started','completed')),
                 CHECK (kind IS NULL OR kind IN ('apply','baseline','squash','repeatable'))
             )"
-        ))
-        .await
-        .map_err(journal_backend)?;
+            ))
+            .await
+            .map_err(journal_backend)?;
+    }
 
     let supersedes = mysql_meta_table(cfg, "schema_migrations_supersedes")?;
-    backend
-        .exec(&format!(
-            "CREATE TABLE IF NOT EXISTS {supersedes} (
+    if !mysql_table_exists(backend, &cfg.pg.meta_schema, "schema_migrations_supersedes").await? {
+        backend
+            .exec(&format!(
+                "CREATE TABLE IF NOT EXISTS {supersedes} (
                 id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 squash_version VARCHAR(128) NOT NULL,
                 superseded_version VARCHAR(128) NOT NULL,
                 recorded_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
             )"
-        ))
-        .await
-        .map_err(journal_backend)?;
+            ))
+            .await
+            .map_err(journal_backend)?;
+    }
 
     let inflight = mysql_meta_table(cfg, "schema_migrations_inflight")?;
-    backend
-        .exec(&format!(
-            "CREATE TABLE IF NOT EXISTS {inflight} (
+    if !mysql_table_exists(backend, &cfg.pg.meta_schema, "schema_migrations_inflight").await? {
+        backend
+            .exec(&format!(
+                "CREATE TABLE IF NOT EXISTS {inflight} (
                 version VARCHAR(128) NOT NULL PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
                 checksum VARCHAR(128) NOT NULL,
                 started_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
                 applied_by VARCHAR(255) NOT NULL
             )"
-        ))
-        .await
-        .map_err(journal_backend)?;
+            ))
+            .await
+            .map_err(journal_backend)?;
+    }
 
     Ok(())
+}
+
+async fn mysql_schema_exists(
+    backend: &MysqlBackend,
+    schema: &str,
+) -> Result<bool, JournalError> {
+    let rows = backend
+        .query_json(
+            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+            &[BindValue::Text(schema.to_string())],
+        )
+        .await
+        .map_err(journal_backend)?;
+    Ok(!rows.rows.is_empty())
+}
+
+async fn mysql_table_exists(
+    backend: &MysqlBackend,
+    schema: &str,
+    table: &str,
+) -> Result<bool, JournalError> {
+    let rows = backend
+        .query_json(
+            "SELECT TABLE_NAME FROM information_schema.TABLES
+              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            &[
+                BindValue::Text(schema.to_string()),
+                BindValue::Text(table.to_string()),
+            ],
+        )
+        .await
+        .map_err(journal_backend)?;
+    Ok(!rows.rows.is_empty())
 }
 
 async fn record_started_mysql(
@@ -943,6 +1164,50 @@ mod tests {
                 .await
                 .expect("echo query");
             assert_eq!(rows.rows[0].get("command_count"), Some(&serde_json::json!(2)));
+        });
+    }
+
+    #[test]
+    fn mysql_lock_name_hashes_long_project_id_to_mysql_limit() {
+        let long = format!("prj_{}", "tenant_with_a_very_long_project_identifier_".repeat(8));
+        let name = mysql_migration_lock_name(&long);
+        assert!(name.starts_with(MYSQL_LOCK_PREFIX), "lock name: {name}");
+        assert!(
+            name.len() <= 64,
+            "MySQL GET_LOCK names are capped at 64 chars, got {}: {name}",
+            name.len()
+        );
+        assert_eq!(
+            name.len(),
+            MYSQL_LOCK_PREFIX.len() + MYSQL_LOCK_HEX_CHARS,
+            "lock name should be fixed-width hashed, not raw project text"
+        );
+        assert_ne!(
+            name,
+            mysql_migration_lock_name(&(long + "_other")),
+            "different project ids should hash to different lock names"
+        );
+    }
+
+    #[test]
+    fn mysql_reset_role_best_effort_is_driver_noop() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let backend = MysqlBackend::echo().expect("echo backend");
+            backend.exec("before reset").await.expect("echo exec");
+            backend.reset_role_best_effort().await;
+            let rows = backend
+                .query_json("after reset", &[])
+                .await
+                .expect("echo query");
+            assert_eq!(
+                rows.rows[0].get("command_count"),
+                Some(&serde_json::json!(2)),
+                "reset_role_best_effort must not issue SET ROLE DEFAULT on MySQL"
+            );
+            assert_eq!(
+                rows.rows[0].get("last_sql"),
+                Some(&serde_json::json!("after reset"))
+            );
         });
     }
 

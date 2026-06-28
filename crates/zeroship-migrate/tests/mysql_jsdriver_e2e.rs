@@ -5,16 +5,19 @@ mod node_realworld;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use zeroship_migrate::render::step::PlanStep;
 use zeroship_migrate::{
-    diff_snapshots, fold_ops, ApplyError, Approval, Checksum, ChecksumInput,
-    EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, Migration,
-    JsDriverError, MigrationBackend, MigrationEngine, MigrationFlags, MigrationId,
-    MigrationIr, MysqlBackend, RowSet, SqlDialect, CURRENT_IR_VERSION,
+    deprovision_mysql_migrator_account, diff_snapshots, fold_ops,
+    provision_mysql_migrator_account, ApplyError, Approval, Checksum,
+    ChecksumInput, EngineError, ExecutorConfig, GuardConfig, IrAuthor,
+    JsDriverError, LiveSchema, Migration, MigrationBackend, MigrationEngine,
+    MigrationFlags, MigrationId, MigrationIr, MysqlBackend, MysqlMigratorAccount,
+    RowSet, SqlDialect, CURRENT_IR_VERSION,
 };
 
 use node_realworld::{allowlist, ensure_mysql, lock_env, EnvGuard, LOCALHOST};
@@ -41,6 +44,16 @@ impl MysqlDsn {
             "database": self.database,
         })
         .to_string()
+    }
+
+    fn for_migrator(&self, cfg: &ExecutorConfig, account: &MysqlMigratorAccount) -> Self {
+        Self {
+            host: self.host.clone(),
+            port: self.port,
+            user: account.user.clone(),
+            password: account.password.clone(),
+            database: cfg.project_schema.clone(),
+        }
     }
 }
 
@@ -164,6 +177,19 @@ fn backend_for(live: &LiveMysql) -> MysqlBackend {
     backend_for_result(live).expect("open live mysql2 JS driver backend")
 }
 
+fn migrator_backend_for(
+    live: &LiveMysql,
+    cfg: &ExecutorConfig,
+    account: &MysqlMigratorAccount,
+) -> MysqlBackend {
+    MysqlBackend::open_mysql_dsn_json_with_policy(
+        live.dsn.for_migrator(cfg, account).json(),
+        allowlist(&live.dsn.host, live.dsn.port, 8, 16 * 1024 * 1024),
+        Duration::from_secs(45),
+    )
+    .expect("open live mysql2 JS driver backend as zs_migrator")
+}
+
 struct MysqlSchemaGuard {
     live: LiveMysql,
     cfg: Option<ExecutorConfig>,
@@ -209,14 +235,15 @@ fn run_isolated_mysql(
     body: impl for<'a> FnOnce(
         &'a MysqlBackend,
         &'a ExecutorConfig,
+        &'a MysqlMigratorAccount,
     ) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
 ) {
     let cfg = cfg_for(&token(label));
     let mut cleanup = MysqlSchemaGuard::new(live.clone(), cfg.clone());
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let backend = setup(live, &cfg).await;
-            body(&backend, &cfg).await;
+            let (backend, account) = setup(live, &cfg).await;
+            body(&backend, &cfg, &account).await;
         });
     }));
     let cleanup_result = cleanup.cleanup_now();
@@ -229,8 +256,9 @@ fn run_isolated_mysql(
     cleanup_result.expect("drop isolated MySQL e2e schemas");
 }
 
-async fn setup(live: &LiveMysql, cfg: &ExecutorConfig) -> MysqlBackend {
+async fn setup(live: &LiveMysql, cfg: &ExecutorConfig) -> (MysqlBackend, MysqlMigratorAccount) {
     let backend = backend_for(live);
+    let _ = deprovision_mysql_migrator_account(&backend).await;
     let _ = backend
         .exec(&format!("DROP SCHEMA IF EXISTS {}", qi(&cfg.project_schema)))
         .await;
@@ -241,11 +269,16 @@ async fn setup(live: &LiveMysql, cfg: &ExecutorConfig) -> MysqlBackend {
         .exec(&format!("CREATE SCHEMA {}", qi(&cfg.project_schema)))
         .await
         .expect("create isolated MySQL project schema");
+    let account = provision_mysql_migrator_account(&backend, cfg)
+        .await
+        .expect("provision least-priv MySQL migrator account");
+    prewarm_mysql_migrator_auth_cache(live, cfg, &account);
     println!(
-        "mysql_jsdriver_e2e using project schema {} and meta schema {} ({})",
-        cfg.project_schema, cfg.pg.meta_schema, live.source
+        "mysql_jsdriver_e2e using project schema {} and meta schema {} as {}@{} ({})",
+        cfg.project_schema, cfg.pg.meta_schema, account.user, account.host, live.source
     );
-    backend
+    drop(backend);
+    (migrator_backend_for(live, cfg, &account), account)
 }
 
 async fn teardown(backend: &MysqlBackend, cfg: &ExecutorConfig) -> Result<(), String> {
@@ -257,7 +290,56 @@ async fn teardown(backend: &MysqlBackend, cfg: &ExecutorConfig) -> Result<(), St
         .exec(&format!("DROP SCHEMA IF EXISTS {}", qi(&cfg.pg.meta_schema)))
         .await
         .map_err(|err| format!("drop meta schema {} failed: {err}", cfg.pg.meta_schema))?;
+    deprovision_mysql_migrator_account(backend)
+        .await
+        .map_err(|err| format!("drop zs_migrator failed: {err}"))?;
     Ok(())
+}
+
+fn prewarm_mysql_migrator_auth_cache(
+    live: &LiveMysql,
+    cfg: &ExecutorConfig,
+    account: &MysqlMigratorAccount,
+) {
+    assert_eq!(
+        (live.dsn.host.as_str(), live.dsn.port),
+        ("127.0.0.1", 3307),
+        "mysql_jsdriver_e2e hard e2e expects zeroship-runtime-mysql2-e2e on 127.0.0.1:3307"
+    );
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg("zeroship-runtime-mysql2-e2e")
+        .arg("mysql")
+        .arg("--protocol=TCP")
+        .arg("-h127.0.0.1")
+        .arg("-P3306")
+        .arg(format!("-u{}", account.user))
+        .arg(format!("--password={}", account.password))
+        .arg("-D")
+        .arg(&cfg.project_schema)
+        .arg("--batch")
+        .arg("--skip-column-names")
+        .arg("-e")
+        .arg("SELECT CURRENT_USER()")
+        .output()
+        .expect("run mysql auth-cache prewarm in e2e container");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "zs_migrator auth-cache prewarm failed: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+    let current_user = stdout.trim();
+    assert!(
+        current_user.starts_with("zs_migrator@"),
+        "prewarm must authenticate as zs_migrator, got {current_user:?}"
+    );
+    println!(
+        "mysql_jsdriver_e2e prewarmed caching_sha2 auth cache as {current_user}"
+    );
 }
 
 fn fixture_ir() -> MigrationIr {
@@ -367,6 +449,176 @@ fn field<'a>(row: &'a serde_json::Map<String, Value>, key: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("row missing field {key}: {row:?}"))
 }
 
+fn manual_migration(name: &str, up: String) -> Migration {
+    let mut migration = Migration {
+        version: MigrationId::generate(),
+        name: name.to_string(),
+        up,
+        down: None,
+        checksum: Checksum::of(&ChecksumInput {
+            up: "",
+            down: None,
+            flags: &MigrationFlags::default(),
+            owner_app: "",
+            depends_on: &[],
+            supersedes: &[],
+            preconditions: &[],
+        }),
+        flags: MigrationFlags::default(),
+        owner_app: OWNER.to_string(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        existence_guard: None,
+    };
+    migration.recompute_checksum();
+    migration
+}
+
+async fn apply_one_result(
+    backend: &MysqlBackend,
+    cfg: &ExecutorConfig,
+    migration: &Migration,
+    actor: &str,
+) -> Result<zeroship_migrate::ApplyOutcome, EngineError> {
+    MigrationEngine::new()
+        .apply_verified(
+            std::slice::from_ref(migration),
+            &GuardConfig::confined_mysql(cfg.project_schema.clone()),
+            None,
+            Approval::None,
+            backend,
+            cfg,
+            actor,
+        )
+        .await
+}
+
+async fn table_exists(backend: &MysqlBackend, schema: &str, table: &str) -> bool {
+    let rows = query(
+        backend,
+        "SELECT TABLE_NAME FROM information_schema.TABLES
+          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+        &[
+            zeroship_migrate::render::step::BindValue::Text(schema.to_string()),
+            zeroship_migrate::render::step::BindValue::Text(table.to_string()),
+        ],
+    )
+    .await;
+    rows_len(&rows) == 1
+}
+
+async fn wait_for_table_or_child_exit(
+    backend: &MysqlBackend,
+    schema: &str,
+    table: &str,
+    timeout: Duration,
+    child: &mut Child,
+) -> Result<(), String> {
+    let start = Instant::now();
+    loop {
+        if table_exists(backend, schema, table).await {
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("poll helper child failed: {err}"))?
+        {
+            return Err(format!(
+                "helper child exited before {schema}.{table} became visible: {status}"
+            ));
+        }
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "timed out waiting for {schema}.{table} while helper child was still running"
+            ));
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn spawn_lock_first_apply_helper(
+    live: &LiveMysql,
+    cfg: &ExecutorConfig,
+    account: &MysqlMigratorAccount,
+) -> Child {
+    let exe = std::env::current_exe().expect("current test binary path");
+    Command::new(exe)
+        .arg("--exact")
+        .arg("mysql_advisory_lock_first_apply_helper")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("ZS_MYSQL_LOCK_HELPER", "1")
+        .env("ZS_MYSQL_LOCK_HELPER_HOST", &live.dsn.host)
+        .env("ZS_MYSQL_LOCK_HELPER_PORT", live.dsn.port.to_string())
+        .env("ZS_MYSQL_LOCK_HELPER_DATABASE", &live.dsn.database)
+        .env("ZS_MYSQL_LOCK_HELPER_PROJECT_ID", &cfg.project_id)
+        .env("ZS_MYSQL_LOCK_HELPER_PROJECT_SCHEMA", &cfg.project_schema)
+        .env("ZS_MYSQL_LOCK_HELPER_META_SCHEMA", &cfg.pg.meta_schema)
+        .env("ZS_MYSQL_LOCK_HELPER_PASSWORD", &account.password)
+        .env("MIGRATE_REQUIRE_MYSQL", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn MySQL lock helper test process")
+}
+
+fn wait_for_helper_success(child: Child, context: &str) {
+    let output = child
+        .wait_with_output()
+        .expect("wait for MySQL lock helper child");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        panic!(
+            "MySQL lock helper failed during {context}: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status, stdout, stderr
+        );
+    }
+    println!("mysql_jsdriver_e2e lock helper output:\n{stdout}");
+    if !stderr.trim().is_empty() {
+        eprintln!("mysql_jsdriver_e2e lock helper stderr:\n{stderr}");
+    }
+}
+
+fn assert_mysql_access_denied(err: JsDriverError, context: &str) {
+    match err {
+        JsDriverError::Remote { code, sqlstate, message }
+            if matches!(code, 1044 | 1045 | 1142 | 1227 | 1410) =>
+        {
+            println!(
+                "mysql_jsdriver_e2e confinement denied {context}: code={code} sqlstate={sqlstate} message={message}"
+            );
+        }
+        other => panic!("expected MySQL access-denied error for {context}, got {other:?}"),
+    }
+}
+
+fn assert_mysql_lock_timeout(err: EngineError, waited: Duration) {
+    let EngineError::Apply(ApplyError::Db(db)) = err else {
+        panic!("expected lock timeout as EngineError::Apply(Db), got {err:?}");
+    };
+    let remote = db
+        .downcast_ref::<JsDriverError>()
+        .unwrap_or_else(|| panic!("lock timeout should downcast to JsDriverError: {db}"));
+    assert!(
+        matches!(
+            remote,
+            JsDriverError::Remote {
+                code: 1205,
+                sqlstate,
+                ..
+            } if sqlstate == "HY000"
+        ),
+        "expected synthetic MySQL lock-timeout remote error, got {remote:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(100),
+        "second apply should have actually waited on GET_LOCK, waited {waited:?}"
+    );
+    println!("mysql_jsdriver_e2e advisory lock contention returned {remote:?} after {waited:?}");
+}
+
 #[test]
 fn live_teardown_guard_drops_schemas_after_panic() {
     let _lock = lock_env();
@@ -381,11 +633,7 @@ fn live_teardown_guard_drops_schemas_after_panic() {
     }));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            let backend = setup(&live, &cfg).await;
-            backend
-                .exec(&format!("CREATE SCHEMA {}", qi(&cfg.pg.meta_schema)))
-                .await
-                .expect("create meta schema for panic-cleanup probe");
+            let (backend, _account) = setup(&live, &cfg).await;
             backend
                 .exec(&format!(
                     "CREATE TABLE {}.{} (id INT NOT NULL)",
@@ -431,7 +679,7 @@ fn live_apply_creates_table_and_index_over_mysql2_node_net() {
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    run_isolated_mysql(&live, "apply", |backend, cfg| Box::pin(async move {
+    run_isolated_mysql(&live, "apply", |backend, cfg, _account| Box::pin(async move {
         let (_ir, migrations) = fixture_migrations(&cfg.project_schema);
         let outcome = apply_fixture(&backend, &cfg, &migrations).await;
         assert_eq!(outcome.applied, migration_versions(&migrations));
@@ -466,7 +714,7 @@ fn live_journal_records_completed_and_second_apply_skips() {
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    run_isolated_mysql(&live, "journal", |backend, cfg| Box::pin(async move {
+    run_isolated_mysql(&live, "journal", |backend, cfg, _account| Box::pin(async move {
         let (_ir, migrations) = fixture_migrations(&cfg.project_schema);
         apply_fixture(&backend, &cfg, &migrations).await;
 
@@ -530,12 +778,209 @@ fn live_journal_records_completed_and_second_apply_skips() {
 }
 
 #[test]
+#[ignore = "helper launched by live_advisory_lock_serializes_concurrent_mysql_applies"]
+fn mysql_advisory_lock_first_apply_helper() {
+    if std::env::var("ZS_MYSQL_LOCK_HELPER").as_deref() != Ok("1") {
+        return;
+    }
+    let _env = EnvGuard::set_dev();
+    let host = std::env::var("ZS_MYSQL_LOCK_HELPER_HOST")
+        .expect("helper host env");
+    let port = std::env::var("ZS_MYSQL_LOCK_HELPER_PORT")
+        .expect("helper port env")
+        .parse::<u16>()
+        .expect("helper port parses");
+    let database = std::env::var("ZS_MYSQL_LOCK_HELPER_DATABASE")
+        .expect("helper database env");
+    let mut cfg = ExecutorConfig::new(
+        std::env::var("ZS_MYSQL_LOCK_HELPER_PROJECT_ID")
+            .expect("helper project id env"),
+        std::env::var("ZS_MYSQL_LOCK_HELPER_PROJECT_SCHEMA")
+            .expect("helper project schema env"),
+    );
+    cfg.pg.meta_schema = std::env::var("ZS_MYSQL_LOCK_HELPER_META_SCHEMA")
+        .expect("helper meta schema env");
+    let account = MysqlMigratorAccount {
+        user: "zs_migrator".to_string(),
+        host: "%".to_string(),
+        password: std::env::var("ZS_MYSQL_LOCK_HELPER_PASSWORD")
+            .expect("helper migrator password env"),
+    };
+    let live = LiveMysql {
+        dsn: MysqlDsn {
+            host,
+            port,
+            user: "root".to_string(),
+            password: "zeroship".to_string(),
+            database,
+        },
+        source: "lock helper env".to_string(),
+    };
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let backend = migrator_backend_for(&live, &cfg, &account);
+        let first = manual_migration(
+            "lock_first_holds_plan",
+            format!(
+                "CREATE TABLE {}.{} (id INT NOT NULL);\nSELECT SLEEP(5)",
+                qi(&cfg.project_schema),
+                qi("lock_first")
+            ),
+        );
+        apply_one_result(
+            &backend,
+            &cfg,
+            &first,
+            "mysql-jsdriver-e2e-lock-first-helper",
+        )
+        .await
+        .expect("first helper apply should hold and release GET_LOCK cleanly");
+        println!("mysql_jsdriver_e2e lock helper first apply completed");
+    });
+}
+
+#[test]
+fn live_advisory_lock_serializes_concurrent_mysql_applies() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+    let live_for_closure = live.clone();
+
+    run_isolated_mysql(&live, "lock", move |backend, cfg, account| {
+        let live = live_for_closure.clone();
+        Box::pin(async move {
+            let second = manual_migration(
+                "lock_second_waits",
+                format!(
+                    "CREATE TABLE {}.{} (id INT NOT NULL)",
+                    qi(&cfg.project_schema),
+                    qi("lock_second")
+                ),
+            );
+
+            let mut short_cfg = cfg.clone();
+            short_cfg.pg.lock_timeout = Duration::from_secs(1);
+            let mut first_apply = spawn_lock_first_apply_helper(&live, cfg, account);
+            if let Err(err) = wait_for_table_or_child_exit(
+                backend,
+                &cfg.project_schema,
+                "lock_first",
+                Duration::from_secs(10),
+                &mut first_apply,
+            )
+            .await
+            {
+                let _ = first_apply.kill();
+                wait_for_helper_success(first_apply, "startup after wait failure");
+                panic!("{err}");
+            }
+
+            let started = Instant::now();
+            let err = apply_one_result(
+                backend,
+                &short_cfg,
+                &second,
+                "mysql-jsdriver-e2e-lock-second",
+            )
+            .await
+            .expect_err("second apply must fail closed while first holds GET_LOCK");
+            assert_mysql_lock_timeout(err, started.elapsed());
+
+            assert!(
+                !table_exists(backend, &cfg.project_schema, "lock_second").await,
+                "second migration must not enter the plan while GET_LOCK is held"
+            );
+
+            wait_for_helper_success(first_apply, "first apply completion");
+
+            let retry = apply_one_result(
+                backend,
+                cfg,
+                &second,
+                "mysql-jsdriver-e2e-lock-second-retry",
+            )
+            .await
+            .expect("second apply should proceed after first releases GET_LOCK");
+            assert_eq!(retry.applied, vec![second.version.as_str().to_string()]);
+            assert!(
+                table_exists(backend, &cfg.project_schema, "lock_second").await,
+                "second migration table should exist after retry"
+            );
+            println!("mysql_jsdriver_e2e advisory lock serialization assertions ran on real :3307");
+        })
+    });
+}
+
+#[test]
+fn live_migrator_account_confines_privileges_and_reset_role_is_noop() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+    let default_database = live.dsn.database.clone();
+
+    run_isolated_mysql(&live, "confine", |backend, cfg, _account| Box::pin(async move {
+        let before = query(backend, "SELECT CURRENT_USER() AS current_user_name", &[]).await;
+        let before_user = field(&before.rows[0], "current_user_name")
+            .as_str()
+            .expect("CURRENT_USER should be a string")
+            .to_string();
+        assert!(
+            before_user.starts_with("zs_migrator@"),
+            "migration connection must authenticate as zs_migrator, got {before_user}"
+        );
+
+        backend.reset_role_best_effort().await;
+        let after = query(backend, "SELECT CURRENT_USER() AS current_user_name", &[]).await;
+        let after_user = field(&after.rows[0], "current_user_name")
+            .as_str()
+            .expect("CURRENT_USER should be a string");
+        assert_eq!(
+            after_user, before_user,
+            "MySQL reset_role_best_effort must not change account identity"
+        );
+
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (id INT NOT NULL)",
+                qi(&cfg.project_schema),
+                qi("in_scope_allowed")
+            ))
+            .await
+            .expect("in-scope project DDL should be allowed for zs_migrator");
+        assert!(
+            table_exists(backend, &cfg.project_schema, "in_scope_allowed").await,
+            "in-scope project DDL should materialize"
+        );
+
+        let create_user = backend
+            .exec("CREATE USER 'zs_forbidden_e2e'@'%' IDENTIFIED BY 'nope'")
+            .await
+            .expect_err("zs_migrator must not be able to create users");
+        assert_mysql_access_denied(create_user, "CREATE USER");
+
+        let cross_schema = backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (id INT NOT NULL)",
+                qi(&default_database),
+                qi("zs_forbidden_cross_schema")
+            ))
+            .await
+            .expect_err("zs_migrator must not be able to create outside project schema");
+        assert_mysql_access_denied(cross_schema, "cross-schema CREATE TABLE");
+
+        println!(
+            "mysql_jsdriver_e2e confinement assertions ran: denied privileged/cross-schema, allowed in-scope, current_user={after_user}"
+        );
+    }));
+}
+
+#[test]
 fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visible() {
     let _lock = lock_env();
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    run_isolated_mysql(&live, "phase", |backend, cfg| Box::pin(async move {
+    run_isolated_mysql(&live, "phase", |backend, cfg, _account| Box::pin(async move {
         let up = format!(
             "CREATE TABLE {}.{} (id INT NOT NULL);\nCREATE INDEX {} ON {}.{} (id)",
             qi(&cfg.project_schema),
@@ -629,7 +1074,7 @@ fn live_snapshot_roundtrips_and_redeploy_is_noop() {
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    run_isolated_mysql(&live, "snapshot", |backend, cfg| Box::pin(async move {
+    run_isolated_mysql(&live, "snapshot", |backend, cfg, _account| Box::pin(async move {
         let (ir, migrations) = fixture_migrations(&cfg.project_schema);
         apply_fixture(&backend, &cfg, &migrations).await;
 
