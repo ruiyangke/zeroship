@@ -506,7 +506,7 @@ export function buildPlugin(
     name: "zeroship:build",
 
     /**
-     * Migration-first gen-types (P3). Before the bundle is walked, fold the
+     * Migration-first gen-types. Before the bundle is walked, fold the
      * committed `.ir.json` migration set into the typed `env.db` surface
      * (`env.db.ts` + `schema.runtime.json`) by shelling the EXISTING
      * `zeroship-migrate-js gen-types` subcommand.
@@ -517,10 +517,9 @@ export function buildPlugin(
      * In a non-production build we REGENERATE (write) so a local
      * `vite build --mode development` refreshes the committed types.
      *
-     * **P3 deferral:** the emitted artifacts are committed but live OUTSIDE the
-     * app tsconfig `include` (default `generated/zeroship/`) and are NOT wired
-     * into the typecheck — P5 owns the type-activation cutover (alias swap +
-     * deletion of `export default { schema }`). See `migrations.ts`.
+     * Type activation is app-level: the emitted `env.db.ts` is committed under
+     * `generated/zeroship/` by default and included by the app tsconfig. See
+     * `migrations.ts`.
      *
      * Skipped in dev (the dev-server's `hotUpdate` handles regeneration) and
      * when there is no migrations dir on disk.

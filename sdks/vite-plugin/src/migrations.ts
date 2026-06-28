@@ -173,20 +173,14 @@ export function sha256Hex(bytes: Buffer): Sha256Hex {
 // subcommand, which folds the committed `.ir.json` set and emits the typed
 // `env.db` surface (`env.db.ts` + `schema.runtime.json`) into an output DIR.
 //
-// **P3 is mechanical-only — type ACTIVATION is deferred to P5.** Both
-// `@zeroship/db`'s shipped `env.d.ts` AND the generated `env.db.ts` declare
-// `declare module "zeroship" { interface Env { db } }`; having BOTH in the same
-// tsc program is TS2717 (duplicate-property) unless the `Db<>` types are
-// byte-identical. So P3 emits into a COMMITTED dir that is NOT in the app
-// tsconfig `include` (default `generated/zeroship/`, see `GEN_TYPES_OUT_DEFAULT`).
-// The artifacts are generated + committed + drift-gated, but NOT wired into the
-// typecheck and the `@zeroship/db`/zeroship-schema alias is untouched. P5 owns
-// the cutover (delete `export default { schema }`, swap the alias, fold the
-// generated `env.db.ts` into `include`).
+// P5 activation: the generated `env.db.ts` is the canonical app-level
+// `declare module "zeroship" { interface Env { db } }`. Apps commit the
+// default output dir and include `generated/zeroship/env.db.ts` in tsconfig.
+// The old `@zeroship/db/env` + `zeroship-schema` declared-schema alias is retired.
 
-/** The default `gen-types` output dir (relative to root). Chosen to live OUTSIDE
- *  the app tsconfig `include` (NOT under `src/`) and to be COMMITTED (NOT
- *  `.zeroship/`, which is gitignored) — see the P3/P5 note above. */
+/** The default `gen-types` output dir (relative to root). Chosen to be COMMITTED
+ *  (NOT `.zeroship/`, which is gitignored); apps include its `env.db.ts` in
+ *  tsconfig for strong `env.db` typing. */
 export const GEN_TYPES_OUT_DEFAULT = "generated/zeroship";
 
 /** The runtime schema descriptor artifact filename `gen-types` emits into
@@ -210,8 +204,7 @@ export interface GenTypesOptions {
   root: string;
   /** Migrations dir relative to root (default `migrations`). */
   migrationsDir?: string;
-  /** The gen-types output dir relative to root (default
-   *  `generated/zeroship`). Emitted OUTSIDE the tsc program in P3. */
+  /** The gen-types output dir relative to root (default `generated/zeroship`). */
   genTypesOut?: string;
   /** Explicit path to the `zeroship-migrate-js` CLI binary. When set, it is
    *  used verbatim (tests / packaged installs); no graceful dev-skip probing. */

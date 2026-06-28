@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "collections": {
+    "notes": {
+      "fields": {
+        "title": {
+          "type": "string",
+          "required": true
+        },
+        "body": {
+          "type": "string"
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": []
+    },
+    "users": {
+      "fields": {
+        "email": {
+          "type": "string",
+          "required": true,
+          "unique": true
+        },
+        "name": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "users_email_key",
+          "fields": [
+            "email"
+          ],
+          "unique": true
+        }
+      ]
+    }
+  }
+}

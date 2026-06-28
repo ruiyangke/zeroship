@@ -28,7 +28,7 @@ export default defineConfig({
 | `devServerPort` | `3001` | Port for the zeroship dev runtime. |
 | `mode` | `"full"` | `"full"` builds client + SSR worker; `"static"` skips the SSR sub-build and omits `manifest.worker`. |
 | `migrations.dir` | `"migrations"` | The op.* migration dir holding the committed `.ir.json` set. Both the `.zship` packer and the gen-types step read it. |
-| `migrations.genTypesOut` | `"generated/zeroship"` | Where the gen-types step writes `env.db.ts` + `schema.runtime.json`. **Committed, but kept OUTSIDE the app tsconfig `include`** — see "Migration-first type generation" below. |
+| `migrations.genTypesOut` | `"generated/zeroship"` | Where the gen-types step writes `env.db.ts` + `schema.runtime.json`. Commit this dir and include `generated/zeroship/env.db.ts` in the app tsconfig. |
 | `migrations.cliPath` | resolved (`ZEROSHIP_MIGRATE_JS_BIN` → `node_modules/.bin`) | Explicit path to the `zeroship-migrate-js` CLI. |
 
 ## Migration-first type generation (`gen-types`)
@@ -42,11 +42,17 @@ When it runs:
 
 Binary resolution mirrors the dev-runtime convention and the `record`/`build` recorder: an explicit `migrations.cliPath`, else `ZEROSHIP_MIGRATE_JS_BIN`, else `<root>/node_modules/.bin/zeroship-migrate-js`. If the binary is **absent in dev**, the step warns once and no-ops — the committed `env.db.ts` stays valid. For the production `--check` drift gate it then falls through to the bare `zeroship-migrate-js` **PATH** name (exactly as the recorder does), so a `cargo install`-style binary on `$PATH` resolves; a genuinely-missing binary surfaces a real spawn `ENOENT` and hard-fails the gate (a misconfigured CI must not silently pass).
 
-### P5 deferral — types are generated + committed, NOT yet activated
+### Type activation
 
-P3 wires the **mechanical** generation only. The generated `env.db.ts` and the shipped `@zeroship/db` `env.d.ts` **both** declare `declare module "zeroship" { interface Env { db } }`; having both in one tsc program is a `TS2717` duplicate-property error unless the `Db<>` types are byte-identical. So the artifacts are emitted into a **committed** dir (`generated/zeroship/` by default) that is deliberately **outside the app tsconfig `include`** (not under `src/`, and not `.zeroship/`, which is gitignored). They are generated, committed, and drift-gated, but **not** wired into the typecheck, and the `@zeroship/db`/zeroship-schema alias is untouched.
+The generated `env.db.ts` is the canonical `Env.db` augmentation. Apps include it in `tsconfig.json`:
 
-The type-activation cutover — deleting `export default { schema }` as the source of truth, swapping the alias, and folding `env.db.ts` into the tsc `include` — is **P5**. Until then both the declared schema and the generated types coexist without colliding.
+```json
+{
+  "include": ["src", "generated/zeroship/env.db.ts"]
+}
+```
+
+Do not also add `@zeroship/db/env` or a `zeroship-schema` path alias. That declared-schema alias path is retired; the generated file is the single source of strong `env.db` typing.
 
 ## Exposed but not currently effectful
 
@@ -129,7 +135,7 @@ Names are never used to infer `query`. Reads opt in via `query(...)` or an expli
 
 [`sdks/vite-plugin/src/rpc-registry.ts`](../../sdks/vite-plugin/src/rpc-registry.ts) emits `virtual:zeroship/_server-entry`. Its job is to normalize the app module and delegate RPC fall-through to `@zeroship/bootstrap`:
 
-- `default.schema` is passed through
+- schema comes from the generated `schema.runtime.json` descriptor, not the synthetic default export
 - `default.fetch` is a shared bootstrap fetch handler that routes `/__zeroship/v1/<wireId>` and falls through to the user's own fetch for non-RPC paths
 - `default.rpc` is a plain object keyed by `wireId`
 

@@ -12,9 +12,8 @@
 
 /**
  * Composite env exposed to user handlers. The interface is exported
- * (not a structural literal) so user projects can augment it via
- * `@zeroship/types`'s `zeroship-schema.d.ts` — the augmentation lifts
- * `env.db` from the bare native handle to a typed `Db<schema>`.
+ * (not a structural literal) so user projects can augment it via the
+ * generated `generated/zeroship/env.db.ts` module.
  */
 export interface Env {
   // Intentionally permissive — plugins attach namespaces and apps add

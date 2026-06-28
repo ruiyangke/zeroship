@@ -10,8 +10,7 @@
     "baseUrl": ".",
     "types": ["@zeroship/types"],
     "paths": {
-      "@/*": ["./src/*"],
-      "zeroship-schema": ["./src/server.ts"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"]

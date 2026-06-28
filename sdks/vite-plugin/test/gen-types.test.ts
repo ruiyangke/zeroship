@@ -16,9 +16,8 @@
  *  (d) a MISSING binary in DEV warns-and-noops (`{ status: "skipped" }`, no throw);
  *      with `requireBinary` (the CI gate) the same absence THROWS.
  *
- * The P3 deferral (artifacts emitted OUTSIDE the tsc program; alias untouched) is a
- * design constraint, not a runtime behaviour, so it is asserted by the `genTypesOut`
- * default living at `generated/zeroship` (NOT under `src/`, NOT `.zeroship/`).
+ * The default output dir stays `generated/zeroship` (committed, not `.zeroship/`)
+ * so apps have a stable path to include in tsconfig.
  */
 
 import { test, describe } from "node:test";
@@ -135,10 +134,9 @@ describe("gen-types wiring (P3)", () => {
     });
   });
 
-  test("genTypesOut defaults to generated/zeroship (committed, OUTSIDE the tsc program)", async () => {
-    // The default is NOT under src/ (would enter `include`) and NOT .zeroship/
-    // (gitignored). This encodes the P3 deferral: emit-and-commit, do NOT
-    // activate the types until P5.
+  test("genTypesOut defaults to generated/zeroship (committed app type dir)", async () => {
+    // The default is NOT .zeroship/ (gitignored), so generated type artifacts can
+    // be committed and included by the app tsconfig.
     assert.equal(GEN_TYPES_OUT_DEFAULT, "generated/zeroship");
     await withStub({}, async ({ root, cliPath, argsLog }) => {
       genTypesViaCli({ root, cliPath }); // no genTypesOut → default

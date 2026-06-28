@@ -87,9 +87,8 @@ export interface Migration {
   build error at drain — never a silent no-op (see
   [Selectors must be terminated](#selectors-must-be-terminated)).
 
-The shape mirrors the platform's `export default { schema, fetch, rpc }` deploy
-idiom (see [zeroship-standard](./zeroship-standard.md)); one typed object, never
-a loose top-level `export function up()` plus a stray `export const name`.
+The default export is one typed migration object, never a loose top-level
+`export function up()` plus a stray `export const name`.
 
 ### `down()` is not auto-derived for DML or lossy DDL
 
@@ -1020,16 +1019,17 @@ loads the committed `.ir.json` set in version order, **folds** it into a
 per-collection field map (the same fold the engine uses internally), and emits two
 artifacts:
 
-- **`schema.runtime.json`** — the `RuntimeSchemaDescriptor`: a
-  `Record<collection, Record<column, FieldDef>>` that formalises what the runtime's
-  `normalizeSchema` produces. It is content-addressed into the `.zship` artifact (a
-  manifest `runtime_descriptor` blob) so the runtime can read the schema without
-  re-evaluating a declared schema object.
+- **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
+  `{ version, collections: { [name]: { fields, options, indexes } } }`. It is
+  content-addressed into the `.zship` artifact (a manifest `runtime_descriptor`
+  blob) so the runtime can read the schema without re-evaluating a declared schema
+  object.
 - **`env.db.ts`** — a generated `@zeroship/db` schema **module** reconstructing
   `const schema = { … t.text() … } as const` of `t.*()` builder calls (the SDK type
   inference keys only off the builder-call value expressions, so the emitter emits
-  builder calls, never a hand-rolled interface), plus a `declare module "zeroship"`
-  augmentation typing `env.db` from that schema.
+  builder calls, never a hand-rolled interface), wraps collections in
+  `schema(...)` when folded options/indexes exist, and declares the single
+  `Env.db` augmentation for the app.
 
 ```bash
 # emit (writes both artifacts into the output dir)
@@ -1047,11 +1047,20 @@ into the generated `env.db.ts`, so `env.db.users.email` reads back as
 `.ts` module (not a `.d.ts`), `tsc` type-checks it like any source file — a
 generated type that does not compile is a hard build failure.
 
+Include the generated module in the app's `tsconfig.json` and do not also add the
+retired `@zeroship/db/env` declared-schema alias:
+
+```json
+{
+  "include": ["src", "generated/zeroship/env.db.ts"]
+}
+```
+
 The `@zeroship/vite-plugin` is a thin client of this same CLI: it regenerates the
 artifacts on dev-server boot and on any change under the migrations dir, and runs
 the `--check` drift gate on a production build. See
 [vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
-for the build/watch wiring and the committed-but-outside-`include` placement.
+for the build/watch wiring.
 
 > **In progress (design — not yet shipped).** Two follow-on tracks extend this
 > surface; treat them as design references, not implemented features:
@@ -1061,14 +1070,6 @@ for the build/watch wiring and the committed-but-outside-`include` placement.
 >   changelog retired. Hard-gated to the Trusted/Platform profile, unreachable from a
 >   Confined creator migration by construction. Design:
 >   [docs/proposals/2026-06-25-vendor-pg-primitives.md](../proposals/2026-06-25-vendor-pg-primitives.md).
-> - **The migration-first runtime cutover (P4/P5)** — the runtime reads the generated
->   `schema.runtime.json` descriptor directly and `export default { schema }` is
->   deleted as the source of truth (the generated `env.db.ts` folds into the app's
->   tsc `include`). Today the artifacts are generated, committed, and drift-gated but
->   **not yet** wired into the typecheck or the runtime (they coexist with the declared
->   schema). Design:
->   [docs/proposals/2026-06-25-migration-first-schema.md](../proposals/2026-06-25-migration-first-schema.md).
-
 ## Offline SQL preview (`plan`)
 
 `zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact

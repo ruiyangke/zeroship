@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   listNotes,
   addNote,
@@ -6,7 +6,7 @@ import {
   bumpVisits,
 } from "./index";
 
-type Note = { id: number; title: string; body: string };
+type Note = { id: string; title: string; body?: string };
 
 export function App() {
   const [notes, setNotes] = useState<Note[]>([]);
@@ -17,11 +17,11 @@ export function App() {
   const refresh = async () => setNotes((await listNotes()) as Note[]);
 
   useEffect(() => {
-    refresh();
-    bumpVisits().then((v) => setVisits(v as number));
+    void refresh();
+    void Promise.resolve(bumpVisits()).then((v) => setVisits(v as number));
   }, []);
 
-  const onSubmit = async (e: React.FormEvent) => {
+  const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
     await addNote({ title: title.trim(), body: body.trim() });
@@ -62,7 +62,13 @@ export function App() {
           >
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <strong>{n.title}</strong>
-              <button onClick={() => deleteNote({ id: n.id }).then(refresh)}>×</button>
+              <button
+                onClick={() => {
+                  void Promise.resolve(deleteNote({ id: n.id })).then(refresh);
+                }}
+              >
+                ×
+              </button>
             </div>
             {n.body && <div style={{ color: "#555" }}>{n.body}</div>}
           </li>

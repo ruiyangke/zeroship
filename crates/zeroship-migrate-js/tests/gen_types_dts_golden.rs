@@ -142,7 +142,10 @@ fn env_dts_golden_covers_full_type_matrix() {
 
     // The generated file imports the SDK `t` + `Db` and binds the `zeroship`
     // module's `Env.db` to `Db<typeof schema>` (reusing the inference chain).
-    assert!(dts.contains("import { t, type Db } from \"@zeroship/db\";"), "imports the SDK t + Db: {dts}");
+    assert!(
+        dts.contains("import { t, schema as defineSchema, type Db } from \"@zeroship/db\";"),
+        "imports the SDK t + schema builder + Db: {dts}"
+    );
     assert!(dts.contains("const schema = {"), "emits a const schema object");
     assert!(dts.contains("as const;"), "the schema is `as const` (narrows enums to unions)");
     assert!(
@@ -239,6 +242,18 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
         },
     ];
     let artifacts = render_artifacts(&ops, "public").expect("render");
+    let dts = &artifacts.env_dts;
+    assert!(
+        dts.contains("posts: defineSchema({"),
+        "metadata-bearing collections are wrapped with the SDK schema builder: {dts}"
+    );
+    assert!(
+        dts.contains(
+            "}).softDelete().withVersioning().strictness(\"lenient\").index(\"posts_author_status_idx\", [\"author_id\",\"status\"]),"
+        ),
+        "env.db.ts mirrors folded softDelete/versioning/strictness/index metadata: {dts}"
+    );
+
     let value: serde_json::Value =
         serde_json::from_str(&artifacts.runtime_descriptor).expect("runtime descriptor is JSON");
     assert_eq!(

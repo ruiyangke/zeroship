@@ -172,11 +172,12 @@ but absent from the plugin's `RUNTIME_NATIVE_MODULES`, so in dev they fall throu
 
 ## 3. env.db / @zeroship/db
 
-The platform's structured database layer. Creators declare a typed schema via
-`export default { schema }`; the runtime installs collection wrappers on `env.db` at boot,
-and all CRUD/search/transaction/migration/reactive operations go through that typed surface
-— no raw SQL. The Rust plugin (`crates/plugin-db`) provides the native V8 surface; the TS SDK
-(`@zeroship/db`) wraps it. Both Postgres (prod) and SQLite (dev/test) are supported.
+The platform's structured database layer. Creators declare schema through committed
+op.* migrations; the generated runtime descriptor installs collection wrappers on
+`env.db` at boot, and all CRUD/search/transaction/migration/reactive operations go
+through that typed surface — no raw SQL. The Rust plugin (`crates/plugin-db`)
+provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postgres
+(prod) and SQLite (dev/test) are supported.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -228,7 +229,7 @@ and all CRUD/search/transaction/migration/reactive operations go through that ty
 | Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/plugin-db/src/auth/` | — | — | PG-only; SQLite has shim. |
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
 | Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |
-| env.db type augmentation (@zeroship/db/env) | 🟢 | tsconfig types + paths | `sdks/db/env.d.ts` | `docs/reference/db.md` | — | Opt-in narrowing. |
+| env.db generated type augmentation | 🟢 | `generated/zeroship/env.db.ts` in tsconfig include | `crates/zeroship-migrate-js/src/gen_types.rs` | `docs/reference/db.md` | `crates/zeroship-migrate-js/tests/gen_types_dts_golden.rs` | Folded migration set is canonical; `@zeroship/db/env` is retired. |
 | Schema strictness (strict/lenient/off) | 🟢 | `schema({...}).strictness(...)` | `crates/plugin-db/src/register_model/validate.rs` | `docs/reference/db.md` | — | Default strict; refuses destructive. |
 | Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/plugin-db/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
 | Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/plugin-db/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |

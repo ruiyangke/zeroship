@@ -83,7 +83,7 @@ export interface ZeroshipOptions {
    */
   devAuth?: boolean | DevAuthUser | { user: DevAuthUser } | { users: DevAuthUser[]; defaultUserId?: string };
   /**
-   * Migration-first type generation (P3). The plugin shells the EXISTING
+   * Migration-first type generation. The plugin shells the EXISTING
    * `zeroship-migrate-js gen-types` subcommand to fold the committed `.ir.json`
    * migration set into the typed `env.db` surface (`env.db.ts` +
    * `schema.runtime.json`):
@@ -92,20 +92,15 @@ export interface ZeroshipOptions {
    *  - at build, once in `buildStart`, with a `--check` DRIFT GATE in
    *    production (a stale committed artifact fails the build).
    *
-   * **P3 is mechanical-only — type ACTIVATION is deferred to P5.** The
-   * artifacts are emitted into a COMMITTED dir OUTSIDE the app tsconfig
-   * `include` (default `generated/zeroship/`); they are NOT yet wired into the
-   * typecheck and the `@zeroship/db` alias is untouched (otherwise the dual
-   * `declare module "zeroship" { interface Env { db } }` from both
-   * `@zeroship/db`'s `env.d.ts` and the generated file is a TS2717
-   * duplicate-property error). P5 owns the cutover.
+   * The artifacts are emitted into a COMMITTED dir (default
+   * `generated/zeroship/`). Include `generated/zeroship/env.db.ts` in the app
+   * tsconfig; it is the single canonical `Env.db` augmentation. Do not add the
+   * retired `@zeroship/db/env` + `zeroship-schema` alias path.
    */
   migrations?: {
     /** Migrations dir relative to root (default `migrations`). */
     dir?: string;
-    /** gen-types output dir relative to root (default `generated/zeroship`).
-     *  Emitted OUTSIDE the tsc program in P3 — do NOT add to tsconfig
-     *  `include` until P5. */
+    /** gen-types output dir relative to root (default `generated/zeroship`). */
     genTypesOut?: string;
     /** Explicit path to the `zeroship-migrate-js` CLI (default: resolved from
      *  `ZEROSHIP_MIGRATE_JS_BIN` / `node_modules/.bin`). */

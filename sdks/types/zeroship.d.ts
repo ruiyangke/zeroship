@@ -33,10 +33,9 @@ declare module "zeroship" {
    * Frozen: direct assignment to properties throws in strict mode.
    *
    * The interface is named (vs. a structural literal) so user code can
-   * augment `env.db` with collection-typed accessors via the
-   * `zeroship-schema` virtual path. That schema-aware augmentation
-   * lives in `@zeroship/db`; this package owns only the base runtime
-   * module shape.
+   * augment `env.db` with collection-typed accessors via the generated
+   * `generated/zeroship/env.db.ts` module. This package owns only the
+   * base runtime module shape.
    */
   export interface Env {
     // `db` and `auth` are populated by their respective augmentations.

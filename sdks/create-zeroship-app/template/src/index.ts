@@ -16,24 +16,13 @@
 // Delete what you don't need; this file is a starting point, not a lecture.
 
 import { query, mutation } from "@zeroship/rpc/server";
-import { t } from "@zeroship/db";
 import { env } from "zeroship";
 import { bucket } from "@zeroship/storage";
 import { kv } from "@zeroship/kv";
 
-// Declare the schema once via the `export default { schema }` convention;
-// the platform installs typed Collection wrappers on `env.db` at app
-// boot. Inside any procedure handler you write `env.db.notes.find(...)`.
-const dbSchema = {
-  notes: {
-    title: t.string().required(),
-    body: t.string(),
-  },
-};
-
-export default { schema: dbSchema };
-
-const db = env.db; // typed Db<typeof dbSchema> via @zeroship/db/env
+// `env.db` is typed by generated/zeroship/env.db.ts, which is generated
+// from the committed migrations.
+const db = env.db;
 
 const uploads = bucket("uploads");
 
@@ -50,7 +39,7 @@ export const listNotes = query(
 
 export const addNote = mutation(
   async ({ title, body }: { title: string; body: string }) => {
-    const r = await db.notes.create({ title, body });
+    const r = await db.notes.insert({ title, body });
     if (r.error) throw r.error;
     return r.data;
   },
@@ -58,8 +47,8 @@ export const addNote = mutation(
 );
 
 export const deleteNote = mutation(
-  async ({ id }: { id: number }) => {
-    const r = await db.notes.findOneAndDelete({ id });
+  async ({ id }: { id: string }) => {
+    const r = await db.notes.delete(id);
     if (r.error) throw r.error;
     return r.data !== null;
   },

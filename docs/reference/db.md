@@ -1,33 +1,37 @@
 # @zeroship/db — Database SDK
 
-`@zeroship/db` is the database SDK for zeroship apps. You declare a typed
-schema once on `default.schema` of your entry module (the
-[zeroship standard deploy contract](./zeroship-standard.md)); the platform reads it
-at boot, installs typed Collection wrappers on `env.db`, and your handlers
-call CRUD methods on `env.db.<name>` directly. Behind the scenes the SDK
-calls into the native `env.db` v8_class surface (registered by the Rust
-runtime); no raw SQL is exposed to user code.
+`@zeroship/db` is the database SDK for zeroship apps. The schema source of
+truth is the committed op.* migration set. `zeroship-migrate-js gen-types`
+folds those migrations into `generated/zeroship/env.db.ts`, which installs
+the TypeScript `Env.db` augmentation, and `schema.runtime.json`, which the
+runtime consumes at boot. Handlers call CRUD methods on `env.db.<name>`
+directly. Behind the scenes the SDK calls into the native `env.db` v8_class
+surface (registered by the Rust runtime); no raw SQL is exposed to user code.
+
+```ts
+// migrations/20260628000000_initial_schema.ts
+import { table, t } from "@zeroship/migrate";
+
+export default {
+  name: "initial_schema",
+  up() {
+    table("users").create({
+      columns: {
+        name: t.text().notNull(),
+        email: t.text().notNull().unique(),
+        role: t.text().default("user"),
+      },
+    });
+  },
+};
+```
 
 ```ts
 // src/index.ts — your app's entry module
-import { t } from "@zeroship/db";
 import { env } from "zeroship";
 import { mutation, query } from "@zeroship/rpc/server";
 
-// Declare your schema once on `default.schema`. The runtime reads it
-// at boot and installs typed Collection wrappers as own properties on
-// `env.db`.
-export default {
-  schema: {
-    users: {
-      name:  t.string().required().max(100),
-      email: t.string().required().unique(),
-      role:  t.string().enum("user", "admin").default("user"),
-    },
-  },
-};
-
-// Anywhere in your code, just dereference env.db:
+// Typed by generated/zeroship/env.db.ts.
 const db = env.db;
 
 export const addUser = mutation(async ({ name, email }: { name: string; email: string }) => {
@@ -48,82 +52,35 @@ export const listAdmins = query(async () => {
 
 ### TypeScript: typed `env.db`
 
-To make `env.db.<name>` strongly typed against your schema, add this to
-your project's `tsconfig.json`:
+To make `env.db.<name>` strongly typed against the folded migration set,
+commit the generated artifacts and include the generated module in your
+project's `tsconfig.json`:
 
 ```json
 {
   "compilerOptions": {
-    "types": ["@zeroship/types", "@zeroship/db/env"],
-    "paths": {
-      "zeroship-schema": ["./src/index.ts"]
-    }
-  }
+    "types": ["@zeroship/types"]
+  },
+  "include": ["src", "generated/zeroship/env.db.ts"]
 }
 ```
 
-`@zeroship/types` declares the base `zeroship` runtime module.
-`@zeroship/db/env` reads the user's schema via the `zeroship-schema`
-paths alias and narrows `env.db` from the bare native handle to a typed
-`Db<typeof schema>` — so `env.db.users.find(...)` typechecks against
-the declared fields. The alias can point at either the app entry module
-(`default = { schema }`) or a schema-only module whose default export is
-the bare collection map.
+`@zeroship/types` declares the base `zeroship` runtime module. The
+generated `env.db.ts` imports `@zeroship/db`'s `t`/`Db` types, reconstructs
+the folded schema, and declares the single `Env.db` augmentation for the
+app. Do not add `@zeroship/db/env` or a `zeroship-schema` path alias; that
+declared-schema typing path is retired.
 
-Keep this augmentation opt-in. The root `@zeroship/db` package is the
-plain TypeScript SDK surface (`t`, `schema`, `RowOf`, `Db`, etc.) and
-does not require a Zeroship app entry module, so it can be imported by
-ordinary TypeScript projects, shared packages, and tests.
-
-### Split-file schemas
-
-For larger apps, lift the schema into its own module and re-export it
-from the entry's `default.schema`:
-
-```ts
-// src/schema.ts
-import { t } from "@zeroship/db";
-export default {
-  users: { name: t.string().required() },
-  todos: { userId: t.ref("users").required(), title: t.string().required() },
-};
-```
-
-```ts
-// src/index.ts — entry module
-import schema from "./schema.ts";
-export default { schema };
-```
-
-When using a split schema file, point the `zeroship-schema` alias at
-that schema-only module:
-
-```json
-{
-  "compilerOptions": {
-    "types": ["@zeroship/types", "@zeroship/db/env"],
-    "paths": {
-      "zeroship-schema": ["./src/schema.ts"]
-    }
-  }
-}
-```
-
-The runtime's bootstrap (`sdks/bootstrap/src/runtime-entry.ts`, embedded
-into the runtime crate at compile time via `crates/runtime/src/core/init.rs::DB_INIT_JS`)
-reads `default.schema` directly off the loaded entry. There is no
-manifest-injected schema path — Stage 5c of the ZS-standard refactor
-dropped that and the SDK now has exactly one discovery surface: the
-entry's default export. See
-[`docs/reference/zeroship-standard.md`](./zeroship-standard.md) for the broader
-contract.
+The root `@zeroship/db` package remains the plain TypeScript SDK surface
+(`t`, `schema`, `RowOf`, `Db`, etc.) for shared packages and tests; only the
+app-level `Env.db` augmentation moved to generated code.
 
 ### Collection names
 
-Collection keys under `default.schema` become physical table names. Keep
-them ASCII alphanumeric plus underscores, at most 63 bytes, and avoid
-the reserved prefixes `pg_` and `__zeroship`. Invalid names are refused
-at deploy time by the validator in `crates/plugin-db/src/query.rs`.
+Collection names created by migrations become physical table names. Keep them
+ASCII alphanumeric plus underscores, at most 63 bytes, and avoid the reserved
+prefixes `pg_` and `__zeroship`. Invalid names are refused at deploy time by
+the validator in `crates/plugin-db/src/query.rs`.
 
 ## Two return contracts
 
@@ -530,7 +487,7 @@ const { data } = await db.todos.find({}, {
 #### v1 limitations (future work)
 
 - **Standalone models degrade.** When `env.db` is schema-typed through
-  `@zeroship/db/env`, joined fields narrow to the referenced row type.
+  `generated/zeroship/env.db.ts`, joined fields narrow to the referenced row type.
   Standalone `model()` callers that do not carry a parent schema map
   still degrade joined fields to `PlainObject | null`.
 - **No projection narrowing.** Drizzle / Prisma support
@@ -916,12 +873,12 @@ commit or roll back as a unit.
 
 ## Migrations (`@zeroship/migrations`)
 
-Schema changes are immediate — the platform's schema installer calls
-`registerModel` (on the platform-internal `__platform` handle, not a
-method you call) for every collection in your `default.schema` map,
-which adds tables and columns idempotently on cold start. **Data
-backfills** are the asynchronous part: a separate orchestrator iterates
-rows in batches with resume, dry-run, cancel, and a dead-letter queue.
+Schema changes come from the op.* migration set and the generated
+`schema.runtime.json` descriptor. The platform installer calls
+`registerModel` (on the platform-internal `__platform` handle, not a method
+you call) for every collection in that descriptor. **Data backfills** are the
+asynchronous part: a separate orchestrator iterates rows in batches with
+resume, dry-run, cancel, and a dead-letter queue.
 
 ```ts
 import { defineMigration, migrations } from "@zeroship/migrations";
@@ -1065,8 +1022,8 @@ code:
   `getOwnPropertySymbols` / `Reflect.ownKeys` / `for..in` / JSON — a
   `v8::Private` slot is not a JS property and cannot be keyed from JS.
 - Schema registration happens automatically at app boot: the platform
-  installer reads your `default.schema` and registers each collection
-  via the platform handle. You never call `registerModel` yourself.
+  installer reads the generated runtime descriptor and registers each
+  collection via the platform handle. You never call `registerModel` yourself.
 
 Public type contracts live in `sdks/types/db.d.ts` (which no longer
 declares the platform-internal classes — those moved to

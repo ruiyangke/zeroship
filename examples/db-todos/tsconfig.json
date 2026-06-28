@@ -13,15 +13,11 @@
     "resolveJsonModule": true,
     "types": [
       "@zeroship/types",
-      "@zeroship/db/env",
       "react",
       "react-dom",
       "vitest/globals",
       "@testing-library/jest-dom"
-    ],
-    "paths": {
-      "zeroship-schema": ["./src/schema.ts"]
-    }
+    ]
   },
   "include": [
     "src/**/*",

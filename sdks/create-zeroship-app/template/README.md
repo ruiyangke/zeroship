@@ -14,6 +14,8 @@ pnpm dev
 - **.zeroship/** — local dev state (SQLite data, uploaded files). Git-ignored.
 - **src/index.ts** — server functions (marked `"use server"`). React UI calls
   these like regular functions; the plugin turns them into RPC.
+- **migrations/** — committed op.* schema migrations.
+- **generated/zeroship/env.db.ts** — generated `env.db` typing from those migrations.
 - **src/App.tsx** — React client.
 
 ## What's wired

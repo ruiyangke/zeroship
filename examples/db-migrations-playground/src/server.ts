@@ -11,7 +11,7 @@
 // State lives in __zeroship_migrations (A3 audit table); a crash
 // mid-migration is recoverable from `validate_cursor`.
 
-import { t, schema } from "@zeroship/db";
+import { t, schema, type Db } from "@zeroship/db";
 import { env } from "zeroship";
 import { defineMigration, migrations } from "@zeroship/migrations";
 import { action, mutation, query } from "@zeroship/rpc/server";
@@ -42,7 +42,7 @@ const dbSchema = {
 
 export default { schema: dbSchema };
 
-const db = env.db; // typed Db<typeof dbSchema> via @zeroship/db/env
+const db = env.db as Db<typeof dbSchema>;
 
 // ---------------------------------------------------------------------------
 // 1. backfillSeverity — set severity="info" where null. The simplest

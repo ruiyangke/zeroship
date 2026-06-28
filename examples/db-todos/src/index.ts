@@ -17,6 +17,7 @@
 //   exports become RPC procedures at /__zeroship/v1/<id>.
 
 import { env } from "zeroship";
+import type { Db } from "@zeroship/db";
 import { query, mutation, action, stream } from "@zeroship/rpc/server";
 import { runQuery } from "@zeroship/server";
 import {
@@ -30,11 +31,9 @@ import {
 
 export default { schema: dbSchema };
 
-// Local `db` shorthand for use inside this module. `env.db` is already
-// typed as `Db<typeof dbSchema>` via the `@zeroship/db/env` augmentation
-// (registered in tsconfig `types` + the `zeroship-schema` path alias) —
-// no cast needed.
-const db = env.db;
+// Local `db` shorthand for this legacy inline-schema example. New apps get
+// this module augmentation from generated/zeroship/env.db.ts.
+const db = env.db as Db<typeof dbSchema>;
 
 // Brand types flow from t.ref(): a todo's `userId` is `Id<"users">`.
 // Passing a todo id where a user id is expected is a compile-time error.

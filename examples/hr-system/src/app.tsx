@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { env } from "zeroship";
+import type { Db } from "@zeroship/db";
+import type { dbSchema } from "./server";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -17,7 +19,7 @@ import { Button } from "@/components/ui/button";
 // collection by name.
 // ---------------------------------------------------------------------------
 
-const db = env.db;
+const db = env.db as Db<typeof dbSchema>;
 
 export async function getEmployees() {
   return db.employees.find({ status: "active" }).sort({ last_name: 1 });

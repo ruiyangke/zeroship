@@ -11,7 +11,7 @@ snapshots, and optimistic UI.
 | Area | Example surface |
 | --- | --- |
 | Schema discovery | `export default { schema: dbSchema }` in `src/index.ts` |
-| Typed `env.db` | `@zeroship/db/env` + `zeroship-schema` path alias in `tsconfig.json` |
+| Typed `env.db` | Local `Db<typeof dbSchema>` cast; new apps use generated `generated/zeroship/env.db.ts` |
 | System fields | Rows include `id`, timestamps, actor fields, `version`, and `deleted_at` automatically |
 | Relations | `todos.userId: t.ref("users").required()` in `src/schema.ts` |
 | RPC wrappers | `query`, `mutation`, `action`, and `stream` from `@zeroship/rpc/server` |

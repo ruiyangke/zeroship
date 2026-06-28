@@ -11,7 +11,7 @@
 // The client (src/App.tsx) uses the older @zeroship/react hook path
 // against `listMessages`.
 
-import { t, schema } from "@zeroship/db";
+import { t, schema, type Db } from "@zeroship/db";
 import { env } from "zeroship";
 import { query, mutation, action } from "@zeroship/rpc/server";
 import { runQuery, runMutation } from "@zeroship/server";
@@ -43,7 +43,7 @@ const dbSchema = {
 
 export default { schema: dbSchema };
 
-const db = env.db; // typed Db<typeof dbSchema> via @zeroship/db/env
+const db = env.db as Db<typeof dbSchema>;
 
 type UserId    = typeof db.users.Id;
 type ChannelId = typeof db.channels.Id;

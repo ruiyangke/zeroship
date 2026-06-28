@@ -9,10 +9,7 @@
     "noEmit": true,
     "isolatedModules": true,
     "resolveJsonModule": true,
-    "types": ["@zeroship/types", "@zeroship/db/env"],
-    "paths": {
-      "zeroship-schema": ["./src/server.ts"]
-    }
+    "types": ["@zeroship/types"]
   },
   "include": ["src/**/*"]
 }
