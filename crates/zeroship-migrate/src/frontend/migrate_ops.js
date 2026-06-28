@@ -513,11 +513,28 @@ function bytesToBase64(bytes) {
   return btoa(bin);
 }
 
+function isPlainObject(value) {
+  if (value === null || typeof value !== "object") return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function rejectNestedFunctionValues(value) {
+  rejectFunctionValue(value);
+  if (Array.isArray(value)) {
+    for (const item of value) rejectNestedFunctionValues(item);
+  } else if (isPlainObject(value)) {
+    for (const item of Object.values(value)) rejectNestedFunctionValues(item);
+  }
+}
+
 /** Normalize a JS scalar into the closed `IrScalar` WIRE carrier (§3.5):
  *   - a JS `bigint` → `{ decimal: "<v>" }`;
  *   - a `Uint8Array` → `{ bytes: "<base64>" }`;
+ *   - JSON containers are scanned so function values fail closed at any depth;
  *   - everything else passes through verbatim. */
 function toIrScalar(value) {
+  rejectNestedFunctionValues(value);
   if (typeof value === "bigint") return { decimal: value.toString() };
   if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
     return { decimal: String(value) };
@@ -729,7 +746,7 @@ function exprArg(x) {
   rejectFunctionValue(x);
   if (x instanceof ExprChain) return x.__node;
   if (x && typeof x === "object" && typeof x.node === "string") return x; // a raw AST node
-  return { node: "literal", value: x };
+  return { node: "literal", value: toIrScalar(x) };
 }
 
 class ExprChain {

@@ -272,6 +272,86 @@ fn non_native_function_value_fails_closed_in_v8_recorder() {
 }
 
 #[test]
+fn nested_function_values_fail_closed_in_v8_recorder() {
+    let cases = [
+        (
+            "nested_fn_insert_object",
+            r#"
+                import { table } from "@zeroship/migrate";
+                export default { name: "n", up() {
+                    const f = () => 42;
+                    table("t").insert({ rows: [ { doc: { a: f } } ] });
+                }};
+            "#,
+        ),
+        (
+            "nested_fn_insert_array",
+            r#"
+                import { table } from "@zeroship/migrate";
+                export default { name: "n", up() {
+                    const f = () => 42;
+                    table("t").insert({ rows: [ { tags: [f] } ] });
+                }};
+            "#,
+        ),
+        (
+            "nested_native_symbol_insert",
+            r#"
+                import { table } from "@zeroship/migrate";
+                export default { name: "n", up() {
+                    table("t").insert({ rows: [ { doc: { a: Date.now } } ] });
+                }};
+            "#,
+        ),
+        (
+            "nested_fn_default",
+            r#"
+                import { table, t } from "@zeroship/migrate";
+                export default { name: "n", up() {
+                    const f = () => 42;
+                    table("t").create({ columns: { doc: t.json().default({ a: f }) } });
+                }};
+            "#,
+        ),
+        (
+            "nested_fn_on_conflict",
+            r#"
+                import { table } from "@zeroship/migrate";
+                export default { name: "n", up() {
+                    const f = () => 42;
+                    table("t").insert({
+                        rows: [ { id: 1 } ],
+                        onConflict: { columns: ["id"], doUpdate: { doc: { a: f } } },
+                    });
+                }};
+            "#,
+        ),
+        (
+            "nested_fn_expr_arg",
+            r#"
+                import { table } from "@zeroship/migrate";
+                export default { name: "n", up() {
+                    const f = () => 42;
+                    table("t").update({ set: { doc: (c) => c.fn.coalesce({ a: f }, "x") } });
+                }};
+            "#,
+        ),
+    ];
+
+    for (name, src) in cases {
+        let err = record_err(src, name);
+        assert!(
+            err.contains("function values are not valid here"),
+            "{name}: nested function value must fail closed, got: {err}"
+        );
+        assert!(
+            err.contains("Date.now / Math.random / crypto.randomUUID"),
+            "{name}: message must steer to supported native symbols, got: {err}"
+        );
+    }
+}
+
+#[test]
 fn date_now_symbol_is_deterministic_across_records() {
     let src = r#"
         import { table } from "@zeroship/migrate";
