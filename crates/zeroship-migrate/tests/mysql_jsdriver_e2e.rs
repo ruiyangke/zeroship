@@ -3,21 +3,27 @@
 #[path = "../../runtime/tests/support/node_realworld.rs"]
 mod node_realworld;
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::{Child, Command, Stdio};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use zeroship_migrate::render::step::PlanStep;
+use zeroship_migrate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
+use zeroship_migrate::render::step::{BindValue, PlanStep};
+#[cfg(debug_assertions)]
+use zeroship_migrate::{MysqlFragmentDecision, MysqlFragmentHookAction};
 use zeroship_migrate::{
     deprovision_mysql_migrator_account, diff_snapshots, fold_ops,
-    provision_mysql_migrator_account, ApplyError, Approval, Checksum,
+    mysql_migration_lock_name, provision_mysql_migrator_account,
+    provision_mysql_migrator_account_with_password, ApplyError, Approval, Checksum,
     ChecksumInput, EngineError, ExecutorConfig, GuardConfig, IrAuthor,
     JsDriverError, LiveSchema, Migration, MigrationBackend, MigrationEngine,
-    MigrationFlags, MigrationId, MigrationIr, MysqlBackend, MysqlMigratorAccount,
-    RowSet, SqlDialect, CURRENT_IR_VERSION,
+    MigrationFlags, MigrationId, MigrationIr, MysqlBackend, MysqlGuardedFragment,
+    MysqlMigratorAccount, RowSet, SqlDialect, CURRENT_IR_VERSION,
 };
 
 use node_realworld::{allowlist, ensure_mysql, lock_env, EnvGuard, LOCALHOST};
@@ -42,6 +48,21 @@ impl MysqlDsn {
             "user": self.user,
             "password": self.password,
             "database": self.database,
+        })
+        .to_string()
+    }
+
+    fn json_with_ssl_ca(&self, ca: impl Into<String>) -> String {
+        json!({
+            "host": self.host,
+            "port": self.port,
+            "user": self.user,
+            "password": self.password,
+            "database": self.database,
+            "ssl": {
+                "ca": ca.into(),
+                "rejectUnauthorized": true
+            }
         })
         .to_string()
     }
@@ -354,6 +375,64 @@ fn prewarm_mysql_migrator_auth_cache(
     );
 }
 
+fn mysql_server_ca_pem(live: &LiveMysql) -> String {
+    assert_eq!(
+        (live.dsn.host.as_str(), live.dsn.port),
+        ("127.0.0.1", 3307),
+        "mysql_jsdriver_e2e TLS cold-cache test reads /var/lib/mysql/ca.pem from \
+         zeroship-runtime-mysql2-e2e and must target 127.0.0.1:3307"
+    );
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg("zeroship-runtime-mysql2-e2e")
+        .arg("sh")
+        .arg("-lc")
+        .arg("cat /var/lib/mysql/ca.pem")
+        .output()
+        .expect("read MySQL server CA from e2e container");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "reading MySQL TLS CA from zeroship-runtime-mysql2-e2e failed: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        stdout,
+        stderr
+    );
+    let ca = stdout.trim().to_string();
+    assert!(
+        ca.contains("-----BEGIN CERTIFICATE-----")
+            && ca.contains("-----END CERTIFICATE-----"),
+        "MySQL container CA is not PEM: {ca:?}"
+    );
+    ca
+}
+
+fn invalid_ca_pem() -> &'static str {
+    "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+}
+
+fn tls_migrator_backend_for(
+    live: &LiveMysql,
+    cfg: &ExecutorConfig,
+    account: &MysqlMigratorAccount,
+    ca_pem: impl Into<String>,
+) -> MysqlBackend {
+    MysqlBackend::open_mysql_dsn_json_with_policy(
+        live.dsn
+            .for_migrator(cfg, account)
+            .json_with_ssl_ca(ca_pem),
+        allowlist(&live.dsn.host, live.dsn.port, 8, 16 * 1024 * 1024),
+        Duration::from_secs(45),
+    )
+    .unwrap_or_else(|err| {
+        panic!(
+            "open live TLS mysql2 JS driver backend as {}: {err}",
+            account.user
+        )
+    })
+}
+
 fn fixture_ir() -> MigrationIr {
     serde_json::from_value(json!({
         "ir_version": CURRENT_IR_VERSION,
@@ -362,6 +441,7 @@ fn fixture_ir() -> MigrationIr {
         "ops": [{
             "op": "createTable",
             "name": "users",
+            "existenceGuard": "ifNotExists",
             "columns": [
                 { "name": "id", "type": "bigInt", "nullable": false, "identity": { "always": false } },
                 { "name": "email", "type": "string", "nullable": false },
@@ -461,6 +541,15 @@ fn field<'a>(row: &'a serde_json::Map<String, Value>, key: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("row missing field {key}: {row:?}"))
 }
 
+fn field_any<'a>(
+    row: &'a serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> &'a Value {
+    keys.iter()
+        .find_map(|key| row.get(*key))
+        .unwrap_or_else(|| panic!("row missing any of {keys:?}: {row:?}"))
+}
+
 fn manual_migration(name: &str, up: String) -> Migration {
     let mut migration = Migration {
         version: MigrationId::generate(),
@@ -485,6 +574,82 @@ fn manual_migration(name: &str, up: String) -> Migration {
     };
     migration.recompute_checksum();
     migration
+}
+
+fn guarded_create_table_migration(name: &str, schema: &str, table: &str) -> Migration {
+    let mut migration = manual_migration(
+        name,
+        format!(
+            "CREATE TABLE {}.{} (id INT NOT NULL)",
+            qi(schema),
+            qi(table)
+        ),
+    );
+    migration.existence_guard = Some(GuardProbe::Table {
+        schema: schema.to_string(),
+        table: table.to_string(),
+        direction: GuardDir::IfNotExists,
+        expect_columns: vec![ExpectColumn {
+            name: "id".to_string(),
+            data_type: "integer".to_string(),
+            nullable: false,
+        }],
+    });
+    migration.recompute_checksum();
+    migration
+}
+
+fn crash_recovery_migration(
+    cfg: &ExecutorConfig,
+) -> (Migration, Vec<MysqlGuardedFragment>) {
+    let table_sql = format!(
+        "CREATE TABLE {}.{} (id INT NOT NULL, email VARCHAR(191) NOT NULL)",
+        qi(&cfg.project_schema),
+        qi("crash_users")
+    );
+    let index_sql = format!(
+        "CREATE INDEX {} ON {}.{} (email)",
+        qi("crash_users_email_idx"),
+        qi(&cfg.project_schema),
+        qi("crash_users")
+    );
+    let migration = manual_migration(
+        "crash_recovery_create_table_then_index",
+        format!("{table_sql};\n{index_sql}"),
+    );
+    let fragments = vec![
+        MysqlGuardedFragment {
+            sql: table_sql,
+            existence_guard: GuardProbe::Table {
+                schema: cfg.project_schema.clone(),
+                table: "crash_users".to_string(),
+                direction: GuardDir::IfNotExists,
+                expect_columns: vec![
+                    ExpectColumn {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                    },
+                    ExpectColumn {
+                        name: "email".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: false,
+                    },
+                ],
+            },
+        },
+        MysqlGuardedFragment {
+            sql: index_sql,
+            existence_guard: GuardProbe::Index {
+                schema: cfg.project_schema.clone(),
+                table: "crash_users".to_string(),
+                name: "crash_users_email_idx".to_string(),
+                direction: GuardDir::IfNotExists,
+                expect: Some((false, vec!["email".to_string()])),
+            },
+        },
+    ];
+    (migration, fragments)
 }
 
 async fn apply_one_result(
@@ -518,6 +683,50 @@ async fn table_exists(backend: &MysqlBackend, schema: &str, table: &str) -> bool
     )
     .await;
     rows_len(&rows) == 1
+}
+
+async fn index_exists(backend: &MysqlBackend, schema: &str, table: &str, index: &str) -> bool {
+    let rows = query(
+        backend,
+        "SELECT INDEX_NAME FROM information_schema.STATISTICS
+          WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?",
+        &[
+            BindValue::Text(schema.to_string()),
+            BindValue::Text(table.to_string()),
+            BindValue::Text(index.to_string()),
+        ],
+    )
+    .await;
+    rows_len(&rows) == 1
+}
+
+async fn wait_for_project_lock_released(backend: &MysqlBackend, cfg: &ExecutorConfig) {
+    let lock_name = mysql_migration_lock_name(&cfg.project_id);
+    let started = Instant::now();
+    loop {
+        let rows = query(
+            backend,
+            "SELECT GET_LOCK(?, 0) AS acquired",
+            &[BindValue::Text(lock_name.clone())],
+        )
+        .await;
+        let acquired = field(&rows.rows[0], "acquired");
+        if acquired == &json!(1) || acquired == &json!("1") {
+            backend
+                .exec_with_binds(
+                    "SELECT RELEASE_LOCK(?)",
+                    &[BindValue::Text(lock_name.clone())],
+                )
+                .await
+                .expect("release lock probe");
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "timed out waiting for injected-crash MySQL session lock to vanish"
+        );
+        compio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn wait_for_table_or_child_exit(
@@ -971,23 +1180,24 @@ fn mysql_advisory_lock_first_apply_helper() {
 
     compio::runtime::Runtime::new().unwrap().block_on(async {
         let backend = migrator_backend_for(&live, &cfg, &account);
-        let first = manual_migration(
-            "lock_first_holds_plan",
-            format!(
-                "CREATE TABLE {}.{} (id INT NOT NULL);\nSELECT SLEEP(5)",
+        backend
+            .acquire_project_lock(&cfg)
+            .await
+            .expect("lock helper must acquire project GET_LOCK");
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (id INT NOT NULL)",
                 qi(&cfg.project_schema),
                 qi("lock_first")
-            ),
-        );
-        apply_one_result(
-            &backend,
-            &cfg,
-            &first,
-            "mysql-jsdriver-e2e-lock-first-helper",
-        )
-        .await
-        .expect("first helper apply should hold and release GET_LOCK cleanly");
-        println!("mysql_jsdriver_e2e lock helper first apply completed");
+            ))
+            .await
+            .expect("lock helper creates marker table while GET_LOCK is held");
+        compio::time::sleep(Duration::from_secs(5)).await;
+        backend
+            .release_project_lock(&cfg)
+            .await
+            .expect("lock helper must release project GET_LOCK");
+        println!("mysql_jsdriver_e2e lock helper held and released GET_LOCK");
     });
 }
 
@@ -1001,13 +1211,10 @@ fn live_advisory_lock_serializes_concurrent_mysql_applies() {
     run_isolated_mysql(&live, "lock", move |backend, cfg, account| {
         let live = live_for_closure.clone();
         Box::pin(async move {
-            let second = manual_migration(
+            let second = guarded_create_table_migration(
                 "lock_second_waits",
-                format!(
-                    "CREATE TABLE {}.{} (id INT NOT NULL)",
-                    qi(&cfg.project_schema),
-                    qi("lock_second")
-                ),
+                &cfg.project_schema,
+                "lock_second",
             );
 
             let mut short_cfg = cfg.clone();
@@ -1142,12 +1349,80 @@ fn live_migrator_account_confines_privileges_and_reset_role_is_noop() {
 }
 
 #[test]
-fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visible() {
+fn live_tls_cold_cache_caching_sha2_connect_uses_pinned_ca() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+    let live_for_closure = live.clone();
+
+    run_isolated_mysql(&live, "tls", move |_backend, cfg, _account| {
+        let live = live_for_closure.clone();
+        Box::pin(async move {
+            let admin = backend_for(&live);
+            let account = provision_mysql_migrator_account_with_password(
+                &admin,
+                cfg,
+                format!("zs_tls_{}", token("pwd")),
+            )
+            .await
+            .expect("re-provision least-priv migrator account with fresh password");
+            admin
+                .exec("FLUSH PRIVILEGES")
+                .await
+                .expect("flush MySQL auth cache before cold-cache TLS connect");
+
+            let ca_pem = mysql_server_ca_pem(&live);
+            let tls_backend = tls_migrator_backend_for(&live, cfg, &account, ca_pem.clone());
+            let current = query(
+                &tls_backend,
+                "SELECT CURRENT_USER() AS current_user_name",
+                &[],
+            )
+            .await;
+            let current_user = field(&current.rows[0], "current_user_name")
+                .as_str()
+                .expect("CURRENT_USER should be a string");
+            assert!(
+                current_user.starts_with(&format!("{}@", account.user)),
+                "TLS cold-cache connection must authenticate as {}, got {current_user}",
+                account.user
+            );
+            let ssl = query(&tls_backend, "SHOW SESSION STATUS LIKE 'Ssl_cipher'", &[]).await;
+            assert_eq!(rows_len(&ssl), 1, "Ssl_cipher status row should exist");
+            let cipher = field_any(&ssl.rows[0], &["Value", "value"])
+                .as_str()
+                .expect("Ssl_cipher Value should be a string");
+            assert!(
+                !cipher.is_empty(),
+                "TLS connection must have a non-empty Ssl_cipher"
+            );
+
+            let empty_ca_backend = tls_migrator_backend_for(&live, cfg, &account, "");
+            let empty_ca_err = empty_ca_backend
+                .query_json("SELECT 1 AS ok", &[])
+                .await
+                .expect_err("empty CA must not silently trust the self-signed MySQL server");
+            let invalid_ca_backend =
+                tls_migrator_backend_for(&live, cfg, &account, invalid_ca_pem());
+            let invalid_ca_err = invalid_ca_backend
+                .query_json("SELECT 1 AS ok", &[])
+                .await
+                .expect_err("invalid CA must be rejected by the mysql2 node:tls path");
+
+            println!(
+                "mysql_jsdriver_e2e TLS cold-cache caching_sha2 connect succeeded on real :3307: current_user={current_user} Ssl_cipher={cipher}; empty CA rejected={empty_ca_err}; invalid CA rejected={invalid_ca_err}"
+            );
+        })
+    });
+}
+
+#[test]
+fn live_mysql_rejects_raw_multi_statement_non_txn_at_validate_time() {
     let _lock = lock_env();
     let _env = EnvGuard::set_dev();
     let Some(live) = live_mysql_or_skip() else { return };
 
-    run_isolated_mysql(&live, "phase", |backend, cfg, _account| Box::pin(async move {
+    run_isolated_mysql(&live, "raw", |backend, cfg, _account| Box::pin(async move {
         let up = format!(
             "CREATE TABLE {}.{} (id INT NOT NULL);\nCREATE INDEX {} ON {}.{} (id)",
             qi(&cfg.project_schema),
@@ -1156,28 +1431,7 @@ fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visi
             qi(&cfg.project_schema),
             qi("missing_table"),
         );
-        let mut migration = Migration {
-            version: MigrationId::generate(),
-            name: "phase_started_then_fail".to_string(),
-            up,
-            down: None,
-            checksum: Checksum::of(&ChecksumInput {
-                up: "",
-                down: None,
-                flags: &MigrationFlags::default(),
-                owner_app: "",
-                depends_on: &[],
-                supersedes: &[],
-                preconditions: &[],
-            }),
-            flags: MigrationFlags::default(),
-            owner_app: OWNER.to_string(),
-            depends_on: Vec::new(),
-            supersedes: Vec::new(),
-            preconditions: Vec::new(),
-            existence_guard: None,
-        };
-        migration.recompute_checksum();
+        let migration = manual_migration("raw_multi_statement_rejected", up);
 
         let err = MigrationEngine::new()
             .apply_verified(
@@ -1190,9 +1444,9 @@ fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visi
                 "mysql-jsdriver-e2e",
             )
             .await
-            .expect_err("second fragment should fail");
+            .expect_err("raw multi-statement MySQL up must fail validation before DDL");
         assert!(
-            matches!(err, EngineError::Apply(ApplyError::MigrationFailed { .. })),
+            matches!(err, EngineError::Apply(ApplyError::NonIdempotentNonTxn { .. })),
             "unexpected error: {err:?}"
         );
 
@@ -1228,11 +1482,164 @@ fn live_two_phase_started_marker_survives_failed_second_fragment_and_ddl_is_visi
             )],
         )
         .await;
-        assert_eq!(rows_len(&inflight), 1, "started marker must be visible");
+        assert_eq!(rows_len(&inflight), 0, "validation failure must not write started marker");
         assert_eq!(rows_len(&completed), 0, "completed marker must not be written");
-        assert_eq!(rows_len(&table), 1, "first DDL fragment auto-committed before journal completion");
-        println!("mysql_jsdriver_e2e two-phase failure assertions ran");
+        assert_eq!(rows_len(&table), 0, "validation failure must not run the first fragment");
+        println!(
+            "mysql_jsdriver_e2e raw multi-statement MySQL up rejected at validate-time on real :3307"
+        );
     }));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn live_fragment_crash_recovery_replays_decide_per_fragment() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+    let live_for_closure = live.clone();
+
+    run_isolated_mysql(&live, "crash", move |backend, cfg, account| {
+        let live = live_for_closure.clone();
+        Box::pin(async move {
+            let (migration, fragments) = crash_recovery_migration(cfg);
+            let version = migration.version.as_str().to_string();
+
+            let crash_backend = migrator_backend_for(&live, cfg, account);
+            crash_backend.register_guarded_fragments(&version, fragments.clone());
+            crash_backend.set_after_fragment_hook(|event| {
+                if event.fragment_index == 0 && event.decision == MysqlFragmentDecision::RunBare {
+                    MysqlFragmentHookAction::CloseConnection
+                } else {
+                    MysqlFragmentHookAction::Continue
+                }
+            });
+
+            let err = apply_one_result(
+                &crash_backend,
+                cfg,
+                &migration,
+                "mysql-jsdriver-e2e-crash",
+            )
+            .await
+            .expect_err("after-fragment seam must close the connection mid-plan");
+            assert!(
+                matches!(err, EngineError::Apply(ApplyError::Db(_))),
+                "expected transport-level crash error, got {err:?}"
+            );
+
+            assert!(
+                table_exists(backend, &cfg.project_schema, "crash_users").await,
+                "fragment 1 CREATE TABLE must be durable after the injected drop"
+            );
+            assert!(
+                !index_exists(
+                    backend,
+                    &cfg.project_schema,
+                    "crash_users",
+                    "crash_users_email_idx"
+                )
+                .await,
+                "fragment 2 CREATE INDEX must not have run before the injected drop"
+            );
+            let inflight = query(
+                backend,
+                &format!(
+                    "SELECT version FROM {} WHERE version = ?",
+                    meta_table(cfg, "schema_migrations_inflight")
+                ),
+                &[BindValue::Text(version.clone())],
+            )
+            .await;
+            let completed = query(
+                backend,
+                &format!(
+                    "SELECT version FROM {}
+                      WHERE event_kind = 'applied' AND phase = 'completed' AND version = ?",
+                    meta_table(cfg, "schema_migrations")
+                ),
+                &[BindValue::Text(version.clone())],
+            )
+            .await;
+            assert_eq!(rows_len(&inflight), 1, "inflight marker must remain after crash");
+            assert_eq!(rows_len(&completed), 0, "completed marker must not exist after crash");
+            drop(crash_backend);
+            wait_for_project_lock_released(backend, cfg).await;
+
+            let recovery_backend = migrator_backend_for(&live, cfg, account);
+            recovery_backend.register_guarded_fragments(&version, fragments);
+            let decisions: Rc<RefCell<Vec<(usize, MysqlFragmentDecision, bool)>>> =
+                Rc::new(RefCell::new(Vec::new()));
+            recovery_backend.set_after_fragment_hook({
+                let decisions = Rc::clone(&decisions);
+                move |event| {
+                    decisions.borrow_mut().push((
+                        event.fragment_index,
+                        event.decision.clone(),
+                        event.had_inflight,
+                    ));
+                    MysqlFragmentHookAction::Continue
+                }
+            });
+            let recovered = apply_one_result(
+                &recovery_backend,
+                cfg,
+                &migration,
+                "mysql-jsdriver-e2e-recover",
+            )
+            .await
+            .expect("recovery run should finish the missing fragment");
+            assert_eq!(recovered.recovered, vec![version.clone()]);
+            assert_eq!(recovered.applied, vec![version.clone()]);
+            assert_eq!(
+                decisions.borrow().as_slice(),
+                &[
+                    (0, MysqlFragmentDecision::SatisfiedNoop, true),
+                    (1, MysqlFragmentDecision::RunBare, true),
+                ],
+                "recovery must replay decide() per fragment"
+            );
+
+            let inflight_after = query(
+                backend,
+                &format!(
+                    "SELECT version FROM {} WHERE version = ?",
+                    meta_table(cfg, "schema_migrations_inflight")
+                ),
+                &[BindValue::Text(version.clone())],
+            )
+            .await;
+            let completed_after = query(
+                backend,
+                &format!(
+                    "SELECT version FROM {}
+                      WHERE event_kind = 'applied' AND phase = 'completed' AND version = ?",
+                    meta_table(cfg, "schema_migrations")
+                ),
+                &[BindValue::Text(version.clone())],
+            )
+            .await;
+            assert_eq!(rows_len(&inflight_after), 0, "recovery must clear inflight");
+            assert_eq!(rows_len(&completed_after), 1, "recovery must write completed");
+            assert!(
+                table_exists(backend, &cfg.project_schema, "crash_users").await,
+                "table must remain present after recovery"
+            );
+            assert!(
+                index_exists(
+                    backend,
+                    &cfg.project_schema,
+                    "crash_users",
+                    "crash_users_email_idx"
+                )
+                .await,
+                "index must be present after recovery"
+            );
+            println!(
+                "mysql_jsdriver_e2e crash recovery decisions on real :3307: fragment0=SatisfiedNoop fragment1=RunBare version={version}"
+            );
+        })
+    });
 }
 
 #[test]

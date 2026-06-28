@@ -621,15 +621,17 @@ var tls_exports = {};
 __export(tls_exports, {
   TLSSocket: () => TLSSocket2,
   connect: () => connect4,
+  createSecureContext: () => createSecureContext2,
   default: () => tls_default
 });
 import * as tlsStar from "node:tls";
 import tlsDefault from "node:tls";
-var TLSSocket2, connect4, tls_default;
+var TLSSocket2, connect4, createSecureContext2, tls_default;
 var init_tls = __esm({
   "shims/tls.js"() {
     TLSSocket2 = tlsStar.TLSSocket;
     connect4 = tlsStar.connect;
+    createSecureContext2 = tlsStar.createSecureContext;
     tls_default = tlsDefault;
   }
 });
@@ -11092,9 +11094,11 @@ var require_client = __commonJS({
 // shims/crypto.js
 var crypto_exports = {};
 __export(crypto_exports, {
+  constants: () => constants3,
   createHash: () => createHash2,
   createHmac: () => createHmac2,
   default: () => crypto_default,
+  publicEncrypt: () => publicEncrypt2,
   randomBytes: () => randomBytes2,
   randomFill: () => randomFill2,
   randomFillSync: () => randomFillSync2,
@@ -11102,11 +11106,13 @@ __export(crypto_exports, {
 });
 import * as cryptoStar from "node:crypto";
 import cryptoDefault from "node:crypto";
-var createHash2, createHmac2, randomBytes2, randomFill2, randomFillSync2, timingSafeEqual2, crypto_default;
+var constants3, createHash2, createHmac2, publicEncrypt2, randomBytes2, randomFill2, randomFillSync2, timingSafeEqual2, crypto_default;
 var init_crypto = __esm({
   "shims/crypto.js"() {
+    constants3 = cryptoStar.constants;
     createHash2 = cryptoStar.createHash;
     createHmac2 = cryptoStar.createHmac;
+    publicEncrypt2 = cryptoStar.publicEncrypt;
     randomBytes2 = cryptoStar.randomBytes;
     randomFill2 = cryptoStar.randomFill;
     randomFillSync2 = cryptoStar.randomFillSync;

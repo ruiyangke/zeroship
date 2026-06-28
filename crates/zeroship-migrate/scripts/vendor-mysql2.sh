@@ -58,6 +58,7 @@ JS
 
 cat > shims/tls.js <<'JS'
 export * from "node:tls";
+export { createSecureContext } from "node:tls";
 import tls from "node:tls";
 export default tls;
 JS
@@ -70,6 +71,7 @@ JS
 
 cat > shims/crypto.js <<'JS'
 export * from "node:crypto";
+export { constants, publicEncrypt } from "node:crypto";
 import crypto from "node:crypto";
 export default crypto;
 JS

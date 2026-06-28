@@ -9,9 +9,10 @@ pub mod transport;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(debug_assertions)]
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use sha2::{Digest, Sha256};
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
 use super::{CrossDeployObligations, MigrationBackend};
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
@@ -23,10 +24,13 @@ use crate::apply::journal::{self, AppliedEntry, JournalError};
 use crate::approval::{Approval, ApprovalScope};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
+use crate::model::probe::GuardProbe;
 use crate::model::snapshot::SchemaSnapshot;
+use crate::render::existence_probe::GuardVerdict;
 use crate::render::plan::SqliteRebuildSpec;
 use crate::render::step::BindValue;
 use snapshot::{rowsets_to_schema_snapshot, MysqlCatalogRowSets};
+use sha2::{Digest, Sha256};
 pub use transport::{JsDriverConn, JsDriverError, RowSet};
 use zeroship_schema::query::SqlDialect;
 
@@ -36,9 +40,20 @@ pub struct MysqlSessionSnapshot {
     pub sql_mode: String,
 }
 
-#[derive(Debug)]
 pub struct MysqlBackend {
     conn: RefCell<JsDriverConn>,
+    guarded_fragments: RefCell<HashMap<String, Vec<MysqlGuardedFragment>>>,
+    #[cfg(debug_assertions)]
+    after_fragment_hook: RefCell<Option<Rc<dyn Fn(MysqlFragmentEvent) -> MysqlFragmentHookAction>>>,
+}
+
+impl std::fmt::Debug for MysqlBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MysqlBackend")
+            .field("conn", &self.conn)
+            .field("guarded_fragments", &self.guarded_fragments)
+            .finish_non_exhaustive()
+    }
 }
 
 const MYSQL_MIGRATOR_USER_PREFIX: &str = "zs_mig_";
@@ -55,6 +70,36 @@ pub struct MysqlMigratorAccount {
     pub password: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlGuardedFragment {
+    pub sql: String,
+    pub existence_guard: GuardProbe,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MysqlFragmentDecision {
+    RunBare,
+    SatisfiedNoop,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MysqlFragmentEvent {
+    pub version: String,
+    pub fragment_index: usize,
+    pub sql: String,
+    pub decision: MysqlFragmentDecision,
+    pub had_inflight: bool,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MysqlFragmentHookAction {
+    Continue,
+    CloseConnection,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MysqlMigratorAccountError {
     #[error("mysql migrator account db error: {0}")]
@@ -69,6 +114,9 @@ impl MysqlBackend {
     pub fn new(conn: JsDriverConn) -> Self {
         Self {
             conn: RefCell::new(conn),
+            guarded_fragments: RefCell::new(HashMap::new()),
+            #[cfg(debug_assertions)]
+            after_fragment_hook: RefCell::new(None),
         }
     }
 
@@ -117,6 +165,154 @@ impl MysqlBackend {
     ) -> Result<RowSet, JsDriverError> {
         self.conn.borrow_mut().query_json(sql, binds).await
     }
+
+    pub fn register_guarded_fragments(
+        &self,
+        version: &str,
+        fragments: Vec<MysqlGuardedFragment>,
+    ) {
+        self.guarded_fragments
+            .borrow_mut()
+            .insert(version.to_string(), fragments);
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn set_after_fragment_hook(
+        &self,
+        hook: impl Fn(MysqlFragmentEvent) -> MysqlFragmentHookAction + 'static,
+    ) {
+        *self.after_fragment_hook.borrow_mut() = Some(Rc::new(hook));
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn clear_after_fragment_hook(&self) {
+        *self.after_fragment_hook.borrow_mut() = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlApplyDecision {
+    RunBare,
+    SatisfiedNoop,
+}
+
+impl MysqlBackend {
+    fn mysql_guarded_fragments(
+        &self,
+        m: &Migration,
+    ) -> Result<Vec<MysqlGuardedFragment>, ApplyError> {
+        let version = m.version.as_str();
+        if let Some(fragments) = self.guarded_fragments.borrow().get(version).cloned() {
+            return validate_mysql_guarded_fragments(m, fragments);
+        }
+
+        let fragments = mysql_statement_fragments(&m.up);
+        if fragments.len() != 1 {
+            return Err(ApplyError::NonIdempotentNonTxn {
+                version: version.to_string(),
+                reason: format!(
+                    "MySQL non-transactional `up` contains {} SQL fragments but no \
+                     per-fragment existence probes were supplied",
+                    fragments.len()
+                ),
+            });
+        }
+        let Some(existence_guard) = m.existence_guard.clone() else {
+            return Err(ApplyError::NonIdempotentNonTxn {
+                version: version.to_string(),
+                reason: "MySQL non-transactional DDL must carry an executor existence probe"
+                    .to_string(),
+            });
+        };
+        validate_mysql_guarded_fragments(
+            m,
+            vec![MysqlGuardedFragment {
+                sql: fragments[0].clone(),
+                existence_guard,
+            }],
+        )
+    }
+
+    async fn after_fragment_decision(
+        &self,
+        version: &str,
+        fragment_index: usize,
+        sql: &str,
+        decision: MysqlApplyDecision,
+        had_inflight: bool,
+    ) -> Result<(), ApplyError> {
+        #[cfg(debug_assertions)]
+        {
+            let event = MysqlFragmentEvent {
+                version: version.to_string(),
+                fragment_index,
+                sql: sql.to_string(),
+                decision: match decision {
+                    MysqlApplyDecision::RunBare => MysqlFragmentDecision::RunBare,
+                    MysqlApplyDecision::SatisfiedNoop => MysqlFragmentDecision::SatisfiedNoop,
+                },
+                had_inflight,
+            };
+            let action = self
+                .after_fragment_hook
+                .borrow()
+                .as_ref()
+                .map_or(MysqlFragmentHookAction::Continue, |hook| hook(event));
+            if action == MysqlFragmentHookAction::CloseConnection {
+                let close_result = self
+                    .conn
+                    .borrow_mut()
+                    .close_for_test(format!(
+                        "test hook closed MySQL JS driver after fragment {fragment_index}"
+                    ))
+                    .await;
+                return Err(ApplyError::Db(transport::backend_error(
+                    close_result.err().unwrap_or_else(|| {
+                        JsDriverError::transport(format!(
+                            "test hook closed MySQL JS driver after fragment {fragment_index}"
+                        ))
+                    }),
+                )));
+            }
+        }
+        let _ = (version, fragment_index, sql, decision, had_inflight);
+        Ok(())
+    }
+}
+
+fn validate_mysql_guarded_fragments(
+    m: &Migration,
+    fragments: Vec<MysqlGuardedFragment>,
+) -> Result<Vec<MysqlGuardedFragment>, ApplyError> {
+    if fragments.is_empty() {
+        return Err(ApplyError::NonIdempotentNonTxn {
+            version: m.version.as_str().to_string(),
+            reason: "MySQL guarded fragment list is empty".to_string(),
+        });
+    }
+    if let Some((idx, _)) = fragments
+        .iter()
+        .enumerate()
+        .find(|(_, fragment)| fragment.sql.trim().is_empty())
+    {
+        return Err(ApplyError::NonIdempotentNonTxn {
+            version: m.version.as_str().to_string(),
+            reason: format!("MySQL guarded fragment #{idx} is empty"),
+        });
+    }
+    let reassembled = fragments
+        .iter()
+        .map(|fragment| fragment.sql.trim())
+        .collect::<Vec<_>>()
+        .join(";\n");
+    if reassembled != m.up.trim() {
+        return Err(ApplyError::NonIdempotentNonTxn {
+            version: m.version.as_str().to_string(),
+            reason: "MySQL guarded fragments do not reassemble to the migration `up`"
+                .to_string(),
+        });
+    }
+    Ok(fragments)
 }
 
 pub fn mysql_migration_lock_name(project_id: &str) -> String {
@@ -365,15 +561,54 @@ impl MigrationBackend for MysqlBackend {
         kind: &str,
     ) -> Result<bool, ApplyError> {
         let version = m.version.as_str();
+        let fragments = self.mysql_guarded_fragments(m)?;
         record_started_mysql(self, cfg, version, &m.name, m.checksum.as_str(), applied_by)
             .await?;
 
         let started = Instant::now();
-        for fragment in mysql_statement_fragments(&m.up) {
-            self.exec(&fragment).await.map_err(|e| ApplyError::MigrationFailed {
-                version: version.to_string(),
-                source: transport::backend_error(e),
-            })?;
+        for (idx, fragment) in fragments.iter().enumerate() {
+            let live = snapshot_schema_mysql_for_schema(self, fragment.existence_guard.schema())
+                .await
+                .map_err(mysql_drift_to_apply)?;
+            match crate::render::existence_probe::decide(
+                &fragment.existence_guard,
+                &live,
+                SqlDialect::Mysql,
+            ) {
+                GuardVerdict::RunBare => {
+                    self.exec(&fragment.sql).await.map_err(|e| ApplyError::MigrationFailed {
+                        version: version.to_string(),
+                        source: transport::backend_error(e),
+                    })?;
+                    self.after_fragment_decision(
+                        version,
+                        idx,
+                        &fragment.sql,
+                        MysqlApplyDecision::RunBare,
+                        had_inflight,
+                    )
+                    .await?;
+                }
+                GuardVerdict::SatisfiedNoop => {
+                    self.after_fragment_decision(
+                        version,
+                        idx,
+                        &fragment.sql,
+                        MysqlApplyDecision::SatisfiedNoop,
+                        had_inflight,
+                    )
+                    .await?;
+                }
+                GuardVerdict::FailDrift(d) => {
+                    return Err(ApplyError::ExistenceGuardDrift {
+                        version: version.to_string(),
+                        object: d.object,
+                        field: d.field,
+                        expected: d.expected,
+                        actual: d.actual,
+                    });
+                }
+            }
         }
         let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
@@ -451,8 +686,8 @@ impl MigrationBackend for MysqlBackend {
         .map_err(RollbackError::Journal)
     }
 
-    fn validate_non_txn(&self, _m: &Migration) -> Result<(), ApplyError> {
-        Ok(())
+    fn validate_non_txn(&self, m: &Migration) -> Result<(), ApplyError> {
+        self.mysql_guarded_fragments(m).map(|_| ())
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
@@ -957,7 +1192,14 @@ async fn snapshot_schema_mysql(
     backend: &MysqlBackend,
     cfg: &ExecutorConfig,
 ) -> Result<SchemaSnapshot, DriftError> {
-    let schema_bind = [BindValue::Text(cfg.project_schema.clone())];
+    snapshot_schema_mysql_for_schema(backend, &cfg.project_schema).await
+}
+
+async fn snapshot_schema_mysql_for_schema(
+    backend: &MysqlBackend,
+    schema: &str,
+) -> Result<SchemaSnapshot, DriftError> {
+    let schema_bind = [BindValue::Text(schema.to_string())];
     let tables = backend
         .query_json(
             "SELECT TABLE_NAME, TABLE_COMMENT
@@ -1042,6 +1284,16 @@ async fn snapshot_schema_mysql(
         referential_constraints,
         views,
     })
+}
+
+fn mysql_drift_to_apply(error: DriftError) -> ApplyError {
+    match error {
+        DriftError::Db(db) => ApplyError::Db(db),
+        DriftError::Journal(journal) => ApplyError::Journal(journal),
+        DriftError::Snapshot(message) | DriftError::Backend(message) => {
+            ApplyError::Backend(message)
+        }
+    }
 }
 
 fn mysql_statement_fragments(sql: &str) -> Vec<String> {
