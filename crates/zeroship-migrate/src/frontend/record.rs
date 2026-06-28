@@ -21,8 +21,8 @@ use crate::{Checksum, MigrationFlags, MigrationIr};
 use zeroship_runtime::Runtime;
 
 use super::embedding::{
-    install_frontend_globals, module_graph, DeterminismProbeSeed, FrontendGlobals,
-    FrontendProgram,
+    install_frontend_globals, module_graph, read_determinism_probe_used, DeterminismProbeSeed,
+    FrontendGlobals, FrontendProgram,
 };
 use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 
@@ -56,10 +56,10 @@ pub enum RecordError {
         /// The observed byte count.
         actual: usize,
     },
-    /// The record-twice determinism probe found that seeded host-clock/RNG globals
-    /// change the recorded IR.
+    /// The determinism probe observed host-clock/RNG invocation, or the secondary
+    /// record-twice check found host-clock/RNG-dependent IR output.
     #[error(
-        "nondeterministic authoring JS changes recorded IR using {accessors} at {differing_path}; use DB-evaluated c.fn.* scalars instead"
+        "nondeterministic authoring JS uses {accessors} at {differing_path}; use DB-evaluated c.fn.* scalars instead"
     )]
     Nondeterministic {
         /// Comma-separated accessor summary when the advisory source lint can name it.
@@ -67,7 +67,7 @@ pub enum RecordError {
         /// First differing IR path/field.
         differing_path: String,
         /// Advisory structured lint findings. These are hints only; the hard error
-        /// comes from recorded IR divergence.
+        /// comes from probe-observed invocation or recorded IR divergence.
         findings: Vec<DeterminismFinding>,
     },
 }
@@ -93,6 +93,11 @@ struct OpIrEnvelope {
     error: Option<String>,
     #[serde(default)]
     ir: Option<serde_json::Value>,
+}
+
+struct RecordProbe {
+    ir_value: serde_json::Value,
+    nondeterminism_used: Vec<String>,
 }
 
 /// **UNSANDBOXED, in-process — for the test oracle / trusted-input use ONLY.**
@@ -135,16 +140,18 @@ pub fn record_migration_to_ir_unsandboxed(
 /// in-process-eval threat):
 /// the PR4 build/CLI path records via the kernel-sandboxed child, never here.
 ///
-/// Record a migration's `up()` into a typed [`MigrationIr`] after the record-twice
-/// determinism probe proves the emitted IR is stable.
+/// Record a migration's `up()` into a typed [`MigrationIr`] after the determinism
+/// probe proves the source did not invoke known host-clock/RNG APIs and the
+/// record-twice secondary check proves the emitted IR is stable.
 ///
 /// This is the same record path as [`record_migration_to_ir_unsandboxed`], but it
-/// keeps the historical [`RecordOutcome`] wrapper used by tests. Detected
-/// If seeded `Date.now()`/`Date()`/`new Date()`/`performance.now()`/
-/// `Math.random()`/`crypto.getRandomValues()`/`crypto.randomUUID()` calls change
-/// the recorded IR, this returns hard [`RecordError::Nondeterministic`]. The
-/// legacy regex lint is retained only as an advisory warning source and never
-/// gates recording.
+/// keeps the historical [`RecordOutcome`] wrapper used by tests.
+/// If the probe observes invocation of `Date.now()`/`Date()`/argless
+/// `new Date()`/`performance.now()`/`Math.random()`/`crypto.getRandomValues()`/
+/// `crypto.randomUUID()`, this returns hard [`RecordError::Nondeterministic`].
+/// The record-twice IR/checksum comparison remains as a secondary defense for
+/// residual unknown nondeterminism. The legacy regex lint is retained only as an
+/// advisory warning source and never gates recording.
 ///
 /// # Errors
 /// See [`RecordError`].
@@ -169,9 +176,21 @@ pub fn record_migration_to_ir_with_warnings_unsandboxed(
         Some(DeterminismProbeSeed::B),
     )?;
 
-    if probe_a != probe_b {
+    let nondeterminism_used =
+        merge_nondeterminism_used(&probe_a.nondeterminism_used, &probe_b.nondeterminism_used);
+    if !nondeterminism_used.is_empty() {
+        let findings = advisory_determinism_findings(migration_source);
+        return Err(RecordError::Nondeterministic {
+            accessors: nondeterminism_used_summary(&nondeterminism_used),
+            differing_path: "$.nondeterminismUsed".to_string(),
+            findings,
+        });
+    }
+
+    if probe_a.ir_value != probe_b.ir_value {
         let differing_path =
-            first_json_difference_path(&probe_a, &probe_b).unwrap_or_else(|| "$".to_string());
+            first_json_difference_path(&probe_a.ir_value, &probe_b.ir_value)
+                .unwrap_or_else(|| "$".to_string());
         let findings = advisory_determinism_findings(migration_source);
         return Err(RecordError::Nondeterministic {
             accessors: accessor_summary(&findings),
@@ -180,8 +199,8 @@ pub fn record_migration_to_ir_with_warnings_unsandboxed(
         });
     }
 
-    let ir_a = ir_from_value(probe_a)?;
-    let ir_b = ir_from_value(probe_b)?;
+    let ir_a = ir_from_value(probe_a.ir_value)?;
+    let ir_b = ir_from_value(probe_b.ir_value)?;
     let checksum_a = determinism_checksum(&ir_a);
     let checksum_b = determinism_checksum(&ir_b);
     if checksum_a != checksum_b {
@@ -204,7 +223,7 @@ fn record_migration_value_unsandboxed(
     owner_app: &str,
     name: &str,
     determinism_probe_seed: Option<DeterminismProbeSeed>,
-) -> Result<serde_json::Value, RecordError> {
+) -> Result<RecordProbe, RecordError> {
     zeroship_runtime::init_v8();
 
     let modules = module_graph(FrontendProgram::RecordMigration {
@@ -213,7 +232,7 @@ fn record_migration_value_unsandboxed(
 
     let runtime = Runtime::builder().build();
 
-    let ir_json: Result<String, RecordError> = runtime.with_scope(|scope| {
+    let probe: Result<(String, Vec<String>), RecordError> = runtime.with_scope(|scope| {
         install_frontend_globals(
             scope,
             FrontendGlobals::Migration,
@@ -242,10 +261,12 @@ fn record_migration_value_unsandboxed(
             .get(scope, k.into())
             .filter(|v| v.is_string())
             .ok_or(RecordError::NoIr)?;
-        Ok(v.to_rust_string_lossy(scope))
+        let nondeterminism_used =
+            read_determinism_probe_used(scope).map_err(RecordError::V8)?;
+        Ok((v.to_rust_string_lossy(scope), nondeterminism_used))
     });
 
-    let ir_json = ir_json?;
+    let (ir_json, nondeterminism_used) = probe?;
     let envelope: OpIrEnvelope =
         serde_json::from_str(&ir_json).map_err(|e| RecordError::Recording(e.to_string()))?;
 
@@ -269,7 +290,10 @@ fn record_migration_value_unsandboxed(
             );
         }
     }
-    Ok(ir_value)
+    Ok(RecordProbe {
+        ir_value,
+        nondeterminism_used,
+    })
 }
 
 fn ir_from_value(ir_value: serde_json::Value) -> Result<MigrationIr, RecordError> {
@@ -352,6 +376,28 @@ pub(crate) fn accessor_summary(findings: &[DeterminismFinding]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     accessors
+}
+
+pub(crate) fn merge_nondeterminism_used(a: &[String], b: &[String]) -> Vec<String> {
+    a.iter()
+        .chain(b.iter())
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+pub(crate) fn nondeterminism_used_summary(used: &[String]) -> String {
+    if used.is_empty() {
+        return accessor_summary(&[]);
+    }
+    used.iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(crate) fn determinism_checksum(ir: &MigrationIr) -> String {

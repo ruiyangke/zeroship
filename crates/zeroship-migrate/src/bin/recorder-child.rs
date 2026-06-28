@@ -30,7 +30,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use zeroship_migrate::frontend::embedding::{
-    install_frontend_globals, module_graph, FrontendGlobals, FrontendProgram,
+    install_frontend_globals, module_graph, read_determinism_probe_used, FrontendGlobals,
+    FrontendProgram,
 };
 use zeroship_migrate::frontend::recorder_protocol::{
     ChildOperation, ChildRequest, ChildResponse, MAX_CHILD_STDIN_BYTES, MAX_TS_SOURCE_BYTES,
@@ -363,7 +364,7 @@ fn run_record_migration(
         source: &req.ts_source,
     });
 
-    let ir_json: Result<String, String> = runtime.with_scope(|scope| {
+    let probe: Result<(String, Vec<String>), String> = runtime.with_scope(|scope| {
         install_frontend_globals(
             scope,
             FrontendGlobals::Migration,
@@ -414,11 +415,12 @@ fn run_record_migration(
             .get(scope, k.into())
             .filter(|v| v.is_string())
             .ok_or_else(|| "op recorder produced no IR".to_string())?;
-        Ok(v.to_rust_string_lossy(scope))
+        let nondeterminism_used = read_determinism_probe_used(scope)?;
+        Ok((v.to_rust_string_lossy(scope), nondeterminism_used))
     });
 
-    let raw_envelope = match ir_json {
-        Ok(s) => s,
+    let (raw_envelope, nondeterminism_used) = match probe {
+        Ok(pair) => pair,
         Err(e) => return Err(ChildResponse::eval_error(e, report)),
     };
 
@@ -429,7 +431,7 @@ fn run_record_migration(
     // MED #3). On inner success we stamp the AUTHORITATIVE owner_app from the
     // server-injected, ownership-cross-checked `req.owner_app` (HIGH #1) — overwriting
     // whatever the untrusted code may have produced.
-    let ir_json = match finalize_envelope(&raw_envelope, &req.owner_app) {
+    let ir_json = match finalize_envelope(&raw_envelope, &req.owner_app, &nondeterminism_used) {
         Ok(s) => s,
         Err(e) => return Err(ChildResponse::eval_error(e, report)),
     };
@@ -485,9 +487,16 @@ fn run_schema_eval(
 /// SECURITY: the authoritative `owner_app` is STAMPED here in Rust from the
 /// server-injected, ownership-cross-checked `owner_app` — never read from a
 /// JS-reachable global the untrusted `up()` body shares (PR4a code-critic HIGH #1).
-fn finalize_envelope(raw: &str, owner_app: &str) -> Result<String, String> {
+fn finalize_envelope(
+    raw: &str,
+    owner_app: &str,
+    nondeterminism_used: &[String],
+) -> Result<String, String> {
     let mut env: serde_json::Value =
         serde_json::from_str(raw).map_err(|e| format!("recorder produced invalid envelope: {e}"))?;
+    if !env.is_object() {
+        return Err("recorder envelope is not an object".to_string());
+    }
 
     let ok = env.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !ok {
@@ -517,6 +526,18 @@ fn finalize_envelope(raw: &str, owner_app: &str) -> Result<String, String> {
         ir_obj.insert(
             "owner_app".to_string(),
             serde_json::Value::String(owner_app.to_string()),
+        );
+    }
+    if let Some(env_obj) = env.as_object_mut() {
+        env_obj.insert(
+            "nondeterminismUsed".to_string(),
+            serde_json::Value::Array(
+                nondeterminism_used
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
         );
     }
 

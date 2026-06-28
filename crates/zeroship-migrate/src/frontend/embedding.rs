@@ -45,6 +45,7 @@ export default {};
 
 const EMPTY_MIGRATION_JS: &str = "export function up() {}\n";
 const EMPTY_SCHEMA_JS: &str = "export default { schema: {} };\n";
+const NONDET_USED_GLOBAL: &str = "__zsNondetUsed";
 
 /// Which front-end program is the graph entrypoint.
 #[derive(Debug, Clone, Copy)]
@@ -199,6 +200,24 @@ fn install_determinism_probe_globals(
   const perfBase = {perf_base};
   const randomBase = {random_base};
   const randomFraction = {random_fraction};
+  const nondetSeen = Object.create(null);
+  const nondetUsed = [];
+  const freeze = Object.freeze.bind(Object);
+  const slice = Function.call.bind(Array.prototype.slice);
+
+  function markNondet(accessor) {{
+    if (!nondetSeen[accessor]) {{
+      nondetSeen[accessor] = true;
+      nondetUsed.push(accessor);
+    }}
+  }}
+
+  Object.defineProperty(g, "{nondet_used_global}", {{
+    get() {{
+      return freeze(slice(nondetUsed));
+    }},
+    configurable: false
+  }});
 
   function nextDateMs() {{
     return dateBase + dateCounter++;
@@ -207,16 +226,26 @@ fn install_determinism_probe_globals(
   function ProbeDate(...args) {{
     if (new.target) {{
       if (args.length === 0) {{
+        markNondet("new Date()");
         return Reflect.construct(OriginalDate, [nextDateMs()], new.target);
       }}
       return Reflect.construct(OriginalDate, args, new.target);
     }}
+    markNondet("Date()");
     return new OriginalDate(nextDateMs()).toString();
   }}
-  Object.setPrototypeOf(ProbeDate, OriginalDate);
-  ProbeDate.prototype = OriginalDate.prototype;
+  Object.setPrototypeOf(ProbeDate, Object.getPrototypeOf(OriginalDate));
+  ProbeDate.prototype = Object.create(OriginalDate.prototype);
+  Object.defineProperty(ProbeDate.prototype, "constructor", {{
+    value: ProbeDate,
+    configurable: true,
+    writable: true
+  }});
   Object.defineProperty(ProbeDate, "now", {{
-    value: () => nextDateMs(),
+    value: () => {{
+      markNondet("Date.now()");
+      return nextDateMs();
+    }},
     configurable: true,
     writable: true
   }});
@@ -232,17 +261,26 @@ fn install_determinism_probe_globals(
   }});
   g.Date = ProbeDate;
 
-  if (!g.performance || typeof g.performance !== "object") {{
-    g.performance = {{}};
-  }}
-  Object.defineProperty(g.performance, "now", {{
-    value: () => perfBase + perfCounter++,
+  const probePerformance = Object.create(null);
+  Object.defineProperty(probePerformance, "now", {{
+    value: () => {{
+      markNondet("performance.now()");
+      return perfBase + perfCounter++;
+    }},
+    configurable: true,
+    writable: true
+  }});
+  Object.defineProperty(g, "performance", {{
+    value: probePerformance,
     configurable: true,
     writable: true
   }});
 
   Object.defineProperty(g.Math, "random", {{
-    value: () => randomFraction,
+    value: () => {{
+      markNondet("Math.random()");
+      return randomFraction;
+    }},
     configurable: true,
     writable: true
   }});
@@ -253,7 +291,7 @@ fn install_determinism_probe_globals(
     return b;
   }}
 
-  function getRandomValues(view) {{
+  function fillRandomValues(view) {{
     if (!view || typeof view.length !== "number") {{
       throw new TypeError("getRandomValues requires a typed array");
     }}
@@ -266,17 +304,22 @@ fn install_determinism_probe_globals(
     return view;
   }}
 
+  function getRandomValues(view) {{
+    markNondet("crypto.getRandomValues()");
+    return fillRandomValues(view);
+  }}
+
   function randomUUID() {{
+    markNondet("crypto.randomUUID()");
     const b = new Uint8Array(16);
-    getRandomValues(b);
+    fillRandomValues(b);
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     const hex = Array.from(b, x => x.toString(16).padStart(2, "0"));
     return `${{hex[0]}}${{hex[1]}}${{hex[2]}}${{hex[3]}}-${{hex[4]}}${{hex[5]}}-${{hex[6]}}${{hex[7]}}-${{hex[8]}}${{hex[9]}}-${{hex[10]}}${{hex[11]}}${{hex[12]}}${{hex[13]}}${{hex[14]}}${{hex[15]}}`;
   }}
 
-  const originalCrypto = g.crypto;
-  const probeCrypto = Object.create(originalCrypto || null);
+  const probeCrypto = Object.create(null);
   Object.defineProperty(probeCrypto, "getRandomValues", {{
     value: getRandomValues,
     configurable: true,
@@ -298,6 +341,7 @@ fn install_determinism_probe_globals(
         perf_base = seed.perf_base_ms(),
         random_base = seed.random_base_byte(),
         random_fraction = seed.random_fraction(),
+        nondet_used_global = NONDET_USED_GLOBAL,
     );
     let source = v8::String::new(scope, &script)
         .ok_or_else(|| "determinism probe globals: source alloc failed".to_string())?;
@@ -307,4 +351,31 @@ fn install_determinism_probe_globals(
         .run(scope)
         .ok_or_else(|| "determinism probe globals: install failed".to_string())?;
     Ok(())
+}
+
+pub fn read_determinism_probe_used(
+    scope: &mut v8::PinScope,
+) -> Result<Vec<String>, String> {
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, NONDET_USED_GLOBAL)
+        .ok_or_else(|| "determinism probe globals: used-set key alloc failed".to_string())?;
+    let value = match global.get(scope, key.into()) {
+        Some(value) if !value.is_undefined() && !value.is_null() => value,
+        _ => return Ok(Vec::new()),
+    };
+    let arr: v8::Local<v8::Array> = value
+        .try_into()
+        .map_err(|_| "determinism probe globals: used-set snapshot is not an array".to_string())?;
+    let mut used = Vec::with_capacity(arr.length() as usize);
+    for i in 0..arr.length() {
+        let item = arr
+            .get_index(scope, i)
+            .ok_or_else(|| format!("determinism probe globals: cannot read used-set[{i}]"))?;
+        if item.is_string() {
+            used.push(item.to_rust_string_lossy(scope));
+        }
+    }
+    used.sort();
+    used.dedup();
+    Ok(used)
 }

@@ -406,6 +406,76 @@ fn record_path_rejects_nondeterministic_source() {
 }
 
 #[test]
+fn record_path_rejects_math_random_difference_by_invocation() {
+    use zeroship_migrate::frontend::{
+        record_migration_to_ir_with_warnings_unsandboxed, RecordError,
+    };
+
+    let dirty = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            const collapsed = Math.random() - Math.random();
+            table("t").insert({ rows: [ { sample: collapsed } ] });
+        }};
+    "#;
+    let err = record_migration_to_ir_with_warnings_unsandboxed(dirty, OWNER, "random_difference")
+        .expect_err("Math.random() - Math.random() must be caught by invocation");
+    match err {
+        RecordError::Nondeterministic {
+            accessors,
+            differing_path,
+            ..
+        } => {
+            assert!(accessors.contains("Math.random"), "accessors: {accessors}");
+            assert_eq!(differing_path, "$.nondeterminismUsed");
+        }
+        other => panic!("expected Nondeterministic, got {other:?}"),
+    }
+}
+
+#[test]
+fn record_path_rejects_argless_new_date_by_invocation() {
+    use zeroship_migrate::frontend::{
+        record_migration_to_ir_with_warnings_unsandboxed, RecordError,
+    };
+
+    let dirty = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { year: new Date().getUTCFullYear() } ] });
+        }};
+    "#;
+    let err = record_migration_to_ir_with_warnings_unsandboxed(dirty, OWNER, "argless_date")
+        .expect_err("argless new Date() must be caught by invocation");
+    match err {
+        RecordError::Nondeterministic {
+            accessors,
+            differing_path,
+            ..
+        } => {
+            assert!(accessors.contains("new Date"), "accessors: {accessors}");
+            assert_eq!(differing_path, "$.nondeterminismUsed");
+        }
+        other => panic!("expected Nondeterministic, got {other:?}"),
+    }
+}
+
+#[test]
+fn record_path_allows_explicit_new_date_argument() {
+    use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
+
+    let clean = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { ms: new Date(0).getTime() } ] });
+        }};
+    "#;
+    let outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "explicit_date")
+        .expect("new Date(<explicit ms>) must not trip the invocation gate");
+    assert_eq!(outcome.ir.ops.len(), 1);
+}
+
+#[test]
 fn record_path_allows_date_now_inside_comment_or_string() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 

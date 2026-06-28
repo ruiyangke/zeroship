@@ -251,12 +251,77 @@ fn math_random_in_op_value_is_caught_by_ir_divergence() {
         .expect_err("Math.random-derived op value must be a hard determinism error");
     match err {
         BuildError::Nondeterministic {
-            differing_path, ..
+            accessors,
+            differing_path,
+            ..
         } => {
-            assert!(
-                differing_path.contains(".ops"),
-                "expected a differing op path, got {differing_path}"
-            );
+            assert!(accessors.contains("Math.random"), "accessors: {accessors}");
+            assert_eq!(differing_path, "$.nondeterminismUsed");
+        }
+        other => panic!("expected Nondeterministic, got {other:?}"),
+    }
+    assert!(
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "nondeterministic source must not write a committed artifact"
+    );
+}
+
+#[test]
+fn math_random_difference_is_caught_by_invocation_not_just_divergence() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_random_difference";
+    let dirty = r#"
+        import { table } from "@zeroship/migrate";
+        export function up() {
+          const collapsed = Math.random() - Math.random();
+          table("events").insert({ rows: [ { sample: collapsed } ] });
+        }
+    "#;
+    write_mig(dir.path(), stem, dirty);
+
+    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect_err("Math.random() - Math.random() must be caught by invocation");
+    match err {
+        BuildError::Nondeterministic {
+            accessors,
+            differing_path,
+            ..
+        } => {
+            assert!(accessors.contains("Math.random"), "accessors: {accessors}");
+            assert_eq!(differing_path, "$.nondeterminismUsed");
+        }
+        other => panic!("expected Nondeterministic, got {other:?}"),
+    }
+    assert!(
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "nondeterministic source must not write a committed artifact"
+    );
+}
+
+#[test]
+fn argless_new_date_field_is_caught() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_folded_date_now";
+    let dirty = r#"
+        import { table } from "@zeroship/migrate";
+        export function up() {
+          table("events").insert({ rows: [ { ms: Date.now() % 1000000 } ] });
+        }
+    "#;
+    write_mig(dir.path(), stem, dirty);
+
+    let err = build_migrations(dir.path(), OWNER, &RecordVia::local())
+        .expect_err("folded Date.now() must be caught by invocation");
+    match err {
+        BuildError::Nondeterministic {
+            accessors,
+            differing_path,
+            ..
+        } => {
+            assert!(accessors.contains("Date.now"), "accessors: {accessors}");
+            assert_eq!(differing_path, "$.nondeterminismUsed");
         }
         other => panic!("expected Nondeterministic, got {other:?}"),
     }
