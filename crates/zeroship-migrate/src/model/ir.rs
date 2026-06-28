@@ -88,7 +88,64 @@ pub const EXPR_INVALID_NUMERIC: &str = "EXPR_INVALID_NUMERIC";
 /// engine that this build cannot faithfully interpret), per the AGENTS.md
 /// "wire-format versioning is code-evolution discipline, not user-compat" stance.
 /// A bump MUST be checksum-neutral for already-applied artifacts (§5.3).
-pub const CURRENT_IR_VERSION: u32 = 5;
+pub const CURRENT_IR_VERSION: u32 = 6;
+
+/// Per-collection deploy-time data-validation strictness, mirroring the
+/// `@zeroship/db` `schema(...).strictness(...)` builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TableStrictness {
+    /// Refuse deploy-time validation violations.
+    Strict,
+    /// Warn on violations but allow the push.
+    Lenient,
+    /// Skip deploy-time validation.
+    Off,
+}
+
+impl Default for TableStrictness {
+    fn default() -> Self {
+        Self::Strict
+    }
+}
+
+/// Complete collection-level runtime options stamped on `createTable`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableRuntimeOptions {
+    /// `schema(...).softDelete()`.
+    pub soft_delete: bool,
+    /// `schema(...).withVersioning()`.
+    pub versioning: bool,
+    /// `schema(...).strictness(...)`; default matches `@zeroship/db`.
+    #[serde(default)]
+    pub strictness: TableStrictness,
+}
+
+impl Default for TableRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            soft_delete: false,
+            versioning: false,
+            strictness: TableStrictness::Strict,
+        }
+    }
+}
+
+/// Patch form for `setTableOptions`: absent fields mean "leave unchanged".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableRuntimeOptionsPatch {
+    /// Toggle soft-delete behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_delete: Option<bool>,
+    /// Toggle optimistic versioning behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub versioning: Option<bool>,
+    /// Change deploy-time validation strictness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strictness: Option<TableStrictness>,
+}
 
 fn deserialize_present_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -1868,6 +1925,10 @@ pub enum Op {
         /// Indexes created with the table.
         #[serde(default)]
         indexes: Vec<IrIndex>,
+        /// Collection-level runtime options (`softDelete`, `versioning`,
+        /// `strictness`) that are not recoverable from physical columns.
+        #[serde(rename = "runtimeOptions", default, skip_serializing_if = "Option::is_none")]
+        runtime_options: Option<TableRuntimeOptions>,
         /// **PR10** — the schema qualifier (§2.7). Honored under Trusted/Platform,
         /// pinned/refused under Confined. Omitted-when-absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1876,6 +1937,20 @@ pub enum Op {
         /// synthesized via a catalog probe; never a native `IF NOT EXISTS`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
+    },
+    /// Metadata-only collection runtime option change. This participates in the
+    /// canonical IR/fold but lowers to no SQL; it exists so later migrations can
+    /// flip `softDelete`, `versioning`, or `strictness` without inferring from
+    /// physical/system columns.
+    SetTableOptions {
+        /// Target table.
+        table: String,
+        /// Option patch. Absent fields leave the previous folded value unchanged.
+        options: TableRuntimeOptionsPatch,
+        /// **PR10** — the schema qualifier (§2.7). Honored under Trusted/Platform,
+        /// pinned/refused under Confined. Omitted-when-absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// `DROP TABLE`.
     DropTable {
@@ -2711,6 +2786,7 @@ impl Op {
         match self {
             // Portable core — no capability required.
             Op::CreateTable { .. }
+            | Op::SetTableOptions { .. }
             | Op::DropTable { .. }
             | Op::RenameTable { .. }
             | Op::AddColumn { .. }
@@ -2794,6 +2870,7 @@ impl Op {
     pub fn touched_table(&self) -> Option<&str> {
         match self {
             Op::CreateTable { name, .. } => Some(name.as_str()),
+            Op::SetTableOptions { table, .. } => Some(table.as_str()),
             // A table rename TOUCHES the existing (OLD) table — the interlock
             // gates the table the op operates ON, which is the source name.
             Op::DropTable { table, .. }
@@ -2859,6 +2936,7 @@ impl Op {
     pub fn schema(&self) -> Option<&str> {
         match self {
             Op::CreateTable { schema, .. }
+            | Op::SetTableOptions { schema, .. }
             | Op::DropTable { schema, .. }
             | Op::RenameTable { schema, .. }
             | Op::AddColumn { schema, .. }
@@ -2938,7 +3016,8 @@ impl Op {
             | Op::DropEnum { existence_guard, .. }
             | Op::DropDomain { existence_guard, .. }
             | Op::DropSequence { existence_guard, .. } => *existence_guard,
-            Op::Insert { .. }
+            Op::SetTableOptions { .. }
+            | Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
@@ -2999,7 +3078,8 @@ impl Op {
             | Op::DropEnum { .. }
             | Op::DropDomain { .. }
             | Op::DropSequence { .. } => Some(ExistenceGuard::IfExists),
-            Op::Insert { .. }
+            Op::SetTableOptions { .. }
+            | Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
             | Op::Backfill { .. }
@@ -3822,6 +3902,7 @@ mod tests {
             }],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -3964,6 +4045,7 @@ mod tests {
             columns: vec![],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: Some(ExistenceGuard::IfNotExists),
         };

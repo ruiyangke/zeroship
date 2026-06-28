@@ -180,6 +180,7 @@ async fn declarative_deploy_holds_project_lock_across_all_sub_batches() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     let plan1 = engine
@@ -232,6 +233,7 @@ async fn declarative_deploy_holds_project_lock_across_all_sub_batches() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(&conn, &cfg.project_schema)

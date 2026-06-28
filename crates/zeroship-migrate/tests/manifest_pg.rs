@@ -457,6 +457,7 @@ fn plain_declarative_plan(
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[desc]).expect("desired_snapshot");
     engine
@@ -588,6 +589,7 @@ async fn rename_declarative_plan(
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d1 = desired_snapshot(&cfg.project_schema, &[v1]).expect("desired_snapshot");
     let create = engine
@@ -610,6 +612,7 @@ async fn rename_declarative_plan(
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     };
     let d2 = desired_snapshot(&cfg.project_schema, &[v2]).expect("desired_snapshot");
     let live = snapshot_schema(conn, &cfg.project_schema).await.expect("snap");

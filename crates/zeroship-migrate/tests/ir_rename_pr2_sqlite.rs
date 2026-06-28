@@ -71,6 +71,7 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 
@@ -145,7 +146,8 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
                 columns: cols,
                 constraints: vec![],
                 indexes: vec![],
-                schema: None,
+                runtime_options: None,
+            schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -313,7 +315,8 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
                     unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
                 constraints: vec![],
                 indexes: vec![],
-                schema: None,
+                runtime_options: None,
+            schema: None,
                 existence_guard: None,
             }],
             flags: IrFlagsOverride::default(),
@@ -488,6 +491,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
             }],
             indexes: vec![],
             constraints: vec![],
+            runtime_options: Default::default(),
             comment: None,
             stored_create_sql: None,
         },
@@ -512,6 +516,7 @@ fn descriptor2(table: &str, a: &str, b: &str) -> CollectionDescriptor {
             FieldDescriptor { name: b.into(), ty: "string".into(), required: true, ..Default::default() },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 

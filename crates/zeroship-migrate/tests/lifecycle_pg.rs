@@ -203,6 +203,7 @@ fn one_field_collection(tbl: &str, field: &str, app: &str) -> CollectionDescript
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 

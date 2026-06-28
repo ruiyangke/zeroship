@@ -497,6 +497,7 @@ fn dml_comment(op: &Op, binds: &[BindValue]) -> String {
 fn op_subject(op: &Op) -> String {
     match op {
         Op::CreateTable { name, .. } | Op::DropTable { table: name, .. } => quote_dotted(&[name]),
+        Op::SetTableOptions { table, .. } => quote_dotted(&[table]),
         Op::AddColumn { table, column, .. }
         | Op::DropColumn { table, column, .. }
         | Op::AlterColumnType { table, column, .. }

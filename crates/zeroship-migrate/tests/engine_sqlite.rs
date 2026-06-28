@@ -125,6 +125,7 @@ async fn engine_applies_sqlite_rebuild_end_to_end() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     // v2: the SAME column re-typed to string → TEXT affinity. A genuine type change
     // → the diff yields exactly one rebuild.
@@ -230,6 +231,7 @@ async fn engine_sqlite_rebuild_rerun_is_a_noop() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -336,6 +338,7 @@ async fn engine_sqlite_rename_routes_to_rebuild_not_run_expand() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].name = "email_address".into();
@@ -456,6 +459,7 @@ async fn engine_sqlite_rebuild_refused_without_approval() {
             columns: vec!["qty".into()],
             unique: false,
         }],
+        runtime_options: Default::default(),
     }];
     let mut v2 = v1.clone();
     v2[0].fields[0].ty = "string".into();
@@ -555,6 +559,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     // v2: drop `legacy` (destructive — a rebuild on SQLite, CHECK-constrained).
     let v2 = vec![CollectionDescriptor {
@@ -567,6 +572,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     // v3: add `note` on top of the post-destructive shape (additive forward).
     let v3 = vec![CollectionDescriptor {
@@ -586,6 +592,7 @@ async fn roll_forward_over_destructive_history_on_sqlite() {
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
 
     let p = paths("roll_forward_destructive");
@@ -719,7 +726,8 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
                     ..Default::default()
                 }],
                 indexes: vec![],
-            },
+            runtime_options: Default::default(),
+    },
             CollectionDescriptor {
                 name: "posts".into(),
                 owner_app: APP.into(),
@@ -730,7 +738,8 @@ async fn warm_multi_collection_reboot_no_spurious_drop_both_usable() {
                     ..Default::default()
                 }],
                 indexes: vec![],
-            },
+            runtime_options: Default::default(),
+    },
         ]
     };
 
@@ -942,6 +951,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
             },
         ],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let (live, ownership) = live_from(&[CollectionDescriptor {
         name: "widgets".into(),
@@ -952,6 +962,7 @@ async fn sqlite_baseline_adopts_a_journal_less_file_then_additive_deploy_works()
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }]);
     let desired2 = desired_snapshot(PROJECT, &v2).expect("v2 desired");
     let plan = engine
@@ -994,6 +1005,7 @@ async fn sqlite_baseline_refuses_when_engine_already_manages_the_file() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let desired1 = desired_snapshot(PROJECT, &v1).expect("v1 desired");
     let plan1 = engine
@@ -1076,6 +1088,7 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }];
     let desired = desired_snapshot(PROJECT, &v1).expect("v1 desired");
     let plan = engine

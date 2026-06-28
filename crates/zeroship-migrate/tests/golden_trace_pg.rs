@@ -351,6 +351,7 @@ fn tbl(name: &str) -> CollectionDescriptor {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 
@@ -368,6 +369,7 @@ fn tbl_renamed(name: &str) -> CollectionDescriptor {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 
@@ -378,6 +380,7 @@ fn tbl_no_email(name: &str) -> CollectionDescriptor {
         owner_app: "app_test".into(),
         fields: vec![],
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 

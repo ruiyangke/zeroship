@@ -180,6 +180,7 @@ fn people_v1() -> Vec<CollectionDescriptor> {
             ..Default::default()
         }],
         indexes: vec![],
+    runtime_options: Default::default(),
     }]
 }
 

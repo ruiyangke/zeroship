@@ -91,6 +91,7 @@ fn op_variant_names_from_schema() {
         "alterColumnType",
         "alterColumnNullability",
         "renameColumn",
+        "setTableOptions",
         "addConstraint",
         "dropConstraint",
         "insert",

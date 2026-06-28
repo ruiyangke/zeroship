@@ -270,7 +270,8 @@ async fn add_column_ifnotexists_absent_runs() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     })).await.expect("create base table");
 
@@ -374,7 +375,8 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     })).await.expect("create base table via migrator");
     conn.batch_execute(&format!(
@@ -387,7 +389,8 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     let err = apply(&conn, &cfg, &steps).await.expect_err("wider live table fails closed");
@@ -407,7 +410,8 @@ async fn create_table_ifnotexists_present_matching_is_noop() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     })).await.expect("create base table");
 
@@ -416,7 +420,8 @@ async fn create_table_ifnotexists_present_matching_is_noop() {
         columns: vec![col("n", ColType::Int)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
     let v = match &steps[0] { PlanStep::Ddl(m) => m.version.as_str().to_string(), _ => unreachable!() };
@@ -455,7 +460,8 @@ async fn create_table_ifnotexists_fresh_creates_all_secondary_indexes_and_reruns
             unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
 
@@ -566,7 +572,8 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
         columns: vec![col("email", ColType::String)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }))
     .await
@@ -728,7 +735,8 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
         columns: vec![col("label", ColType::String)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }))
     .await
@@ -746,7 +754,8 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
 
@@ -788,7 +797,8 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
         columns: vec![col("legacy", ColType::String)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     })).await.expect("create base table via migrator");
 
@@ -847,7 +857,8 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
         columns: vec![col("name", ColType::String)],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     })).await.expect("create base table via migrator");
 

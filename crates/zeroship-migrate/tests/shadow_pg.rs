@@ -360,6 +360,7 @@ fn descriptor(name: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor 
         owner_app: "app_test".into(),
         fields,
         indexes: vec![],
+    runtime_options: Default::default(),
     }
 }
 

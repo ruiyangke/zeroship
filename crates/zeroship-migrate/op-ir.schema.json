@@ -104,6 +104,17 @@
               },
               "default": []
             },
+            "runtimeOptions": {
+              "description": "Collection-level runtime options (`softDelete`, `versioning`,\n`strictness`) that are not recoverable from physical columns.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TableRuntimeOptions"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "schema": {
               "description": "**PR10** — the schema qualifier (§2.7). Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
               "type": [
@@ -132,6 +143,37 @@
             "op",
             "name",
             "columns"
+          ]
+        },
+        {
+          "description": "Metadata-only collection runtime option change. This participates in the\ncanonical IR/fold but lowers to no SQL; it exists so later migrations can\nflip `softDelete`, `versioning`, or `strictness` without inferring from\nphysical/system columns.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "options": {
+              "description": "Option patch. Absent fields leave the previous folded value unchanged.",
+              "$ref": "#/$defs/TableRuntimeOptionsPatch"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7). Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "setTableOptions"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "options"
           ]
         },
         {
@@ -3807,6 +3849,50 @@
         }
       ]
     },
+    "TableRuntimeOptions": {
+      "description": "Complete collection-level runtime options stamped on `createTable`.",
+      "type": "object",
+      "properties": {
+        "softDelete": {
+          "description": "`schema(...).softDelete()`.",
+          "type": "boolean"
+        },
+        "versioning": {
+          "description": "`schema(...).withVersioning()`.",
+          "type": "boolean"
+        },
+        "strictness": {
+          "description": "`schema(...).strictness(...)`; default matches `@zeroship/db`.",
+          "$ref": "#/$defs/TableStrictness",
+          "default": "strict"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "softDelete",
+        "versioning"
+      ]
+    },
+    "TableStrictness": {
+      "description": "Per-collection deploy-time data-validation strictness, mirroring the\n`@zeroship/db` `schema(...).strictness(...)` builder.",
+      "oneOf": [
+        {
+          "description": "Refuse deploy-time validation violations.",
+          "type": "string",
+          "const": "strict"
+        },
+        {
+          "description": "Warn on violations but allow the push.",
+          "type": "string",
+          "const": "lenient"
+        },
+        {
+          "description": "Skip deploy-time validation.",
+          "type": "string",
+          "const": "off"
+        }
+      ]
+    },
     "ExistenceGuard": {
       "description": "**PR10** — the uniform existence-guard modifier (§2.7). Carried on a guarded\nDDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on\nthe wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE\n(decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native\n`IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /\nSQLite (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;\nSQLite has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A\nCLOSED 2-variant enum so serde rejects any other token at deserialize and the\nvalidate-time legal-direction check (`ifNotExists` on create*/add*; `ifExists`\non drop*/rename/alter) is a total match. Camel-cased on the wire\n(`\"ifNotExists\"`, `\"ifExists\"`).",
       "oneOf": [
@@ -3821,6 +3907,38 @@
           "const": "ifExists"
         }
       ]
+    },
+    "TableRuntimeOptionsPatch": {
+      "description": "Patch form for `setTableOptions`: absent fields mean \"leave unchanged\".",
+      "type": "object",
+      "properties": {
+        "softDelete": {
+          "description": "Toggle soft-delete behaviour.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "versioning": {
+          "description": "Toggle optimistic versioning behaviour.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "strictness": {
+          "description": "Change deploy-time validation strictness.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TableStrictness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "CommentTarget": {
       "description": "CLOSED target shape for `COMMENT ON`. Only object identifiers and a comment\nliteral are carried; PostgreSQL's function comments normally require an\nargument-type signature for overloaded functions, but the IR intentionally\nmodels only the function name. Function comments are therefore rendered only\nfor unambiguous `FUNCTION name` references and are not folded into the\nsnapshot.",

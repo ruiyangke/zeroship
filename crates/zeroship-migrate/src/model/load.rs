@@ -136,6 +136,7 @@ const UNKNOWN_OWNER: &str = "<unregistered>";
 fn op_target_table(op: &Op) -> Option<&str> {
     match op {
         Op::CreateTable { name, .. } => Some(name),
+        Op::SetTableOptions { table, .. } => Some(table),
         // The ownership gate checks the EXISTING (old) table — a rename of a table
         // the deploying app does not own is refused on the source name.
         Op::DropTable { table, .. }
@@ -444,6 +445,7 @@ mod tests {
                 unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }

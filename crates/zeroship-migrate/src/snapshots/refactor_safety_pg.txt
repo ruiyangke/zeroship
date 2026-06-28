@@ -295,6 +295,11 @@ TableSnapshot {
             comment: None,
         },
     ],
+    runtime_options: TableRuntimeOptions {
+        soft_delete: false,
+        versioning: false,
+        strictness: Strict,
+    },
     comment: None,
     stored_create_sql: None,
 }

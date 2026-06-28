@@ -215,6 +215,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                 columns: Vec::new(),
                 indexes: Vec::new(),
                 constraints: Vec::new(),
+                runtime_options: Default::default(),
                 comment: None,
                 // H1 — carry the verbatim CREATE text so the DROP-COLUMN rebuild
                 // router can detect CHECK / generated / partial-index references the

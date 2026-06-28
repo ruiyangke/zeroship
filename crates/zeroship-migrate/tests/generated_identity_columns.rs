@@ -60,7 +60,8 @@ fn create_table(columns: Vec<IrColumn>, constraints: Vec<IrConstraint>) -> Op {
         columns,
         constraints,
         indexes: Vec::new(),
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     }
 }

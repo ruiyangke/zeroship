@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::ir::{ColType, IdentityCol, SafeI64, SafeU64, SequenceOwnedBy};
+use crate::model::ir::{
+    ColType, IdentityCol, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+};
 
 /// One column of a table, as introspected from `information_schema.columns`.
 ///
@@ -337,6 +339,10 @@ pub struct TableSnapshot {
     pub indexes: Vec<IndexSnapshot>,
     /// Constraints, ordered by name.
     pub constraints: Vec<ConstraintSnapshot>,
+    /// Runtime-visible collection options. These are intentionally excluded from
+    /// structural drift equality because live catalog introspection cannot recover
+    /// them; the offline fold/gen-types path is their authority.
+    pub runtime_options: TableRuntimeOptions,
     /// User-authored catalog comment on this table.
     pub comment: Option<String>,
     /// **Introspection-only** verbatim `CREATE TABLE` text (`SQLite`

@@ -114,6 +114,7 @@ fn checksum_of_ir_byte_stable_golden() {
                 unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
             constraints: vec![],
             indexes: vec![],
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         },
@@ -502,7 +503,8 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
         constraints: vec![],
         indexes: vec![],
-        schema: None,
+        runtime_options: None,
+            schema: None,
         existence_guard: None,
     };
     let v = vec![ct];
