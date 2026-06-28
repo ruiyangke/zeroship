@@ -33,7 +33,7 @@ use zeroship_migrate::frontend::embedding::{
     install_frontend_globals, module_graph, FrontendGlobals, FrontendProgram,
 };
 use zeroship_migrate::frontend::recorder_protocol::{
-    ChildOperation, ChildRequest, ChildResponse,
+    ChildOperation, ChildRequest, ChildResponse, MAX_CHILD_STDIN_BYTES, MAX_TS_SOURCE_BYTES,
 };
 use zeroship_migrate::frontend::sandbox::{
     apply_landlock, apply_seccomp, assert_recorder_single_threaded, init_recorder_v8,
@@ -145,8 +145,18 @@ fn main() {
     // filesystem — it is piped in-memory, so landlock can deny ALL fs reads outside
     // the explicit allow-list without starving the recorder).
     let mut buf = String::new();
-    if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+    let mut stdin = std::io::stdin().take((MAX_CHILD_STDIN_BYTES as u64) + 1);
+    if let Err(e) = stdin.read_to_string(&mut buf) {
         emit_fatal(&format!("recorder child: read stdin failed: {e}"));
+        return;
+    }
+    if buf.len() > MAX_CHILD_STDIN_BYTES {
+        emit(&ChildResponse::request_too_large(
+            "request",
+            MAX_CHILD_STDIN_BYTES,
+            buf.len(),
+            SandboxReport::default(),
+        ));
         return;
     }
     let req: ChildRequest = match serde_json::from_str(&buf) {
@@ -169,6 +179,28 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
     } else {
         SandboxPosture::Local
     };
+    let source_field = match req.operation {
+        ChildOperation::RecordMigration => "ts_source",
+        ChildOperation::EvalSchema => "schema_source",
+    };
+    if req.ts_source.len() > MAX_TS_SOURCE_BYTES {
+        return Err(ChildResponse::request_too_large(
+            source_field,
+            MAX_TS_SOURCE_BYTES,
+            req.ts_source.len(),
+            SandboxReport::default(),
+        ));
+    }
+    if let Some(blob) = req.schema_types_blob.as_deref() {
+        if blob.len() > MAX_TS_SOURCE_BYTES {
+            return Err(ChildResponse::request_too_large(
+                "schema_types_blob",
+                MAX_TS_SOURCE_BYTES,
+                blob.len(),
+                SandboxReport::default(),
+            ));
+        }
+    }
 
     // TEST-ONLY: spawn a worker thread BEFORE the lockdown to model a V8 background
     // thread that already exists when the in-process filter is installed (the CRITICAL
@@ -258,8 +290,8 @@ fn run(req: ChildRequest) -> Result<ChildResponse, ChildResponse> {
     match apply_landlock(&allow_read) {
         Ok(engaged) => report.landlock = engaged,
         Err(e) => {
-            // landlock-less host => degraded floor (resolver is the fs boundary).
-            // Not fatal; record not-engaged.
+            // landlock-less/setup-failed host => degraded floor only for LOCAL. Hosted
+            // refuses below because filesystem Landlock is mandatory there.
             tracing::debug!("landlock not enforced: {e}");
             report.landlock = false;
         }

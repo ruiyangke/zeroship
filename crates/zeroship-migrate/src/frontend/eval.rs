@@ -33,6 +33,7 @@
 
 use crate::render::declarative::CollectionDescriptor;
 
+use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use super::recorder_service::{spawn_sandboxed_schema_eval, RecorderError, SchemaEvalRequest};
 use super::sandbox::{ResourceBudget, SandboxPosture};
 
@@ -47,6 +48,14 @@ pub enum EvalError {
     /// budget/kernel containment fired or the child infrastructure failed.
     #[error("schema sandbox failed: {0}")]
     Sandbox(String),
+    /// The schema source exceeded the shared recorder source cap.
+    #[error("schema_source is {actual} bytes; the recorder accepts at most {limit} bytes")]
+    SourceTooLarge {
+        /// The accepted byte limit.
+        limit: usize,
+        /// The observed byte count.
+        actual: usize,
+    },
     /// The adapter ran but reported a lowering error (e.g. the module does not
     /// expose a schema authoring map, or a field is not a `t.*` builder).
     #[error("schema lowering failed: {0}")]
@@ -98,6 +107,12 @@ pub fn eval_schema_to_ir_with_budget(
     owner_app: &str,
     budget: ResourceBudget,
 ) -> Result<Vec<CollectionDescriptor>, EvalError> {
+    if schema_source.len() > MAX_TS_SOURCE_BYTES {
+        return Err(EvalError::SourceTooLarge {
+            limit: MAX_TS_SOURCE_BYTES,
+            actual: schema_source.len(),
+        });
+    }
     let req = SchemaEvalRequest {
         schema_source: schema_source.to_string(),
         owner_app: owner_app.to_string(),
@@ -108,6 +123,9 @@ pub fn eval_schema_to_ir_with_budget(
     let ir_json = match spawn_sandboxed_schema_eval(&req) {
         Ok(result) => result.schema_ir_json,
         Err(RecorderError::EvalError(message)) => return Err(EvalError::V8(message)),
+        Err(RecorderError::RequestTooLarge { limit, actual, .. }) => {
+            return Err(EvalError::SourceTooLarge { limit, actual })
+        }
         Err(err) => return Err(EvalError::Sandbox(format!("{}: {err}", err.code()))),
     };
 

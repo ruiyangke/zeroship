@@ -22,14 +22,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use super::recorder_service::{RecorderError, RecorderService};
-
-/// Max accepted `ts_source` size at the HTTP boundary (PR4a code-critic MED #5).
-/// A migration `.ts` is human/AI-authored source; even a generated 4000-op migration
-/// is well under a MiB. We cap at 8 MiB — generous for any legitimate migration, far
-/// below V8's ~512MB max-string limit, and a cheap DoS-amplification guard that
-/// rejects a hostile blob BEFORE spawning a sandbox child.
-pub const MAX_TS_SOURCE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Max accepted client-controlled migration `name` (PR4a code-critic MED #5). A
 /// filename-derived label is short; cap it so an oversized name cannot reach the
@@ -48,7 +42,7 @@ pub const MAX_APP_ID_BYTES: usize = 256;
 /// `globalThis.__zsSchemaTypes` via `v8::String::new` (a panic vector above V8's ~512MB
 /// limit). A type-only `.d.ts`-style blob is small; we cap at 8 MiB (same generous
 /// ceiling as `ts_source`), rejecting a hostile blob with 413 before a child is spawned.
-pub const MAX_SCHEMA_TYPES_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_SCHEMA_TYPES_BYTES: usize = MAX_TS_SOURCE_BYTES;
 
 /// The `POST /v1/recorder/record` request body (design §8.9.2).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -104,6 +98,7 @@ impl From<&RecorderError> for StructuredError {
             RecorderError::EvalError(_) => (422, false), // authoring reject
             RecorderError::BudgetExceeded { .. } => (422, false), // bounded build
             RecorderError::KilledBySeccomp => (422, false), // the migration tried something denied
+            RecorderError::RequestTooLarge { .. } => (413, false),
             RecorderError::SandboxRefused(_) => (503, true), // environment refusal
             RecorderError::EnvironmentKilled(_) => (503, true), // ambiguous bare SIGKILL -> retry/fallback-to-local
             RecorderError::Overloaded => (429, true),        // backpressure -> retry/queue

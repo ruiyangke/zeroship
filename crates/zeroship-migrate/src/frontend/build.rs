@@ -36,13 +36,16 @@
 //! serializers. Either record path yields the same typed-value checksum.
 
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use zeroship_bundle::manifest::MigrationFileEntry;
 use crate::model::ir::CanonicalOpList;
+use crate::model::ir::Op;
 use crate::plan::loader;
 use crate::{Checksum, MigrationFlags, MigrationIr};
 
+use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use super::recorder_http::StructuredError;
 use super::recorder_service::{spawn_sandboxed_record, RecordRequest, RecorderError};
 use super::sandbox::{ResourceBudget, SandboxPosture};
@@ -128,6 +131,34 @@ pub enum BuildError {
         /// The underlying io error.
         source: std::io::Error,
     },
+    /// Reading a migration `.ts` source failed before recording.
+    #[error("read source {path}: {source}")]
+    ReadSource {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying io error.
+        source: std::io::Error,
+    },
+    /// A migration `.ts` source exceeds the recorder source cap.
+    #[error(
+        "source {path} is {actual} bytes; the recorder accepts at most {limit} bytes"
+    )]
+    SourceTooLarge {
+        /// The source path.
+        path: PathBuf,
+        /// The accepted byte limit.
+        limit: usize,
+        /// The observed size.
+        actual: u64,
+    },
+    /// A migration `.ts` source is not valid UTF-8.
+    #[error("source {path} is not valid UTF-8: {message}")]
+    InvalidSourceUtf8 {
+        /// The source path.
+        path: PathBuf,
+        /// The UTF-8 error.
+        message: String,
+    },
     /// A committed `.ir.json` could not be re-parsed to a [`MigrationIr`] for the
     /// canonical-checksum fold (the on-disk artifact is corrupt / out of contract).
     #[error("committed {stem}.ir.json is not a valid IR document: {message}")]
@@ -172,6 +203,28 @@ pub enum BuildError {
         committed: String,
         /// The freshly re-recorded typed-value checksum.
         recorded: String,
+    },
+    /// The determinism lint detected host-clock/RNG accessors in authoring JS.
+    #[error(
+        "determinism error in {stem}.ts: nondeterministic authoring JS uses {accessors}; \
+         use DB-evaluated c.fn.* scalars instead"
+    )]
+    Nondeterministic {
+        /// The migration stem.
+        stem: String,
+        /// Comma-separated accessor summary.
+        accessors: String,
+        /// The structured lint findings.
+        findings: Vec<super::record::DeterminismFinding>,
+    },
+    /// The determinism lint itself failed, so the build cannot prove the source is
+    /// deterministic.
+    #[error("determinism lint failed for {stem}.ts: {message}")]
+    DeterminismLintFailed {
+        /// The migration stem.
+        stem: String,
+        /// The lint infrastructure error.
+        message: String,
     },
     /// The packed-hash invariant (A2) was violated: a `MigrationFileEntry.hash`
     /// does not equal the sha256 of the committed `.ir.json` bytes on disk (the
@@ -269,7 +322,9 @@ pub struct BuiltMigration {
     pub checksum: String,
     /// How this file's `.ir.json` was produced.
     pub record_path: RecordPath,
-    /// The §4.3 determinism warnings surfaced for this migration (may be empty).
+    /// Determinism warnings retained for old telemetry shape. Detected
+    /// nondeterminism is now a hard build error, so successful fresh records carry
+    /// an empty vector.
     pub warnings: Vec<super::record::DeterminismFinding>,
 }
 
@@ -362,7 +417,7 @@ fn suggest_stem(stem: &str) -> String {
 
 /// Fold the typed-value checksum (`Checksum::of_ir`) over a committed `.ir.json`
 /// bytes. The committed shape is the BARE [`MigrationIr`] document (what
-/// [`super::record::record_migration_to_json`] writes), not the recorder
+/// [`super::record::record_migration_to_json_unsandboxed`] writes), not the recorder
 /// envelope — parse it directly.
 fn checksum_of_committed(bytes: &[u8], stem: &str) -> Result<String, BuildError> {
     let ir: MigrationIr =
@@ -412,7 +467,7 @@ fn typed_checksum(ir: &MigrationIr, stem: &str) -> Result<String, BuildError> {
 /// committed `.ir.json` bytes: re-parse the inner `ir` through the real
 /// [`MigrationIr`], stamp the authoritative `owner_app`, then `to_string_pretty` +
 /// trailing `\n` — the IDENTICAL byte convention as
-/// [`super::record::record_migration_to_json`], so a LOCAL recorder child and the
+/// [`super::record::record_migration_to_json_unsandboxed`], so a LOCAL recorder child and the
 /// in-process `record.rs` path produce byte-identical committed artifacts.
 fn canonicalize_envelope(
     ir_json: &str,
@@ -454,7 +509,7 @@ fn canonicalize_envelope(
             stem: stem.to_string(),
             message: format!("recorded IR violates the frozen contract: {e}"),
         })?;
-    // Canonical committed bytes: pretty + trailing newline (== record_migration_to_json).
+    // Canonical committed bytes: pretty + trailing newline (== record_migration_to_json_unsandboxed).
     let mut s =
         serde_json::to_string_pretty(&ir).map_err(|e| BuildError::CorruptArtifact {
             stem: stem.to_string(),
@@ -507,12 +562,7 @@ fn record_one(
     owner_app: &str,
     via: &RecordVia<'_>,
 ) -> Result<(Vec<u8>, MigrationIr, RecordPath, String), BuildError> {
-    let ts_source = std::fs::read_to_string(&m.ts_path).map_err(|source| {
-        BuildError::ReadCommitted {
-            path: m.ts_path.clone(),
-            source,
-        }
-    })?;
+    let ts_source = read_ts_source_bounded(&m.ts_path)?;
     let ts_dir = m.ts_path.parent().unwrap_or_else(|| Path::new("."));
     // The `.ts` source is read ONCE here and threaded back to the caller so the §4.3
     // determinism lint reuses it (no second `read_to_string` of the same file).
@@ -552,6 +602,81 @@ fn record_one(
                 })
             }
         },
+    }
+}
+
+fn read_ts_source_bounded(path: &Path) -> Result<String, BuildError> {
+    let meta = std::fs::metadata(path).map_err(|source| BuildError::ReadSource {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let len = meta.len();
+    if len > MAX_TS_SOURCE_BYTES as u64 {
+        return Err(BuildError::SourceTooLarge {
+            path: path.to_path_buf(),
+            limit: MAX_TS_SOURCE_BYTES,
+            actual: len,
+        });
+    }
+
+    let file = std::fs::File::open(path).map_err(|source| BuildError::ReadSource {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut limited = file.take((MAX_TS_SOURCE_BYTES as u64) + 1);
+    let mut bytes = Vec::with_capacity(len as usize);
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|source| BuildError::ReadSource {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if bytes.len() > MAX_TS_SOURCE_BYTES {
+        return Err(BuildError::SourceTooLarge {
+            path: path.to_path_buf(),
+            limit: MAX_TS_SOURCE_BYTES,
+            actual: bytes.len() as u64,
+        });
+    }
+    String::from_utf8(bytes).map_err(|e| BuildError::InvalidSourceUtf8 {
+        path: path.to_path_buf(),
+        message: e.utf8_error().to_string(),
+    })
+}
+
+fn enforce_deterministic_source(
+    stem: &str,
+    ts_source: &str,
+) -> Result<Vec<super::record::DeterminismFinding>, BuildError> {
+    let findings = super::record::lint_migration_determinism(ts_source).map_err(|e| {
+        BuildError::DeterminismLintFailed {
+            stem: stem.to_string(),
+            message: e.to_string(),
+        }
+    })?;
+    if findings.is_empty() {
+        return Ok(findings);
+    }
+    let accessors = findings
+        .iter()
+        .map(|f| f.accessor.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(BuildError::Nondeterministic {
+        stem: stem.to_string(),
+        accessors,
+        findings,
+    })
+}
+
+fn warn_on_confined_rejected_raw_sql(stem: &str, ir: &MigrationIr) {
+    if ir.ops.iter().any(|op| matches!(op, Op::PgRaw { .. })) {
+        eprintln!(
+            "build: WARNING: {stem}.ts records pgRaw/raw SQL; Confined deploy validation \
+             rejects raw SQL unless an operator explicitly grants the raw-SQL capability"
+        );
     }
 }
 
@@ -637,13 +762,13 @@ fn build_discovered(
             let checksum = checksum_of_committed(&bytes, &m.stem)?;
             (bytes, checksum, RecordPath::CommittedVerbatim, Vec::new())
         } else {
-            // Record fresh, write the committed artifact, surface determinism warnings.
+            // Record fresh, enforce deterministic source, then write the committed
+            // artifact. Lint infrastructure failure is fail-closed: if the lint cannot
+            // prove determinism, the build stops.
             let (bytes, ir, path, ts_source) = record_one(m, owner_app, via)?;
             let checksum = typed_checksum(&ir, &m.stem)?;
-            // §4.3 determinism warnings (best-effort, non-blocking) over the source
-            // `record_one` already read (no second read of the same `.ts`).
-            let warnings = super::record::lint_migration_determinism(&ts_source)
-                .unwrap_or_default();
+            let warnings = enforce_deterministic_source(&m.stem, &ts_source)?;
+            warn_on_confined_rejected_raw_sql(&m.stem, &ir);
             std::fs::write(&ir_path, &bytes).map_err(|source| BuildError::Write {
                 path: ir_path.clone(),
                 source,

@@ -32,10 +32,10 @@
 //!   op.* `generate_ops` fail-closes on); distinct from [`scaffold::generate_ops`]
 //!   (the creator-facing portable op.* autogenerate → `.ts`/`.ir.json`).
 //!
-//! The in-process `record::record_migration_to_*` functions (design §2.5 / PR1) run
-//! UNSANDBOXED V8 in-process and are `#[doc(hidden)]` test-only oracles — see their
-//! safety notes. They are NOT a public recording surface; record via the sandboxed
-//! build path above.
+//! The in-process `record::record_migration_to_*_unsandboxed` functions (design §2.5
+//! / PR1) run UNSANDBOXED V8 in-process and are `#[doc(hidden)]` test-only oracles
+//! — see their safety notes. They are NOT a public recording surface; record via the
+//! sandboxed build path above.
 
 pub mod build;
 #[doc(hidden)]
@@ -65,8 +65,9 @@ pub use scaffold::{
     generate_ops, scaffold_new_ts, timestamp_14, GeneratedMigration, ScaffoldError,
 };
 pub use record::{
-    lint_migration_determinism, record_migration_to_ir, record_migration_to_ir_with_warnings,
-    record_migration_to_json, DeterminismFinding, RecordError, RecordOutcome,
+    lint_migration_determinism, record_migration_to_ir_unsandboxed,
+    record_migration_to_ir_with_warnings_unsandboxed, record_migration_to_json_unsandboxed,
+    DeterminismFinding, RecordError, RecordOutcome,
 };
 pub use recorder_service::{
     recorder_child_path, spawn_sandboxed_record, Authorizer, ConcurrencyLimits, RecordRequest,

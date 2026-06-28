@@ -10,12 +10,12 @@
 //! out-of-envelope node so the documented PgOnly escape is reachable end-to-end
 //! (the companion to the Rust render-path fix that emits native `split_part` on PG).
 
-use zeroship_migrate::frontend::record_migration_to_json;
+use zeroship_migrate::frontend::record_migration_to_json_unsandboxed;
 
 const OWNER: &str = "app_lint";
 
 fn record(src: &str) -> Result<String, String> {
-    record_migration_to_json(src, OWNER, "lint").map_err(|e| e.to_string())
+    record_migration_to_json_unsandboxed(src, OWNER, "lint").map_err(|e| e.to_string())
 }
 
 /// In-envelope `c.fn.splitPart(c("name"), " ", 1)` records cleanly and emits a

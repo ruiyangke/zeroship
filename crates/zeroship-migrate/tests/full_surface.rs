@@ -8,20 +8,20 @@
 //! the full fluent fixtures) with targeted, single-behavior regression assertions.
 
 use serde_json::{json, Value};
-use zeroship_migrate::frontend::{lint_migration_determinism, record_migration_to_ir};
+use zeroship_migrate::frontend::{lint_migration_determinism, record_migration_to_ir_unsandboxed};
 
 const OWNER: &str = "app_pr3";
 
 /// Record a migration source → its recorded IR as a `serde_json::Value` (so a
 /// test can assert on the wire ops without re-deserializing the typed IR).
 fn record(src: &str, name: &str) -> Value {
-    let ir = record_migration_to_ir(src, OWNER, name)
+    let ir = record_migration_to_ir_unsandboxed(src, OWNER, name)
         .unwrap_or_else(|e| panic!("record {name}: {e}"));
     serde_json::to_value(&ir).expect("ir -> value")
 }
 
 fn record_err(src: &str, name: &str) -> String {
-    record_migration_to_ir(src, OWNER, name)
+    record_migration_to_ir_unsandboxed(src, OWNER, name)
         .err()
         .map(|e| e.to_string())
         .unwrap_or_else(|| panic!("{name}: expected a recording error, got Ok"))
@@ -261,8 +261,10 @@ fn same_source_records_same_json() {
             u.update({ set: { email: (c) => c.fn.lower(c("email")) }, where: (c) => c("id").isNotNull() });
         }};
     "#;
-    let a = zeroship_migrate::frontend::record_migration_to_json(src, OWNER, "det").unwrap();
-    let b = zeroship_migrate::frontend::record_migration_to_json(src, OWNER, "det").unwrap();
+    let a =
+        zeroship_migrate::frontend::record_migration_to_json_unsandboxed(src, OWNER, "det").unwrap();
+    let b =
+        zeroship_migrate::frontend::record_migration_to_json_unsandboxed(src, OWNER, "det").unwrap();
     assert_eq!(a, b, "the same source must record byte-identical .ir.json");
 }
 
@@ -363,15 +365,13 @@ fn update_carries_a_batch_knob() {
 
 /// The §4.3 determinism lint is WIRED into the record/build path (not just an inert
 /// standalone function): recording a migration whose op argument carries a
-/// non-deterministic accessor SURFACES the finding on the record outcome's
-/// `warnings` — the pre-commit catch the AI loop self-corrects on (§8.8). Per §4.3
-/// it is a WARNING, not a hard reject (the build-once committed artifact already
-/// neutralizes post-deploy non-determinism, so the IR is still produced). A
-/// pre-wiring recorder would record the `Date.now()` migration with ZERO warnings
-/// (the lint never fired on the record path).
+/// non-deterministic accessor is a HARD error. A pre-hardening recorder only
+/// surfaced a warning and still produced IR.
 #[test]
-fn record_path_surfaces_determinism_warnings() {
-    use zeroship_migrate::frontend::record_migration_to_ir_with_warnings;
+fn record_path_rejects_nondeterministic_source() {
+    use zeroship_migrate::frontend::{
+        record_migration_to_ir_with_warnings_unsandboxed, RecordError,
+    };
 
     let dirty = r#"
         import { table } from "@zeroship/migrate";
@@ -379,19 +379,15 @@ fn record_path_surfaces_determinism_warnings() {
             table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
     "#;
-    // Recording still SUCCEEDS (warn, don't fail-closed) — the IR is produced …
-    let outcome = record_migration_to_ir_with_warnings(dirty, OWNER, "dirty")
-        .expect("recording a non-deterministic migration still produces an IR (warn, not reject)");
-    // … and the wired lint surfaces the structured finding the AI loop steers on.
-    assert!(
-        !outcome.warnings.is_empty(),
-        "the wired record path must surface a determinism warning (pre-wiring it was empty)"
-    );
-    assert!(outcome.warnings.iter().any(|f| f.accessor.contains("Date.now")));
-    assert!(outcome.warnings.iter().all(|f| f.code == "NONDETERMINISTIC_OP_ARG"));
-    // The op is actually recorded — recording is not blocked.
-    let ir = serde_json::to_value(&outcome.ir).unwrap();
-    assert_eq!(ops(&ir)[0].get("op").unwrap(), "insert");
+    let err = record_migration_to_ir_with_warnings_unsandboxed(dirty, OWNER, "dirty")
+        .expect_err("Date.now() must be a hard determinism error");
+    match err {
+        RecordError::Nondeterministic { findings, .. } => {
+            assert!(findings.iter().any(|f| f.accessor.contains("Date.now")));
+            assert!(findings.iter().all(|f| f.code == "NONDETERMINISTIC_OP_ARG"));
+        }
+        other => panic!("expected Nondeterministic, got {other:?}"),
+    }
 
     // The structured `c.fn.now()` replacement records cleanly — NO warnings.
     let clean = r#"
@@ -400,7 +396,7 @@ fn record_path_surfaces_determinism_warnings() {
             table("t").insert({ rows: [ { v: 1 } ] });
         }};
     "#;
-    let clean_outcome = record_migration_to_ir_with_warnings(clean, OWNER, "clean")
+    let clean_outcome = record_migration_to_ir_with_warnings_unsandboxed(clean, OWNER, "clean")
         .expect("clean migration records");
     assert!(
         clean_outcome.warnings.is_empty(),
