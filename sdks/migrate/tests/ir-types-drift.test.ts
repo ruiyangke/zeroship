@@ -211,6 +211,24 @@ test("index element and comment target tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.CommentTarget, "kind"), TS.CommentTarget);
 });
 
+// **#180** — the migration flags-override FIELD set. `IrFlagsOverride` in `ir.ts`
+// is a flat struct (no `op` tag), so the per-`Op` field gate below does not cover
+// it — that is exactly how `lock_timeout_ms` was added to the engine schema but
+// silently never transcribed into `ir.ts`. Pin its property set against the schema
+// so a future added/renamed flag FAILS here, forcing `ir.ts` into lockstep.
+const TS_FLAGS_OVERRIDE = [
+  "transactional", "destructive", "online", "requires_approval", "repeatable",
+  "engine_goodie_ddl", "timeout_ms", "lock_timeout_ms", "phase",
+].sort();
+
+test("IrFlagsOverride field set matches the schema (#180)", () => {
+  assert.deepEqual(
+    Object.keys(schema.$defs.IrFlagsOverride.properties).sort(),
+    TS_FLAGS_OVERRIDE,
+    "IrFlagsOverride field set drifted from the schema — update src/generated/ir.ts",
+  );
+});
+
 test("closed string-enum tokens match the schema", () => {
   for (const name of [
     "BinaryOp",
