@@ -57,6 +57,10 @@ const session = {
   commands: [],
 };
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function okRows(cmd) {
   return [{
     command_count: session.commands.length,
@@ -71,6 +75,9 @@ async function main() {
   for (;;) {
     const cmd = await __zsNextCommand();
     try {
+      if (cmd.sql === "__zs_echo_delay_after_timeout__") {
+        await delay(25);
+      }
       session.commands.push({ kind: cmd.kind, sql: cmd.sql, binds: cmd.binds ?? [] });
       if (cmd.kind === "exec") {
         __zsResolve(cmd.id, { ok: [] });
@@ -111,6 +118,15 @@ pub struct RowSet {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JsDriverError {
+    #[error(
+        "timed out waiting for JS driver command {command_id} after {timeout:?}; connection poisoned and driver runtime torn down"
+    )]
+    TimedOut {
+        command_id: u64,
+        timeout: Duration,
+    },
+    #[error("JS driver connection is poisoned: {message}")]
+    Poisoned { message: String },
     #[error("JS driver transport error: {message}")]
     Transport { message: String },
     #[error("JS driver remote error {code} SQLSTATE {sqlstate}: {message}")]
@@ -132,6 +148,12 @@ impl JsDriverError {
 
     pub(crate) fn marshal(message: impl Into<String>) -> Self {
         Self::Marshal {
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn poisoned(message: impl Into<String>) -> Self {
+        Self::Poisoned {
             message: message.into(),
         }
     }
@@ -162,10 +184,11 @@ struct RemoteReply {
 }
 
 pub struct JsDriverConn {
-    runtime: Runtime,
+    runtime: Option<Runtime>,
     next_id: u64,
     in_flight: bool,
     command_timeout: Duration,
+    poisoned: Option<String>,
 }
 
 impl fmt::Debug for JsDriverConn {
@@ -174,6 +197,7 @@ impl fmt::Debug for JsDriverConn {
             .field("next_id", &self.next_id)
             .field("in_flight", &self.in_flight)
             .field("command_timeout", &self.command_timeout)
+            .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
 }
@@ -242,6 +266,9 @@ impl JsDriverConn {
         sql: &str,
         binds: Vec<Value>,
     ) -> Result<Value, JsDriverError> {
+        if let Some(message) = &self.poisoned {
+            return Err(JsDriverError::poisoned(message.clone()));
+        }
         if self.in_flight {
             return Err(JsDriverError::transport(
                 "JS driver connection is non-reentrant: command already in flight",
@@ -269,14 +296,22 @@ impl JsDriverConn {
         })
         .map_err(|e| JsDriverError::marshal(format!("failed to encode command: {e}")))?;
 
-        let rx = self.enqueue(id, payload)?;
+        let rx = match self.enqueue(id, payload) {
+            Ok(rx) => rx,
+            Err(err) => {
+                self.poison_transport("failed to enqueue JS driver command");
+                return Err(err);
+            }
+        };
         let result_json = match compio::time::timeout(self.command_timeout, rx.recv()).await {
             Ok(json) => json,
             Err(_) => {
-                self.remove_result_sender(id);
-                return Err(JsDriverError::transport(format!(
-                    "timed out waiting for JS driver command {id}"
-                )));
+                let timeout = self.command_timeout;
+                self.poison_timeout(id, timeout);
+                return Err(JsDriverError::TimedOut {
+                    command_id: id,
+                    timeout,
+                });
             }
         };
         let reply: DriverReply = serde_json::from_str(&result_json).map_err(|e| {
@@ -297,7 +332,14 @@ impl JsDriverConn {
     fn enqueue(&self, id: u64, payload: String) -> Result<ResultReceiver<String>, JsDriverError> {
         let (tx, rx) = result_slot();
         {
-            let state = self.runtime.state();
+            let runtime = self.runtime.as_ref().ok_or_else(|| {
+                JsDriverError::poisoned(
+                    self.poisoned
+                        .clone()
+                        .unwrap_or_else(|| "driver runtime has been torn down".to_string()),
+                )
+            })?;
+            let state = runtime.state();
             let mut state = state.borrow_mut();
             let driver = state.js_driver.as_mut().ok_or_else(|| {
                 JsDriverError::transport("runtime was not seeded with JS driver state")
@@ -309,16 +351,27 @@ impl JsDriverConn {
             }
             driver.command_queue.push_back(payload);
         }
-        self.runtime.notify_pump();
+        if let Some(runtime) = &self.runtime {
+            runtime.notify_pump();
+        }
         Ok(rx)
     }
 
-    fn remove_result_sender(&self, id: u64) {
-        let state = self.runtime.state();
-        let mut state = state.borrow_mut();
-        if let Some(driver) = state.js_driver.as_mut() {
-            driver.result_senders.remove(&id);
+    fn poison_timeout(&mut self, id: u64, timeout: Duration) {
+        self.poison_and_teardown(format!(
+            "timed out waiting for JS driver command {id} after {timeout:?}"
+        ));
+    }
+
+    fn poison_transport(&mut self, context: &str) {
+        self.poison_and_teardown(context.to_string());
+    }
+
+    fn poison_and_teardown(&mut self, message: String) {
+        if self.poisoned.is_none() {
+            self.poisoned = Some(message);
         }
+        drop(self.runtime.take());
     }
 
     fn open_with_entry(
@@ -338,10 +391,11 @@ impl JsDriverConn {
             .map_err(|e| JsDriverError::transport(format!("driver module init failed: {e}")))?;
         runtime.notify_pump();
         Ok(Self {
-            runtime,
+            runtime: Some(runtime),
             next_id: 1,
             in_flight: false,
             command_timeout,
+            poisoned: None,
         })
     }
 }
@@ -410,6 +464,44 @@ mod tests {
             assert_eq!(row.get("last_kind"), Some(&Value::from("query_json")));
             assert_eq!(row.get("bind_count"), Some(&Value::from(1)));
             assert_eq!(row.get("driver"), Some(&Value::from("echo")));
+        });
+    }
+
+    #[test]
+    fn timed_out_command_poisons_conn_and_blocks_later_commands() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let mut conn =
+                JsDriverConn::open_echo_with_timeout(Duration::from_millis(5))
+                    .expect("echo driver opens");
+            let probe = conn
+                .runtime
+                .as_ref()
+                .expect("driver runtime exists before timeout")
+                .clone()
+                .into_inner_probe_for_test();
+
+            let first = conn.exec("__zs_echo_delay_after_timeout__").await;
+            assert!(matches!(
+                first,
+                Err(JsDriverError::TimedOut {
+                    command_id: 1,
+                    timeout,
+                }) if timeout == Duration::from_millis(5)
+            ));
+            assert!(
+                conn.runtime.is_none(),
+                "timed-out connection should eagerly drop its runtime"
+            );
+            assert_eq!(
+                probe.strong_count(),
+                0,
+                "timed-out connection should tear down the runtime inner"
+            );
+
+            compio::time::sleep(Duration::from_millis(40)).await;
+
+            let later = conn.exec("after timeout").await;
+            assert!(matches!(later, Err(JsDriverError::Poisoned { .. })));
         });
     }
 }
