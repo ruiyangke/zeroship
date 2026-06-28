@@ -69,6 +69,10 @@ pub enum SchemaScope {
     /// Platform: a set of permitted schemas (e.g. `zeroship` / `oauth_hydra` /
     /// `public`). A reference is foreign iff its schema is NOT in this list.
     Allowlist(Vec<String>),
+    /// Explicit Trusted/operator posture: no validate-time cross-schema
+    /// confinement. This is deliberately distinct from `None` at public load /
+    /// validate APIs so an omitted capability defaults to least privilege.
+    Unconfined,
 }
 
 impl SchemaScope {
@@ -89,6 +93,7 @@ impl SchemaScope {
         match self {
             Self::Single(s) => schema.eq_ignore_ascii_case(s),
             Self::Allowlist(v) => v.iter().any(|s| s.eq_ignore_ascii_case(schema)),
+            Self::Unconfined => true,
         }
     }
 }

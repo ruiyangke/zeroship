@@ -20,7 +20,7 @@
 //! This module is render-only; it assumes the op already passed both gates.
 
 use crate::render::dml::{quote_ident_checked, render_predicate_pg, DmlError, IdentQuoteError};
-use crate::model::ir::{GrantTarget, Op, Privilege, TriggerAction};
+use crate::model::ir::{is_valid_pg_type_ref, GrantTarget, Op, Privilege, TriggerAction};
 
 /// A single rendered vendor statement: a name (for the journaled `Migration`), the
 /// forward SQL (no trailing `;`), and the reverse SQL (or `None` for an
@@ -74,6 +74,15 @@ pub enum VendorError {
     /// wrapper; SUPERUSER must never be hidden inside that body.
     #[error("vendor render: createRole cannot combine superuser:true with ifNotExists:true")]
     SuperuserIfNotExistsUnsupported,
+    /// A function signature type was not in the conservative type-reference
+    /// grammar.
+    #[error("vendor render: unsafe function type reference in {slot}: {value:?}")]
+    InvalidTypeRef {
+        /// The field being rendered.
+        slot: &'static str,
+        /// The rejected value.
+        value: String,
+    },
 }
 
 /// Quote an identifier through the crate's single seam, mapping the error.
@@ -164,6 +173,17 @@ fn roles_sql(roles: &[String], what: &'static str) -> Result<String, VendorError
 /// Render a closed-AST predicate, mapping the renderer error.
 fn predicate(expr: &crate::model::expr::Expr) -> Result<String, VendorError> {
     render_predicate_pg(expr).map_err(|e: DmlError| VendorError::Predicate(e.to_string()))
+}
+
+fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, VendorError> {
+    if is_valid_pg_type_ref(value) {
+        Ok(value)
+    } else {
+        Err(VendorError::InvalidTypeRef {
+            slot,
+            value: value.to_string(),
+        })
+    }
 }
 
 /// Render a VENDOR op to its ordered Postgres statement list (vendor spec §4.4).
@@ -454,15 +474,22 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                     .iter()
                     .map(|a| {
                         let mode = a.mode.map(|m| format!("{} ", m.as_sql())).unwrap_or_default();
-                        let nm = a.name.as_ref().map(|n| format!("{n} ")).unwrap_or_default();
-                        format!("{mode}{nm}{}", a.ty)
+                        let nm = a
+                            .name
+                            .as_ref()
+                            .map(|n| qid(n).map(|n| format!("{n} ")))
+                            .transpose()?
+                            .unwrap_or_default();
+                        let ty = type_ref_sql(&a.ty, "createFunction.args[].type")?;
+                        Ok(format!("{mode}{nm}{ty}"))
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>, VendorError>>()?
                     .join(", "),
                 None => String::new(),
             };
             let or_replace = if replace.unwrap_or(false) { "CREATE OR REPLACE" } else { "CREATE" };
             let vol = volatility.map(|v| format!(" {}", v.as_sql())).unwrap_or_default();
+            let returns = type_ref_sql(returns, "createFunction.returns")?;
             // The raw `body` is embedded VERBATIM inside a `$zsfn$ … $zsfn$` dollar
             // tag; the WHOLE statement is `pg_query`-parsed + deny-scanned by the
             // guard at the lower seam (vendor spec §3.3).
@@ -482,7 +509,17 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
                 Some(sch) => qualified(sch, name)?,
                 None => qid(name)?,
             };
-            let args_sql = arg_types.as_ref().map(|t| t.join(", ")).unwrap_or_default();
+            let args_sql = arg_types
+                .as_ref()
+                .map(|types| {
+                    types
+                        .iter()
+                        .map(|ty| type_ref_sql(ty, "dropFunction.argTypes[]").map(str::to_string))
+                        .collect::<Result<Vec<_>, VendorError>>()
+                        .map(|types| types.join(", "))
+                })
+                .transpose()?
+                .unwrap_or_default();
             let mut up = String::from("DROP FUNCTION ");
             if if_exists.unwrap_or(false) {
                 up.push_str("IF EXISTS ");

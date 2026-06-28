@@ -154,6 +154,7 @@ impl GuardConfig {
                 let project_schema = match &self.schemas {
                     SchemaScope::Single(s) => s.clone(),
                     SchemaScope::Allowlist(list) => list.first().cloned().unwrap_or_default(),
+                    SchemaScope::Unconfined => String::new(),
                 };
                 Self::confined_sqlite(project_schema)
             }
@@ -163,6 +164,7 @@ impl GuardConfig {
                 let project_schema = match &self.schemas {
                     SchemaScope::Single(s) => s.clone(),
                     SchemaScope::Allowlist(list) => list.first().cloned().unwrap_or_default(),
+                    SchemaScope::Unconfined => String::new(),
                 };
                 Self::confined_mysql(project_schema)
             }
@@ -243,8 +245,9 @@ impl GuardConfig {
     /// - `Some(SchemaScope)` for **Confined** (the `Single(project_schema)` pin) and
     ///   **Platform** (the configured `Allowlist`) — an op's explicit `schema` must
     ///   be permitted by it.
-    /// - `None` for **Trusted** (the public dbmate-like posture) — NO cross-schema
-    ///   confinement; the operator owns the DB.
+    /// - `Some(SchemaScope::Unconfined)` for **Trusted** (the public dbmate-like
+    ///   posture) — NO cross-schema confinement, but still an explicit operator
+    ///   signal to the validate/load APIs.
     ///
     /// This is the SINGLE source of truth that maps the guard's trust posture to the
     /// validator's confinement scope, so the parse-guard cross-schema denial (line 1)
@@ -252,7 +255,7 @@ impl GuardConfig {
     #[must_use]
     pub fn schema_scope(&self) -> Option<SchemaScope> {
         match self.trust {
-            TrustProfile::Trusted => None,
+            TrustProfile::Trusted => Some(SchemaScope::Unconfined),
             // Confined ⇒ Single(project_schema); Platform ⇒ Allowlist — both carried
             // verbatim in `self.schemas`.
             TrustProfile::Confined | TrustProfile::Platform => Some(self.schemas.clone()),
@@ -491,6 +494,45 @@ impl SqlGuard {
         })
     }
 
+    /// Backstop for the two IR raw islands (`pg.sql` and `createFunction.body`)
+    /// under the Trusted operator profile. Trusted still skips project-schema
+    /// confinement for general SQL files, but arbitrary SQL strings embedded inside
+    /// otherwise structured IR must not bypass the deny-list for host-reaching or
+    /// privilege-escalating constructs.
+    ///
+    /// # Errors
+    /// [`GuardError`] when parsing fails or a deny-listed construct is found.
+    pub(crate) fn check_raw_island_sql_backstop(&self, sql: &str) -> Result<(), GuardError> {
+        match self.cfg.dialect() {
+            SqlDialect::Postgres => {}
+            SqlDialect::Sqlite => return Err(GuardError::SqliteRawSqlRejected),
+            SqlDialect::Mysql => return Err(GuardError::MysqlRawSqlRejected),
+        }
+
+        let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
+        for raw_stmt in &parsed.protobuf.stmts {
+            let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+                continue;
+            };
+            let raw = stmt_text(sql, raw_stmt);
+            let json = guard_stmt_json(raw_stmt, &raw)?;
+            self.check_node_raw_island_backstop(node, &json, &raw)?;
+        }
+        Ok(())
+    }
+
+    /// Backstop for a raw function body under Trusted. PL/pgSQL is only
+    /// best-effort parseable as SQL, so this intentionally reuses the existing body
+    /// scanner: parse what can be parsed, inspect dynamic SQL literals, then token
+    /// scan for deny-listed names.
+    pub(crate) fn check_raw_island_body_backstop(
+        &self,
+        body: &str,
+        raw: &str,
+    ) -> Result<(), GuardError> {
+        self.check_body_text(body, raw)
+    }
+
     /// Check one top-level statement node (and everything nested under it).
     ///
     /// `json` is the `serde_json` serialization of the statement's `RawStmt`
@@ -546,6 +588,26 @@ impl SqlGuard {
         //    case. A dangerous construct hidden in a body is still dangerous.
         self.check_bodies(node, raw)?;
 
+        Ok(())
+    }
+
+    /// Raw-island variant of [`Self::check_node`]. It preserves the deny-list and
+    /// body scanning but skips project-schema confinement, matching Trusted's
+    /// operator posture for SQL ownership while still blocking dangerous arbitrary
+    /// raw text.
+    fn check_node_raw_island_backstop(
+        &self,
+        node: &NodeEnum,
+        json: &Value,
+        raw: &str,
+    ) -> Result<(), GuardError> {
+        self.check_statement_kind(node, raw)?;
+        Self::check_system_catalog_relations(json, raw)?;
+        Self::check_dangerous_functions(json, raw)?;
+        Self::check_regproc_casts(json, raw)?;
+        Self::check_set_config_calls(json, raw)?;
+        self.check_sql_string_arg_calls(json, raw)?;
+        self.check_bodies(node, raw)?;
         Ok(())
     }
 
@@ -3285,8 +3347,21 @@ mod tests {
 
     /// A Trusted guard, minted via the same `for_test` operator-token seam.
     fn trusted_guard() -> SqlGuard {
+        SqlGuard::new(trusted_guard_config())
+    }
+
+    fn trusted_guard_config() -> GuardConfig {
         let cap = OperatorCapability::for_test();
-        SqlGuard::new(GuardConfig::trusted(&cap))
+        GuardConfig::trusted(&cap)
+    }
+
+    fn trusted_author() -> crate::render::lower::IrAuthor {
+        let cfg = trusted_guard_config();
+        let scope = cfg
+            .schema_scope()
+            .expect("Trusted guard carries the explicit unconfined operator scope");
+        crate::render::lower::IrAuthor::new("public", "app_corpus", SqlDialect::Postgres)
+            .with_schema_scope(scope)
     }
 
     /// The Trusted early-return SKIPS the deny-list ENTIRELY: SQL the Confined
@@ -3338,6 +3413,106 @@ mod tests {
             flags.requires_approval,
             "a destructive op still requires approval (CLI --yes) under Trusted"
         );
+    }
+
+    #[test]
+    fn trusted_pg_raw_still_runs_raw_island_denylist_backstop() {
+        let cfg = trusted_guard_config();
+        let author = trusted_author();
+        let bad = crate::model::ir::Op::PgRaw {
+            sql: "CREATE ROLE zsmig_raw_evil SUPERUSER".into(),
+            binds: Vec::new(),
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(bad),
+            &cfg,
+            &crate::render::lower::LiveSchema::default(),
+        ) {
+            Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "pgRaw");
+                assert!(
+                    matches!(
+                        denial.source,
+                        GuardError::Denied {
+                            rule: rule::SUPERUSER_ROLE,
+                            ..
+                        }
+                    ),
+                    "Trusted pgRaw must still hit the SUPERUSER deny-list backstop, got {:?}",
+                    denial.source
+                );
+            }
+            other => panic!("Trusted pgRaw SUPERUSER must be denied; got {other:?}"),
+        }
+
+        let clean = crate::model::ir::Op::PgRaw {
+            sql: "SELECT 1".into(),
+            binds: Vec::new(),
+        };
+        author
+            .lower_guarded(
+                &vendor_ir(clean),
+                &cfg,
+                &crate::render::lower::LiveSchema::default(),
+            )
+            .expect("clean Trusted pgRaw should pass the raw-island backstop");
+    }
+
+    #[test]
+    fn trusted_create_function_body_still_runs_raw_island_denylist_backstop() {
+        let cfg = trusted_guard_config();
+        let author = trusted_author();
+        let bad = crate::model::ir::Op::CreateFunction {
+            name: "raw_body_evil".into(),
+            schema: Some("public".into()),
+            args: None,
+            returns: "void".into(),
+            language: crate::model::ir::FuncLanguage::Plpgsql,
+            replace: Some(true),
+            volatility: None,
+            body: "BEGIN COPY public.audit_events TO PROGRAM 'sh -c id'; END;".into(),
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(bad),
+            &cfg,
+            &crate::render::lower::LiveSchema::default(),
+        ) {
+            Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "createFunction");
+                assert!(
+                    matches!(
+                        denial.source,
+                        GuardError::Denied {
+                            rule: rule::BODY_INSPECTION,
+                            ..
+                        }
+                    ),
+                    "Trusted createFunction body must be scanned, got {:?}",
+                    denial.source
+                );
+            }
+            other => panic!("Trusted createFunction COPY PROGRAM body must deny; got {other:?}"),
+        }
+
+        let clean = crate::model::ir::Op::CreateFunction {
+            name: "raw_body_clean".into(),
+            schema: Some("public".into()),
+            args: None,
+            returns: "void".into(),
+            language: crate::model::ir::FuncLanguage::Plpgsql,
+            replace: Some(true),
+            volatility: None,
+            body: "BEGIN RAISE NOTICE 'ok'; RETURN; END;".into(),
+        };
+        author
+            .lower_guarded(
+                &vendor_ir(clean),
+                &cfg,
+                &crate::render::lower::LiveSchema::default(),
+            )
+            .expect("clean Trusted createFunction body should pass the raw-island backstop");
     }
 
     /// The Trusted early-return is gated on `trust == Trusted` ONLY: a Confined

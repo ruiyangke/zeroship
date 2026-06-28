@@ -338,14 +338,15 @@ pub fn validate_ir(
 
 /// **PR10** — [`validate_ir`] threaded with the active schema confinement scope
 /// (§2.7). `schema_scope`:
-/// - `None` ⇒ the **Trusted** posture (the public dbmate-like CLI): NO cross-schema
-///   confinement (the operator owns the DB). The legal-direction + schema-ident
-///   checks STILL run (they are trust-independent safety/authoring checks).
+/// - `None` ⇒ omitted/default public capability: no project schema is known, so
+///   cross-schema checks are not applied, but vendor capabilities stay confined.
 /// - `Some(SchemaScope::Single(project_schema))` ⇒ the **Confined** creator
 ///   profile: an explicit `schema != project_schema` is REFUSED fail-closed
 ///   ([`CODE_CROSS_SCHEMA`]).
 /// - `Some(SchemaScope::Allowlist([...]))` ⇒ the **Platform** profile: an explicit
 ///   `schema` must be a member of the allow-list.
+/// - `Some(SchemaScope::Unconfined)` ⇒ the explicit **Trusted** operator profile:
+///   no cross-schema confinement and full vendor capability.
 ///
 /// # Errors
 /// The first [`AuthoringError`] any op produces (cross-schema, invalid schema ident,
@@ -407,9 +408,10 @@ pub fn validate_op_scoped(
     // `PgOnly`, §4.3), or (b) the active capability set — derived from the threaded
     // [`SchemaScope`] — does not GRANT the op's required capability. The Confined
     // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
-    // here; Platform/Trusted (`Allowlist`/`None`) grant the operator preset.
+    // here; Platform/Trusted (`Allowlist`/`Unconfined`) grant the operator preset.
     validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
     validate_sequence_options(op, target_dialect, op_index, ts_location)?;
+    validate_function_type_refs(op, target_dialect, op_index, ts_location)?;
 
     // Constraint-embedded expressions validate against the given table scope.
     let check_constraint =
@@ -907,6 +909,56 @@ fn validate_vendor_op(
     Ok(())
 }
 
+fn validate_function_type_refs(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let reject = |slot: &'static str, value: &str| AuthoringError {
+        code: CODE_UNSUPPORTED.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "{slot} must be a conservative PostgreSQL type reference (bare or \
+             schema-qualified name with optional precision and [] suffixes), not \
+             a SQL fragment: {value:?}"
+        ),
+        suggested_fix: Some(
+            "use a type like text, int[], numeric(10,2), or myschema.mytype; \
+             function attributes such as SECURITY DEFINER must be explicit \
+             structured fields, not smuggled through a type string"
+                .to_string(),
+        ),
+    };
+
+    match op {
+        crate::model::ir::Op::CreateFunction { args, returns, .. } => {
+            if !crate::model::ir::is_valid_pg_type_ref(returns) {
+                return Err(reject("createFunction.returns", returns));
+            }
+            if let Some(args) = args {
+                for arg in args {
+                    if !crate::model::ir::is_valid_pg_type_ref(&arg.ty) {
+                        return Err(reject("createFunction.args[].type", &arg.ty));
+                    }
+                }
+            }
+        }
+        crate::model::ir::Op::DropFunction { arg_types: Some(arg_types), .. } => {
+            for ty in arg_types {
+                if !crate::model::ir::is_valid_pg_type_ref(ty) {
+                    return Err(reject("dropFunction.argTypes[]", ty));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn view_body_error(
     target_dialect: Dialect,
     op_index: usize,
@@ -1084,8 +1136,9 @@ fn validate_select_ast(
 ///    validate-time reject is the defense the names-are-strings stance needs).
 /// 2. **Cross-schema confinement** — under a `Some(scope)` (Confined/Platform) an
 ///    explicit `schema` the scope does not `permit` is refused
-///    ([`CODE_CROSS_SCHEMA`]). Absent schema, or a permitted one, passes. Trusted
-///    (`None`) skips this — no confinement.
+    ///    ([`CODE_CROSS_SCHEMA`]). Absent schema, or a permitted one, passes.
+    ///    `SchemaScope::Unconfined` skips this for the explicit Trusted operator
+    ///    profile; `None` means default public validation without vendor capabilities.
 /// 3. **Existence-guard direction** — a guard whose direction is illegal for the op
 ///    variant is refused ([`CODE_GUARD_DIRECTION`]).
 fn validate_op_schema_and_guard(
@@ -1105,13 +1158,12 @@ fn validate_op_schema_and_guard(
         suggested_fix: Some(fix),
     };
 
-    // (1) + (2) — the schema qualifier.
-    if let Some(schema) = op.schema() {
+    let check_schema = |schema: &str, what: &str| -> Result<(), AuthoringError> {
         if !is_safe_schema_ident(schema) {
             return Err(mk(
                 CODE_INVALID_SCHEMA_IDENT,
                 format!(
-                    "schema qualifier {schema:?} is not a safe bare SQL identifier \
+                    "{what} schema qualifier {schema:?} is not a safe bare SQL identifier \
                      (must be non-empty, start with a letter or '_', and contain only \
                      letters, digits, or '_')"
                 ),
@@ -1123,8 +1175,8 @@ fn validate_op_schema_and_guard(
                 let (reason, fix) = match scope {
                     crate::model::policy::SchemaScope::Single(project) => (
                         format!(
-                            "this migration is CONFINED to its project schema {project:?}, \
-                             but op names a different schema {schema:?} — a cross-schema \
+                            "this migration is CONFINED to its project schema {project:?}, but \
+                             {what} names a different schema {schema:?} — a cross-schema \
                              migration is refused fail-closed (the creator profile pins the \
                              project schema; the migrator role would also reject it, but this \
                              is the earlier, friendlier gate)"
@@ -1136,15 +1188,45 @@ fn validate_op_schema_and_guard(
                     ),
                     crate::model::policy::SchemaScope::Allowlist(allowed) => (
                         format!(
-                            "op names schema {schema:?}, which is not in the permitted \
+                            "{what} names schema {schema:?}, which is not in the permitted \
                              platform schema allow-list {allowed:?}"
                         ),
                         format!("name one of the permitted schemas {allowed:?}"),
+                    ),
+                    crate::model::policy::SchemaScope::Unconfined => (
+                        format!(
+                            "internal error: unconfined operator scope unexpectedly refused \
+                             schema {schema:?}"
+                        ),
+                        "report this migrate engine bug".to_string(),
                     ),
                 };
                 return Err(mk(CODE_CROSS_SCHEMA, reason, fix));
             }
         }
+        Ok(())
+    };
+
+    // (1) + (2) — the top-level schema qualifier.
+    if let Some(schema) = op.schema() {
+        check_schema(schema, "op")?;
+    }
+
+    // Review #5 LOW-6: GRANT/REVOKE table targets carry an inner schema that is
+    // not `Op::schema()`. Surface it to the same validate-time allowlist gate so
+    // an out-of-scope table grant is refused before lower/render.
+    match op {
+        crate::model::ir::Op::Grant {
+            on: crate::model::ir::GrantTarget::Table { schema: Some(schema), .. },
+            ..
+        }
+        | crate::model::ir::Op::Revoke {
+            on: crate::model::ir::GrantTarget::Table { schema: Some(schema), .. },
+            ..
+        } => {
+            check_schema(schema, "grant table target")?;
+        }
+        _ => {}
     }
 
     // (3) — the existence-guard direction.
@@ -2829,8 +2911,9 @@ mod tests {
         assert!(validate_ir_scoped(&none, Dialect::Postgres, &[], Some(&scope)).is_ok());
     }
 
-    /// TRUSTED (`None` scope) honors any schema — no cross-schema confinement — but
-    /// PLATFORM (`Allowlist`) refuses a schema outside its allow-list (§2.7).
+    /// Defaulted public validation (`None` scope) has no project schema available,
+    /// so it honors any schema for non-vendor ops; PLATFORM (`Allowlist`) refuses a
+    /// schema outside its allow-list (§2.7).
     #[test]
     fn trusted_honors_any_schema_platform_gates_to_allowlist() {
         use crate::model::policy::SchemaScope;
@@ -2840,7 +2923,7 @@ mod tests {
             schema: Some("anything".into()),
             existence_guard: None,
         }]);
-        // Trusted: permitted.
+        // Defaulted public validation: permitted for non-vendor schema qualifiers.
         assert!(validate_ir_scoped(&foreign, Dialect::Postgres, &[], None).is_ok());
         // Platform allow-list excluding "anything": refused.
         let scope = SchemaScope::Allowlist(vec!["zeroship".into(), "public".into()]);
@@ -2869,7 +2952,7 @@ mod tests {
                 schema: Some(bad.into()),
                 existence_guard: None,
             }]);
-            // Even Trusted (None scope) rejects an injection-shaped ident.
+            // Even defaulted public validation (None scope) rejects an injection-shaped ident.
             let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], None).unwrap_err();
             assert_eq!(err.code, CODE_INVALID_SCHEMA_IDENT, "schema {bad:?} got: {err}");
         }
