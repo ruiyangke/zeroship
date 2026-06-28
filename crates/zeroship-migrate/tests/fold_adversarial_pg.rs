@@ -111,6 +111,9 @@ async fn apply_doc(
     ops
 }
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
+    snap.roles.clear();
+    snap.schemas.clear();
+    snap.extensions.clear();
     for t in snap.tables.values_mut() {
         for c in &mut t.constraints {
             if c.kind == "CHECK" {

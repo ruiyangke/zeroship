@@ -545,6 +545,63 @@ impl Default for SequenceSnapshot {
     }
 }
 
+/// A deterministic snapshot of a privileged Postgres role that a vendor
+/// migration intentionally manages. Passwords and role settings are deliberately
+/// not modeled here; only closed role attributes and membership declared by the IR
+/// participate in structural drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleSnapshot {
+    /// `LOGIN` / `NOLOGIN`.
+    pub login: bool,
+    /// `SUPERUSER` / `NOSUPERUSER`.
+    pub superuser: bool,
+    /// `CREATEDB` / `NOCREATEDB`.
+    pub create_db: bool,
+    /// `CREATEROLE` / `NOCREATEROLE`.
+    pub create_role: bool,
+    /// `BYPASSRLS` / `NOBYPASSRLS`.
+    pub bypass_rls: bool,
+    /// `INHERIT` / `NOINHERIT`.
+    pub inherit: bool,
+    /// `REPLICATION` / `NOREPLICATION`.
+    pub replication: bool,
+    /// Roles this role is a member of (`IN ROLE ...`), sorted canonically.
+    pub member_of: Vec<String>,
+}
+
+impl Default for RoleSnapshot {
+    fn default() -> Self {
+        Self {
+            login: false,
+            superuser: false,
+            create_db: false,
+            create_role: false,
+            bypass_rls: false,
+            inherit: true,
+            replication: false,
+            member_of: Vec::new(),
+        }
+    }
+}
+
+/// A deterministic snapshot of a Postgres schema object managed by a vendor
+/// migration. `owner = None` means the authored op did not assert
+/// `AUTHORIZATION`; diff treats that as presence-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaObjectSnapshot {
+    /// Schema owner / `AUTHORIZATION` role when modeled by the authored op.
+    pub owner: Option<String>,
+}
+
+/// A deterministic snapshot of a Postgres extension object managed by a vendor
+/// migration. `schema = None` means the authored op did not assert placement;
+/// diff treats that as presence-only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExtensionSnapshot {
+    /// Extension placement schema (`WITH SCHEMA ...`) when modeled.
+    pub schema: Option<String>,
+}
+
 /// A deterministic snapshot of a project schema's structure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchemaSnapshot {
@@ -556,6 +613,12 @@ pub struct SchemaSnapshot {
     pub named_types: BTreeMap<String, NamedTypeSnapshot>,
     /// Standalone sequences in the schema, keyed + ordered by name.
     pub sequences: BTreeMap<String, SequenceSnapshot>,
+    /// Privileged Postgres roles intentionally managed by vendor migrations.
+    pub roles: BTreeMap<String, RoleSnapshot>,
+    /// Postgres schemas intentionally managed by vendor migrations.
+    pub schemas: BTreeMap<String, SchemaObjectSnapshot>,
+    /// Postgres extensions intentionally managed by vendor migrations.
+    pub extensions: BTreeMap<String, ExtensionSnapshot>,
 }
 
 /// A schema-level named type. The engine only needs the object class for drift and

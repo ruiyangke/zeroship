@@ -41,7 +41,8 @@ use crate::model::migration::Migration;
 use crate::model::snapshot::{
     index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnSnapshot,
-    ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, SchemaSnapshot,
+    ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
+    NamedTypeSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
     SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use crate::model::ir::{SafeI64, SafeU64, SequenceOwnedBy};
@@ -691,11 +692,87 @@ pub async fn snapshot_schema(
         );
     }
 
+    let schema_rows = conn
+        .query(
+            "SELECT n.nspname AS schema_name, owner.rolname AS owner \
+             FROM pg_namespace n \
+             JOIN pg_roles owner ON owner.oid = n.nspowner \
+             WHERE n.nspname = $1",
+            &[&project_schema],
+        )
+        .await?;
+    let mut schemas = BTreeMap::new();
+    for r in &schema_rows {
+        schemas.insert(
+            r.get("schema_name"),
+            SchemaObjectSnapshot {
+                owner: Some(r.get("owner")),
+            },
+        );
+    }
+
+    let extension_rows = conn
+        .query(
+            "SELECT e.extname AS extension_name, n.nspname AS schema_name \
+             FROM pg_extension e \
+             JOIN pg_namespace n ON n.oid = e.extnamespace \
+             ORDER BY e.extname",
+            &[],
+        )
+        .await?;
+    let mut extensions = BTreeMap::new();
+    for r in &extension_rows {
+        extensions.insert(
+            r.get("extension_name"),
+            ExtensionSnapshot {
+                schema: Some(r.get("schema_name")),
+            },
+        );
+    }
+
+    let role_rows = conn
+        .query(
+            "SELECT r.rolname, r.rolcanlogin, r.rolsuper, r.rolcreatedb, \
+                    r.rolcreaterole, r.rolbypassrls, r.rolinherit, r.rolreplication, \
+                    COALESCE( \
+                      array_agg(parent.rolname ORDER BY parent.rolname) \
+                        FILTER (WHERE parent.rolname IS NOT NULL), \
+                      ARRAY[]::text[] \
+                    ) AS member_of \
+             FROM pg_roles r \
+             LEFT JOIN pg_auth_members m ON m.member = r.oid \
+             LEFT JOIN pg_roles parent ON parent.oid = m.roleid \
+             GROUP BY r.rolname, r.rolcanlogin, r.rolsuper, r.rolcreatedb, \
+                      r.rolcreaterole, r.rolbypassrls, r.rolinherit, r.rolreplication \
+             ORDER BY r.rolname",
+            &[],
+        )
+        .await?;
+    let mut roles = BTreeMap::new();
+    for r in &role_rows {
+        roles.insert(
+            r.get("rolname"),
+            RoleSnapshot {
+                login: r.get("rolcanlogin"),
+                superuser: r.get("rolsuper"),
+                create_db: r.get("rolcreatedb"),
+                create_role: r.get("rolcreaterole"),
+                bypass_rls: r.get("rolbypassrls"),
+                inherit: r.get("rolinherit"),
+                replication: r.get("rolreplication"),
+                member_of: r.try_get("member_of").unwrap_or_default(),
+            },
+        );
+    }
+
     Ok(SchemaSnapshot {
         tables,
         views,
         named_types,
         sequences,
+        roles,
+        schemas,
+        extensions,
     })
 }
 
@@ -800,6 +877,39 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
             continue;
         };
         diff_sequence_attrs(name, exp_seq, act_seq, &mut altered);
+    }
+    for name in expected.roles.keys() {
+        if !actual.roles.contains_key(name) {
+            missing.push(format!("role {name}"));
+        }
+    }
+    for (name, exp_role) in &expected.roles {
+        let Some(act_role) = actual.roles.get(name) else {
+            continue;
+        };
+        diff_role_attrs(name, exp_role, act_role, &mut altered);
+    }
+    for name in expected.schemas.keys() {
+        if !actual.schemas.contains_key(name) {
+            missing.push(format!("schema {name}"));
+        }
+    }
+    for (name, exp_schema) in &expected.schemas {
+        let Some(act_schema) = actual.schemas.get(name) else {
+            continue;
+        };
+        diff_schema_attrs(name, exp_schema, act_schema, &mut altered);
+    }
+    for name in expected.extensions.keys() {
+        if !actual.extensions.contains_key(name) {
+            missing.push(format!("extension {name}"));
+        }
+    }
+    for (name, exp_extension) in &expected.extensions {
+        let Some(act_extension) = actual.extensions.get(name) else {
+            continue;
+        };
+        diff_extension_attrs(name, exp_extension, act_extension, &mut altered);
     }
     for (name, exp_v) in &expected.views {
         let Some(act_v) = actual.views.get(name) else {
@@ -924,6 +1034,134 @@ fn diff_sequence_attrs(
         expected.comment.clone().unwrap_or_default(),
         actual.comment.clone().unwrap_or_default(),
     );
+}
+
+fn push_vendor_attr(
+    altered: &mut Vec<AlteredObject>,
+    name: &str,
+    object: String,
+    field: &str,
+    expected: String,
+    actual: String,
+) {
+    if expected != actual {
+        altered.push(AlteredObject {
+            table: name.to_string(),
+            object,
+            field: field.to_string(),
+            expected,
+            actual,
+        });
+    }
+}
+
+fn diff_role_attrs(
+    name: &str,
+    expected: &RoleSnapshot,
+    actual: &RoleSnapshot,
+    altered: &mut Vec<AlteredObject>,
+) {
+    let object = format!("role {name}");
+    push_vendor_attr(
+        altered,
+        name,
+        object.clone(),
+        "login",
+        expected.login.to_string(),
+        actual.login.to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        name,
+        object.clone(),
+        "superuser",
+        expected.superuser.to_string(),
+        actual.superuser.to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        name,
+        object.clone(),
+        "create_db",
+        expected.create_db.to_string(),
+        actual.create_db.to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        name,
+        object.clone(),
+        "create_role",
+        expected.create_role.to_string(),
+        actual.create_role.to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        name,
+        object.clone(),
+        "bypass_rls",
+        expected.bypass_rls.to_string(),
+        actual.bypass_rls.to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        name,
+        object.clone(),
+        "inherit",
+        expected.inherit.to_string(),
+        actual.inherit.to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        name,
+        object.clone(),
+        "replication",
+        expected.replication.to_string(),
+        actual.replication.to_string(),
+    );
+    push_vendor_attr(
+        altered,
+        name,
+        object,
+        "member_of",
+        expected.member_of.join(","),
+        actual.member_of.join(","),
+    );
+}
+
+fn diff_schema_attrs(
+    name: &str,
+    expected: &SchemaObjectSnapshot,
+    actual: &SchemaObjectSnapshot,
+    altered: &mut Vec<AlteredObject>,
+) {
+    if let Some(owner) = expected.owner.as_ref() {
+        push_vendor_attr(
+            altered,
+            name,
+            format!("schema {name}"),
+            "owner",
+            owner.clone(),
+            actual.owner.clone().unwrap_or_default(),
+        );
+    }
+}
+
+fn diff_extension_attrs(
+    name: &str,
+    expected: &ExtensionSnapshot,
+    actual: &ExtensionSnapshot,
+    altered: &mut Vec<AlteredObject>,
+) {
+    if let Some(schema) = expected.schema.as_ref() {
+        push_vendor_attr(
+            altered,
+            name,
+            format!("extension {name}"),
+            "schema",
+            schema.clone(),
+            actual.schema.clone().unwrap_or_default(),
+        );
+    }
 }
 
 /// Compare the attributes of same-name children (columns/indexes/constraints
