@@ -135,6 +135,7 @@ fn drive_one(
     let outcome = runtime.call_fetch_handler(method, url, headers, body, &env, ctx);
     match outcome {
         FetchOutcome::Response { status, body, .. } => {
+            let body = String::from_utf8_lossy(&body).into_owned();
             assert!(
                 (200..300).contains(&status),
                 "non-2xx in bench fixture: status={status} body={body}"

@@ -35,7 +35,9 @@ fn dispatch_against(runtime: &Runtime) -> (u16, String) {
         ctx,
     );
     match outcome {
-        FetchOutcome::Response { status, body, .. } => (status, body),
+        FetchOutcome::Response { status, body, .. } => {
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
         other => panic!(
             "expected sync Response, got {}",
             std::any::type_name_of_val(&other),

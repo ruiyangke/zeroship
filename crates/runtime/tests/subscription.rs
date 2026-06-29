@@ -58,6 +58,7 @@ fn upgrade(runtime: &Runtime) -> u32 {
         FetchOutcome::WebSocketUpgrade { ws_id, .. } => ws_id,
         other => match other {
             FetchOutcome::Response { status, body, .. } => {
+                let body = String::from_utf8_lossy(&body).into_owned();
                 panic!("expected WS upgrade, got Response status={status} body={body}")
             }
             _ => panic!("expected WS upgrade, got non-Response outcome"),

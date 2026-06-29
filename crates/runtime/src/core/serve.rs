@@ -578,7 +578,7 @@ async fn handle_connection(
 // Response builders
 // ===========================================================================
 
-fn build_http_response(status: u16, headers: &[(String, String)], body: &str) -> Vec<u8> {
+fn build_http_response(status: u16, headers: &[(String, String)], body: &[u8]) -> Vec<u8> {
     let status_text = match status {
         200 => "OK",
         201 => "Created",
@@ -619,7 +619,7 @@ fn build_http_response(status: u16, headers: &[(String, String)], body: &str) ->
         buf.extend_from_slice(b"\r\n");
     }
     buf.extend_from_slice(b"\r\n");
-    buf.extend_from_slice(body.as_bytes());
+    buf.extend_from_slice(body);
     buf
 }
 
@@ -925,14 +925,14 @@ async fn handle_request(
                         r#"{{"message":"{}","name":"Error"}}"#,
                         e.message.replace('"', "\\\"")
                     );
-                    let resp = build_http_response(e.status, &[], &body);
+                    let resp = build_http_response(e.status, &[], body.as_bytes());
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
                 }
                 None => {
                     let resp = build_http_response(
                         504, &[],
-                        r#"{"message":"request timed out","name":"Error"}"#,
+                        br#"{"message":"request timed out","name":"Error"}"#,
                     );
                     let BufResult(r, _) = stream.write_all(resp).await;
                     r.is_ok()
@@ -1135,7 +1135,7 @@ async fn handle_websocket_upgrade(
 
 
     if ws_key.is_empty() {
-        let response = build_http_response(400, &[], "Missing Sec-WebSocket-Key");
+        let response = build_http_response(400, &[], b"Missing Sec-WebSocket-Key");
         let BufResult(r, _) = stream.write_all(response).await;
         return r.is_ok();
     }

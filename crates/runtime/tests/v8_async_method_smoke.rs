@@ -234,14 +234,14 @@ export default {{ fetch: _zsFetch }};
         runtime.call_fetch_handler("POST", "http://test/run", &[], "", &env, ctx);
 
     if let FetchOutcome::Response { body, .. } = &outcome {
-        return body.clone();
+        return String::from_utf8_lossy(body).into_owned();
     }
 
     // Async dispatch: drive through the pump on a compio runtime.
     compio::runtime::Runtime::new().unwrap().block_on(async {
         runtime.start_pump();
         match outcome {
-            FetchOutcome::Response { body, .. } => body,
+            FetchOutcome::Response { body, .. } => String::from_utf8_lossy(&body).into_owned(),
             FetchOutcome::Stream { body_reader, .. } => {
                 let mut buf = Vec::new();
                 for chunk in body_reader.drain() {
@@ -255,7 +255,9 @@ export default {{ fetch: _zsFetch }};
                     .expect("test pending timed out")
                     .expect("test pending delivered DispatchError");
                 match settled {
-                    SettledFetch::Response { body, .. } => body,
+                    SettledFetch::Response { body, .. } => {
+                        String::from_utf8_lossy(&body).into_owned()
+                    }
                     SettledFetch::Stream { body_reader, .. } => {
                         let mut buf = Vec::new();
                         for chunk in body_reader.drain() {

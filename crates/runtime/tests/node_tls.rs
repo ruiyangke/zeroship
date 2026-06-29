@@ -324,10 +324,16 @@ async fn run_js_module(module_src: String, policy: NetPolicy, max_wait: Duration
 
 async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsResult {
     match outcome {
-        FetchOutcome::Response { status, body, .. } => JsResult { status, body },
+        FetchOutcome::Response { status, body, .. } => JsResult {
+            status,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        },
         FetchOutcome::Pending { rx, .. } => match compio::time::timeout(max_wait, rx.recv()).await
         {
-            Ok(Ok(SettledFetch::Response { status, body, .. })) => JsResult { status, body },
+            Ok(Ok(SettledFetch::Response { status, body, .. })) => JsResult {
+                status,
+                body: String::from_utf8_lossy(&body).into_owned(),
+            },
             Ok(Ok(SettledFetch::Stream {
                 status,
                 body_reader,

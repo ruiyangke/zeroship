@@ -1690,14 +1690,14 @@ impl RuntimeInner {
                 return crate::FetchOutcome::Response {
                     status: 500,
                     headers: vec![("content-type".into(), "application/json".into())],
-                    body: payload.to_string(),
+                    body: payload.to_string().into_bytes(),
                     logs: vec![],
                 };
             }
             return crate::FetchOutcome::Response {
                 status: 404,
                 headers: vec![("content-type".into(), "application/json".into())],
-                body: r#"{"message":"No default.fetch handler exported","name":"Error"}"#.into(),
+                body: r#"{"message":"No default.fetch handler exported","name":"Error"}"#.as_bytes().to_vec(),
                 logs: vec![],
             };
         }
@@ -1978,7 +1978,8 @@ impl RuntimeInner {
                     "CPU time limit exceeded",
                     "Error",
                     crate::dispatch::ErrorExtras::default(),
-                ),
+                )
+                .into_bytes(),
                 logs: vec![],
             };
         }
@@ -2016,7 +2017,8 @@ impl RuntimeInner {
                     headers: vec![("content-type".into(), "application/json".into())],
                     body: crate::dispatch::build_error_body(
                         status, request_id, &message, &name, extras,
-                    ),
+                    )
+                    .into_bytes(),
                     logs: vec![],
                 }
             }
@@ -2035,7 +2037,8 @@ impl RuntimeInner {
                         &msg,
                         "Error",
                         crate::dispatch::ErrorExtras::default(),
-                    ),
+                    )
+                    .into_bytes(),
                     logs: vec![],
                 }
             }
@@ -3163,7 +3166,8 @@ fn settle_rpc_promise(
                         headers: vec![("content-type".into(), "application/json".into())],
                         body: crate::dispatch::build_error_body(
                             status, request_id, &message, &name, extras,
-                        ),
+                        )
+                        .into_bytes(),
                     }))
                 }
                 _ => SettledResult::Http(Err("rpc rejected".to_string())),
@@ -3383,7 +3387,7 @@ fn classify_fetch_fast_return(
 
     // String → 200 OK with body, application/json content-type.
     if val.is_string() {
-        let body = val.to_rust_string_lossy(scope);
+        let body = val.to_rust_string_lossy(scope).into_bytes();
         return FetchFastResult::Handled(Ok(DispatchResult::HttpResponse(
             http::ResponseInfo::Complete {
                 status: 200,
@@ -3404,7 +3408,7 @@ fn classify_fetch_fast_return(
     // Plain object with { status, headers, body }.
     if let Some(obj) = val.to_object(scope) {
         let status = http::get_u32_property(scope, obj, "status") as u16;
-        let body = http::get_string_property(scope, obj, "body");
+        let body = http::get_string_property(scope, obj, "body").into_bytes();
         let headers = extract_plain_headers(scope, obj);
         let effective_status = if status == 0 { 200 } else { status };
         return FetchFastResult::Handled(Ok(DispatchResult::HttpResponse(
@@ -3419,7 +3423,8 @@ fn classify_fetch_fast_return(
     // Fallback: JSON.stringify.
     let body = v8::json::stringify(scope, val)
         .map(|s| s.to_rust_string_lossy(scope))
-        .unwrap_or_else(|| "null".to_string());
+        .unwrap_or_else(|| "null".to_string())
+        .into_bytes();
     FetchFastResult::Handled(Ok(DispatchResult::HttpResponse(
         http::ResponseInfo::Complete {
             status: 200,
@@ -3562,7 +3567,7 @@ fn rpc_invalid_argument_response(message: &str) -> DispatchResult {
     DispatchResult::HttpResponse(http::ResponseInfo::Complete {
         status: 400,
         headers: vec![("content-type".into(), "application/json".into())],
-        body,
+        body: body.into_bytes(),
     })
 }
 
@@ -3736,14 +3741,7 @@ fn classify_rpc_return<'s>(
 
     // Plain value → superjson encode and wrap in `{ json, meta? }`.
     let body = match crate::rpc::encode_to_bytes(scope, val) {
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(body) => body,
-            Err(e) => {
-                return RpcCallResult::Handled(Ok(DispatchResult::Error(format!(
-                    "superjson encode produced invalid UTF-8: {e}",
-                ))));
-            }
-        },
+        Ok(bytes) => bytes,
         Err(e) => {
             return RpcCallResult::Handled(Ok(DispatchResult::Error(e.message)));
         }

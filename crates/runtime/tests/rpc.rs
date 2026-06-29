@@ -34,10 +34,11 @@ fn dispatch_zs(
 
     // Sync Response — return immediately.
     if let FetchOutcome::Response { status, body, .. } = &outcome {
+        let body = String::from_utf8_lossy(body).into_owned();
         if !(200..300).contains(status) {
-            return Err(parse_message(body));
+            return Err(parse_message(&body));
         }
-        return Ok(unwrap_json_envelope(body));
+        return Ok(unwrap_json_envelope(&body));
     }
 
     // Async / streaming — drive through a compio runtime.
@@ -45,6 +46,7 @@ fn dispatch_zs(
         runtime.start_pump();
         match outcome {
             FetchOutcome::Response { status, body, .. } => {
+                let body = String::from_utf8_lossy(&body).into_owned();
                 if !(200..300).contains(&status) {
                     Err(parse_message(&body))
                 } else {
@@ -76,6 +78,7 @@ fn dispatch_zs(
                     .expect("dispatch error");
                 match settled {
                     SettledFetch::Response { status, body, .. } => {
+                        let body = String::from_utf8_lossy(&body).into_owned();
                         if !(200..300).contains(&status) {
                             Err(parse_message(&body))
                         } else {
@@ -181,6 +184,7 @@ fn superjson_output_date_preserves_meta_on_rpc_fast_path() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = String::from_utf8_lossy(&body).into_owned();
     assert_eq!(status, 200, "body: {}", body);
     assert!(
         body.contains(r#""json":"2026-01-01T00:00:00.000Z""#),
@@ -215,7 +219,10 @@ fn persistent_context() {
             r#"{"json":null}"#, &env, ctx,
         );
         match outcome {
-            FetchOutcome::Response { body, .. } => unwrap_json_envelope(&body),
+            FetchOutcome::Response { body, .. } => {
+                let body = String::from_utf8_lossy(&body).into_owned();
+                unwrap_json_envelope(&body)
+            }
             _ => panic!("unexpected outcome"),
         }
     };

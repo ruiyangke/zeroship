@@ -93,10 +93,16 @@ async fn run_pg_js(module_src: String, max_wait: Duration) -> JsResult {
 
 async fn drive_fetch_outcome(outcome: FetchOutcome, max_wait: Duration) -> JsResult {
     match outcome {
-        FetchOutcome::Response { status, body, .. } => JsResult { status, body },
+        FetchOutcome::Response { status, body, .. } => JsResult {
+            status,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        },
         FetchOutcome::Pending { rx, .. } => match compio::time::timeout(max_wait, rx.recv()).await
         {
-            Ok(Ok(SettledFetch::Response { status, body, .. })) => JsResult { status, body },
+            Ok(Ok(SettledFetch::Response { status, body, .. })) => JsResult {
+                status,
+                body: String::from_utf8_lossy(&body).into_owned(),
+            },
             Ok(Ok(SettledFetch::Stream {
                 status,
                 body_reader,

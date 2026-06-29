@@ -7,6 +7,10 @@ use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestC
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
+pub fn body_to_string(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).into_owned()
+}
+
 /// Create a module list from a single JS source string.
 ///
 /// The caller writes `export function foo() {...}` style, and `m()` returns a
@@ -144,7 +148,7 @@ pub fn no_env() -> HashMap<String, String> {
 /// variants to drive the pump.
 async fn drive_fetch_outcome(outcome: FetchOutcome) -> (u16, String, Vec<String>) {
     match outcome {
-        FetchOutcome::Response { status, body, logs, .. } => (status, body, logs),
+        FetchOutcome::Response { status, body, logs, .. } => (status, body_to_string(&body), logs),
         FetchOutcome::Stream { status, body_reader, logs, .. } => {
             // Most dispatch calls return Response.json(...) which collapses to
             // the Response arm; SSE (async-generator) tests intentionally
@@ -162,7 +166,7 @@ async fn drive_fetch_outcome(outcome: FetchOutcome) -> (u16, String, Vec<String>
                 .expect("fetch pending timed out")
                 .expect("fetch pending delivered DispatchError");
             match settled {
-                SettledFetch::Response { status, body, logs, .. } => (status, body, logs),
+                SettledFetch::Response { status, body, logs, .. } => (status, body_to_string(&body), logs),
                 SettledFetch::Stream { status, body_reader, logs, .. } => {
                     let mut body = Vec::new();
                     for chunk in body_reader.drain() {
@@ -210,7 +214,7 @@ fn run_dispatch_on_runtime(runtime: &Runtime, method: &str, args_json: &str) -> 
 
     // Sync path: Response variant returns immediately — no compio needed.
     if let FetchOutcome::Response { status, body: json_body, logs, .. } = &outcome {
-        let (status, json_body, logs) = (*status, json_body.clone(), logs.clone());
+        let (status, json_body, logs) = (*status, body_to_string(json_body), logs.clone());
         if !(200..300).contains(&status) {
             return Err(parse_error_message(&json_body));
         }
@@ -533,7 +537,7 @@ pub fn dispatch_with_env(
     );
 
     if let FetchOutcome::Response { status, body: json_body, logs, .. } = &outcome {
-        let (status, json_body, logs) = (*status, json_body.clone(), logs.clone());
+        let (status, json_body, logs) = (*status, body_to_string(json_body), logs.clone());
         if !(200..300).contains(&status) {
             return Err(parse_error_message(&json_body));
         }
@@ -583,17 +587,20 @@ pub fn dispatch_http_sync(
 
     // Sync path: Response variant returns immediately.
     if let FetchOutcome::Response { status, headers, body, .. } = &outcome {
+        let body = body_to_string(body);
         if *status == 404 && body.contains("No default.fetch handler") {
             return None;
         }
-        return Some((*status, headers.clone(), body.clone()));
+        return Some((*status, headers.clone(), body));
     }
 
     // Otherwise spin up a compio runtime and drive through the pump.
     Some(compio::runtime::Runtime::new().unwrap().block_on(async {
         runtime.start_pump();
         match outcome {
-            FetchOutcome::Response { status, headers, body, .. } => (status, headers, body),
+            FetchOutcome::Response { status, headers, body, .. } => {
+                (status, headers, body_to_string(&body))
+            }
             FetchOutcome::Stream { status, headers, body_reader, .. } => {
                 let mut out = Vec::new();
                 for chunk in body_reader.drain() {
@@ -607,7 +614,9 @@ pub fn dispatch_http_sync(
                     .expect("dispatch_http_sync pending timed out")
                     .expect("dispatch_http_sync pending delivered DispatchError");
                 match settled {
-                    SettledFetch::Response { status, headers, body, .. } => (status, headers, body),
+                    SettledFetch::Response { status, headers, body, .. } => {
+                        (status, headers, body_to_string(&body))
+                    }
                     SettledFetch::Stream { status, headers, body_reader, .. } => {
                         let mut out = Vec::new();
                         for chunk in body_reader.drain() {
@@ -693,4 +702,3 @@ pub fn dispatch_fetch_with_env(
         ctx,
     )
 }
-

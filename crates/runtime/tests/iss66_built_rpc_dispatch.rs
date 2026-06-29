@@ -34,12 +34,14 @@ const BUNDLE: &str =
 
 fn drive(runtime: &Runtime, outcome: FetchOutcome) -> (u16, String) {
     if let FetchOutcome::Response { status, body, .. } = &outcome {
-        return (*status, body.clone());
+        return (*status, String::from_utf8_lossy(body).into_owned());
     }
     compio::runtime::Runtime::new().unwrap().block_on(async {
         runtime.start_pump();
         match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Stream { status, body_reader, .. } => {
                 let mut out = Vec::new();
                 loop {
@@ -53,7 +55,9 @@ fn drive(runtime: &Runtime, outcome: FetchOutcome) -> (u16, String) {
                 let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await.expect("dispatch pending timed out").expect("dispatch error");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     SettledFetch::Stream { status, body_reader, .. } => {
                         let mut out = Vec::new();
                         loop {
@@ -129,4 +133,3 @@ fn iss66_built_bundle_dispatches_users_public() {
         "handler hit the inlined stub (env.db undefined). body={body}"
     );
 }
-

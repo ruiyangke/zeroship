@@ -61,19 +61,23 @@ fn start_rpc(runtime: &Runtime, id: &str, input_json: &str) -> FetchOutcome {
 /// returning `(status, body)`. Spawns a compio runtime if needed.
 fn await_outcome(runtime: Runtime, outcome: FetchOutcome) -> (u16, String) {
     if let FetchOutcome::Response { status, body, .. } = &outcome {
-        return (*status, body.clone());
+        return (*status, String::from_utf8_lossy(body).into_owned());
     }
     compio::runtime::Runtime::new().unwrap().block_on(async {
         runtime.start_pump();
         match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
                     .expect("pending timed out")
                     .expect("pending delivered DispatchError");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     other => panic!("unexpected settle: {:?}", std::any::type_name_of_val(&other)),
                 }
             }
@@ -145,14 +149,18 @@ fn eviction_fires_single_inflight_controller() {
         // cleared from the registry.
         let outcome = start_rpc(&rt_clone, "readFlag", "[]");
         let (status, body) = match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(2), rx.recv())
                     .await
                     .expect("readFlag timed out")
                     .expect("readFlag dispatch error");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     other => panic!("unexpected settle: {:?}", std::any::type_name_of_val(&other)),
                 }
             }
@@ -208,14 +216,18 @@ fn eviction_fires_all_inflight_controllers() {
 
         let outcome = start_rpc(&rt_clone, "readCount", "[]");
         let (status, body) = match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(2), rx.recv())
                     .await
                     .expect("readCount timed out")
                     .expect("readCount dispatch error");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     other => panic!("unexpected: {}", std::any::type_name_of_val(&other)),
                 }
             }
@@ -374,14 +386,18 @@ fn integration_two_isolates_eviction_walks_correct_registry() {
         rt_a_clone.enter_isolate();
         let outcome = start_rpc(&rt_a_clone, "readFlag", "[]");
         let (status, body) = match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(2), rx.recv())
                     .await
                     .expect("readFlag timed out")
                     .expect("readFlag error");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     other => panic!("unexpected: {}", std::any::type_name_of_val(&other)),
                 }
             }

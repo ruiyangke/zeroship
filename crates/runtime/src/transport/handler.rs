@@ -103,7 +103,7 @@ pub enum ResponseInfo {
     Complete {
         status: u16,
         headers: Vec<(String, String)>,
-        body: String,
+        body: Vec<u8>,
     },
     /// Streaming response — body arrives via the stream forwarder.
     Stream {
@@ -150,7 +150,7 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
         .unwrap_or(0) as u16;
     if status == 0 {
         // Likely not a Response — wrap raw value as 200 text body
-        let body = response_val.to_rust_string_lossy(scope);
+        let body = response_val.to_rust_string_lossy(scope).into_bytes();
         return Ok(ResponseInfo::Complete {
             status: 200,
             headers: vec![("content-type".into(), "text/plain;charset=UTF-8".into())],
@@ -204,7 +204,7 @@ pub fn inspect_response(scope: &mut v8::PinScope, response_val: v8::Local<v8::Va
     if let Some(view) = crate::fetch_response::try_native_response_body(scope, obj) {
         return inspect_native_response(scope, obj, status, headers, view);
     }
-    Ok(ResponseInfo::Complete { status, headers, body: String::new() })
+    Ok(ResponseInfo::Complete { status, headers, body: Vec::new() })
 }
 
 /// Read a native Response body via the public surface (no polyfill probes).
@@ -220,14 +220,10 @@ fn inspect_native_response(
         NativeResponseBody::Empty => Ok(ResponseInfo::Complete {
             status,
             headers,
-            body: String::new(),
+            body: Vec::new(),
         }),
         NativeResponseBody::Bytes(rc) => {
-            // Materialise as UTF-8 text. The wire path treats body as
-            // a String; binary bodies survive lossy conversion because
-            // the resulting Rust String is round-tripped to bytes when
-            // sent on the wire.
-            let body = String::from_utf8_lossy(&rc).into_owned();
+            let body = rc.to_vec();
             Ok(ResponseInfo::Complete { status, headers, body })
         }
         NativeResponseBody::Stream => {
@@ -265,11 +261,8 @@ fn classify_stream(
         // Stream sync-completed in start() — collect buffered chunks
         // as a complete body and discard the forwarder.
         let chunks = crate::streams::response_forwarder::drain_into_complete(&state, stream_id);
-        let body_text = chunks
-            .iter()
-            .map(|b| String::from_utf8_lossy(b).to_string())
-            .collect::<String>();
-        Ok(ResponseInfo::Complete { status, headers, body: body_text })
+        let body = chunks.concat();
+        Ok(ResponseInfo::Complete { status, headers, body })
     } else {
         // Stream still open — return as streaming. The runtime will
         // attach a direct writer in build_fetch_outcome; chunks
@@ -404,7 +397,8 @@ pub fn extract_settled_result(
                         headers: vec![("content-type".into(), "application/json".into())],
                         body: crate::dispatch::build_error_body(
                             status, request_id, &message, &name, extras,
-                        ),
+                        )
+                        .into_bytes(),
                     }))
                 }
                 _ => SettledResult::Http(Err("Promise rejected".to_string())),

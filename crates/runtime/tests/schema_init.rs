@@ -132,6 +132,7 @@ export default {{ fetch: _zsFetch, rpc: _zsRpc }};
     );
     match outcome {
         FetchOutcome::Response { status, body, .. } => {
+            let body = String::from_utf8_lossy(&body).into_owned();
             if (200..300).contains(&status) {
                 Ok(body)
             } else {
@@ -211,6 +212,7 @@ export default {
     );
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
+            let body = String::from_utf8_lossy(&body).into_owned();
             assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
             body
         }
@@ -313,6 +315,7 @@ import "@zeroship/db/internal";
     );
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
+            let body = String::from_utf8_lossy(&body).into_owned();
             assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
             body
         }
@@ -416,6 +419,7 @@ import "@zeroship/db/internal";
     );
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
+            let body = String::from_utf8_lossy(&body).into_owned();
             assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
             body
         }
@@ -489,6 +493,7 @@ export default {
     );
     let body = match outcome {
         FetchOutcome::Response { status, body, .. } => {
+            let body = String::from_utf8_lossy(&body).into_owned();
             assert!((200..300).contains(&status), "non-2xx: status={status} body={body}");
             body
         }

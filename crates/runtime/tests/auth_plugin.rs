@@ -48,7 +48,9 @@ fn dispatch_with_user(runtime: &Runtime, user_json: Option<String>) -> (u16, Str
         user_json,
     );
     match outcome {
-        FetchOutcome::Response { status, body, .. } => (status, body),
+        FetchOutcome::Response { status, body, .. } => {
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
         other => {
             let name = match other {
                 FetchOutcome::Stream { .. } => "Stream",

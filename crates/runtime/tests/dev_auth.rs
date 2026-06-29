@@ -98,7 +98,9 @@ fn dispatch_dev(runtime: &Runtime, method: &str, url: &str, cookie: Option<&str>
     let outcome =
         runtime.call_fetch_handler_with_user(method, url, &headers, body, &env, ctx, user_json);
     match outcome {
-        FetchOutcome::Response { status, body, .. } => (status, body),
+        FetchOutcome::Response { status, body, .. } => {
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
         other => {
             let name = match other {
                 FetchOutcome::Stream { .. } => "Stream",

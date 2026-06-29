@@ -71,6 +71,7 @@ fn dispatch_zs_for_capability(
         }
         _ => panic!("unexpected outcome variant (Stream or WebSocketUpgrade)"),
     };
+    let body = String::from_utf8_lossy(&body).into_owned();
     let json: serde_json::Value =
         serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
     (status, json)

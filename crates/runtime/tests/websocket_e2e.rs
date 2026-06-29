@@ -219,12 +219,16 @@ fn run_js_with_runtime(src: &str, max_wait: Duration) -> String {
         // Drive the outcome to completion.
         let start = Instant::now();
         match outcome {
-            zeroship_runtime::FetchOutcome::Response { body, .. } => body,
+            zeroship_runtime::FetchOutcome::Response { body, .. } => {
+                String::from_utf8_lossy(&body).into_owned()
+            }
             zeroship_runtime::FetchOutcome::Pending { rx, .. } => {
                 // Wait for the promise to settle.
                 let res = compio::time::timeout(max_wait, rx.recv()).await;
                 match res {
-                    Ok(Ok(zeroship_runtime::SettledFetch::Response { body, .. })) => body,
+                    Ok(Ok(zeroship_runtime::SettledFetch::Response { body, .. })) => {
+                        String::from_utf8_lossy(&body).into_owned()
+                    }
                     Ok(Ok(zeroship_runtime::SettledFetch::Stream { .. })) => "STREAM".into(),
                     Ok(Ok(zeroship_runtime::SettledFetch::WebSocketUpgrade { .. })) => {
                         "WS_UPGRADE".into()

@@ -368,7 +368,7 @@ fn record_stream_unary(
 ///
 /// Body is moved, not copied — for large responses (image uploads, large
 /// JSON payloads) this halves the memory churn per request.
-fn make_http_response(status: u16, headers: Vec<(String, String)>, body: String) -> HttpResponse {
+fn make_http_response(status: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> HttpResponse {
     let status_code = ntex::http::StatusCode::from_u16(status)
         .unwrap_or(ntex::http::StatusCode::OK);
     let mut builder = HttpResponse::build(status_code);
@@ -777,6 +777,99 @@ mod tests {
                 v["bytes"],
                 serde_json::json!([255, 0, 254, 128]),
                 "request body must be byte-exact, not UTF-8-lossy"
+            );
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn dispatch_preserves_non_utf8_response_body_bytes() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            init_runtime();
+
+            let app_id = Uuid::new_v4();
+            let source = br#"
+                export default {
+                  fetch() {
+                    return new Response(new Uint8Array([0xFF, 0x00, 0xFE, 0x80]));
+                  }
+                }
+            "#;
+            crate::cache::init_cache(
+                10,
+                crate::cache::KernelConfig {
+                    db_url: None,
+                    kv_url: None,
+                    storage_backend: None,
+                    meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
+                },
+            );
+            crate::cache::load_app(
+                app_id,
+                source,
+                AppRuntimeLimits::default(),
+                zeroship_core::types::AppNetPolicy::default(),
+                None,
+                None,
+                &EnvSnapshot::empty(),
+            )
+            .expect("app loads");
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            crate::sync::put_env_from_json(
+                &envs,
+                app_id,
+                r#"{"vars":{},"secrets":{},"expose":[]}"#,
+                0,
+            )
+            .expect("insert env");
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("blob-binary-response");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let config = Arc::new(crate::WorkerConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_url: None,
+                kv_url: None,
+                storage_backend: None,
+                max_isolates: 10,
+                poll_interval_secs: 60,
+                worker_key: String::new(),
+                shutdown_timeout_secs: 0,
+                blob_store,
+            });
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+            )
+            .await;
+
+            let req = test::TestRequest::post()
+                .uri(&format!("/dispatch/{app_id}"))
+                .set_payload(dispatch_frame(
+                    "GET",
+                    "http://example.test/binary-response",
+                    b"",
+                ))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            assert_eq!(
+                &body[..],
+                &[0xff, 0x00, 0xfe, 0x80],
+                "response body must be byte-exact, not UTF-8-lossy"
             );
 
             let _ = std::fs::remove_dir_all(blob_root);

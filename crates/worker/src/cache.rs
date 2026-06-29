@@ -589,7 +589,9 @@ mod tests {
         runtime.exit_isolate();
 
         match outcome {
-            zeroship_runtime::FetchOutcome::Response { status, body, .. } => (status, body),
+            zeroship_runtime::FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             zeroship_runtime::FetchOutcome::Pending { rx, .. } => {
                 let settled = compio::time::timeout(Duration::from_secs(5), rx.recv())
                     .await
@@ -597,7 +599,7 @@ mod tests {
                     .expect("pending fetch delivered DispatchError");
                 match settled {
                     zeroship_runtime::SettledFetch::Response { status, body, .. } => {
-                        (status, body)
+                        (status, String::from_utf8_lossy(&body).into_owned())
                     }
                     _ => panic!("expected settled response"),
                 }

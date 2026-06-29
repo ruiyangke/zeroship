@@ -31,7 +31,7 @@ fn drain_sse(modules: Vec<zeroship_runtime::ModuleEntry>, name: &str) -> String 
         r#"{"json":null}"#, &env, ctx,
     );
     if let FetchOutcome::Response { body, .. } = &outcome {
-        return body.clone();
+        return String::from_utf8_lossy(body).into_owned();
     }
     compio::runtime::Runtime::new().unwrap().block_on(async {
         runtime.start_pump();
@@ -58,11 +58,13 @@ fn drain_sse(modules: Vec<zeroship_runtime::ModuleEntry>, name: &str) -> String 
                         }
                         String::from_utf8_lossy(&out).into_owned()
                     }
-                    SettledFetch::Response { body, .. } => body,
+                    SettledFetch::Response { body, .. } => {
+                        String::from_utf8_lossy(&body).into_owned()
+                    }
                     _ => panic!("unexpected"),
                 }
             }
-            FetchOutcome::Response { body, .. } => body,
+            FetchOutcome::Response { body, .. } => String::from_utf8_lossy(&body).into_owned(),
             _ => panic!("unexpected outcome"),
         }
     })

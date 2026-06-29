@@ -73,13 +73,15 @@ fn dispatch(runtime: &Runtime, name: &str, body: &str) -> (u16, String) {
         ctx,
     );
     if let FetchOutcome::Response { status, body, .. } = &outcome {
-        return (*status, body.clone());
+        return (*status, String::from_utf8_lossy(body).into_owned());
     }
     // Async/stream — drive on a compio runtime.
     compio::runtime::Runtime::new().unwrap().block_on(async {
         runtime.start_pump();
         match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Stream { status, body_reader, .. } => {
                 let mut out = Vec::new();
                 loop {
@@ -99,7 +101,9 @@ fn dispatch(runtime: &Runtime, name: &str, body: &str) -> (u16, String) {
                     .expect("dispatch pending timed out")
                     .expect("dispatch error");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     SettledFetch::Stream { status, body_reader, .. } => {
                         let mut out = Vec::new();
                         loop {

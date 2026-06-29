@@ -27,6 +27,7 @@ fn node_globals_set_immediate_present() {
     "#);
     match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""setImmediateIsFn":true"#), "body: {}", body);
             assert!(body.contains(r#""clearImmediateIsFn":true"#), "body: {}", body);
@@ -47,7 +48,30 @@ fn simple_response() {
     match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
         FetchOutcome::Response { status, body, .. } => {
             assert_eq!(status, 200);
-            assert_eq!(body, "hello");
+            assert_eq!(&body[..], b"hello");
+        }
+        _ => panic!("expected Response outcome"),
+    }
+}
+
+#[test]
+fn response_body_preserves_non_utf8_bytes() {
+    let modules = m(r#"
+        export default {
+            fetch() {
+                return new Response(new Uint8Array([0xFF, 0x00, 0xFE, 0x80]));
+            }
+        };
+    "#);
+
+    match dispatch_fetch(modules, TestRequest::get("http://localhost/binary-response")) {
+        FetchOutcome::Response { status, body, .. } => {
+            assert_eq!(status, 200);
+            assert_eq!(
+                &body[..],
+                &[0xff, 0x00, 0xfe, 0x80],
+                "ResponseInfo::Complete.body must preserve native Response bytes"
+            );
         }
         _ => panic!("expected Response outcome"),
     }
@@ -95,6 +119,7 @@ fn request_body_preserves_non_utf8_bytes() {
             }
             _ => panic!("expected response"),
         };
+        let body = body_to_string(&body);
 
         assert_eq!(status, 200, "body: {body}");
         let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
@@ -146,6 +171,7 @@ fn fetch_fast_receives_non_utf8_body_bytes() {
         let FetchOutcome::Response { status, body, .. } = outcome else {
             panic!("expected synchronous fetchFast response");
         };
+        let body = body_to_string(&body);
         assert_eq!(status, 200, "body: {body}");
         let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
         assert_eq!(v["isUint8Array"], true);
@@ -200,7 +226,7 @@ fn async_response() {
         match settled {
             SettledFetch::Response { status, body, .. } => {
                 assert_eq!(status, 202);
-                assert_eq!(body, "later");
+                assert_eq!(&body[..], b"later");
             }
             _ => panic!("expected SettledFetch::Response"),
         }
@@ -220,6 +246,7 @@ fn handler_throwing_http_error_preserves_status() {
     "#);
     match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 404, "expected 404 from thrown err.status, got status={} body={}", status, body);
             assert!(body.contains("not found"), "body: {}", body);
         }
@@ -241,6 +268,7 @@ fn handler_throwing_500_returns_sanitized_error_body() {
     "#);
     match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 500, "body: {}", body);
             assert!(body.contains(r#""message":"internal error""#), "body: {}", body);
             assert!(body.contains(r#""name":"Error""#), "body: {}", body);
@@ -292,6 +320,7 @@ fn async_handler_rejecting_500_returns_sanitized_error_body() {
 
         match settled {
             SettledFetch::Response { status, body, .. } => {
+                let body = body_to_string(&body);
                 assert_eq!(status, 500, "body: {}", body);
                 assert!(body.contains(r#""message":"internal error""#), "body: {}", body);
                 assert!(body.contains(r#""request_id":""#), "body: {}", body);
@@ -380,6 +409,7 @@ fn streaming_response() {
                 // assert only that the Stream variant was produced.
             }
             SettledFetch::Response { status, body, .. } => {
+                let body = body_to_string(&body);
                 panic!(
                     "expected Stream variant but got Response — inspect_response may \
                      have collapsed the stream because it closed too early \
@@ -419,6 +449,7 @@ fn zs_env_returns_snapshot() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
     // Both arg and op must return the env contents.
     assert!(body.contains(r#""FOO":"bar""#), "body: {}", body);
@@ -452,6 +483,7 @@ fn zs_bind_and_get_request_ctx() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
     assert!(body.contains(r#""sameRef":true"#), "body: {}", body);
     assert!(body.contains(r#""hasWaitUntil":true"#), "body: {}", body);
@@ -633,6 +665,7 @@ fn zeroship_module_env_import() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
     assert!(body.contains(r#""allEqual":true"#), "body: {}", body);
     assert!(body.contains(r#""FOO":"bar""#), "body: {}", body);
@@ -661,6 +694,7 @@ fn zeroship_wait_until_accepts_promise() {
     "#);
     match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""called":true"#), "body: {}", body);
         }
@@ -690,6 +724,7 @@ fn zeroship_wait_until_rejects_non_promise() {
     "#);
     match dispatch_fetch(modules, TestRequest::get("http://localhost/")) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""threw":true"#), "body: {}", body);
             assert!(body.contains(r#""name":"TypeError""#), "body: {}", body);
@@ -715,6 +750,7 @@ fn zeroship_get_request_returns_request() {
     "#);
     match dispatch_fetch(modules, TestRequest::get("http://localhost/foo")) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""sameRef":true"#), "body: {}", body);
             assert!(body.contains("/foo"), "body: {}", body);
@@ -862,6 +898,7 @@ fn bootstrap_routes_rpc_to_named_export() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
     // Wire wraps the result in `{ json: ... }`.
     assert!(body.contains(r#""hello":"world""#), "body: {}", body);
@@ -888,6 +925,7 @@ fn bootstrap_rpc_method_not_found_returns_404() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 404, "body: {}", body);
     assert!(body.contains("Method not found"), "body: {}", body);
 }
@@ -913,6 +951,7 @@ fn bootstrap_rpc_malformed_json_returns_400() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 400, "body: {}", body);
     assert!(body.contains("invalid JSON body"), "body: {}", body);
 }
@@ -940,6 +979,7 @@ fn bootstrap_rpc_input_extracted_from_json_envelope() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
     assert!(body.contains(r#""hello":"world""#), "body: {}", body);
 }
@@ -987,6 +1027,7 @@ fn rpc_error_envelope_carries_code_details_retryable() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 400, "body: {}", body);
     let v: serde_json::Value = serde_json::from_str(&body)
         .unwrap_or_else(|e| panic!("body is not JSON: {} (body: {})", e, body));
@@ -1025,6 +1066,7 @@ fn rpc_error_envelope_omits_absent_optional_fields() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 418, "body: {}", body);
     let v: serde_json::Value = serde_json::from_str(&body)
         .unwrap_or_else(|e| panic!("body is not JSON: {} (body: {})", e, body));
@@ -1072,6 +1114,7 @@ fn rpc_error_envelope_ignores_non_string_code_and_non_bool_retryable() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 422, "body: {}", body);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let obj = v.as_object().unwrap();
@@ -1118,7 +1161,7 @@ fn sse_error_frame_carries_code_details_retryable() {
     let body = compio::runtime::Runtime::new().unwrap().block_on(async move {
         runtime.start_pump();
         match outcome {
-            FetchOutcome::Response { body, .. } => body,
+            FetchOutcome::Response { body, .. } => body_to_string(&body),
             FetchOutcome::Stream { body_reader, .. } => {
                 let mut out = Vec::new();
                 for chunk in body_reader.drain() { out.extend_from_slice(&chunk); }
@@ -1139,7 +1182,7 @@ fn sse_error_frame_carries_code_details_retryable() {
                         }
                         String::from_utf8_lossy(&out).into_owned()
                     }
-                    SettledFetch::Response { body, .. } => body,
+                    SettledFetch::Response { body, .. } => body_to_string(&body),
                     _ => panic!("unexpected outcome"),
                 }
             }
@@ -1198,6 +1241,7 @@ fn var_appears_in_process_env() {
     let env = EnvSnapshot::new(vars(&[("K", "v")]), BTreeMap::new(), vec![]);
     match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""K":"v""#), "body: {}", body);
         }
@@ -1223,6 +1267,7 @@ fn secret_does_not_appear_in_process_env() {
     );
     match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""type":"undefined""#), "body: {}", body);
             // Belt-and-suspenders: the literal value must not appear anywhere.
@@ -1249,6 +1294,7 @@ fn secret_visible_via_zeroship_env() {
     );
     match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""value":"topsecret""#), "body: {}", body);
         }
@@ -1275,6 +1321,7 @@ fn secret_visible_via_env_get() {
     );
     match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""value":"topsecret""#), "body: {}", body);
         }
@@ -1299,6 +1346,7 @@ fn exposed_secret_appears_in_process_env() {
     );
     match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""K":"v""#), "body: {}", body);
         }
@@ -1325,6 +1373,7 @@ fn var_and_secret_same_key_var_wins_in_process_env() {
     );
     match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""K":"var-value""#), "body: {}", body);
         }
@@ -1352,6 +1401,7 @@ fn merged_env_in_zeroship_module_secret_wins() {
     );
     match dispatch_fetch_with_env(modules, TestRequest::get("http://localhost/"), env) {
         FetchOutcome::Response { status, body, .. } => {
+            let body = body_to_string(&body);
             assert_eq!(status, 200, "body: {}", body);
             assert!(body.contains(r#""K":"secret-value""#), "body: {}", body);
         }
@@ -1418,6 +1468,7 @@ fn env_exposes_plugin_namespace() {
     let FetchOutcome::Response { status, body, .. } = outcome else {
         panic!("expected Response");
     };
+    let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
     assert!(body.contains(r#""hasEchoImport":true"#), "body: {}", body);
     assert!(body.contains(r#""hasEchoArg":true"#), "body: {}", body);

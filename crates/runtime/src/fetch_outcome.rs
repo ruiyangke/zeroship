@@ -12,7 +12,7 @@ pub enum FetchOutcome {
     Response {
         status: u16,
         headers: Vec<(String, String)>,
-        body: String,
+        body: Vec<u8>,
         logs: Vec<String>,
     },
     /// Headers known, body arrives chunk-by-chunk via `body_reader`.
@@ -43,7 +43,7 @@ pub enum SettledFetch {
     Response {
         status: u16,
         headers: Vec<(String, String)>,
-        body: String,
+        body: Vec<u8>,
         logs: Vec<String>,
     },
     Stream {

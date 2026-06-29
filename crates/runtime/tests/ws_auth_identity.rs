@@ -58,7 +58,7 @@ fn result_id(runtime: &Runtime) -> String {
     );
     match outcome {
         FetchOutcome::Response { body, .. } => {
-            let v: serde_json::Value = serde_json::from_str(&body).expect("/result body is JSON");
+            let v: serde_json::Value = serde_json::from_slice(&body).expect("/result body is JSON");
             v["id"].as_str().unwrap_or("UNSET").to_string()
         }
         _ => panic!("/result should return a Response"),
@@ -120,6 +120,7 @@ fn ws_handler_getuser_is_connection_user_not_stale_leftover() {
             other => {
                 let name = match other {
                     FetchOutcome::Response { status, body, .. } => {
+                        let body = String::from_utf8_lossy(&body).into_owned();
                         format!("Response(status={status}, body={body})")
                     }
                     FetchOutcome::Stream { .. } => "Stream".into(),

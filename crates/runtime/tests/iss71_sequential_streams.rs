@@ -33,11 +33,15 @@ async fn dispatch_and_drain(runtime: &Runtime, name: &str) -> String {
 
     let reader = match outcome {
         FetchOutcome::Stream { body_reader, .. } => body_reader,
-        FetchOutcome::Response { body, .. } => return body,
+        FetchOutcome::Response { body, .. } => {
+            return String::from_utf8_lossy(&body).into_owned();
+        }
         FetchOutcome::Pending { rx, .. } => {
             match compio::time::timeout(Duration::from_secs(3), rx.recv()).await {
                 Ok(Ok(SettledFetch::Stream { body_reader, .. })) => body_reader,
-                Ok(Ok(SettledFetch::Response { body, .. })) => return body,
+                Ok(Ok(SettledFetch::Response { body, .. })) => {
+                    return String::from_utf8_lossy(&body).into_owned();
+                }
                 Ok(Ok(_)) => panic!("unexpected pending settle (not Stream/Response)"),
                 Ok(Err(_)) => panic!("pending dispatch errored"),
                 Err(_) => panic!("pending dispatch timed out"),
