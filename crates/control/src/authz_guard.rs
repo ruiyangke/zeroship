@@ -268,26 +268,35 @@ async fn oauth_guard_from_bearer(
                 web::error::ErrorUnauthorized("oauth introspection failed").into()
             }
         })?;
-    if !verified.aud.as_ref().is_some_and(|audiences| {
-        audiences
-            .iter()
-            .any(|audience| audience == &state.expected_oauth_audience)
-    }) {
-        return Err(unauthorized_json("wrong_audience"));
-    }
+    let (principal_id, token_policy) = match &verified.provider_authz {
+        ProviderAuthz::OAuthScope(raw_scope) => {
+            if !verified.aud.as_ref().is_some_and(|audiences| {
+                audiences
+                    .iter()
+                    .any(|audience| audience == &state.expected_oauth_audience)
+            }) {
+                return Err(unauthorized_json("wrong_audience"));
+            }
 
-    let principal_id = Uuid::parse_str(&verified.provider_subject)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
+            let principal_id = Uuid::parse_str(&verified.provider_subject)
+                .map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
+            let token_policy = policy_from_scope_string(raw_scope, "invalid oauth scope")?;
+            (principal_id, token_policy)
+        }
+        ProviderAuthz::GoTrueRole(role) => {
+            if role != "authenticated" {
+                return Err(web::error::ErrorUnauthorized("unauthenticated gotrue role").into());
+            }
 
-    let raw_scope = match verified.provider_authz {
-        ProviderAuthz::OAuthScope(scope) => scope,
-        ProviderAuthz::GoTrueRole(_) => {
-            return Err(web::error::ErrorUnauthorized("unsupported oauth authz").into());
+            let principal_id =
+                resolve_supabase_principal(state, &verified.provider_subject).await?;
+            let grants = load_principal_grants(state, principal_id).await?;
+            let raw_scope = grants.join(" ");
+            let token_policy =
+                policy_from_scope_string(&raw_scope, "invalid principal grant")?;
+            (principal_id, token_policy)
         }
     };
-    let scopes = authz::parse_scope_string(&raw_scope)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid oauth scope"))?;
-    let token_policy = authz::scopes_to_policy(&scopes);
 
     Ok(Some(AuthzGuard {
         principal_id,
@@ -298,6 +307,70 @@ async fn oauth_guard_from_bearer(
         request_ip,
         request_id,
     }))
+}
+
+fn policy_from_scope_string(
+    raw_scope: &str,
+    error: &'static str,
+) -> Result<authz::Policy, web::Error> {
+    let scopes =
+        authz::parse_scope_string(raw_scope).map_err(|_| web::error::ErrorUnauthorized(error))?;
+    Ok(authz::scopes_to_policy(&scopes))
+}
+
+async fn resolve_supabase_principal(
+    state: &AppState,
+    provider_subject: &str,
+) -> Result<Uuid, web::Error> {
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT principal_id \
+             FROM zeroship.identity_links \
+             WHERE provider = 'supabase' AND provider_subject = $1",
+            &[&provider_subject],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                "control: supabase identity link lookup failed"
+            );
+            web::error::ErrorInternalServerError("identity link lookup failed")
+        })?;
+    // P-S2: links created during device-flow approval (JIT provisioning);
+    // this slice is read-side only.
+    let row = rows
+        .first()
+        .ok_or_else(|| web::error::ErrorUnauthorized("unlinked supabase principal"))?;
+    Ok(row.get("principal_id"))
+}
+
+async fn load_principal_grants(
+    state: &AppState,
+    principal_id: Uuid,
+) -> Result<Vec<String>, web::Error> {
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT grant_name \
+             FROM zeroship.principal_grants \
+             WHERE principal_id = $1 \
+             ORDER BY grant_name",
+            &[&principal_id],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                "control: principal grant lookup failed"
+            );
+            web::error::ErrorInternalServerError("principal grant lookup failed")
+        })?;
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<_, String>("grant_name"))
+        .collect())
 }
 
 fn unauthorized_json(error: &'static str) -> web::Error {

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ntex::web;
+use zeroship_core::auth_provider::{AuthProvider, SupabaseConfig, SupabaseProvider};
 use zeroship_core::config::{
     bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, resolve_overlay_string,
     validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
@@ -321,9 +322,54 @@ struct ControlCli {
     #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
     hydra_admin_url: Option<String>,
 
-    /// Platform auth provider backend. This slice supports only `hydra`.
+    /// Platform auth provider backend.
     #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", default_value = "hydra")]
     auth_provider: String,
+
+    /// Supabase Auth / GoTrue base URL used when `--auth-provider=supabase`.
+    #[arg(long = "supabase-url", env = "SUPABASE_URL", default_value = "")]
+    supabase_url: String,
+
+    /// Supabase anon API key used for GoTrue browser/session API calls.
+    #[arg(
+        long = "supabase-anon-key",
+        env = "SUPABASE_ANON_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    supabase_anon_key: String,
+
+    /// Supabase service-role key. Optional in this read-side slice; P-S2 uses it
+    /// for admin lookups while provisioning identity links.
+    #[arg(
+        long = "supabase-service-role-key",
+        env = "SUPABASE_SERVICE_ROLE_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    supabase_service_role_key: String,
+
+    /// HS256 GoTrue JWT secret. Mutually exclusive with `--supabase-jwks-url`.
+    #[arg(
+        long = "supabase-jwt-secret",
+        env = "SUPABASE_JWT_SECRET",
+        default_value = "",
+        hide_env_values = true
+    )]
+    supabase_jwt_secret: String,
+
+    /// JWKS URL for asymmetric GoTrue JWT verification. Mutually exclusive with
+    /// `--supabase-jwt-secret`.
+    #[arg(long = "supabase-jwks-url", env = "SUPABASE_JWKS_URL", default_value = "")]
+    supabase_jwks_url: String,
+
+    /// GoTrue JWT issuer pinned during Supabase token verification.
+    #[arg(
+        long = "supabase-jwt-issuer",
+        env = "SUPABASE_JWT_ISSUER",
+        default_value = ""
+    )]
+    supabase_jwt_issuer: String,
 
     /// Allow a non-loopback Hydra **admin** API URL. The admin API is
     /// privileged; outside `--dev-insecure` a remote admin URL is refused
@@ -441,6 +487,12 @@ impl std::fmt::Debug for ControlCli {
             .field("obs", &self.obs)
             .field("hydra_admin_url", &self.hydra_admin_url)
             .field("auth_provider", &self.auth_provider)
+            .field("supabase_url", &self.supabase_url)
+            .field("supabase_anon_key", &"<redacted>")
+            .field("supabase_service_role_key", &"<redacted>")
+            .field("supabase_jwt_secret", &"<redacted>")
+            .field("supabase_jwks_url", &self.supabase_jwks_url)
+            .field("supabase_jwt_issuer", &self.supabase_jwt_issuer)
             .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
             .field("hydra_public_url", &self.hydra_public_url)
             .field("stash_signing_key", &"<redacted>")
@@ -498,24 +550,57 @@ fn build_billing_mailer(cli: &ControlCli) -> Result<Arc<dyn zeroship_mailer::Mai
 fn build_control_auth_provider(
     auth_provider: &str,
     hydra_admin_url: &str,
-) -> Result<Arc<zeroship_core::auth_provider::AuthProvider>, String> {
-    control_auth_provider_kind(auth_provider)?;
-    Ok(zeroship_control::hydra_auth_provider(hydra_admin_url))
+    supabase: ControlSupabaseAuthConfig,
+) -> Result<Arc<AuthProvider>, String> {
+    match control_auth_provider_kind(auth_provider)? {
+        "hydra" => Ok(zeroship_control::hydra_auth_provider(hydra_admin_url)),
+        "supabase" => {
+            if supabase.anon_key.trim().is_empty() {
+                return Err("SUPABASE_ANON_KEY is required for ZEROSHIP_AUTH_PROVIDER=supabase"
+                    .to_string());
+            }
+            let config = SupabaseConfig::new(
+                supabase.url,
+                supabase.anon_key,
+                empty_string_as_none(supabase.service_role_key),
+                empty_string_as_none(supabase.jwt_secret),
+                empty_string_as_none(supabase.jwks_url),
+                supabase.jwt_issuer,
+            )
+            .map_err(|err| format!("supabase auth provider config: {err}"))?;
+            Ok(Arc::new(AuthProvider::Supabase(SupabaseProvider::new(config))))
+        }
+        other => Err(format!("unsupported auth provider kind: {other}")),
+    }
 }
 
 fn control_auth_provider_kind(auth_provider: &str) -> Result<&'static str, String> {
     let normalized = auth_provider.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "" | "hydra" => Ok("hydra"),
-        "supabase" => Err(
-            "ZEROSHIP_AUTH_PROVIDER=supabase: token verification is implemented \
-             (core::auth_provider::SupabaseProvider) but control authz wiring requires \
-             the identity-bridge slice (GoTrue sub -> platform principal); not yet enabled"
-                .to_string(),
-        ),
+        "supabase" => Ok("supabase"),
         other => Err(format!(
-            "unknown ZEROSHIP_AUTH_PROVIDER value {other:?}; expected hydra"
+            "unknown ZEROSHIP_AUTH_PROVIDER value {other:?}; expected hydra|supabase"
         )),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ControlSupabaseAuthConfig<'a> {
+    url: &'a str,
+    anon_key: &'a str,
+    service_role_key: &'a str,
+    jwt_secret: &'a str,
+    jwks_url: &'a str,
+    jwt_issuer: &'a str,
+}
+
+fn empty_string_as_none(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -593,6 +678,12 @@ fn main() -> std::io::Result<()> {
             std::process::exit(1);
         }
     };
+    let supabase_url = cli.supabase_url.clone();
+    let supabase_anon_key = cli.supabase_anon_key.clone();
+    let supabase_service_role_key = cli.supabase_service_role_key.clone();
+    let supabase_jwt_secret = cli.supabase_jwt_secret.clone();
+    let supabase_jwks_url = cli.supabase_jwks_url.clone();
+    let supabase_jwt_issuer = cli.supabase_jwt_issuer.clone();
     let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
     tracing::info!(
         trusted_oauth_clients = trusted_oauth_clients.len(),
@@ -604,7 +695,8 @@ fn main() -> std::io::Result<()> {
     // literal loopback only (no DNS), closing the rebind/TOCTOU window. Dev mode
     // does NOT bypass this (matching auth): allowing a privileged remote admin
     // endpoint is its own deliberate opt-in, separate from --dev-insecure.
-    if !hydra_admin_url.is_empty()
+    if auth_provider_kind == "hydra"
+        && !hydra_admin_url.is_empty()
         && !allow_remote_hydra_admin
         && !is_loopback_url(&hydra_admin_url)
     {
@@ -938,7 +1030,7 @@ fn main() -> std::io::Result<()> {
     // audit run on the SINGLE `--db` connection (there is no separate auth DB
     // any more). Refuses to boot unless these are configured (`--dev-insecure`
     // permits localhost defaults only).
-    if !insecure_dev {
+    if !insecure_dev && auth_provider_kind == "hydra" {
         let mut missing = Vec::new();
         if hydra_public_url.is_empty() {
             missing.push("--hydra-public-url / HYDRA_PUBLIC_URL");
@@ -997,6 +1089,24 @@ fn main() -> std::io::Result<()> {
         report.field(
             "auth_provider",
             CheckValue::Plain(auth_provider_kind.to_string()),
+        );
+        report.field("supabase_url", CheckValue::Plain(supabase_url.clone()));
+        report.field(
+            "supabase_anon_key_configured",
+            CheckValue::Secret(!supabase_anon_key.is_empty()),
+        );
+        report.field(
+            "supabase_service_role_key_configured",
+            CheckValue::Secret(!supabase_service_role_key.is_empty()),
+        );
+        report.field(
+            "supabase_jwt_secret_configured",
+            CheckValue::Secret(!supabase_jwt_secret.is_empty()),
+        );
+        report.field("supabase_jwks_url", CheckValue::Plain(supabase_jwks_url.clone()));
+        report.field(
+            "supabase_jwt_issuer",
+            CheckValue::Plain(supabase_jwt_issuer.clone()),
         );
         report.field(
             "hydra_public_url",
@@ -1151,7 +1261,18 @@ fn main() -> std::io::Result<()> {
     // Control plane is a pure API resource server: no console OIDC RP. The
     // selected auth provider still drives the OAuth-bearer arm of the
     // `AuthzGuard` after local PAT verification fails.
-    let auth_provider = match build_control_auth_provider(&auth_provider_name, &hydra_admin_url) {
+    let auth_provider = match build_control_auth_provider(
+        &auth_provider_name,
+        &hydra_admin_url,
+        ControlSupabaseAuthConfig {
+            url: &supabase_url,
+            anon_key: &supabase_anon_key,
+            service_role_key: &supabase_service_role_key,
+            jwt_secret: &supabase_jwt_secret,
+            jwks_url: &supabase_jwks_url,
+            jwt_issuer: &supabase_jwt_issuer,
+        },
+    ) {
         Ok(provider) => provider,
         Err(message) => {
             eprintln!("control: {message}");
@@ -1656,18 +1777,66 @@ mod tests {
     }
 
     #[test]
-    fn auth_provider_selector_defaults_to_hydra_and_rejects_supabase_for_now() {
+    fn auth_provider_selector_defaults_to_hydra_and_accepts_supabase() {
         let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
         assert_eq!(cli.auth_provider, "hydra");
         assert_eq!(control_auth_provider_kind(&cli.auth_provider), Ok("hydra"));
         assert_eq!(control_auth_provider_kind(""), Ok("hydra"));
+        assert_eq!(control_auth_provider_kind("supabase"), Ok("supabase"));
 
-        let err = control_auth_provider_kind("supabase").unwrap_err();
+        let err = control_auth_provider_kind("bogus").unwrap_err();
+        assert!(err.contains("hydra|supabase"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn supabase_auth_provider_requires_anon_key_and_pinned_mode() {
+        let err = build_control_auth_provider(
+            "supabase",
+            "",
+            ControlSupabaseAuthConfig {
+                url: "https://project.supabase.co",
+                anon_key: "",
+                service_role_key: "",
+                jwt_secret: "test-supabase-jwt-secret-at-least-32-bytes",
+                jwks_url: "",
+                jwt_issuer: "https://project.supabase.co/auth/v1",
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("SUPABASE_ANON_KEY"), "unexpected error: {err}");
+
+        let err = build_control_auth_provider(
+            "supabase",
+            "",
+            ControlSupabaseAuthConfig {
+                url: "https://project.supabase.co",
+                anon_key: "anon",
+                service_role_key: "",
+                jwt_secret: "test-supabase-jwt-secret-at-least-32-bytes",
+                jwks_url: "https://project.supabase.co/auth/v1/.well-known/jwks.json",
+                jwt_issuer: "https://project.supabase.co/auth/v1",
+            },
+        )
+        .unwrap_err();
         assert!(
-            err.contains("token verification is implemented")
-                && err.contains("identity-bridge slice"),
-            "supabase must fail clearly in this slice: {err}"
+            err.contains("exactly one Supabase verification mode"),
+            "unexpected error: {err}"
         );
+
+        let provider = build_control_auth_provider(
+            "supabase",
+            "",
+            ControlSupabaseAuthConfig {
+                url: "https://project.supabase.co",
+                anon_key: "anon",
+                service_role_key: "",
+                jwt_secret: "test-supabase-jwt-secret-at-least-32-bytes",
+                jwks_url: "",
+                jwt_issuer: "https://project.supabase.co/auth/v1",
+            },
+        )
+        .expect("valid HS256 supabase provider");
+        assert_eq!(provider.issuer(), "https://project.supabase.co/auth/v1");
     }
 
     #[test]
