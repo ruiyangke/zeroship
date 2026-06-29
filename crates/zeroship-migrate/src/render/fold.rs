@@ -1465,6 +1465,7 @@ fn fold_create_table_specs(
                     references_table,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
+                    dialect,
                 );
                 // A FOREIGN KEY materializes no index.
                 push_folded_constraint(table, snap, FoldedConstraint { constraint: fk, index: None })?;
@@ -1661,6 +1662,7 @@ fn add_constraint_snapshot(
                     references_table,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
+                    dialect,
                 ),
                 index: None,
             })

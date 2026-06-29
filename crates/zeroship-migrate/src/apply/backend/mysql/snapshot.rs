@@ -345,8 +345,9 @@ fn group_referential_constraints(
 fn mysql_referential_action(rule: &str) -> Result<&'static str, DriftError> {
     match rule.trim().to_ascii_uppercase().as_str() {
         "CASCADE" => Ok("CASCADE"),
-        "RESTRICT" => Ok("RESTRICT"),
-        "NO ACTION" => Ok("NO ACTION"),
+        // InnoDB checks both immediately; canonicalize the default action to the
+        // spelling this snapshot renderer omits from FK definitions.
+        "RESTRICT" | "NO ACTION" => Ok("NO ACTION"),
         "SET NULL" => Ok("SET NULL"),
         "SET DEFAULT" => Ok("SET DEFAULT"),
         other => Err(DriftError::Snapshot(format!(
@@ -631,6 +632,71 @@ mod tests {
             fk.definition,
             "FOREIGN KEY (parent_id) REFERENCES app.parents(id) ON UPDATE CASCADE \
              ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED"
+        );
+    }
+
+    #[test]
+    fn rowsets_to_schema_snapshot_omits_mysql_restrict_no_action_defaults() {
+        let snapshot = rowsets_to_schema_snapshot(
+            "app",
+            MysqlCatalogRowSets {
+                tables: RowSet {
+                    rows: vec![
+                        row(json!({ "TABLE_NAME": "parents" })),
+                        row(json!({ "TABLE_NAME": "children" })),
+                    ],
+                },
+                columns: RowSet::default(),
+                statistics: RowSet {
+                    rows: vec![row(json!({
+                        "TABLE_NAME": "children",
+                        "INDEX_NAME": "children_parent_fkey",
+                        "NON_UNIQUE": 1,
+                        "SEQ_IN_INDEX": 1,
+                        "COLUMN_NAME": "parent_id",
+                        "INDEX_TYPE": "BTREE"
+                    }))],
+                },
+                table_constraints: RowSet {
+                    rows: vec![row(json!({
+                        "TABLE_NAME": "children",
+                        "CONSTRAINT_NAME": "children_parent_fkey",
+                        "CONSTRAINT_TYPE": "FOREIGN KEY"
+                    }))],
+                },
+                key_column_usage: RowSet {
+                    rows: vec![row(json!({
+                        "TABLE_NAME": "children",
+                        "CONSTRAINT_NAME": "children_parent_fkey",
+                        "COLUMN_NAME": "parent_id",
+                        "ORDINAL_POSITION": 1,
+                        "REFERENCED_TABLE_NAME": "parents",
+                        "REFERENCED_COLUMN_NAME": "id"
+                    }))],
+                },
+                referential_constraints: RowSet {
+                    rows: vec![row(json!({
+                        "TABLE_NAME": "children",
+                        "CONSTRAINT_NAME": "children_parent_fkey",
+                        "REFERENCED_TABLE_NAME": "parents",
+                        "UPDATE_RULE": "RESTRICT",
+                        "DELETE_RULE": "NO ACTION"
+                    }))],
+                },
+                views: RowSet::default(),
+            },
+        )
+        .expect("maps FK");
+
+        let children = snapshot.tables.get("children").expect("children table");
+        let fk = children
+            .constraints
+            .iter()
+            .find(|c| c.name == "children_parent_fkey")
+            .expect("FK constraint");
+        assert_eq!(
+            fk.definition,
+            "FOREIGN KEY (parent_id) REFERENCES app.parents(id) DEFERRABLE INITIALLY DEFERRED"
         );
     }
 }

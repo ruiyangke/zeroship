@@ -2020,7 +2020,8 @@ impl IrAuthor {
                 // constraint NAME must match what the executor will see in the live
                 // catalog — derive it the SAME way `lower_add_constraint` does.
                 if let Some(g) = guard {
-                    let (cname, ckind) = ir_constraint_name_and_kind(table, constraint);
+                    let (cname, ckind) =
+                        ir_constraint_name_and_kind(table, constraint, self.dialect);
                     probe = Some(crate::model::probe::GuardProbe::Constraint {
                         schema: eff_schema.clone(),
                         table: table.clone(),
@@ -2761,6 +2762,7 @@ impl IrAuthor {
                         references_table,
                         on_delete.map(RefAction::as_token),
                         on_update.map(RefAction::as_token),
+                        self.dialect,
                     );
                     snap.constraints.push(fk);
                 }
@@ -3348,6 +3350,7 @@ impl IrAuthor {
                     references_table,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
+                    self.dialect,
                 );
                 decl.lower_add_fk(table, &fk)
             }
@@ -4747,7 +4750,11 @@ pub(crate) fn derived_constraint_name(table: &str, cols: &[String], suffix: &str
 /// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. A CHECK constraint never
 /// reaches this helper — `lower_add_constraint` returns `ExprRenderDeferred` before
 /// the probe is built — but it is handled for totality.
-fn ir_constraint_name_and_kind(table: &str, constraint: &IrConstraint) -> (String, String) {
+fn ir_constraint_name_and_kind(
+    table: &str,
+    constraint: &IrConstraint,
+    dialect: SqlDialect,
+) -> (String, String) {
     let explicit = constraint.name.as_deref();
     match &constraint.kind {
         IrConstraintKind::Fk { columns, references_table, .. } => {
@@ -4759,7 +4766,7 @@ fn ir_constraint_name_and_kind(table: &str, constraint: &IrConstraint) -> (Strin
             // the local column / explicit name), so `None, None` keeps the derived
             // `<col>_fkey` byte-identical to the lowered FK's name.
             let snap = crate::render::declarative::ir_fk_constraint_snapshot(
-                "", explicit, local, references_table, None, None,
+                "", explicit, local, references_table, None, None, dialect,
             );
             (snap.name, "FOREIGN KEY".to_string())
         }

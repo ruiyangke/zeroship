@@ -1565,8 +1565,10 @@ fn build_fk_clause(
     validate_collection(target)?;
     let constraint_name = fk_constraint_name(field, "");
 
-    let on_delete = normalize_fk_action(def.get("onDelete").and_then(|v| v.as_str()));
-    let on_update = normalize_fk_action(def.get("onUpdate").and_then(|v| v.as_str()));
+    let on_delete =
+        normalize_fk_action_for_dialect(def.get("onDelete").and_then(|v| v.as_str()), dialect);
+    let on_update =
+        normalize_fk_action_for_dialect(def.get("onUpdate").and_then(|v| v.as_str()), dialect);
     let deferrable = def
         .get("deferrable")
         .and_then(|v| v.as_bool())
@@ -1579,15 +1581,22 @@ fn build_fk_clause(
         ""
     };
 
-    Ok(format!(
-        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id) ON DELETE {} ON UPDATE {}{}",
+    let mut clause = format!(
+        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id)",
         quote_ident_for_dialect(&constraint_name, dialect),
         quote_ident_for_dialect(field, dialect),
         target_qualified,
-        on_delete,
-        on_update,
-        deferrable_clause,
-    ))
+    );
+    if !matches!(dialect, SqlDialect::Mysql) || on_delete != "NO ACTION" {
+        clause.push_str(" ON DELETE ");
+        clause.push_str(on_delete);
+    }
+    if !matches!(dialect, SqlDialect::Mysql) || on_update != "NO ACTION" {
+        clause.push_str(" ON UPDATE ");
+        clause.push_str(on_update);
+    }
+    clause.push_str(deferrable_clause);
+    Ok(clause)
 }
 
 /// Normalise an FK action to the SQL keyword form Postgres accepts.
@@ -1605,6 +1614,24 @@ fn normalize_fk_action_inner(s: Option<&str>) -> &'static str {
 /// Normalise an FK action; used cross-module by the diff engine.
 pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
     normalize_fk_action_inner(s)
+}
+
+/// Normalise an FK action for a dialect's canonical comparison/render form.
+///
+/// MySQL/InnoDB has no deferred constraint checks, so `RESTRICT` and
+/// `NO ACTION` are the same immediate-reject default. Keep them distinct on
+/// Postgres/SQLite, where the distinction is meaningful to their catalog/render
+/// forms.
+pub fn normalize_fk_action_for_dialect(
+    s: Option<&str>,
+    dialect: SqlDialect,
+) -> &'static str {
+    let action = normalize_fk_action_inner(s);
+    if matches!(dialect, SqlDialect::Mysql) && matches!(action, "RESTRICT" | "NO ACTION") {
+        "NO ACTION"
+    } else {
+        action
+    }
 }
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
@@ -8406,6 +8433,49 @@ mod tests {
         });
         let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("ON DELETE CASCADE"), "{sql}");
+        assert!(sql.contains("ON UPDATE CASCADE"), "{sql}");
+    }
+
+    #[test]
+    fn mysql_fk_restrict_and_no_action_render_as_implicit_default() {
+        let schema = json!({
+            "authorDefault": {
+                "type": "ref",
+                "refTarget": "users",
+            },
+            "authorRestrict": {
+                "type": "ref",
+                "refTarget": "users",
+                "onDelete": "restrict",
+                "onUpdate": "restrict",
+            },
+            "authorNoAction": {
+                "type": "ref",
+                "refTarget": "users",
+                "onDelete": "noAction",
+                "onUpdate": "noAction",
+            },
+            "authorCascade": {
+                "type": "ref",
+                "refTarget": "users",
+                "onDelete": "setNull",
+                "onUpdate": "cascade",
+            },
+        });
+        let sql = build_create_table_with_fks_for_dialect(
+            "app1",
+            "posts",
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Mysql,
+        )
+        .unwrap();
+
+        assert!(!sql.contains("ON DELETE RESTRICT"), "{sql}");
+        assert!(!sql.contains("ON UPDATE RESTRICT"), "{sql}");
+        assert!(!sql.contains("ON DELETE NO ACTION"), "{sql}");
+        assert!(!sql.contains("ON UPDATE NO ACTION"), "{sql}");
+        assert!(sql.contains("ON DELETE SET NULL"), "{sql}");
         assert!(sql.contains("ON UPDATE CASCADE"), "{sql}");
     }
 
