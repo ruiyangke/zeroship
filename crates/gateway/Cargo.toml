@@ -12,6 +12,10 @@ path = "src/main.rs"
 name = "dispatch_lookup"
 harness = false
 
+[[bench]]
+name = "dispatch_envelope"
+harness = false
+
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
