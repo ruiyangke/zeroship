@@ -1,0 +1,26 @@
+{
+  "name": "zeroship-starter",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "catalog:",
+    "@zeroship/rpc": "workspace:*",
+    "@zeroship/server": "workspace:*",
+    "@zeroship/vite-plugin": "workspace:*",
+    "react": "catalog:react18",
+    "react-dom": "catalog:react18",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:react18",
+    "@types/react-dom": "catalog:react18",
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}
