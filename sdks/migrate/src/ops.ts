@@ -2401,8 +2401,9 @@ function splitPartGrammarLint(delim: unknown, n: unknown): void {
   const fail = (reason: string) => {
     throw structuredError("EXPR_NOT_PORTABLE", reason, {
       suggested_fix:
-        "pass a non-empty string-literal delimiter and a positive-integer n; to target SQLite, " +
-        "stay in-envelope (single-ASCII delimiter, 1<=n<=8)",
+        "pass a non-empty string-literal delimiter and a positive-integer n; to target " +
+        "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8); out-of-envelope " +
+        "forms are only renderable on dialects with a native renderer such as Postgres/MySQL",
     });
   };
   if (typeof delim !== "string") fail(`c.fn.splitPart delimiter must be a string literal; got ${typeof delim}`);

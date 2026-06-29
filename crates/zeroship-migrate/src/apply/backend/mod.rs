@@ -27,11 +27,10 @@
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
 //!   ([`crate::apply::drift::check_checksum_drift`]).
 //!
-//! **P1 (this phase): Postgres is the FIRST AND ONLY impl.** [`PostgresBackend`]
-//! is the regression bar — every method below moves the EXISTING executor /
-//! journal / drift code behind the trait, behavior-identical. No SQLite code
-//! exists yet; a `SqliteBackend` is added later (design §2.1.1) WITHOUT forking
-//! the executor, because the orchestration is already generic over this trait.
+//! [`PostgresBackend`], [`SqliteBackend`], and [`MysqlBackend`] are the live
+//! implementations. Postgres remains the richest regression bar; SQLite and MySQL
+//! provide dialect-specific session, journal, drift, and DML behavior behind the
+//! same orchestration trait, without forking the generic executor.
 //!
 //! The trait is used through **static dispatch** (`<B: MigrationBackend>`), so
 //! native `async fn` in trait (Rust ≥ 1.75) is used directly — no boxing, no

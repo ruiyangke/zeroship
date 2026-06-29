@@ -40,7 +40,16 @@ async function main() {
       if (startupErr) {
         throw startupErr;
       }
-      if (cmd.kind === "exec") {
+      if (cmd.kind === "begin_transaction") {
+        await conn.beginTransaction();
+        __zsResolve(cmd.id, { ok: [] });
+      } else if (cmd.kind === "commit") {
+        await conn.commit();
+        __zsResolve(cmd.id, { ok: [] });
+      } else if (cmd.kind === "rollback") {
+        await conn.rollback();
+        __zsResolve(cmd.id, { ok: [] });
+      } else if (cmd.kind === "exec") {
         await conn.execute(cmd.sql, cmd.binds ?? []);
         __zsResolve(cmd.id, { ok: [] });
       } else if (cmd.kind === "query_json") {
@@ -120,7 +129,9 @@ async function main() {
         await delay(25);
       }
       session.commands.push({ kind: cmd.kind, sql: cmd.sql, binds: cmd.binds ?? [] });
-      if (cmd.kind === "exec") {
+      if (cmd.kind === "begin_transaction" || cmd.kind === "commit" || cmd.kind === "rollback") {
+        __zsResolve(cmd.id, { ok: [] });
+      } else if (cmd.kind === "exec") {
         __zsResolve(cmd.id, { ok: [] });
       } else if (cmd.kind === "query_json") {
         __zsResolve(cmd.id, { ok: okRows(cmd) });
@@ -308,6 +319,21 @@ impl JsDriverConn {
 
     pub async fn exec(&mut self, sql: &str) -> Result<(), JsDriverError> {
         self.exec_with_binds(sql, &[]).await
+    }
+
+    pub async fn begin_transaction(&mut self) -> Result<(), JsDriverError> {
+        let _ = self.command("begin_transaction", "", Vec::new()).await?;
+        Ok(())
+    }
+
+    pub async fn commit(&mut self) -> Result<(), JsDriverError> {
+        let _ = self.command("commit", "", Vec::new()).await?;
+        Ok(())
+    }
+
+    pub async fn rollback(&mut self) -> Result<(), JsDriverError> {
+        let _ = self.command("rollback", "", Vec::new()).await?;
+        Ok(())
     }
 
     pub async fn exec_with_binds(
