@@ -130,4 +130,41 @@ mod tests {
         let err = decode_dispatch_frame(&frame).expect_err("truncated metadata rejected");
         assert!(matches!(err, DispatchFrameError::TruncatedMetadata));
     }
+
+    #[test]
+    fn dispatch_frame_rejects_oversized_metadata_len() {
+        // An attacker-controlled metadata length of u32::MAX must be rejected by
+        // the MAX_DISPATCH_META_BYTES cap BEFORE any slice/allocation — no OOB,
+        // no panic. The frame body is tiny; only the declared length is hostile.
+        let mut frame = u32::MAX.to_le_bytes().to_vec();
+        frame.extend_from_slice(br#"{"method":"GET","url":"/","headers":[]}"#);
+
+        let err = decode_dispatch_frame(&frame).expect_err("oversized metadata len rejected");
+        assert!(matches!(err, DispatchFrameError::MetadataTooLarge));
+    }
+
+    #[test]
+    fn dispatch_frame_rejects_subprefix_frame() {
+        // Fewer than the 4 prefix bytes must error cleanly, never index OOB.
+        for len in 0..DISPATCH_FRAME_PREFIX_BYTES {
+            let frame = vec![0u8; len];
+            let err = decode_dispatch_frame(&frame).expect_err("sub-prefix frame rejected");
+            assert!(matches!(err, DispatchFrameError::TooShort), "len={len}");
+        }
+    }
+
+    #[test]
+    fn dispatch_frame_round_trips_empty_body() {
+        // An empty creator-app body must round-trip to an empty slice (body_offset
+        // == frame.len()), not error.
+        let headers = vec![("x-test".to_string(), "1".to_string())];
+        let frame = encode_dispatch_frame("GET", "https://example.test/", &headers, &[])
+            .expect("encode frame");
+        let decoded = decode_dispatch_frame(&frame).expect("decode frame");
+
+        assert_eq!(decoded.metadata.method, "GET");
+        assert_eq!(decoded.metadata.headers, headers);
+        assert!(decoded.body.is_empty());
+        assert_eq!(decoded.body_offset, frame.len());
+    }
 }
