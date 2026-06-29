@@ -189,6 +189,41 @@ fn insert_row_object_normalizes_to_columns_and_rows() {
 }
 
 #[test]
+fn insert_row_object_rejects_ragged_later_row_keys() {
+    let src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("t").insert({ rows: [ { a: 1 }, { a: 2, b: 2 } ] });
+        }};
+    "#;
+    let err = record_err(src, "insert_ragged_rows");
+    assert!(
+        err.contains("ragged insert rows"),
+        "ragged insert rows must fail closed, got: {err}"
+    );
+}
+
+#[test]
+fn insert_later_row_function_value_fails_closed() {
+    let src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            const f = () => 1;
+            table("t").insert({ rows: [ { a: 1 }, { b: f } ] });
+        }};
+    "#;
+    let err = record_err(src, "insert_later_row_fn");
+    assert!(
+        err.contains("function values are not valid here"),
+        "later-row non-native function insert value must fail closed, got: {err}"
+    );
+    assert!(
+        err.contains("Date.now / Math.random / crypto.randomUUID"),
+        "message must steer to supported native symbols, got: {err}"
+    );
+}
+
+#[test]
 fn date_now_symbol_records_as_fnsynth_now() {
     let symbol = r#"
         import { table } from "@zeroship/migrate";

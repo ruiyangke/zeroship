@@ -1494,9 +1494,25 @@ function normalizeInsertRows(rows, what) {
   }
   if (!Array.isArray(normalizedRows)) normalizedRows = [normalizedRows];
   const columns = normalizedRows.length > 0 ? Object.keys(normalizedRows[0]) : [];
-  const positional = normalizedRows.map((r) =>
-    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? toIrValue(r[col]) : null)),
-  );
+  const firstKeySet = new Set(columns);
+  const normalized = normalizedRows.map((r) => {
+    const keys = Object.keys(r);
+    const values = {};
+    for (const key of keys) values[key] = toIrValue(r[key]);
+    return { keys, values };
+  });
+  for (let i = 0; i < normalized.length; i++) {
+    const keys = normalized[i].keys;
+    const sameShape =
+      keys.length === columns.length && keys.every((key) => firstKeySet.has(key));
+    if (!sameShape) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what}: row ${i} has keys [${keys.join(", ")}], expected [${columns.join(", ")}]; ragged insert rows are not allowed`,
+      );
+    }
+  }
+  const positional = normalized.map(({ values }) => columns.map((col) => values[col]));
   return { columns, rows: positional };
 }
 
