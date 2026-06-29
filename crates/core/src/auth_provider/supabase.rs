@@ -9,15 +9,13 @@ use crate::auth_provider::{ProviderAuthz, VerifiedToken};
 use crate::oidc_verify::{CachedKey, JwksCache, OidcError};
 
 const SUPABASE_AUTHENTICATED_AUD: &str = "authenticated";
+const SUPABASE_HS256_JWT_SECRET_MIN_BYTES: usize = 32;
 const SUPABASE_ASYMMETRIC_ALGORITHMS: &[Algorithm] = &[
     Algorithm::RS256,
     Algorithm::RS384,
     Algorithm::RS512,
     Algorithm::ES256,
 ];
-const SUPABASE_RSA_ALGORITHMS: &[Algorithm] =
-    &[Algorithm::RS256, Algorithm::RS384, Algorithm::RS512];
-const SUPABASE_EC_ALGORITHMS: &[Algorithm] = &[Algorithm::ES256];
 
 /// Supabase Auth provider configuration.
 ///
@@ -70,7 +68,8 @@ impl SupabaseConfig {
         }
 
         let verification = if let Some(jwt_secret) = jwt_secret {
-            if jwt_secret.is_empty() {
+            let trimmed_len = jwt_secret.trim().as_bytes().len();
+            if trimmed_len == 0 || trimmed_len < SUPABASE_HS256_JWT_SECRET_MIN_BYTES {
                 return Err(SupabaseConfigError::EmptyJwtSecret);
             }
             SupabaseVerification::Hs256 { jwt_secret, issuer }
@@ -151,7 +150,7 @@ pub enum SupabaseConfigError {
     #[error("SUPABASE_JWT_ISSUER is required")]
     EmptyIssuer,
 
-    #[error("SUPABASE_JWT_SECRET is required for HS256 verification")]
+    #[error("SUPABASE_JWT_SECRET must be non-empty and at least 32 bytes for HS256 verification")]
     EmptyJwtSecret,
 
     #[error("SUPABASE_JWKS_URL is required for asymmetric verification")]
@@ -324,12 +323,22 @@ async fn verify_asymmetric(
         return Err(SupabaseVerifyError::UnsupportedAlgorithm(alg));
     }
 
-    let keys = jwks.keys().await?;
-    let key = find_key(&keys, &kid, alg)?;
-    let validation = supabase_validation(expected_issuer, asymmetric_algorithms_for(alg)?);
-    let data = decode::<SupabaseClaims>(token, &key.decoding, &validation)
-        .map_err(|e| SupabaseVerifyError::Jwt(e.to_string()))?;
-    verify_registered_claims(data.claims, expected_issuer)
+    let try_verify = |keys: Vec<CachedKey>| -> Result<SupabaseClaims, SupabaseVerifyError> {
+        let key = find_key(&keys, &kid, alg)?;
+        let validation = supabase_validation(expected_issuer, asymmetric_algorithms_for(alg)?);
+        let data = decode::<SupabaseClaims>(token, &key.decoding, &validation)
+            .map_err(|e| SupabaseVerifyError::Jwt(e.to_string()))?;
+        verify_registered_claims(data.claims, expected_issuer)
+    };
+
+    match try_verify(jwks.keys().await?) {
+        Ok(claims) => Ok(claims),
+        Err(SupabaseVerifyError::NoMatchingKey(_)) => {
+            jwks.refresh().await?;
+            try_verify(jwks.keys().await?)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn find_key<'a>(
@@ -343,12 +352,10 @@ fn find_key<'a>(
 }
 
 fn asymmetric_algorithms_for(alg: Algorithm) -> Result<Vec<Algorithm>, SupabaseVerifyError> {
-    match alg {
-        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => {
-            Ok(SUPABASE_RSA_ALGORITHMS.to_vec())
-        }
-        Algorithm::ES256 => Ok(SUPABASE_EC_ALGORITHMS.to_vec()),
-        other => Err(SupabaseVerifyError::UnsupportedAlgorithm(other)),
+    if SUPABASE_ASYMMETRIC_ALGORITHMS.contains(&alg) {
+        Ok(vec![alg])
+    } else {
+        Err(SupabaseVerifyError::UnsupportedAlgorithm(alg))
     }
 }
 
@@ -422,19 +429,35 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use jsonwebtoken::{encode, EncodingKey, Header};
+    use ntex::web::{self, HttpResponse};
+    use parking_lot::RwLock;
     use serde_json::{json, Value};
     use std::future::Future;
     use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc};
     use std::task::{Context, Poll, Waker};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     const URL: &str = "https://project.supabase.co";
     const ISSUER: &str = "https://project.supabase.co/auth/v1";
     const ANON_KEY: &str = "anon-key";
-    const JWT_SECRET: &str = "test-supabase-jwt-secret";
+    const JWT_SECRET: &str = "test-supabase-jwt-secret-at-least-32-bytes";
     const TEST_KID: &str = "supabase-rs256-test-kid";
+    const OLD_TEST_KID: &str = "supabase-old-rs256-test-kid";
+    const MISSING_TEST_KID: &str = "supabase-missing-rs256-test-kid";
     const RSA_N: &str = "xNHoKDPStS1XlmQMubUWC59gR2CVsOeq4SabVnAXkyn5mWexM9yCLDShmTNkhq5mNII1c_GwbQZmUnTVtw3pFU_WsiRMAIB5ypSw-XzeoKq0IYz-IQimpQDpL0Gpih_rRIXwHWPB8C-Ia3tOy09qMiFLTluv7FTylaF0K2DXcoHOyWm4Ymbpn7LYI_LnP7aJXLIt3D8TKdNRRJ8zMRf-6m_h-jlhx43v9jHmPYZp63FaOUIyAZPnXj-8Jvq6qmMTPf_1rpIw6pyd9v6MnXtNw7Lj92s80WVRT9ZqmPwNS5avCy6kManMiqA2IaH2ygLsKMgo89FvLEAIa1u_2Yc7Iw";
     const RSA_E: &str = "AQAB";
+    const RSA_PUBLIC_PEM: &str = r#"-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxNHoKDPStS1XlmQMubUW
+C59gR2CVsOeq4SabVnAXkyn5mWexM9yCLDShmTNkhq5mNII1c/GwbQZmUnTVtw3p
+FU/WsiRMAIB5ypSw+XzeoKq0IYz+IQimpQDpL0Gpih/rRIXwHWPB8C+Ia3tOy09q
+MiFLTluv7FTylaF0K2DXcoHOyWm4Ymbpn7LYI/LnP7aJXLIt3D8TKdNRRJ8zMRf+
+6m/h+jlhx43v9jHmPYZp63FaOUIyAZPnXj+8Jvq6qmMTPf/1rpIw6pyd9v6MnXtN
+w7Lj92s80WVRT9ZqmPwNS5avCy6kManMiqA2IaH2ygLsKMgo89FvLEAIa1u/2Yc7
+IwIDAQAB
+-----END PUBLIC KEY-----"#;
     const RSA_PRIVATE_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDE0egoM9K1LVeW
 ZAy5tRYLn2BHYJWw56rhJptWcBeTKfmZZ7Ez3IIsNKGZM2SGrmY0gjVz8bBtBmZS
@@ -505,12 +528,7 @@ chfOO390zPo2KvlyenOqynqSZA==
     }
 
     fn jwks_provider() -> SupabaseProvider {
-        let decoding = DecodingKey::from_rsa_components(RSA_N, RSA_E).expect("RSA public key");
-        let cache = JwksCache::for_test(vec![CachedKey {
-            kid: TEST_KID.to_string(),
-            alg: Algorithm::RS256,
-            decoding,
-        }]);
+        let cache = JwksCache::for_test(vec![rsa_cached_key(TEST_KID)]);
         SupabaseProvider::with_jwks_cache_for_test(
             SupabaseConfig::new(
                 URL,
@@ -523,6 +541,27 @@ chfOO390zPo2KvlyenOqynqSZA==
             .expect("valid JWKS config"),
             cache,
         )
+    }
+
+    fn rsa_cached_key(kid: &str) -> CachedKey {
+        CachedKey {
+            kid: kid.to_string(),
+            alg: Algorithm::RS256,
+            decoding: DecodingKey::from_rsa_components(RSA_N, RSA_E).expect("RSA public key"),
+        }
+    }
+
+    fn rsa_jwks_body(kid: &str) -> String {
+        json!({
+            "keys": [{
+                "kid": kid,
+                "kty": "RSA",
+                "alg": "RS256",
+                "n": RSA_N,
+                "e": RSA_E,
+            }]
+        })
+        .to_string()
     }
 
     fn sign_hs256(claims: &Value, secret: &str) -> String {
@@ -549,6 +588,90 @@ chfOO390zPo2KvlyenOqynqSZA==
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).expect("claims JSON"));
         format!("{header}.{payload}.")
+    }
+
+    struct MockJwksState {
+        jwks_body: RwLock<String>,
+        hits: AtomicUsize,
+    }
+
+    struct MockJwks {
+        base: String,
+        state: Arc<MockJwksState>,
+        shutdown: Option<mpsc::Sender<()>>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockJwks {
+        fn start(jwks_body: String) -> Self {
+            let state = Arc::new(MockJwksState {
+                jwks_body: RwLock::new(jwks_body),
+                hits: AtomicUsize::new(0),
+            });
+            let factory_state = state.clone();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (shutdown_tx, shutdown_rx) = mpsc::channel();
+            let thread = thread::spawn(move || {
+                ntex::rt::System::build()
+                    .name("supabase-jwks-mock")
+                    .testing()
+                    .build(ntex::rt::DefaultRuntime)
+                    .block_on(async move {
+                        let server = web::test::server(move || {
+                            let state = factory_state.clone();
+                            async move {
+                                web::App::new().state(state).service(
+                                    web::resource("/auth/v1/.well-known/jwks.json")
+                                        .route(web::get().to(jwks_handler)),
+                                )
+                            }
+                        })
+                        .await;
+                        let addr = server.addr();
+                        started_tx.send(addr).expect("send mock server addr");
+                        let _ = shutdown_rx.recv();
+                        drop(server);
+                    });
+            });
+            let addr = started_rx.recv().expect("mock server starts");
+            Self {
+                base: format!("http://{addr}"),
+                state,
+                shutdown: Some(shutdown_tx),
+                thread: Some(thread),
+            }
+        }
+
+        fn jwks_url(&self) -> String {
+            format!("{}/auth/v1/.well-known/jwks.json", self.base)
+        }
+
+        fn set_jwks_body(&self, jwks_body: String) {
+            *self.state.jwks_body.write() = jwks_body;
+        }
+
+        fn hits(&self) -> usize {
+            self.state.hits.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for MockJwks {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    async fn jwks_handler(state: web::types::State<Arc<MockJwksState>>) -> HttpResponse {
+        state.hits.fetch_add(1, Ordering::SeqCst);
+        let body = state.jwks_body.read().clone();
+        HttpResponse::Ok()
+            .content_type("application/json")
+            .body(body)
     }
 
     fn poll_ready<T>(future: impl Future<Output = T>) -> T {
@@ -591,6 +714,74 @@ chfOO390zPo2KvlyenOqynqSZA==
             ISSUER,
         );
         assert!(matches!(empty_url, Err(SupabaseConfigError::EmptyUrl)));
+    }
+
+    #[test]
+    fn supabase_config_rejects_empty_issuer_secret_and_jwks_url() {
+        let empty_issuer = SupabaseConfig::new(
+            URL,
+            ANON_KEY,
+            None,
+            Some(JWT_SECRET.to_string()),
+            None,
+            " ",
+        );
+        assert!(matches!(
+            empty_issuer,
+            Err(SupabaseConfigError::EmptyIssuer)
+        ));
+
+        let whitespace_secret = SupabaseConfig::new(
+            URL,
+            ANON_KEY,
+            None,
+            Some(" \t\n ".to_string()),
+            None,
+            ISSUER,
+        );
+        assert!(matches!(
+            whitespace_secret,
+            Err(SupabaseConfigError::EmptyJwtSecret)
+        ));
+
+        let empty_jwks_url = SupabaseConfig::new(
+            URL,
+            ANON_KEY,
+            None,
+            None,
+            Some(" ".to_string()),
+            ISSUER,
+        );
+        assert!(matches!(
+            empty_jwks_url,
+            Err(SupabaseConfigError::EmptyJwksUrl)
+        ));
+    }
+
+    #[test]
+    fn supabase_config_rejects_short_hs256_secret() {
+        let short_secret = SupabaseConfig::new(
+            URL,
+            ANON_KEY,
+            None,
+            Some("too-short".to_string()),
+            None,
+            ISSUER,
+        );
+        assert!(matches!(
+            short_secret,
+            Err(SupabaseConfigError::EmptyJwtSecret)
+        ));
+
+        let strong_secret = SupabaseConfig::new(
+            URL,
+            ANON_KEY,
+            None,
+            Some("a".repeat(32)),
+            None,
+            ISSUER,
+        );
+        strong_secret.expect("32-byte HS256 secret is accepted");
     }
 
     #[test]
@@ -701,6 +892,22 @@ chfOO390zPo2KvlyenOqynqSZA==
     }
 
     #[test]
+    fn supabase_hs256_rejects_empty_array_aud() {
+        let provider = hs256_provider();
+        let token = sign_hs256(&claims(json!([])), JWT_SECRET);
+
+        let err = poll_ready(provider.verify_token(&token))
+            .expect_err("empty audience array must reject");
+        assert!(
+            matches!(
+                err,
+                SupabaseVerifyError::AudienceMissingAuthenticated { ref aud } if aud.is_empty()
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
     fn supabase_hs256_rejects_wrong_secret() {
         let provider = hs256_provider();
         let token = sign_hs256(&claims(json!("authenticated")), "wrong-secret");
@@ -753,7 +960,7 @@ chfOO390zPo2KvlyenOqynqSZA==
         let token = encode(
             &header,
             &claims(json!("authenticated")),
-            &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
+            &EncodingKey::from_secret(RSA_PUBLIC_PEM.as_bytes()),
         )
         .expect("HS256 JWT");
 
@@ -761,11 +968,57 @@ chfOO390zPo2KvlyenOqynqSZA==
             .expect_err("HS256 token must not verify against JWKS config");
     }
 
-    #[test]
-    fn supabase_jwks_rejects_wrong_kid() {
-        let provider = jwks_provider();
-        let token = sign_rs256(&claims(json!("authenticated")), "wrong-kid");
+    #[compio::test]
+    async fn supabase_jwks_refreshes_once_on_kid_miss() {
+        let mock = MockJwks::start(rsa_jwks_body(OLD_TEST_KID));
+        let cache = JwksCache::new(mock.jwks_url())
+            .with_fetch_timeout_for_test(Duration::from_millis(500));
+        cache.refresh().await.expect("initial old-key JWKS refresh");
+        assert_eq!(mock.hits(), 1, "initial cache prime fetches once");
 
-        poll_ready(provider.verify_token(&token)).expect_err("wrong kid must reject");
+        mock.set_jwks_body(rsa_jwks_body(TEST_KID));
+        let provider = SupabaseProvider::with_jwks_cache_for_test(
+            SupabaseConfig::new(
+                URL,
+                ANON_KEY,
+                Some("service-role-key".to_string()),
+                None,
+                Some(mock.jwks_url()),
+                ISSUER,
+            )
+            .expect("valid JWKS config"),
+            cache,
+        );
+
+        let rotated_kid_token = sign_rs256(&claims(json!("authenticated")), TEST_KID);
+        provider
+            .verify_token(&rotated_kid_token)
+            .await
+            .expect("rotated kid verifies after one forced refresh");
+        assert_eq!(
+            mock.hits(),
+            2,
+            "fresh-cache kid miss triggers exactly one forced refresh"
+        );
+
+        let missing_kid_token = sign_rs256(&claims(json!("authenticated")), MISSING_TEST_KID);
+        let hits_before = mock.hits();
+        let err = provider
+            .verify_token(&missing_kid_token)
+            .await
+            .expect_err("never-existing kid still rejects");
+
+        assert!(
+            matches!(
+                err,
+                SupabaseVerifyError::NoMatchingKey(ref kid) if kid == MISSING_TEST_KID
+            ),
+            "got: {err:?}"
+        );
+        assert_eq!(
+            mock.hits(),
+            hits_before + 1,
+            "unknown attacker-controlled kid gets one forced refresh, not a fetch loop"
+        );
     }
 }
