@@ -162,7 +162,7 @@ BEGIN
     EXECUTE 'GRANT SELECT, INSERT, DELETE         ON zeroship.federated_identities TO zeroship_auth';
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON zeroship.idp_sessions TO zeroship_auth';
     EXECUTE 'GRANT SELECT, INSERT, UPDATE         ON zeroship.oauth_grants TO zeroship_auth';
-    EXECUTE 'GRANT SELECT                         ON zeroship.oauth_clients TO zeroship_auth';
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE         ON zeroship.oauth_clients TO zeroship_auth';
     EXECUTE 'GRANT SELECT                         ON zeroship.app_scope_defs TO zeroship_auth';
     EXECUTE 'GRANT SELECT, INSERT, DELETE         ON zeroship.jwk_key_state TO zeroship_auth';
     EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON zeroship.magic_links TO zeroship_auth';

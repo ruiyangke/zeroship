@@ -118,7 +118,7 @@ fn device_grant_flow_polls_until_approved() {
     assert_eq!(requests[0].path, "/oauth2/device/auth");
     assert_eq!(
         requests[0].body,
-        "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread"
+        "client_id=zeroship-cli&scope=openid+offline_access+apps%3Aread+apps%3Awrite+apps%3Adeploy&audience=control.zeroship.ai"
     );
     assert_eq!(requests[1].path, "/oauth2/token");
     assert!(requests[1]

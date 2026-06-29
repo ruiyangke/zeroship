@@ -279,7 +279,7 @@ async fn oauth_guard_from_bearer(
         Uuid::parse_str(&sub).map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
 
     let raw_scope = result.scope.unwrap_or_default();
-    let scopes = authz::parse_scope_string(&raw_scope)
+    let scopes = parse_resource_server_scopes(&raw_scope)
         .map_err(|_| web::error::ErrorUnauthorized("invalid oauth scope"))?;
     let token_policy = authz::scopes_to_policy(&scopes);
 
@@ -292,6 +292,20 @@ async fn oauth_guard_from_bearer(
         request_ip,
         request_id,
     }))
+}
+
+fn parse_resource_server_scopes(raw: &str) -> Result<Vec<authz::Scope>, authz::ParseScopeError> {
+    raw.split_whitespace()
+        .filter(|scope| !is_standard_oidc_scope(scope))
+        .map(authz::Scope::parse)
+        .collect()
+}
+
+fn is_standard_oidc_scope(scope: &str) -> bool {
+    matches!(
+        scope,
+        "openid" | "offline_access" | "profile" | "email" | "address" | "phone"
+    )
 }
 
 fn unauthorized_json(error: &'static str) -> web::Error {

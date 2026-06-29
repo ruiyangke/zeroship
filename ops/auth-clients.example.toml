@@ -15,8 +15,9 @@ client_secret = ""
 grant_types = ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
 response_types = []
 redirect_uris = []
-scope = "openid offline_access apps:deploy apps:read"
+scope = "openid offline_access apps:read apps:write apps:deploy"
 token_endpoint_auth_method = "none"
+audience = ["control.zeroship.ai"]
 first_party = true
 
 [[client]]

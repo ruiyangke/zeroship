@@ -427,6 +427,28 @@ async fn oauth_token_with_apps_read_can_list_apps() {
     fx.cleanup().await;
 }
 
+#[compio::test]
+async fn oauth_token_ignores_standard_oidc_scopes() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active(
+        user_id,
+        "openid offline_access profile email address phone apps:read",
+    );
+    let Some(fx) = fixture_with_hydra(&hydra, "oidc-scopes", user_id).await else {
+        return;
+    };
+    let app = init_control!(fx);
+
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    fx.cleanup().await;
+}
+
 /// F3 regression — drives the REAL self-service path end to end with NO
 /// pre-seeded `app_members` / platform role:
 ///

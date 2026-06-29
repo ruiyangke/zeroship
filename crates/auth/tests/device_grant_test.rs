@@ -224,7 +224,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
             response_types: vec![],
             redirect_uris: vec![],
             post_logout_redirect_uris: vec![],
-            scope: "openid offline_access apps:deploy apps:read".into(),
+            scope: "openid offline_access apps:read apps:write apps:deploy".into(),
             token_endpoint_auth_method: "none".into(),
             subject_type: "public".into(),
             access_token_strategy: None,
@@ -241,7 +241,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
 
     let device_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &client_id)
-        .append_pair("scope", "openid offline_access apps:deploy apps:read")
+        .append_pair("scope", "openid offline_access apps:read apps:write apps:deploy")
         .finish();
     let resp = http
         .request(http::Method::POST, format!("{hydra_public}/oauth2/device/auth"))
@@ -399,7 +399,7 @@ async fn device_post_requires_csrf_token() {
             response_types: vec![],
             redirect_uris: vec![],
             post_logout_redirect_uris: vec![],
-            scope: "openid offline_access apps:deploy apps:read".into(),
+            scope: "openid offline_access apps:read apps:write apps:deploy".into(),
             token_endpoint_auth_method: "none".into(),
             subject_type: "public".into(),
             access_token_strategy: None,
@@ -416,7 +416,7 @@ async fn device_post_requires_csrf_token() {
 
     let device_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &client_id)
-        .append_pair("scope", "openid offline_access apps:deploy apps:read")
+        .append_pair("scope", "openid offline_access apps:read apps:write apps:deploy")
         .finish();
     let resp = http
         .request(http::Method::POST, format!("{hydra_public}/oauth2/device/auth"))

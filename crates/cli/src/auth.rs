@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 const CLIENT_ID: &str = "zeroship-cli";
 const DEFAULT_AUTH_URL: &str = "https://auth.zeroship.ai";
-const SCOPE: &str = "openid offline_access apps:deploy apps:read";
+const SCOPE: &str = "openid offline_access apps:read apps:write apps:deploy";
+const AUDIENCE: &str = "control.zeroship.ai";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,7 +143,11 @@ fn login(auth_url: &str, print_prompt: bool) -> Result<(), String> {
     let device_url = endpoint(auth_url, "/oauth2/device/auth");
     let resp = post_form(
         &device_url,
-        &[("client_id", CLIENT_ID), ("scope", SCOPE)],
+        &[
+            ("client_id", CLIENT_ID),
+            ("scope", SCOPE),
+            ("audience", AUDIENCE),
+        ],
     )?;
     if !(200..300).contains(&resp.status) {
         return Err(format!(
@@ -403,10 +408,14 @@ mod tests {
 
     #[test]
     fn device_grant_request_shape() {
-        let body = form_body(&[("client_id", CLIENT_ID), ("scope", SCOPE)]);
+        let body = form_body(&[
+            ("client_id", CLIENT_ID),
+            ("scope", SCOPE),
+            ("audience", AUDIENCE),
+        ]);
         assert_eq!(
             body,
-            "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread"
+            "client_id=zeroship-cli&scope=openid+offline_access+apps%3Aread+apps%3Awrite+apps%3Adeploy&audience=control.zeroship.ai"
         );
     }
 }

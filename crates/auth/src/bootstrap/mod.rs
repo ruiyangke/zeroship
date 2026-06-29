@@ -14,7 +14,7 @@ pub mod keys;
 use compio_postgres::Client;
 
 use crate::advisory_lock::{with_advisory_lock, BOOTSTRAP_CLIENTS_LOCK};
-use crate::error::Result;
+use crate::error::{AuthError, Result};
 use crate::hydra_client::HydraAdmin;
 use clients_config::ClientsConfig;
 
@@ -71,8 +71,45 @@ async fn reconcile_clients(admin: &HydraAdmin, db: &Client, path: &str) -> Resul
                     admin.update_client(&desired).await?;
                 }
             }
+            upsert_local_client(db, entry).await?;
         }
         Ok(())
     })
     .await
+}
+
+async fn upsert_local_client(
+    db: &Client,
+    entry: &clients_config::ClientEntry,
+) -> Result<()> {
+    let client_name = entry
+        .client_name
+        .clone()
+        .unwrap_or_else(|| entry.client_id.clone());
+    let scopes = entry
+        .scope
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    db.execute(
+        "INSERT INTO zeroship.oauth_clients \
+             (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
+         VALUES ($1, $2, $3, $4, $5, $1) \
+         ON CONFLICT (client_id) DO UPDATE \
+         SET client_name = EXCLUDED.client_name, \
+             redirect_uris = EXCLUDED.redirect_uris, \
+             scopes = EXCLUDED.scopes, \
+             skip_consent = EXCLUDED.skip_consent, \
+             hydra_client_id = EXCLUDED.hydra_client_id",
+        &[
+            &entry.client_id,
+            &client_name,
+            &entry.redirect_uris,
+            &scopes,
+            &entry.first_party,
+        ],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("upsert zeroship.oauth_clients: {e}")))?;
+    Ok(())
 }

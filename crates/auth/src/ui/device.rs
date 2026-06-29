@@ -157,7 +157,7 @@ pub async fn post(
                 },
             )
             .await;
-            redirect(&resp.redirect_to)
+            redirect_with_cookies(&resp.redirect_to, &verified.set_cookies)
         }
         Err(e) => {
             tracing::warn!(error = %e, "accept device user code failed");
@@ -193,6 +193,7 @@ fn csrf_valid(req: &HttpRequest, form: &DeviceForm, insecure_dev: bool) -> bool 
 struct VerifiedDeviceCode {
     location: String,
     device_challenge: Option<String>,
+    set_cookies: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -239,10 +240,18 @@ async fn verify_user_code(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let set_cookies = res
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .map(str::to_string)
+        .collect();
     let device_challenge = query_param(&location, "device_challenge");
     Ok(VerifiedDeviceCode {
         location,
         device_challenge,
+        set_cookies,
     })
 }
 
@@ -285,11 +294,25 @@ fn query_param(raw_url: &str, key: &str) -> Option<String> {
 }
 
 fn redirect(to: &str) -> HttpResponse {
+    redirect_with_cookies(to, &[])
+}
+
+fn redirect_with_cookies(to: &str, set_cookies: &[String]) -> HttpResponse {
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,
         HeaderValue::from_str(to).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
+    for cookie in set_cookies {
+        match HeaderValue::from_str(cookie) {
+            Ok(value) => {
+                resp.header(SET_COOKIE, value);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "hydra device verification set-cookie was invalid");
+            }
+        }
+    }
     resp.finish()
 }
 
