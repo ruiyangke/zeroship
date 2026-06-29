@@ -1750,15 +1750,13 @@ impl RuntimeInner {
             None
         };
 
-        // Serialize env JSON only when the slow path will need it.
-        // (Headers no longer need JSON marshalling: the kernel-side
-        // fast-path Request builder takes the headers slice directly.)
-        let env_json = if rpc_id_str.is_some() {
-            String::new()
-        } else {
-            env.as_json().to_string()
-        };
-
+        // NOTE: the env JSON is NOT marshalled here. Every tier that needs
+        // the env reads the cached `state.env_obj` V8 global (built once in
+        // `ensure_initialized`). The raw JSON is only touched in the slow
+        // path's *uncached* fallback (env_obj == None), where it is read
+        // lazily via `env.as_json()` (a borrow, no per-request String clone).
+        // Headers likewise need no JSON marshalling — the kernel-side
+        // fast-path Request builder takes the headers slice directly.
         self.arm_cpu_timer();
         // Tracks which dispatch tier produced a pending promise so the
         // pump can pick the right settle path (envelope-wrap for Rpc,
@@ -1938,7 +1936,9 @@ impl RuntimeInner {
                             match maybe_global {
                                 Some(g) => v8::Local::new(scope, g).into(),
                                 None => {
-                                    let env_src = v8::String::new(scope, &env_json).unwrap();
+                                    // Uncached fallback only — read the env JSON
+                                    // lazily here (borrow, no per-request clone).
+                                    let env_src = v8::String::new(scope, env.as_json()).unwrap();
                                     v8::json::parse(scope, env_src)
                                         .unwrap_or_else(|| v8::Object::new(scope).into())
                                 }
