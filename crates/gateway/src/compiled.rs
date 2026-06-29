@@ -6,6 +6,7 @@
 //! path-segment trie for URL resources. Per-request work drops to a
 //! single `HashMap::get` on the most-specific resource key.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use zeroship_bundle::{
@@ -91,6 +92,15 @@ pub struct EffectivePolicy {
     pub action: ResolvedAction,
     pub input_schema: Option<String>,
     pub output_schema: Option<String>,
+}
+
+/// Resource resolution result used by dispatch: the flattened policy plus the
+/// stable resource key that feeds the per-resource rate-limit bucket.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ResolvedResource<'a> {
+    pub policy: &'a EffectivePolicy,
+    pub key: Cow<'a, str>,
 }
 
 /// What dispatch should actually do once the policy is satisfied.
@@ -325,6 +335,21 @@ impl CompiledManifest {
     pub fn lookup_resource(&self, path: &str) -> Option<&EffectivePolicy> {
         let key = self.lookup_resource_key(path)?;
         self.effective_policies.get(&key)
+    }
+
+    /// Resolve the policy and resource key in the same shape dispatch needs.
+    ///
+    /// Baseline implementation intentionally mirrors the pre-dedup dispatch
+    /// sequence: a gate `lookup_resource`, the execute-path `lookup_resource`,
+    /// then `lookup_resource_key` for the per-resource rate limiter.
+    pub fn lookup_resource_resolved(&self, path: &str) -> Option<ResolvedResource<'_>> {
+        self.lookup_resource(path)?;
+        let policy = self.lookup_resource(path)?;
+        let key = self.lookup_resource_key(path)?;
+        Some(ResolvedResource {
+            policy,
+            key: Cow::Owned(key),
+        })
     }
 
     /// Same lookup as `lookup_resource`, but returns the resource key

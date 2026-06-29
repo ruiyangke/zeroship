@@ -8,6 +8,10 @@ description = "zeroship gateway — auth, rate limit, proxy to workers"
 name = "zeroship-gate"
 path = "src/main.rs"
 
+[[bench]]
+name = "dispatch_lookup"
+harness = false
+
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
@@ -73,6 +77,7 @@ zeroship-mailer = { workspace = true }
 # Phase 8 U1 — signing-key loader round-trip tests write a PKCS#8
 # PEM/DER fixture to a tmpdir and call `signing::load_from_path`.
 tempfile = { workspace = true }
+criterion = { workspace = true }
 
 [lints]
 workspace = true
