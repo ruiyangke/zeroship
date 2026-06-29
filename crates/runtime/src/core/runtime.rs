@@ -2269,10 +2269,7 @@ impl RuntimeInner {
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
                     crate::dispatch::resolve_op(scope, &self.state, op_id, &value);
-                    match request_id {
-                        Some(rid) => take_settled_request(scope, &mut self.pending_requests, rid),
-                        None => collect_settled_promises(scope, &mut self.pending_requests),
-                    }
+                    collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
 
@@ -2324,10 +2321,7 @@ impl RuntimeInner {
                 self.arm_cpu_timer();
                 let settled_results = enter_v8!(self, |scope| {
                     crate::dispatch::reject_op(scope, &self.state, op_id, &error);
-                    match request_id {
-                        Some(rid) => take_settled_request(scope, &mut self.pending_requests, rid),
-                        None => collect_settled_promises(scope, &mut self.pending_requests),
-                    }
+                    collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
 
@@ -2480,10 +2474,7 @@ impl RuntimeInner {
                         }
                     }
                     crate::core::init::perform_microtask_checkpoint(scope);
-                    match request_id {
-                        Some(rid) => take_settled_request(scope, &mut self.pending_requests, rid),
-                        None => collect_settled_promises(scope, &mut self.pending_requests),
-                    }
+                    collect_settled_promises(scope, &mut self.pending_requests)
                 });
                 self.disarm_cpu_timer();
 
@@ -2638,10 +2629,7 @@ impl RuntimeInner {
         self.arm_cpu_timer();
         let settled_results = enter_v8!(self, |scope| {
             crate::dispatch::fire_timer_callback(scope, &self.state, id);
-            match owner_request_id {
-                Some(rid) => take_settled_request(scope, &mut self.pending_requests, rid),
-                None => collect_settled_promises(scope, &mut self.pending_requests),
-            }
+            collect_settled_promises(scope, &mut self.pending_requests)
         });
         self.disarm_cpu_timer();
 
@@ -2720,10 +2708,7 @@ impl RuntimeInner {
             self.arm_cpu_timer();
             let settled_results = enter_v8!(self, |scope| {
                 crate::dispatch::fire_timer_callback(scope, &self.state, timer_id);
-                match owner_request_id {
-                    Some(rid) => take_settled_request(scope, &mut self.pending_requests, rid),
-                    None => collect_settled_promises(scope, &mut self.pending_requests),
-                }
+                collect_settled_promises(scope, &mut self.pending_requests)
             });
             self.disarm_cpu_timer();
 
@@ -3105,37 +3090,6 @@ fn collect_settled_promises(
             Some((id, req, result))
         })
         .collect()
-}
-
-/// Check only the owning request's promise (O(1)).
-///
-/// Returns a 0-or-1 result vector so callers can keep the same
-/// `for (id, req, settled)` loop shape used with `collect_settled_promises`.
-fn take_settled_request(
-    scope: &mut v8::PinScope,
-    pending_requests: &mut HashMap<u64, PendingRequest>,
-    rid: u64,
-) -> Vec<(u64, PendingRequest, SettledResult)> {
-    let is_settled = match pending_requests.get(&rid) {
-        Some(req) => {
-            let p = v8::Local::new(scope, &req.promise);
-            p.state() != v8::PromiseState::Pending
-        }
-        None => false,
-    };
-
-    if !is_settled {
-        return Vec::new();
-    }
-
-    let Some(req) = pending_requests.remove(&rid) else {
-        return Vec::new();
-    };
-    let result = match req.origin {
-        PendingOrigin::Fetch => http::extract_settled_result(scope, &req.promise, rid),
-        PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, rid),
-    };
-    vec![(rid, req, result)]
 }
 
 /// Settle a pending RPC promise into a `SettledResult`. The resolved
