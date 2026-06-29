@@ -1594,8 +1594,10 @@ fn build_fk_clause(
 fn normalize_fk_action_inner(s: Option<&str>) -> &'static str {
     match s.unwrap_or("restrict").to_ascii_lowercase().as_str() {
         "cascade" => "CASCADE",
-        "set null" | "set_null" => "SET NULL",
-        "no action" | "no_action" => "NO ACTION",
+        "set null" | "set_null" | "setnull" => "SET NULL",
+        "set default" | "set_default" | "setdefault" => "SET DEFAULT",
+        "no action" | "no_action" | "noaction" => "NO ACTION",
+        "restrict" => "RESTRICT",
         _ => "RESTRICT",
     }
 }

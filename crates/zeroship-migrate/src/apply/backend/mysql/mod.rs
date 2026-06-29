@@ -1373,15 +1373,18 @@ async fn snapshot_schema_mysql_for_schema(
         .await
         .map_err(drift_backend)?;
 
-    rowsets_to_schema_snapshot(MysqlCatalogRowSets {
-        tables,
-        columns,
-        statistics,
-        table_constraints,
-        key_column_usage,
-        referential_constraints,
-        views,
-    })
+    rowsets_to_schema_snapshot(
+        schema,
+        MysqlCatalogRowSets {
+            tables,
+            columns,
+            statistics,
+            table_constraints,
+            key_column_usage,
+            referential_constraints,
+            views,
+        },
+    )
 }
 
 fn mysql_drift_to_apply(error: DriftError) -> ApplyError {

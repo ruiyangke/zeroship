@@ -541,28 +541,81 @@ fn fixture_ir() -> MigrationIr {
 
 fn fixture_migrations(schema: &str) -> (MigrationIr, Vec<Migration>) {
     let ir = fixture_ir();
+    let migrations = lower_mysql_migrations(schema, &ir, "fixture");
+    (ir, migrations)
+}
+
+fn lower_mysql_migrations(schema: &str, ir: &MigrationIr, label: &str) -> Vec<Migration> {
     let steps = IrAuthor::new(schema, OWNER, SqlDialect::Mysql)
         .lower_steps(&ir, &LiveSchema::default())
-        .expect("lower fixture IR to MySQL");
+        .unwrap_or_else(|err| panic!("lower {label} IR to MySQL: {err}"));
     let migrations = steps
         .into_iter()
         .map(|step| match step {
             PlanStep::Ddl(m) => m,
-            other => panic!("fixture should lower to DDL only, got {other:?}"),
+            other => panic!("{label} should lower to DDL only, got {other:?}"),
         })
         .collect::<Vec<_>>();
     assert!(
         !migrations.is_empty(),
-        "createTable+index fixture should lower to at least one migration"
+        "{label} should lower to at least one migration"
     );
     for migration in &migrations {
         println!(
-            "mysql_jsdriver_e2e lowered MySQL DDL {}:\n{}",
+            "mysql_jsdriver_e2e lowered MySQL {label} DDL {}:\n{}",
             migration.version.as_str(),
             migration.up
         );
     }
-    (ir, migrations)
+    migrations
+}
+
+fn fk_roundtrip_ir() -> MigrationIr {
+    serde_json::from_value(json!({
+        "ir_version": CURRENT_IR_VERSION,
+        "name": "mysql_fk_roundtrip",
+        "owner_app": OWNER,
+        "ops": [
+            {
+                "op": "createTable",
+                "name": "accounts",
+                "existenceGuard": "ifNotExists",
+                "columns": [
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "name", "type": "text", "nullable": false }
+                ],
+                "constraints": [
+                    { "name": "accounts_pkey", "kind": { "kind": "pk", "columns": ["id"] } }
+                ]
+            },
+            {
+                "op": "createTable",
+                "name": "orders",
+                "existenceGuard": "ifNotExists",
+                "columns": [
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "account_id", "type": "int", "nullable": true },
+                    { "name": "code", "type": "text", "nullable": false }
+                ],
+                "constraints": [
+                    { "name": "orders_pkey", "kind": { "kind": "pk", "columns": ["id"] } },
+                    { "name": "orders_account_fkey", "kind": {
+                        "kind": "fk",
+                        "columns": ["account_id"],
+                        "referencesTable": "accounts",
+                        "referencesColumns": ["id"],
+                        "onDelete": "setNull",
+                        "onUpdate": "cascade"
+                    } }
+                ]
+            }
+        ],
+        "flags": {},
+        "depends_on": [],
+        "supersedes": [],
+        "preconditions": []
+    }))
+    .expect("FK roundtrip IR is valid")
 }
 
 fn migration_versions(migrations: &[Migration]) -> Vec<String> {
@@ -2166,5 +2219,88 @@ fn live_snapshot_roundtrips_and_redeploy_is_noop() {
         assert!(redeploy.is_noop(), "same migration set should redeploy as skip: {redeploy:?}");
         assert_eq!(sorted_versions(redeploy.skipped), migration_versions(&migrations));
         println!("mysql_jsdriver_e2e snapshot + redeploy assertions ran");
+    }));
+}
+
+#[test]
+fn live_mysql_fk_snapshot_roundtrips_actions_and_detects_action_drift() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "fkdrift", |backend, cfg, _account| Box::pin(async move {
+        let ir = fk_roundtrip_ir();
+        let migrations = lower_mysql_migrations(&cfg.project_schema, &ir, "fk_roundtrip");
+        apply_fixture(backend, cfg, &migrations).await;
+
+        let live_snapshot = backend
+            .snapshot_schema(cfg)
+            .await
+            .expect("snapshot live MySQL FK schema");
+        let expected = fold_ops(&ir.ops, SqlDialect::Mysql, &cfg.project_schema)
+            .expect("fold FK IR to expected MySQL snapshot");
+        let drift = diff_snapshots(&expected, &live_snapshot);
+        assert!(
+            drift.is_clean(),
+            "clean MySQL FK should match folded IR without false drift: {drift:?}"
+        );
+
+        let orders = live_snapshot.tables.get("orders").expect("orders table");
+        let fk = orders
+            .constraints
+            .iter()
+            .find(|c| c.name == "orders_account_fkey")
+            .expect("orders_account_fkey");
+        assert!(
+            fk.definition.contains("REFERENCES"),
+            "FK definition must include target: {}",
+            fk.definition
+        );
+        assert!(
+            fk.definition.contains("ON UPDATE CASCADE")
+                && fk.definition.contains("ON DELETE SET NULL"),
+            "FK definition must include actions: {}",
+            fk.definition
+        );
+
+        let redeploy = apply_fixture(backend, cfg, &migrations).await;
+        assert!(redeploy.is_noop(), "same FK migration set should redeploy as skip: {redeploy:?}");
+
+        backend
+            .exec(&format!(
+                "ALTER TABLE {}.{} DROP FOREIGN KEY {}",
+                qi(&cfg.project_schema),
+                qi("orders"),
+                qi("orders_account_fkey")
+            ))
+            .await
+            .expect("drop FK before divergent re-add");
+        backend
+            .exec(&format!(
+                "ALTER TABLE {}.{} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}.{} ({}) \
+                 ON UPDATE CASCADE ON DELETE RESTRICT",
+                qi(&cfg.project_schema),
+                qi("orders"),
+                qi("orders_account_fkey"),
+                qi("account_id"),
+                qi(&cfg.project_schema),
+                qi("accounts"),
+                qi("id")
+            ))
+            .await
+            .expect("re-add FK with divergent action");
+
+        let mutated_snapshot = backend
+            .snapshot_schema(cfg)
+            .await
+            .expect("snapshot mutated MySQL FK schema");
+        let drift = diff_snapshots(&expected, &mutated_snapshot);
+        assert!(
+            !drift.is_clean(),
+            "changed MySQL FK action must be detected as drift"
+        );
+        println!(
+            "mysql_jsdriver_e2e FK snapshot roundtrip and action drift assertions ran on real :3307: {drift:?}"
+        );
     }));
 }
