@@ -46,6 +46,28 @@ struct AppCounters {
 }
 
 impl AppCounters {
+    fn add_fixed_request(
+        &self,
+        cpu_us: u64,
+        wall_us: u64,
+        egress_bytes: u64,
+        ingress_bytes: u64,
+    ) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        if cpu_us > 0 {
+            self.cpu_us.fetch_add(cpu_us, Ordering::Relaxed);
+        }
+        if wall_us > 0 {
+            self.wall_us.fetch_add(wall_us, Ordering::Relaxed);
+        }
+        if egress_bytes > 0 {
+            self.egress_bytes.fetch_add(egress_bytes, Ordering::Relaxed);
+        }
+        if ingress_bytes > 0 {
+            self.ingress_bytes.fetch_add(ingress_bytes, Ordering::Relaxed);
+        }
+    }
+
     /// Bump a counter by `n` and return the metric's new running total
     /// (this period, pre-drain). A fixed-metric name routes to its atomic;
     /// any other name lands in `custom`. Relaxed ordering is fine — the
@@ -131,6 +153,20 @@ impl Meter {
         apps.entry(app_id.to_string()).or_default().add(metric, n)
     }
 
+    fn with_app_counters<R>(&self, app_id: &str, f: impl FnOnce(&AppCounters) -> R) -> R {
+        // Fast path: read lock, app already present.
+        {
+            let apps = self.apps.read().unwrap();
+            if let Some(counters) = apps.get(app_id) {
+                return f(counters);
+            }
+        }
+        // Slow path: write lock, insert if another thread did not already
+        // create the app after the read guard was released.
+        let mut apps = self.apps.write().unwrap();
+        f(apps.entry(app_id.to_string()).or_default())
+    }
+
     /// Record one completed request's platform counters in a single call —
     /// the auto-counter hook the worker calls per dispatch.
     pub fn record_request(
@@ -141,19 +177,9 @@ impl Meter {
         egress_bytes: u64,
         ingress_bytes: u64,
     ) {
-        self.increment(app_id, "requests", 1);
-        if cpu_us > 0 {
-            self.increment(app_id, "cpu_us", cpu_us);
-        }
-        if wall_us > 0 {
-            self.increment(app_id, "wall_us", wall_us);
-        }
-        if egress_bytes > 0 {
-            self.increment(app_id, "egress_bytes", egress_bytes);
-        }
-        if ingress_bytes > 0 {
-            self.increment(app_id, "ingress_bytes", ingress_bytes);
-        }
+        self.with_app_counters(app_id, |counters| {
+            counters.add_fixed_request(cpu_us, wall_us, egress_bytes, ingress_bytes);
+        });
     }
 
     /// Drain every app's counters to a `{ app_id → AppUsage }` map, resetting

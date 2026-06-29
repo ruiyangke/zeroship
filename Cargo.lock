@@ -6934,6 +6934,7 @@ name = "zeroship-metering"
 version = "0.1.0"
 dependencies = [
  "compio",
+ "criterion",
  "cyper",
  "serde_json",
  "tracing",

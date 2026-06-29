@@ -13,6 +13,7 @@ use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 struct IsolateEntry {
     runtime: Runtime,
     last_used: std::time::Instant,
+    app_id: String,
 }
 
 struct AppCache {
@@ -172,13 +173,22 @@ pub fn record_request(
 ) {
     METER.with(|m| {
         if let Some(meter) = m.borrow().as_ref() {
-            meter.record_request(
-                &app_id.to_string(),
-                cpu_us,
-                wall_us,
-                egress_bytes,
-                ingress_bytes,
-            );
+            let recorded = CACHE.with(|c| {
+                let cache = c.borrow();
+                let Some(app_id) = cache
+                    .as_ref()
+                    .and_then(|cache| cache.isolates.get(app_id))
+                    .map(|entry| entry.app_id.as_str())
+                else {
+                    return false;
+                };
+                meter.record_request(app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+                true
+            });
+            if !recorded {
+                let id = app_id.to_string();
+                meter.record_request(&id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+            }
         }
     });
 }
@@ -266,8 +276,9 @@ pub fn load_app(
 
     let plugins = create_plugins();
     let meter = METER.with(|m| m.borrow().clone());
+    let app_id_string = app_id.to_string();
     let mut env_vars = HashMap::new();
-    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    env_vars.insert("APP_ID".to_string(), app_id_string.clone());
     // **T6** — inject the per-app deploy/schema-version token so plugin-db's
     // deploy-keyed introspection cache (crypto/mask/column metadata) keys off
     // the real `deploy_hash` and invalidates on a redeploy. `mint_db` reads
@@ -335,6 +346,7 @@ pub fn load_app(
             IsolateEntry {
                 runtime,
                 last_used: std::time::Instant::now(),
+                app_id: app_id_string,
             },
         );
 
@@ -560,8 +572,12 @@ mod tests {
         runtime
     }
 
-    fn entry(runtime: Runtime, last_used: Instant) -> IsolateEntry {
-        IsolateEntry { runtime, last_used }
+    fn entry(app_id: Uuid, runtime: Runtime, last_used: Instant) -> IsolateEntry {
+        IsolateEntry {
+            runtime,
+            last_used,
+            app_id: app_id.to_string(),
+        }
     }
 
     async fn fetch_body(runtime: &Runtime) -> (u16, String) {
@@ -979,11 +995,11 @@ mod tests {
             };
             cache.isolates.insert(
                 socketed_id,
-                entry(socketed, now - Duration::from_secs(600)),
+                entry(socketed_id, socketed, now - Duration::from_secs(600)),
             );
             cache.isolates.insert(
                 socketless_id,
-                entry(socketless, now - Duration::from_secs(1)),
+                entry(socketless_id, socketless, now - Duration::from_secs(1)),
             );
 
             assert!(evict_lru(&mut cache));
@@ -1020,9 +1036,9 @@ mod tests {
             };
             cache.isolates.insert(
                 leased_id,
-                entry(leased.clone(), now - Duration::from_secs(600)),
+                entry(leased_id, leased.clone(), now - Duration::from_secs(600)),
             );
-            cache.isolates.insert(victim_id, entry(victim, now));
+            cache.isolates.insert(victim_id, entry(victim_id, victim, now));
 
             assert!(evict_lru(&mut cache));
             assert!(
@@ -1059,7 +1075,7 @@ mod tests {
             };
             cache
                 .isolates
-                .insert(app_id, entry(runtime.clone(), now - Duration::from_secs(60)));
+                .insert(app_id, entry(app_id, runtime.clone(), now - Duration::from_secs(60)));
 
             assert!(evict_lru(&mut cache));
             assert!(!cache.isolates.contains_key(&app_id));
