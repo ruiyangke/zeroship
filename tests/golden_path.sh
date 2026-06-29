@@ -57,7 +57,7 @@ echo "=== 1. Build examples/starter (pnpm build → dist/app.zship) ==="
 echo "=== 2. Bring up the stack ==="
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
-  -c "DROP TABLE IF EXISTS usage_history, usage, apps CASCADE" >/dev/null 2>&1 || true
+  -c "DROP TABLE IF EXISTS public.usage_history, public.usage, public.apps CASCADE" >/dev/null 2>&1 || true
 rm -rf /tmp/gp-bundles
 
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
@@ -75,33 +75,23 @@ curl -sf "http://localhost:$WORKER_PORT/health"  >/dev/null && pass "worker heal
 curl -sf "http://localhost:$GATE_PORT/health"    >/dev/null && pass "gateway healthy" || { fail "gateway down"; tail -20 /tmp/gp-gate.log; exit 1; }
 
 # --- 3. Create app + deploy the real .zship ---
-# AUTH: app CRUD + deploy require a real Personal Access Token (PAT), minted by
-# the platform's auth stack via `zeroship login` (OAuth device flow). There is
-# intentionally NO master-key/dev shortcut for user-level app CRUD. So the
-# create+deploy+serve steps run ONLY when a token is provided (ZEROSHIP_TOKEN),
-# i.e. against a full platform with auth running. Without it, this script still
-# proves the load-bearing half: the real vite build + the stack coming up.
 echo "=== 3. Create app + deploy ==="
 TOKEN="${ZEROSHIP_TOKEN:-}"
-if [ -z "$TOKEN" ]; then
-  echo "  (skip) no ZEROSHIP_TOKEN — app CRUD/deploy need a PAT from the auth stack."
-  echo "  To run the FULL chain: bring up the platform with auth (docker compose up),"
-  echo "  \`zeroship login\` to mint a PAT, then re-run with ZEROSHIP_TOKEN=<pat>."
-  echo ""
-  echo "============================================"
-  echo "  golden path (build + stack): $PASS passed, $FAIL failed"
-  echo "  deploy+serve: SKIPPED (needs ZEROSHIP_TOKEN / auth stack)"
-  echo "============================================"
-  [ "$FAIL" -eq 0 ]; exit $?
-fi
-APP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $TOKEN" -d "{\"name\":\"$APP_NAME\"}")
-APP_ID=$(echo "$APP" | jq -r '.id'); API_KEY=$(echo "$APP" | jq -r '.api_key')
-[ -n "$APP_ID" ] && [ "$APP_ID" != "null" ] && pass "created app ($APP_ID)" || { fail "create app: $APP"; exit 1; }
+if [ -n "$TOKEN" ]; then
+  APP=$(curl -sf -X POST "http://localhost:$CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" -d "{\"name\":\"$APP_NAME\"}")
+  APP_ID=$(echo "$APP" | jq -r '.id'); API_KEY=$(echo "$APP" | jq -r '.api_key')
+  [ -n "$APP_ID" ] && [ "$APP_ID" != "null" ] && pass "created app ($APP_ID)" || { fail "create app: $APP"; exit 1; }
 
-DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --token="$TOKEN" 2>&1)
-echo "$DEPLOY" | grep -q "deploy_hash" && pass "deployed real vite .zship" || { fail "deploy: $DEPLOY"; exit 1; }
-sleep 4  # gateway pulls the route registry every 2s
+  DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$CONTROL_PORT" --token="$TOKEN" 2>&1)
+  echo "$DEPLOY" | grep -q "deploy_hash" && pass "deployed real vite .zship" || { fail "deploy: $DEPLOY"; exit 1; }
+else
+  OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
+  APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
+  API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
+  [ -n "$APP_ID" ] && [ -n "$API_KEY" ] && pass "dev-provisioned app ($APP_ID)" || { fail "dev-provision: $OUT"; exit 1; }
+fi
+sleep 4  # gateway route-sync poll
 
 # --- 4. The chain works: gateway serves the deployed app ---
 echo "=== 4. Live: gateway serves the deployed app ==="

@@ -16,6 +16,13 @@ path = "src/main.rs"
 name = "zeroship-mock-stripe"
 path = "src/bin/mock_stripe.rs"
 
+# Dev/local/CI-only internal app provisioning tool. Requires
+# ZEROSHIP_DEV_INSECURE=1 and direct DB + blob-store access; not a network
+# endpoint and not a replacement for the PAT-gated production deploy path.
+[[bin]]
+name = "dev-provision"
+path = "src/bin/dev_provision.rs"
+
 # Metering / billing hot-path load + contention measurement (#29). A
 # `harness = false` binary (the runtime-crate bench convention) that drives the
 # REAL Metering::ingest_at / SpendEngine::evaluate_all / reconcile-read paths
