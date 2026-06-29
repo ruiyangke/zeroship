@@ -8,11 +8,18 @@ use thiserror::Error;
 
 use crate::hydra::{HydraIntrospector, IntrospectError, IntrospectResult};
 
+mod supabase;
+
+pub use supabase::{
+    SupabaseConfig, SupabaseConfigError, SupabaseProvider, SupabaseVerification,
+    SupabaseVerifyError,
+};
+
 /// The selected platform auth provider.
 #[derive(Debug)]
 pub enum AuthProvider {
     Hydra(HydraProvider),
-    // Supabase(...) — later slice.
+    Supabase(SupabaseProvider),
 }
 
 impl AuthProvider {
@@ -20,6 +27,10 @@ impl AuthProvider {
     pub async fn verify_token(&self, token: &str) -> Result<VerifiedToken, VerifyTokenError> {
         match self {
             Self::Hydra(provider) => provider.verify_token(token).await,
+            Self::Supabase(provider) => provider
+                .verify_token(token)
+                .await
+                .map_err(|_err| VerifyTokenError::InactiveToken),
         }
     }
 
@@ -27,6 +38,7 @@ impl AuthProvider {
     pub fn issuer(&self) -> &str {
         match self {
             Self::Hydra(provider) => provider.issuer(),
+            Self::Supabase(provider) => provider.issuer(),
         }
     }
 }

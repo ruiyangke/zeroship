@@ -508,7 +508,9 @@ fn control_auth_provider_kind(auth_provider: &str) -> Result<&'static str, Strin
     match normalized.as_str() {
         "" | "hydra" => Ok("hydra"),
         "supabase" => Err(
-            "ZEROSHIP_AUTH_PROVIDER=supabase is not implemented in this slice; only hydra is valid"
+            "ZEROSHIP_AUTH_PROVIDER=supabase: token verification is implemented \
+             (core::auth_provider::SupabaseProvider) but control authz wiring requires \
+             the identity-bridge slice (GoTrue sub -> platform principal); not yet enabled"
                 .to_string(),
         ),
         other => Err(format!(
@@ -1662,7 +1664,8 @@ mod tests {
 
         let err = control_auth_provider_kind("supabase").unwrap_err();
         assert!(
-            err.contains("not implemented"),
+            err.contains("token verification is implemented")
+                && err.contains("identity-bridge slice"),
             "supabase must fail clearly in this slice: {err}"
         );
     }
