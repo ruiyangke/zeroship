@@ -17,11 +17,12 @@ use zeroship_migrate::render::step::{BindValue, PlanStep};
 use zeroship_migrate::{
     deprovision_mysql_migrator_account, diff_snapshots, fold_ops,
     mysql_migration_lock_name, provision_mysql_migrator_account,
-    provision_mysql_migrator_account_with_password, ApplyError, Approval, Checksum,
-    ChecksumInput, EngineError, ExecutorConfig, GuardConfig, IrAuthor,
-    JsDriverError, LiveSchema, Migration, MigrationBackend, MigrationEngine,
-    MigrationFlags, MigrationId, MigrationIr, MysqlBackend, MysqlGuardedFragment,
-    MysqlMigratorAccount, RowSet, SqlDialect, CURRENT_IR_VERSION,
+    provision_mysql_migrator_account_with_password, ApplyError, Approval,
+    ApprovalScope, Checksum, ChecksumInput, EngineError, ExecutorConfig,
+    GuardConfig, IrAuthor, JsDriverError, LiveSchema, LockMode, Migration,
+    MigrationBackend, MigrationEngine, MigrationFlags, MigrationId, MigrationIr,
+    MysqlBackend, MysqlGuardedFragment, MysqlMigratorAccount, Phase, RowSet,
+    SqlDialect, CURRENT_IR_VERSION,
 };
 
 use node_realworld::{allowlist, ensure_mysql, lock_env, EnvGuard, LOCALHOST};
@@ -1295,6 +1296,338 @@ fn live_journal_records_completed_and_second_apply_skips() {
         );
         println!("mysql_jsdriver_e2e journal skip assertions ran");
     }));
+}
+
+#[test]
+fn mysql_dml_step_rejects_destructive_out_of_scope() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "dml_scope", |backend, cfg, _account| Box::pin(async move {
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (id BIGINT NOT NULL PRIMARY KEY)",
+                qi(&cfg.project_schema),
+                qi("dml_scope")
+            ))
+            .await
+            .expect("create DML scope table");
+        backend
+            .exec_with_binds(
+                &format!(
+                    "INSERT INTO {}.{} (id) VALUES (?)",
+                    qi(&cfg.project_schema),
+                    qi("dml_scope")
+                ),
+                &[BindValue::Int(1)],
+            )
+            .await
+            .expect("seed DML scope row");
+
+        let version = MigrationId::generate();
+        let refused = backend
+            .run_dml_step(
+                cfg,
+                &version,
+                "wipe_dml_scope",
+                &format!(
+                    "DELETE FROM {}.{} WHERE id = ?",
+                    qi(&cfg.project_schema),
+                    qi("dml_scope")
+                ),
+                &[BindValue::Int(1)],
+                true,
+                OWNER,
+                Approval::Approved,
+                &ApprovalScope::Versions(std::collections::BTreeSet::new()),
+                "mysql-jsdriver-e2e",
+                LockMode::AlreadyHeld,
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(ApplyError::ApprovalNotScoped { version: ref got })
+                    if got == version.as_str()
+            ),
+            "destructive MySQL DML outside the approved version scope must be refused, got {refused:?}"
+        );
+
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT COUNT(*) AS n FROM {}.{}",
+                qi(&cfg.project_schema),
+                qi("dml_scope")
+            ),
+            &[],
+        )
+        .await;
+        assert_eq!(
+            value_as_i64(field(&rows.rows[0], "n")),
+            1,
+            "scope-refused destructive DML must not delete the row"
+        );
+        let journal = query(
+            backend,
+            &format!(
+                "SELECT version FROM {}
+                  WHERE event_kind = 'applied' AND phase = 'completed' AND version = ?",
+                meta_table(cfg, "schema_migrations")
+            ),
+            &[BindValue::Text(version.as_str().to_string())],
+        )
+        .await;
+        assert_eq!(rows_len(&journal), 0, "scope-refused DML must not journal");
+    }));
+}
+
+#[test]
+fn mysql_dml_step_is_idempotent_for_completed_version() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "dml_idem", |backend, cfg, _account| Box::pin(async move {
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (id BIGINT NOT NULL PRIMARY KEY, hits BIGINT NOT NULL)",
+                qi(&cfg.project_schema),
+                qi("dml_idem")
+            ))
+            .await
+            .expect("create DML idempotency table");
+        backend
+            .exec_with_binds(
+                &format!(
+                    "INSERT INTO {}.{} (id, hits) VALUES (?, ?)",
+                    qi(&cfg.project_schema),
+                    qi("dml_idem")
+                ),
+                &[BindValue::Int(1), BindValue::Int(0)],
+            )
+            .await
+            .expect("seed DML idempotency row");
+
+        let version = MigrationId::generate();
+        let template = format!(
+            "UPDATE {}.{} SET hits = hits + ? WHERE id = ?",
+            qi(&cfg.project_schema),
+            qi("dml_idem")
+        );
+        let first = backend
+            .run_dml_step(
+                cfg,
+                &version,
+                "bump_dml_idem",
+                &template,
+                &[BindValue::Int(1), BindValue::Int(1)],
+                false,
+                OWNER,
+                Approval::None,
+                &ApprovalScope::All,
+                "mysql-jsdriver-e2e",
+                LockMode::AlreadyHeld,
+            )
+            .await
+            .expect("first MySQL DML run should apply");
+        assert!(first, "first DML run should report applied");
+
+        let second = backend
+            .run_dml_step(
+                cfg,
+                &version,
+                "bump_dml_idem",
+                &template,
+                &[BindValue::Int(1), BindValue::Int(1)],
+                false,
+                OWNER,
+                Approval::None,
+                &ApprovalScope::All,
+                "mysql-jsdriver-e2e",
+                LockMode::AlreadyHeld,
+            )
+            .await
+            .expect("second MySQL DML run should be a completed-version skip");
+        assert!(!second, "completed DML version must return Ok(false) on retry");
+
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT hits FROM {}.{} WHERE id = ?",
+                qi(&cfg.project_schema),
+                qi("dml_idem")
+            ),
+            &[BindValue::Int(1)],
+        )
+        .await;
+        assert_eq!(
+            value_as_i64(field(&rows.rows[0], "hits")),
+            1,
+            "completed-version retry must not execute the DML a second time"
+        );
+        let completed = backend.applied(cfg).await.expect("read MySQL applied journal");
+        assert!(
+            completed
+                .iter()
+                .any(|entry| entry.version == version.as_str() && entry.phase == Phase::Completed),
+            "first DML run must journal the completed version"
+        );
+    }));
+}
+
+#[test]
+fn mysql_dml_step_journals_execution_atomically() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+    let live_for_closure = live.clone();
+
+    run_isolated_mysql(&live, "dml_atomic", move |backend, cfg, _account| {
+        let live = live_for_closure.clone();
+        Box::pin(async move {
+            backend
+                .exec(&format!(
+                    "CREATE TABLE {}.{} (id BIGINT NOT NULL PRIMARY KEY, label VARCHAR(64) NOT NULL)",
+                    qi(&cfg.project_schema),
+                    qi("dml_atomic")
+                ))
+                .await
+                .expect("create DML atomic table");
+
+            let admin = backend_for(&live);
+            admin
+                .exec(&format!(
+                    "ALTER TABLE {} ADD CONSTRAINT {} CHECK (name <> 'journal_failure')",
+                    meta_table(cfg, "schema_migrations"),
+                    qi("dml_atomic_block")
+                ))
+                .await
+                .expect("install journal failure constraint for atomicity probe");
+
+            let failed_version = MigrationId::generate();
+            let failed_template = format!(
+                "INSERT INTO {}.{} (id, label) VALUES (?, ?)",
+                qi(&cfg.project_schema),
+                qi("dml_atomic")
+            );
+            let failed = backend
+                .run_dml_step(
+                    cfg,
+                    &failed_version,
+                    "journal_failure",
+                    &failed_template,
+                    &[BindValue::Int(1), BindValue::Text("rolled_back".to_string())],
+                    false,
+                    OWNER,
+                    Approval::None,
+                    &ApprovalScope::All,
+                    "mysql-jsdriver-e2e",
+                    LockMode::AlreadyHeld,
+                )
+                .await;
+            assert!(
+                matches!(failed, Err(ApplyError::Journal(_))),
+                "journal failure after DML must surface as a journal error, got {failed:?}"
+            );
+            let rolled_back_data = query(
+                backend,
+                &format!(
+                    "SELECT label FROM {}.{} WHERE id = ?",
+                    qi(&cfg.project_schema),
+                    qi("dml_atomic")
+                ),
+                &[BindValue::Int(1)],
+            )
+            .await;
+            assert_eq!(
+                rows_len(&rolled_back_data),
+                0,
+                "journal failure must roll back the data DML in the same transaction"
+            );
+            let rolled_back_journal = query(
+                backend,
+                &format!(
+                    "SELECT version FROM {}
+                      WHERE event_kind = 'applied' AND version = ?",
+                    meta_table(cfg, "schema_migrations")
+                ),
+                &[BindValue::Text(failed_version.as_str().to_string())],
+            )
+            .await;
+            assert_eq!(
+                rows_len(&rolled_back_journal),
+                0,
+                "failed journal insert must not leave a journal row"
+            );
+
+            let version = MigrationId::generate();
+            let template = format!(
+                "INSERT INTO {}.{} (id, label) VALUES (?, ?)",
+                qi(&cfg.project_schema),
+                qi("dml_atomic")
+            );
+            let ran = backend
+                .run_dml_step(
+                    cfg,
+                    &version,
+                    "insert_dml_atomic",
+                    &template,
+                    &[BindValue::Int(7), BindValue::Text("journaled".to_string())],
+                    false,
+                    OWNER,
+                    Approval::None,
+                    &ApprovalScope::All,
+                    "mysql-jsdriver-e2e",
+                    LockMode::AlreadyHeld,
+                )
+                .await
+                .expect("MySQL DML should apply and journal in one transaction");
+            assert!(ran, "fresh DML version should report applied");
+
+            let data = query(
+                backend,
+                &format!(
+                    "SELECT label FROM {}.{} WHERE id = ?",
+                    qi(&cfg.project_schema),
+                    qi("dml_atomic")
+                ),
+                &[BindValue::Int(7)],
+            )
+            .await;
+            assert_eq!(rows_len(&data), 1, "DML data row must be committed");
+            assert_eq!(field(&data.rows[0], "label"), &json!("journaled"));
+
+            let expected_checksum = Checksum::of(&ChecksumInput {
+                up: &template,
+                down: None,
+                flags: &MigrationFlags::default(),
+                owner_app: OWNER,
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            });
+            let journal = query(
+                backend,
+                &format!(
+                    "SELECT version, name, checksum, phase, kind
+                       FROM {}
+                      WHERE event_kind = 'applied' AND version = ?",
+                    meta_table(cfg, "schema_migrations")
+                ),
+                &[BindValue::Text(version.as_str().to_string())],
+            )
+            .await;
+            assert_eq!(rows_len(&journal), 1, "DML completed journal row must exist");
+            let row = &journal.rows[0];
+            assert_eq!(field(row, "version"), &json!(version.as_str()));
+            assert_eq!(field(row, "name"), &json!("insert_dml_atomic"));
+            assert_eq!(field(row, "checksum"), &json!(expected_checksum.as_str()));
+            assert_eq!(field(row, "phase"), &json!("completed"));
+            assert_eq!(field(row, "kind"), &json!("apply"));
+        })
+    });
 }
 
 #[test]

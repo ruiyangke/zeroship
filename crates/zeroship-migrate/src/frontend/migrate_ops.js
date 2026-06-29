@@ -2398,8 +2398,8 @@ function splitPartGrammarLint(delim, n) {
     throw structuredError("EXPR_NOT_PORTABLE", reason, {
       suggested_fix:
         "pass a non-empty string-literal delimiter and a positive-integer n; to target " +
-        "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8) — a multi-char/" +
-        "non-ASCII delimiter or n>8 renders only on Postgres (dialect_scope=PgOnly)",
+        "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8); out-of-envelope " +
+        "forms are only renderable on dialects with a native renderer such as Postgres/MySQL",
     });
   };
   if (typeof delim !== "string") {

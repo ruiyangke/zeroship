@@ -2,7 +2,9 @@
 //!
 //! The backend talks to MySQL through the platform-owned Trusted JS driver
 //! isolate. The isolate loads the vendored, unmodified `mysql2/promise` bundle
-//! and all SQL reaches the server through `connection.execute`.
+//! and bound SQL reaches the server through `connection.execute`; transaction
+//! control uses mysql2's `beginTransaction`/`commit`/`rollback` on the same
+//! connection.
 
 pub mod snapshot;
 pub mod transport;
@@ -156,6 +158,18 @@ impl MysqlBackend {
         binds: &[BindValue],
     ) -> Result<(), JsDriverError> {
         self.conn.borrow_mut().exec_with_binds(sql, binds).await
+    }
+
+    async fn begin_transaction(&self) -> Result<(), JsDriverError> {
+        self.conn.borrow_mut().begin_transaction().await
+    }
+
+    async fn commit(&self) -> Result<(), JsDriverError> {
+        self.conn.borrow_mut().commit().await
+    }
+
+    async fn rollback(&self) -> Result<(), JsDriverError> {
+        self.conn.borrow_mut().rollback().await
     }
 
     pub async fn query_json(
@@ -406,8 +420,8 @@ pub async fn provision_mysql_migrator_account_with_password(
     let project = mysql_quote_ident(&cfg.project_schema)?;
     admin
         .exec(&format!(
-            "GRANT CREATE, ALTER, DROP, INDEX, REFERENCES, CREATE VIEW, SHOW VIEW, \
-                    TRIGGER, CREATE ROUTINE, ALTER ROUTINE, EVENT
+            "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, \
+                    CREATE VIEW, SHOW VIEW, TRIGGER, CREATE ROUTINE, ALTER ROUTINE, EVENT
                ON {project}.* TO {account}"
         ))
         .await?;
@@ -628,7 +642,7 @@ impl MigrationBackend for MysqlBackend {
             )
             .await?;
         } else {
-            self.exec("START TRANSACTION").await.map_err(apply_db)?;
+            self.begin_transaction().await.map_err(apply_db)?;
             let result = async {
                 record_completed_mysql(
                     self,
@@ -647,10 +661,10 @@ impl MigrationBackend for MysqlBackend {
             }
             .await;
             if let Err(e) = result {
-                let _ = self.exec("ROLLBACK").await;
+                let _ = self.rollback().await;
                 return Err(ApplyError::Journal(e));
             }
-            self.exec("COMMIT").await.map_err(apply_db)?;
+            self.commit().await.map_err(apply_db)?;
         }
 
         Ok(had_inflight)
@@ -792,22 +806,47 @@ impl MigrationBackend for MysqlBackend {
 
     async fn run_dml_step(
         &self,
-        _cfg: &ExecutorConfig,
-        _version: &MigrationId,
-        _name: &str,
+        cfg: &ExecutorConfig,
+        version: &MigrationId,
+        name: &str,
         template: &str,
         binds: &[BindValue],
         destructive: bool,
-        _owner_app: &str,
+        owner_app: &str,
         approval: Approval,
-        _scope: &ApprovalScope,
-        _applied_by: &str,
+        scope: &ApprovalScope,
+        applied_by: &str,
         _lock_mode: LockMode,
     ) -> Result<bool, ApplyError> {
         if destructive && approval != Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
-        self.exec_with_binds(template, binds).await.map_err(apply_db)?;
+        if destructive && !scope.admits(version.as_str()) {
+            return Err(ApplyError::ApprovalNotScoped {
+                version: version.as_str().to_string(),
+            });
+        }
+        let already = self
+            .applied(cfg)
+            .await
+            .map_err(ApplyError::Journal)?
+            .into_iter()
+            .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
+            .any(|e| e.version == version.as_str());
+        if already {
+            return Ok(false);
+        }
+        run_dml_transactional_mysql(
+            self,
+            cfg,
+            version.as_str(),
+            name,
+            template,
+            binds,
+            owner_app,
+            applied_by,
+        )
+        .await?;
         Ok(true)
     }
 
@@ -1008,6 +1047,65 @@ async fn record_completed_mysql(
         )
         .await
         .map_err(journal_backend)
+}
+
+async fn run_dml_transactional_mysql(
+    backend: &MysqlBackend,
+    cfg: &ExecutorConfig,
+    version: &str,
+    name: &str,
+    template: &str,
+    binds: &[BindValue],
+    owner_app: &str,
+    applied_by: &str,
+) -> Result<(), ApplyError> {
+    let started = Instant::now();
+    let checksum = crate::model::migration::Checksum::of(&crate::model::migration::ChecksumInput {
+        up: template,
+        down: None,
+        flags: &crate::model::migration::MigrationFlags::default(),
+        owner_app,
+        depends_on: &[],
+        supersedes: &[],
+        preconditions: &[],
+    });
+
+    backend.begin_transaction().await.map_err(apply_db)?;
+    let result = async {
+        backend.exec_with_binds(template, binds).await.map_err(apply_db)?;
+        let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        record_completed_mysql(
+            backend,
+            cfg,
+            journal::CompletedRecord {
+                version,
+                name,
+                checksum: checksum.as_str(),
+                applied_by,
+                exec_ms,
+                kind: "apply",
+            },
+        )
+        .await
+        .map_err(ApplyError::Journal)
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            if let Err(e) = backend.commit().await {
+                let _ = backend.rollback().await;
+                return Err(apply_db(e));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if let Err(rb) = backend.rollback().await {
+                tracing::warn!(error = %rb, version = %version, "zeroship-migrate: MySQL ROLLBACK failed after DML transaction error");
+            }
+            Err(e)
+        }
+    }
 }
 
 async fn record_rolled_back_mysql(
