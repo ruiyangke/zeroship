@@ -233,6 +233,96 @@ fn async_response() {
     });
 }
 
+/// Invariant guard: a pending request's handler promise can settle during a
+/// DIFFERENT request's pump turn, via a module-global promise shared across
+/// requests in the same isolate. The pump MUST detect that cross-request
+/// settlement — it cannot assume "only the request owning the completing
+/// op/timer can have settled".
+///
+/// Request S (`/wait`) returns a module-global `shared` promise and parks as a
+/// pending request with NO owned op/timer. Request R (`/release`) awaits a
+/// `setTimeout(0)` (a timer owned by R); when that timer fires, R's callback
+/// resolves `shared`, settling S's handler promise during R's turn. Both must
+/// be delivered.
+///
+/// This is the regression guard for the reverted "settle only the owning
+/// request's promise" optimization (commit 0134a13c, reverted in 257bf38c):
+/// that shortcut would check only R on the timer turn and S would hang forever
+/// (the receiver below would time out and FAIL this test). The full
+/// `collect_settled_promises` scan delivers both.
+#[test]
+fn cross_request_shared_promise_settles() {
+    let modules = m(r#"
+        let resolveShared;
+        const shared = new Promise((resolve) => { resolveShared = resolve; });
+        export default {
+            async fetch(request, env, ctx) {
+                const path = new URL(request.url).pathname;
+                if (path === "/wait") {
+                    return shared;
+                }
+                if (path === "/release") {
+                    await new Promise((r) => setTimeout(r, 0));
+                    resolveShared(new Response("shared-resolved", { status: 201 }));
+                    return new Response("released", { status: 200 });
+                }
+                return new Response("other", { status: 404 });
+            }
+        };
+    "#);
+
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let runtime = Runtime::builder().modules(modules).build();
+        runtime.start_pump();
+
+        let env = EnvSnapshot::empty();
+
+        // Dispatch S first so it is already parked-pending on `shared` when R's
+        // timer fires and resolves it.
+        let s_ctx = RequestCtx::new(CancelFlag::new());
+        let s_outcome =
+            runtime.call_fetch_handler("GET", "http://localhost/wait", &[], "", &env, s_ctx);
+        let FetchOutcome::Pending { rx: s_rx, cancel: _ } = s_outcome else {
+            panic!("request S (/wait) must be Pending — it returns an unresolved shared promise");
+        };
+
+        let r_ctx = RequestCtx::new(CancelFlag::new());
+        let r_outcome =
+            runtime.call_fetch_handler("GET", "http://localhost/release", &[], "", &env, r_ctx);
+        let FetchOutcome::Pending { rx: r_rx, cancel: _ } = r_outcome else {
+            panic!("request R (/release) must be Pending — it awaits setTimeout(0)");
+        };
+
+        // R settles normally.
+        let r_settled = compio::time::timeout(Duration::from_secs(5), r_rx.recv())
+            .await
+            .expect("R receiver timed out")
+            .expect("R delivered DispatchError");
+        match r_settled {
+            SettledFetch::Response { status, body, .. } => {
+                assert_eq!(status, 200);
+                assert_eq!(&body[..], b"released");
+            }
+            _ => panic!("expected SettledFetch::Response for R"),
+        }
+
+        // S MUST be delivered too — its promise settled during R's timer turn.
+        // With the owner-only shortcut this receiver would hang → timeout → fail.
+        let s_settled = compio::time::timeout(Duration::from_secs(5), s_rx.recv())
+            .await
+            .expect("S receiver timed out — cross-request shared-promise settlement was MISSED")
+            .expect("S delivered DispatchError");
+        match s_settled {
+            SettledFetch::Response { status, body, .. } => {
+                assert_eq!(status, 201);
+                assert_eq!(&body[..], b"shared-resolved");
+            }
+            _ => panic!("expected SettledFetch::Response for S"),
+        }
+    });
+}
+
 #[test]
 fn handler_throwing_http_error_preserves_status() {
     let modules = m(r#"
