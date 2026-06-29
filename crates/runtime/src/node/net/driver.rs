@@ -243,7 +243,8 @@ async fn run_plain_reader_loop(
                     break;
                 }
                 let chunk = res.1;
-                let data = chunk.as_slice()[..n].to_vec();
+                let mut data = chunk;
+                data.truncate(n);
                 if let Some(socket) = lookup_native_socket_state(state, socket_id) {
                     socket.borrow_mut().bytes_read += n as u64;
                 }
@@ -323,7 +324,8 @@ async fn run_tls_driver(
                     break;
                 }
                 let chunk = res.1;
-                let data = chunk.as_slice()[..n].to_vec();
+                let mut data = chunk;
+                data.truncate(n);
                 if let Some(socket) = lookup_native_socket_state(&state, socket_id) {
                     socket.borrow_mut().bytes_read += n as u64;
                 }
