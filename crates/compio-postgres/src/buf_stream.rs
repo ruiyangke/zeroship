@@ -67,6 +67,7 @@ pub(crate) const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 pub(crate) struct BufStream<S> {
     inner: S,
     read_buf: BytesMut,
+    read_scratch: Vec<u8>,
     write_buf: BytesMut,
 }
 
@@ -79,6 +80,7 @@ where
         Self {
             inner: stream,
             read_buf: BytesMut::with_capacity(READ_BUF_CAPACITY),
+            read_scratch: vec![0u8; READ_CHUNK],
             write_buf: BytesMut::with_capacity(1024),
         }
     }
@@ -110,11 +112,10 @@ where
             )));
         }
         while self.read_buf.len() < min_bytes {
-            // Always allocate a fixed, small chunk — NEVER `min_bytes`-sized.
-            // A 64 MB frame drip-fed in 16 KB chunks must not translate to
-            // 4096 × 64 MB heap allocations. `extend_from_slice` amortises
-            // the `read_buf` growth; `READ_CHUNK` keeps each syscall bounded.
-            let buf = vec![0u8; READ_CHUNK];
+            if self.read_scratch.is_empty() {
+                self.read_scratch = vec![0u8; READ_CHUNK];
+            }
+            let buf = std::mem::take(&mut self.read_scratch);
             let (n, buf) = self.read_raw(buf).await?;
             if n == 0 {
                 return Err(Error::io(std::io::Error::new(
@@ -123,6 +124,7 @@ where
                 )));
             }
             self.read_buf.extend_from_slice(&buf[..n]);
+            self.read_scratch = buf;
         }
         Ok(())
     }
@@ -274,6 +276,7 @@ pub trait SplitStream: Sized {
 pub(crate) struct BufReadHalf<R> {
     inner: R,
     read_buf: BytesMut,
+    read_scratch: Vec<u8>,
 }
 
 impl<R> BufReadHalf<R>
@@ -299,7 +302,10 @@ where
             )));
         }
         while self.read_buf.len() < min_bytes {
-            let buf = vec![0u8; READ_CHUNK];
+            if self.read_scratch.is_empty() {
+                self.read_scratch = vec![0u8; READ_CHUNK];
+            }
+            let buf = std::mem::take(&mut self.read_scratch);
             let (n, buf) = self.read_raw(buf).await?;
             if n == 0 {
                 return Err(Error::io(std::io::Error::new(
@@ -308,6 +314,7 @@ where
                 )));
             }
             self.read_buf.extend_from_slice(&buf[..n]);
+            self.read_scratch = buf;
         }
         Ok(())
     }
@@ -411,6 +418,7 @@ where
         let BufStream {
             inner,
             read_buf,
+            read_scratch,
             write_buf,
         } = self;
         match inner.try_into_split() {
@@ -418,6 +426,7 @@ where
                 BufReadHalf {
                     inner: r,
                     read_buf,
+                    read_scratch,
                 },
                 BufWriteHalf {
                     inner: w,
@@ -427,6 +436,7 @@ where
             Err(inner) => Err(BufStream {
                 inner,
                 read_buf,
+                read_scratch,
                 write_buf,
             }),
         }
