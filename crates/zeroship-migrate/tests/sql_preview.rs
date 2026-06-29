@@ -204,7 +204,7 @@ fn mysql_feature_preview_renders_mysql8_sql() {
         out.contains(
             "ALTER TABLE `public`.`members` ADD CONSTRAINT `members_team_fk` \
              FOREIGN KEY (`team_id`) REFERENCES `public`.`teams` (`id`) \
-             ON UPDATE RESTRICT ON DELETE CASCADE"
+             ON DELETE CASCADE"
         ),
         "{out}"
     );

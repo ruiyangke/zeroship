@@ -1737,22 +1737,19 @@ pub(crate) fn build_table_snapshot(
                     constraints.push(ConstraintSnapshot {
                         name: fk_constraint_name(&f.name),
                         kind: "FOREIGN KEY".into(),
-                        // EXACT `pg_get_constraintdef` spelling (#1): the target
-                        // is schema-qualified, NO space before `(id)`, the policy
-                        // clauses render `ON UPDATE <b>` THEN `ON DELETE <a>` (pg's
-                        // canonical order, the reverse of the DDL), a `NO ACTION`
-                        // action is OMITTED, and a deferrable FK ends with
-                        // ` DEFERRABLE INITIALLY DEFERRED`. Built to match live
-                        // byte-for-byte so a policy FK re-diffs clean — and the
-                        // differ can compare FK bodies on existing tables (a
-                        // changed target/policy is caught, not silently skipped).
-                        definition: fk_definition_pg(
+                        // EXACT canonical catalog spelling (#1): the target is
+                        // schema-qualified, NO space before `(id)`, policy clauses
+                        // render in catalog order (`ON UPDATE` then `ON DELETE`),
+                        // and default actions are omitted per dialect. Built to
+                        // match live byte-for-byte so a policy FK re-diffs clean.
+                        definition: fk_definition_for_dialect(
                             &f.name,
                             project_schema,
                             target,
                             f.on_delete.as_deref(),
                             f.on_update.as_deref(),
                             f.deferrable.unwrap_or(true),
+                            dialect,
                         ),
                         comment: None,
                     });
@@ -1943,11 +1940,11 @@ fn fk_constraint_name(field: &str) -> String {
 }
 
 /// §6.4 — build the [`ConstraintSnapshot`] for a stand-alone IR `addConstraint`
-/// FK, in the EXACT shape the differ's deferred-FK path carries: the canonical
-/// `pg_get_constraintdef`-shaped `definition` (via [`fk_definition_pg`]) + the
-/// deterministic `<field>_fkey` name (or an explicit name). `IrAuthor` calls this
-/// so the FK body is built by the SAME helper the differ uses — never re-spelled —
-/// and `lower_add_fk` then renders it byte-identically to a deferred FK.
+/// FK, in the EXACT shape the differ's deferred-FK path carries: the dialect
+/// canonical `definition` (via [`fk_definition_for_dialect`]) + the deterministic
+/// `<field>_fkey` name (or an explicit name). `IrAuthor` calls this so the FK body
+/// is built by the SAME helper the differ uses — never re-spelled — and
+/// `lower_add_fk` then renders it byte-identically to a deferred FK.
 ///
 /// Single-column FK only in PR1 (the `t.*`/`op.*` `ref` shape is single-column,
 /// referencing the target's `id`); a multi-column FK is a later wave.
@@ -1958,25 +1955,24 @@ pub(crate) fn ir_fk_constraint_snapshot(
     references_table: &str,
     on_delete: Option<&str>,
     on_update: Option<&str>,
+    dialect: SqlDialect,
 ) -> ConstraintSnapshot {
     let name = explicit_name
         .map(ToString::to_string)
         .unwrap_or_else(|| fk_constraint_name(local_column));
-    // C1 — the referential actions ARE rendered. When both are absent the
-    // `None,None` defaults reproduce the differ's `ref` FK byte-for-byte
-    // (`declarative.rs:1325`): NO ACTION on_delete/on_update (rendered RESTRICT by
-    // the shared `normalize_fk_action`) + `deferrable = true` (the ref default),
-    // so an action-free stand-alone IR FK stays byte-identical to the FK the
-    // differ builds for the same single-column reference. A set action threads
-    // through `fk_definition_pg` (which already accepts both) → the rendered
-    // definition carries `ON DELETE CASCADE` / `ON UPDATE …` per the action token.
-    let definition = fk_definition_pg(
+    // C1 — the referential actions are rendered through the same dialect canonical
+    // path as declarative `ref` fields, so an action-free stand-alone IR FK stays
+    // byte-identical to the FK the differ builds for the same single-column
+    // reference. On MySQL, `restrict`/`noAction`/absent all collapse to the omitted
+    // default; real actions still render explicitly.
+    let definition = fk_definition_for_dialect(
         local_column,
         project_schema,
         references_table,
         on_delete,
         on_update,
         true,
+        dialect,
     );
     ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition, comment: None }
 }
@@ -2201,19 +2197,13 @@ fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
         .map_err(|e| DeclarativeError::Invalid(e.to_string()))
 }
 
-/// Normalise a DSL FK action token to the SQL keyword Postgres reports.
-///
-/// Schema-authority P2: DELEGATES to the shared kernel's
-/// [`zeroship_schema::query::normalize_fk_action`] (the SDK `FkAction` tokens
-/// fold to `RESTRICT`/`CASCADE`/`SET NULL`/`NO ACTION`; anything unrecognised →
-/// `RESTRICT`, fail-safe). The engine's own copy is deleted.
-fn normalize_fk_action(s: Option<&str>) -> &'static str {
-    zeroship_schema::query::normalize_fk_action(s)
+fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'static str {
+    zeroship_schema::query::normalize_fk_action_for_dialect(s, dialect)
 }
 
-/// Build a FOREIGN KEY definition body in the EXACT spelling
-/// `pg_get_constraintdef(oid)` renders, so the desired snapshot round-trips to
-/// the live introspected constraint (#1).
+/// Build a FOREIGN KEY definition body in the dialect's canonical catalog
+/// spelling, so the desired snapshot round-trips to the live introspected
+/// constraint (#1).
 ///
 /// Empirically (probed against PG 17), `pg_get_constraintdef` renders a FK as:
 ///
@@ -2228,16 +2218,17 @@ fn normalize_fk_action(s: Option<&str>) -> &'static str {
 ///   default — `confdeltype`/`confupdtype` = `'a'`), so a FK with both actions
 ///   `NO ACTION` renders with no action clauses at all.
 ///
-/// `RESTRICT`, `CASCADE`, and `SET NULL` are rendered explicitly. The actions
-/// pass through [`normalize_fk_action`] first (matching plugin-db's
-/// emit-time normalisation), so the same DSL tokens land on the same keywords.
-fn fk_definition_pg(
+/// On Postgres, `RESTRICT`, `CASCADE`, and `SET NULL` are rendered explicitly.
+/// On MySQL, `RESTRICT` and `NO ACTION` are semantically identical and both fold
+/// to the omitted default; `CASCADE`, `SET NULL`, and `SET DEFAULT` still render.
+fn fk_definition_for_dialect(
     field: &str,
     project_schema: &str,
     target: &str,
     on_delete: Option<&str>,
     on_update: Option<&str>,
     deferrable: bool,
+    dialect: SqlDialect,
 ) -> String {
     use std::fmt::Write as _;
     // **PR10 review (LOW)** — quote the referenced schema + table the SAME way
@@ -2260,9 +2251,11 @@ fn fk_definition_pg(
         quote_ident_if_needed(project_schema),
         quote_ident_if_needed(target),
     );
-    let on_update = normalize_fk_action(on_update);
-    let on_delete = normalize_fk_action(on_delete);
-    // pg renders ON UPDATE before ON DELETE, and omits a NO ACTION clause.
+    let on_update = normalize_fk_action_for_dialect(on_update, dialect);
+    let on_delete = normalize_fk_action_for_dialect(on_delete, dialect);
+    // Catalog definitions render ON UPDATE before ON DELETE and omit the
+    // dialect's canonical default action. On MySQL, RESTRICT and NO ACTION both
+    // canonicalize to NO ACTION because InnoDB has no deferred checks.
     if on_update != "NO ACTION" {
         let _ = write!(def, " ON UPDATE {on_update}");
     }
@@ -2273,6 +2266,26 @@ fn fk_definition_pg(
         def.push_str(" DEFERRABLE INITIALLY DEFERRED");
     }
     def
+}
+
+#[cfg(test)]
+fn fk_definition_pg(
+    field: &str,
+    project_schema: &str,
+    target: &str,
+    on_delete: Option<&str>,
+    on_update: Option<&str>,
+    deferrable: bool,
+) -> String {
+    fk_definition_for_dialect(
+        field,
+        project_schema,
+        target,
+        on_delete,
+        on_update,
+        deferrable,
+        SqlDialect::Postgres,
+    )
 }
 
 /// Reject a `ref` whose target is schema-qualified with a `<otherApp>.` prefix —
@@ -4647,11 +4660,10 @@ impl DeclarativeAuthor {
     /// [<policy>]` clause for inline CREATE TABLE / ALTER ADD CONSTRAINT use.
     ///
     /// The ON UPDATE / ON DELETE / DEFERRABLE policy tail is carried in the
-    /// constraint `definition` (built by [`fk_definition_pg`] in the canonical
-    /// `pg_get_constraintdef` spelling). Postgres accepts that same clause order
-    /// as DDL, so the tail is appended verbatim — the applied constraint then
-    /// introspects back to the identical definition, and the FK round-trips clean
-    /// (#1). A bare FK (no policy tail) emits nothing extra.
+    /// constraint `definition` (built by [`fk_definition_for_dialect`] in the
+    /// dialect canonical spelling). The tail is appended verbatim — the applied
+    /// constraint then introspects back to the identical definition, and the FK
+    /// round-trips clean (#1). A bare FK (no policy tail) emits nothing extra.
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {
         if matches!(self.dialect, SqlDialect::Mysql) {
             return self.mysql_fk_clause(fk);
@@ -5130,8 +5142,8 @@ impl DeclarativeAuthor {
                 // Object-scoped probe for THIS FK constraint. **F2** — UNLIKE the
                 // stand-alone `addConstraint ifNotExists` path (whose IR body cannot be
                 // proven equal to the live catalog), the `createTable` deferred FK
-                // carries the FK definition in the EXACT `pg_get_constraintdef`
-                // spelling (`fk_definition_pg`), so the probe stamps `expect_definition`
+                // carries the FK definition in the dialect canonical spelling
+                // (`fk_definition_for_dialect`), so the probe stamps `expect_definition`
                 // and the decider STRUCTURALLY compares: a present same-name + same-kind
                 // FK whose live definition byte-equals the declared one is an idempotent
                 // SatisfiedNoop (a re-run of the guarded `createTable ifNotExists` over a
@@ -6000,7 +6012,7 @@ fn fk_target_table(definition: &str) -> Option<String> {
 }
 
 /// Extract the policy tail (everything AFTER `REFERENCES <schema>.<target>(id)`)
-/// from a FK definition built by [`fk_definition_pg`] — i.e. the
+/// from a FK definition built by [`fk_definition_for_dialect`] — i.e. the
 /// ` ON UPDATE …`/` ON DELETE …`/` DEFERRABLE INITIALLY DEFERRED` clauses, with
 /// a leading space, or an empty string for a bare FK.
 ///

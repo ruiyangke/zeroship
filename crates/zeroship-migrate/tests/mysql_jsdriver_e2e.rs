@@ -619,6 +619,63 @@ fn fk_roundtrip_ir() -> MigrationIr {
     .expect("FK roundtrip IR is valid")
 }
 
+fn fk_default_action_ir(on_delete: Option<&str>, on_update: Option<&str>) -> MigrationIr {
+    let mut fk_kind = json!({
+        "kind": "fk",
+        "columns": ["account_id"],
+        "referencesTable": "accounts",
+        "referencesColumns": ["id"]
+    });
+    let kind = fk_kind
+        .as_object_mut()
+        .expect("FK kind fixture is an object");
+    if let Some(action) = on_delete {
+        kind.insert("onDelete".to_string(), json!(action));
+    }
+    if let Some(action) = on_update {
+        kind.insert("onUpdate".to_string(), json!(action));
+    }
+
+    serde_json::from_value(json!({
+        "ir_version": CURRENT_IR_VERSION,
+        "name": "mysql_fk_default_action",
+        "owner_app": OWNER,
+        "ops": [
+            {
+                "op": "createTable",
+                "name": "accounts",
+                "existenceGuard": "ifNotExists",
+                "columns": [
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "name", "type": "text", "nullable": false }
+                ],
+                "constraints": [
+                    { "name": "accounts_pkey", "kind": { "kind": "pk", "columns": ["id"] } }
+                ]
+            },
+            {
+                "op": "createTable",
+                "name": "orders",
+                "existenceGuard": "ifNotExists",
+                "columns": [
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "account_id", "type": "int", "nullable": true },
+                    { "name": "code", "type": "text", "nullable": false }
+                ],
+                "constraints": [
+                    { "name": "orders_pkey", "kind": { "kind": "pk", "columns": ["id"] } },
+                    { "name": "orders_account_fkey", "kind": fk_kind }
+                ]
+            }
+        ],
+        "flags": {},
+        "depends_on": [],
+        "supersedes": [],
+        "preconditions": []
+    }))
+    .expect("FK default-action IR is valid")
+}
+
 fn migration_versions(migrations: &[Migration]) -> Vec<String> {
     let mut versions = migrations
         .iter()
@@ -2410,6 +2467,64 @@ fn live_snapshot_roundtrips_and_redeploy_is_noop() {
         assert_eq!(sorted_versions(redeploy.skipped), migration_versions(&migrations));
         println!("mysql_jsdriver_e2e snapshot + redeploy assertions ran");
     }));
+}
+
+#[test]
+fn mysql_fk_default_action_does_not_false_drift() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    for (label, on_delete, on_update) in [
+        ("fkdefault", None, None),
+        ("fkrestrict", Some("restrict"), Some("restrict")),
+        ("fknoaction", Some("noAction"), Some("noAction")),
+    ] {
+        run_isolated_mysql(&live, label, |backend, cfg, _account| Box::pin(async move {
+            let ir = fk_default_action_ir(on_delete, on_update);
+            let migrations =
+                lower_mysql_migrations(&cfg.project_schema, &ir, "fk_default_action");
+            apply_fixture(backend, cfg, &migrations).await;
+
+            let live_snapshot = backend
+                .snapshot_schema(cfg)
+                .await
+                .expect("snapshot live MySQL FK default-action schema");
+            let expected = fold_ops(&ir.ops, SqlDialect::Mysql, &cfg.project_schema)
+                .expect("fold default-action FK IR to expected MySQL snapshot");
+            let drift = diff_snapshots(&expected, &live_snapshot);
+            assert!(
+                drift.is_clean(),
+                "{label}: MySQL FK default/restrict/noAction must not false-drift: {drift:?}"
+            );
+
+            let orders = live_snapshot.tables.get("orders").expect("orders table");
+            let fk = orders
+                .constraints
+                .iter()
+                .find(|c| c.name == "orders_account_fkey")
+                .expect("orders_account_fkey");
+            assert!(
+                !fk.definition.contains("ON DELETE RESTRICT")
+                    && !fk.definition.contains("ON UPDATE RESTRICT")
+                    && !fk.definition.contains("ON DELETE NO ACTION")
+                    && !fk.definition.contains("ON UPDATE NO ACTION"),
+                "{label}: MySQL default FK action must be implicit in canonical definition: {}",
+                fk.definition
+            );
+
+            let redeploy = apply_fixture(backend, cfg, &migrations).await;
+            assert!(
+                redeploy.is_noop(),
+                "{label}: same default-action FK migration set should redeploy as skip: {redeploy:?}"
+            );
+            assert_eq!(sorted_versions(redeploy.skipped), migration_versions(&migrations));
+        }));
+    }
+
+    println!(
+        "mysql_jsdriver_e2e FK default-action canonicalization assertions ran on real :3307"
+    );
 }
 
 #[test]
