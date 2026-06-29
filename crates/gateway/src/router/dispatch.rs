@@ -530,9 +530,12 @@ async fn handle_request(
     // request; we look up the resource-tree CORS policy for the
     // requested path and answer with a 204. If no resource matches,
     // fall through to normal dispatch (which will return 404).
+    let resolved_resource = compiled_route
+        .manifest
+        .lookup_canonical_resource_resolved(&dispatch_path);
     if req.method() == ntex::http::Method::OPTIONS && req.headers().contains_key("origin") {
-        if let Some(policy) = compiled_route.manifest.lookup_resource(&dispatch_path) {
-            if let Some(cors) = &policy.cors {
+        if let Some(resolved) = resolved_resource.as_ref() {
+            if let Some(cors) = &resolved.policy.cors {
                 let origin = req
                     .headers()
                     .get("origin")
@@ -546,22 +549,23 @@ async fn handle_request(
     // Resource-tree dispatch — resources is the only dispatch path.
     // No match → 404 (the `*` catch-all in resources should always
     // match if the user wants a fallback handler).
-    if compiled_route.manifest.lookup_resource(&dispatch_path).is_some() {
-        return execute_resource_tree(
-            req,
-            state,
-            &app_id,
-            &compiled_route,
-            &dispatch_path,
-            tail,
-            body,
-            wall_start,
-        )
-        .await;
-    }
+    let Some(resolved_resource) = resolved_resource else {
+        return HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "no resource matched"}));
+    };
 
-    HttpResponse::NotFound()
-        .json(&serde_json::json!({"error": "no resource matched"}))
+    execute_resource_tree(
+        req,
+        state,
+        &app_id,
+        &compiled_route,
+        resolved_resource,
+        &dispatch_path,
+        tail,
+        body,
+        wall_start,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +582,7 @@ async fn execute_resource_tree(
     state: web::types::State<Arc<GateState>>,
     app_id: &Uuid,
     compiled_route: &crate::sync::CompiledRoute,
+    resolved_resource: crate::compiled::ResolvedResource<'_>,
     dispatch_path: &str,
     tail: &str,
     body: Bytes,
@@ -586,11 +591,7 @@ async fn execute_resource_tree(
     use crate::compiled::ResolvedAction;
     use zeroship_bundle::ProcedureKind;
 
-    // 1. Resolve the resource. No match → 404.
-    let Some(policy) = compiled_route.manifest.lookup_resource(dispatch_path) else {
-        return HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "no resource matched"}));
-    };
+    let policy = resolved_resource.policy;
 
     // 1a. Account gate (G2): the OUTER AND, evaluated BEFORE spend at the SAME
     //     hoist point so a `Suspended` creator's apps 402 across every action
@@ -737,11 +738,7 @@ async fn execute_resource_tree(
     //    resource key into a stable `rule_idx`. Two distinct resource
     //    keys with the same rate_limit shape get independent buckets.
     if let Some(rl) = &policy.rate_limit {
-        let resource_key = compiled_route
-            .manifest
-            .lookup_resource_key(dispatch_path)
-            .unwrap_or_default();
-        let rule_idx = resource_key_hash(&resource_key);
+        let rule_idx = resource_key_hash(resolved_resource.key.as_ref());
         let bucket_id = compute_bucket_id(
             &req,
             rl.per,

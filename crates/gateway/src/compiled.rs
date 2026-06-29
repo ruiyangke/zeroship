@@ -247,13 +247,13 @@ impl PathMatcher {
     /// 1. Exact literal hit — O(1).
     /// 2. Glob match — first hit in the pre-sorted (most specific first)
     ///    list wins.
-    fn find(&self, path: &str) -> Option<String> {
+    fn find_ref(&self, path: &str) -> Option<&str> {
         if let Some(id) = self.literals.get(path) {
-            return Some(id.clone());
+            return Some(id.as_str());
         }
         for g in &self.globs {
             if match_glob_simple(&g.glob, path) {
-                return Some(g.key.clone());
+                return Some(g.key.as_str());
             }
         }
         None
@@ -333,22 +333,28 @@ impl CompiledManifest {
     ///   `rpc:<remainder>` in `rpc_index`.
     /// * Otherwise → `url_index` lookup (most specific wins).
     pub fn lookup_resource(&self, path: &str) -> Option<&EffectivePolicy> {
-        let key = self.lookup_resource_key(path)?;
-        self.effective_policies.get(&key)
+        self.lookup_resource_resolved(path)
+            .map(|resolved| resolved.policy)
     }
 
     /// Resolve the policy and resource key in the same shape dispatch needs.
-    ///
-    /// Baseline implementation intentionally mirrors the pre-dedup dispatch
-    /// sequence: a gate `lookup_resource`, the execute-path `lookup_resource`,
-    /// then `lookup_resource_key` for the per-resource rate limiter.
     pub fn lookup_resource_resolved(&self, path: &str) -> Option<ResolvedResource<'_>> {
-        self.lookup_resource(path)?;
-        let policy = self.lookup_resource(path)?;
-        let key = self.lookup_resource_key(path)?;
+        let canonical = canonicalize_path(path);
+        self.lookup_canonical_resource_resolved(&canonical)
+    }
+
+    /// Resolve a resource from an already-canonical path. Dispatch uses this
+    /// after `canonicalize_dispatch_path` so the request path is normalized
+    /// exactly once before policy and rate-limit resolution.
+    pub(crate) fn lookup_canonical_resource_resolved(
+        &self,
+        canonical_path: &str,
+    ) -> Option<ResolvedResource<'_>> {
+        let key = self.lookup_canonical_resource_key(canonical_path)?;
+        let policy = self.effective_policies.get(key)?;
         Some(ResolvedResource {
             policy,
-            key: Cow::Owned(key),
+            key: Cow::Borrowed(key),
         })
     }
 
@@ -364,10 +370,15 @@ impl CompiledManifest {
         // caller (CORS preflight, rate-limit keying, this lookup) safe even if
         // a future callsite forgets the 400 guard.
         let canonical = canonicalize_path(path);
+        self.lookup_canonical_resource_key(&canonical)
+            .map(str::to_owned)
+    }
+
+    fn lookup_canonical_resource_key(&self, canonical: &str) -> Option<&str> {
         if let Some(rest) = canonical.strip_prefix("/__zeroship/v1/") {
-            return self.rpc_index.get(rest).cloned();
+            return self.rpc_index.get(rest).map(String::as_str);
         }
-        self.url_index.find(&canonical)
+        self.url_index.find_ref(canonical)
     }
 
     /// Look up an asset (build-time or runtime-emitted) by path.
