@@ -1456,6 +1456,39 @@ mod tests {
     }
 
     #[test]
+    fn insert_on_conflict_do_update_renders_fnsynth_without_bind_pg() {
+        let oc = OnConflict {
+            columns: vec!["code".into()],
+            do_update: Some(BTreeMap::from([(
+                "updated_at".to_string(),
+                IrValue::Expr(Expr::FnSynth {
+                    r#fn: SynthFn::Now,
+                    args: vec![],
+                }),
+            )])),
+        };
+        let a = assemble_insert(
+            SCHEMA,
+            SqlDialect::Postgres,
+            "status_codes",
+            &["code".into(), "label".into()],
+            &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
+            Some(&oc),
+        )
+        .unwrap();
+        assert_eq!(
+            a.template,
+            "INSERT INTO \"app_proj\".\"status_codes\" (\"code\", \"label\") VALUES ($1, $2) \
+             ON CONFLICT (\"code\") DO UPDATE SET \"updated_at\" = now()"
+        );
+        assert_eq!(
+            a.binds,
+            vec![BindValue::Int(1), BindValue::Text("ok".into())],
+            "fnSynth(now) in doUpdate must be DB-evaluated, not a bind"
+        );
+    }
+
+    #[test]
     fn insert_on_conflict_do_nothing_pg() {
         let oc = OnConflict { columns: vec!["code".into()], do_update: None };
         let a = assemble_insert(
