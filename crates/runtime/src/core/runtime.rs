@@ -434,6 +434,13 @@ impl Runtime {
         self.inner.borrow().idle_gc_fire_count.get()
     }
 
+    /// Test-only: true while this isolate has fetch/RPC promises waiting for
+    /// the pump to settle or cancel them.
+    #[doc(hidden)]
+    pub fn has_pending_requests_for_test(&self) -> bool {
+        self.inner.borrow().has_pending_requests()
+    }
+
     /// Hold an explicit lease that makes this isolate un-evictable by the
     /// worker cache until the returned guard is dropped.
     pub fn lease_isolate(&self) -> RuntimeLease {
@@ -1357,6 +1364,9 @@ impl RuntimeInner {
                 if should_yield {
                     compio::time::sleep(Duration::ZERO).await;
                 }
+            } else {
+                let Some(runtime) = runtime.upgrade() else { return; };
+                runtime.borrow_mut().cleanup_cancelled_requests();
             }
         }
     }
