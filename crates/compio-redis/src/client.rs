@@ -134,6 +134,7 @@ impl Client {
     /// gating it off the public surface keeps it from being an app/SDK
     /// footgun. It still applies the same `DEFAULT_CONNECT_TIMEOUT` as
     /// `connect`, so even internal callers get a bounded connect.
+    #[cfg(test)]
     pub(crate) async fn connect_tcp(addr: (IpAddr, u16)) -> Result<Self> {
         let stream = timeout(DEFAULT_CONNECT_TIMEOUT, TcpStream::connect(addr))
             .await

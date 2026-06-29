@@ -62,13 +62,6 @@ use crate::streams::slots;
 // TextEncoderStream
 // ---------------------------------------------------------------------------
 
-/// Heap-resident encoder state shared between the underlying
-/// transformer's `transform` callback and the class instance. The
-/// callback's data slot owns a raw pointer to the box; the class
-/// instance holds a `v8::Global` to the function whose finalizer will
-/// reclaim the box on GC. We stick to UTF-8 unconditionally per spec.
-struct EncoderState;
-
 /// `TextEncoderStream` — WHATWG Encoding §6.
 ///
 /// IDL:
@@ -95,15 +88,11 @@ impl TextEncoderStream {
         // 1. Build the underlyingTransformer object: { transform, flush }.
         //    transform delegates to UTF-8 encode; flush is a no-op (every
         //    chunk is fully encoded inline — UTF-8 has no carryover).
-        let state: Rc<RefCell<EncoderState>> = Rc::new(RefCell::new(EncoderState));
-
         let transformer = v8::Object::new(scope);
 
         let transform_fn = build_payload_function(
             scope,
-            EncoderPayload {
-                state: state.clone(),
-            },
+            EncoderPayload,
             encoder_transform_callback,
         );
         let key = v8::String::new(scope, "transform").unwrap();
@@ -145,9 +134,7 @@ impl TextEncoderStream {
 }
 
 #[allow(missing_debug_implementations)]
-struct EncoderPayload {
-    state: Rc<RefCell<EncoderState>>,
-}
+struct EncoderPayload;
 
 /// `transform(chunk, controller)` for TextEncoderStream.
 ///

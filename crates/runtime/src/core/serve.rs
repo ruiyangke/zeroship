@@ -16,10 +16,12 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(not(feature = "runtime_native_websocket"))]
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+#[cfg(not(feature = "runtime_native_websocket"))]
 use std::task::Waker;
 use std::time::Duration;
 
@@ -1455,6 +1457,7 @@ async fn native_ws_pump(
     reader_result
 }
 
+#[cfg(not(feature = "runtime_native_websocket"))]
 enum WsEvent {
     Frame(Option<(u8, Vec<u8>)>),
     Outgoing,
@@ -1464,18 +1467,21 @@ enum WsEvent {
 /// Avoids the overhead of `Fuse` wrappers + `futures::select!` (saves ~9% CPU).
 ///
 /// SAFETY: `read_fut` is structurally pinned.
+#[cfg(not(feature = "runtime_native_websocket"))]
 struct WsPollBoth<F> {
     read_fut: F,
     outgoing_ready: Rc<Cell<bool>>,
     pump_waker: Rc<RefCell<Option<Waker>>>,
 }
 
+#[cfg(not(feature = "runtime_native_websocket"))]
 impl<F> WsPollBoth<F> {
     fn new(read_fut: F, outgoing_ready: Rc<Cell<bool>>, pump_waker: Rc<RefCell<Option<Waker>>>) -> Self {
         Self { read_fut, outgoing_ready, pump_waker }
     }
 }
 
+#[cfg(not(feature = "runtime_native_websocket"))]
 impl<F: std::future::Future<Output = Option<(u8, Vec<u8>)>>> std::future::Future for WsPollBoth<F> {
     type Output = WsEvent;
 

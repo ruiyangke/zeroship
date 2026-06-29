@@ -368,12 +368,6 @@ fn append_part_bytes(
     Ok(())
 }
 
-/// True for objects and functions; matches WebIDL "object" semantics
-/// (which excludes primitives but includes callable functions).
-fn is_object_like(v: v8::Local<v8::Value>) -> bool {
-    v.is_object() || v.is_function()
-}
-
 /// True if `obj` is an instance of `globalThis.Blob` per ES `instanceof`.
 /// Used as the brand check inside the `BlobPart` union dispatch — we
 /// can't rely solely on internal-field 0 being an External (other
@@ -418,6 +412,9 @@ fn is_blob_instance(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>) -> boo
 /// behaviour identical.
 #[derive(Default, Debug, WebIdlDict)]
 pub(crate) struct BlobPropertyBag {
+    // Parsed for WebIDL dictionary member access order; Blob construction
+    // currently preserves transparent/native line endings identically.
+    #[allow(dead_code)]
     pub endings: Option<String>,
     #[webidl_name = "type"]
     pub type_: Option<String>,

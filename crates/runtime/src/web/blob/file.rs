@@ -100,6 +100,8 @@ impl Default for File {
 /// overflow (current epoch fits in ~41 bits).
 #[derive(Default, Debug, WebIdlDict)]
 pub(crate) struct FilePropertyBag {
+    // Parsed for WebIDL dictionary member access order inherited from Blob.
+    #[allow(dead_code)]
     pub endings: Option<String>,
     #[webidl_name = "lastModified"]
     pub last_modified: Option<f64>,

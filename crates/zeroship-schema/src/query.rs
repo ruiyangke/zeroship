@@ -822,7 +822,7 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
 ///
 /// Call this from every code path that translates a creator-declared
 /// schema field into DDL (currently `field_to_column`). Filter-time
-/// validators (`build_field_condition`, `build_vector_search`,
+/// validators (`build_field_condition_with_dialect`, `build_vector_search`,
 /// `build_spatial_near`) must continue to call the underlying
 /// [`validate_field_name`] so creators can keep writing
 /// `db.users.find({ id: "..." })`.
@@ -5195,7 +5195,7 @@ fn build_having_inner(
     }
 }
 
-/// Build a single HAVING condition. Like `build_field_condition` but takes
+/// Build a single HAVING condition. Like `build_field_condition_with_dialect` but takes
 /// a pre-resolved column expression (which may be an aggregate like `COUNT(*)`).
 fn build_having_condition(
     col_expr: &str,
@@ -5342,21 +5342,6 @@ fn build_where_with_dialect_inner(
             "filter must be an object or null".to_string(),
         )),
     }
-}
-
-/// Build a condition for a single field.
-///
-/// **P5.5 PR 1** — runs `validate_field_name` on the filter key so a
-/// query like `db.users.find({ ssn_masked: "..." })` is refused with
-/// the same `InvalidIdent` error path that DDL-time validation uses.
-/// This fences the `_masked` reserved suffix at filter time so the
-/// creator can never query against a sibling column through the SDK.
-fn build_field_condition(
-    field: &str,
-    value: &Value,
-    params: &mut Vec<String>,
-) -> Result<String, QueryError> {
-    build_field_condition_with_dialect(field, value, params, SqlDialect::Postgres)
 }
 
 fn build_field_condition_with_dialect(
@@ -5515,6 +5500,7 @@ fn build_order_by(order: &Value) -> Result<String, QueryError> {
     build_order_by_with_dialect(order, SqlDialect::Postgres)
 }
 
+#[cfg(test)]
 fn build_order_by_with_dialect(order: &Value, dialect: SqlDialect) -> Result<String, QueryError> {
     build_order_by_with_validator(order, dialect, validate_field_name)
 }
@@ -9257,7 +9243,7 @@ mod tests {
 
     /// Reserved-name validator fires at filter time too: a query like
     /// `db.users.find({ ssn_masked: "..." })` is refused via
-    /// `build_field_condition` calling `validate_field_name`.
+    /// `build_field_condition_with_dialect` calling `validate_field_name`.
     #[test]
     fn build_where_rejects_reserved_masked_suffix_in_filter() {
         let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });

@@ -214,6 +214,7 @@ impl DiskBlobTemp {
     }
 
     /// The temp path, for the no-clobber publish primitive.
+    #[cfg(test)]
     fn path(&self) -> &Path {
         self.path
             .as_deref()

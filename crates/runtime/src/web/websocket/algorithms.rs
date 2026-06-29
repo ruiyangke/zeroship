@@ -21,9 +21,7 @@ use std::collections::HashSet;
 
 use zeroship_runtime_macros::WebIdlDict;
 
-use crate::dom::event_target::{
-    add_internal_listener, listeners_of, remove_internal_listener,
-};
+use crate::dom::event_target::{add_internal_listener, remove_internal_listener};
 use crate::state::OpError;
 
 use super::constants::{
@@ -376,41 +374,5 @@ where
     match slot_picker(&handles) {
         Some(g) => v8::Local::new(scope, g.clone()).into(),
         None => v8::null(scope).into(),
-    }
-}
-
-// Helper for tests / dispatch path: cache the JS wrapper and (re)install
-// any pending EventHandler listeners. Lazy-attaches the listener Rc.
-pub(crate) fn ensure_handler_listeners_installed(
-    scope: &mut v8::PinScope,
-    wrapper: v8::Local<v8::Object>,
-    impl_: &WebSocketImpl,
-) {
-    // Cache the wrapper for subsequent setter installations.
-    let mut handles = impl_.cached_handles.borrow_mut();
-    if handles.ws_obj.is_none() {
-        handles.ws_obj = Some(v8::Global::new(scope, wrapper));
-    }
-    // Make sure the listener Rc is attached — needed for dispatchEvent
-    // to pick up listeners on this wrapper.
-    let _ = listeners_of; // suppress unused-import; install via attach
-    crate::dom::event_target::attach_listeners(scope, wrapper);
-
-    // (Re)install any handlers stored before the wrapper was cached.
-    let pairs = [
-        ("open", handles.on_open.clone()),
-        ("message", handles.on_message.clone()),
-        ("error", handles.on_error.clone()),
-        ("close", handles.on_close.clone()),
-    ];
-    drop(handles); // release the borrow before re-entering listener APIs.
-    for (event, slot) in pairs.into_iter() {
-        if let Some(g) = slot {
-            // Idempotent: add_internal_listener is dedup'd on
-            // (callback, capture). We call remove first to ensure no
-            // stale listeners remain from a prior wrapper-bind cycle.
-            remove_internal_listener(scope, wrapper, event);
-            add_internal_listener(scope, wrapper, event, g);
-        }
     }
 }

@@ -46,8 +46,8 @@ struct CompiledGlob {
 #[derive(Debug, Clone)]
 enum GlobSegment {
     Literal(String),
-    SingleCapture(String),
-    CatchAll(String),
+    SingleCapture,
+    CatchAll,
     Star,
 }
 
@@ -267,7 +267,7 @@ fn match_glob_simple(glob: &CompiledGlob, path: &str) -> bool {
     let mut xi = 0;
     while pi < glob.segments.len() {
         let seg = &glob.segments[pi];
-        if matches!(seg, GlobSegment::CatchAll(_)) {
+        if matches!(seg, GlobSegment::CatchAll) {
             return true;
         }
         if xi >= path_segs.len() {
@@ -280,12 +280,12 @@ fn match_glob_simple(glob: &CompiledGlob, path: &str) -> bool {
                     return false;
                 }
             }
-            GlobSegment::SingleCapture(_) | GlobSegment::Star => {
+            GlobSegment::SingleCapture | GlobSegment::Star => {
                 if x.is_empty() {
                     return false;
                 }
             }
-            GlobSegment::CatchAll(_) => unreachable!(),
+            GlobSegment::CatchAll => unreachable!(),
         }
         pi += 1;
         xi += 1;
@@ -711,11 +711,9 @@ fn compile_glob(pattern: &str) -> CompiledGlob {
                 i + 1 == total,
                 "glob catch-all [...name] must be the last segment in `{pattern}`",
             );
-            let name = &seg[4..seg.len() - 1];
-            segments.push(GlobSegment::CatchAll(name.to_string()));
+            segments.push(GlobSegment::CatchAll);
         } else if seg.starts_with('[') && seg.ends_with(']') {
-            let name = &seg[1..seg.len() - 1];
-            segments.push(GlobSegment::SingleCapture(name.to_string()));
+            segments.push(GlobSegment::SingleCapture);
         } else if *seg == "*" {
             segments.push(GlobSegment::Star);
         } else {

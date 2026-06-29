@@ -3186,6 +3186,7 @@ fn settle_rpc_promise(
 // ---------------------------------------------------------------------------
 
 /// Look up a WebSocket in the global `__wsRegistry` by ID and call a method on it.
+#[cfg(not(feature = "runtime_native_websocket"))]
 fn call_ws_method(
     scope: &mut v8::PinScope,
     ws_id: u32,

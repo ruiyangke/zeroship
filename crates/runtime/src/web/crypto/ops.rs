@@ -14,10 +14,10 @@
 use super::crypto_key;
 use super::helpers::{read_buffer_source, read_optional_buffer_source};
 use super::key_material::{
-    AesKeyAlgorithm, CryptoKeyState, EcKeyAlgorithm, HashAlgo, HmacKeyAlgorithm, KeyAlgorithm,
+    AesKeyAlgorithm, CryptoKeyState, EcKeyAlgorithm, HmacKeyAlgorithm, KeyAlgorithm,
     KeyFormat, KeyMaterial, KeyType, KeyUsage, NamedCurve, RsaHashedKeyAlgorithm,
 };
-use super::registry::{self, AlgorithmName, NormalizedHead, Operation};
+use super::registry::{self, AlgorithmName, Operation};
 use crate::enforce_range::read_enforce_range_u32;
 use crate::state::OpError;
 
@@ -457,23 +457,6 @@ pub fn unwrap_key<'s>(
 /// equal to `normalizedAlgorithm.name`, throw `InvalidAccessError`."
 fn alg_matches_key(name: AlgorithmName, key_state: &CryptoKeyState) -> bool {
     name.canonical() == key_state.algorithm.name()
-}
-
-/// Resolve a `_NormalizedHead` head's hash field, defaulting to the
-/// key's stored hash if absent (some ops like `RSA-PSS sign` rely on
-/// the key's hash slot).
-pub(super) fn resolve_hash_or_key_hash(
-    head: &NormalizedHead,
-    key_state: &CryptoKeyState,
-) -> Result<HashAlgo, OpError> {
-    if let Some(h) = head.hash {
-        return Ok(h);
-    }
-    match &key_state.algorithm {
-        KeyAlgorithm::RsaHashed(r) => Ok(r.hash),
-        KeyAlgorithm::Hmac(h) => Ok(h.hash),
-        _ => Err(OpError::dom("NotSupportedError", "missing 'hash' field")),
-    }
 }
 
 // Suppress dead warning for unused enum variants in this stub-heavy

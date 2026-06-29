@@ -256,22 +256,6 @@ fn escape_json_string(s: &str, out: &mut String) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// V8 value serialization
-// ---------------------------------------------------------------------------
-
-/// Serialize a V8 value to JSON via `JSON.stringify`. Returns a fallback
-/// `"null"` if stringification fails (cycle, non-serializable). Matches
-/// the web platform's convention: `undefined` round-trips as `null`.
-fn v8_to_json_string(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> String {
-    if value.is_undefined() {
-        return "null".to_string();
-    }
-    v8::json::stringify(scope, value)
-        .map(|s| s.to_rust_string_lossy(scope))
-        .unwrap_or_else(|| "null".to_string())
-}
-
 /// Extract a human-readable error message from a V8 exception value.
 /// Reads `.message` when present (Error instances); falls back to
 /// `String(exception)` for other throwables (plain strings, numbers).

@@ -872,20 +872,6 @@ fn response_state_ptr_mut<'s>(
     Some(ptr)
 }
 
-fn response_state_ptr<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    obj: v8::Local<'s, v8::Object>,
-) -> Option<*const crate::fetch_response::ResponseState> {
-    let ext = obj
-        .get_internal_field(scope, 0)
-        .and_then(|v| v8::Local::<v8::External>::try_from(v).ok())?;
-    let ptr = ext.value() as *const crate::fetch_response::ResponseState;
-    if ptr.is_null() {
-        return None;
-    }
-    Some(ptr)
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
