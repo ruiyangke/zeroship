@@ -37,46 +37,51 @@ Run `nix develop --command bash tests/golden_path.sh` (needs the release binarie
 REAL vite-built `.zship` (not a hand-packed fixture):
 
 1. ✅ `examples/starter` builds to `dist/app.zship` via the real vite-plugin pipeline.
-2. ✅ The platform stack (control + worker + gateway) comes up healthy on the
-   current HEAD binaries.
-3. ⏭️ Create-app + deploy + serve runs only when `ZEROSHIP_TOKEN=<pat>` is set
-   (see the auth gap below) — point it at a full platform with auth and re-run.
+2. ✅ A fresh DB is migrated + the platform stack (control + worker + gateway)
+   comes up healthy on the current HEAD binaries.
+3. ✅ The app is provisioned + deployed (`dev-provision`, dev-only) and the
+   **gateway serves it**: `GET /apps/<name>/` returns the app's `index.html` + JS
+   asset, and the **RPC server function executes** in the worker and returns data
+   (`/__zeroship/v1/getMessages`). The whole in-monorepo chain passes **9/9**.
 
-## The two productization gaps (the roadmap to "easy create + deploy")
+## Both halves are now proven end-to-end
 
-These are the concrete things to build to make the golden path frictionless for
-external creators and AI agents:
+### External build (`tests/external_chain.sh`) — gap #1 PROVEN closable
+An app **outside the monorepo** installs `@zeroship/*` **from a registry** and
+builds a deploy artifact, with zero workspace/file coupling. The script stands up
+the `verdaccio` compose service (`config/verdaccio/`), publishes all SDKs
+(`scripts/publish-sdks.sh`), scaffolds with `create-zeroship-app` into a temp
+dir, `npm install`s (`@zeroship:registry=http://localhost:4873`) — verified to
+resolve every `@zeroship/*` from Verdaccio with **no `workspace:`/`file:` links**
+— and runs `npm run build` → `dist/app.zship`. So the SDK-distribution mechanism
+works; the remaining *productization* step is hosting a real registry (npmjs or a
+hosted Verdaccio) instead of the local one. (DB-backed scaffolds that *regenerate*
+schema also need the `zeroship-migrate-js` toolchain on PATH; the committed
+template ships pre-generated `generated/zeroship/` so a first build doesn't.)
 
-### 1. SDK distribution — external creators can't `npm install @zeroship/*` yet
-The `@zeroship/*` SDKs (`@zeroship/rpc`, `@zeroship/server`, `@zeroship/vite-plugin`,
-`@zeroship/db`, …) are **workspace-only** (`workspace:*`); they resolve only
-inside this monorepo. A creator building on their own machine needs them
-installable. Options (existing track:
-`docs/decisions/2026-05-26-sdk-distribution-private-registry.md`):
-publish to npm, or serve a private registry (Verdaccio). Until then the starter
-builds only inside the monorepo.
-
-### 2. Frictionless deploy auth — no dev/CI/agent token path
-App CRUD + deploy require a **Personal Access Token (PAT)**, minted only by the
-platform's auth stack via `zeroship login` (OAuth device flow). There is
-intentionally **no** master-key/dev shortcut for user-level app CRUD, and
-`--dev-insecure` only relaxes admin/control/webhook secrets (not user auth), so
-a PAT cannot be forged for a local control. For "an AI agent / CI deploys" to be
-smooth, we need either:
-- a headless-friendly `zeroship login` against the **dev auth tier**
-  (`docs/reference/auth-dev-tier.md`) that auto-mints a PAT in dev, and/or
-- a scoped, deploy-only **CI/agent token** path.
-
-This is the single biggest blocker for end-to-end `golden_path.sh` (the create +
-deploy + serve steps). Closing it lets the script prove the *whole* chain.
+### Deploy auth — unblocked for local/CI; real flow uses `zeroship login`
+App CRUD + deploy require a **PAT**, minted only by the platform's auth stack via
+`zeroship login` (OAuth device flow) — there is intentionally **no**
+master-key/dev shortcut, and a PAT can't be forged for a local control. For
+**local/CI** this is unblocked by `dev-provision` (`crates/control/src/bin/`):
+a DEV-ONLY internal provisioning tool (gated on `ZEROSHIP_DEV_INSECURE=1`,
+needs direct DB+blob access — not a network endpoint; it reuses the same
+`zeroship_bundle::ingest` + `Registry::set_deploy_with_manifest` path
+`bootstrap_console` uses, and does not touch the production `/api/apps` PAT path).
+For the **real agent flow** against a deployed platform, the path is
+`zeroship login` (one-time) → `zeroship deploy`.
 
 ## Status
 
-- ✅ Starter scaffold + agent `CLAUDE.md` (`examples/starter/`).
+- ✅ Starter scaffold + agent `CLAUDE.md` (`examples/starter/`), incl. the SEC-5
+  RPC-auth default + public opt-in (`src/server/config.ts`).
 - ✅ Real build → `.zship` (vite-plugin) — proven.
-- ✅ Stack bringup (control/worker/gateway) — proven on HEAD.
-- ☐ Frictionless deploy auth (gap #2) — next.
-- ☐ SDK distribution for external creators (gap #1).
+- ✅ In-monorepo chain: migrate → stack → deploy → serve + RPC — **9/9**
+  (`tests/golden_path.sh`).
+- ✅ External build: registry-installed SDKs, scaffolded app builds outside the
+  monorepo — **PASS** (`tests/external_chain.sh`) — gap #1 mechanism proven.
+- ✅ Local/CI deploy auth unblocked (`dev-provision`); real flow = `zeroship login`.
+- ☐ Host a real SDK registry (npmjs / hosted Verdaccio) for production gap #1.
 - ☐ Smooth one-step deploy UX (provision-app-if-needed; a `zeroship deploy` that
   creates the app on first push instead of requiring a pre-created `--app`).
 - ☐ Agent integration: a control-plane MCP server / Claude Code skill so the
