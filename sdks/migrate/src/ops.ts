@@ -1617,11 +1617,25 @@ function normalizeInsertRows<R extends Row = Row>(
   if (rows === undefined) throw structuredError("OP_INVALID", `${what}: rows is required`);
   const arr = (Array.isArray(rows) ? rows : [rows]) as R[];
   const columns = arr.length > 0 ? Object.keys(arr[0]) : [];
-  const positional = arr.map((r) =>
-    columns.map((col) =>
-      Object.prototype.hasOwnProperty.call(r, col) ? toIrValue((r as Row)[col]) : null,
-    ),
-  );
+  const firstKeySet = new Set(columns);
+  const normalized = arr.map((r) => {
+    const keys = Object.keys(r);
+    const values: Record<string, unknown> = {};
+    for (const key of keys) values[key] = toIrValue((r as Row)[key]);
+    return { keys, values };
+  });
+  for (let i = 0; i < normalized.length; i++) {
+    const keys = normalized[i].keys;
+    const sameShape =
+      keys.length === columns.length && keys.every((key) => firstKeySet.has(key));
+    if (!sameShape) {
+      throw structuredError(
+        "OP_INVALID",
+        `${what}: row ${i} has keys [${keys.join(", ")}], expected [${columns.join(", ")}]; ragged insert rows are not allowed`,
+      );
+    }
+  }
+  const positional = normalized.map(({ values }) => columns.map((col) => values[col]));
   return { columns, rows: positional };
 }
 

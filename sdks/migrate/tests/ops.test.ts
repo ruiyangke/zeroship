@@ -174,6 +174,13 @@ test("insert row-object normalizes to columns + positional rows", () => {
   assert.deepEqual(ops[0].rows, [[1, "a"], [2, "b"]]);
 });
 
+test("insert row-object rejects ragged later-row keys", () => {
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ a: 1 }, { a: 2, b: 2 }] } as any)),
+    (e: any) => e.code === "OP_INVALID" && /ragged insert rows/.test(e.message),
+  );
+});
+
 test("insert normalizes a bigint to {decimal} and Uint8Array to {bytes:base64}", () => {
   const ops = record(() =>
     table("t").insert({ rows: [{ big: 9007199254740993n, raw: new Uint8Array([1, 2, 3]) }] }),
@@ -190,6 +197,10 @@ test("non-native function values fail closed instead of recording as JSON null",
 
   assert.throws(
     () => record(() => table("t").insert({ rows: [{ v: () => 42 }] } as any)),
+    isInvalidFunction,
+  );
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ a: 1 }, { b: () => 42 }] } as any)),
     isInvalidFunction,
   );
   assert.throws(
