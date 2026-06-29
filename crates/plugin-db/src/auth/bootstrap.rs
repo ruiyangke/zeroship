@@ -1418,6 +1418,7 @@ pub fn per_app_role_name(app_id: &str) -> String {
 /// The role name flows through [`per_app_role_name`] (validated +
 /// normalised) and is double-quoted, so this is injection-safe even
 /// though it interpolates.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn set_local_role_sql(app_id: &str) -> String {
     format!("SET LOCAL ROLE {}", crate::query::quote_ident(&per_app_role_name(app_id)))
 }
@@ -1426,12 +1427,14 @@ pub fn set_local_role_sql(app_id: &str) -> String {
 /// non-transactional client-SQL path. MUST be paired with
 /// [`reset_role_sql`] before the connection returns to the pool, or the
 /// next checkout inherits the constrained role.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn set_role_sql(app_id: &str) -> String {
     format!("SET ROLE {}", crate::query::quote_ident(&per_app_role_name(app_id)))
 }
 
 /// `RESET ROLE` — restore the session's original (login) role. Pairs
 /// with [`set_role_sql`] on the non-transactional path.
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn reset_role_sql() -> &'static str {
     "RESET ROLE"
 }

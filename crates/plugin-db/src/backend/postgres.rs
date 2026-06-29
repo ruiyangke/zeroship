@@ -14,16 +14,18 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::diff::LiveSchema;
 use crate::error::DbError;
 
 use super::{
-    AuditWriter, DialectBuilder, FullTextIndex, GeoPoint, IndexBuilder, LockManager,
-    NamespaceManager, PgLockManager, PgSqlExecutor, SchemaIntrospect, SpatialIndex, SqlExecutor,
-    VectorIndex, VectorMetric,
+    DialectBuilder, FullTextIndex, GeoPoint, LockManager, NamespaceManager, PgSqlExecutor,
+    SpatialIndex, SqlExecutor, VectorIndex, VectorMetric,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
+#[cfg(any(test, feature = "test-helpers"))]
+use super::{AuditWriter, IndexBuilder, PgLockManager, SchemaIntrospect};
 
 /// Single concrete impl of [`Backend`] backed by `compio_postgres`.
 ///
@@ -160,6 +162,7 @@ impl SqlExecutor for PostgresBackend {
         Ok(rows.len() as u64)
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
         // Multi-statement DDL (CREATE TABLE + implicit system-field
         // CREATE INDEXes + `COMMENT ON COLUMN` mask sentinels) must use
@@ -276,6 +279,7 @@ impl NamespaceManager for PostgresBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl SchemaIntrospect for PostgresBackend {
     type LiveSchema = LiveSchema;
 
@@ -297,6 +301,7 @@ impl SchemaIntrospect for PostgresBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl IndexBuilder for PostgresBackend {
     async fn create_index_with_recovery(
         &self,
@@ -333,6 +338,7 @@ impl PgSqlExecutor for PostgresBackend {
 // `create_index_with_recovery_audited` continues to call the free
 // function directly so it can chain `update_audit_status` after, no
 // behaviour change on the PG audit path.
+#[cfg(any(test, feature = "test-helpers"))]
 impl AuditWriter for PostgresBackend {
     async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
         crate::audit::ensure_audit_table_exists(self.pool.as_ref(), app_id).await
@@ -425,6 +431,7 @@ impl PostgresBackend {
 }
 
 impl VectorIndex for PostgresBackend {
+    #[cfg(any(test, feature = "test-helpers"))]
     async fn ensure_vector_index(
         &self,
         app_id: &str,
@@ -546,6 +553,7 @@ impl VectorIndex for PostgresBackend {
 // ---------------------------------------------------------------------------
 
 impl FullTextIndex for PostgresBackend {
+    #[cfg(any(test, feature = "test-helpers"))]
     async fn ensure_fts_index(
         &self,
         app_id: &str,
@@ -777,6 +785,7 @@ impl PostgresBackend {
 }
 
 impl SpatialIndex for PostgresBackend {
+    #[cfg(any(test, feature = "test-helpers"))]
     async fn ensure_spatial_index(
         &self,
         app_id: &str,
@@ -845,6 +854,7 @@ impl SpatialIndex for PostgresBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl PgLockManager for PostgresBackend {
     async fn acquire_pooled_client_for_lock<'p>(
         &'p self,
@@ -882,6 +892,7 @@ impl PgLockManager for PostgresBackend {
 pub(crate) struct PgDialect;
 
 impl DialectBuilder for PgDialect {
+    #[cfg(any(test, feature = "test-helpers"))]
     fn sql_dialect(&self) -> crate::query::SqlDialect {
         crate::query::SqlDialect::Postgres
     }
@@ -906,6 +917,7 @@ impl DialectBuilder for PgDialect {
     /// already (`CREATE [UNIQUE] INDEX CONCURRENTLY …`); the `online`
     /// flag has no separate consumer at PR 3. PR 5 may reshape this
     /// when SQLite's `IndexBuilder` lands.
+    #[cfg(any(test, feature = "test-helpers"))]
     fn build_create_index(
         &self,
         spec: &crate::query::IndexSpec,
@@ -957,6 +969,7 @@ impl DialectBuilder for PgDialect {
 /// separate field. The bodies delegate to the `PgDialect` ZST; rustc
 /// inlines the value away because every method is `&self`.
 impl DialectBuilder for PostgresBackend {
+    #[cfg(any(test, feature = "test-helpers"))]
     fn sql_dialect(&self) -> crate::query::SqlDialect {
         PgDialect.sql_dialect()
     }
@@ -969,6 +982,7 @@ impl DialectBuilder for PostgresBackend {
         PgDialect.build_ensure_app_schema(app_id)
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     fn build_create_index(
         &self,
         spec: &crate::query::IndexSpec,
@@ -1013,6 +1027,7 @@ impl Backend for PostgresBackend {}
 // behind the same `Backend::create_index_with_recovery` signature.
 // ---------------------------------------------------------------------------
 
+#[cfg(any(test, feature = "test-helpers"))]
 async fn create_index_with_recovery_audited(
     pool: &compio_postgres::Pool,
     app_id: &str,
@@ -1870,6 +1885,7 @@ mod backup_pg {
 
 /// DB-9: validate FTS source column names with the shared identifier fence
 /// before they are spliced unquoted into the `tsvector_update_trigger` DDL.
+#[cfg(any(test, feature = "test-helpers"))]
 fn validate_fts_columns(columns: &[String]) -> Result<(), DbError> {
     for col in columns {
         crate::query::validate_field_name(col).map_err(DbError::from)?;

@@ -16,6 +16,7 @@
 //! hooks have no PR-3 consumer.
 
 use crate::backend::DialectBuilder;
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::query::IndexSpec;
 
 /// SQLite-flavoured dialect. Zero-sized — every method is pure.
@@ -27,6 +28,7 @@ use crate::query::IndexSpec;
 pub(crate) struct SqliteDialect;
 
 impl DialectBuilder for SqliteDialect {
+    #[cfg(any(test, feature = "test-helpers"))]
     fn sql_dialect(&self) -> crate::query::SqlDialect {
         crate::query::SqlDialect::Sqlite
     }
@@ -79,6 +81,7 @@ impl DialectBuilder for SqliteDialect {
     /// `IndexSpec` does not carry the collection name separately, so we
     /// recover the attached-schema/table target from the deterministic PG
     /// `spec.sql` shape emitted by `query.rs`.
+    #[cfg(any(test, feature = "test-helpers"))]
     fn build_create_index(&self, spec: &IndexSpec, _online: bool) -> String {
         if !matches!(spec.kind, crate::query::IndexKind::BTree) {
             tracing::debug!(
@@ -183,6 +186,7 @@ impl DialectBuilder for SqliteDialect {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn extract_pg_index_target(sql: &str) -> Option<(String, String)> {
     let (_, on_tail) = sql.split_once(" ON ")?;
     let (target, _) = on_tail.split_once(" (")?;
@@ -190,6 +194,7 @@ fn extract_pg_index_target(sql: &str) -> Option<(String, String)> {
     Some((unquote_ident(app)?, unquote_ident(collection)?))
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn unquote_ident(ident: &str) -> Option<String> {
     let inner = ident.strip_prefix('"')?.strip_suffix('"')?;
     Some(inner.replace("\"\"", "\""))

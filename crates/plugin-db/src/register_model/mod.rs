@@ -45,15 +45,20 @@
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::{AuditWriter, DialectBuilder, RegisterBackend};
 use crate::context;
 use crate::error::DbError;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod apply;
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod bootstrap;
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod plan;
 pub(crate) mod sqlite_engine;
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod validate;
 
 /// `zeroship.db.registerModel(collection, schemaJson)` → `Promise<void>`
@@ -253,6 +258,7 @@ async fn exec_register_model(
 /// `apply` but no concrete-type leak remains in this signature. Open
 /// Q5 resolution per `docs/proposals/p0-implementation-plan.md`
 /// §"PR 3" + §3 Q5 and `docs/proposals/db-system-design.md` §7.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn run_pipeline<B: RegisterBackend + DialectBuilder + AuditWriter>(
     backend: &B,
     app_id: &str,

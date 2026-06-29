@@ -17,9 +17,16 @@
 
 #![allow(unsafe_code)]
 
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
 use zeroship_plugin_db::v8_classes::collection::Collection;
 use zeroship_plugin_db::v8_classes::db::{mint_db, Db};
-use zeroship_runtime::init_v8;
+use zeroship_runtime::{init_v8, RuntimeState, SharedState};
+
+fn install_runtime_state(scope: &mut v8::PinScope<'_, '_>) {
+    let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None, None)));
+    scope.set_slot(state);
+}
 
 #[test]
 fn db_is_v8_class_instance() {
@@ -28,6 +35,7 @@ fn db_is_v8_class_instance() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
 
@@ -59,6 +67,7 @@ fn db_collection_caches_by_name() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     let collection_key = v8::String::new(scope, "collection").unwrap();
@@ -194,6 +203,7 @@ fn db_transaction_is_a_native_method() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     let key = v8::String::new(scope, "transaction").unwrap();
@@ -214,6 +224,7 @@ fn db_begin_transaction_is_not_exposed() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     let key = v8::String::new(scope, "beginTransaction").unwrap();
@@ -270,6 +281,7 @@ fn db_platform_internals_removed_from_env_db() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     for name in [
@@ -297,6 +309,7 @@ fn db_public_surface_retained() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     for name in ["collection", "transaction"] {
@@ -319,6 +332,7 @@ fn db_platform_string_access_is_denied() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     let key = v8::String::new(scope, "__platform").unwrap();
@@ -358,6 +372,7 @@ fn db_platform_computed_string_access_is_denied() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     let threw = {
@@ -379,6 +394,7 @@ fn db_platform_invisible_to_reflection() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
 
@@ -439,6 +455,7 @@ fn db_platform_handle_reachable_via_private_symbol() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
     let priv_sym = platform_private(scope);
@@ -482,6 +499,7 @@ fn db_platform_private_slot_unreachable_by_named_symbol() {
     v8::scope!(let handle_scope, &mut isolate);
     let context = v8::Context::new(handle_scope, Default::default());
     let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
 
     let db = mint_db(scope, "test_app").expect("mint_db");
 

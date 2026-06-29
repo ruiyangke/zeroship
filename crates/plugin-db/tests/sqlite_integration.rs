@@ -5238,10 +5238,10 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 //     parent stores the ciphertext / plaintext as before.
 
 /// **P5.5 PR 2 — DDL shape on SQLite**: `build_create_table_with_fks`
-/// emits both the parent and a sibling `<col>_masked TEXT NOT NULL`
-/// column for every masked field. The SQLite arm receives the SQL
+/// emits both the parent and a sibling `<col>_masked TEXT` column for
+/// every masked field. The SQLite arm receives the SQL
 /// byte-identical to PG; the sibling clause itself is standard SQL
-/// (`TEXT NOT NULL`) so the SQLite engine accepts it once executed
+/// (`TEXT`) so the SQLite engine accepts it once executed
 /// through the SQLite-flavoured `CREATE TABLE` path.
 #[test]
 fn sibling_column_emitted_for_masked_field_sqlite() {
@@ -5256,8 +5256,12 @@ fn sibling_column_emitted_for_masked_field_sqlite() {
     let sql =
         build_create_table_with_fks("app_demo", "users", &schema, &FkEmission::Inline).unwrap();
     assert!(
-        sql.contains("\"ssn_masked\" TEXT NOT NULL"),
+        sql.contains("\"ssn_masked\" TEXT"),
         "sibling column must be emitted: {sql}"
+    );
+    assert!(
+        sql.contains("__zsmask:kind=last4,classification=spi"),
+        "sibling column must carry the mask sentinel: {sql}"
     );
     assert!(
         !sql.contains("\"name_masked\""),

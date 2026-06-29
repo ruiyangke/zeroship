@@ -29,10 +29,6 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::SqliteBackend;
-use crate::backend::{LockManager, LockScope, SqlExecutor};
-use crate::error::DbError;
-
 /// Per-process advisory-lock registry. One instance per
 /// [`super::SqliteBackend`].
 #[derive(Default)]
@@ -124,26 +120,14 @@ impl InProcessLockRegistry {
 /// async unlock SQL. This is the right shape for `register_model` on the
 /// SQLite arm, where the critical failure mode was "acquire succeeded,
 /// then an early return / panic / cancellation leaked the slot forever".
+#[cfg(test)]
 #[must_use = "SqliteLockGuard releases the registry slot on Drop"]
 pub(crate) struct SqliteLockGuard {
     registry: Rc<InProcessLockRegistry>,
     key: Option<(String, String)>,
 }
 
-impl SqliteLockGuard {
-    pub(crate) async fn acquire(
-        backend: &SqliteBackend,
-        scope: &LockScope,
-    ) -> Result<Self, DbError> {
-        let client = backend.acquire_dedicated_client().await?;
-        backend.acquire(&client, scope).await?;
-        Ok(Self {
-            registry: Rc::clone(&backend.lock_registry),
-            key: Some(scope.to_keys()),
-        })
-    }
-}
-
+#[cfg(test)]
 impl Drop for SqliteLockGuard {
     fn drop(&mut self) {
         if let Some(key) = self.key.take() {

@@ -283,6 +283,7 @@ pub fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, Value) {
         }
         _ => panic!("unexpected outcome variant"),
     };
+    let body = String::from_utf8_lossy(&body).into_owned();
     let json: Value =
         serde_json::from_str(&body).unwrap_or_else(|_| Value::String(body.clone()));
     (status, json)

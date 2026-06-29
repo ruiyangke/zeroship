@@ -173,6 +173,7 @@ pub(crate) enum Command {
     /// Consumer is the SQLite register-model apply path, which needs
     /// the full `CREATE TABLE ...; CREATE INDEX ...; ...` payload to
     /// land atomically on the writer thread.
+    #[cfg(any(test, feature = "test-helpers"))]
     ExecBatch {
         sql: String,
         reply: flume::Sender<Result<(), DbError>>,
@@ -417,6 +418,7 @@ impl SqliteSession {
                         let result = run_exec(&conn, &sql, &params);
                         let _ = reply.send(result);
                     }
+                    #[cfg(any(test, feature = "test-helpers"))]
                     Command::ExecBatch { sql, reply } => {
                         let result = run_exec_batch(&conn, &sql);
                         let _ = reply.send(result);
@@ -487,6 +489,7 @@ impl SqliteSession {
     }
 
     /// Send an `ExecBatch` command and await the reply.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
         let (reply_tx, reply_rx) = flume::bounded::<Result<(), DbError>>(1);
         let cmd = Command::ExecBatch {
@@ -834,6 +837,7 @@ fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, DbEr
     Ok(n as u64)
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn run_exec_batch(conn: &Connection, sql: &str) -> Result<(), DbError> {
     conn.execute_batch(sql).map_err(from_sqlite)
 }

@@ -67,6 +67,7 @@ use std::rc::Rc;
 
 use crate::error::DbError;
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod lock_guard;
 pub(crate) mod owned_lock_guard;
 pub mod postgres;
@@ -83,6 +84,7 @@ pub(crate) mod sqlite;
 #[cfg(feature = "test-helpers")]
 pub mod sqlite;
 
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) use lock_guard::LockGuard;
 pub(crate) use owned_lock_guard::OwnedLockGuard;
 pub use postgres::PostgresBackend;
@@ -150,6 +152,7 @@ pub trait SqlExecutor: 'static {
     /// the SQLite arm (whose `pool_exec` routes through `sqlite3_exec`,
     /// natively multi-statement) and for mocks. The Postgres backend
     /// overrides it to use `batch_execute`.
+    #[cfg(any(test, feature = "test-helpers"))]
     #[allow(async_fn_in_trait)]
     async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
         self.pool_exec(sql, &[]).await.map(|_| ())
@@ -594,6 +597,7 @@ pub trait NamespaceManager: 'static {
 /// associated type via the `SchemaIntrospect<LiveSchema = LiveSchema>`
 /// super-bound below so the constraint is unchanged for existing
 /// callers.
+#[cfg(any(test, feature = "test-helpers"))]
 pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses
@@ -625,6 +629,7 @@ pub trait SchemaIntrospect: 'static {
 /// every retry. The `: SqlExecutor` super-bound is load-bearing: the
 /// PG impl pulls the pool through that trait's [`SqlExecutor::Client`]
 /// associated type so the SQLSTATE classification stays in one place.
+#[cfg(any(test, feature = "test-helpers"))]
 pub trait IndexBuilder: SqlExecutor {
     /// Idempotent `CREATE INDEX CONCURRENTLY` with retry + audit.
     /// SQLSTATE-driven: unique/not-null/fk/check violations are fatal;
@@ -681,6 +686,7 @@ pub trait IndexBuilder: SqlExecutor {
 /// of callers.
 ///
 /// Not `Send + Sync` for the same reason as [`SqlExecutor`] — Open Q4.
+#[cfg(any(test, feature = "test-helpers"))]
 pub trait AuditWriter: 'static {
     /// Idempotently create the per-app `__zeroship_migrations` table.
     #[allow(async_fn_in_trait)]
@@ -849,6 +855,7 @@ pub struct MintedToken {
 /// per-backend struct) is the canonical shape.
 pub trait DialectBuilder: 'static {
     /// Concrete SQL dialect this builder targets.
+    #[cfg(any(test, feature = "test-helpers"))]
     fn sql_dialect(&self) -> crate::query::SqlDialect;
 
     /// Quote an identifier (column / table / schema name) per the
@@ -865,6 +872,7 @@ pub trait DialectBuilder: 'static {
     /// `online = true` requests the engine's "concurrent" variant
     /// (PG: `CREATE INDEX CONCURRENTLY`); SQLite has no concurrent
     /// build, so the flag is a no-op there.
+    #[cfg(any(test, feature = "test-helpers"))]
     fn build_create_index(
         &self,
         spec: &crate::query::IndexSpec,
@@ -945,6 +953,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::Client> {
 /// [`SqlExecutor::Client`] that [`LockManager::acquire_advisory_lock`]
 /// takes, so the orchestrator can hand the returned client straight
 /// into `LockGuard::acquire` without an adapter.
+#[cfg(any(test, feature = "test-helpers"))]
 pub trait PgLockManager: LockManager<Client = compio_postgres::Client> {
     /// Acquire a pool-leased client for advisory-lock duty. The
     /// returned [`compio_postgres::PooledClient`]'s `'p` lifetime is
@@ -1180,6 +1189,7 @@ pub trait VectorIndex: 'static {
     /// CONCURRENTLY IF NOT EXISTS … USING ivfflat ("col" vector_{metric}_ops)`.
     /// SQLite: no-op (flat scan needs no index; PR 4 wires the
     /// CHECK constraint at column-DDL time instead).
+    #[cfg(any(test, feature = "test-helpers"))]
     #[allow(async_fn_in_trait)]
     async fn ensure_vector_index(
         &self,
@@ -1243,6 +1253,7 @@ pub trait FullTextIndex: 'static {
     /// column + GIN index + trigger. SQLite: creates the
     /// `<coll>__fts` external-content virtual table + the
     /// INSERT/UPDATE/DELETE mirror triggers.
+    #[cfg(any(test, feature = "test-helpers"))]
     #[allow(async_fn_in_trait)]
     async fn ensure_fts_index(
         &self,
@@ -1291,6 +1302,7 @@ pub trait SpatialIndex: 'static {
     /// Idempotently create the spatial index. PG: `CREATE INDEX
     /// CONCURRENTLY … USING GIST ("col")`. SQLite: no-op (haversine
     /// full-scan needs no index).
+    #[cfg(any(test, feature = "test-helpers"))]
     #[allow(async_fn_in_trait)]
     async fn ensure_spatial_index(
         &self,
@@ -1614,6 +1626,7 @@ impl Drop for SchemaPendingGuard {
 // the `MaskBackfill` / `MaskRewrite` dispatch in `register_model::apply`
 // (the backfill decrypts encrypted columns before applying the mask
 // transform). Both backends impl `EncryptedColumn` unconditionally.
+#[cfg(any(test, feature = "test-helpers"))]
 pub trait RegisterBackend:
     PgSqlExecutor
     + LockManager<Client = compio_postgres::Client>
@@ -1628,6 +1641,7 @@ pub trait RegisterBackend:
 {
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl<T> RegisterBackend for T where
     T: PgSqlExecutor
         + LockManager<Client = compio_postgres::Client>

@@ -528,6 +528,7 @@ impl IsolateDbContext {
     /// to re-run the cold path instead of the warm short-circuit. Used by tests
     /// that re-register the same `(app, collection)` with a CHANGED schema (a real
     /// dev re-deploy mints a fresh isolate; the test reuses one).
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn clear_model_registered(&mut self, app_id: &str, collection: &str) {
         let key = format!("{app_id}:{collection}");
         self.registered_models.remove(&key);

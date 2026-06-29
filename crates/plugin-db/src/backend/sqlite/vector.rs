@@ -59,6 +59,7 @@ use crate::query::quote_ident;
 /// Returns `"cosine"` or `"l2"`. `InnerProduct` is not a vec0-native
 /// metric — callers route through [`reject_inner_product`] before
 /// reaching the SQL builders.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn metric_keyword(metric: VectorMetric) -> &'static str {
     match metric {
         VectorMetric::Cosine => "cosine",
@@ -139,6 +140,7 @@ pub(crate) fn build_vector_search_sql(
 /// CREATE VIRTUAL TABLE IF NOT EXISTS "<app>"."<coll>__vec_<col>"
 ///   USING vec0("<col>" float[<dims>] distance_metric=<cosine|l2>)
 /// ```
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_create_vec0_sql(
     app_id: &str,
     collection: &str,
@@ -165,6 +167,7 @@ pub(crate) fn build_create_vec0_sql(
 /// <coll>` statement. Run exactly once, gated by a `sqlite_master`
 /// presence probe (same pattern as FTS5; see
 /// `fts::build_initial_population_sql` rustdoc).
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_initial_population_sql(
     app_id: &str,
     collection: &str,
@@ -185,6 +188,7 @@ pub(crate) fn build_initial_population_sql(
 /// qualifier — the SQLite engine rule "table referenced inside a
 /// trigger body cannot be qualified by the database name" applies
 /// (see `fts::build_insert_trigger_sql` rustdoc).
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_insert_trigger_sql(
     app_id: &str,
     collection: &str,
@@ -207,6 +211,7 @@ pub(crate) fn build_insert_trigger_sql(
 /// vtable. vec0 supports plain `DELETE FROM v WHERE rowid = ?` (it
 /// internally owns the row, no external-content sentinel required —
 /// contrast FTS5's `'delete'` command sentinel).
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_delete_trigger_sql(
     app_id: &str,
     collection: &str,
@@ -228,6 +233,7 @@ pub(crate) fn build_delete_trigger_sql(
 /// pair on the same rowid: vec0 has no `UPDATE` syntax that touches
 /// the vector column directly (a future vec0 release may add it; the
 /// d/i pair is the documented pattern today).
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_update_trigger_sql(
     app_id: &str,
     collection: &str,

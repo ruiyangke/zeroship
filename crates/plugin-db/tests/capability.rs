@@ -81,71 +81,18 @@ fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
         }
         _ => panic!("unexpected outcome variant"),
     };
+    let body = String::from_utf8_lossy(&body).into_owned();
     let json: serde_json::Value =
         serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
     (status, json)
 }
 
-/// SSR-entry shim that mirrors the runtime's `__zsDispatch` capability
-/// frame logic: reads `fn.config.kind`, calls `__zsEnterKind` before
-/// invocation, exits on settle. This is a function-shape `default.rpc`
-/// (the advanced / back-compat path — see
-/// `docs/reference/zeroship-standard.md`) so the shim owns the frame logic
-/// directly; dict-shape deploys get the same behaviour through
-/// `__zsDispatch`.
-const SHIM: &str = r#"
-function _shimRpc(name, input, ctx) {
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {
-        throw Object.assign(new Error("Method not found: " + name), { status: 404 });
-    }
-    const cfg = fn.config;
-    const kind = (cfg && typeof cfg.kind === "string" && cfg.kind) || undefined;
-    const ek = globalThis.__zsEnterKind;
-    const xk = globalThis.__zsExitKind;
-    const tok = (kind && typeof ek === "function") ? ek(kind) : -1;
-    try {
-        const out = fn(input, ctx);
-        if (out && typeof out.then === "function") {
-            return out.then(
-                (v) => { if (tok >= 0) xk(tok); return v; },
-                (e) => { if (tok >= 0) xk(tok); throw e; },
-            );
-        }
-        if (tok >= 0) xk(tok);
-        return out;
-    } catch (e) {
-        if (tok >= 0) xk(tok);
-        throw e;
-    }
-}
-async function _zsRpcAndRespond(name, input) {
-    try {
-        const result = await _shimRpc(name, input);
-        return new Response(JSON.stringify({ json: result === undefined ? null : result }),
-            { status: 200, headers: { "content-type": "application/json" } });
-    } catch (err) {
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
-        if (err && typeof err.code === "string") body.code = err.code;
-        if (err && err.details !== undefined) body.details = err.details;
-        return new Response(JSON.stringify(body), {
-            status, headers: { "content-type": "application/json" },
-        });
-    }
-}
-async function _zsFetch(request) {
-    const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    const text = await request.text();
-    let input;
-    if (text) {
-        const env = JSON.parse(text);
-        input = env && typeof env === "object" && "json" in env ? env.json : env;
-    }
-    return await _zsRpcAndRespond(id, input);
-}
-export default { fetch: _zsFetch, rpc: _shimRpc };
+/// Export the procedure dictionary directly so the runtime-owned dispatcher
+/// installs the hidden capability frame. User modules cannot observe
+/// `globalThis.__zsEnterKind`; bootstrap captures that native callback in an
+/// internal bridge before deleting the global.
+const DICT_RPC_EXPORT: &str = r#"
+export default { rpc: _procedures };
 "#;
 
 /// A `query()` handler that calls `zeroship.db.insert(...)` must be
@@ -161,7 +108,7 @@ function getStuff(_input, _ctx) {
 getStuff.config = { kind: "query" };
 const _procedures = { getStuff };
 "#;
-    let src = format!("{user_code}\n{SHIM}");
+    let src = format!("{user_code}\n{DICT_RPC_EXPORT}");
     let (status, body) = dispatch_zs(&src, "getStuff");
     assert_eq!(status, 500, "capability_violation surfaces as 500; body={body}");
     assert_eq!(
@@ -205,7 +152,7 @@ listThings_{label}.config = {{ kind: "query" }};
 const _procedures = {{ ["t_{label}"]: listThings_{label} }};
 "#
         );
-        let src = format!("{user_code}\n{SHIM}");
+        let src = format!("{user_code}\n{DICT_RPC_EXPORT}");
         let (status, body) = dispatch_zs(&src, &format!("t_{label}"));
         assert_eq!(
             status, 500,
@@ -273,7 +220,7 @@ function doAction(_input, _ctx) {
 doAction.config = { kind: "action" };
 const _procedures = { doAction };
 "#;
-    let src = format!("{user_code}\n{SHIM}");
+    let src = format!("{user_code}\n{DICT_RPC_EXPORT}");
     let (_status, body) = dispatch_zs(&src, "doAction");
     let json = body.get("json").unwrap_or(&body);
     // Two acceptable outcomes for "the gate did NOT fire":

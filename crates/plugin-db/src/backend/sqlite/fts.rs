@@ -75,6 +75,7 @@ use crate::query::{build_where, quote_ident};
 /// indexed columns — the engine would accept this but every search
 /// would return zero hits; the caller (the `ensure_fts_index` impl)
 /// is responsible for refusing the empty case loudly.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_create_fts_table_sql(
     app_id: &str,
     collection: &str,
@@ -108,6 +109,7 @@ pub(crate) fn build_create_fts_table_sql(
 /// "did we just create the vtable" — the impl block in `mod.rs` performs
 /// a `SELECT 1 FROM sqlite_master WHERE name = '<coll>__fts'` probe
 /// before running this statement.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_initial_population_sql(
     app_id: &str,
     collection: &str,
@@ -147,6 +149,7 @@ pub(crate) fn build_initial_population_sql(
 /// base table `<coll>` (we create it in the same `app_id`-keyed
 /// attached database), so the unqualified reference inside the body
 /// resolves to the correct vtable.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_insert_trigger_sql(
     app_id: &str,
     collection: &str,
@@ -187,6 +190,7 @@ pub(crate) fn build_insert_trigger_sql(
 ///
 /// Same unqualified-table-in-body rule as `build_insert_trigger_sql`
 /// — see that helper's rustdoc.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_delete_trigger_sql(
     app_id: &str,
     collection: &str,
@@ -221,6 +225,7 @@ pub(crate) fn build_delete_trigger_sql(
 /// that don't touch a tokenised column — same optimisation the PG
 /// adapter applies (`BEFORE INSERT OR UPDATE OF cols ON …`). Same
 /// unqualified-table-in-body rule as the insert trigger.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn build_update_trigger_sql(
     app_id: &str,
     collection: &str,

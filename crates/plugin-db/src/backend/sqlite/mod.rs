@@ -34,13 +34,13 @@ use std::rc::Rc;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use crate::backend::{
-    AuditWriter, DialectBuilder, IndexBuilder, LockManager, NamespaceManager, SchemaIntrospect,
-    SqlExecutor,
-};
+use crate::backend::{DialectBuilder, LockManager, NamespaceManager, SqlExecutor};
+#[cfg(any(test, feature = "test-helpers"))]
+use crate::backend::{AuditWriter, IndexBuilder, SchemaIntrospect};
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::Backend;
 use crate::error::DbError;
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::query::IndexSpec;
 
 // `cdc` is the P2 PR-1+ home for the SQLite-side `ChangeStream`
@@ -230,6 +230,7 @@ impl SqliteBackend {
             .insert((app_id.to_string(), collection.to_string()));
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) async fn exec_batch(&self, sql: &str) -> Result<(), DbError> {
         self.session.exec_batch(sql).await
     }
@@ -709,6 +710,7 @@ impl NamespaceManager for SqliteBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl SchemaIntrospect for SqliteBackend {
     // Same associated type as the PG impl — the diff engine consumes
     // a uniform `LiveSchema` shape; the SQLite impl populates the
@@ -1037,6 +1039,7 @@ impl SchemaIntrospect for SqliteBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl IndexBuilder for SqliteBackend {
     /// Atomic `CREATE [UNIQUE] INDEX IF NOT EXISTS` against the per-app
     /// attached database. Per plan §3.5, SQLite has no `CREATE INDEX
@@ -1190,6 +1193,7 @@ impl IndexBuilder for SqliteBackend {
 // PR 2: full `AuditWriter` capability for the SQLite register-model
 // pipeline — provisioning, `next_schema_version`, row insert, and
 // terminal-status updates all route through the session actor.
+#[cfg(any(test, feature = "test-helpers"))]
 impl AuditWriter for SqliteBackend {
     async fn ensure_audit_table(&self, app_id: &str) -> Result<(), DbError> {
         let q_app = self.quote_ident(app_id);
@@ -1344,6 +1348,7 @@ impl DialectBuilder for SqliteBackend {
     // per call — rustc inlines the value away because every method on
     // `SqliteDialect` is `&self` and side-effect-free.
 
+    #[cfg(any(test, feature = "test-helpers"))]
     fn sql_dialect(&self) -> crate::query::SqlDialect {
         SqliteDialect.sql_dialect()
     }
@@ -1356,6 +1361,7 @@ impl DialectBuilder for SqliteBackend {
         SqliteDialect.build_ensure_app_schema(app_id)
     }
 
+    #[cfg(any(test, feature = "test-helpers"))]
     fn build_create_index(&self, spec: &IndexSpec, online: bool) -> String {
         SqliteDialect.build_create_index(spec, online)
     }
@@ -1607,6 +1613,7 @@ impl crate::backend::SessionMinter for SqliteBackend {
 // at COMMIT time. See `fts.rs` rustdoc for the canonical walkthrough.
 
 impl crate::backend::VectorIndex for SqliteBackend {
+    #[cfg(any(test, feature = "test-helpers"))]
     /// Idempotently create the vec0 virtual table + mirror triggers
     /// for `<app>.<collection>.<column>`. Runs five statements in
     /// order: CREATE VIRTUAL TABLE, gated initial population, three
@@ -1795,6 +1802,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
 // rustdoc for the canonical ordering walkthrough.
 
 impl crate::backend::FullTextIndex for SqliteBackend {
+    #[cfg(any(test, feature = "test-helpers"))]
     async fn ensure_fts_index(
         &self,
         app_id: &str,
@@ -1958,6 +1966,7 @@ fn build_spatial_near_base_query(
 //     field.
 
 impl crate::backend::SpatialIndex for SqliteBackend {
+    #[cfg(any(test, feature = "test-helpers"))]
     async fn ensure_spatial_index(
         &self,
         _app_id: &str,
@@ -2155,6 +2164,7 @@ impl crate::backend::EncryptedColumn for SqliteBackend {
 /// out a sidecar `__zs_schema_meta` table as the eventual upgrade;
 /// PR 3 ships the regex per the implementation plan's §5
 /// trade-off acknowledgement.
+#[cfg(any(test, feature = "test-helpers"))]
 fn parse_encryption_sentinels(
     create_table_text: &str,
 ) -> std::collections::HashMap<String, crate::diff::EncryptionMeta> {
@@ -2245,6 +2255,7 @@ fn parse_encryption_sentinels(
 ///
 /// Same hand-rolled walker pattern as
 /// [`parse_encryption_sentinels`] — no `regex` dep required.
+#[cfg(any(test, feature = "test-helpers"))]
 fn parse_mask_sentinels(
     create_table_text: &str,
 ) -> std::collections::HashMap<String, crate::diff::MaskMeta> {
@@ -2263,7 +2274,7 @@ fn parse_mask_sentinels(
         };
         let body = create_table_text[body_start..body_start + end_rel].trim();
         // Reuse the canonical parser so the wire shape is centralised.
-        match crate::crud::mask_backfill::parse_mask_sentinel(body) {
+        match zeroship_schema::mask_codec::parse_mask_sentinel(body) {
             Ok((kind, classification)) => {
                 let before = &create_table_text[..abs_marker];
                 if let Some(sibling_name) = recover_preceding_quoted_ident(before) {
@@ -2282,7 +2293,7 @@ fn parse_mask_sentinels(
             Err(e) => {
                 tracing::warn!(
                     sentinel = %body,
-                    error = %e.clone().into_string(),
+                    error = %e,
                     "diff: malformed mask sentinel on SQLite sibling column; \
                      treating parent column as unmasked",
                 );
@@ -2296,6 +2307,7 @@ fn parse_mask_sentinels(
 /// Find the most recent double-quoted identifier in `text`, returning
 /// the identifier's contents (with `""` un-escaped to `"`). Returns
 /// `None` if no closing-then-opening `"` pair is found.
+#[cfg(any(test, feature = "test-helpers"))]
 fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
     // Scan from the right for a closing `"`, then for the matching
     // opening `"`. Handles the SQL `""` doubled-quote escape: a

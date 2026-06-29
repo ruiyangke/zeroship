@@ -12,9 +12,8 @@
 //!   path (string-typed value), `setup_js_promise` for the
 //!   `OpResult::JsValue` path (real JS values via `ResolveValue::Json` /
 //!   `ResolveValue::F64` / `ResolveValue::JsGlobal`).
-//! - **Argument decoders**: `get_string_arg`, `get_i64_arg`,
-//!   `read_json_arg`, `v8_value_to_serde_json` (the hot-path walker
-//!   that avoids a `JSON.stringify` round-trip).
+//! - **Argument decoders**: `read_json_arg`, `v8_value_to_serde_json`
+//!   (the hot-path walker that avoids a `JSON.stringify` round-trip).
 //! - **State accessors**: `runtime_state` (read the `SharedState` off
 //!   the isolate slot), `get_app_id_pub` (read APP_ID out of env_vars).
 //! - **Capability gate**: `refuse_if_query_capability` — the B3 gate
@@ -33,42 +32,6 @@ use serde_json::Value;
 use zeroship_runtime::state::SharedState;
 
 use crate::backend::sqlite::session::{TypedCell, TypedRows};
-
-// ---------------------------------------------------------------------------
-// Argument decoders
-// ---------------------------------------------------------------------------
-
-/// Extract a string argument from V8, returning None if undefined/null.
-pub(crate) fn get_string_arg(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: &v8::FunctionCallbackArguments,
-    index: i32,
-) -> Option<String> {
-    if args.length() <= index {
-        return None;
-    }
-    let val = args.get(index);
-    if val.is_null_or_undefined() {
-        return None;
-    }
-    Some(val.to_rust_string_lossy(scope))
-}
-
-/// Parse an optional integer argument.
-pub(crate) fn get_i64_arg(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: &v8::FunctionCallbackArguments,
-    index: i32,
-) -> Option<i64> {
-    if args.length() <= index {
-        return None;
-    }
-    let val = args.get(index);
-    if val.is_null_or_undefined() {
-        return None;
-    }
-    val.integer_value(scope)
-}
 
 // ---------------------------------------------------------------------------
 // State accessors
@@ -379,6 +342,7 @@ pub(crate) fn setup_js_promise<'s>(
 /// `Result<_, String>` rail. New code should prefer
 /// [`crate::error::DbError::from_pg`] directly so the SQLSTATE
 /// classification reaches the V8 boundary intact.
+#[cfg(any(test, feature = "test-helpers"))]
 pub(crate) fn fmt_db_err(e: &compio_postgres::Error) -> String {
     crate::error::DbError::from_pg(e).into_string()
 }

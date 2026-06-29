@@ -80,9 +80,7 @@ pub(crate) use unmask::{dispatch_bulk_unmask_field, dispatch_unmask_field};
 // register-model apply pipeline. Same visibility pattern: `pub` under
 // `test-helpers` so the integration tests can drive the helpers
 // directly without standing up the full orchestrator.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod mask_backfill;
-#[cfg(feature = "test-helpers")]
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod mask_backfill;
 
 // **P5.5 PR 7** — drift detection: sample masked-column siblings vs.

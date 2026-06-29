@@ -79,6 +79,7 @@ impl ActorKind {
 }
 
 /// Phase of a migration row — proposal A3 `phase` column.
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug, Clone, Copy)]
 pub enum Phase {
     Ddl,
@@ -89,6 +90,7 @@ pub enum Phase {
     Backfill,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl Phase {
     pub(crate) fn as_sql(self) -> &'static str {
         match self {
@@ -145,6 +147,7 @@ impl From<crate::diff::ChangeClass> for ChangeClass {
 /// CHECK accepts it as both an initial and terminal value (see
 /// `ensure_audit_table_exists`).
 #[derive(Debug, Clone, Copy)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub enum InitialStatus {
     #[allow(dead_code, reason = "Pending remains part of the audit state machine for queued/test flows that are not compiled into the current release build.")]
     Pending,
@@ -155,6 +158,7 @@ pub enum InitialStatus {
     ValidationRefused,
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl InitialStatus {
     pub(crate) fn as_sql(self) -> &'static str {
         match self {
@@ -199,6 +203,7 @@ impl TerminalStatus {
 /// proposal A3 column list; columns the worker doesn't populate (parent
 /// link, dead-letter PKs, validate cursor, owner session, heartbeat) are
 /// left to the B1 migrations runtime.
+#[cfg(any(test, feature = "test-helpers"))]
 #[derive(Debug)]
 pub struct AuditRow {
     pub collection: String,
@@ -350,6 +355,7 @@ pub async fn next_schema_version(pool: &Pool, app_id: &str) -> Result<i32, DbErr
 /// Insert a single row into the audit table, returning its PK so callers
 /// can later call [`update_audit_status`] to drive it to a terminal
 /// state.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn write_audit_row(pool: &Pool, app_id: &str, row: &AuditRow) -> Result<i64, DbError> {
     validate_app_id(app_id)?;
 
@@ -393,6 +399,7 @@ pub async fn write_audit_row(pool: &Pool, app_id: &str, row: &AuditRow) -> Resul
 /// Note: `validation_refused` is normally written INSERT-direct from
 /// `validate.rs` (since cycle-15:17 `6afab751`); this method accepts it
 /// as a terminal for symmetry with `InitialStatus::ValidationRefused`.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn update_audit_status(
     pool: &Pool,
     app_id: &str,

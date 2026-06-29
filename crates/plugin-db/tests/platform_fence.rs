@@ -95,6 +95,7 @@ fn dispatch(source: &str, name: &str) -> (u16, serde_json::Value) {
         }
         _ => panic!("unexpected outcome variant"),
     };
+    let body = String::from_utf8_lossy(&body).into_owned();
     let json: serde_json::Value =
         serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body.clone()));
     (status, json)
