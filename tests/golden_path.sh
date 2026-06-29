@@ -119,16 +119,18 @@ if [ -n "$ASSET" ]; then
   [ "$code" = "200" ] && pass "client JS asset served ($ASSET → 200)" || fail "asset $ASSET → $code"
 fi
 
-# --- 5. Best-effort: an RPC round-trip (the starter's getMessages) ---
-echo "=== 5. RPC round-trip (best-effort) ==="
-RPC=$(curl -sf -X POST "http://localhost:$GATE_PORT/apps/$APP_NAME/rpc" -H 'Content-Type: application/json' \
-  -H "X-Api-Key: $API_KEY" -d '{"jsonrpc":"2.0","method":"getMessages","params":[],"id":1}' 2>/dev/null || echo "")
-if echo "$RPC" | jq -e '.result' >/dev/null 2>&1; then
-  pass "getMessages RPC returned a result"
+# --- 5. RPC round-trip: the deployed app's SERVER FUNCTION actually executes ---
+# vite-app RPCs are at /__zeroship/v1/<wireId> (GET ?input= for queries), the
+# same path the browser client uses; through the path-routed gateway that's
+# /apps/<name>/__zeroship/v1/<wireId>. getMessages takes no input.
+echo "=== 5. RPC round-trip (server function executes) ==="
+RPC=$(curl -s "http://localhost:$GATE_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
+  -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
+if echo "$RPC" | grep -q "Build locally"; then
+  pass "getMessages RPC executed in the worker and returned the seeded messages"
 else
-  echo "  (note) RPC via /apps/<name>/rpc returned: ${RPC:0:120}"
-  echo "  (vite-app RPCs are normally called by the browser client via /__zeroship/v1/<wireId>;"
-  echo "   the static-serve proof above is the load-bearing end-to-end assertion.)"
+  echo "  RPC response: ${RPC:0:200}"
+  fail "RPC round-trip (getMessages did not return the expected data)"
 fi
 
 echo ""

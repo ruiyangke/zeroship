@@ -34,6 +34,25 @@ export const addItem = mutation(async (input: { text: string }) => input, {
 
 Use `query`, `mutation`, `stream`, and `subscription` from `@zeroship/rpc/server` for server functions. Use explicit `id` values for deployable builds. Validate inputs and outputs with Zod via `z` from `@zeroship/server`. Plain exports that are not wrapped stay private to the server bundle.
 
+### RPC auth — authenticated by default (IMPORTANT)
+
+Behind the gateway, **every RPC procedure requires an authenticated end-user by default** (no auth policy ⇒ `auth: "user"`). This is fail-closed by design: forgetting to set auth yields a loud `401`, never a silent public endpoint. So a procedure called from an anonymous browser **401s** unless you opt it into anonymous access.
+
+Declare the policy in `src/server/config.ts` (see this starter's file):
+
+```ts
+import { defineApp } from "@zeroship/server";
+
+export default defineApp({
+  resources: {
+    // intentionally public — the validator requires publiclyAccessible alongside anon
+    "rpc:getMessages": { auth: "anon", publiclyAccessible: true },
+  },
+});
+```
+
+For procedures that need a user, leave them at the default (`auth: "user"`) and read identity inside the handler with `env.auth.getUser()` / `env.auth.requireUser()`. `auth: "admin"` restricts to platform admins.
+
 ## Client Calls
 
 Re-export server functions from `src/api.ts`:
