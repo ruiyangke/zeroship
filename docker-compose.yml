@@ -449,56 +449,18 @@ services:
     command: migrate sql up -e --yes
     restart: on-failure
 
-  # zeroship-sandbox — Docker-backed dev containers for the AI builder.
-  # Spawns sibling containers (Docker-out-of-Docker) by mounting
-  # /var/run/docker.sock from the host. Bind-mounts the host's
-  # /var/zeroship/projects so workspaces survive sandbox restarts AND
-  # are reachable directly from the host (the agent's `read_file` /
-  # `write_file` ops bypass docker exec for performance).
-  sandbox:
-    build: .
-    image: zeroship-platform:dev
-    restart: on-failure
-    command: >
-      zeroship-sandbox
-    environment:
-      SANDBOX_PORT: "9091"
-      SANDBOX_TOKEN: sandbox-dev-token-change-me-0123456789abcd
-      SANDBOX_IMAGE: zeroship/sandbox-base:latest
-      SANDBOX_WORKSPACE_ROOT: /var/zeroship/projects
-      SANDBOX_NETWORK: zeroship-sandbox-net
-      SANDBOX_AUTO_PULL: "false"
-      SANDBOX_IDLE_TIMEOUT_SECS: "1800"
-      SANDBOX_MAX_LIFETIME_SECS: "28800"
-      # Pg-backed non-secret sandbox state (P13 role split, changesets
-      # 0011 + 0026). Each handle connects AS its least-privilege role:
-      #   - SANDBOX_DATABASE_URL        → sandbox_app   (runtime DML)
-      #   - SANDBOX_DATABASE_URL_AUDIT  → sandbox_audit (INSERT-only events)
-      #   - SANDBOX_DATABASE_URL_GDPR   → sandbox_gdpr  (scoped DELETE)
-      # The sandbox tables live in the shared `zeroship` schema, owned by the
-      # `migrate` service (zeroship-migrate); the sandbox only verifies connectivity at
-      # boot. Setting SANDBOX_DATABASE_URL flips pg integration ON.
-      SANDBOX_DATABASE_URL: postgres://sandbox_app:sandbox_app@postgres:5432/zeroship
-      SANDBOX_DATABASE_URL_AUDIT: postgres://sandbox_audit:sandbox_audit@postgres:5432/zeroship
-      SANDBOX_DATABASE_URL_GDPR: postgres://sandbox_gdpr:sandbox_gdpr@postgres:5432/zeroship
-    ports:
-      - "9091:9091"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /var/zeroship/projects:/var/zeroship/projects
-    networks:
-      - default
-      - zeroship-sandbox-net
-    security_opt:
-      - seccomp:unconfined
-    depends_on:
-      # pg integration is now ON (SANDBOX_DATABASE_URL set), so wait for the
-      # schema + roles to exist (postgres healthy + the one-shot migrate done),
-      # the same way control/auth/gateway/worker do.
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+  # zeroship-sandbox — the sandbox/preview backend now lives in the STANDALONE
+  # `zeroship-sandbox` project (sibling repo), NOT in this compose. It is built
+  # and run there (it has its own compose). The control plane reaches it over
+  # HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN` (see the `control` service env).
+  #
+  # The sandbox still uses THIS deployment's shared Postgres: the `migrate`
+  # service applies the sandbox schema + creates the least-privilege roles
+  # (`sandbox_app` / `sandbox_audit` / `sandbox_gdpr`, db/migrations
+  # V0011–V0024), and the external sandbox controller connects AS those roles
+  # via its own SANDBOX_DATABASE_URL{,_AUDIT,_GDPR}. To run previews locally,
+  # bring up the zeroship-sandbox project pointed at this Postgres + set the
+  # control service's SANDBOX_URL to the external controller.
 
   # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
   # The AI app-builder IS the console now: a regular zeroship app built to a
@@ -537,11 +499,6 @@ services:
         condition: service_started
       hydra:
         condition: service_started
-
-networks:
-  zeroship-sandbox-net:
-    name: zeroship-sandbox-net
-    driver: bridge
 
 volumes:
   bundles:

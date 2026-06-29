@@ -1,9 +1,13 @@
 # syntax=docker/dockerfile:1
 #
-# zeroship platform image — builds all SEVEN binaries:
+# zeroship platform image — builds all SIX binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship-sandbox, zeroship (CLI), zeroship-migrate (DB migration runner —
-#   the compose `migrate` service runs it under the Platform trust profile).
+#   zeroship (CLI), zeroship-migrate (DB migration runner — the compose
+#   `migrate` service runs it under the Platform trust profile).
+#
+# NOTE: the sandbox/preview backend (zeroship-sandbox + agent + nomad-driver-ch)
+# now lives in the standalone `zeroship-sandbox` project and is built/shipped
+# there. The control plane talks to it over HTTP (SANDBOX_URL / SANDBOX_TOKEN).
 #
 # Two-stage native build with a Node pre-stage:
 #   1. `sdks` (node:22) runs `pnpm build` to emit the bootstrap dist files
@@ -14,7 +18,7 @@
 #   2. `builder` (rust) copies crates/, the freshly-built sdks/, and the
 #      policies/ tree (crates/authz/build.rs parses ../../policies/*.cedar
 #      at build time) and compiles all seven binaries.
-#   3. final (ubuntu) ships the seven binaries + docker CLI for the sandbox.
+#   3. final (ubuntu) ships the six binaries.
 
 # ---------------------------------------------------------------------------
 # Stage 1 — build the SDK dist (bootstrap runtime-entry + dispatcher).
@@ -47,7 +51,7 @@ RUN pnpm --filter zeroship-builder build \
  && test -f apps/zeroship-builder/dist/app.zship
 
 # ---------------------------------------------------------------------------
-# Stage 2 — native (Rust) build of all seven binaries.
+# Stage 2 — native (Rust) build of all six binaries.
 # ---------------------------------------------------------------------------
 FROM rust:latest AS builder
 WORKDIR /build
@@ -74,7 +78,6 @@ RUN cargo build --release \
     -p zeroship-gateway \
     -p zeroship-worker \
     -p zeroship-auth \
-    -p zeroship-sandbox \
     -p zeroship \
     -p zeroship-migrate
 
@@ -83,15 +86,12 @@ RUN cargo build --release \
 # ---------------------------------------------------------------------------
 # Use Ubuntu 24.04 (glibc 2.39) instead of Debian bookworm (glibc 2.36)
 FROM ubuntu:24.04 AS runtime
-# `docker.io` gives us the docker CLI inside the sandbox container so
-# zeroship-sandbox can shell out via docker.sock (Docker-out-of-Docker).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl docker.io && rm -rf /var/lib/apt/lists/*
+    ca-certificates curl && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/zeroship-control /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-gate /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
-COPY --from=builder /build/target/release/zeroship-sandbox /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
 # The DB migration runner the compose `migrate` service invokes.
 COPY --from=builder /build/target/release/zeroship-migrate /usr/local/bin/

@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # M0 exit-gate harness: real Builder chat agent -> real sandbox -> real deploy
 # tool -> real control plane -> live gateway fetch.
+#
+# The sandbox/preview backend now lives in the standalone `zeroship-sandbox`
+# project (sibling repo); this harness drives it via that project's
+# tests/sandbox_{up,down}.sh. Keep `zeroship-sandbox` checked out beside this
+# repo, or set SANDBOX_PROJECT_DIR to its location.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SANDBOX_PROJECT_DIR="${SANDBOX_PROJECT_DIR:-$ROOT/../zeroship-sandbox}"
 APP_DIR="$ROOT/apps/zeroship-builder"
 PROMPTS_JSON="$APP_DIR/e2e/m0-prompts.json"
 STATE_DIR="$ROOT/.zeroship/m0-gate"
@@ -102,7 +108,7 @@ cleanup() {
   done
   wait 2>/dev/null || true
   if [[ "${M0_KEEP_SANDBOX:-0}" != "1" ]]; then
-    SANDBOX_URL="$SANDBOX_URL" SANDBOX_TOKEN="$SANDBOX_TOKEN" ./tests/sandbox_down.sh >/dev/null 2>&1 || true
+    SANDBOX_URL="$SANDBOX_URL" SANDBOX_TOKEN="$SANDBOX_TOKEN" "$SANDBOX_PROJECT_DIR/tests/sandbox_down.sh" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -142,7 +148,7 @@ cat <<EOF
 
 Bring-up commands used by tests/m0_gate.sh:
   docker compose up -d postgres
-  ./tests/sandbox_up.sh
+  "$SANDBOX_PROJECT_DIR/tests/sandbox_up.sh"
   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway
   target/release/zeroship-control --port $CONTROL_PORT --db "$DATABASE_URL" --blob-store "$STATE_DIR/bundles" --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY"
   target/release/zeroship-worker --port $WORKER_PORT --worker-threads 2 --control "$CONTROL_URL" --control-key "$CONTROL_KEY" --poll-interval 2
@@ -173,7 +179,7 @@ ensure_postgres_db zeroship
 
 echo "[m0] starting sandbox controller"
 kill_port_processes 9091 "sandbox controller"
-SANDBOX_URL="$SANDBOX_URL" SANDBOX_TOKEN="$SANDBOX_TOKEN" ./tests/sandbox_up.sh
+SANDBOX_URL="$SANDBOX_URL" SANDBOX_TOKEN="$SANDBOX_TOKEN" "$SANDBOX_PROJECT_DIR/tests/sandbox_up.sh"
 
 if [[ "${M0_SKIP_BUILD:-0}" != "1" ]]; then
   echo "[m0] building SDKs and release platform binaries"
