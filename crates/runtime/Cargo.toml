@@ -147,5 +147,9 @@ harness = false
 name = "pump_concurrency"
 harness = false
 
+[[bench]]
+name = "node_net_read"
+harness = false
+
 [lints]
 workspace = true
