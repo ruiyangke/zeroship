@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use zeroship_migrate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
+use zeroship_migrate::render::existence_probe::{decide, GuardVerdict};
 use zeroship_migrate::render::step::{BindValue, PlanStep};
 use zeroship_migrate::{
     deprovision_mysql_migrator_account, diff_snapshots, fold_ops,
@@ -813,6 +814,54 @@ fn crash_recovery_migration(
                 schema: cfg.project_schema.clone(),
                 table: "crash_users".to_string(),
                 name: "crash_users_email_idx".to_string(),
+                direction: GuardDir::IfNotExists,
+                expect: Some((false, vec!["email".to_string()])),
+            },
+        },
+    ];
+    (migration, fragments)
+}
+
+fn crash_recovery_faildrift_migration(
+    cfg: &ExecutorConfig,
+) -> (Migration, Vec<MysqlGuardedFragment>) {
+    let table_sql = format!(
+        "CREATE TABLE {}.{} (id INT NOT NULL, email VARCHAR(191) NOT NULL)",
+        qi(&cfg.project_schema),
+        qi("drift_users")
+    );
+    let sleep_sql = "SELECT SLEEP(8)".to_string();
+    let migration = manual_migration(
+        "crash_recovery_faildrift_table_then_probe",
+        format!("{table_sql};\n{sleep_sql}"),
+    );
+    let fragments = vec![
+        MysqlGuardedFragment {
+            sql: table_sql,
+            existence_guard: GuardProbe::Table {
+                schema: cfg.project_schema.clone(),
+                table: "drift_users".to_string(),
+                direction: GuardDir::IfNotExists,
+                expect_columns: vec![
+                    ExpectColumn {
+                        name: "id".to_string(),
+                        data_type: "integer".to_string(),
+                        nullable: false,
+                    },
+                    ExpectColumn {
+                        name: "email".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: false,
+                    },
+                ],
+            },
+        },
+        MysqlGuardedFragment {
+            sql: sleep_sql,
+            existence_guard: GuardProbe::Index {
+                schema: cfg.project_schema.clone(),
+                table: "drift_users".to_string(),
+                name: "drift_users_email_idx".to_string(),
                 direction: GuardDir::IfNotExists,
                 expect: Some((false, vec!["email".to_string()])),
             },
@@ -2173,6 +2222,147 @@ fn live_fragment_crash_recovery_replays_decide_per_fragment() {
             );
             println!(
                 "mysql_jsdriver_e2e crash recovery replayed guarded fragments on real :3307 after killing connection {connection_id}: version={version}"
+            );
+        })
+    });
+}
+
+#[test]
+fn live_fragment_crash_recovery_faildrift_refuses_divergent_partial_apply() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+    let live_for_closure = live.clone();
+
+    run_isolated_mysql(&live, "faildrift", move |backend, cfg, account| {
+        let live = live_for_closure.clone();
+        Box::pin(async move {
+            let (migration, fragments) = crash_recovery_faildrift_migration(cfg);
+            let version = migration.version.as_str().to_string();
+
+            let crash_backend = migrator_backend_for(&live, cfg, account);
+            crash_backend.register_guarded_fragments(&version, fragments.clone());
+            let connection_id = mysql_connection_id(&crash_backend).await;
+            let killer = spawn_sleep_fragment_killer(live.clone(), connection_id, "SLEEP");
+
+            let err = apply_one_result(
+                &crash_backend,
+                cfg,
+                &migration,
+                "mysql-jsdriver-e2e-faildrift-crash",
+            )
+            .await
+            .expect_err("external killer must close the connection mid-plan");
+            killer
+                .join()
+                .expect("sleep-fragment killer helper should finish cleanly");
+            assert!(
+                matches!(
+                    err,
+                    EngineError::Apply(ApplyError::MigrationFailed { .. })
+                        | EngineError::Apply(ApplyError::Db(_))
+                ),
+                "expected killed-connection apply error, got {err:?}"
+            );
+            drop(crash_backend);
+            wait_for_project_lock_released(backend, cfg).await;
+
+            assert!(
+                table_exists(backend, &cfg.project_schema, "drift_users").await,
+                "fragment 1 CREATE TABLE must be durable after the injected drop"
+            );
+            assert!(
+                !index_exists(
+                    backend,
+                    &cfg.project_schema,
+                    "drift_users",
+                    "drift_users_email_idx"
+                )
+                .await,
+                "fragment 2 probe target must not exist before the divergent mutation"
+            );
+
+            backend
+                .exec(&format!(
+                    "CREATE INDEX {} ON {}.{} (id)",
+                    qi("drift_users_email_idx"),
+                    qi(&cfg.project_schema),
+                    qi("drift_users")
+                ))
+                .await
+                .expect("create divergent same-name index");
+
+            let live_snapshot = backend
+                .snapshot_schema(cfg)
+                .await
+                .expect("snapshot mutated MySQL schema");
+            match decide(&fragments[1].existence_guard, &live_snapshot, SqlDialect::Mysql) {
+                GuardVerdict::FailDrift(d) => {
+                    assert_eq!(d.object, "index drift_users_email_idx");
+                    assert_eq!(d.field, "columns");
+                    assert_eq!(d.expected, "email");
+                    assert_eq!(d.actual, "id");
+                }
+                other => panic!("expected fragment-2 probe to FailDrift, got {other:?}"),
+            }
+
+            let recovery_backend = migrator_backend_for(&live, cfg, account);
+            recovery_backend.register_guarded_fragments(&version, fragments);
+            let err = apply_one_result(
+                &recovery_backend,
+                cfg,
+                &migration,
+                "mysql-jsdriver-e2e-faildrift-recover",
+            )
+            .await
+            .expect_err("recovery over a divergent fragment must fail closed");
+            match err {
+                EngineError::Apply(ApplyError::ExistenceGuardDrift {
+                    object,
+                    field,
+                    expected,
+                    actual,
+                    ..
+                }) => {
+                    assert_eq!(object, "index drift_users_email_idx");
+                    assert_eq!(field, "columns");
+                    assert_eq!(expected, "email");
+                    assert_eq!(actual, "id");
+                }
+                other => panic!("expected ExistenceGuardDrift, got {other:?}"),
+            }
+
+            let inflight_after = query(
+                backend,
+                &format!(
+                    "SELECT version FROM {} WHERE version = ?",
+                    meta_table(cfg, "schema_migrations_inflight")
+                ),
+                &[BindValue::Text(version.clone())],
+            )
+            .await;
+            let completed_after = query(
+                backend,
+                &format!(
+                    "SELECT version FROM {}
+                      WHERE event_kind = 'applied' AND phase = 'completed' AND version = ?",
+                    meta_table(cfg, "schema_migrations")
+                ),
+                &[BindValue::Text(version.clone())],
+            )
+            .await;
+            assert_eq!(
+                rows_len(&inflight_after),
+                1,
+                "FailDrift recovery must leave the migration inflight"
+            );
+            assert_eq!(
+                rows_len(&completed_after),
+                0,
+                "FailDrift recovery must not write the completed marker"
+            );
+            println!(
+                "mysql_jsdriver_e2e crash recovery FailDrift refused divergent partial apply on real :3307 after killing connection {connection_id}: version={version}"
             );
         })
     });
