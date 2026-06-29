@@ -2,7 +2,7 @@
 //!
 //! Commands:
 //!   zeroship serve   <file-or-dir> [--port=3000] [--workers=0]
-//!   zeroship deploy  <path-to-.zship> --app=<id> [--control=URL] [--token=PAT]
+//!   zeroship deploy  <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]
 //!
 //! `build` and `inspect` were removed in the artifact-layout redesign —
 //! the canonical build path is now `@zeroship/vite-plugin`, which emits
@@ -264,9 +264,9 @@ fn cmd_serve(args: &[String]) {
 // generated descriptor before it can install typed `env.db`.
 fn cmd_deploy(args: &[String]) {
     let input = args.get(2).expect(
-        "Usage: zeroship deploy <path-to-.zship> --app=<name-or-id> [--control=http://localhost:9090] [--token=<PAT>]",
+        "Usage: zeroship deploy <path-to-.zship> --app=<name> [--control=http://localhost:9090] [--token=<PAT>]",
     );
-    let app = flag_str(args, "--app=").expect("--app=<name-or-id> is required");
+    let app = flag_str(args, "--app=").expect("--app=<name> is required");
     let control_url = flag_str(args, "--control=")
         .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
         .unwrap_or_else(|| "http://localhost:9090".into());
@@ -274,6 +274,7 @@ fn cmd_deploy(args: &[String]) {
         eprintln!("zeroship deploy: {e}");
         std::process::exit(1);
     });
+    let auto_create = deploy_auto_create(args);
 
     let input_path = PathBuf::from(input);
     let body = std::fs::read(&input_path).unwrap_or_else(|e| {
@@ -288,9 +289,63 @@ fn cmd_deploy(args: &[String]) {
         body.len() as f64 / 1024.0,
     );
 
-    let deploy_url = format!("{control_url}/api/apps/{app}/deploy");
-    let response = std::process::Command::new("curl")
-        .args([
+    let mut client = CurlControlClient;
+    match deploy_archive(&mut client, &control_url, &app, &token, &body, auto_create) {
+        Ok(outcome) => {
+            if let Some(created) = outcome.created_app {
+                eprintln!("created app {} ({})", created.name, created.id);
+            }
+            eprintln!("Deployed successfully!");
+            if let Some(hash) = outcome.deploy_hash {
+                eprintln!("  deploy_hash: {hash}");
+            }
+        }
+        Err(e) => {
+            eprintln!("zeroship deploy: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlResponse {
+    status: u16,
+    body: String,
+}
+
+trait ControlClient {
+    fn deploy_zship(
+        &mut self,
+        control_url: &str,
+        app: &str,
+        token: &str,
+        body: &[u8],
+    ) -> Result<ControlResponse, String>;
+
+    fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String>;
+
+    fn create_app(
+        &mut self,
+        control_url: &str,
+        token: &str,
+        name: &str,
+    ) -> Result<ControlResponse, String>;
+}
+
+struct CurlControlClient;
+
+impl ControlClient for CurlControlClient {
+    fn deploy_zship(
+        &mut self,
+        control_url: &str,
+        app: &str,
+        token: &str,
+        body: &[u8],
+    ) -> Result<ControlResponse, String> {
+        let deploy_url = format!("{control_url}/api/apps/{app}/deploy");
+        let auth = format!("Authorization: Bearer {token}");
+        let mut command = std::process::Command::new("curl");
+        command.args([
             "-s",
             "-w",
             "\n%{http_code}",
@@ -298,52 +353,263 @@ fn cmd_deploy(args: &[String]) {
             "POST",
             &deploy_url,
             "-H",
-            &format!("Authorization: Bearer {token}"),
+            &auth,
             "-H",
             "Content-Type: application/x-zship",
             "--data-binary",
             "@-",
-        ])
-        .stdin(std::process::Stdio::piped())
+        ]);
+        run_curl(&mut command, Some(body))
+    }
+
+    fn list_apps(&mut self, control_url: &str, token: &str) -> Result<ControlResponse, String> {
+        let url = format!("{control_url}/api/apps");
+        let auth = format!("Authorization: Bearer {token}");
+        let mut command = std::process::Command::new("curl");
+        command.args(["-s", "-w", "\n%{http_code}", "-H", &auth, &url]);
+        run_curl(&mut command, None)
+    }
+
+    fn create_app(
+        &mut self,
+        control_url: &str,
+        token: &str,
+        name: &str,
+    ) -> Result<ControlResponse, String> {
+        let url = format!("{control_url}/api/apps");
+        let auth = format!("Authorization: Bearer {token}");
+        let body = serde_json::to_vec(&serde_json::json!({ "name": name }))
+            .map_err(|e| format!("serialize create-app request: {e}"))?;
+        let mut command = std::process::Command::new("curl");
+        command.args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-X",
+            "POST",
+            &url,
+            "-H",
+            &auth,
+            "-H",
+            "Content-Type: application/json",
+            "--data-binary",
+            "@-",
+        ]);
+        run_curl(&mut command, Some(&body))
+    }
+}
+
+fn run_curl(
+    command: &mut std::process::Command,
+    stdin_body: Option<&[u8]>,
+) -> Result<ControlResponse, String> {
+    let stdin = if stdin_body.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
+    let mut child = command
+        .stdin(stdin)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            if let Some(ref mut stdin) = child.stdin {
-                stdin.write_all(&body).ok();
-            }
-            child.wait_with_output()
-        });
+        .map_err(|e| {
+            format!("failed to run curl: {e}; make sure curl is installed and the control plane is running")
+        })?;
 
-    match response {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let lines: Vec<&str> = stdout.trim().rsplitn(2, '\n').collect();
-            let (status_str, body_text) = if lines.len() == 2 {
-                (lines[0], lines[1])
-            } else {
-                (lines[0], "")
-            };
-            let status: u16 = status_str.parse().unwrap_or(0);
-            if status == 200 {
-                eprintln!("Deployed successfully!");
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_text) {
-                    if let Some(hash) = json.get("deploy_hash").and_then(|h| h.as_str()) {
-                        eprintln!("  deploy_hash: {hash}");
-                    }
-                }
-            } else {
-                eprintln!("Deploy failed (HTTP {status}): {body_text}");
-                std::process::exit(1);
-            }
+    if let Some(body) = stdin_body {
+        use std::io::Write;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "failed to open curl stdin".to_string())?;
+        stdin
+            .write_all(body)
+            .map_err(|e| format!("failed to write request body to curl: {e}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for curl: {e}"))?;
+    Ok(parse_curl_response(output))
+}
+
+fn parse_curl_response(output: std::process::Output) -> ControlResponse {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim_end_matches(&['\r', '\n'][..]);
+    let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout));
+    ControlResponse {
+        status: status_str.trim().parse().unwrap_or(0),
+        body: body.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeployOutcome {
+    deploy_hash: Option<String>,
+    created_app: Option<CreatedApp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreatedApp {
+    name: String,
+    id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedApp {
+    id: String,
+    created: Option<CreatedApp>,
+}
+
+fn deploy_archive<C: ControlClient>(
+    client: &mut C,
+    control_url: &str,
+    app: &str,
+    token: &str,
+    body: &[u8],
+    auto_create: bool,
+) -> Result<DeployOutcome, String> {
+    if !is_uuid(app) {
+        let resolved = resolve_or_create_app(client, control_url, token, app, None, auto_create)?;
+        let response = client.deploy_zship(control_url, &resolved.id, token, body)?;
+        if response.status != 200 {
+            return Err(format!(
+                "Deploy failed (HTTP {}): {}",
+                response.status, response.body
+            ));
         }
-        Err(e) => {
-            eprintln!("Failed to run curl: {e}");
-            eprintln!("Make sure curl is installed and the control plane is running.");
-            std::process::exit(1);
+        return deploy_success(response.body, resolved.created);
+    }
+
+    let first = client.deploy_zship(control_url, app, token, body)?;
+    if first.status == 200 {
+        return deploy_success(first.body, None);
+    }
+
+    if !auto_create || !should_resolve_or_create_after_deploy_failure(&first) {
+        return Err(format!("Deploy failed (HTTP {}): {}", first.status, first.body));
+    }
+
+    let resolved = resolve_or_create_app(client, control_url, token, app, Some(first.status), true)?;
+    let retry = client.deploy_zship(control_url, &resolved.id, token, body)?;
+    if retry.status != 200 {
+        return Err(format!("Deploy failed (HTTP {}): {}", retry.status, retry.body));
+    }
+    deploy_success(retry.body, resolved.created)
+}
+
+fn should_resolve_or_create_after_deploy_failure(response: &ControlResponse) -> bool {
+    response.status == 404
+}
+
+fn resolve_or_create_app<C: ControlClient>(
+    client: &mut C,
+    control_url: &str,
+    token: &str,
+    name: &str,
+    deploy_status: Option<u16>,
+    auto_create: bool,
+) -> Result<ResolvedApp, String> {
+    if let Some(id) = find_existing_app(client, control_url, token, name)? {
+        return Ok(ResolvedApp { id, created: None });
+    }
+
+    if !auto_create {
+        return Err(format!(
+            "app `{name}` not found; remove --no-create to create it on first deploy"
+        ));
+    }
+
+    let create = client.create_app(control_url, token, name)?;
+    if create.status != 201 && create.status != 200 {
+        let context = deploy_status
+            .map(|status| format!("deploy returned HTTP {status}; "))
+            .unwrap_or_default();
+        return Err(format!(
+            "{context}app auto-create failed (HTTP {}): {}",
+            create.status, create.body
+        ));
+    }
+
+    let id = parse_app_id(&create.body, "create app response")?;
+    Ok(ResolvedApp {
+        id: id.clone(),
+        created: Some(CreatedApp {
+            name: name.to_string(),
+            id,
+        }),
+    })
+}
+
+fn find_existing_app<C: ControlClient>(
+    client: &mut C,
+    control_url: &str,
+    token: &str,
+    name: &str,
+) -> Result<Option<String>, String> {
+    let list = client.list_apps(control_url, token)?;
+    if list.status != 200 {
+        return Err(format!(
+            "app lookup failed (HTTP {}): {}",
+            list.status, list.body
+        ));
+    }
+    find_app_id_by_name(&list.body, name)
+}
+
+fn deploy_success(body: String, created_app: Option<CreatedApp>) -> Result<DeployOutcome, String> {
+    let deploy_hash = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|json| {
+            json.get("deploy_hash")
+                .and_then(|hash| hash.as_str())
+                .map(|hash| hash.to_string())
+        });
+    Ok(DeployOutcome {
+        deploy_hash,
+        created_app,
+    })
+}
+
+fn deploy_auto_create(args: &[String]) -> bool {
+    !args.iter().any(|arg| arg == "--no-create")
+}
+
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|&idx| bytes[idx] == b'-')
+        && bytes.iter().enumerate().all(|(idx, byte)| {
+            matches!(idx, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit()
+        })
+}
+
+fn find_app_id_by_name(body: &str, name: &str) -> Result<Option<String>, String> {
+    let json = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|e| format!("parse app list response: {e}"))?;
+    let apps = json
+        .as_array()
+        .ok_or_else(|| "parse app list response: expected array".to_string())?;
+    for app in apps {
+        if app.get("name").and_then(|n| n.as_str()) == Some(name) {
+            return Ok(Some(parse_app_id_value(app, "app list response")?));
         }
     }
+    Ok(None)
+}
+
+fn parse_app_id(body: &str, context: &str) -> Result<String, String> {
+    let json = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|e| format!("parse {context}: {e}"))?;
+    parse_app_id_value(&json, context)
+}
+
+fn parse_app_id_value(json: &serde_json::Value, context: &str) -> Result<String, String> {
+    json.get("id")
+        .and_then(|id| id.as_str())
+        .map(|id| id.to_string())
+        .ok_or_else(|| format!("parse {context}: missing string id"))
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +622,7 @@ fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
-    eprintln!("  zeroship deploy   <path-to-.zship> --app=<id> [--control=URL] [--token=PAT]");
+    eprintln!("  zeroship deploy   <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
     eprintln!("  zeroship login    [--auth-url=https://auth.zeroship.ai]");
@@ -500,6 +766,7 @@ fn non_empty_token(token: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
 
     // -----------------------------------------------------------------------
     // ISS-57: arg-parser robustness
@@ -556,6 +823,211 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum FakeCall {
+        Deploy(String),
+        List,
+        Create(String),
+    }
+
+    #[derive(Default)]
+    struct FakeControlClient {
+        calls: Vec<FakeCall>,
+        deploys: VecDeque<ControlResponse>,
+        lists: VecDeque<ControlResponse>,
+        creates: VecDeque<ControlResponse>,
+    }
+
+    impl FakeControlClient {
+        fn with_deploy(mut self, status: u16, body: &str) -> Self {
+            self.deploys.push_back(ControlResponse {
+                status,
+                body: body.to_string(),
+            });
+            self
+        }
+
+        fn with_list(mut self, status: u16, body: &str) -> Self {
+            self.lists.push_back(ControlResponse {
+                status,
+                body: body.to_string(),
+            });
+            self
+        }
+
+        fn with_create(mut self, status: u16, body: &str) -> Self {
+            self.creates.push_back(ControlResponse {
+                status,
+                body: body.to_string(),
+            });
+            self
+        }
+    }
+
+    impl ControlClient for FakeControlClient {
+        fn deploy_zship(
+            &mut self,
+            _control_url: &str,
+            app: &str,
+            _token: &str,
+            _body: &[u8],
+        ) -> Result<ControlResponse, String> {
+            self.calls.push(FakeCall::Deploy(app.to_string()));
+            self.deploys
+                .pop_front()
+                .ok_or_else(|| "unexpected deploy call".to_string())
+        }
+
+        fn list_apps(
+            &mut self,
+            _control_url: &str,
+            _token: &str,
+        ) -> Result<ControlResponse, String> {
+            self.calls.push(FakeCall::List);
+            self.lists
+                .pop_front()
+                .ok_or_else(|| "unexpected list call".to_string())
+        }
+
+        fn create_app(
+            &mut self,
+            _control_url: &str,
+            _token: &str,
+            name: &str,
+        ) -> Result<ControlResponse, String> {
+            self.calls.push(FakeCall::Create(name.to_string()));
+            self.creates
+                .pop_front()
+                .ok_or_else(|| "unexpected create call".to_string())
+        }
+    }
+
+    #[test]
+    fn deploy_creates_missing_app_after_404_and_retries_by_id() {
+        let missing_app = "33333333-3333-4333-8333-333333333333";
+        let mut client = FakeControlClient::default()
+            .with_deploy(404, r#"{"error":"app not found"}"#)
+            .with_list(200, "[]")
+            .with_create(
+                201,
+                r#"{"id":"11111111-1111-4111-8111-111111111111","name":"33333333-3333-4333-8333-333333333333"}"#,
+            )
+            .with_deploy(200, r#"{"deploy_hash":"sha256:abc"}"#);
+
+        let outcome = deploy_archive(
+            &mut client,
+            "http://control.test",
+            missing_app,
+            "token",
+            b"zship",
+            true,
+        )
+        .expect("deploy should create and retry");
+
+        assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:abc"));
+        assert_eq!(
+            outcome.created_app,
+            Some(CreatedApp {
+                name: missing_app.to_string(),
+                id: "11111111-1111-4111-8111-111111111111".to_string(),
+            })
+        );
+        assert_eq!(
+            client.calls,
+            vec![
+                FakeCall::Deploy(missing_app.to_string()),
+                FakeCall::List,
+                FakeCall::Create(missing_app.to_string()),
+                FakeCall::Deploy("11111111-1111-4111-8111-111111111111".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deploy_name_create_path_resolves_before_upload() {
+        let mut client = FakeControlClient::default()
+            .with_list(200, "[]")
+            .with_create(
+                201,
+                r#"{"id":"22222222-2222-4222-8222-222222222222","name":"calendar"}"#,
+            )
+            .with_deploy(200, r#"{"deploy_hash":"sha256:def"}"#);
+
+        let outcome = deploy_archive(
+            &mut client,
+            "http://control.test",
+            "calendar",
+            "token",
+            b"zship",
+            true,
+        )
+        .expect("name deploy should create and retry by id");
+
+        assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:def"));
+        assert_eq!(
+            client.calls,
+            vec![
+                FakeCall::List,
+                FakeCall::Create("calendar".to_string()),
+                FakeCall::Deploy("22222222-2222-4222-8222-222222222222".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deploy_no_create_suppresses_missing_app_provisioning() {
+        let missing_app = "44444444-4444-4444-8444-444444444444";
+        let args = s(&[
+            "zeroship",
+            "deploy",
+            "dist/app.zship",
+            "--app=44444444-4444-4444-8444-444444444444",
+            "--no-create",
+        ]);
+        assert!(!deploy_auto_create(&args));
+
+        let mut client = FakeControlClient::default()
+            .with_deploy(404, r#"{"error":"app not found"}"#);
+
+        let err = deploy_archive(
+            &mut client,
+            "http://control.test",
+            missing_app,
+            "token",
+            b"zship",
+            deploy_auto_create(&args),
+        )
+        .expect_err("--no-create should keep the original deploy failure");
+
+        assert!(err.contains("HTTP 404"), "{err}");
+        assert_eq!(client.calls, vec![FakeCall::Deploy(missing_app.to_string())]);
+    }
+
+    #[test]
+    fn deploy_existing_app_success_path_is_unchanged() {
+        let mut client = FakeControlClient::default()
+            .with_deploy(200, r#"{"deploy_hash":"sha256:existing"}"#);
+
+        let outcome = deploy_archive(
+            &mut client,
+            "http://control.test",
+            "11111111-1111-4111-8111-111111111111",
+            "token",
+            b"zship",
+            true,
+        )
+        .expect("existing app deploy");
+
+        assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:existing"));
+        assert_eq!(outcome.created_app, None);
+        assert_eq!(
+            client.calls,
+            vec![FakeCall::Deploy(
+                "11111111-1111-4111-8111-111111111111".to_string()
+            )]
+        );
     }
 
     // -----------------------------------------------------------------------
