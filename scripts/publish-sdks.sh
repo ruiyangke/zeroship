@@ -11,6 +11,8 @@ fi
 
 publish_packages=(
   "sdks/types"
+  "sdks/control"
+  "sdks/mcp"
   "sdks/db"
   "sdks/migrate"
   "sdks/bootstrap"

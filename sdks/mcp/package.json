@@ -1,0 +1,36 @@
+{
+  "name": "@zeroship/mcp",
+  "version": "0.1.0",
+  "description": "MCP server for deploying and managing zeroship apps from AI agents",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
+  "bin": {
+    "zeroship-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@zeroship/control": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsup": "^8.5.1",
+    "typescript": "catalog:"
+  }
+}

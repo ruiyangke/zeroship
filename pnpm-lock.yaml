@@ -1100,6 +1100,28 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  sdks/mcp:
+    dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76)
+      '@zeroship/control':
+        specifier: workspace:*
+        version: link:../control
+      zod:
+        specifier: 'catalog:'
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   sdks/migrate:
     dependencies:
       '@zeroship/db':
