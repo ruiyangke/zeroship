@@ -8,9 +8,7 @@
 
 use std::time::Duration;
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use zeroship_runtime::channel::{CancelFlag, ResultReceiver};
 use zeroship_runtime::runtime::{DispatchError, Runtime};
@@ -31,11 +29,6 @@ export default {
 
 type PendingRx = ResultReceiver<Result<SettledFetch, DispatchError>>;
 
-struct PendingBatch {
-    runtime: Runtime,
-    receivers: Vec<PendingRx>,
-}
-
 fn build_runtime() -> Runtime {
     init_v8();
     let modules = vec![ModuleEntry {
@@ -50,9 +43,11 @@ fn build_runtime() -> Runtime {
         .build()
 }
 
-fn prepare_pending_batch(request_count: usize) -> PendingBatch {
-    let runtime = build_runtime();
-    let env = EnvSnapshot::empty();
+fn prepare_pending_requests(
+    runtime: &Runtime,
+    env: &EnvSnapshot,
+    request_count: usize,
+) -> Vec<PendingRx> {
     let mut receivers = Vec::with_capacity(request_count);
 
     for i in 0..request_count {
@@ -78,13 +73,11 @@ fn prepare_pending_batch(request_count: usize) -> PendingBatch {
     }
 
     assert_eq!(receivers.len(), request_count);
-    PendingBatch { runtime, receivers }
+    receivers
 }
 
-async fn drain_pending_batch(batch: PendingBatch) {
-    batch.runtime.start_pump();
-
-    for rx in batch.receivers {
+async fn drain_pending_requests(receivers: Vec<PendingRx>) {
+    for rx in receivers {
         let settled = rx.recv().await.expect("pending fetch delivered DispatchError");
         match settled {
             SettledFetch::Response { status, body, .. } => {
@@ -108,22 +101,27 @@ fn bench_pump_concurrency(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(1));
     group.measurement_time(Duration::from_secs(5));
 
+    let compio_rt = compio::runtime::Runtime::new()
+        .expect("failed to create compio runtime for pump bench");
+    let runtime = build_runtime();
+    let env = EnvSnapshot::empty();
+    runtime
+        .initialize(&env)
+        .expect("failed to initialize pump bench module");
+    compio_rt.block_on(async {
+        runtime.start_pump();
+    });
+
     for request_count in CONCURRENCY_LEVELS {
         group.throughput(Throughput::Elements(request_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(request_count),
             &request_count,
             |b, &request_count| {
-                let compio_rt = compio::runtime::Runtime::new()
-                    .expect("failed to create compio runtime for pump bench");
-
-                b.iter_batched(
-                    || prepare_pending_batch(request_count),
-                    |batch| {
-                        compio_rt.block_on(drain_pending_batch(batch));
-                    },
-                    BatchSize::SmallInput,
-                );
+                b.iter(|| {
+                    let receivers = prepare_pending_requests(&runtime, &env, request_count);
+                    compio_rt.block_on(drain_pending_requests(receivers));
+                });
             },
         );
     }
