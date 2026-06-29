@@ -804,7 +804,13 @@ interpolated):
   within its pinned envelope (see below)
 - `c.fn.now()`, `c.fn.genRandomUuid()` — DB-evaluated apply-time scalars
   (render to `now()` / `gen_random_uuid()` per dialect). Use these instead of
-  baking a build-time `Date.now()` / UUID literal into the artifact.
+  baking a build-time `Date.now()` / UUID literal into the artifact. As an
+  ergonomic shorthand, the **bare native symbol** (no parens) `Date.now`,
+  `Math.random`, or `crypto.randomUUID` used as an op value records as the
+  identical fnSynth scalar — `Date.now` ⇒ `c.fn.now()`, `Math.random` /
+  `crypto.randomUUID` ⇒ `c.fn.genRandomUuid()` — so the DB evaluates it at apply
+  time. Calling it (`Date.now()`, with parens) just evaluates to a frozen
+  build-time value instead (see Determinism below).
 
 The expression records as **dialect-neutral data, never SQL** — the engine owns
 all per-dialect lowering, so the plan checksum is dialect-stable. There is no
@@ -814,12 +820,23 @@ surface is the engine-pinned `c.fn.splitPart`.
 
 ### Determinism: don't bake a clock or RNG into a migration
 
-A migration is recorded once into a committed artifact, so a `Date.now()` /
-`Math.random()` / `crypto.randomUUID()` / `new Date()` in an op argument would
-freeze a build-time value. `lintDeterminism(source)` is a best-effort source
-scan that steers you to the structured replacement (`c.fn.now()` /
-`c.fn.genRandomUuid()`); findings are warnings, not hard rejects
-(`sdks/migrate/src/ops.ts:682-696`).
+A migration is recorded once into a committed artifact, so a **called**
+`Date.now()` / `Math.random()` / `crypto.randomUUID()` / `new Date()` in an op
+argument freezes a build-time value (deterministic within that artifact, but
+almost never what you want). The recorder handles this by translation, not by a
+gate:
+
+- The **bare native symbol** (no parens) — `Date.now`, `Math.random`,
+  `crypto.randomUUID` — records as the DB-evaluated fnSynth scalar (identical IR
+  to `c.fn.now()` / `c.fn.genRandomUuid()`). This is the recommended way to get
+  an apply-time value.
+- A **call** (`Date.now()`) just evaluates and the resulting scalar is recorded
+  verbatim; `lintDeterminism(source)` emits an advisory **warning** steering you
+  to the symbol / `c.fn.*` form — it is advisory-only, never a hard reject (there
+  is no record-twice / invocation determinism gate).
+- A **function value** (native symbol or otherwise) nested inside a container/JSON
+  op value is rejected fail-closed (a function can't be DB-evaluated inside a JSON
+  literal), as is a non-native function used directly as an op value.
 
 ## The DML portability boundary
 
