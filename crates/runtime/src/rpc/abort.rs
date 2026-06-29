@@ -51,14 +51,14 @@ use uuid::Uuid;
 // Registry
 // ---------------------------------------------------------------------------
 
-/// Per-isolate registry of in-flight `AbortController`s, keyed by
-/// `(app_id, request_id)`. Lives in a thread-local because every V8
-/// isolate is pinned to one worker thread; a per-thread map is the
-/// natural shape (no locking, no Send/Sync requirement on the Global).
-///
-/// The HashMap value is the JS `AbortController` itself (NOT just the
-/// signal) — `entered_for_eviction` calls `.abort()` on the controller,
-/// which runs the spec's signal-abort algorithm on the owned signal.
+// Per-isolate registry of in-flight `AbortController`s, keyed by
+// `(app_id, request_id)`. Lives in a thread-local because every V8
+// isolate is pinned to one worker thread; a per-thread map is the
+// natural shape (no locking, no Send/Sync requirement on the Global).
+//
+// The HashMap value is the JS `AbortController` itself (NOT just the
+// signal) — `entered_for_eviction` calls `.abort()` on the controller,
+// which runs the spec's signal-abort algorithm on the owned signal.
 thread_local! {
     static REGISTRY: RefCell<HashMap<RegistryKey, v8::Global<v8::Object>>> =
         RefCell::new(HashMap::new());

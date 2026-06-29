@@ -29,7 +29,7 @@
 use std::cell::{Cell, RefCell};
 
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_inherit, v8_name, WebIdlDict,
+    v8_class, WebIdlDict,
 };
 
 use crate::state::OpError;

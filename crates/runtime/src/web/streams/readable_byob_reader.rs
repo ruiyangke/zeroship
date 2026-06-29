@@ -24,7 +24,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
-use zeroship_runtime_macros::{v8_class, v8_constructor};
+use zeroship_runtime_macros::v8_class;
 
 use crate::state::OpError;
 use crate::streams::algorithms;

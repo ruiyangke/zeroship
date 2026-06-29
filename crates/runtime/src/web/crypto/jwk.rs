@@ -11,7 +11,7 @@
 use super::crypto_key;
 use super::helpers::{
     base64url_decode, base64url_encode, read_optional_bool, read_optional_string,
-    read_optional_string_array, read_required_object,
+    read_optional_string_array,
 };
 use super::key_material::{
     AesKeyAlgorithm, CryptoKeyState, EcKeyAlgorithm, HashAlgo, HmacKeyAlgorithm, KeyAlgorithm,

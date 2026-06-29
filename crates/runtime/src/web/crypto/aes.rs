@@ -5,7 +5,7 @@
 
 use super::crypto_key;
 use super::helpers::{
-    read_buffer_source, read_optional_buffer_source, vec_to_arraybuffer,
+    read_buffer_source, vec_to_arraybuffer,
 };
 use super::key_material::{
     AesKeyAlgorithm, CryptoKeyState, KeyAlgorithm, KeyFormat, KeyMaterial, KeyType, KeyUsage,
@@ -175,7 +175,7 @@ fn gcm_encrypt_any_iv(
     plaintext: &[u8],
     tag_bits: usize,
 ) -> Result<Vec<u8>, OpError> {
-    let mut state = GcmState::new(key_bytes)?;
+    let state = GcmState::new(key_bytes)?;
     let j0 = state.derive_j0(iv);
     let ciphertext = state.gctr(j0_inc(&j0), plaintext);
     let full_tag = state.compute_tag(&j0, aad, &ciphertext);
@@ -198,7 +198,7 @@ fn gcm_decrypt_any_iv(
     }
     let ct = &input[..input.len() - tag_bytes];
     let user_tag = &input[input.len() - tag_bytes..];
-    let mut state = GcmState::new(key_bytes)?;
+    let state = GcmState::new(key_bytes)?;
     let j0 = state.derive_j0(iv);
     let expected = state.compute_tag(&j0, aad, ct);
     // Constant-time compare on the first tag_bytes bytes.
@@ -451,7 +451,7 @@ fn read_cbc_iv(
 
 fn aes_cbc_encrypt(key_bytes: &[u8], iv: &[u8], pt: &[u8]) -> Result<Vec<u8>, OpError> {
     use aws_lc_rs::cipher::{
-        EncryptionContext, PaddedBlockEncryptingKey, UnboundCipherKey, AES_128, AES_192, AES_256,
+        EncryptionContext, PaddedBlockEncryptingKey, UnboundCipherKey,
     };
     use aws_lc_rs::iv::FixedLength;
     let alg = aes_cipher_alg(key_bytes.len())?;

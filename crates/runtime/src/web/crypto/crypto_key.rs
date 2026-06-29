@@ -11,7 +11,7 @@
 
 #![allow(unsafe_code)]
 
-use super::key_material::{CryptoKeyState, KeyAlgorithm, KeyType, KeyUsage, CRYPTO_KEY_TAG};
+use super::key_material::{CryptoKeyState, KeyAlgorithm, KeyUsage, CRYPTO_KEY_TAG};
 use crate::state::OpError;
 
 #[allow(unused_imports)]

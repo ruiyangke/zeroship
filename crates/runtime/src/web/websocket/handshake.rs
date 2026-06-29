@@ -46,8 +46,7 @@ use std::io;
 use std::time::Duration;
 
 use base64::Engine;
-use compio::buf::IoBuf;
-use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio_tls::TlsStream;
 use sha1::{Digest, Sha1};

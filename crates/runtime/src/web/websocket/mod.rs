@@ -37,9 +37,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_inherit, v8_method, v8_name, v8_setter,
-};
+use zeroship_runtime_macros::v8_class;
 
 use crate::state::OpError;
 

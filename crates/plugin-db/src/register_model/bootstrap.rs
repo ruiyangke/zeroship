@@ -23,9 +23,7 @@
 
 use serde_json::Value;
 
-use crate::backend::{
-    AuditWriter, LockGuard, LockScope, NamespaceManager, PgSqlExecutor, RegisterBackend,
-};
+use crate::backend::{AuditWriter, LockGuard, LockScope, NamespaceManager, RegisterBackend};
 use crate::error::DbError;
 use crate::query;
 

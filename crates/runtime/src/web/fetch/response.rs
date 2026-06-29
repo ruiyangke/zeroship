@@ -55,7 +55,7 @@
 use std::cell::{Cell, RefCell};
 
 use zeroship_runtime_macros::{
-    v8_class, v8_constructor, v8_getter, v8_method, v8_name, v8_state_marker, v8_static_method,
+    v8_class,
     WebIdlDict,
 };
 

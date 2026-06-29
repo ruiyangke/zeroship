@@ -4,7 +4,6 @@
 #![allow(dead_code)]
 
 use super::crypto_key;
-use super::digest;
 use super::helpers::{read_buffer_source, vec_to_uint8array};
 use super::key_material::{
     CryptoKeyState, HashAlgo, HmacKeyAlgorithm, KeyAlgorithm, KeyFormat, KeyMaterial, KeyType,

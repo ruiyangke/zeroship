@@ -36,7 +36,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use zeroship_runtime_macros::{v8_class, v8_constructor};
+use zeroship_runtime_macros::v8_class;
 
 use crate::state::OpError;
 use crate::streams::budget::{try_alloc_stream, StreamBudgetGuard};

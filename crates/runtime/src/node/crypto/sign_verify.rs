@@ -18,13 +18,11 @@
 #![allow(unsafe_code)]
 
 use crate::node::buffer;
-use super::key_object::{self, KeyObjectState};
+use super::key_object::{self};
 use crate::web::crypto::crypto_key;
 use crate::web::crypto::key_material::{
-    AesKeyAlgorithm, CryptoKeyState, EcKeyAlgorithm, HashAlgo, KeyAlgorithm, KeyMaterial, KeyType,
-    KeyUsage, NamedCurve, RsaHashedKeyAlgorithm, RsaPrivateComponents, RsaPublicComponents,
+    HashAlgo, KeyMaterial, KeyType,
 };
-use crate::web::crypto::okp;
 use crate::state::OpError;
 
 #[allow(unused_imports)]
