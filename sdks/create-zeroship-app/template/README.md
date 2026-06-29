@@ -10,6 +10,9 @@ pnpm install
 pnpm dev
 ```
 
+Production builds that ship migrations run the gen-types drift gate. Keep
+`zeroship-migrate-js` on PATH, or set `ZEROSHIP_MIGRATE_JS_BIN=/path/to/zeroship-migrate-js`.
+
 - **http://localhost:5173** — your app
 - **.zeroship/** — local dev state (SQLite data, uploaded files). Git-ignored.
 - **src/index.ts** — server functions (marked `"use server"`). React UI calls
@@ -28,6 +31,7 @@ plugin build or `zeroship-migrate-js gen-types`.
 | SDK | Where it comes from | What it does |
 |---|---|---|
 | `@zeroship/db` | `env.db` | Typed CRUD over the app database |
+| `@zeroship/server` | build-time/server bundle | Server wrapper helpers used by the Vite transform |
 | `@zeroship/storage` | `env.storage` | File uploads / object storage |
 | `@zeroship/kv` | `env.kv` | Ephemeral key-value state, sessions, counters |
 

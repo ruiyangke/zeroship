@@ -12,6 +12,7 @@ fi
 publish_packages=(
   "sdks/types"
   "sdks/db"
+  "sdks/migrate"
   "sdks/bootstrap"
   "sdks/auth"
   "sdks/kv"
