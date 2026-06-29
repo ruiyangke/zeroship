@@ -139,5 +139,9 @@ criterion = { workspace = true }
 name = "rpc_dispatch"
 harness = false
 
+[[bench]]
+name = "response_body_convert"
+harness = false
+
 [lints]
 workspace = true
