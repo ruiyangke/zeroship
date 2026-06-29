@@ -1051,6 +1051,7 @@ dependencies = [
  "bytes",
  "compio",
  "compio-tls",
+ "criterion",
  "fallible-iterator 0.2.0",
  "futures-channel",
  "futures-util",
