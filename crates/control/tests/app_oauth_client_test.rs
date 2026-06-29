@@ -339,9 +339,7 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies().expect("authz policies"),
         pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
-        hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-            "http://127.0.0.1:9",
-        )),
+        auth_provider: zeroship_control::hydra_auth_provider("http://127.0.0.1:9"),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),

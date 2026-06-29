@@ -143,12 +143,14 @@ fn manifest_for(
         asset_version: 0,
         sourcemaps: HashMap::new(),
         auth: Default::default(),
+        net: Default::default(),
         metadata: ManifestMetadata {
             compiler: Some("test".into()),
             built_at: "2026-04-29T00:00:00Z".into(),
         },
         exports: None,
         migrations: Vec::new(),
+        runtime_descriptor: None,
     }
 }
 
@@ -312,9 +314,7 @@ async fn build_state_inner(db_url: &str, label: &str, provision_dsn: Option<Stri
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
-        hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-            "http://127.0.0.1:9",
-        )),
+        auth_provider: zeroship_control::hydra_auth_provider("http://127.0.0.1:9"),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),

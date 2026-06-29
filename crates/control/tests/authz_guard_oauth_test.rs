@@ -18,7 +18,6 @@ use zeroship_control::{
     RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_authz::{Action, Resource};
-use zeroship_core::hydra::HydraIntrospector;
 
 #[allow(dead_code)]
 mod common;
@@ -244,7 +243,7 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
-        hydra_introspector: Arc::new(HydraIntrospector::new(&hydra.base)),
+        auth_provider: zeroship_control::hydra_auth_provider(&hydra.base),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),

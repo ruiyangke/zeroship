@@ -25,6 +25,9 @@ pub struct IntrospectResult {
     pub scope: Option<String>,
     pub aud: Option<Vec<String>>,
     pub client_id: Option<String>,
+    pub email: Option<String>,
+    pub email_verified: Option<bool>,
+    pub session_id: Option<String>,
     /// Absolute token expiry in UNIX seconds.
     pub exp: Option<u64>,
 }
@@ -97,6 +100,11 @@ impl HydraIntrospector {
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
+    }
+
+    #[must_use]
+    pub fn admin_url(&self) -> &str {
+        &self.admin_url
     }
 
     /// Remove every cached introspection result whose subject matches
@@ -238,6 +246,14 @@ struct HydraIntrospectionResponse {
     #[serde(default)]
     client_id: Option<String>,
     #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    email_verified: Option<bool>,
+    #[serde(default)]
+    sid: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
     exp: Option<u64>,
 }
 
@@ -249,6 +265,9 @@ impl From<HydraIntrospectionResponse> for IntrospectResult {
             scope: value.scope,
             aud: value.aud,
             client_id: value.client_id,
+            email: value.email,
+            email_verified: value.email_verified,
+            session_id: value.sid.or(value.session_id),
             exp: value.exp,
         }
     }

@@ -2,6 +2,7 @@
 
 pub mod types;
 pub mod auth;
+pub mod auth_provider;
 pub mod db_url;
 pub mod typed_id;
 pub mod net_policy;

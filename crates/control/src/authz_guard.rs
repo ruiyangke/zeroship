@@ -7,6 +7,7 @@ use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
+use zeroship_core::auth_provider::{ProviderAuthz, VerifyTokenError};
 
 use crate::{http_util, AppState};
 
@@ -253,18 +254,21 @@ async fn oauth_guard_from_bearer(
     request_ip: Option<IpAddr>,
     request_id: String,
 ) -> Result<Option<AuthzGuard>, web::Error> {
-    let result = state
-        .hydra_introspector
-        .introspect(token)
+    let verified = state
+        .auth_provider
+        .verify_token(token)
         .await
-        .map_err(|err| {
-            tracing::warn!(error = %err, "control: hydra introspect failed");
-            web::error::ErrorUnauthorized("oauth introspection failed")
+        .map_err(|err| match err {
+            VerifyTokenError::InactiveToken => unauthorized_json("inactive_token"),
+            VerifyTokenError::MissingSubject => {
+                web::error::ErrorUnauthorized("missing oauth sub").into()
+            }
+            VerifyTokenError::HydraIntrospection(err) => {
+                tracing::warn!(error = %err, "control: hydra introspect failed");
+                web::error::ErrorUnauthorized("oauth introspection failed").into()
+            }
         })?;
-    if !result.active {
-        return Err(unauthorized_json("inactive_token"));
-    }
-    if !result.aud.as_ref().is_some_and(|audiences| {
+    if !verified.aud.as_ref().is_some_and(|audiences| {
         audiences
             .iter()
             .any(|audience| audience == &state.expected_oauth_audience)
@@ -272,13 +276,15 @@ async fn oauth_guard_from_bearer(
         return Err(unauthorized_json("wrong_audience"));
     }
 
-    let sub = result
-        .sub
-        .ok_or_else(|| web::error::ErrorUnauthorized("missing oauth sub"))?;
-    let principal_id =
-        Uuid::parse_str(&sub).map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
+    let principal_id = Uuid::parse_str(&verified.provider_subject)
+        .map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
 
-    let raw_scope = result.scope.unwrap_or_default();
+    let raw_scope = match verified.provider_authz {
+        ProviderAuthz::OAuthScope(scope) => scope,
+        ProviderAuthz::GoTrueRole(_) => {
+            return Err(web::error::ErrorUnauthorized("unsupported oauth authz").into());
+        }
+    };
     let scopes = authz::parse_scope_string(&raw_scope)
         .map_err(|_| web::error::ErrorUnauthorized("invalid oauth scope"))?;
     let token_policy = authz::scopes_to_policy(&scopes);

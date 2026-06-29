@@ -64,6 +64,16 @@ pub use zeroship_core::auth::trusted_clients::{
     default_trusted_oauth_clients, resolve_trusted_oauth_clients,
 };
 
+pub fn hydra_auth_provider(
+    admin_url: impl Into<String>,
+) -> Arc<zeroship_core::auth_provider::AuthProvider> {
+    Arc::new(zeroship_core::auth_provider::AuthProvider::Hydra(
+        zeroship_core::auth_provider::HydraProvider::new(
+            zeroship_core::hydra::HydraIntrospector::new(admin_url),
+        ),
+    ))
+}
+
 /// String that zeroizes its heap buffer on drop AND refuses to leak
 /// via `Display` / `Debug` / `serde::Serialize`. Use for any secret
 /// that lives in `AppState` or any long-lived struct.
@@ -199,9 +209,9 @@ pub struct AppState {
     /// Control uses the same key material as the gateway's
     /// `--signing-key-file` wrapper-token issuer for P9 v1.
     pub pat_issuer: Arc<token_handlers::PatIssuer>,
-    /// Hydra admin introspection client for third-party OAuth bearer
+    /// Platform auth-provider token verifier for third-party OAuth bearer
     /// access tokens. Used only after local PAT verification fails.
-    pub hydra_introspector: Arc<zeroship_core::hydra::HydraIntrospector>,
+    pub auth_provider: Arc<zeroship_core::auth_provider::AuthProvider>,
     /// In-process replay cache for OIDC Back-Channel Logout
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.

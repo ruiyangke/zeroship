@@ -321,6 +321,10 @@ struct ControlCli {
     #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
     hydra_admin_url: Option<String>,
 
+    /// Platform auth provider backend. This slice supports only `hydra`.
+    #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", default_value = "hydra")]
+    auth_provider: String,
+
     /// Allow a non-loopback Hydra **admin** API URL. The admin API is
     /// privileged; outside `--dev-insecure` a remote admin URL is refused
     /// unless this is set.
@@ -436,6 +440,7 @@ impl std::fmt::Debug for ControlCli {
             .field("check_config_format", &self.check_config_format)
             .field("obs", &self.obs)
             .field("hydra_admin_url", &self.hydra_admin_url)
+            .field("auth_provider", &self.auth_provider)
             .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
             .field("hydra_public_url", &self.hydra_public_url)
             .field("stash_signing_key", &"<redacted>")
@@ -487,6 +492,28 @@ fn build_billing_mailer(cli: &ControlCli) -> Result<Arc<dyn zeroship_mailer::Mai
             Ok(Arc::new(ResendMailer::new(ResendConfig { api_key })))
         }
         other => Err(format!("unknown mailer: {other:?}; use stdout|smtp|resend")),
+    }
+}
+
+fn build_control_auth_provider(
+    auth_provider: &str,
+    hydra_admin_url: &str,
+) -> Result<Arc<zeroship_core::auth_provider::AuthProvider>, String> {
+    control_auth_provider_kind(auth_provider)?;
+    Ok(zeroship_control::hydra_auth_provider(hydra_admin_url))
+}
+
+fn control_auth_provider_kind(auth_provider: &str) -> Result<&'static str, String> {
+    let normalized = auth_provider.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" | "hydra" => Ok("hydra"),
+        "supabase" => Err(
+            "ZEROSHIP_AUTH_PROVIDER=supabase is not implemented in this slice; only hydra is valid"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "unknown ZEROSHIP_AUTH_PROVIDER value {other:?}; expected hydra"
+        )),
     }
 }
 
@@ -555,6 +582,15 @@ fn main() -> std::io::Result<()> {
         file.auth.hydra_public_url.clone(),
         insecure_dev.then_some(DEV_HYDRA_PUBLIC_URL),
     );
+    let auth_provider_name = cli.auth_provider.clone();
+    let auth_provider_kind = match control_auth_provider_kind(&auth_provider_name) {
+        Ok(kind) => kind,
+        Err(message) => {
+            eprintln!("control: {message}");
+            tracing::error!(error = %message, "control: refusing to start with invalid auth provider");
+            std::process::exit(1);
+        }
+    };
     let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
     tracing::info!(
         trusted_oauth_clients = trusted_oauth_clients.len(),
@@ -957,6 +993,10 @@ fn main() -> std::io::Result<()> {
         );
         report.field("hydra_admin_url", CheckValue::Plain(hydra_admin_url.clone()));
         report.field(
+            "auth_provider",
+            CheckValue::Plain(auth_provider_kind.to_string()),
+        );
+        report.field(
             "hydra_public_url",
             CheckValue::Plain(hydra_public_url.clone()),
         );
@@ -1107,11 +1147,16 @@ fn main() -> std::io::Result<()> {
     let pairwise_salt =
         zeroship_core::auth::derive_pairwise_salt(pairwise_salt_secret.as_bytes());
     // Control plane is a pure API resource server: no console OIDC RP. The
-    // hydra introspector is still needed for the OAuth-bearer arm of the
-    // `AuthzGuard` (third-party access tokens introspected against hydra-admin).
-    let hydra_introspector = Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-        &hydra_admin_url,
-    ));
+    // selected auth provider still drives the OAuth-bearer arm of the
+    // `AuthzGuard` after local PAT verification fails.
+    let auth_provider = match build_control_auth_provider(&auth_provider_name, &hydra_admin_url) {
+        Ok(provider) => provider,
+        Err(message) => {
+            eprintln!("control: {message}");
+            tracing::error!(error = %message, "control: refusing to start with invalid auth provider");
+            std::process::exit(1);
+        }
+    };
 
     // Single shared long-lived connection on the one physical `zeroship` DB
     // (`--db`). There is no separate auth database any more — the former
@@ -1324,7 +1369,7 @@ fn main() -> std::io::Result<()> {
         static_policies: zeroship_authz::load_platform_policies()
             .expect("control: bundled authz policies parse"),
         pat_issuer,
-        hydra_introspector,
+        auth_provider,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider,
         tax_provider,
@@ -1606,6 +1651,20 @@ mod tests {
                 .expect("blob-store flag should parse");
 
         assert_eq!(cli.blob_store, "/tmp/blob-root");
+    }
+
+    #[test]
+    fn auth_provider_selector_defaults_to_hydra_and_rejects_supabase_for_now() {
+        let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
+        assert_eq!(cli.auth_provider, "hydra");
+        assert_eq!(control_auth_provider_kind(&cli.auth_provider), Ok("hydra"));
+        assert_eq!(control_auth_provider_kind(""), Ok("hydra"));
+
+        let err = control_auth_provider_kind("supabase").unwrap_err();
+        assert!(
+            err.contains("not implemented"),
+            "supabase must fail clearly in this slice: {err}"
+        );
     }
 
     #[test]
