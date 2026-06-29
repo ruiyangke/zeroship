@@ -54,6 +54,110 @@ fn simple_response() {
 }
 
 #[test]
+fn request_body_preserves_non_utf8_bytes() {
+    let modules = m(r#"
+        export default {
+            async fetch(request) {
+                const bytes = Array.from(new Uint8Array(await request.arrayBuffer()));
+                return Response.json({ bytes });
+            }
+        };
+    "#);
+
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let runtime = Runtime::builder().modules(modules).build();
+        runtime.start_pump();
+
+        let env = EnvSnapshot::empty();
+        let ctx = RequestCtx::new(CancelFlag::new());
+        let raw_body = [0xff, 0x00, 0xfe, 0x80];
+        let outcome = runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/binary",
+            &[],
+            raw_body.as_slice(),
+            &env,
+            ctx,
+        );
+
+        let (status, body) = match outcome {
+            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Pending { rx, cancel: _ } => {
+                match compio::time::timeout(Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("receiver wait timed out")
+                    .expect("pending delivered DispatchError")
+                {
+                    SettledFetch::Response { status, body, .. } => (status, body),
+                    _ => panic!("expected settled response"),
+                }
+            }
+            _ => panic!("expected response"),
+        };
+
+        assert_eq!(status, 200, "body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(
+            v["bytes"],
+            serde_json::json!([255, 0, 254, 128]),
+            "Request.arrayBuffer() must expose exact request bytes"
+        );
+    });
+}
+
+#[test]
+fn fetch_fast_receives_non_utf8_body_bytes() {
+    let modules = m(r#"
+        export default {
+            fetchFast(method, url, bodyBytes) {
+                return {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({
+                        isUint8Array: bodyBytes instanceof Uint8Array,
+                        bytes: Array.from(bodyBytes),
+                    }),
+                };
+            },
+            fetch() {
+                return new Response("slow path should not run", { status: 599 });
+            },
+        };
+    "#);
+
+    compio::runtime::Runtime::new().unwrap().block_on(async move {
+        init_v8();
+        let runtime = Runtime::builder().modules(modules).build();
+        runtime.start_pump();
+
+        let env = EnvSnapshot::empty();
+        let ctx = RequestCtx::new(CancelFlag::new());
+        let raw_body = [0xff, 0x00, 0xfe, 0x80];
+        let outcome = runtime.call_fetch_handler(
+            "POST",
+            "http://localhost/binary-fast",
+            &[],
+            raw_body.as_slice(),
+            &env,
+            ctx,
+        );
+
+        let FetchOutcome::Response { status, body, .. } = outcome else {
+            panic!("expected synchronous fetchFast response");
+        };
+        assert_eq!(status, 200, "body: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("body is JSON");
+        assert_eq!(v["isUint8Array"], true);
+        assert_eq!(
+            v["bytes"],
+            serde_json::json!([255, 0, 254, 128]),
+            "fetchFast must receive exact request bytes"
+        );
+    });
+}
+
+#[test]
 fn async_response() {
     let modules = m(r#"
         export default {

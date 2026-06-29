@@ -8,6 +8,7 @@ use uuid::Uuid;
 use zeroship_core::auth::{
     extract_bearer, validate_control_key, verify_zeroship_user_header_for_request,
 };
+use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
@@ -30,11 +31,10 @@ const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// ~1 MiB bounds the in-memory un-recorded egress between deltas.
 const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
 
-/// Cap on the dispatch envelope body. The envelope wraps a creator-app
-/// HTTP request including headers and body — most apps don't need
-/// huge inbound bodies on this surface (file uploads typically go
-/// straight to object storage). 4 MiB is generous enough for JSON
-/// APIs + form posts and small enough to bound per-request memory.
+/// Cap on the decoded creator-app request body. Most apps don't need huge
+/// inbound bodies on this surface (file uploads typically go straight to object
+/// storage). 4 MiB is generous enough for JSON APIs + form posts and small
+/// enough to bound per-request memory.
 pub const MAX_DISPATCH_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// Verify the gateway-issued bearer token on /dispatch endpoints.
@@ -136,30 +136,21 @@ fn wall_limit(runtime: &Runtime) -> Option<std::time::Duration> {
 // Unified dispatch — the worker's single entry point
 // ---------------------------------------------------------------------------
 
-/// JSON envelope the gateway sends. The full HTTP request (method, URL,
-/// headers, body) flows in here and `Runtime::call_fetch_handler`
-/// dispatches it through the kernel's three-tier path:
+/// Length-prefixed dispatch frame the gateway sends. The full HTTP request
+/// shape (method, URL, headers, raw body bytes) flows in here and
+/// `Runtime::call_fetch_handler` dispatches it through the kernel's three-tier
+/// path:
 ///   1. `default.rpc(name, input, ctx)` for `/__zeroship/v1/<id>` URLs.
-///   2. `default.fetchFast(method, url, body, env)` for non-RPC traffic.
+///   2. `default.fetchFast(method, url, bodyBytes, env)` for non-RPC traffic.
 ///   3. `default.fetch(request, env, ctx)` (WinterCG slow path) for
 ///      everything else, including fall-through from (1) and (2).
-#[derive(serde::Deserialize)]
-struct HttpEnvelope {
-    method: String,
-    url: String,
-    /// Headers as [[key, value], ...] array.
-    headers: Vec<(String, String)>,
-    #[serde(default)]
-    body: String,
-}
-
 /// Dispatch an HTTP request through the V8 fetch handler.
 ///
-/// The gateway forwards an HTTP envelope (method, URL, headers, body) and
-/// the worker hands it to `Runtime::call_fetch_handler`, which invokes the
-/// app's exported `default.fetch(req, env, ctx)`. Response may be buffered
-/// or streaming (SSE); WebSocket upgrades aren't reachable through this
-/// endpoint (the gateway uses a separate WS proxy path).
+/// The gateway forwards a dispatch frame (method, URL, headers, raw body
+/// bytes) and the worker hands it to `Runtime::call_fetch_handler`, which
+/// invokes the app's exported `default.fetch(req, env, ctx)`. Response may be
+/// buffered or streaming (SSE); WebSocket upgrades aren't reachable through
+/// this endpoint (the gateway uses a separate WS proxy path).
 pub async fn dispatch(
     req: HttpRequest,
     config: web::types::State<Arc<WorkerConfig>>,
@@ -177,13 +168,6 @@ pub async fn dispatch(
         Err(resp) => return resp,
     };
 
-    // Cheap rejection BEFORE app_id parse / runtime lookup / env load.
-    if body.len() > MAX_DISPATCH_BODY_BYTES {
-        metrics::inc(&metrics::DISPATCH_REJECTED_BODY_TOO_LARGE);
-        return HttpResponse::PayloadTooLarge()
-            .json(&serde_json::json!({"error": "dispatch body too large"}));
-    }
-
     let app_id = match path.parse::<Uuid>() {
         Ok(id) => id,
         Err(_) => {
@@ -191,6 +175,26 @@ pub async fn dispatch(
             return HttpResponse::BadRequest().body(r#"{"error":"invalid app_id"}"#);
         }
     };
+
+    // Parse the metadata prefix from the dispatch frame. The remaining bytes
+    // are the creator-app request body; keep them as a refcounted `Bytes`
+    // slice so binary uploads are byte-exact and not copied here.
+    let (metadata, request_body) = match decode_dispatch_frame(body.as_ref()) {
+        Ok(parts) => {
+            let request_body = body.slice(parts.body_offset..);
+            (parts.metadata, request_body)
+        }
+        Err(e) => {
+            metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": format!("invalid envelope: {e}")}));
+        }
+    };
+    if request_body.len() > MAX_DISPATCH_BODY_BYTES {
+        metrics::inc(&metrics::DISPATCH_REJECTED_BODY_TOO_LARGE);
+        return HttpResponse::PayloadTooLarge()
+            .json(&serde_json::json!({"error": "dispatch body too large"}));
+    }
 
     // On-demand loading: if app is not cached, pull from control plane.
     if cache::get_runtime(&app_id).is_none() {
@@ -218,16 +222,6 @@ pub async fn dispatch(
     // `cache::record_request` below.
     let wall_start = std::time::Instant::now();
 
-    // Parse the HTTP envelope from the request body.
-    let envelope: HttpEnvelope = match serde_json::from_slice(&body) {
-        Ok(env) => env,
-        Err(e) => {
-            metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
-            return HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": format!("invalid envelope: {e}")}));
-        }
-    };
-
     // env comes from the process-wide SharedEnvs (Arc<RwLock>), populated
     // by the reconcile loop or load-on-demand path. Read = brief read
     // lock + Arc clone; never held across await.
@@ -253,7 +247,7 @@ pub async fn dispatch(
 
     // ingress_bytes = the end-user request body bytes the worker received
     // (the inner envelope body, not the JSON envelope wrapper overhead).
-    let ingress_bytes = envelope.body.len() as u64;
+    let ingress_bytes = request_body.len() as u64;
 
     // Enter isolate, dispatch through the unified fetch handler. Sample the
     // V8 thread's CPU clock (CLOCK_THREAD_CPUTIME_ID — the same clock the
@@ -267,10 +261,10 @@ pub async fn dispatch(
     let outcome = {
         runtime.enter_isolate();
         let o = runtime.call_fetch_handler_with_user(
-            &envelope.method,
-            &envelope.url,
-            &envelope.headers,
-            &envelope.body,
+            &metadata.method,
+            &metadata.url,
+            &metadata.headers,
+            request_body.as_ref(),
             &env,
             ctx,
             user_json,
@@ -545,6 +539,11 @@ mod tests {
         path
     }
 
+    fn dispatch_frame(method: &str, url: &str, body: &[u8]) -> Vec<u8> {
+        zeroship_core::dispatch_frame::encode_dispatch_frame(method, url, &[], body)
+            .expect("dispatch frame")
+    }
+
     // Regression: the `unlimited`/`enterprise` plan reports `wall_timeout =
     // None`, and `wall_limit` must pass that `None` straight through (no cap) so
     // a long single-request streaming upload isn't cut. Pre-fix this
@@ -661,15 +660,13 @@ mod tests {
             )
             .await;
 
-            let envelope = serde_json::json!({
-                "method": "GET",
-                "url": "http://example.test/from-worker-test",
-                "headers": [],
-                "body": "",
-            });
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{app_id}"))
-                .set_payload(serde_json::to_vec(&envelope).unwrap())
+                .set_payload(dispatch_frame(
+                    "GET",
+                    "http://example.test/from-worker-test",
+                    b"",
+                ))
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
@@ -684,6 +681,103 @@ mod tests {
             let body = test::read_body(resp).await;
             let lines: Vec<String> = serde_json::from_slice(&body).expect("logs json");
             assert_eq!(lines, vec!["b2-real-log /from-worker-test"]);
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn dispatch_preserves_non_utf8_request_body_bytes() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            init_runtime();
+
+            let app_id = Uuid::new_v4();
+            let source = br#"
+                export default {
+                  async fetch(req) {
+                    const bytes = Array.from(new Uint8Array(await req.arrayBuffer()));
+                    return Response.json({ bytes });
+                  }
+                }
+            "#;
+            crate::cache::init_cache(
+                10,
+                crate::cache::KernelConfig {
+                    db_url: None,
+                    kv_url: None,
+                    storage_backend: None,
+                    meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
+                },
+            );
+            crate::cache::load_app(
+                app_id,
+                source,
+                AppRuntimeLimits::default(),
+                zeroship_core::types::AppNetPolicy::default(),
+                None,
+                None,
+                &EnvSnapshot::empty(),
+            )
+            .expect("app loads");
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            crate::sync::put_env_from_json(
+                &envs,
+                app_id,
+                r#"{"vars":{},"secrets":{},"expose":[]}"#,
+                0,
+            )
+            .expect("insert env");
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("blob-binary-body");
+            let blob_store: Arc<dyn BlobStore> =
+                Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+            let config = Arc::new(crate::WorkerConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_url: None,
+                kv_url: None,
+                storage_backend: None,
+                max_isolates: 10,
+                poll_interval_secs: 60,
+                worker_key: String::new(),
+                shutdown_timeout_secs: 0,
+                blob_store,
+            });
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(web::resource("/dispatch/{app_id}").route(web::post().to(dispatch))),
+            )
+            .await;
+
+            let raw_body = [0xff, 0x00, 0xfe, 0x80];
+            let req = test::TestRequest::post()
+                .uri(&format!("/dispatch/{app_id}"))
+                .set_payload(dispatch_frame(
+                    "POST",
+                    "http://example.test/binary-body",
+                    &raw_body,
+                ))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            let v: serde_json::Value =
+                serde_json::from_slice(&body).expect("handler returned JSON");
+            assert_eq!(
+                v["bytes"],
+                serde_json::json!([255, 0, 254, 128]),
+                "request body must be byte-exact, not UTF-8-lossy"
+            );
 
             let _ = std::fs::remove_dir_all(blob_root);
         });
@@ -782,15 +876,9 @@ mod tests {
             // A non-empty request body → ingress_bytes must equal its length.
             let req_body = "the-end-user-request-body-payload";
             let url = "http://example.test/counters-probe";
-            let envelope = serde_json::json!({
-                "method": "POST",
-                "url": url,
-                "headers": [],
-                "body": req_body,
-            });
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{app_id}"))
-                .set_payload(serde_json::to_vec(&envelope).unwrap())
+                .set_payload(dispatch_frame("POST", url, req_body.as_bytes()))
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
@@ -971,15 +1059,13 @@ mod tests {
             )
             .await;
 
-            let envelope = serde_json::json!({
-                "method": "GET",
-                "url": "http://example.test/kernel-probe",
-                "headers": [],
-                "body": "",
-            });
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{app_id}"))
-                .set_payload(serde_json::to_vec(&envelope).unwrap())
+                .set_payload(dispatch_frame(
+                    "GET",
+                    "http://example.test/kernel-probe",
+                    b"",
+                ))
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(

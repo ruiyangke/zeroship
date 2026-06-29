@@ -527,7 +527,6 @@ async fn handle_connection(
                 let BufResult(write_result, _) = stream.write_all(HEALTH_RESPONSE.to_vec()).await;
                 if write_result.is_err() { return; }
             } else {
-                let body_str = std::str::from_utf8(body_bytes).unwrap_or("");
                 let host = headers.iter()
                     .find(|h| h.name.eq_ignore_ascii_case("host"))
                     .and_then(|h| std::str::from_utf8(h.value).ok())
@@ -554,7 +553,7 @@ async fn handle_connection(
                 );
 
                 let wrote_ok = handle_request(
-                    &mut stream, method, &full_url, &request_headers, body_str, &runtime, &app_env,
+                    &mut stream, method, &full_url, &request_headers, body_bytes, &runtime, &app_env,
                 ).await;
                 if !wrote_ok { return; }
                 if is_upgrade { return; }
@@ -860,7 +859,7 @@ async fn handle_request(
     method: &str,
     url: &str,
     request_headers: &[(String, String)],
-    body: &str,
+    body: &[u8],
     runtime: &Runtime,
     app_env: &EnvSnapshot,
 ) -> bool {

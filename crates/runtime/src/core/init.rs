@@ -272,7 +272,7 @@ export {
 ///
 /// The kernel invokes one of three entry points per request:
 ///   - `user.default.rpc(name, input, ctx)`  for `/__zeroship/v1/<id>` (when set)
-///   - `user.default.fetchFast(method, url, body, env)`  for non-RPC paths (when set)
+///   - `user.default.fetchFast(method, url, bodyBytes, env)`  for non-RPC paths (when set)
 ///   - `user.default.fetch(request, env, ctx)`  WinterCG slow path (always)
 ///
 /// The synthetic SSR entry (emitted by `@zeroship/vite-plugin`) provides
@@ -929,7 +929,7 @@ const USER_FETCH = __USER_FETCH_RAW
       }
     : null;
 
-// Optional zeroship extension: `user.default.fetchFast(method, url, body, env)`.
+// Optional zeroship extension: `user.default.fetchFast(method, url, bodyBytes, env)`.
 // Opt-in handler that bypasses the Request/Response construction entirely.
 // Returns one of:
 //   - { status, headers, body } plain object → HTTP response
@@ -948,9 +948,9 @@ const __USER_FETCH_FAST_RAW = (user && user.default && typeof user.default.fetch
 // rejected `__zsSchemaReady` throws out of the shim → kernel maps it to
 // an error envelope. Near-free on the warm path (settled promise).
 const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
-    ? async function gatedFetchFast(method, url, body, env) {
+    ? async function gatedFetchFast(method, url, bodyBytes, env) {
           await __zsAwaitSchemaReady();
-          return __USER_FETCH_FAST_RAW(method, url, body, env);
+          return __USER_FETCH_FAST_RAW(method, url, bodyBytes, env);
       }
     : null;
 
@@ -1067,7 +1067,7 @@ export default {
     // Symmetric to fetch — independent kernel entry, not layered.
     rpc: USER_RPC,
     // Zeroship extension: non-WinterCG fast HTTP dispatch for non-RPC
-    // traffic. Kernel calls this with raw (method, url, body, env).
+    // traffic. Kernel calls this with raw (method, url, bodyBytes, env).
     // User returns a plain response shape or null to fall through to
     // fetch(). Skips Request/Response construction — hot-path-only win.
     fetchFast: USER_FETCH_FAST,

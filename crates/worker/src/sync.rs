@@ -785,15 +785,16 @@ mod tests {
     }
 
     fn dispatch_req(app_id: &Uuid) -> ntex::http::Request {
-        let envelope = serde_json::json!({
-            "method": "GET",
-            "url": "http://example.test/env-probe",
-            "headers": [],
-            "body": "",
-        });
+        let frame = zeroship_core::dispatch_frame::encode_dispatch_frame(
+            "GET",
+            "http://example.test/env-probe",
+            &[],
+            b"",
+        )
+        .expect("dispatch frame");
         test::TestRequest::post()
             .uri(&format!("/dispatch/{app_id}"))
-            .set_payload(serde_json::to_vec(&envelope).unwrap())
+            .set_payload(frame)
             .to_request()
     }
 

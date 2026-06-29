@@ -358,7 +358,7 @@ impl Runtime {
         method: &str,
         url: &str,
         headers: &[(String, String)],
-        body: &str,
+        body: impl AsRef<[u8]>,
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
     ) -> crate::FetchOutcome {
@@ -372,11 +372,12 @@ impl Runtime {
         method: &str,
         url: &str,
         headers: &[(String, String)],
-        body: &str,
+        body: impl AsRef<[u8]>,
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
         user_json: Option<String>,
     ) -> crate::FetchOutcome {
+        let body = body.as_ref();
         self.inner.borrow_mut().call_fetch_handler(
             self.modules.as_slice(),
             method,
@@ -736,7 +737,7 @@ pub(crate) struct RuntimeInner {
     pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
     /// Cached reference to `module.default.fetchFast` — the zeroship
     /// extension for bypassing the WinterCG Request/Response contract.
-    /// Signature: `fetchFast(method, url, body, env) → object | string | null`.
+    /// Signature: `fetchFast(method, url, bodyBytes, env) → object | string | null`.
     /// When non-null result: `{ status, headers, body }` plain object OR
     /// a string body (200 OK). When null: kernel falls through to the
     /// full `default.fetch(request, env, ctx)` path.
@@ -1637,7 +1638,7 @@ impl RuntimeInner {
     /// Kernel's sole HTTP dispatch primitive. Three tiers, in order:
     ///   1. `default.rpc(name, input, ctx)` when set + URL matches
     ///      `/__zeroship/v1/<id>` and the request isn't a WS upgrade.
-    ///   2. `default.fetchFast(method, url, body, env)` when set.
+    ///   2. `default.fetchFast(method, url, bodyBytes, env)` when set.
     ///   3. `default.fetch(request, env, ctx)` (WinterCG slow path).
     ///
     /// Tiers 1 and 2 can fall through to (3) by returning a sentinel
@@ -1650,7 +1651,7 @@ impl RuntimeInner {
         method: &str,
         url: &str,
         headers: &[(String, String)],
-        body: &str,
+        body: &[u8],
         env: &crate::EnvSnapshot,
         ctx: crate::RequestCtx,
         user_json: Option<String>,
@@ -1887,7 +1888,8 @@ impl RuntimeInner {
                     let ff_fn = v8::Local::new(scope, ff_fn_global);
                     let method_arg = v8::String::new(scope, method).unwrap().into();
                     let url_arg = v8::String::new(scope, url).unwrap().into();
-                    let body_arg = v8::String::new(scope, body).unwrap().into();
+                    let body_arg = uint8_array_from_bytes(scope, body)
+                        .unwrap_or_else(|| v8::undefined(scope).into());
                     let env_arg: v8::Local<v8::Value> = {
                         let maybe_global = self.state.borrow().env_obj.clone();
                         match maybe_global {
@@ -1901,7 +1903,7 @@ impl RuntimeInner {
                 };
 
                 if let FetchFastResult::Handled(res) = fetch_fast_result {
-                    // ---- Fast path: fetchFast(method, url, body, env) ----
+                    // ---- Fast path: fetchFast(method, url, bodyBytes, env) ----
                     // Returned a concrete result — use it directly, no
                     // Request/Response object construction needed.
                     res
@@ -3270,7 +3272,7 @@ fn wait_until_noop_callback(
 /// - `Err(v8::Global<v8::Promise>)` — handler returned a still-pending
 ///   promise. The real async path lands in Task B4; caller serves 501
 ///   in the meantime.
-/// Outcome of the `fetchFast(method, url, body, env)` extension.
+/// Outcome of the `fetchFast(method, url, bodyBytes, env)` extension.
 ///
 /// `Handled` means the user produced a definitive result (sync or
 /// promise-based). `FallThrough` means the user returned `null` /
@@ -3356,6 +3358,17 @@ fn call_fetch_fast_inner(
     }
 
     classify_fetch_fast_return(scope, result)
+}
+
+fn uint8_array_from_bytes<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    body: &[u8],
+) -> Option<v8::Local<'s, v8::Value>> {
+    let len = body.len();
+    let store = v8::ArrayBuffer::new_backing_store_from_vec(body.to_vec()).make_shared();
+    let ab = v8::ArrayBuffer::with_backing_store(scope, &store);
+    let view = v8::Uint8Array::new(scope, ab, 0, len)?;
+    Some(view.into())
 }
 
 /// Turn a resolved `fetchFast` return value into a DispatchResult
@@ -3495,7 +3508,7 @@ fn parse_rpc_input<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     method: &str,
     url: &str,
-    body: &str,
+    body: &[u8],
 ) -> InputParse<'s> {
     if method.eq_ignore_ascii_case("POST") {
         return parse_rpc_body(scope, body);
@@ -3519,19 +3532,19 @@ fn parse_rpc_input<'s>(
     let Ok(s) = std::str::from_utf8(&decoded) else {
         return InputParse::Reject400("invalid base64url input");
     };
-    parse_rpc_body(scope, s)
+    parse_rpc_body(scope, s.as_bytes())
 }
 
 /// Parse a superjson body and revive rich values into V8.
 #[inline]
 fn parse_rpc_body<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    body: &str,
+    body: &[u8],
 ) -> InputParse<'s> {
     if body.is_empty() {
         return InputParse::Ok(v8::undefined(scope).into());
     }
-    match crate::rpc::decode_from_bytes(scope, body.as_bytes()) {
+    match crate::rpc::decode_from_bytes(scope, body) {
         Ok(v) => InputParse::Ok(v),
         Err(_) => InputParse::Reject400("invalid JSON body"),
     }

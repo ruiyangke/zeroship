@@ -7,6 +7,7 @@ pub mod typed_id;
 pub mod net_policy;
 pub mod crypto;
 pub mod config;
+pub mod dispatch_frame;
 pub mod dpop;
 pub mod observability;
 pub mod logout_token;

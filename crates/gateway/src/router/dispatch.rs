@@ -1408,9 +1408,9 @@ fn forward_url(scheme: &str, host: &str, tail: &str, query: Option<&str>) -> Str
 }
 
 ///
-/// The full HTTP request (method, URL, headers, body) is packaged into the
-/// HttpEnvelope and handed to `Runtime::call_fetch_handler`, which invokes
-/// the app's exported `default.fetch(req, env, ctx)`. Covers both the
+/// The full HTTP request (method, URL, headers, raw body bytes) is packaged
+/// into the dispatch frame and handed to `Runtime::call_fetch_handler`, which
+/// invokes the app's exported `default.fetch(req, env, ctx)`. Covers both the
 /// `_rpc/*` URLs (routed inside the kernel via the bootstrap) and plain
 /// HTTP requests. Enables streaming responses (e.g., SSE for LLM token
 /// streaming).
@@ -1469,19 +1469,16 @@ async fn handle_dispatch(
     // HMAC `ZeroShip-User` channel (`user_header_value`), never here.
     let headers = collect_forwarded_headers(req.headers());
 
-    let method = req.method().as_str();
-    let body_str = String::from_utf8_lossy(&body);
-
     // Proxy to worker via CHWBL hash ring.
     let mut response = match proxy::forward_dispatch(
         &state.hash_ring,
         app_id,
         &route.plan_id,
         &request_id,
-        method,
+        req.method().as_str(),
         &url,
         &headers,
-        &body_str,
+        body.as_ref(),
         user_header_value.as_deref(),
         &state.config.worker_key,
     )

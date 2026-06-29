@@ -193,12 +193,13 @@ fn pool_key(worker_url: &str) -> String {
 /// Forward an HTTP request to a worker via the unified `/dispatch/{app_id}`
 /// endpoint.
 ///
-/// Wraps the original HTTP request (method, URL, headers, body) into the
-/// JSON envelope the worker's kernel passes to `Runtime::call_fetch_handler`
-/// (which in turn invokes the app's exported `default.fetch`). This is the
-/// one path the kernel exposes — both `_rpc/*` URLs and normal HTTP requests
-/// travel the same wire; any routing within the app happens in user-space JS
-/// via the bootstrap router.
+/// Wraps the original HTTP request metadata into a small length-prefixed JSON
+/// prefix, then appends the original request body as raw bytes. The worker's
+/// kernel passes the decoded shape to `Runtime::call_fetch_handler` (which in
+/// turn invokes the app's exported `default.fetch`). This is the one path the
+/// kernel exposes — both `_rpc/*` URLs and normal HTTP requests travel the
+/// same wire; any routing within the app happens in user-space JS via the
+/// bootstrap router.
 pub async fn forward_dispatch(
     ring: &HashRing,
     app_id: &Uuid,
@@ -207,24 +208,20 @@ pub async fn forward_dispatch(
     method: &str,
     url: &str,
     headers: &[(String, String)],
-    body: &str,
+    body: &[u8],
     user_header: Option<&str>,
     worker_key: &str,
 ) -> Result<HttpResponse, String> {
     if ring.num_workers() == 0 {
         return Err("no workers configured".into());
     }
+
+    let envelope_bytes =
+        zeroship_core::dispatch_frame::encode_dispatch_frame(method, url, headers, body)
+            .map_err(|e| format!("invalid dispatch envelope: {e}"))?;
+
     let (idx, worker_url) = ring.select(app_id);
     ring.acquire(idx);
-
-    // Build the HTTP envelope JSON.
-    let envelope = serde_json::json!({
-        "method": method,
-        "url": url,
-        "headers": headers,
-        "body": body,
-    });
-    let envelope_bytes = serde_json::to_vec(&envelope).unwrap_or_default();
 
     let result = forward_to_worker_dispatch(
         worker_url, app_id, plan_id, request_id, &envelope_bytes, user_header, worker_key,

@@ -1,28 +1,26 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
-#[derive(serde::Deserialize)]
-struct HttpEnvelope {
-    method: String,
-    url: String,
-    headers: Vec<(String, String)>,
-    #[serde(default)]
-    body: String,
-}
-
-fn old_json_string_encode_decode(body: &[u8]) -> usize {
-    let body_str = String::from_utf8_lossy(body);
-    let envelope = serde_json::json!({
-        "method": "POST",
-        "url": "https://example.test/upload?x=1",
-        "headers": [
-            ["content-type", "application/octet-stream"],
-            ["x-request-id", "bench-request"],
-        ],
-        "body": &*body_str,
-    });
-    let envelope_bytes = serde_json::to_vec(&envelope).expect("serialize envelope");
-    let decoded: HttpEnvelope = serde_json::from_slice(&envelope_bytes).expect("decode envelope");
-    decoded.method.len() + decoded.url.len() + decoded.headers.len() + decoded.body.len()
+fn framed_encode_decode(body: &[u8]) -> usize {
+    let headers = [
+        (
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        ),
+        ("x-request-id".to_string(), "bench-request".to_string()),
+    ];
+    let frame = zeroship_core::dispatch_frame::encode_dispatch_frame(
+        "POST",
+        "https://example.test/upload?x=1",
+        &headers,
+        body,
+    )
+    .expect("serialize dispatch frame");
+    let decoded =
+        zeroship_core::dispatch_frame::decode_dispatch_frame(&frame).expect("decode dispatch frame");
+    decoded.metadata.method.len()
+        + decoded.metadata.url.len()
+        + decoded.metadata.headers.len()
+        + decoded.body.len()
 }
 
 fn bench_dispatch_envelope(c: &mut Criterion) {
@@ -37,7 +35,7 @@ fn bench_dispatch_envelope(c: &mut Criterion) {
         let body = vec![b'a'; size];
         group.bench_with_input(BenchmarkId::from_parameter(name), &body, |b, body| {
             b.iter(|| {
-                let observed = old_json_string_encode_decode(black_box(body));
+                let observed = framed_encode_decode(black_box(body));
                 black_box(observed);
             });
         });

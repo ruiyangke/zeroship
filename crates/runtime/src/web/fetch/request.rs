@@ -1065,7 +1065,7 @@ pub fn build_kernel_request<'s>(
     method: &str,
     url: &str,
     headers: &[(String, String)],
-    body: &str,
+    body: &[u8],
 ) -> Option<v8::Local<'s, v8::Object>> {
     // 1. Resolve the FunctionTemplate from the macro's install slot.
     //    Set on the first call to `Request::install` in this isolate
@@ -1102,13 +1102,13 @@ pub fn build_kernel_request<'s>(
     let raw_headers = Arc::new(headers.to_vec());
 
     // 4. Build the body. For wire HTTP: GET/HEAD have no body; for
-    // other methods, treat the body string as bytes. We use the
+    // other methods, preserve the raw request bytes. We use the
     // BodySource::Bytes path so consumer methods (`text` / `json` /
     // etc.) can short-circuit without materializing a stream.
     let body_impl = if body.is_empty() || method == "GET" || method == "HEAD" {
         crate::fetch_body::body::BodyImpl::null()
     } else {
-        let bytes = std::rc::Rc::new(body.as_bytes().to_vec());
+        let bytes = std::rc::Rc::new(body.to_vec());
         let length = Some(bytes.len() as u64);
         crate::fetch_body::body::BodyImpl {
             stream: std::cell::RefCell::new(None),
