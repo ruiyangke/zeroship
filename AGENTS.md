@@ -2,6 +2,8 @@
 
 A platform where anyone can create, launch, and monetize software — without writing code. Creators describe what they want in natural language. AI builds it. The platform handles everything: hosting, database, auth, payments, scaling. The platform earns two ways: creators pay for the infrastructure their apps consume (tiered plans + pay-as-you-go overage), and when a creator monetizes their app the platform takes a configurable application fee on end-user revenue (default 15%). Think Shopify for AI-generated apps.
 
+**Primary creator flow (2026-06-29 direction): build locally → deploy.** Creators (or an AI coding agent — Claude Code / Codex — on the creator's machine) build a zeroship app locally and `zeroship deploy` the built `.zship` to the platform. We don't rebuild a hosted in-browser AI builder (the agents do that better); the platform's value is the *infrastructure* (runtime, `env.*` primitives, deploy contract, gateway, billing). The hosted-build environment / **sandbox is deferred** (extracted to the standalone `zeroship-sandbox` project). Golden path + scaffold: `docs/build-and-deploy-golden-path.md` · `examples/starter/` (+ its `CLAUDE.md`) · `tests/golden_path.sh`.
+
 This file is the AI-agent landing page. Read the **task router** below first.
 
 ---
@@ -40,6 +42,7 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `crates/zeroship-migrate/` · `sdks/migrate/` |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
+| **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/cli/` (`zeroship deploy`) |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/runtime/src/core/init.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/bootstrap/` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/control/src/{stripe_handlers,stripe_store,metering}.rs` |

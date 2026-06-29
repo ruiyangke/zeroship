@@ -20,10 +20,13 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
-DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/zeroship}"
+# Dedicated, freshly-migrated DB per run (isolated from the shared `zeroship`
+# db) so the run is self-contained + reproducible and never re-provisions a
+# stale app.
 PG_CONTAINER="${PG_CONTAINER:-appbase-migrate-postgres-1}"
 PG_USER="${PG_USER:-postgres}"
-PG_DB="${PG_DB:-zeroship}"
+PG_DB="${PG_DB:-zeroship_golden}"
+DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # Distinct ports so this never clashes with a running dev stack.
 CONTROL_PORT="${CONTROL_PORT:-9390}"
 WORKER_PORT="${WORKER_PORT:-8390}"
@@ -56,9 +59,20 @@ echo "=== 1. Build examples/starter (pnpm build → dist/app.zship) ==="
 # --- 2. Bring up the stack (control + worker + gateway) ---
 echo "=== 2. Bring up the stack ==="
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
-docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" \
-  -c "DROP TABLE IF EXISTS public.usage_history, public.usage, public.apps CASCADE" >/dev/null 2>&1 || true
 rm -rf /tmp/gp-bundles
+
+# Fresh dedicated DB + the full platform schema (db/migrations/*.sql are plain
+# SQL, applied in order — no migrate-engine build needed).
+echo "  migrating a fresh $PG_DB ..."
+docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || \
+  docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB" >/dev/null 2>&1 || true
+docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
+for f in $(ls "$ROOT"/db/migrations/V*.sql | grep -vE "\.down\." | sort); do
+  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q < "$f" >/tmp/gp-migrate.log 2>&1 \
+    || { fail "migration $(basename "$f") failed"; tail -5 /tmp/gp-migrate.log; exit 1; }
+done
+docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regclass('zeroship.apps')" 2>/dev/null | grep -q apps \
+  && pass "schema migrated (fresh $PG_DB)" || { fail "schema missing after migrate"; exit 1; }
 
 "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$DB_URL" --blob-store /tmp/gp-bundles \
   --control-key "$CONTROL_KEY" --master-key "$MASTER_KEY" >/tmp/gp-control.log 2>&1 & PIDS+=($!)
