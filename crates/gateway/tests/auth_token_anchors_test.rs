@@ -377,7 +377,6 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp: Arc::new(oidc_rp),
         db,
-        dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
         signing_key: Some(Arc::new(signing_key)),
@@ -907,7 +906,7 @@ async fn hydra_refresh(oidc: &OidcRp, hydra: &MockHydra) -> Result<(), String> {
         .refresh_token_public(CLIENT_ID, "rt_seed")
         .await
         .map_err(|e| e.to_string())?;
-    // Verify the rotated raw access JWT locally (no introspection).
+    // Verify the rotated raw access JWT locally (no remote validation).
     let raw = oidc
         .verify_access_token(&tokens.access_token)
         .await
@@ -1723,7 +1722,7 @@ async fn cleanup_f1(dsn: &str, user_id: Uuid) {
 /// The default BFF popup flow mints its session via `POST /__zeroship/auth/session`
 /// (`mint_session_from_code`). Pre-fix, THAT path wrote the gateway session +
 /// the reload-recovery anchor but NEVER wrote `zeroship.app_user_identities`
-/// (only the DPoP/Bearer arms did). H1's reset teardown (`password_reset::
+/// (only the Bearer arm did). H1's reset teardown (`password_reset::
 /// complete`) derives the per-app family marker by JOINing `app_user_identities`
 /// — so for a cookie-only user it found ZERO rows, wrote ZERO markers, and the
 /// victim's live `__Host-zeroship_app_session` cookie survived the reset for its

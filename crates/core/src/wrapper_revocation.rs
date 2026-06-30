@@ -4,7 +4,7 @@
 //! **`token_revocations`** is the SOLE wrapper-token revocation primitive
 //! keyed on `(client_id, sub)` with `sub` stored as TEXT, so it holds the
 //! wrapper's `pws_…` pairwise subject (and, on the raw-Hydra arm, the per-app
-//! `pws_` derived from the global UUID). The wrapper / Bearer / DPoP arms
+//! `pws_` derived from the global UUID). The wrapper / Bearer arms
 //! (§1.3 c-wrap / c-hydra) reject a token when a row exists for its
 //! `(client_id, pws_)` with `revoked_after > token.iat`. Per-app scoping means
 //! revoking a user on app A leaves their tokens on app B valid.
@@ -125,7 +125,7 @@ pub async fn sweep_expired_families(db: &Client) -> Result<u64, Error> {
 
 // ─── R1d: short-TTL read-through cache for the per-request marker read ────
 //
-// The cookie hot path (and the Bearer / DPoP-introspect arms) verifies the
+// The cookie hot path (and the Bearer arm) verifies the
 // token LOCALLY, then runs ONE per-request DB read — the family-marker
 // revocation gate. R1d caches that read so the steady-state (no-revocation)
 // request is fully DB-free on a cache hit.
@@ -146,10 +146,9 @@ pub async fn sweep_expired_families(db: &Client) -> Result<u64, Error> {
 // gateway-side family revoke) busts the entry immediately, so same-node
 // signout needs no TTL wait; cross-node writers rely on the TTL backstop.
 //
-// No tokio: a `std::Mutex<HashMap>` with sweep-on-insert and a capacity cap,
-// the same shape as [`crate::dpop::JtiCache`]. The instance lives on
-// `GateState` as an `Arc` and is threaded into the resolve arms like the
-// other shared caches.
+// No tokio: a `std::Mutex<HashMap>` with sweep-on-insert and a capacity cap.
+// The instance lives on `GateState` as an `Arc` and is threaded into the
+// resolve arms like the other shared caches.
 
 /// Default cache TTL. Short on purpose: it is the upper bound on how long a
 /// cross-node revocation can be unseen by a cache-warm node. 5 s is small

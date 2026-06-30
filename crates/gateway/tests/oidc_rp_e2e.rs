@@ -209,6 +209,12 @@ async fn gateway_oidc_rp_full_dance() {
         // frame_ancestor_origins in the immersive-popup CSP work.
         frame_ancestor_origins: vec![],
         hydra_public_url: Some(hydra_public.clone()),
+        auth_provider: None,
+        supabase_url: None,
+        supabase_anon_key: None,
+        gotrue_email_hook_secret: None,
+        control_url: None,
+        control_key: String::new(),
         clients_config: "ops/auth-clients.example.toml".to_string(),
         bootstrap: false,
         dev_insecure: Some(true),
@@ -242,6 +248,8 @@ async fn gateway_oidc_rp_full_dance() {
         mail_from_email: "auth@zeroship.ai".to_string(),
         mail_from_name: "zeroship".to_string(),
         public_url: "http://localhost:9092".to_string(),
+        auth_signing_key_file: None,
+        auth_pairwise_salt_file: None,
         postmark_webhook_user: None,
         postmark_webhook_password: None,
         // Relay (Slice 5) — this e2e doesn't exercise the relay path; defaults.
