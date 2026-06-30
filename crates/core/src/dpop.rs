@@ -1161,9 +1161,9 @@ mod jti_cache_tests {
             .detach();
 
             client
-                .execute("CREATE SCHEMA IF NOT EXISTS auth", &[])
+                .execute("CREATE SCHEMA IF NOT EXISTS zeroship", &[])
                 .await
-                .expect("create auth schema");
+                .expect("create zeroship schema");
             client
                 .execute(
                     "CREATE TABLE IF NOT EXISTS zeroship.dpop_jti ( \
@@ -1228,9 +1228,9 @@ mod jti_cache_tests {
             .detach();
 
             client
-                .execute("CREATE SCHEMA IF NOT EXISTS auth", &[])
+                .execute("CREATE SCHEMA IF NOT EXISTS zeroship", &[])
                 .await
-                .expect("create auth schema");
+                .expect("create zeroship schema");
             client
                 .execute(
                     "CREATE TABLE IF NOT EXISTS zeroship.dpop_jti ( \

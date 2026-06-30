@@ -44,6 +44,7 @@ use compio_postgres::Client;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
+use crate::advisory_lock::NS_USER;
 use crate::error::{AuthError, Result};
 
 /// Lifetime of a reset token from issue to expiry.
@@ -278,6 +279,9 @@ pub async fn complete(
                    AND ml.user_id IS NOT NULL \
                    AND ml.consumed_at IS NULL \
                    AND ml.expires_at > NOW() \
+             ), locked AS ( \
+                 SELECT pg_advisory_xact_lock($4::INT4, hashtext(c.user_id::text)) \
+                 FROM candidate c \
              ), updated_user AS ( \
                  UPDATE zeroship.users u \
                  SET password_hash = $3, \
@@ -285,7 +289,7 @@ pub async fn complete(
                      failed_login_count = 0, \
                      locked_until = NULL, \
                      updated_at = NOW() \
-                 FROM candidate c \
+                 FROM candidate c, locked l \
                  WHERE u.id = c.user_id \
                  RETURNING u.id, c.email \
              ), consumed AS ( \
@@ -297,7 +301,7 @@ pub async fn complete(
                    AND ml.user_id = u.id \
                    AND ml.consumed_at IS NULL \
                  RETURNING u.id AS user_id, u.email AS email \
-             ), revoked_families AS ( \
+             ), wrapper_family_markers AS ( \
                  INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
                  SELECT aui.app_client_id, aui.pairwise_sub, NOW() \
                  FROM zeroship.app_user_identities aui \
@@ -310,9 +314,26 @@ pub async fn complete(
                  FROM consumed c \
                  WHERE a.global_user_id = c.user_id \
                    AND a.revoked_at IS NULL \
+             ), refresh_families AS ( \
+                 SELECT DISTINCT ort.client_id, ort.sub, NOW() AS revoked_after \
+                 FROM zeroship.oauth_refresh_tokens ort \
+                 JOIN consumed c ON c.user_id = ort.user_id \
+                 WHERE ort.revoked_at IS NULL \
+             ), refresh_revoked AS ( \
+                 UPDATE zeroship.oauth_refresh_tokens ort \
+                 SET revoked_at = NOW() \
+                 FROM consumed c \
+                 WHERE ort.user_id = c.user_id \
+                   AND ort.revoked_at IS NULL \
+             ), refresh_family_markers AS ( \
+                 INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+                 SELECT client_id, sub, revoked_after \
+                 FROM refresh_families \
+                 ON CONFLICT (client_id, sub) \
+                   DO UPDATE SET revoked_after = EXCLUDED.revoked_after \
              ) \
              SELECT user_id, email FROM consumed",
-            &[&token_hash.as_slice(), &PURPOSE, &password_hash],
+            &[&token_hash.as_slice(), &PURPOSE, &password_hash, &NS_USER],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset complete: {e}")))?;

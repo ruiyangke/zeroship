@@ -12,6 +12,7 @@ use std::time::Duration;
 use compio_postgres::Client;
 
 use crate::error::{AuthError, Result};
+use crate::op::refresh;
 
 const INTERVAL_SECS: u64 = 60 * 60;
 
@@ -41,6 +42,8 @@ pub struct TokenSweepReport {
     pub email_verifications_deleted: u64,
     pub token_revocations_deleted: u64,
     pub rate_limits_deleted: u64,
+    pub refresh_tokens_deleted: u64,
+    pub refresh_idem_reaped: u64,
 }
 
 impl TokenSweepReport {
@@ -51,6 +54,8 @@ impl TokenSweepReport {
             + self.email_verifications_deleted
             + self.token_revocations_deleted
             + self.rate_limits_deleted
+            + self.refresh_tokens_deleted
+            + self.refresh_idem_reaped
     }
 }
 
@@ -75,6 +80,8 @@ pub async fn run(db: Arc<Client>) {
                     email_verifications_deleted = report.email_verifications_deleted,
                     token_revocations_deleted = report.token_revocations_deleted,
                     rate_limits_deleted = report.rate_limits_deleted,
+                    refresh_tokens_deleted = report.refresh_tokens_deleted,
+                    refresh_idem_reaped = report.refresh_idem_reaped,
                     total_deleted = report.total(),
                     "token_sweep completed"
                 );
@@ -113,6 +120,9 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
         zeroship_core::wrapper_revocation::sweep_expired_families(db)
             .await
             .map_err(|e| AuthError::Db(format!("token_sweep zeroship.token_revocations: {e}")))?;
+    let (refresh_tokens_deleted, refresh_idem_reaped) = refresh::sweep_refresh_tokens(db)
+        .await
+        .map_err(|e| AuthError::Db(format!("token_sweep zeroship.oauth_refresh_tokens: {e}")))?;
 
     // SEC-3: reap idle rate-limit buckets (and relay dedup sentinels, which
     // share this table) so a forged-IP flood can't leave permanent rows. The
@@ -135,6 +145,8 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
         email_verifications_deleted,
         token_revocations_deleted,
         rate_limits_deleted,
+        refresh_tokens_deleted,
+        refresh_idem_reaped,
     })
 }
 
@@ -205,7 +217,9 @@ mod tests {
             email_verifications_deleted: 1,
             token_revocations_deleted: 1,
             rate_limits_deleted: 3,
+            refresh_tokens_deleted: 2,
+            refresh_idem_reaped: 4,
         };
-        assert_eq!(report.total(), 8, "rate_limits_deleted must be summed in total()");
+        assert_eq!(report.total(), 14, "refresh counts must be summed in total()");
     }
 }

@@ -8,6 +8,7 @@ use compio_postgres::Client;
 use rand::RngCore as _;
 use serde::Serialize;
 use uuid::Uuid;
+use zeroship_core::auth::hash_api_key;
 use zeroship_authz::Scope;
 
 /// Client ID of the first-party `zeroship-builder` OAuth client.
@@ -121,7 +122,7 @@ pub async fn bootstrap_builder_oauth_client(
 
     let client_secret = ensure_client_secret(&cfg.client_secret_path)?;
     create_hydra_client(cfg, &client_secret).await?;
-    insert_oauth_client(pg, cfg).await?;
+    insert_oauth_client(pg, cfg, &client_secret).await?;
 
     tracing::info!(
         client_id = BUILDER_CLIENT_ID,
@@ -148,6 +149,7 @@ async fn oauth_client_exists(pg: &Client) -> Result<bool, BuilderClientBootstrap
 async fn insert_oauth_client(
     pg: &Client,
     cfg: &BuilderClientBootstrapConfig,
+    client_secret: &str,
 ) -> Result<(), BuilderClientBootstrapError> {
     let redirect_uris = vec![cfg.redirect_uri.as_str()];
     let scopes = BUILDER_SCOPES
@@ -155,11 +157,13 @@ async fn insert_oauth_client(
         .map(|scope| scope.as_str())
         .collect::<Vec<_>>();
     let created_by: Option<Uuid> = None;
+    let client_secret_hash = hash_api_key(client_secret);
     pg.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-             skip_consent, created_by, hydra_client_id) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1)",
+             skip_consent, created_by, hydra_client_id, client_secret_hash, \
+             refresh_allowed, token_endpoint_auth_method) \
+         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1, $7, TRUE, 'client_secret_basic')",
         &[
             &BUILDER_CLIENT_ID,
             &BUILDER_CLIENT_NAME,
@@ -167,6 +171,7 @@ async fn insert_oauth_client(
             &scopes,
             &cfg.skip_consent,
             &created_by,
+            &client_secret_hash,
         ],
     )
     .await

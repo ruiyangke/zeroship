@@ -407,6 +407,20 @@ pub struct AuthConfig {
     #[arg(long = "auth-pairwise-salt-file", env = "AUTH_PAIRWISE_SALT_FILE")]
     pub auth_pairwise_salt_file: Option<PathBuf>,
 
+    /// Refresh-token HMAC keyring file.
+    ///
+    /// The OP stores only HMAC-SHA256 refresh-token verifiers in Postgres.
+    /// This file is the out-of-DB keyring used to mint/verify those hashes.
+    #[arg(long = "refresh-hash-key-file", env = "REFRESH_HASH_KEY_FILE")]
+    pub refresh_hash_key_file: Option<PathBuf>,
+
+    /// Refresh-token idempotency-cache AEAD key source file.
+    ///
+    /// Used only to seal the bounded lost-response retry cache stored on a
+    /// rotated predecessor row.
+    #[arg(long = "refresh-idem-key-file", env = "REFRESH_IDEM_KEY_FILE")]
+    pub refresh_idem_key_file: Option<PathBuf>,
+
     // ─── Relay email (Slice 5 — app → user one-way forwarding) ───────────
     /// Relay alias domain. Aliases are minted as `{token}@{relay_domain}`
     /// (lowercase). Dev: `relay.zeroship.localhost`; prod: `relay.zeroship.ai`
@@ -844,6 +858,8 @@ impl std::fmt::Debug for AuthConfig {
             .field("public_url", &self.public_url)
             .field("auth_signing_key_file", &self.auth_signing_key_file)
             .field("auth_pairwise_salt_file", &self.auth_pairwise_salt_file)
+            .field("refresh_hash_key_file", &self.refresh_hash_key_file)
+            .field("refresh_idem_key_file", &self.refresh_idem_key_file)
             .field("postmark_webhook_password", &"<redacted>")
             .field("relay_domain", &self.relay_domain)
             .field("relay_forward_mailer", &self.relay_forward_mailer)
@@ -940,15 +956,17 @@ mod tests {
 
     #[test]
     fn auth_provider_defaults_to_hydra() {
-        let mut cfg = test_config();
-        cfg.try_resolve(AuthSection::default())
-            .expect("resolve default auth config");
+        with_hydra_env(None, None, || {
+            let mut cfg = test_config();
+            cfg.try_resolve(AuthSection::default())
+                .expect("resolve default auth config");
 
-        assert_eq!(cfg.auth_provider(), AuthProviderKind::Hydra);
-        assert_eq!(cfg.hydra_public_url(), DEFAULT_HYDRA_PUBLIC_URL);
-        assert!(cfg.supabase_url().is_none());
-        assert!(cfg.supabase_anon_key().is_none());
-        assert_eq!(cfg.control_url(), DEFAULT_CONTROL_URL);
+            assert_eq!(cfg.auth_provider(), AuthProviderKind::Hydra);
+            assert_eq!(cfg.hydra_public_url(), DEFAULT_HYDRA_PUBLIC_URL);
+            assert!(cfg.supabase_url().is_none());
+            assert!(cfg.supabase_anon_key().is_none());
+            assert_eq!(cfg.control_url(), DEFAULT_CONTROL_URL);
+        });
     }
 
     #[test]

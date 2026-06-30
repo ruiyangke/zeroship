@@ -275,6 +275,8 @@ fn map_claims(claims: PlatformAccessClaims) -> Result<VerifiedToken, PlatformVer
         session_id: None,
         provider_authz: ProviderAuthz::OAuthScope(claims.scope),
         exp: claims.exp,
+        client_id: Some(claims.client_id),
+        iat: Some(claims.iat),
         aud: Some(claims.aud.0),
     })
 }

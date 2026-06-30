@@ -704,13 +704,16 @@ async fn upsert_db_rows(
     tx.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-             skip_consent, created_by, hydra_client_id) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1) \
+             skip_consent, created_by, hydra_client_id, refresh_allowed, \
+             token_endpoint_auth_method) \
+         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1, FALSE, 'none') \
          ON CONFLICT (client_id) DO UPDATE SET \
             client_name = EXCLUDED.client_name, \
             redirect_uris = EXCLUDED.redirect_uris, \
             scopes = EXCLUDED.scopes, \
-            skip_consent = EXCLUDED.skip_consent",
+            skip_consent = EXCLUDED.skip_consent, \
+            refresh_allowed = FALSE, \
+            token_endpoint_auth_method = 'none'",
         &[
             &client_id,
             &client_name,

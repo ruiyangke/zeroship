@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{
     AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest,
-    ManifestMetadata, ScopeDef, WorkerCode,
+    ManifestMetadata, RuntimeDescriptorEntry, ScopeDef, WorkerCode,
 };
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
@@ -814,16 +814,22 @@ fn zship_with_ir_migration(ir_name: &str, ir_body: &str) -> Vec<u8> {
     let server_hash = sha256_hex(server);
     let ir_bytes = ir_body.as_bytes().to_vec();
     let ir_hash = sha256_hex(&ir_bytes);
+    let descriptor = br#"{"version":1,"collections":{}}"#;
+    let descriptor_hash = sha256_hex(descriptor);
 
     let mut manifest = manifest_for(Some(&server_hash), &[]);
     manifest.migrations = vec![zeroship_bundle::MigrationFileEntry {
         name: ir_name.to_string(),
         hash: ir_hash.clone(),
     }];
+    manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
+        hash: descriptor_hash.clone(),
+    });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let blobs = vec![
         (server_hash.clone(), server.to_vec()),
         (ir_hash.clone(), ir_bytes),
+        (descriptor_hash, descriptor.to_vec()),
     ];
     build_zship(&manifest_bytes, &blobs, true)
 }

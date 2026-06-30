@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
+use crate::op::refresh::{self, ClientAuth, RefreshTokenKeys};
 use crate::op::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
 use crate::return_to;
 use crate::sessions::login as login_session;
@@ -21,7 +22,7 @@ use crate::store::sessions as session_store;
 
 const AUTH_CODE_TTL_SECS: i64 = 60;
 const PKCE_METHOD_S256: &str = "S256";
-const TOKEN_TYPE_BEARER: &str = "Bearer";
+pub(super) const TOKEN_TYPE_BEARER: &str = "Bearer";
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -30,6 +31,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::post().to(authorize_post)),
     )
     .service(web::resource("/token").route(web::post().to(token_post)));
+    refresh::configure(cfg);
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,29 +53,37 @@ pub struct TokenRequest {
     pub redirect_uri: Option<String>,
     pub client_id: Option<String>,
     pub code_verifier: Option<String>,
+    pub refresh_token: Option<String>,
+    pub client_secret: Option<String>,
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-struct TokenResponse {
-    access_token: String,
+pub(super) struct TokenResponse {
+    pub access_token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    id_token: Option<String>,
-    token_type: &'static str,
-    expires_in: u64,
-    scope: String,
+    pub id_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    pub token_type: &'static str,
+    pub expires_in: u64,
+    pub scope: String,
 }
 
 #[derive(Debug, Clone)]
-struct OAuthClient {
-    client_id: String,
-    redirect_uris: Vec<String>,
-    scopes: Vec<String>,
-    app_id: Option<Uuid>,
-    sector_identifier: String,
+pub(super) struct OAuthClient {
+    pub client_id: String,
+    pub redirect_uris: Vec<String>,
+    pub scopes: Vec<String>,
+    pub app_id: Option<Uuid>,
+    pub sector_identifier: String,
+    pub client_secret_hash: Option<String>,
+    pub refresh_allowed: bool,
+    pub token_endpoint_auth_method: String,
 }
 
 impl OAuthClient {
-    fn resource_audience(&self) -> String {
+    pub(super) fn resource_audience(&self) -> String {
         self.app_id
             .map(|id| format!("app:{id}"))
             .unwrap_or_else(|| "zeroship".to_string())
@@ -89,17 +99,18 @@ struct ConsumedCode {
     granted_scopes: Vec<String>,
     nonce: Option<String>,
     user_id: Uuid,
+    auth_credential_version: i64,
 }
 
 #[derive(Debug)]
-struct OAuthError {
-    status: StatusCode,
-    error: &'static str,
-    description: &'static str,
+pub(super) struct OAuthError {
+    pub status: StatusCode,
+    pub error: &'static str,
+    pub description: &'static str,
 }
 
 impl OAuthError {
-    fn invalid_request(description: &'static str) -> Self {
+    pub(super) fn invalid_request(description: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             error: "invalid_request",
@@ -107,7 +118,7 @@ impl OAuthError {
         }
     }
 
-    fn invalid_client(description: &'static str) -> Self {
+    pub(super) fn invalid_client(description: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             error: "invalid_client",
@@ -115,7 +126,7 @@ impl OAuthError {
         }
     }
 
-    fn invalid_grant(description: &'static str) -> Self {
+    pub(super) fn invalid_grant(description: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             error: "invalid_grant",
@@ -123,7 +134,7 @@ impl OAuthError {
         }
     }
 
-    fn invalid_scope(description: &'static str) -> Self {
+    pub(super) fn invalid_scope(description: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             error: "invalid_scope",
@@ -147,7 +158,7 @@ impl OAuthError {
         }
     }
 
-    fn server_error(description: &'static str) -> Self {
+    pub(super) fn server_error(description: &'static str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             error: "server_error",
@@ -253,9 +264,9 @@ async fn authorize_inner(
     db.execute(
         "INSERT INTO zeroship.oauth_authorization_codes \
             (code_hash, client_id, redirect_uri, pkce_challenge, pkce_method, \
-             requested_scopes, granted_scopes, nonce, user_id, expires_at) \
-         VALUES ($1, $2, $3, $4, 'S256', $5, $6, $7, $8, \
-                 NOW() + ($9::text || ' seconds')::interval)",
+             requested_scopes, granted_scopes, nonce, user_id, auth_credential_version, expires_at) \
+         VALUES ($1, $2, $3, $4, 'S256', $5, $6, $7, $8, $9, \
+                 NOW() + ($10::text || ' seconds')::interval)",
         &[
             &code_hash,
             &client.client_id,
@@ -265,6 +276,7 @@ async fn authorize_inner(
             &granted_scopes,
             &nonce,
             &session.user_id,
+            &session.credential_version,
             &AUTH_CODE_TTL_SECS.to_string(),
         ],
     )
@@ -289,11 +301,27 @@ async fn authorize_inner(
 
 #[allow(clippy::future_not_send)]
 pub async fn token_post(
+    req: HttpRequest,
     form: web::types::Form<TokenRequest>,
+    cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<Client>>,
     issuer: web::types::State<Arc<Issuer>>,
 ) -> HttpResponse {
-    match token_inner(form.into_inner(), db.as_ref(), issuer.as_ref()).await {
+    let params = form.into_inner();
+    let client_auth = refresh::client_auth_from_request(
+        &req,
+        params.client_id.as_deref(),
+        params.client_secret.as_deref(),
+    );
+    match token_inner(
+        params,
+        &client_auth,
+        cfg.as_ref(),
+        db.as_ref(),
+        issuer.as_ref(),
+    )
+    .await
+    {
         Ok(resp) => token_json_response(resp),
         Err(err) => oauth_error_response(err),
     }
@@ -302,20 +330,50 @@ pub async fn token_post(
 #[allow(clippy::future_not_send)]
 async fn token_inner(
     params: TokenRequest,
+    client_auth: &ClientAuth,
+    cfg: &AuthConfig,
     db: &Client,
     issuer: &Issuer,
 ) -> Result<TokenResponse, OAuthError> {
-    if params.grant_type != "authorization_code" {
-        return Err(OAuthError::unsupported_grant_type(
-            "only authorization_code is supported here",
-        ));
-    }
-    let client_id = required_param(params.client_id.as_deref(), "client_id")?;
-    let redirect_uri = required_param(params.redirect_uri.as_deref(), "redirect_uri")?;
-    let code = required_param(params.code.as_deref(), "code")?;
-    let code_verifier = required_param(params.code_verifier.as_deref(), "code_verifier")?;
-    let client = load_client(db, client_id).await?;
+    let result = match params.grant_type.as_str() {
+        "authorization_code" => {
+            let client_id = required_param(params.client_id.as_deref(), "client_id")?;
+            let redirect_uri = required_param(params.redirect_uri.as_deref(), "redirect_uri")?;
+            let code = required_param(params.code.as_deref(), "code")?;
+            let code_verifier = required_param(params.code_verifier.as_deref(), "code_verifier")?;
+            let client = load_client(db, client_id).await?;
+            run_token_tx(db, async {
+                exchange_authorization_code(
+                    db,
+                    issuer,
+                    cfg,
+                    &client,
+                    redirect_uri,
+                    code,
+                    code_verifier,
+                )
+                .await
+            })
+            .await
+        }
+        "refresh_token" => {
+            let keys = RefreshTokenKeys::from_config(cfg)?;
+            refresh::exchange_refresh_token(db, issuer, &keys, &params, client_auth).await
+        }
+        _ => Err(OAuthError::unsupported_grant_type(
+            "grant_type is not supported",
+        )),
+    };
+    result
+}
 
+async fn run_token_tx<F>(
+    db: &Client,
+    work: F,
+) -> Result<TokenResponse, OAuthError>
+where
+    F: std::future::Future<Output = Result<TokenResponse, OAuthError>>,
+{
     db.execute("BEGIN", &[])
         .await
         .map_err(|err| {
@@ -323,8 +381,7 @@ async fn token_inner(
             OAuthError::server_error("token transaction unavailable")
         })?;
 
-    let result = exchange_authorization_code(db, issuer, &client, redirect_uri, code, code_verifier)
-        .await;
+    let result = work.await;
     match result {
         Ok(response) => {
             db.execute("COMMIT", &[]).await.map_err(|err| {
@@ -346,6 +403,7 @@ async fn token_inner(
 async fn exchange_authorization_code(
     db: &Client,
     issuer: &Issuer,
+    cfg: &AuthConfig,
     client: &OAuthClient,
     redirect_uri: &str,
     code: &str,
@@ -360,7 +418,7 @@ async fn exchange_authorization_code(
                AND consumed_at IS NULL \
                AND expires_at > NOW() \
              RETURNING client_id, redirect_uri, pkce_challenge, pkce_method, \
-                       granted_scopes, nonce, user_id",
+                       granted_scopes, nonce, user_id, auth_credential_version",
             &[&code_hash],
         )
         .await
@@ -382,6 +440,7 @@ async fn exchange_authorization_code(
         granted_scopes: row.get("granted_scopes"),
         nonce: row.try_get("nonce").ok().flatten(),
         user_id: row.get("user_id"),
+        auth_credential_version: row.get("auth_credential_version"),
     };
 
     if consumed.client_id != client.client_id || consumed.redirect_uri != redirect_uri {
@@ -397,20 +456,7 @@ async fn exchange_authorization_code(
     }
 
     let user_id = consumed.user_id.to_string();
-    let audience = client.resource_audience();
-    let access_token = issuer
-        .issue_access_token(&AccessTokenMint {
-            user_id: &user_id,
-            sector: &client.sector_identifier,
-            audience: &audience,
-            client_id: &client.client_id,
-            scopes: &consumed.granted_scopes,
-            ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
-        })
-        .map_err(|err| {
-            tracing::error!(error = %err, "token: access-token mint failed");
-            OAuthError::server_error("access token mint failed")
-        })?;
+    let access_token = mint_access_token(issuer, client, consumed.user_id, &consumed.granted_scopes)?;
 
     let id_token = if consumed.granted_scopes.iter().any(|scope| scope == "openid") {
         let nonce = consumed
@@ -439,9 +485,31 @@ async fn exchange_authorization_code(
         None
     };
 
+    let refresh_token =
+        if consumed.granted_scopes.iter().any(|scope| scope == "offline_access")
+            && client.refresh_allowed
+        {
+            let keys = RefreshTokenKeys::from_config(cfg)?;
+            Some(
+                refresh::issue_root_refresh_token(
+                    db,
+                    issuer,
+                    &keys,
+                    client,
+                    consumed.user_id,
+                    &consumed.granted_scopes,
+                    consumed.auth_credential_version,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
     Ok(TokenResponse {
         access_token,
         id_token,
+        refresh_token,
         token_type: TOKEN_TYPE_BEARER,
         expires_in: ACCESS_TOKEN_TTL_SECS as u64,
         scope: consumed.granted_scopes.join(" "),
@@ -467,10 +535,11 @@ async fn resolve_session(
     })
 }
 
-async fn load_client(db: &Client, client_id: &str) -> Result<OAuthClient, OAuthError> {
+pub(super) async fn load_client(db: &Client, client_id: &str) -> Result<OAuthClient, OAuthError> {
     let rows = db
         .query(
             "SELECT oc.client_id, oc.redirect_uris, oc.scopes, \
+                    oc.client_secret_hash, oc.refresh_allowed, oc.token_endpoint_auth_method, \
                     aoc.app_id, aoc.sector_identifier \
              FROM zeroship.oauth_clients oc \
              LEFT JOIN zeroship.app_oauth_clients aoc ON aoc.client_id = oc.client_id \
@@ -496,6 +565,11 @@ async fn load_client(db: &Client, client_id: &str) -> Result<OAuthClient, OAuthE
         scopes: sort_dedup(row.get("scopes")),
         app_id: row.try_get("app_id").ok().flatten(),
         sector_identifier,
+        client_secret_hash: row.try_get("client_secret_hash").ok().flatten(),
+        refresh_allowed: row.try_get("refresh_allowed").unwrap_or(false),
+        token_endpoint_auth_method: row
+            .try_get("token_endpoint_auth_method")
+            .unwrap_or_else(|_| "none".to_string()),
     })
 }
 
@@ -584,7 +658,7 @@ async fn touch_consent_grant(
     Ok(())
 }
 
-fn required_param<'a>(value: Option<&'a str>, name: &'static str) -> Result<&'a str, OAuthError> {
+pub(super) fn required_param<'a>(value: Option<&'a str>, name: &'static str) -> Result<&'a str, OAuthError> {
     let value = value.map(str::trim).unwrap_or("");
     if value.is_empty() {
         return Err(OAuthError::invalid_request(name));
@@ -604,7 +678,7 @@ fn require_eq(
     }
 }
 
-fn parse_scopes(scope: &str) -> Vec<String> {
+pub(super) fn parse_scopes(scope: &str) -> Vec<String> {
     sort_dedup(
         scope
             .split_ascii_whitespace()
@@ -614,20 +688,20 @@ fn parse_scopes(scope: &str) -> Vec<String> {
     )
 }
 
-fn sort_dedup(mut scopes: Vec<String>) -> Vec<String> {
+pub(super) fn sort_dedup(mut scopes: Vec<String>) -> Vec<String> {
     scopes.sort();
     scopes.dedup();
     scopes
 }
 
-fn scope_subset(requested: &[String], allowed: &[String]) -> bool {
+pub(super) fn scope_subset(requested: &[String], allowed: &[String]) -> bool {
     let allowed = sort_dedup(allowed.to_vec());
     requested
         .iter()
         .all(|scope| allowed.binary_search(scope).is_ok())
 }
 
-fn clean_optional(value: Option<String>) -> Option<String> {
+pub(super) fn clean_optional(value: Option<String>) -> Option<String> {
     value.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }
 
@@ -683,14 +757,14 @@ fn see_other(location: &str) -> ntex::web::HttpResponseBuilder {
     resp
 }
 
-fn token_json_response(body: TokenResponse) -> HttpResponse {
+pub(super) fn token_json_response(body: TokenResponse) -> HttpResponse {
     HttpResponse::Ok()
         .header("cache-control", "no-store")
         .header("pragma", "no-cache")
         .json(&body)
 }
 
-fn oauth_error_response(err: OAuthError) -> HttpResponse {
+pub(super) fn oauth_error_response(err: OAuthError) -> HttpResponse {
     HttpResponse::build(err.status)
         .header("cache-control", "no-store")
         .header("pragma", "no-cache")
@@ -698,4 +772,27 @@ fn oauth_error_response(err: OAuthError) -> HttpResponse {
             "error": err.error,
             "error_description": err.description,
         }))
+}
+
+pub(super) fn mint_access_token(
+    issuer: &Issuer,
+    client: &OAuthClient,
+    user_id: Uuid,
+    scopes: &[String],
+) -> Result<String, OAuthError> {
+    let user_id = user_id.to_string();
+    let audience = client.resource_audience();
+    issuer
+        .issue_access_token(&AccessTokenMint {
+            user_id: &user_id,
+            sector: &client.sector_identifier,
+            audience: &audience,
+            client_id: &client.client_id,
+            scopes,
+            ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
+        })
+        .map_err(|err| {
+            tracing::error!(error = %err, "token: access-token mint failed");
+            OAuthError::server_error("access token mint failed")
+        })
 }

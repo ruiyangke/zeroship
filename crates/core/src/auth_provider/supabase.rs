@@ -435,6 +435,8 @@ fn map_claims(claims: SupabaseClaims) -> Result<VerifiedToken, SupabaseVerifyErr
         session_id: claims.session_id,
         provider_authz: ProviderAuthz::GoTrueRole(claims.role),
         exp: claims.exp,
+        client_id: None,
+        iat: None,
         aud: Some(claims.aud.0),
     })
 }

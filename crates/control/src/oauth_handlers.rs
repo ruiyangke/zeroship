@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{Action, Resource, Scope};
+use zeroship_core::auth::hash_api_key;
 
 use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
@@ -123,12 +124,14 @@ pub async fn create_oauth_client(
         Err(err) => return hydra_error_response("create", &body.client_id, err),
     };
 
+    let client_secret = hydra.client_secret.clone();
     let persisted = insert_oauth_client(
         &state,
         &body,
         &scopes,
         authz.principal_id,
         skip_consent,
+        client_secret.as_deref(),
     )
     .await;
     let persisted = match persisted {
@@ -161,8 +164,8 @@ pub async fn create_oauth_client(
 
     web::HttpResponse::Created().json(&CreateOauthClientResponse {
         client: persisted,
-        client_secret_show_once: hydra.client_secret.is_some(),
-        client_secret: hydra.client_secret,
+        client_secret_show_once: client_secret.is_some(),
+        client_secret,
     })
 }
 
@@ -366,16 +369,20 @@ async fn insert_oauth_client(
     scopes: &[String],
     created_by: Uuid,
     skip_consent: bool,
+    client_secret: Option<&str>,
 ) -> Result<OauthClientRow, web::HttpResponse> {
     let redirect_uris: Vec<&str> = body.redirect_uris.iter().map(String::as_str).collect();
     let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let client_secret_hash = client_secret.map(hash_api_key);
+    let refresh_allowed = body.grant_types.iter().any(|grant| grant == "refresh_token");
     let rows = state
         .control_pg
         .query(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                 skip_consent, created_by, hydra_client_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $1) \
+                 skip_consent, created_by, hydra_client_id, client_secret_hash, \
+                 refresh_allowed, token_endpoint_auth_method) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $1, $9, $10, $11) \
              RETURNING client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                        skip_consent, created_at, created_by, hydra_client_id",
             &[
@@ -387,6 +394,9 @@ async fn insert_oauth_client(
                 &scopes,
                 &skip_consent,
                 &created_by,
+                &client_secret_hash,
+                &refresh_allowed,
+                &body.token_endpoint_auth_method,
             ],
         )
         .await
