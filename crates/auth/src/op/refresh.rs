@@ -1,0 +1,1016 @@
+//! OP refresh-token families: CLI/programmatic rotation + reuse detection.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{DateTime, Utc};
+use compio_postgres::Client;
+use ntex::web::{self, HttpRequest, HttpResponse};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+use zeroship_core::auth::{hash_api_key, hmac_sha256, validate_api_key};
+use zeroship_core::crypto;
+use zeroship_core::typed_id;
+
+use crate::advisory_lock::{lock_refresh_family_xact, lock_refresh_user_xact};
+use crate::config::AuthConfig;
+use crate::op::authorization_code::{
+    clean_optional, load_client, mint_access_token, parse_scopes, required_param, scope_subset,
+    sort_dedup, OAuthClient, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
+};
+use crate::op::{Issuer, ACCESS_TOKEN_TTL_SECS};
+
+const REFRESH_TOKEN_BYTES: usize = 32;
+const REFRESH_TOKEN_PREFIX: &str = "zrt_";
+const FAMILY_IDLE_DAYS: i64 = 7;
+const FAMILY_ABSOLUTE_DAYS: i64 = 30;
+const IDEM_WINDOW_SECS: i64 = 30;
+const IDEM_AAD_PREFIX: &[u8] = b"zs:auth:refresh_idem:v1\0";
+
+#[derive(Debug, Clone)]
+pub(super) struct RefreshTokenKeys {
+    active: RefreshHashKey,
+    verify: Vec<RefreshHashKey>,
+    idem_key: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+struct RefreshHashKey {
+    version: i16,
+    key: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct TokenHash {
+    version: i16,
+    hash: Vec<u8>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedRefreshResponse {
+    refresh_token: String,
+    scope: String,
+}
+
+#[derive(Debug)]
+struct RefreshRow {
+    token_hash: Vec<u8>,
+    hash_key_version: i16,
+    refresh_family_id: String,
+    replaced_by_token_hash: Option<Vec<u8>>,
+    client_id: String,
+    user_id: Uuid,
+    sub: String,
+    family_granted_scopes: Vec<String>,
+    expires_at: DateTime<Utc>,
+    family_absolute_expires_at: DateTime<Utc>,
+    rotated_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+    idem_response_enc: Option<Vec<u8>>,
+    idem_expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeRequest {
+    pub token: Option<String>,
+    pub token_type_hint: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+}
+
+#[derive(Debug)]
+pub(super) struct ClientAuth {
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub method: ClientAuthMethod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClientAuthMethod {
+    None,
+    Basic,
+    Post,
+}
+
+pub fn configure(cfg: &mut web::ServiceConfig) {
+    cfg.service(web::resource("/revoke").route(web::post().to(revoke_post)));
+}
+
+impl RefreshTokenKeys {
+    pub(super) fn from_config(cfg: &AuthConfig) -> Result<Self, OAuthError> {
+        let hash_file = cfg.refresh_hash_key_file.as_deref().ok_or_else(|| {
+            OAuthError::server_error("refresh hash key is not configured")
+        })?;
+        let idem_file = cfg.refresh_idem_key_file.as_deref().ok_or_else(|| {
+            OAuthError::server_error("refresh idempotency key is not configured")
+        })?;
+        Self::from_files(hash_file, idem_file).map_err(|err| {
+            tracing::error!(error = %err, "refresh token key load failed");
+            OAuthError::server_error("refresh token keys unavailable")
+        })
+    }
+
+    pub fn from_files(hash_file: &Path, idem_file: &Path) -> Result<Self, String> {
+        let mut verify = load_hash_keyring(hash_file)?;
+        verify.sort_by(|a, b| b.version.cmp(&a.version));
+        let Some(active) = verify.first().cloned() else {
+            return Err(format!(
+                "REFRESH_HASH_KEY_FILE {} yielded no keys",
+                hash_file.display()
+            ));
+        };
+        let idem_secret = read_secret_file(idem_file, "REFRESH_IDEM_KEY_FILE")?;
+        let idem_key = crypto::derive_key(&String::from_utf8_lossy(&idem_secret));
+        Ok(Self {
+            active,
+            verify,
+            idem_key,
+        })
+    }
+
+    fn active_hash(&self, raw: &str) -> TokenHash {
+        TokenHash {
+            version: self.active.version,
+            hash: hmac_sha256(&self.active.key, raw.as_bytes()).to_vec(),
+        }
+    }
+
+    fn hashes_newest_first(&self, raw: &str) -> Vec<TokenHash> {
+        self.verify
+            .iter()
+            .map(|key| TokenHash {
+                version: key.version,
+                hash: hmac_sha256(&key.key, raw.as_bytes()).to_vec(),
+            })
+            .collect()
+    }
+
+    fn seal_cached_response(
+        &self,
+        predecessor_hash: &[u8],
+        family_id: &str,
+        body: &CachedRefreshResponse,
+    ) -> Result<Vec<u8>, OAuthError> {
+        let aad = idem_aad(predecessor_hash, family_id);
+        let plain = serde_json::to_vec(body).map_err(|err| {
+            tracing::error!(error = %err, "refresh: encode idempotency cache failed");
+            OAuthError::server_error("refresh idempotency cache failed")
+        })?;
+        crypto::encrypt(&self.idem_key, &aad, &plain).map_err(|err| {
+            tracing::error!(error = %err, "refresh: seal idempotency cache failed");
+            OAuthError::server_error("refresh idempotency cache failed")
+        })
+    }
+
+    fn open_cached_response(
+        &self,
+        predecessor_hash: &[u8],
+        family_id: &str,
+        enc: &[u8],
+    ) -> Result<CachedRefreshResponse, OAuthError> {
+        let aad = idem_aad(predecessor_hash, family_id);
+        let plain = crypto::decrypt(&self.idem_key, &aad, enc).map_err(|err| {
+            tracing::warn!(error = %err, "refresh: idempotency cache decrypt failed");
+            OAuthError::invalid_grant("refresh token is invalid")
+        })?;
+        serde_json::from_slice(&plain).map_err(|err| {
+            tracing::warn!(error = %err, "refresh: idempotency cache decode failed");
+            OAuthError::invalid_grant("refresh token is invalid")
+        })
+    }
+}
+
+pub(super) fn client_auth_from_request(
+    req: &HttpRequest,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+) -> ClientAuth {
+    if let Some((id, secret)) = basic_client_auth(req) {
+        return ClientAuth {
+            client_id: Some(id),
+            client_secret: Some(secret),
+            method: ClientAuthMethod::Basic,
+        };
+    }
+    ClientAuth {
+        client_id: clean_optional(client_id.map(str::to_string)),
+        client_secret: clean_optional(client_secret.map(str::to_string)),
+        method: if client_secret.is_some_and(|secret| !secret.trim().is_empty()) {
+            ClientAuthMethod::Post
+        } else {
+            ClientAuthMethod::None
+        },
+    }
+}
+
+#[allow(clippy::future_not_send)]
+pub(super) async fn issue_root_refresh_token(
+    db: &Client,
+    issuer: &Issuer,
+    keys: &RefreshTokenKeys,
+    client: &OAuthClient,
+    user_id: Uuid,
+    granted_scopes: &[String],
+    auth_credential_version: i64,
+) -> Result<String, OAuthError> {
+    lock_refresh_user_xact(db, user_id).await.map_err(|err| {
+        tracing::error!(error = %err, user_id = %user_id, "refresh issuance user lock failed");
+        OAuthError::server_error("refresh issuance unavailable")
+    })?;
+
+    let rows = db
+        .query(
+            "SELECT credential_version FROM zeroship.users WHERE id = $1",
+            &[&user_id],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, user_id = %user_id, "refresh issuance credential_version read failed");
+            OAuthError::server_error("refresh issuance unavailable")
+        })?;
+    let Some(row) = rows.first() else {
+        return Err(OAuthError::invalid_grant("authenticated user no longer exists"));
+    };
+    let current_version: i64 = row.get("credential_version");
+    if current_version != auth_credential_version {
+        return Err(OAuthError::invalid_grant("credential version changed"));
+    }
+
+    let raw = generate_refresh_token();
+    let hash = keys.active_hash(&raw);
+    let family_id = typed_id::generate("rfam");
+    let user_id_string = user_id.to_string();
+    let sub = issuer.pairwise_subject(&user_id_string, &client.sector_identifier);
+    db.execute(
+        "INSERT INTO zeroship.oauth_refresh_tokens \
+            (token_hash, hash_key_version, refresh_family_id, client_id, user_id, sub, \
+             granted_scopes, family_granted_scopes, expires_at, family_absolute_expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, \
+                 LEAST(NOW() + make_interval(days => $8::INT), \
+                       NOW() + make_interval(days => $9::INT)), \
+                 NOW() + make_interval(days => $9::INT))",
+        &[
+            &hash.hash,
+            &hash.version,
+            &family_id,
+            &client.client_id,
+            &user_id,
+            &sub,
+            &granted_scopes,
+            &i32::try_from(FAMILY_IDLE_DAYS).unwrap_or(7),
+            &i32::try_from(FAMILY_ABSOLUTE_DAYS).unwrap_or(30),
+        ],
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(error = %err, family_id = %family_id, "refresh root insert failed");
+        OAuthError::server_error("refresh issuance unavailable")
+    })?;
+    Ok(raw)
+}
+
+#[allow(clippy::future_not_send)]
+pub(super) async fn exchange_refresh_token(
+    db: &Client,
+    issuer: &Issuer,
+    keys: &RefreshTokenKeys,
+    params: &TokenRequest,
+    client_auth: &ClientAuth,
+) -> Result<TokenResponse, OAuthError> {
+    db.execute("BEGIN", &[]).await.map_err(|err| {
+        tracing::error!(error = %err, "refresh: BEGIN failed");
+        OAuthError::server_error("refresh rotation unavailable")
+    })?;
+    let result = exchange_refresh_token_inner(db, issuer, keys, params, client_auth).await;
+    match result {
+        Ok(response) => {
+            db.execute("COMMIT", &[]).await.map_err(|err| {
+                tracing::error!(error = %err, "refresh: COMMIT failed");
+                OAuthError::server_error("refresh rotation unavailable")
+            })?;
+            Ok(response)
+        }
+        Err(err) if err.status == ntex::http::StatusCode::BAD_REQUEST => {
+            db.execute("COMMIT", &[]).await.map_err(|commit_err| {
+                tracing::error!(error = %commit_err, oauth_error = err.error, "refresh: COMMIT failed");
+                OAuthError::server_error("refresh rotation unavailable")
+            })?;
+            Err(err)
+        }
+        Err(err) => {
+            if let Err(rollback) = db.execute("ROLLBACK", &[]).await {
+                tracing::error!(error = %rollback, "refresh: ROLLBACK failed");
+            }
+            Err(err)
+        }
+    }
+}
+
+#[allow(clippy::future_not_send)]
+async fn exchange_refresh_token_inner(
+    db: &Client,
+    issuer: &Issuer,
+    keys: &RefreshTokenKeys,
+    params: &TokenRequest,
+    client_auth: &ClientAuth,
+) -> Result<TokenResponse, OAuthError> {
+    let raw_token = required_param(params.refresh_token.as_deref(), "refresh_token")?;
+    let client_id = authenticated_client_id(db, params.client_id.as_deref(), client_auth).await?;
+    let client = load_client(db, &client_id).await?;
+    authenticate_for_refresh(&client, client_auth).await?;
+    if !client.refresh_allowed {
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    }
+
+    let Some((presented_hash, initial)) = lookup_by_any_hash(db, keys, raw_token).await? else {
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    };
+
+    lock_refresh_user_xact(db, initial.user_id).await.map_err(|err| {
+        tracing::error!(
+            error = %err,
+            user_id = %initial.user_id,
+            "refresh rotation user lock failed"
+        );
+        OAuthError::server_error("refresh rotation unavailable")
+    })?;
+    lock_refresh_family_xact(db, &initial.refresh_family_id)
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                family_id = %initial.refresh_family_id,
+                "refresh rotation family lock failed"
+            );
+            OAuthError::server_error("refresh rotation unavailable")
+        })?;
+
+    let Some(row) = select_refresh_row_for_update(db, &presented_hash.hash).await? else {
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    };
+    if row.hash_key_version != presented_hash.version {
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    }
+    if row.client_id != client.client_id {
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    }
+
+    if row.rotated_at.is_some() {
+        return replay_or_kill(db, issuer, keys, &client, &row).await;
+    }
+
+    if row.revoked_at.is_some()
+        || family_has_revoked_row(db, &row.refresh_family_id).await?
+        || row.expires_at <= Utc::now()
+        || row.family_absolute_expires_at <= Utc::now()
+    {
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    }
+
+    let new_scopes = requested_refresh_scopes(params.scope.as_deref(), &row.family_granted_scopes)?;
+    let new_raw = generate_refresh_token();
+    let new_hash = keys.active_hash(&new_raw);
+    let cached = CachedRefreshResponse {
+        refresh_token: new_raw.clone(),
+        scope: new_scopes.join(" "),
+    };
+    let idem_response_enc =
+        keys.seal_cached_response(&row.token_hash, &row.refresh_family_id, &cached)?;
+
+    let consumed = db
+        .query(
+            "UPDATE zeroship.oauth_refresh_tokens \
+             SET rotated_at = NOW(), \
+                 consumed_at = NOW(), \
+                 last_used_at = NOW(), \
+                 replaced_by_token_hash = $2, \
+                 idem_response_enc = $3, \
+                 idem_expires_at = NOW() + make_interval(secs => $4::INT) \
+             WHERE token_hash = $1 \
+               AND rotated_at IS NULL \
+               AND revoked_at IS NULL \
+             RETURNING refresh_family_id",
+            &[
+                &row.token_hash,
+                &new_hash.hash,
+                &idem_response_enc,
+                &i32::try_from(IDEM_WINDOW_SECS).unwrap_or(30),
+            ],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "refresh token consume failed");
+            OAuthError::server_error("refresh rotation unavailable")
+        })?;
+    if consumed.is_empty() {
+        kill_family(db, &row.refresh_family_id, "race").await?;
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    }
+
+    db.execute(
+        "INSERT INTO zeroship.oauth_refresh_tokens \
+            (token_hash, hash_key_version, refresh_family_id, client_id, user_id, sub, \
+             granted_scopes, family_granted_scopes, expires_at, family_absolute_expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
+                 LEAST(NOW() + make_interval(days => $9::INT), $10), $10)",
+        &[
+            &new_hash.hash,
+            &new_hash.version,
+            &row.refresh_family_id,
+            &row.client_id,
+            &row.user_id,
+            &row.sub,
+            &new_scopes,
+            &row.family_granted_scopes,
+            &i32::try_from(FAMILY_IDLE_DAYS).unwrap_or(7),
+            &row.family_absolute_expires_at,
+        ],
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(error = %err, family_id = %row.refresh_family_id, "refresh child insert failed");
+        OAuthError::server_error("refresh rotation unavailable")
+    })?;
+
+    let access_token = mint_access_token(issuer, &client, row.user_id, &new_scopes)?;
+    Ok(TokenResponse {
+        access_token,
+        id_token: None,
+        refresh_token: Some(new_raw),
+        token_type: TOKEN_TYPE_BEARER,
+        expires_in: ACCESS_TOKEN_TTL_SECS as u64,
+        scope: new_scopes.join(" "),
+    })
+}
+
+#[allow(clippy::future_not_send)]
+pub async fn revoke_post(
+    req: HttpRequest,
+    form: web::types::Form<RevokeRequest>,
+    cfg: web::types::State<Arc<AuthConfig>>,
+    db: web::types::State<Arc<Client>>,
+) -> HttpResponse {
+    match revoke_inner(&req, form.into_inner(), cfg.as_ref(), db.as_ref()).await {
+        Ok(()) => HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .header("pragma", "no-cache")
+            .finish(),
+        Err(err) if err.error == "invalid_client" => {
+            super::authorization_code::oauth_error_response(err)
+        }
+        Err(err) if err.status == ntex::http::StatusCode::BAD_REQUEST => HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .header("pragma", "no-cache")
+            .finish(),
+        Err(err) => super::authorization_code::oauth_error_response(err),
+    }
+}
+
+#[allow(clippy::future_not_send)]
+async fn revoke_inner(
+    req: &HttpRequest,
+    form: RevokeRequest,
+    cfg: &AuthConfig,
+    db: &Client,
+) -> Result<(), OAuthError> {
+    let _hint = form.token_type_hint.as_deref();
+    let Some(raw_token) = form.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+        return Ok(());
+    };
+    let client_auth =
+        client_auth_from_request(req, form.client_id.as_deref(), form.client_secret.as_deref());
+    let client_id = match authenticated_client_id(db, form.client_id.as_deref(), &client_auth).await
+    {
+        Ok(client_id) => client_id,
+        Err(err) if err.error == "invalid_client" => return Err(err),
+        Err(_) => return Ok(()),
+    };
+    let client = load_client(db, &client_id).await?;
+    authenticate_for_refresh(&client, &client_auth).await?;
+
+    let keys = RefreshTokenKeys::from_config(cfg)?;
+    db.execute("BEGIN", &[]).await.map_err(|err| {
+        tracing::error!(error = %err, "revoke: BEGIN failed");
+        OAuthError::server_error("revoke unavailable")
+    })?;
+    let result = async {
+        let Some((_hash, row)) = lookup_by_any_hash(db, &keys, raw_token).await? else {
+            return Ok(());
+        };
+        if row.client_id != client.client_id {
+            return Ok(());
+        }
+        lock_refresh_user_xact(db, row.user_id).await.map_err(|err| {
+            tracing::error!(error = %err, user_id = %row.user_id, "revoke user lock failed");
+            OAuthError::server_error("revoke unavailable")
+        })?;
+        lock_refresh_family_xact(db, &row.refresh_family_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, family_id = %row.refresh_family_id, "revoke family lock failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+        kill_family(db, &row.refresh_family_id, "revoke").await?;
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            db.execute("COMMIT", &[]).await.map_err(|err| {
+                tracing::error!(error = %err, "revoke: COMMIT failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback) = db.execute("ROLLBACK", &[]).await {
+                tracing::error!(error = %rollback, "revoke: ROLLBACK failed");
+            }
+            Err(err)
+        }
+    }
+}
+
+pub async fn revoke_user_refresh_families(db: &Client, user_id: Uuid, reason: &'static str) -> Result<(), String> {
+    lock_refresh_user_xact(db, user_id)
+        .await
+        .map_err(|err| format!("refresh user revoke lock: {err}"))?;
+    db.execute(
+        "WITH fam AS ( \
+             SELECT DISTINCT client_id, sub \
+             FROM zeroship.oauth_refresh_tokens \
+             WHERE user_id = $1 AND revoked_at IS NULL \
+         ), upd AS ( \
+             UPDATE zeroship.oauth_refresh_tokens \
+             SET revoked_at = NOW() \
+             WHERE user_id = $1 AND revoked_at IS NULL \
+             RETURNING 1 \
+         ) \
+         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+         SELECT client_id, sub, NOW() FROM fam \
+         ON CONFLICT (client_id, sub) \
+           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+        &[&user_id],
+    )
+    .await
+    .map_err(|err| format!("refresh user revoke families ({reason}): {err}"))?;
+    tracing::info!(user_id = %user_id, reason, "refresh families revoked for user");
+    Ok(())
+}
+
+pub async fn sweep_refresh_tokens(db: &Client) -> Result<(u64, u64), String> {
+    let family_deleted = sweep_refresh_family_delete(db).await?;
+    let idem_reaped = sweep_refresh_idem(db).await?;
+    Ok((family_deleted, idem_reaped))
+}
+
+async fn replay_or_kill(
+    db: &Client,
+    issuer: &Issuer,
+    keys: &RefreshTokenKeys,
+    client: &OAuthClient,
+    row: &RefreshRow,
+) -> Result<TokenResponse, OAuthError> {
+    if let (Some(successor_hash), Some(idem_expires_at), Some(enc)) = (
+        row.replaced_by_token_hash.as_ref(),
+        row.idem_expires_at,
+        row.idem_response_enc.as_ref(),
+    ) {
+        if idem_expires_at > Utc::now() {
+            if let Some(successor) = select_live_successor(db, successor_hash).await? {
+                let cached =
+                    keys.open_cached_response(&row.token_hash, &row.refresh_family_id, enc)?;
+                let scopes = parse_scopes(&cached.scope);
+                let access_token = mint_access_token(issuer, client, successor.user_id, &scopes)?;
+                tracing::info!(
+                    family_id = %row.refresh_family_id,
+                    client_id = %row.client_id,
+                    "refresh idempotency replay recovered"
+                );
+                return Ok(TokenResponse {
+                    access_token,
+                    id_token: None,
+                    refresh_token: Some(cached.refresh_token),
+                    token_type: TOKEN_TYPE_BEARER,
+                    expires_in: ACCESS_TOKEN_TTL_SECS as u64,
+                    scope: scopes.join(" "),
+                });
+            }
+        }
+    }
+
+    kill_family(db, &row.refresh_family_id, "replay").await?;
+    Err(OAuthError::invalid_grant("refresh token is invalid"))
+}
+
+async fn authenticated_client_id(
+    db: &Client,
+    request_client_id: Option<&str>,
+    client_auth: &ClientAuth,
+) -> Result<String, OAuthError> {
+    let form_client_id = clean_optional(request_client_id.map(str::to_string));
+    let auth_client_id = client_auth.client_id.clone();
+    match (auth_client_id, form_client_id) {
+        (Some(auth_id), Some(form_id)) if auth_id != form_id => {
+            Err(OAuthError::invalid_client("client authentication mismatch"))
+        }
+        (Some(auth_id), _) => Ok(auth_id),
+        (None, Some(form_id)) => {
+            let _ = load_client(db, &form_id).await?;
+            Ok(form_id)
+        }
+        (None, None) => Err(OAuthError::invalid_client("client_id is required")),
+    }
+}
+
+async fn authenticate_for_refresh(
+    client: &OAuthClient,
+    client_auth: &ClientAuth,
+) -> Result<(), OAuthError> {
+    match client.token_endpoint_auth_method.as_str() {
+        "none" => {
+            if client_auth.method != ClientAuthMethod::None {
+                return Err(OAuthError::invalid_client("public client must not authenticate with a secret"));
+            }
+            Ok(())
+        }
+        "client_secret_basic" => {
+            if client_auth.method != ClientAuthMethod::Basic {
+                return Err(OAuthError::invalid_client("client_secret_basic required"));
+            }
+            verify_client_secret(client, client_auth)
+        }
+        "client_secret_post" => {
+            if client_auth.method != ClientAuthMethod::Post {
+                return Err(OAuthError::invalid_client("client_secret_post required"));
+            }
+            verify_client_secret(client, client_auth)
+        }
+        _ => Err(OAuthError::invalid_client("unsupported client authentication method")),
+    }
+}
+
+fn verify_client_secret(client: &OAuthClient, client_auth: &ClientAuth) -> Result<(), OAuthError> {
+    let Some(stored_hash) = client.client_secret_hash.as_deref() else {
+        return Err(OAuthError::invalid_client("client secret is not configured"));
+    };
+    let Some(secret) = client_auth.client_secret.as_deref() else {
+        return Err(OAuthError::invalid_client("client secret is required"));
+    };
+    if validate_api_key(secret, stored_hash) {
+        Ok(())
+    } else {
+        Err(OAuthError::invalid_client("client authentication failed"))
+    }
+}
+
+fn requested_refresh_scopes(
+    requested: Option<&str>,
+    family_granted_scopes: &[String],
+) -> Result<Vec<String>, OAuthError> {
+    match requested {
+        Some(scope) if !scope.trim().is_empty() => {
+            let scopes = parse_scopes(scope);
+            if !scope_subset(&scopes, family_granted_scopes) {
+                return Err(OAuthError::invalid_scope("scope exceeds original grant"));
+            }
+            Ok(scopes)
+        }
+        _ => Ok(sort_dedup(family_granted_scopes.to_vec())),
+    }
+}
+
+async fn lookup_by_any_hash(
+    db: &Client,
+    keys: &RefreshTokenKeys,
+    raw_token: &str,
+) -> Result<Option<(TokenHash, RefreshRow)>, OAuthError> {
+    for hash in keys.hashes_newest_first(raw_token) {
+        if let Some(row) = select_refresh_row(db, &hash.hash, false).await? {
+            return Ok(Some((hash, row)));
+        }
+    }
+    Ok(None)
+}
+
+async fn select_refresh_row_for_update(
+    db: &Client,
+    token_hash: &[u8],
+) -> Result<Option<RefreshRow>, OAuthError> {
+    select_refresh_row(db, token_hash, true).await
+}
+
+async fn select_refresh_row(
+    db: &Client,
+    token_hash: &[u8],
+    for_update: bool,
+) -> Result<Option<RefreshRow>, OAuthError> {
+    let sql = if for_update {
+        REFRESH_ROW_SELECT_FOR_UPDATE
+    } else {
+        REFRESH_ROW_SELECT
+    };
+    let rows = db.query(sql, &[&token_hash]).await.map_err(|err| {
+        tracing::error!(error = %err, "refresh row lookup failed");
+        OAuthError::server_error("refresh token store unavailable")
+    })?;
+    Ok(rows.first().map(row_to_refresh_row))
+}
+
+const REFRESH_ROW_SELECT: &str = "\
+    SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
+           client_id, user_id, sub, family_granted_scopes, expires_at, \
+           family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
+    FROM zeroship.oauth_refresh_tokens \
+    WHERE token_hash = $1";
+const REFRESH_ROW_SELECT_FOR_UPDATE: &str = "\
+    SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
+           client_id, user_id, sub, family_granted_scopes, expires_at, \
+           family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
+    FROM zeroship.oauth_refresh_tokens \
+    WHERE token_hash = $1 \
+    FOR UPDATE";
+
+fn row_to_refresh_row(row: &compio_postgres::Row) -> RefreshRow {
+    RefreshRow {
+        token_hash: row.get("token_hash"),
+        hash_key_version: row.get("hash_key_version"),
+        refresh_family_id: row.get("refresh_family_id"),
+        replaced_by_token_hash: row.try_get("replaced_by_token_hash").ok().flatten(),
+        client_id: row.get("client_id"),
+        user_id: row.get("user_id"),
+        sub: row.get("sub"),
+        family_granted_scopes: row.get("family_granted_scopes"),
+        expires_at: row.get("expires_at"),
+        family_absolute_expires_at: row.get("family_absolute_expires_at"),
+        rotated_at: row.try_get("rotated_at").ok().flatten(),
+        revoked_at: row.try_get("revoked_at").ok().flatten(),
+        idem_response_enc: row.try_get("idem_response_enc").ok().flatten(),
+        idem_expires_at: row.try_get("idem_expires_at").ok().flatten(),
+    }
+}
+
+async fn family_has_revoked_row(db: &Client, family_id: &str) -> Result<bool, OAuthError> {
+    let rows = db
+        .query(
+            "SELECT 1 FROM zeroship.oauth_refresh_tokens \
+             WHERE refresh_family_id = $1 AND revoked_at IS NOT NULL LIMIT 1",
+            &[&family_id],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, family_id, "refresh family revoke check failed");
+            OAuthError::server_error("refresh token store unavailable")
+        })?;
+    Ok(!rows.is_empty())
+}
+
+async fn select_live_successor(
+    db: &Client,
+    successor_hash: &[u8],
+) -> Result<Option<RefreshRow>, OAuthError> {
+    let rows = db
+        .query(
+            "SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
+                    client_id, user_id, sub, family_granted_scopes, expires_at, \
+                    family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
+             FROM zeroship.oauth_refresh_tokens \
+             WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL",
+            &[&successor_hash],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "refresh successor lookup failed");
+            OAuthError::server_error("refresh token store unavailable")
+        })?;
+    Ok(rows.first().map(row_to_refresh_row))
+}
+
+async fn kill_family(db: &Client, family_id: &str, reason: &'static str) -> Result<(), OAuthError> {
+    db.execute(
+        "WITH fam AS ( \
+             SELECT DISTINCT client_id, sub \
+             FROM zeroship.oauth_refresh_tokens \
+             WHERE refresh_family_id = $1 \
+         ), upd AS ( \
+             UPDATE zeroship.oauth_refresh_tokens \
+             SET revoked_at = NOW() \
+             WHERE refresh_family_id = $1 AND revoked_at IS NULL \
+             RETURNING 1 \
+         ) \
+         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+         SELECT client_id, sub, NOW() FROM fam \
+         ON CONFLICT (client_id, sub) \
+           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+        &[&family_id],
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(error = %err, family_id, reason, "refresh family kill failed");
+        OAuthError::server_error("refresh family revoke unavailable")
+    })?;
+    tracing::info!(family_id, reason, "refresh family killed");
+    Ok(())
+}
+
+async fn sweep_refresh_family_delete(db: &Client) -> Result<u64, String> {
+    let users = db
+        .query(
+            "SELECT DISTINCT user_id \
+             FROM zeroship.oauth_refresh_tokens \
+             WHERE family_absolute_expires_at < NOW() \
+                OR (rotated_at IS NOT NULL AND issued_at < NOW() - INTERVAL '24 hours')",
+            &[],
+        )
+        .await
+        .map_err(|err| format!("refresh sweep enumerate family-delete users: {err}"))?;
+    let mut deleted = 0;
+    for row in users {
+        let user_id: Uuid = row.get("user_id");
+        db.execute("BEGIN", &[])
+            .await
+            .map_err(|err| format!("refresh sweep family-delete begin: {err}"))?;
+        let result = async {
+            lock_refresh_user_xact(db, user_id)
+                .await
+                .map_err(|err| format!("refresh sweep family-delete lock {user_id}: {err}"))?;
+            db.execute(
+                "DELETE FROM zeroship.oauth_refresh_tokens \
+                 WHERE user_id = $1 \
+                   AND (family_absolute_expires_at < NOW() \
+                        OR (rotated_at IS NOT NULL AND issued_at < NOW() - INTERVAL '24 hours'))",
+                &[&user_id],
+            )
+            .await
+            .map_err(|err| format!("refresh sweep family-delete {user_id}: {err}"))
+        }
+        .await;
+        match result {
+            Ok(n) => {
+                db.execute("COMMIT", &[])
+                    .await
+                    .map_err(|err| format!("refresh sweep family-delete commit: {err}"))?;
+                deleted += n;
+            }
+            Err(err) => {
+                let _ = db.execute("ROLLBACK", &[]).await;
+                return Err(err);
+            }
+        }
+    }
+    Ok(deleted)
+}
+
+async fn sweep_refresh_idem(db: &Client) -> Result<u64, String> {
+    let users = db
+        .query(
+            "SELECT DISTINCT user_id \
+             FROM zeroship.oauth_refresh_tokens \
+             WHERE idem_response_enc IS NOT NULL AND idem_expires_at < NOW()",
+            &[],
+        )
+        .await
+        .map_err(|err| format!("refresh sweep enumerate idem users: {err}"))?;
+    let mut reaped = 0;
+    for row in users {
+        let user_id: Uuid = row.get("user_id");
+        db.execute("BEGIN", &[])
+            .await
+            .map_err(|err| format!("refresh sweep idem begin: {err}"))?;
+        let result = async {
+            lock_refresh_user_xact(db, user_id)
+                .await
+                .map_err(|err| format!("refresh sweep idem lock {user_id}: {err}"))?;
+            db.execute(
+                "UPDATE zeroship.oauth_refresh_tokens \
+                 SET idem_response_enc = NULL, idem_expires_at = NULL \
+                 WHERE user_id = $1 \
+                   AND idem_response_enc IS NOT NULL \
+                   AND idem_expires_at < NOW()",
+                &[&user_id],
+            )
+            .await
+            .map_err(|err| format!("refresh sweep idem {user_id}: {err}"))
+        }
+        .await;
+        match result {
+            Ok(n) => {
+                db.execute("COMMIT", &[])
+                    .await
+                    .map_err(|err| format!("refresh sweep idem commit: {err}"))?;
+                reaped += n;
+            }
+            Err(err) => {
+                let _ = db.execute("ROLLBACK", &[]).await;
+                return Err(err);
+            }
+        }
+    }
+    Ok(reaped)
+}
+
+fn basic_client_auth(req: &HttpRequest) -> Option<(String, String)> {
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())?;
+    let encoded = header.strip_prefix("Basic ")?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (id, secret) = decoded.split_once(':')?;
+    Some((id.to_string(), secret.to_string()))
+}
+
+fn generate_refresh_token() -> String {
+    let mut bytes = [0u8; REFRESH_TOKEN_BYTES];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    format!("{REFRESH_TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn idem_aad(predecessor_hash: &[u8], family_id: &str) -> Vec<u8> {
+    let mut aad =
+        Vec::with_capacity(IDEM_AAD_PREFIX.len() + predecessor_hash.len() + family_id.len());
+    aad.extend_from_slice(IDEM_AAD_PREFIX);
+    aad.extend_from_slice(predecessor_hash);
+    aad.extend_from_slice(family_id.as_bytes());
+    aad
+}
+
+fn load_hash_keyring(path: &Path) -> Result<Vec<RefreshHashKey>, String> {
+    let raw = read_secret_file(path, "REFRESH_HASH_KEY_FILE")?;
+    if let Ok(text) = std::str::from_utf8(&raw) {
+        let mut keys = Vec::new();
+        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let Some((version, secret)) = line.split_once(':') else {
+                continue;
+            };
+            let version: i16 = version
+                .trim()
+                .parse()
+                .map_err(|_| format!("REFRESH_HASH_KEY_FILE {} has invalid version {version:?}", path.display()))?;
+            let key = decode_key_material(secret.trim()).unwrap_or_else(|| secret.as_bytes().to_vec());
+            if key.is_empty() {
+                return Err(format!(
+                    "REFRESH_HASH_KEY_FILE {} has empty key for version {version}",
+                    path.display()
+                ));
+            }
+            keys.push(RefreshHashKey { version, key });
+        }
+        if !keys.is_empty() {
+            return Ok(keys);
+        }
+    }
+    Ok(vec![RefreshHashKey {
+        version: 1,
+        key: raw,
+    }])
+}
+
+fn decode_key_material(value: &str) -> Option<Vec<u8>> {
+    hex::decode(value)
+        .ok()
+        .or_else(|| URL_SAFE_NO_PAD.decode(value).ok())
+        .filter(|bytes| !bytes.is_empty())
+}
+
+fn read_secret_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path).map_err(|err| format!("read {label} {}: {err}", path.display()))?;
+    reject_insecure_permissions(path, label)?;
+    if bytes.is_empty() {
+        return Err(format!("{label} {} is empty", path.display()));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn reject_insecure_permissions(path: &Path, label: &str) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mode = path
+        .metadata()
+        .map_err(|err| format!("stat {label} {}: {err}", path.display()))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "{label} {} has insecure permissions {mode:o}; require owner-only permissions",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_insecure_permissions(_path: &Path, _label: &str) -> Result<(), String> {
+    Ok(())
+}
+
+#[must_use]
+pub fn client_secret_hash(secret: &str) -> String {
+    hash_api_key(secret)
+}

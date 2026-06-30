@@ -607,6 +607,51 @@ async fn dual_issuer_accepts_platform_deploy_and_legacy_hydra_but_rejects_unknow
 }
 
 #[compio::test]
+async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active(user_id, "apps:read");
+    let jwks = PlatformJwksMock::start();
+    let auth_provider = platform_auth_provider(jwks.jwks_url(), &hydra.base);
+    let Some(mut fx) =
+        fixture_with_auth_provider(&hydra, "platform-revoked", user_id, auth_provider).await
+    else {
+        return;
+    };
+    let app_id = create_app(&mut fx, "platform-revoked").await;
+    let app = init_control!(fx);
+
+    let token = platform_token(user_id, "apps:deploy", PLATFORM_ISSUER);
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+             VALUES ('zeroship-cli', $1, NOW()) \
+             ON CONFLICT (client_id, sub) DO UPDATE \
+             SET revoked_after = EXCLUDED.revoked_after",
+            &[&user_id.to_string()],
+        )
+        .await
+        .expect("insert platform token revocation marker");
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .header("authorization", bearer_for(&token))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    fx.state
+        .control_pg
+        .execute(
+            "DELETE FROM zeroship.token_revocations WHERE client_id = 'zeroship-cli' AND sub = $1",
+            &[&user_id.to_string()],
+        )
+        .await
+        .expect("cleanup platform token revocation marker");
+    fx.cleanup().await;
+}
+
+#[compio::test]
 async fn oauth_token_with_apps_read_can_list_apps() {
     let user_id = Uuid::new_v4();
     let hydra = MockHydra::active(user_id, "apps:read apps:deploy");

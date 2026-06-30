@@ -3,6 +3,7 @@
 use std::future::Future;
 
 use compio_postgres::Client;
+use uuid::Uuid;
 
 use crate::error::{AuthError, Result};
 
@@ -12,6 +13,11 @@ pub const BOOTSTRAP_SIGNING_KEYS_LOCK: i64 = 0x0042_B007_A071_0001;
 pub const BOOTSTRAP_CLIENTS_LOCK: i64 = 0x0042_B007_A071_0002;
 /// Stable process-wide lock for platform OP signing-key registry reconciliation.
 pub const OP_SIGNING_KEY_BOOTSTRAP_LOCK: i64 = 0x0042_B007_A071_0003;
+
+/// Refresh-token family hierarchy namespace for the outer per-user lock.
+pub const NS_USER: i32 = 0x7a55_0001;
+/// Refresh-token family hierarchy namespace for the inner per-family lock.
+pub const NS_FAM: i32 = 0x7a55_0002;
 
 /// Run `f` while holding a session-scoped PostgreSQL advisory lock.
 ///
@@ -53,6 +59,46 @@ async fn release_advisory_lock(conn: &Client, key: i64) -> Result<()> {
     conn.execute("SELECT pg_advisory_unlock($1)", &[&key])
         .await
         .map_err(|e| AuthError::Db(format!("pg_advisory_unlock({key}): {e}")))?;
+    Ok(())
+}
+
+/// Acquire a transaction-scoped two-argument advisory lock on this connection.
+///
+/// The caller must already be inside the transaction whose writes the lock
+/// protects. PostgreSQL releases this form automatically at COMMIT/ROLLBACK.
+pub async fn with_xact_advisory_lock2(conn: &Client, ns: i32, key: i32) -> Result<()> {
+    conn.execute("SELECT pg_advisory_xact_lock($1::INT4, $2::INT4)", &[&ns, &key])
+        .await
+        .map_err(|e| AuthError::Db(format!("pg_advisory_xact_lock({ns},{key}): {e}")))?;
+    Ok(())
+}
+
+/// Acquire the refresh hierarchy's per-user xact advisory lock.
+///
+/// The SQL deliberately hashes in Postgres as `hashtext(user_id::text)`, matching
+/// the P5b lock contract and all companion writers.
+pub async fn lock_refresh_user_xact(conn: &Client, user_id: Uuid) -> Result<()> {
+    conn.execute(
+        "SELECT pg_advisory_xact_lock($1::INT4, hashtext($2::text))",
+        &[&NS_USER, &user_id.to_string()],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("refresh user advisory lock {user_id}: {e}")))?;
+    Ok(())
+}
+
+/// Acquire the refresh hierarchy's per-family xact advisory lock.
+pub async fn lock_refresh_family_xact(conn: &Client, refresh_family_id: &str) -> Result<()> {
+    conn.execute(
+        "SELECT pg_advisory_xact_lock($1::INT4, hashtext($2::text))",
+        &[&NS_FAM, &refresh_family_id],
+    )
+    .await
+    .map_err(|e| {
+        AuthError::Db(format!(
+            "refresh family advisory lock {refresh_family_id}: {e}"
+        ))
+    })?;
     Ok(())
 }
 

@@ -225,6 +225,12 @@ pub struct VerifiedToken {
     pub session_id: Option<String>,
     pub provider_authz: ProviderAuthz,
     pub exp: u64,
+    /// OAuth client that minted the token, when the verifier can attest it
+    /// from the signed/introspected token. Platform OP access tokens always
+    /// carry this; legacy providers may not.
+    pub client_id: Option<String>,
+    /// Issued-at timestamp, epoch seconds, when present and trusted.
+    pub iat: Option<u64>,
     /// Provider token audiences. The Hydra control-plane deploy-token path
     /// gates this against the expected platform OAuth audience.
     pub aud: Option<Vec<String>>,
@@ -310,6 +316,8 @@ fn hydra_verified_token(result: IntrospectResult) -> Result<VerifiedToken, Verif
         session_id: result.session_id,
         provider_authz: ProviderAuthz::OAuthScope(result.scope.unwrap_or_default()),
         exp: result.exp.unwrap_or_default(),
+        client_id: result.client_id,
+        iat: None,
         aud: result.aud,
     })
 }
@@ -367,6 +375,8 @@ mod tests {
             ProviderAuthz::OAuthScope("apps:read apps:deploy".to_string())
         );
         assert_eq!(verified.exp, 1_800_000_000);
+        assert_eq!(verified.client_id.as_deref(), Some("oauth-test-client"));
+        assert_eq!(verified.iat, None);
         assert_eq!(
             verified.aud.as_deref(),
             Some(&["control.zeroship.ai".to_string()][..])

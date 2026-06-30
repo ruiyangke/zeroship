@@ -6,6 +6,7 @@ pub mod authorization_code;
 pub mod issuer;
 pub mod device_token;
 pub mod metadata;
+pub mod refresh;
 pub mod signing;
 
 pub use issuer::{

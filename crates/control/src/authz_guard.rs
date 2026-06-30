@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ntex::http::Payload;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
@@ -8,6 +9,9 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
 use zeroship_core::auth_provider::{ProviderAuthz, VerifyTokenError};
+use zeroship_core::wrapper_revocation::{
+    family_revoked_at, revoked_after_for, RevocationCache, REVOCATION_CACHE_MAX_ENTRIES,
+};
 
 use crate::{http_util, AppState};
 
@@ -248,6 +252,62 @@ fn now_unix() -> Result<i64, String> {
     .map_err(|err| format!("clock overflow: {err}"))
 }
 
+const CONTROL_REVOCATION_CACHE_TTL_SECS: u64 = 10;
+
+static CONTROL_REVOCATION_CACHE: OnceLock<RevocationCache> = OnceLock::new();
+
+fn control_revocation_cache() -> &'static RevocationCache {
+    CONTROL_REVOCATION_CACHE.get_or_init(|| {
+        RevocationCache::with_ttl_and_capacity(
+            CONTROL_REVOCATION_CACHE_TTL_SECS,
+            REVOCATION_CACHE_MAX_ENTRIES,
+        )
+    })
+}
+
+async fn cached_revoked_after_for(
+    state: &AppState,
+    client_id: &str,
+    sub: &str,
+) -> Result<Option<i64>, web::Error> {
+    let cache = control_revocation_cache();
+    let now = Instant::now();
+    if let Some(cached) = cache.get(client_id, sub, now) {
+        return Ok(cached);
+    }
+
+    let revoked_after = revoked_after_for(&state.control_pg, client_id, sub)
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                client_id,
+                sub,
+                "control: token revocation lookup failed"
+            );
+            unauthorized_json("revocation_check_failed")
+        })?;
+    cache.store(client_id, sub, revoked_after, now);
+    Ok(revoked_after)
+}
+
+async fn reject_revoked_platform_token(
+    state: &AppState,
+    client_id: Option<&str>,
+    sub: &str,
+    iat: Option<u64>,
+) -> Result<(), web::Error> {
+    let (Some(client_id), Some(iat)) = (client_id, iat) else {
+        return Ok(());
+    };
+    let iat = i64::try_from(iat).map_err(|_| web::error::ErrorUnauthorized("invalid token iat"))?;
+    let revoked_after = cached_revoked_after_for(state, client_id, sub).await?;
+    if family_revoked_at(revoked_after, iat) {
+        return Err(unauthorized_json("token_revoked"));
+    }
+    Ok(())
+}
+
 async fn oauth_guard_from_bearer(
     token: &str,
     state: &AppState,
@@ -284,6 +344,13 @@ async fn oauth_guard_from_bearer(
             }) {
                 return Err(unauthorized_json("wrong_audience"));
             }
+            reject_revoked_platform_token(
+                state,
+                verified.client_id.as_deref(),
+                &verified.provider_subject,
+                verified.iat,
+            )
+            .await?;
 
             let principal_id = Uuid::parse_str(&verified.provider_subject)
                 .map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;

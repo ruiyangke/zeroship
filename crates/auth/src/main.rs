@@ -167,6 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CheckValue::Secret(cfg.auth_pairwise_salt_file.is_some()),
         );
         report.field(
+            "refresh_hash_key_file_configured",
+            CheckValue::Secret(cfg.refresh_hash_key_file.is_some()),
+        );
+        report.field(
+            "refresh_idem_key_file_configured",
+            CheckValue::Secret(cfg.refresh_idem_key_file.is_some()),
+        );
+        report.field(
             "frame_ancestor_origins",
             CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
         );
@@ -241,6 +249,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth_pairwise_salt_file = cfg.auth_pairwise_salt_file.as_deref().ok_or_else(|| {
         AuthError::Config(
             "AUTH_PAIRWISE_SALT_FILE / --auth-pairwise-salt-file is required".into(),
+        )
+    })?;
+    cfg.refresh_hash_key_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "REFRESH_HASH_KEY_FILE / --refresh-hash-key-file is required".into(),
+        )
+    })?;
+    cfg.refresh_idem_key_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "REFRESH_IDEM_KEY_FILE / --refresh-idem-key-file is required".into(),
         )
     })?;
     let op_issuer = zeroship_auth::op::Issuer::from_files(

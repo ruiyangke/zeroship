@@ -19,37 +19,42 @@
 
 #![doc(hidden)]
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Fast-path gate: `false` whenever no fault is armed, so [`trip`] short-circuits
 /// on a single relaxed load on every production boundary.
-static ARMED: AtomicBool = AtomicBool::new(false);
+static ARMED_THREADS: AtomicUsize = AtomicUsize::new(0);
 
-/// The armed faults: `point name → remaining hits before it fires`. A fault armed
-/// with `skip = k` fires on the `(k+1)`-th [`trip`] of that point (so `skip = 0`
-/// fires on the first trip). It fires AT MOST ONCE, then disarms itself.
-fn registry() -> &'static Mutex<HashMap<String, u32>> {
-    static R: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
-    R.get_or_init(Mutex::default)
+// The armed faults: `point name -> remaining hits before it fires`. A fault armed
+// with `skip = k` fires on the `(k+1)`-th trip of that point (so `skip = 0`
+// fires on the first trip). It fires AT MOST ONCE, then disarms itself.
+thread_local! {
+    static REGISTRY: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
 }
 
 /// Arm a one-shot crash at `point`, firing after `skip` prior trips of it (so
 /// `skip = 0` ⇒ crash on the first trip of `point`). Test-only.
 pub fn arm(point: &str, skip: u32) {
-    registry()
-        .lock()
-        .unwrap()
-        .insert(point.to_string(), skip);
-    ARMED.store(true, Ordering::SeqCst);
+    REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        if registry.is_empty() {
+            ARMED_THREADS.fetch_add(1, Ordering::SeqCst);
+        }
+        registry.insert(point.to_string(), skip);
+    });
 }
 
 /// Clear every armed fault (call between crash-fuzz iterations). Test-only.
 pub fn disarm_all() {
-    registry().lock().unwrap().clear();
-    ARMED.store(false, Ordering::SeqCst);
+    REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        if !registry.is_empty() {
+            registry.clear();
+            ARMED_THREADS.fetch_sub(1, Ordering::SeqCst);
+        }
+    });
 }
 
 /// The executor's boundary check: returns an injected [`crate::apply::executor::ApplyError`] (a simulated
@@ -60,24 +65,28 @@ pub fn disarm_all() {
 /// [`crate::apply::executor::ApplyError::Backend`] tagged `fault-injection: <point>` when
 /// the armed fault fires.
 pub fn trip(point: &str) -> Result<(), crate::apply::executor::ApplyError> {
-    if !ARMED.load(Ordering::Relaxed) {
+    if ARMED_THREADS.load(Ordering::Relaxed) == 0 {
         return Ok(());
     }
-    let mut reg = registry().lock().unwrap();
-    let fire = match reg.get_mut(point) {
-        Some(0) => true,
-        Some(n) => {
-            *n -= 1;
-            false
+    let fire = REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let fire = match registry.get_mut(point) {
+            Some(0) => true,
+            Some(n) => {
+                *n -= 1;
+                false
+            }
+            None => false,
+        };
+        if fire {
+            registry.remove(point);
+            if registry.is_empty() {
+                ARMED_THREADS.fetch_sub(1, Ordering::SeqCst);
+            }
         }
-        None => false,
-    };
+        fire
+    });
     if fire {
-        reg.remove(point);
-        if reg.is_empty() {
-            ARMED.store(false, Ordering::SeqCst);
-        }
-        drop(reg);
         return Err(crate::apply::executor::ApplyError::Backend(format!(
             "fault-injection: simulated crash at boundary '{point}'"
         )));
