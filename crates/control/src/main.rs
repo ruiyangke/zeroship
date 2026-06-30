@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ntex::web;
-use zeroship_core::auth_provider::{AuthProvider, SupabaseConfig, SupabaseProvider};
+use zeroship_core::auth_provider::{
+    AuthProvider, DualIssuerProvider, HydraProvider, LegacyAuthProvider, PlatformConfig,
+    PlatformProvider, SupabaseConfig, SupabaseProvider,
+};
 use zeroship_core::config::{
     bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, resolve_overlay_string,
     validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
@@ -371,6 +374,22 @@ struct ControlCli {
     )]
     supabase_jwt_issuer: String,
 
+    /// Platform OP issuer for platform-issued control/deploy access tokens.
+    #[arg(
+        long = "auth-platform-issuer",
+        env = "AUTH_PLATFORM_ISSUER",
+        default_value = ""
+    )]
+    auth_platform_issuer: String,
+
+    /// Platform OP JWKS URL. Defaults to `{AUTH_PLATFORM_ISSUER}/.well-known/jwks.json`.
+    #[arg(
+        long = "auth-platform-jwks-url",
+        env = "AUTH_PLATFORM_JWKS_URL",
+        default_value = ""
+    )]
+    auth_platform_jwks_url: String,
+
     /// Allow a non-loopback Hydra **admin** API URL. The admin API is
     /// privileged; outside `--dev-insecure` a remote admin URL is refused
     /// unless this is set.
@@ -493,6 +512,8 @@ impl std::fmt::Debug for ControlCli {
             .field("supabase_jwt_secret", &"<redacted>")
             .field("supabase_jwks_url", &self.supabase_jwks_url)
             .field("supabase_jwt_issuer", &self.supabase_jwt_issuer)
+            .field("auth_platform_issuer", &self.auth_platform_issuer)
+            .field("auth_platform_jwks_url", &self.auth_platform_jwks_url)
             .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
             .field("hydra_public_url", &self.hydra_public_url)
             .field("stash_signing_key", &"<redacted>")
@@ -550,10 +571,15 @@ fn build_billing_mailer(cli: &ControlCli) -> Result<Arc<dyn zeroship_mailer::Mai
 fn build_control_auth_provider(
     auth_provider: &str,
     hydra_admin_url: &str,
+    hydra_issuer: &str,
     supabase: ControlSupabaseAuthConfig,
+    platform: ControlPlatformAuthConfig,
 ) -> Result<Arc<AuthProvider>, String> {
-    match control_auth_provider_kind(auth_provider)? {
-        "hydra" => Ok(zeroship_control::hydra_auth_provider(hydra_admin_url)),
+    let legacy = match control_auth_provider_kind(auth_provider)? {
+        "hydra" => LegacyAuthProvider::Hydra(HydraProvider::new_with_issuer(
+            zeroship_core::hydra::HydraIntrospector::new(hydra_admin_url),
+            hydra_issuer,
+        )),
         "supabase" => {
             if supabase.anon_key.trim().is_empty() {
                 return Err("SUPABASE_ANON_KEY is required for ZEROSHIP_AUTH_PROVIDER=supabase"
@@ -568,10 +594,18 @@ fn build_control_auth_provider(
                 supabase.jwt_issuer,
             )
             .map_err(|err| format!("supabase auth provider config: {err}"))?;
-            Ok(Arc::new(AuthProvider::Supabase(SupabaseProvider::new(config))))
+            LegacyAuthProvider::Supabase(SupabaseProvider::new(config))
         }
-        other => Err(format!("unsupported auth provider kind: {other}")),
-    }
+        other => return Err(format!("unsupported auth provider kind: {other}")),
+    };
+
+    let Some(platform_config) = platform_config(platform)? else {
+        return Ok(Arc::new(AuthProvider::from(legacy)));
+    };
+    Ok(Arc::new(AuthProvider::DualIssuer(DualIssuerProvider::new(
+        PlatformProvider::new(platform_config),
+        legacy,
+    ))))
 }
 
 fn control_auth_provider_kind(auth_provider: &str) -> Result<&'static str, String> {
@@ -593,6 +627,32 @@ struct ControlSupabaseAuthConfig<'a> {
     jwt_secret: &'a str,
     jwks_url: &'a str,
     jwt_issuer: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct ControlPlatformAuthConfig<'a> {
+    issuer: &'a str,
+    jwks_url: &'a str,
+}
+
+fn platform_config(
+    platform: ControlPlatformAuthConfig<'_>,
+) -> Result<Option<PlatformConfig>, String> {
+    if platform.issuer.trim().is_empty() {
+        if !platform.jwks_url.trim().is_empty() {
+            return Err(
+                "AUTH_PLATFORM_ISSUER is required when AUTH_PLATFORM_JWKS_URL is set"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    }
+    PlatformConfig::new(
+        platform.issuer,
+        empty_string_as_none(platform.jwks_url),
+    )
+    .map(Some)
+    .map_err(|err| format!("platform auth provider config: {err}"))
 }
 
 fn empty_string_as_none(value: &str) -> Option<String> {
@@ -689,6 +749,24 @@ fn main() -> std::io::Result<()> {
     let supabase_jwt_secret = cli.supabase_jwt_secret.clone();
     let supabase_jwks_url = cli.supabase_jwks_url.clone();
     let supabase_jwt_issuer = cli.supabase_jwt_issuer.clone();
+    let auth_platform_issuer = resolve_overlay_string(
+        if cli.auth_platform_issuer.is_empty() {
+            None
+        } else {
+            Some(cli.auth_platform_issuer.clone())
+        },
+        file.auth.platform_issuer.clone(),
+        None,
+    );
+    let auth_platform_jwks_url = resolve_overlay_string(
+        if cli.auth_platform_jwks_url.is_empty() {
+            None
+        } else {
+            Some(cli.auth_platform_jwks_url.clone())
+        },
+        file.auth.platform_jwks_url.clone(),
+        None,
+    );
     let trusted_oauth_clients = zeroship_control::resolve_trusted_oauth_clients(&file.auth);
     tracing::info!(
         trusted_oauth_clients = trusted_oauth_clients.len(),
@@ -1114,6 +1192,26 @@ fn main() -> std::io::Result<()> {
             CheckValue::Plain(supabase_jwt_issuer.clone()),
         );
         report.field(
+            "auth_platform_issuer",
+            CheckValue::Plain(auth_platform_issuer.clone()),
+        );
+        let platform_jwks_report = match platform_config(ControlPlatformAuthConfig {
+            issuer: &auth_platform_issuer,
+            jwks_url: &auth_platform_jwks_url,
+        }) {
+            Ok(Some(config)) => config.jwks_url,
+            Ok(None) => String::new(),
+            Err(message) => {
+                eprintln!("control: {message}");
+                tracing::error!(error = %message, "control: invalid platform auth provider config");
+                std::process::exit(1);
+            }
+        };
+        report.field(
+            "auth_platform_jwks_url",
+            CheckValue::Plain(platform_jwks_report),
+        );
+        report.field(
             "hydra_public_url",
             CheckValue::Plain(hydra_public_url.clone()),
         );
@@ -1269,6 +1367,7 @@ fn main() -> std::io::Result<()> {
     let auth_provider = match build_control_auth_provider(
         &auth_provider_name,
         &hydra_admin_url,
+        &hydra_public_url,
         ControlSupabaseAuthConfig {
             url: &supabase_url,
             anon_key: &supabase_anon_key,
@@ -1276,6 +1375,10 @@ fn main() -> std::io::Result<()> {
             jwt_secret: &supabase_jwt_secret,
             jwks_url: &supabase_jwks_url,
             jwt_issuer: &supabase_jwt_issuer,
+        },
+        ControlPlatformAuthConfig {
+            issuer: &auth_platform_issuer,
+            jwks_url: &auth_platform_jwks_url,
         },
     ) {
         Ok(provider) => provider,
@@ -1799,6 +1902,7 @@ mod tests {
         let err = build_control_auth_provider(
             "supabase",
             "",
+            "https://hydra.zeroship.test",
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "",
@@ -1807,6 +1911,10 @@ mod tests {
                 jwks_url: "",
                 jwt_issuer: "https://project.supabase.co/auth/v1",
             },
+            ControlPlatformAuthConfig {
+                issuer: "",
+                jwks_url: "",
+            },
         )
         .unwrap_err();
         assert!(err.contains("SUPABASE_ANON_KEY"), "unexpected error: {err}");
@@ -1814,6 +1922,7 @@ mod tests {
         let err = build_control_auth_provider(
             "supabase",
             "",
+            "https://hydra.zeroship.test",
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1821,6 +1930,10 @@ mod tests {
                 jwt_secret: "test-supabase-jwt-secret-at-least-32-bytes",
                 jwks_url: "https://project.supabase.co/auth/v1/.well-known/jwks.json",
                 jwt_issuer: "https://project.supabase.co/auth/v1",
+            },
+            ControlPlatformAuthConfig {
+                issuer: "",
+                jwks_url: "",
             },
         )
         .unwrap_err();
@@ -1832,6 +1945,7 @@ mod tests {
         let provider = build_control_auth_provider(
             "supabase",
             "",
+            "https://hydra.zeroship.test",
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1840,9 +1954,37 @@ mod tests {
                 jwks_url: "",
                 jwt_issuer: "https://project.supabase.co/auth/v1",
             },
+            ControlPlatformAuthConfig {
+                issuer: "",
+                jwks_url: "",
+            },
         )
         .expect("valid HS256 supabase provider");
         assert_eq!(provider.issuer(), "https://project.supabase.co/auth/v1");
+
+        let provider = build_control_auth_provider(
+            "supabase",
+            "",
+            "https://hydra.zeroship.test",
+            ControlSupabaseAuthConfig {
+                url: "https://project.supabase.co",
+                anon_key: "anon",
+                service_role_key: "",
+                jwt_secret: "test-supabase-jwt-secret-at-least-32-bytes",
+                jwks_url: "",
+                jwt_issuer: "https://project.supabase.co/auth/v1",
+            },
+            ControlPlatformAuthConfig {
+                issuer: "https://auth.zeroship.test",
+                jwks_url: "",
+            },
+        )
+        .expect("valid dual-issuer provider");
+        assert_eq!(
+            provider.issuer(),
+            "https://project.supabase.co/auth/v1",
+            "dual issuer reports the legacy issuer for Supabase device-flow helpers"
+        );
     }
 
     #[test]

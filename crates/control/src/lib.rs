@@ -76,6 +76,18 @@ pub fn hydra_auth_provider(
     ))
 }
 
+pub fn hydra_auth_provider_with_issuer(
+    admin_url: impl Into<String>,
+    issuer: impl Into<String>,
+) -> Arc<zeroship_core::auth_provider::AuthProvider> {
+    Arc::new(zeroship_core::auth_provider::AuthProvider::Hydra(
+        zeroship_core::auth_provider::HydraProvider::new_with_issuer(
+            zeroship_core::hydra::HydraIntrospector::new(admin_url),
+            issuer,
+        ),
+    ))
+}
+
 /// String that zeroizes its heap buffer on drop AND refuses to leak
 /// via `Display` / `Debug` / `serde::Serialize`. Use for any secret
 /// that lives in `AppState` or any long-lived struct.

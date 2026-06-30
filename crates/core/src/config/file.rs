@@ -68,6 +68,10 @@ pub struct AuthSection {
     pub supabase_url: Option<String>,
     /// Supabase anon API key used by browser-side GoTrue session calls.
     pub supabase_anon_key: Option<String>,
+    /// Platform OP issuer accepted for platform-issued access tokens.
+    pub platform_issuer: Option<String>,
+    /// Platform OP JWKS URL. Defaults to `{platform_issuer}/.well-known/jwks.json`.
+    pub platform_jwks_url: Option<String>,
     /// Control-plane base URL used by auth-service browser flows.
     pub control_url: Option<String>,
     /// First-party OAuth client IDs trusted by the platform.
@@ -229,6 +233,8 @@ mod tests {
         assert!(config.auth.auth_provider.is_none());
         assert!(config.auth.supabase_url.is_none());
         assert!(config.auth.supabase_anon_key.is_none());
+        assert!(config.auth.platform_issuer.is_none());
+        assert!(config.auth.platform_jwks_url.is_none());
         assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert!(config.auth.frame_ancestor_origins.is_none());
@@ -273,6 +279,8 @@ hydra_public_url = "https://auth.zeroship.ai"
 auth_provider = "supabase"
 supabase_url = "https://project.supabase.test"
 supabase_anon_key = "anon-test-key"
+platform_issuer = "https://auth.zeroship.ai"
+platform_jwks_url = "https://auth.zeroship.ai/.well-known/jwks.json"
 control_url = "https://control.zeroship.ai"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
@@ -300,6 +308,14 @@ log_format = "json"
         assert_eq!(
             config.auth.supabase_anon_key.as_deref(),
             Some("anon-test-key")
+        );
+        assert_eq!(
+            config.auth.platform_issuer.as_deref(),
+            Some("https://auth.zeroship.ai")
+        );
+        assert_eq!(
+            config.auth.platform_jwks_url.as_deref(),
+            Some("https://auth.zeroship.ai/.well-known/jwks.json")
         );
         assert_eq!(
             config.auth.control_url.as_deref(),
@@ -365,6 +381,8 @@ rust_log = "debug"
         assert!(config.auth.auth_provider.is_none());
         assert!(config.auth.supabase_url.is_none());
         assert!(config.auth.supabase_anon_key.is_none());
+        assert!(config.auth.platform_issuer.is_none());
+        assert!(config.auth.platform_jwks_url.is_none());
         assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert_eq!(config.observability.log_filter.as_deref(), Some("debug"));
