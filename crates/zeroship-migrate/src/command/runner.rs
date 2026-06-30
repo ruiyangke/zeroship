@@ -256,20 +256,31 @@ pub enum RunError {
     /// single-step-shape precondition test) and exists for defense in depth.
     #[error("plan shape: {0}")]
     NotSingleStep(#[from] crate::render::plan::NotSingleStep),
-    /// A Platform-profile migration directory contains both committed op-DSL IR
-    /// artifacts and SQL files. Pre-launch, a directory is exactly one migration
-    /// corpus format.
+    /// A Platform-profile migration directory contains multiple corpus formats.
+    /// Pre-launch, a directory is exactly one format.
     #[error(
-        "mixed migration corpus in '{dir}': found IR file '{ir}' and SQL file '{sql}' \
-         (a Platform migration directory must be all .ir.json or all .sql)"
+        "mixed platform migration corpus in '{dir}': found {found} \
+         (use exactly one format: .ts record/apply, or legacy .sql for db/migrations)"
     )]
-    MixedMigrationCorpus {
+    MixedPlatformMigrationCorpus {
         /// The migration directory.
         dir: String,
-        /// An example IR file seen.
+        /// Human-readable examples of the formats seen.
+        found: String,
+    },
+    /// Committed Platform `.ir.json` was an intermediate apply-core test path.
+    /// Model C makes platform migrations `.ts`-only (transient IR), while creator
+    /// deployments keep committed `.ir.json` through control's deploy path.
+    #[error(
+        "unsupported platform migration corpus in '{dir}': found committed IR file '{ir}' \
+         (Platform migrations are .ts-only record/apply; creator committed .ir.json \
+         remains in the control-plane deploy path)"
+    )]
+    PlatformIrCorpusUnsupported {
+        /// The migration directory.
+        dir: String,
+        /// An example committed IR file.
         ir: String,
-        /// An example SQL file seen.
-        sql: String,
     },
     /// Applying committed `.ir.json` migrations failed.
     #[error("apply IR migrations: {0}")]
@@ -295,17 +306,18 @@ fn load_dir_flat(dir: &Path) -> Result<Vec<crate::model::migration::Migration>, 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MigrationCorpusFormat {
+    Ts,
     Sql,
-    Ir,
 }
 
 /// Detect the top-level migration corpus shape for the Platform Postgres
 /// `migrate` command.
 ///
-/// IR mode is selected by any `*.ir.json` file. SQL mode is selected by any
-/// `*.sql` file and then delegated to the existing loader, which owns the exact
-/// Flyway/dbmate filename grammar and hard-rejects malformed names. A mixed
-/// directory is refused before either loader runs.
+/// Model C selects `.ts` as the platform source format: the runner records each
+/// file to transient IR at migrate time and applies that IR. The `.sql` branch is
+/// retained only for the current repo-root `db/migrations/` port until the platform
+/// schema is rebaselined to `.ts`. Committed Platform `.ir.json` is intentionally
+/// rejected here; creator committed IR still flows through control/deploy.
 fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError> {
     let read = std::fs::read_dir(dir).map_err(|e| {
         RunError::Load(LoaderError::Io {
@@ -313,6 +325,7 @@ fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError>
             message: e.to_string(),
         })
     })?;
+    let mut first_ts: Option<String> = None;
     let mut first_ir: Option<String> = None;
     let mut first_sql: Option<String> = None;
     for entry in read {
@@ -331,20 +344,38 @@ fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError>
         };
         if name.ends_with(".ir.json") {
             first_ir.get_or_insert_with(|| name.to_string());
+        } else if name.ends_with(".ts") {
+            first_ts.get_or_insert_with(|| name.to_string());
         } else if name.ends_with(".sql") {
             first_sql.get_or_insert_with(|| name.to_string());
         }
     }
-    match (first_ir, first_sql) {
-        (Some(ir), Some(sql)) => Err(RunError::MixedMigrationCorpus {
+    let mut found = Vec::new();
+    if let Some(ts) = &first_ts {
+        found.push(format!(".ts '{ts}'"));
+    }
+    if let Some(ir) = &first_ir {
+        found.push(format!(".ir.json '{ir}'"));
+    }
+    if let Some(sql) = &first_sql {
+        found.push(format!(".sql '{sql}'"));
+    }
+    if found.len() > 1 {
+        return Err(RunError::MixedPlatformMigrationCorpus {
+            dir: dir.display().to_string(),
+            found: found.join(", "),
+        });
+    }
+    match (first_ts, first_ir, first_sql) {
+        (Some(_), None, None) => Ok(MigrationCorpusFormat::Ts),
+        (None, Some(ir), None) => Err(RunError::PlatformIrCorpusUnsupported {
             dir: dir.display().to_string(),
             ir,
-            sql,
         }),
-        (Some(_), None) => Ok(MigrationCorpusFormat::Ir),
         // Preserve the existing loader as the source of truth for empty dirs,
         // malformed SQL names, dbmate files, and stray files.
-        (None, _) => Ok(MigrationCorpusFormat::Sql),
+        (None, None, _) => Ok(MigrationCorpusFormat::Sql),
+        _ => unreachable!("mixed platform corpus returned above"),
     }
 }
 
@@ -712,7 +743,8 @@ fn sqlite_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
 
 /// `migrate` — dispatch by the `--database-url` engine, then load the dir, plan,
 /// honour the H1 destructive gate, and apply PENDING (design §9). Postgres SQL
-/// corpora run the existing path, Platform IR corpora route through the IR apply
+/// corpora run the existing path, Platform `.ts` corpora record to transient IR
+/// and route through the IR apply
 /// path, SQLite runs the same generic engine through a hardened [`SqliteBackend`],
 /// and an unsupported URL is an honest refusal.
 ///
@@ -746,8 +778,11 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
 
 /// The Postgres leg of `migrate`.
 async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    if cfg.profile == RunProfile::Platform && platform_corpus_format(&cfg.dir)? == MigrationCorpusFormat::Ir {
-        return run_migrate_pg_ir(cfg).await;
+    if cfg.profile == RunProfile::Platform {
+        match platform_corpus_format(&cfg.dir)? {
+            MigrationCorpusFormat::Ts => return run_migrate_pg_platform_ts(cfg).await,
+            MigrationCorpusFormat::Sql => {}
+        }
     }
     let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
@@ -769,8 +804,8 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
     Ok(RunReport::Migrate(outcome))
 }
 
-/// The Platform Postgres IR leg of `migrate`.
-async fn run_migrate_pg_ir(cfg: &RunConfig) -> Result<RunReport, RunError> {
+/// The Platform Postgres `.ts` leg of `migrate`.
+async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunError> {
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
     let guard_cfg = build_guard_cfg(cfg);
@@ -779,15 +814,17 @@ async fn run_migrate_pg_ir(cfg: &RunConfig) -> Result<RunReport, RunError> {
     } else {
         Approval::None
     };
-    let outcome = crate::command::ir_apply::apply_bundle_ir_postgres(
+    let via = crate::frontend::RecordVia::local();
+    let outcome = crate::command::ir_apply::apply_platform_ts_postgres(
         &PostgresBackend::new(&conn),
         &cfg.project_schema,
         PLATFORM_OWNER_APP,
         &cfg.dir,
+        &via,
         &exec_cfg,
         &guard_cfg,
         approval,
-        "platform-migrate-ir",
+        "platform-migrate-ts",
     )
     .await?;
     Ok(RunReport::Migrate(ApplyOutcome {

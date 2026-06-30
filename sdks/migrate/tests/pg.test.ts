@@ -79,7 +79,7 @@ test("pg namespace records every standalone vendor op shape", () => {
       argTypes: ["text"],
       ifExists: true,
     });
-    pg.pgRaw({ sql: "SELECT set_config('a', $1, false)", binds: ["x"] });
+    pg.raw({ sql: "SELECT set_config('a', $1, false)", binds: ["x"] });
     pg.sql`SELECT ${"x"}, ${1}, ${true}`;
   });
 
