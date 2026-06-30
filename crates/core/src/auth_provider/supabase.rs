@@ -199,6 +199,21 @@ impl SupabaseProvider {
     pub fn issuer(&self) -> &str {
         self.config.verification.issuer()
     }
+
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.config.url
+    }
+
+    #[must_use]
+    pub fn anon_key(&self) -> &str {
+        &self.config.anon_key
+    }
+
+    #[must_use]
+    pub fn service_role_key(&self) -> Option<&str> {
+        self.config.service_role_key.as_deref()
+    }
 }
 
 #[derive(Debug, Error)]

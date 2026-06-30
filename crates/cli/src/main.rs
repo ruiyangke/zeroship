@@ -1073,6 +1073,11 @@ mod tests {
                     expires_at: u64::MAX,
                     auth_url: "http://auth.test".to_string(),
                     client_id: "zeroship-cli".to_string(),
+                    provider: "hydra".to_string(),
+                    control_url: None,
+                    token_endpoint: None,
+                    anon_key: None,
+                    userinfo_url: None,
                 })
             },
         )

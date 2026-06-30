@@ -19,6 +19,7 @@ pub mod cron;
 pub mod deploy;
 pub mod deploy_migrate;
 pub mod disputes;
+pub mod device_handlers;
 pub mod env_handlers;
 pub mod env_store;
 pub mod fee_policy;

@@ -41,6 +41,30 @@ impl AuthProvider {
             Self::Supabase(provider) => provider.issuer(),
         }
     }
+
+    #[must_use]
+    pub fn supabase_url(&self) -> Option<&str> {
+        match self {
+            Self::Hydra(_) => None,
+            Self::Supabase(provider) => Some(provider.url()),
+        }
+    }
+
+    #[must_use]
+    pub fn supabase_anon_key(&self) -> Option<&str> {
+        match self {
+            Self::Hydra(_) => None,
+            Self::Supabase(provider) => Some(provider.anon_key()),
+        }
+    }
+
+    #[must_use]
+    pub fn supabase_service_role_key(&self) -> Option<&str> {
+        match self {
+            Self::Hydra(_) => None,
+            Self::Supabase(provider) => provider.service_role_key(),
+        }
+    }
 }
 
 /// Provider-neutral verified token claims. This is not an authorization

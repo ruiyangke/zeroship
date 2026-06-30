@@ -28,6 +28,10 @@ impl MockServer {
             .set_nonblocking(true)
             .expect("set mock server nonblocking");
         let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let responses: Vec<(u16, String)> = responses
+            .into_iter()
+            .map(|(status, body)| (status, body.replace("{{BASE_URL}}", &url)))
+            .collect();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let thread_requests = Arc::clone(&requests);
         let handle = std::thread::spawn(move || {
@@ -35,7 +39,7 @@ impl MockServer {
                 let mut stream = accept_with_timeout(&listener);
                 let request = read_request(&mut stream);
                 thread_requests.lock().expect("lock requests").push(request);
-                write_response(&mut stream, status, body);
+                write_response(&mut stream, status, &body);
             }
         });
         Self {
@@ -151,6 +155,82 @@ fn device_grant_flow_polls_until_approved() {
             & 0o777;
         assert_eq!(mode, 0o600);
     }
+}
+
+#[test]
+fn supabase_device_flow_uses_control_then_refreshes_gotrue_session() {
+    let server = MockServer::start(vec![
+        (
+            200,
+            r#"{"device_code":"supabase-dev-123","user_code":"BCDF-GHJK","verification_uri":"http://auth.test/device","verification_uri_complete":"http://auth.test/device?user_code=BCDF-GHJK","interval":1,"expires_in":60}"#,
+        ),
+        (400, r#"{"error":"authorization_pending"}"#),
+        (
+            200,
+            r#"{"refresh_token":"bound-refresh","token_type":"Bearer","provider":"supabase","auth_url":"{{BASE_URL}}","token_endpoint":"{{BASE_URL}}/auth/v1/token?grant_type=refresh_token","anon_key":"anon-test-key"}"#,
+        ),
+        (
+            200,
+            r#"{"access_token":"gotrue-access","refresh_token":"gotrue-refresh-rotated","expires_in":120,"token_type":"bearer"}"#,
+        ),
+        (200, r#"{"email":"supabase@example.com","id":"gotrue-user-id"}"#),
+    ]);
+    let config = tempfile::tempdir().expect("tempdir");
+    let token_endpoint = format!("{}/auth/v1/token?grant_type=refresh_token", server.url);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .arg("login")
+        .arg("--provider=supabase")
+        .arg("--control")
+        .arg(&server.url)
+        .env("ZEROSHIP_CONFIG_HOME", config.path())
+        .output()
+        .expect("run zeroship login --provider=supabase");
+
+    assert!(
+        output.status.success(),
+        "login failed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("Signed in as supabase@example.com"),
+        "stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 5);
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/api/device/auth");
+    assert_header(&requests[0], "content-type", "application/json");
+    assert!(requests[0].body.contains(r#""client_id":"zeroship-cli""#));
+    assert_eq!(requests[1].path, "/api/device/token");
+    assert!(requests[1].body.contains("supabase-dev-123"));
+    assert_eq!(requests[2].path, "/api/device/token");
+    assert!(
+        requests[2].at.duration_since(requests[1].at) >= Duration::from_millis(900),
+        "token polling did not wait for the server interval"
+    );
+    assert_eq!(
+        requests[3].path,
+        "/auth/v1/token?grant_type=refresh_token"
+    );
+    assert_header(&requests[3], "apikey", "anon-test-key");
+    assert!(requests[3].body.contains("refresh_token=bound-refresh"));
+    assert_eq!(requests[4].path, "/auth/v1/user");
+    assert_header(&requests[4], "authorization", "Bearer gotrue-access");
+    assert_header(&requests[4], "apikey", "anon-test-key");
+
+    let token = read_token(config.path());
+    assert_eq!(token["access_token"], "gotrue-access");
+    assert_eq!(token["refresh_token"], "gotrue-refresh-rotated");
+    assert_eq!(token["provider"], "supabase");
+    assert_eq!(token["auth_url"], server.url);
+    assert_eq!(token["control_url"], server.url);
+    assert_eq!(token["token_endpoint"], token_endpoint);
+    assert_eq!(token["anon_key"], "anon-test-key");
+    assert!(token["expires_at"].as_u64().expect("expires_at") > now_secs());
 }
 
 #[test]

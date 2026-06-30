@@ -13,7 +13,7 @@ use zeroship_core::config::{
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_control::{
-    admin_handlers, api, bootstrap_console, env_handlers,
+    admin_handlers, api, bootstrap_console, device_handlers, env_handlers,
     internal, oauth_grants_handlers, oauth_handlers, stripe_handlers, token_handlers,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
@@ -1680,6 +1680,7 @@ fn main() -> std::io::Result<()> {
             // console is handled by the GATEWAY's own per-app BCL endpoint (it
             // is a gateway app like any other). Control exposes only the PAT /
             // OAuth-grant management surfaces below.
+            .configure(device_handlers::configure)
             .configure(token_handlers::configure)
             .configure(oauth_grants_handlers::configure)
             // --- Stripe Connect ---
