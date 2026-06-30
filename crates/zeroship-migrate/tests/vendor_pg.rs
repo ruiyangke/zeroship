@@ -51,6 +51,16 @@ fn render_create_schema() {
 }
 
 #[test]
+fn render_drop_extension() {
+    // SA-25: the IF EXISTS form quotes the hyphenated name; the if_exists:None form
+    // emits a bare DROP EXTENSION. No CASCADE (matching the renderer).
+    let with_if = Op::DropExtension { name: "uuid-ossp".into(), if_exists: Some(true) };
+    assert_eq!(render_up(&with_if), r#"DROP EXTENSION IF EXISTS "uuid-ossp""#);
+    let bare = Op::DropExtension { name: "pgcrypto".into(), if_exists: None };
+    assert_eq!(render_up(&bare), r#"DROP EXTENSION "pgcrypto""#);
+}
+
+#[test]
 fn render_create_extension_with_schema() {
     let op = Op::CreateExtension {
         name: "uuid-ossp".into(),
