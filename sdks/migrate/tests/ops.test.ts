@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { t, table, comment, lintDeterminism } from "../src/index.js";
+import { t, table, comment, lintDeterminism, pgEnum, sequence } from "../src/index.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 
@@ -17,6 +17,23 @@ function record(up: () => void): any[] {
   up();
   return __drain();
 }
+
+test("SA-7: pgEnum rejects an empty values[] at authoring time", () => {
+  assert.throws(
+    () => record(() => pgEnum("empty_enum", [])),
+    (e: any) => e.code === "OP_INVALID" && /non-empty string\[\]/.test(e.message),
+  );
+});
+
+test("SA-6: sequence({ as }) rejects a type outside { int, bigInt }", () => {
+  assert.throws(
+    () => record(() => sequence("s").create({ as: t.text() })),
+    (e: any) => e.code === "OP_INVALID" && /as must be one of int \| bigInt/.test(e.message),
+  );
+  // valid tokens still record
+  const ops = record(() => sequence("s2").create({ as: t.bigInt() }));
+  assert.equal(ops[0].as, "bigInt");
+});
 
 test("t.text() is nullable-by-default; .notNull() opts in", () => {
   const ops = record(() => {

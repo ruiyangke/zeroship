@@ -21,6 +21,35 @@ test("@zeroship/migrate/pg subpath resolves through package exports", async () =
   assert.equal(typeof imported.pg.sql, "function");
 });
 
+test("SA-8: pg.grant/revoke reject empty privilege/role arrays and a non-object target", () => {
+  assert.throws(
+    () => record(() => pg.grant({ privileges: [], on: { kind: "table", names: ["u"] }, to: ["r"] } as any)),
+    (e: any) => e.code === "OP_INVALID" && /privileges must be a non-empty array/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => pg.grant({ privileges: ["select"], on: "u" as any, to: ["r"] } as any)),
+    (e: any) => e.code === "OP_INVALID" && /on must be a target object/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => pg.revoke({ privileges: ["select"], on: { kind: "table", names: ["u"] }, from: [] } as any)),
+    (e: any) => e.code === "OP_INVALID" && /from must be a non-empty array/.test(e.message),
+  );
+});
+
+test("SA-10/SA-11: pg.createPolicy requires using and rejects an explicit empty to[]", () => {
+  assert.throws(
+    () => record(() => pg.createPolicy({ name: "p", table: "u" } as any)),
+    (e: any) => e.code === "OP_INVALID" && /using is required/.test(e.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        pg.createPolicy({ name: "p", table: "u", to: [], using: (c: any) => c("x").isNotNull() } as any),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /to must be a non-empty role array/.test(e.message),
+  );
+});
+
 test("pg namespace records every standalone vendor op shape", () => {
   const ops = record(() => {
     pg.createSchema({ name: "zs", ifNotExists: true, authorization: "owner" });
