@@ -1,9 +1,10 @@
--- Platform-mediated OAuth device flow for providers without a native device grant.
+-- Platform-mediated OAuth device flow for platform deploy tokens.
 --
--- GoTrue has no RFC 8628 device authorization endpoint, so control owns the
--- pending grant. The poll secret (`device_code`) is never stored in plaintext:
--- callers look up rows by SHA-256 hash, while the low-entropy `user_code` is
--- only the human-facing selector for an already-authenticated approval.
+-- Control owns the pending grant and polling discipline; the platform OP
+-- (auth service) owns access-token issuance. The poll secret (`device_code`) is
+-- never stored in plaintext: callers look up rows by SHA-256 hash, while the
+-- low-entropy `user_code` is only the human-facing selector for an
+-- already-authenticated approval.
 
 CREATE TABLE zeroship.device_grants (
     device_code_hash         TEXT        PRIMARY KEY,
@@ -11,7 +12,7 @@ CREATE TABLE zeroship.device_grants (
     status                   TEXT        NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'approved', 'denied')),
     principal_id             UUID        REFERENCES zeroship.users(id),
-    gotrue_refresh_token_enc BYTEA,
+    platform_access_token_enc BYTEA,
     provider                 TEXT        NOT NULL,
     scope                    TEXT,
     created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 const CLIENT_ID: &str = "zeroship-cli";
 const DEFAULT_AUTH_URL: &str = "https://auth.zeroship.ai";
 const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
-const SCOPE: &str = "openid offline_access apps:deploy apps:read";
+const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,11 +51,7 @@ struct TokenResponse {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
-    auth_url: Option<String>,
-    #[serde(default)]
-    token_endpoint: Option<String>,
-    #[serde(default)]
-    anon_key: Option<String>,
+    principal_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,6 +77,7 @@ struct HttpResponse {
 enum CliDeviceFlow {
     Hydra,
     Supabase,
+    Platform,
 }
 
 pub fn cmd_login(args: &[String]) -> Result<(), String> {
@@ -90,7 +87,7 @@ pub fn cmd_login(args: &[String]) -> Result<(), String> {
         .unwrap_or_else(|| DEFAULT_AUTH_URL.into());
     match provider {
         CliDeviceFlow::Hydra => login_hydra(&auth_url, true),
-        CliDeviceFlow::Supabase => {
+        CliDeviceFlow::Supabase | CliDeviceFlow::Platform => {
             let control_url = crate::flag_str(args, "--control=")
                 .or_else(|| flag_value(args, "--control"))
                 .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
@@ -137,7 +134,11 @@ pub fn cmd_logout() -> Result<(), String> {
 pub fn cmd_whoami() -> Result<(), String> {
     let creds = load_credentials()?;
     let user = userinfo(&creds)?;
-    let identity = user.email.or(user.sub).unwrap_or_else(|| "<unknown>".into());
+    let identity = user
+        .email
+        .or(user.sub)
+        .or(user.id)
+        .unwrap_or_else(|| "<unknown>".into());
     println!("{identity}");
     println!("Token expires at {}", creds.expires_at);
     Ok(())
@@ -153,6 +154,9 @@ pub fn load_credentials() -> Result<Credentials, String> {
     let token = match credential_provider(&creds)? {
         CliDeviceFlow::Hydra => refresh_hydra(&creds)?,
         CliDeviceFlow::Supabase => refresh_supabase_credentials(&creds)?,
+        CliDeviceFlow::Platform => {
+            return Err("saved platform token expired; run `zeroship login` again".to_string());
+        }
     };
     creds.access_token = require_access_token(token.access_token, "refresh token response")?;
     if let Some(refresh_token) = token.refresh_token {
@@ -207,7 +211,11 @@ fn login_hydra(auth_url: &str, print_prompt: bool) -> Result<(), String> {
     save_credentials(&creds)?;
 
     let user = userinfo(&creds)?;
-    let identity = user.email.or(user.sub).unwrap_or_else(|| "<unknown>".into());
+    let identity = user
+        .email
+        .or(user.sub)
+        .or(user.id)
+        .unwrap_or_else(|| "<unknown>".into());
     println!("Signed in as {identity}");
     Ok(())
 }
@@ -247,46 +255,27 @@ fn login_supabase(control_url: &str, print_prompt: bool) -> Result<(), String> {
     }
 
     let bound = poll_for_supabase_token(control_url, &device, interval)?;
-    if bound.provider.as_deref() != Some("supabase") {
-        return Err("device token response did not name provider=supabase".to_string());
+    if bound.provider.as_deref() != Some("platform") {
+        return Err("device token response did not name provider=platform".to_string());
     }
-    let refresh_token = bound
-        .refresh_token
-        .ok_or_else(|| "device token response did not include refresh_token".to_string())?;
-    let auth_url = bound
-        .auth_url
-        .ok_or_else(|| "device token response did not include auth_url".to_string())?;
-    let token_endpoint = bound
-        .token_endpoint
-        .ok_or_else(|| "device token response did not include token_endpoint".to_string())?;
-    let anon_key = bound
-        .anon_key
-        .ok_or_else(|| "device token response did not include anon_key".to_string())?;
-
-    let refreshed = refresh_supabase(&token_endpoint, &anon_key, &refresh_token)?;
-    let access_token = require_access_token(refreshed.access_token, "Supabase refresh response")?;
-    let refresh_token = refreshed.refresh_token.unwrap_or(refresh_token);
-    let expires_at = now_secs()?.saturating_add(refreshed.expires_in.unwrap_or(3600));
+    let access_token = require_access_token(bound.access_token, "device token response")?;
+    let principal_id = bound.principal_id.clone();
+    let expires_at = now_secs()?.saturating_add(bound.expires_in.unwrap_or(900));
     let creds = Credentials {
         access_token,
-        refresh_token,
+        refresh_token: String::new(),
         expires_at,
-        auth_url: auth_url.trim_end_matches('/').to_string(),
+        auth_url: control_url.to_string(),
         client_id: CLIENT_ID.to_string(),
-        provider: "supabase".to_string(),
+        provider: "platform".to_string(),
         control_url: Some(control_url.to_string()),
-        token_endpoint: Some(token_endpoint),
-        anon_key: Some(anon_key),
+        token_endpoint: None,
+        anon_key: None,
         userinfo_url: None,
     };
     save_credentials(&creds)?;
 
-    let user = userinfo(&creds)?;
-    let identity = user
-        .email
-        .or(user.sub)
-        .or(user.id)
-        .unwrap_or_else(|| "<unknown>".into());
+    let identity = principal_id.unwrap_or_else(|| "<unknown>".into());
     println!("Signed in as {identity}");
     Ok(())
 }
@@ -400,6 +389,7 @@ fn poll_for_supabase_token(
 fn userinfo(creds: &Credentials) -> Result<UserInfo, String> {
     let (url, headers) = match credential_provider(creds)? {
         CliDeviceFlow::Hydra => (endpoint(&creds.auth_url, "/userinfo"), Vec::new()),
+        CliDeviceFlow::Platform => return Ok(userinfo_from_platform_token(&creds.access_token)),
         CliDeviceFlow::Supabase => {
             let anon_key = creds
                 .anon_key
@@ -512,7 +502,10 @@ fn parse_provider_value(provider: &str) -> Result<CliDeviceFlow, String> {
     match provider.trim().to_ascii_lowercase().as_str() {
         "" | "hydra" => Ok(CliDeviceFlow::Hydra),
         "supabase" => Ok(CliDeviceFlow::Supabase),
-        other => Err(format!("unknown auth provider {other:?}; expected hydra|supabase")),
+        "platform" => Ok(CliDeviceFlow::Platform),
+        other => Err(format!(
+            "unknown auth provider {other:?}; expected hydra|supabase|platform"
+        )),
     }
 }
 
@@ -522,6 +515,46 @@ fn default_provider() -> String {
 
 fn require_access_token(value: Option<String>, context: &str) -> Result<String, String> {
     value.ok_or_else(|| format!("{context} did not include access_token"))
+}
+
+fn userinfo_from_platform_token(token: &str) -> UserInfo {
+    let sub = token
+        .split('.')
+        .nth(1)
+        .and_then(|payload| base64_url_decode(payload).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|claims| {
+            claims
+                .get("sub")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        });
+    UserInfo {
+        email: None,
+        sub,
+        id: None,
+    }
+}
+
+fn base64_url_decode(value: &str) -> Result<Vec<u8>, String> {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = Vec::with_capacity(value.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    for byte in value.bytes() {
+        let Some(idx) = ALPHABET.iter().position(|candidate| *candidate == byte) else {
+            return Err("invalid base64url".to_string());
+        };
+        buf = (buf << 6) | idx as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
 }
 
 fn credentials_path() -> Result<PathBuf, String> {
@@ -713,7 +746,7 @@ mod tests {
         let body = form_body(&[("client_id", CLIENT_ID), ("scope", SCOPE)]);
         assert_eq!(
             body,
-            "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread"
+            "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread+apps%3Awrite"
         );
     }
 }

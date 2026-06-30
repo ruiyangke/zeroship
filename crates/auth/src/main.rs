@@ -139,6 +139,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "control_url",
             CheckValue::Plain(cfg.control_url().to_string()),
         );
+        report.field(
+            "control_key_configured",
+            CheckValue::Secret(!cfg.control_key.is_empty()),
+        );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field(
             "log_format",
@@ -321,6 +325,12 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
         "AUTH_STASH_SIGNING_KEY / --stash-signing-key",
         &cfg.stash_signing_key,
         file_secrets.stash_signing_key.as_deref(),
+        check,
+    );
+    cfg.control_key = obtain_secret(
+        "CONTROL_KEY / --control-key",
+        &cfg.control_key,
+        file_secrets.control_key.as_deref(),
         check,
     );
     cfg.totp_enc_key = obtain_secret(
