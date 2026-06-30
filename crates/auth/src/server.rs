@@ -35,6 +35,7 @@ pub fn configure(
     github_enabled: bool,
 ) -> impl Fn(&mut web::ServiceConfig) {
     move |cfg: &mut web::ServiceConfig| {
+        op::authorization_code::configure(cfg);
         op::device_token::configure(cfg);
         cfg.service(healthz)
             .service(readyz)

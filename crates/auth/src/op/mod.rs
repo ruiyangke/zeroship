@@ -1,9 +1,8 @@
 //! Platform OpenID Provider primitives.
 //!
-//! This module is the P1a foundation only: file-custodied Ed25519 signing,
-//! platform JWT minting, JWKS publication, and discovery metadata. OAuth grant
-//! endpoints are wired in later slices.
+//! Platform OpenID Provider primitives and closed-world OAuth endpoints.
 
+pub mod authorization_code;
 pub mod issuer;
 pub mod device_token;
 pub mod metadata;
