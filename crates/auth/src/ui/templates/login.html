@@ -5,8 +5,13 @@
 {% if let Some(err) = error %}
   <div class="error">{{ err }}</div>
 {% endif %}
-<form method="POST" action="/login?login_challenge={{ challenge }}">
+<form method="POST" action="/login{% if is_hydra %}?login_challenge={{ challenge }}{% endif %}">
   <input type="hidden" name="csrf" value="{{ csrf }}">
+  {% if is_hydra %}
+    <input type="hidden" name="login_challenge" value="{{ challenge }}">
+  {% else %}
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+  {% endif %}
   <label>Email
     <input type="email" name="email" autocomplete="username" required autofocus>
   </label>
@@ -16,7 +21,7 @@
   <button type="submit">Sign in</button>
   <p style="font-size:0.875rem;text-align:right;margin-top:0"><a href="/forgot">Forgot password?</a></p>
 </form>
-{% if google_enabled || github_enabled %}
+{% if is_hydra && (google_enabled || github_enabled) %}
   <div class="oauth-divider"><span>or sign in with</span></div>
   <div class="oauth-buttons">
     {% if google_enabled %}
@@ -53,5 +58,7 @@
     </form>
   </details>
 </div>
-<p><a href="/signup?login_challenge={{ challenge }}">Create an account</a></p>
+{% if is_hydra %}
+  <p><a href="/signup?login_challenge={{ challenge }}">Create an account</a></p>
+{% endif %}
 {% endblock %}

@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::config::AuthConfig;
 use crate::op::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
+use crate::return_to;
 use crate::sessions::login as login_session;
 use crate::store::sessions as session_store;
 
@@ -240,8 +241,12 @@ async fn authorize_inner(
         return Ok(login_redirect(req));
     };
 
-    let granted_scopes = record_consent_grant(db, session.user_id, &client.client_id, &requested_scopes)
-        .await?;
+    if consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await? {
+        touch_consent_grant(db, session.user_id, &client.client_id).await?;
+    } else {
+        return Ok(consent_redirect(req));
+    }
+    let granted_scopes = requested_scopes.clone();
 
     let code = generate_code();
     let code_hash = code_hash(&code);
@@ -494,12 +499,12 @@ async fn load_client(db: &Client, client_id: &str) -> Result<OAuthClient, OAuthE
     })
 }
 
-async fn record_consent_grant(
+pub(crate) async fn persist_consent_grant(
     db: &Client,
     user_id: Uuid,
     client_id: &str,
     requested_scopes: &[String],
-) -> Result<Vec<String>, OAuthError> {
+) -> Result<Vec<String>, String> {
     let existing = db
         .query(
             "SELECT granted_scopes \
@@ -509,8 +514,7 @@ async fn record_consent_grant(
         )
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, "authorize: oauth grant lookup failed");
-            OAuthError::server_error("consent store unavailable")
+            format!("oauth grant lookup failed: {err}")
         })?;
     let mut granted = existing
         .first()
@@ -531,8 +535,7 @@ async fn record_consent_grant(
     )
     .await
     .map_err(|err| {
-        tracing::error!(error = %err, "authorize: oauth grant upsert failed");
-        OAuthError::server_error("consent store unavailable")
+        format!("oauth grant upsert failed: {err}")
     })?;
     Ok(granted)
 }
@@ -560,6 +563,25 @@ async fn consent_covers(
     };
     let consent_scopes = sort_dedup(row.get::<_, Vec<String>>("granted_scopes"));
     Ok(scope_subset(granted_scopes, &consent_scopes))
+}
+
+async fn touch_consent_grant(
+    db: &Client,
+    user_id: Uuid,
+    client_id: &str,
+) -> Result<(), OAuthError> {
+    db.execute(
+        "UPDATE zeroship.oauth_grants \
+         SET last_used_at = NOW() \
+         WHERE user_id = $1 AND client_id = $2",
+        &[&user_id, &client_id],
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(error = %err, "authorize: oauth grant touch failed");
+        OAuthError::server_error("consent store unavailable")
+    })?;
+    Ok(())
 }
 
 fn required_param<'a>(value: Option<&'a str>, name: &'static str) -> Result<&'a str, OAuthError> {
@@ -639,19 +661,14 @@ fn authorization_success_redirect(
 }
 
 fn login_redirect(req: &HttpRequest) -> HttpResponse {
-    let mut location = String::from("/login");
-    let request_target = if req.query_string().is_empty() {
-        req.path().to_string()
-    } else {
-        format!("{}?{}", req.path(), req.query_string())
-    };
-    if !request_target.is_empty() {
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("return_to", &request_target)
-            .finish();
-        location.push('?');
-        location.push_str(&query);
-    }
+    let location = return_to::login_location(&return_to::request_target(req));
+    see_other(&location)
+        .header("cache-control", "no-store")
+        .finish()
+}
+
+fn consent_redirect(req: &HttpRequest) -> HttpResponse {
+    let location = return_to::consent_location(&return_to::request_target(req));
     see_other(&location)
         .header("cache-control", "no-store")
         .finish()
