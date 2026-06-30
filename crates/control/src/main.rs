@@ -627,6 +627,11 @@ fn resolve_pairwise_salt(
 }
 
 fn main() -> std::io::Result<()> {
+    // Control uses cyper for provider/admin calls (Supabase identity bridge,
+    // Stripe reconciliation). Install the workspace's selected rustls provider
+    // before any outbound client can be constructed.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let cli = ControlCli::parse();
     // Billing notifier mailer (PR-6): built from the --mailer flag up front, before any
     // `cli` field is moved out below. An unknown driver / missing creds refuses to boot.

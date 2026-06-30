@@ -83,6 +83,7 @@ ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 jsonwebtoken = { workspace = true }
 rand = "0.8"
 cyper = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 url = { workspace = true }
 http = { workspace = true }
 tracing = { workspace = true }
