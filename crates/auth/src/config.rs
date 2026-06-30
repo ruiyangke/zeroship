@@ -380,6 +380,22 @@ pub struct AuthConfig {
     )]
     pub public_url: String,
 
+    /// Platform OP Ed25519 private signing key file (PEM/PKCS#8 or DER).
+    ///
+    /// Required on real boot. The key is loaded into auth-service memory and
+    /// never stored in Postgres; `zeroship.signing_keys` receives only the
+    /// matching public JWK metadata.
+    #[arg(long = "auth-signing-key-file", env = "AUTH_SIGNING_KEY_FILE")]
+    pub auth_signing_key_file: Option<PathBuf>,
+
+    /// Platform OP pairwise subject salt source file.
+    ///
+    /// Required on real boot. The file contents are fed through
+    /// `derive_pairwise_salt`, then used with `(user_id, sector_identifier)` to
+    /// mint cross-app-unlinkable `pws_...` subjects.
+    #[arg(long = "auth-pairwise-salt-file", env = "AUTH_PAIRWISE_SALT_FILE")]
+    pub auth_pairwise_salt_file: Option<PathBuf>,
+
     // ─── Relay email (Slice 5 — app → user one-way forwarding) ───────────
     /// Relay alias domain. Aliases are minted as `{token}@{relay_domain}`
     /// (lowercase). Dev: `relay.zeroship.localhost`; prod: `relay.zeroship.ai`
@@ -814,6 +830,8 @@ impl std::fmt::Debug for AuthConfig {
             .field("smtp_password", &"<redacted>")
             .field("resend_api_key", &"<redacted>")
             .field("public_url", &self.public_url)
+            .field("auth_signing_key_file", &self.auth_signing_key_file)
+            .field("auth_pairwise_salt_file", &self.auth_pairwise_salt_file)
             .field("postmark_webhook_password", &"<redacted>")
             .field("relay_domain", &self.relay_domain)
             .field("relay_forward_mailer", &self.relay_forward_mailer)

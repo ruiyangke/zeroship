@@ -11,6 +11,7 @@ pub mod error;
 pub mod headers;
 pub mod hydra_client;
 pub mod identity;
+pub mod op;
 pub mod ratelimit;
 pub mod server;
 pub mod sessions;
