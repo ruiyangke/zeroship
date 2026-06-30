@@ -40,15 +40,16 @@ pub fn spawn_all(
     // sweep flips the append-only tamper trigger off via a transaction-local
     // GUC, which must never share a socket with other traffic), so it takes
     // only the config — not the shared `Arc<Client>`.
-    let cfg_audit = cfg;
+    let cfg_audit = cfg.clone();
     compio::runtime::spawn(async move {
         audit_retention::run(cfg_audit).await;
     })
     .detach();
 
     let db_token_sweep = db.clone();
+    let cfg_token_sweep = cfg.clone();
     compio::runtime::spawn(async move {
-        token_sweep::run(db_token_sweep).await;
+        token_sweep::run(db_token_sweep, cfg_token_sweep).await;
     })
     .detach();
 

@@ -291,8 +291,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
-    //    the listener is bound. `Arc<Client>` is shared with the server
-    //    so both drive I/O through the single compio-postgres connection.
+    //    the listener is bound. `Arc<Client>` is shared for autocommit
+    //    cron work; refresh-family sweeps open dedicated sessions for
+    //    their advisory-locked transactions.
     let cfg = Arc::new(cfg);
     let db = Arc::new(client);
     cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
@@ -301,6 +302,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
+    //    OP refresh-token rotations/revokes/root issuance do not run
+    //    multi-statement transactions on this shared handle; they open
+    //    dedicated compio-postgres sessions from cfg.db_url.
     server::run(
         cfg,
         admin,

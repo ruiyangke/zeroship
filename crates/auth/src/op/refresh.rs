@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient, NoTls};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ struct CachedRefreshResponse {
     scope: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RefreshRow {
     token_hash: Vec<u8>,
     hash_key_version: i16,
@@ -207,7 +207,7 @@ pub(super) fn client_auth_from_request(
 
 #[allow(clippy::future_not_send)]
 pub(super) async fn issue_root_refresh_token(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     client: &OAuthClient,
@@ -273,34 +273,35 @@ pub(super) async fn issue_root_refresh_token(
 
 #[allow(clippy::future_not_send)]
 pub(super) async fn exchange_refresh_token(
-    db: &Client,
+    db_url: &str,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
     client_auth: &ClientAuth,
 ) -> Result<TokenResponse, OAuthError> {
-    db.execute("BEGIN", &[]).await.map_err(|err| {
-        tracing::error!(error = %err, "refresh: BEGIN failed");
+    let mut conn = connect_dedicated_oauth(db_url, "refresh rotation").await?;
+    let tx = conn.transaction().await.map_err(|err| {
+        tracing::error!(error = %err, "refresh: BEGIN failed on dedicated session");
         OAuthError::server_error("refresh rotation unavailable")
     })?;
-    let result = exchange_refresh_token_inner(db, issuer, keys, params, client_auth).await;
+    let result = exchange_refresh_token_inner(&tx, issuer, keys, params, client_auth).await;
     match result {
         Ok(response) => {
-            db.execute("COMMIT", &[]).await.map_err(|err| {
+            tx.commit().await.map_err(|err| {
                 tracing::error!(error = %err, "refresh: COMMIT failed");
                 OAuthError::server_error("refresh rotation unavailable")
             })?;
             Ok(response)
         }
         Err(err) if err.status == ntex::http::StatusCode::BAD_REQUEST => {
-            db.execute("COMMIT", &[]).await.map_err(|commit_err| {
+            tx.commit().await.map_err(|commit_err| {
                 tracing::error!(error = %commit_err, oauth_error = err.error, "refresh: COMMIT failed");
                 OAuthError::server_error("refresh rotation unavailable")
             })?;
             Err(err)
         }
         Err(err) => {
-            if let Err(rollback) = db.execute("ROLLBACK", &[]).await {
+            if let Err(rollback) = tx.rollback().await {
                 tracing::error!(error = %rollback, "refresh: ROLLBACK failed");
             }
             Err(err)
@@ -310,7 +311,7 @@ pub(super) async fn exchange_refresh_token(
 
 #[allow(clippy::future_not_send)]
 async fn exchange_refresh_token_inner(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
@@ -450,9 +451,8 @@ pub async fn revoke_post(
     req: HttpRequest,
     form: web::types::Form<RevokeRequest>,
     cfg: web::types::State<Arc<AuthConfig>>,
-    db: web::types::State<Arc<Client>>,
 ) -> HttpResponse {
-    match revoke_inner(&req, form.into_inner(), cfg.as_ref(), db.as_ref()).await {
+    match revoke_inner(&req, form.into_inner(), cfg.as_ref()).await {
         Ok(()) => HttpResponse::Ok()
             .header("cache-control", "no-store")
             .header("pragma", "no-cache")
@@ -473,7 +473,6 @@ async fn revoke_inner(
     req: &HttpRequest,
     form: RevokeRequest,
     cfg: &AuthConfig,
-    db: &Client,
 ) -> Result<(), OAuthError> {
     let _hint = form.token_type_hint.as_deref();
     let Some(raw_token) = form.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
@@ -481,51 +480,51 @@ async fn revoke_inner(
     };
     let client_auth =
         client_auth_from_request(req, form.client_id.as_deref(), form.client_secret.as_deref());
-    let client_id = match authenticated_client_id(db, form.client_id.as_deref(), &client_auth).await
-    {
-        Ok(client_id) => client_id,
-        Err(err) if err.error == "invalid_client" => return Err(err),
-        Err(_) => return Ok(()),
-    };
-    let client = load_client(db, &client_id).await?;
-    authenticate_for_refresh(&client, &client_auth).await?;
-
     let keys = RefreshTokenKeys::from_config(cfg)?;
-    db.execute("BEGIN", &[]).await.map_err(|err| {
-        tracing::error!(error = %err, "revoke: BEGIN failed");
+    let mut conn = connect_dedicated_oauth(&cfg.db_url, "refresh revoke").await?;
+    let tx = conn.transaction().await.map_err(|err| {
+        tracing::error!(error = %err, "revoke: BEGIN failed on dedicated session");
         OAuthError::server_error("revoke unavailable")
     })?;
     let result = async {
-        let Some((_hash, row)) = lookup_by_any_hash(db, &keys, raw_token).await? else {
+        let client_id =
+            match authenticated_client_id(&tx, form.client_id.as_deref(), &client_auth).await {
+                Ok(client_id) => client_id,
+                Err(err) if err.error == "invalid_client" => return Err(err),
+                Err(_) => return Ok(()),
+            };
+        let client = load_client(&tx, &client_id).await?;
+        authenticate_for_refresh(&client, &client_auth).await?;
+        let Some((_hash, row)) = lookup_by_any_hash(&tx, &keys, raw_token).await? else {
             return Ok(());
         };
         if row.client_id != client.client_id {
             return Ok(());
         }
-        lock_refresh_user_xact(db, row.user_id).await.map_err(|err| {
+        lock_refresh_user_xact(&tx, row.user_id).await.map_err(|err| {
             tracing::error!(error = %err, user_id = %row.user_id, "revoke user lock failed");
             OAuthError::server_error("revoke unavailable")
         })?;
-        lock_refresh_family_xact(db, &row.refresh_family_id)
+        lock_refresh_family_xact(&tx, &row.refresh_family_id)
             .await
             .map_err(|err| {
                 tracing::error!(error = %err, family_id = %row.refresh_family_id, "revoke family lock failed");
                 OAuthError::server_error("revoke unavailable")
             })?;
-        kill_family(db, &row.refresh_family_id, "revoke").await?;
+        kill_family(&tx, &row.refresh_family_id, "revoke").await?;
         Ok(())
     }
     .await;
     match result {
         Ok(()) => {
-            db.execute("COMMIT", &[]).await.map_err(|err| {
+            tx.commit().await.map_err(|err| {
                 tracing::error!(error = %err, "revoke: COMMIT failed");
                 OAuthError::server_error("revoke unavailable")
             })?;
             Ok(())
         }
         Err(err) => {
-            if let Err(rollback) = db.execute("ROLLBACK", &[]).await {
+            if let Err(rollback) = tx.rollback().await {
                 tracing::error!(error = %rollback, "revoke: ROLLBACK failed");
             }
             Err(err)
@@ -533,41 +532,64 @@ async fn revoke_inner(
     }
 }
 
-pub async fn revoke_user_refresh_families(db: &Client, user_id: Uuid, reason: &'static str) -> Result<(), String> {
-    lock_refresh_user_xact(db, user_id)
+pub async fn revoke_user_refresh_families(
+    db_url: &str,
+    user_id: Uuid,
+    reason: &'static str,
+) -> Result<(), String> {
+    let mut conn = connect_dedicated_string(db_url, "refresh user revoke").await?;
+    let tx = conn
+        .transaction()
         .await
-        .map_err(|err| format!("refresh user revoke lock: {err}"))?;
-    db.execute(
-        "WITH fam AS ( \
-             SELECT DISTINCT client_id, sub \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE user_id = $1 AND revoked_at IS NULL \
-         ), upd AS ( \
-             UPDATE zeroship.oauth_refresh_tokens \
-             SET revoked_at = NOW() \
-             WHERE user_id = $1 AND revoked_at IS NULL \
-             RETURNING 1 \
-         ) \
-         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-         SELECT client_id, sub, NOW() FROM fam \
-         ON CONFLICT (client_id, sub) \
-           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
-        &[&user_id],
-    )
-    .await
-    .map_err(|err| format!("refresh user revoke families ({reason}): {err}"))?;
+        .map_err(|err| format!("refresh user revoke begin ({reason}): {err}"))?;
+    let result = async {
+        lock_refresh_user_xact(&tx, user_id)
+            .await
+            .map_err(|err| format!("refresh user revoke lock: {err}"))?;
+        tx.execute(
+            "WITH fam AS ( \
+                 SELECT DISTINCT client_id, sub \
+                 FROM zeroship.oauth_refresh_tokens \
+                 WHERE user_id = $1 AND revoked_at IS NULL \
+             ), upd AS ( \
+                 UPDATE zeroship.oauth_refresh_tokens \
+                 SET revoked_at = NOW() \
+                 WHERE user_id = $1 AND revoked_at IS NULL \
+                 RETURNING 1 \
+             ) \
+             INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+             SELECT client_id, sub, NOW() FROM fam \
+             ON CONFLICT (client_id, sub) \
+               DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+            &[&user_id],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| format!("refresh user revoke families ({reason}): {err}"))
+    }
+    .await;
+    match result {
+        Ok(()) => tx
+            .commit()
+            .await
+            .map_err(|err| format!("refresh user revoke commit ({reason}): {err}"))?,
+        Err(err) => {
+            let _ = tx.rollback().await;
+            return Err(err);
+        }
+    }
     tracing::info!(user_id = %user_id, reason, "refresh families revoked for user");
     Ok(())
 }
 
-pub async fn sweep_refresh_tokens(db: &Client) -> Result<(u64, u64), String> {
-    let family_deleted = sweep_refresh_family_delete(db).await?;
-    let idem_reaped = sweep_refresh_idem(db).await?;
+pub async fn sweep_refresh_tokens(db_url: &str) -> Result<(u64, u64), String> {
+    let family_deleted = sweep_refresh_family_delete(db_url).await?;
+    let idem_reaped = sweep_refresh_idem(db_url).await?;
     Ok((family_deleted, idem_reaped))
 }
 
 async fn replay_or_kill(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     client: &OAuthClient,
@@ -578,25 +600,32 @@ async fn replay_or_kill(
         row.idem_expires_at,
         row.idem_response_enc.as_ref(),
     ) {
-        if idem_expires_at > Utc::now() {
+        let now = Utc::now();
+        if idem_expires_at > now
+            && row.expires_at > now
+            && row.family_absolute_expires_at > now
+        {
             if let Some(successor) = select_live_successor(db, successor_hash).await? {
-                let cached =
-                    keys.open_cached_response(&row.token_hash, &row.refresh_family_id, enc)?;
-                let scopes = parse_scopes(&cached.scope);
-                let access_token = mint_access_token(issuer, client, successor.user_id, &scopes)?;
-                tracing::info!(
-                    family_id = %row.refresh_family_id,
-                    client_id = %row.client_id,
-                    "refresh idempotency replay recovered"
-                );
-                return Ok(TokenResponse {
-                    access_token,
-                    id_token: None,
-                    refresh_token: Some(cached.refresh_token),
-                    token_type: TOKEN_TYPE_BEARER,
-                    expires_in: ACCESS_TOKEN_TTL_SECS as u64,
-                    scope: scopes.join(" "),
-                });
+                if successor.expires_at > now && successor.family_absolute_expires_at > now {
+                    let cached =
+                        keys.open_cached_response(&row.token_hash, &row.refresh_family_id, enc)?;
+                    let scopes = parse_scopes(&cached.scope);
+                    let access_token =
+                        mint_access_token(issuer, client, successor.user_id, &scopes)?;
+                    tracing::info!(
+                        family_id = %row.refresh_family_id,
+                        client_id = %row.client_id,
+                        "refresh idempotency replay recovered"
+                    );
+                    return Ok(TokenResponse {
+                        access_token,
+                        id_token: None,
+                        refresh_token: Some(cached.refresh_token),
+                        token_type: TOKEN_TYPE_BEARER,
+                        expires_in: ACCESS_TOKEN_TTL_SECS as u64,
+                        scope: scopes.join(" "),
+                    });
+                }
             }
         }
     }
@@ -606,7 +635,7 @@ async fn replay_or_kill(
 }
 
 async fn authenticated_client_id(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     request_client_id: Option<&str>,
     client_auth: &ClientAuth,
 ) -> Result<String, OAuthError> {
@@ -683,27 +712,45 @@ fn requested_refresh_scopes(
 }
 
 async fn lookup_by_any_hash(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     keys: &RefreshTokenKeys,
     raw_token: &str,
 ) -> Result<Option<(TokenHash, RefreshRow)>, OAuthError> {
-    for hash in keys.hashes_newest_first(raw_token) {
-        if let Some(row) = select_refresh_row(db, &hash.hash, false).await? {
-            return Ok(Some((hash, row)));
+    let hashes = keys.hashes_newest_first(raw_token);
+    if hashes.is_empty() {
+        return Ok(None);
+    }
+    let candidate_hashes = hashes
+        .iter()
+        .map(|hash| hash.hash.clone())
+        .collect::<Vec<_>>();
+    let rows = db
+        .query(REFRESH_ROW_SELECT_ANY, &[&candidate_hashes])
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "refresh row lookup failed");
+            OAuthError::server_error("refresh token store unavailable")
+        })?
+        .into_iter()
+        .map(|row| row_to_refresh_row(&row))
+        .collect::<Vec<_>>();
+    for hash in hashes {
+        if let Some(row) = rows.iter().find(|row| row.token_hash == hash.hash) {
+            return Ok(Some((hash, row.clone())));
         }
     }
     Ok(None)
 }
 
 async fn select_refresh_row_for_update(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     token_hash: &[u8],
 ) -> Result<Option<RefreshRow>, OAuthError> {
     select_refresh_row(db, token_hash, true).await
 }
 
 async fn select_refresh_row(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     token_hash: &[u8],
     for_update: bool,
 ) -> Result<Option<RefreshRow>, OAuthError> {
@@ -725,6 +772,12 @@ const REFRESH_ROW_SELECT: &str = "\
            family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
     FROM zeroship.oauth_refresh_tokens \
     WHERE token_hash = $1";
+const REFRESH_ROW_SELECT_ANY: &str = "\
+    SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
+           client_id, user_id, sub, family_granted_scopes, expires_at, \
+           family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
+    FROM zeroship.oauth_refresh_tokens \
+    WHERE token_hash = ANY($1::BYTEA[])";
 const REFRESH_ROW_SELECT_FOR_UPDATE: &str = "\
     SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
            client_id, user_id, sub, family_granted_scopes, expires_at, \
@@ -752,7 +805,10 @@ fn row_to_refresh_row(row: &compio_postgres::Row) -> RefreshRow {
     }
 }
 
-async fn family_has_revoked_row(db: &Client, family_id: &str) -> Result<bool, OAuthError> {
+async fn family_has_revoked_row(
+    db: &(impl GenericClient + ?Sized),
+    family_id: &str,
+) -> Result<bool, OAuthError> {
     let rows = db
         .query(
             "SELECT 1 FROM zeroship.oauth_refresh_tokens \
@@ -768,7 +824,7 @@ async fn family_has_revoked_row(db: &Client, family_id: &str) -> Result<bool, OA
 }
 
 async fn select_live_successor(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     successor_hash: &[u8],
 ) -> Result<Option<RefreshRow>, OAuthError> {
     let rows = db
@@ -788,7 +844,11 @@ async fn select_live_successor(
     Ok(rows.first().map(row_to_refresh_row))
 }
 
-async fn kill_family(db: &Client, family_id: &str, reason: &'static str) -> Result<(), OAuthError> {
+async fn kill_family(
+    db: &(impl GenericClient + ?Sized),
+    family_id: &str,
+    reason: &'static str,
+) -> Result<(), OAuthError> {
     db.execute(
         "WITH fam AS ( \
              SELECT DISTINCT client_id, sub \
@@ -815,8 +875,9 @@ async fn kill_family(db: &Client, family_id: &str, reason: &'static str) -> Resu
     Ok(())
 }
 
-async fn sweep_refresh_family_delete(db: &Client) -> Result<u64, String> {
-    let users = db
+async fn sweep_refresh_family_delete(db_url: &str) -> Result<u64, String> {
+    let enum_conn = connect_dedicated_string(db_url, "refresh sweep family-delete enumerate").await?;
+    let users = enum_conn
         .query(
             "SELECT DISTINCT user_id \
              FROM zeroship.oauth_refresh_tokens \
@@ -829,14 +890,16 @@ async fn sweep_refresh_family_delete(db: &Client) -> Result<u64, String> {
     let mut deleted = 0;
     for row in users {
         let user_id: Uuid = row.get("user_id");
-        db.execute("BEGIN", &[])
+        let mut conn = connect_dedicated_string(db_url, "refresh sweep family-delete").await?;
+        let tx = conn
+            .transaction()
             .await
             .map_err(|err| format!("refresh sweep family-delete begin: {err}"))?;
         let result = async {
-            lock_refresh_user_xact(db, user_id)
+            lock_refresh_user_xact(&tx, user_id)
                 .await
                 .map_err(|err| format!("refresh sweep family-delete lock {user_id}: {err}"))?;
-            db.execute(
+            tx.execute(
                 "DELETE FROM zeroship.oauth_refresh_tokens \
                  WHERE user_id = $1 \
                    AND (family_absolute_expires_at < NOW() \
@@ -849,13 +912,13 @@ async fn sweep_refresh_family_delete(db: &Client) -> Result<u64, String> {
         .await;
         match result {
             Ok(n) => {
-                db.execute("COMMIT", &[])
+                tx.commit()
                     .await
                     .map_err(|err| format!("refresh sweep family-delete commit: {err}"))?;
                 deleted += n;
             }
             Err(err) => {
-                let _ = db.execute("ROLLBACK", &[]).await;
+                let _ = tx.rollback().await;
                 return Err(err);
             }
         }
@@ -863,8 +926,9 @@ async fn sweep_refresh_family_delete(db: &Client) -> Result<u64, String> {
     Ok(deleted)
 }
 
-async fn sweep_refresh_idem(db: &Client) -> Result<u64, String> {
-    let users = db
+async fn sweep_refresh_idem(db_url: &str) -> Result<u64, String> {
+    let enum_conn = connect_dedicated_string(db_url, "refresh sweep idem enumerate").await?;
+    let users = enum_conn
         .query(
             "SELECT DISTINCT user_id \
              FROM zeroship.oauth_refresh_tokens \
@@ -876,14 +940,16 @@ async fn sweep_refresh_idem(db: &Client) -> Result<u64, String> {
     let mut reaped = 0;
     for row in users {
         let user_id: Uuid = row.get("user_id");
-        db.execute("BEGIN", &[])
+        let mut conn = connect_dedicated_string(db_url, "refresh sweep idem").await?;
+        let tx = conn
+            .transaction()
             .await
             .map_err(|err| format!("refresh sweep idem begin: {err}"))?;
         let result = async {
-            lock_refresh_user_xact(db, user_id)
+            lock_refresh_user_xact(&tx, user_id)
                 .await
                 .map_err(|err| format!("refresh sweep idem lock {user_id}: {err}"))?;
-            db.execute(
+            tx.execute(
                 "UPDATE zeroship.oauth_refresh_tokens \
                  SET idem_response_enc = NULL, idem_expires_at = NULL \
                  WHERE user_id = $1 \
@@ -897,18 +963,46 @@ async fn sweep_refresh_idem(db: &Client) -> Result<u64, String> {
         .await;
         match result {
             Ok(n) => {
-                db.execute("COMMIT", &[])
+                tx.commit()
                     .await
                     .map_err(|err| format!("refresh sweep idem commit: {err}"))?;
                 reaped += n;
             }
             Err(err) => {
-                let _ = db.execute("ROLLBACK", &[]).await;
+                let _ = tx.rollback().await;
                 return Err(err);
             }
         }
     }
     Ok(reaped)
+}
+
+async fn connect_dedicated_oauth(
+    db_url: &str,
+    operation: &'static str,
+) -> Result<Client, OAuthError> {
+    connect_dedicated_string(db_url, operation)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, operation, "refresh dedicated database session failed");
+            OAuthError::server_error("refresh database unavailable")
+        })
+}
+
+async fn connect_dedicated_string(
+    db_url: &str,
+    operation: &'static str,
+) -> Result<Client, String> {
+    let (client, connection) = compio_postgres::connect(db_url, NoTls)
+        .await
+        .map_err(|err| format!("{operation}: connect dedicated session: {err}"))?;
+    compio::runtime::spawn(async move {
+        if let Err(err) = connection.run().await {
+            tracing::error!(error = %err, operation, "refresh dedicated pg connection error");
+        }
+    })
+    .detach();
+    Ok(client)
 }
 
 fn basic_client_auth(req: &HttpRequest) -> Option<(String, String)> {
@@ -942,33 +1036,59 @@ fn idem_aad(predecessor_hash: &[u8], family_id: &str) -> Vec<u8> {
 
 fn load_hash_keyring(path: &Path) -> Result<Vec<RefreshHashKey>, String> {
     let raw = read_secret_file(path, "REFRESH_HASH_KEY_FILE")?;
-    if let Ok(text) = std::str::from_utf8(&raw) {
-        let mut keys = Vec::new();
-        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-            let Some((version, secret)) = line.split_once(':') else {
-                continue;
-            };
-            let version: i16 = version
-                .trim()
-                .parse()
-                .map_err(|_| format!("REFRESH_HASH_KEY_FILE {} has invalid version {version:?}", path.display()))?;
-            let key = decode_key_material(secret.trim()).unwrap_or_else(|| secret.as_bytes().to_vec());
-            if key.is_empty() {
-                return Err(format!(
-                    "REFRESH_HASH_KEY_FILE {} has empty key for version {version}",
-                    path.display()
-                ));
-            }
-            keys.push(RefreshHashKey { version, key });
+    let text = std::str::from_utf8(&raw).map_err(|err| {
+        format!(
+            "REFRESH_HASH_KEY_FILE {} must be UTF-8 version:key lines: {err}",
+            path.display()
+        )
+    })?;
+    let mut keys = Vec::new();
+    for (idx, line) in text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .enumerate()
+    {
+        let Some((version, secret)) = line.split_once(':') else {
+            return Err(format!(
+                "REFRESH_HASH_KEY_FILE {} line {} must be version:hex-or-base64url-key",
+                path.display(),
+                idx + 1
+            ));
+        };
+        let version: i16 = version.trim().parse().map_err(|_| {
+            format!(
+                "REFRESH_HASH_KEY_FILE {} line {} has invalid version {:?}",
+                path.display(),
+                idx + 1,
+                version
+            )
+        })?;
+        let key = decode_key_material(secret.trim()).ok_or_else(|| {
+            format!(
+                "REFRESH_HASH_KEY_FILE {} line {} has unparseable key material",
+                path.display(),
+                idx + 1
+            )
+        })?;
+        if key.len() < 32 {
+            return Err(format!(
+                "REFRESH_HASH_KEY_FILE {} line {} key for version {} is {} bytes; require at least 32",
+                path.display(),
+                idx + 1,
+                version,
+                key.len()
+            ));
         }
-        if !keys.is_empty() {
-            return Ok(keys);
-        }
+        keys.push(RefreshHashKey { version, key });
     }
-    Ok(vec![RefreshHashKey {
-        version: 1,
-        key: raw,
-    }])
+    if keys.is_empty() {
+        return Err(format!(
+            "REFRESH_HASH_KEY_FILE {} yielded no keys",
+            path.display()
+        ));
+    }
+    Ok(keys)
 }
 
 fn decode_key_material(value: &str) -> Option<Vec<u8>> {

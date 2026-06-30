@@ -71,13 +71,15 @@ impl MockHydra {
         // NOT gate PAT minting — `validate_grant_subset` checks the principal's
         // DB-side platform role with `token_policy = None` — so any valid
         // platform scope suffices to resolve the non-PAT principal.
+        let now = unix_now_secs();
         let body = json!({
             "active": true,
             "sub": sub.to_string(),
             "scope": "apps:read apps:deploy",
             "aud": ["control.zeroship.ai"],
             "client_id": "oac_console_test",
-            "exp": unix_now_secs() + 3600,
+            "iat": now,
+            "exp": now + 3600,
         });
         let state = Arc::new(MockState { body });
         let factory_state = state.clone();

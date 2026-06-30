@@ -42,6 +42,30 @@ CREATE TABLE zeroship.oauth_refresh_tokens (
         CHECK (expires_at <= family_absolute_expires_at)
 );
 
+COMMENT ON COLUMN zeroship.oauth_refresh_tokens.sub IS
+    'Pairwise subject snapshot persisted for refresh-family kill markers. app_oauth_clients.sector_identifier is immutable after insert so this snapshot cannot diverge from newly minted access-token subjects.';
+
+CREATE OR REPLACE FUNCTION zeroship.app_oauth_clients_reject_sector_change()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.sector_identifier IS DISTINCT FROM OLD.sector_identifier THEN
+    RAISE EXCEPTION 'app_oauth_clients.sector_identifier is immutable after insert'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER app_oauth_clients_sector_identifier_immutable
+BEFORE UPDATE OF sector_identifier ON zeroship.app_oauth_clients
+FOR EACH ROW
+EXECUTE FUNCTION zeroship.app_oauth_clients_reject_sector_change();
+
+COMMENT ON COLUMN zeroship.app_oauth_clients.sector_identifier IS
+    'Immutable after insert: refresh-token revocation markers persist the derived pairwise subject, so changing the sector would de-align stored family-kill markers from live access-token subjects.';
+
 CREATE UNIQUE INDEX oauth_refresh_tokens_one_active_per_family
     ON zeroship.oauth_refresh_tokens (refresh_family_id)
     WHERE rotated_at IS NULL AND revoked_at IS NULL;

@@ -14,7 +14,7 @@
 //! All cases gate on `CONTROL_TEST_DB` / `PG_TEST_URL`; silent skip in dev.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
@@ -31,6 +31,11 @@ fn db_url() -> Option<String> {
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
+
+// These tests all exercise the production sweep against the same live test
+// database. Serialize them so one test's sweep cannot purge another test's
+// freshly inserted ownerless app before that test asserts its own report.
+static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn tmpdir(label: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -186,6 +191,7 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "ownerless").await;
     let state = &fx.state;
 
@@ -233,6 +239,7 @@ async fn reaper_leaves_owned_app_untouched() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "owned").await;
     let state = &fx.state;
 
@@ -270,6 +277,7 @@ async fn reaper_never_touches_system_app() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "system").await;
     let state = &fx.state;
 
@@ -300,6 +308,7 @@ async fn reaper_respects_grace_window() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "grace").await;
     let state = &fx.state;
 
@@ -328,6 +337,7 @@ async fn purge_app_removes_db_row_and_vfs_blob() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "purge").await;
     let state = &fx.state;
 

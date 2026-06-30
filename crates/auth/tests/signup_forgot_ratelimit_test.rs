@@ -12,6 +12,7 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
+use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 use zeroship_auth::store::{users};
 use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
@@ -123,39 +124,49 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
         .expect("zsidp_csrf cookie set on GET /signup");
 
     let peer = SocketAddr::new(unique_loopback(), 49152);
-    for i in 0..11 {
-        let email = format!("{prefix}-{i}@zeroship.test");
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("csrf", &csrf)
-            .append_pair("name", "Rate Limit")
-            .append_pair("email", &email)
-            .append_pair("password", "correct horse battery staple")
-            .finish();
-        let resp = test::call_service(
-            &app,
-            test::TestRequest::post()
-                .uri("/signup")
-                .peer_addr(peer)
-                // ntex's `TestRequest::peer_addr` does not propagate to
-                // `req.peer_addr()` (its own test asserts it stays None),
-                // so the handler can't see a per-test socket peer. The
-                // handler keys its rate-limit on the *forwarded* client IP
-                // (auth runs behind the gateway), so we inject uniqueness
-                // via X-Forwarded-For — otherwise every test would share
-                // the single `signup_ip:0.0.0.0` bucket and drain it.
-                .header("x-forwarded-for", peer.ip().to_string())
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header("cookie", format!("zsidp_csrf={csrf}"))
-                .set_payload(body)
-                .to_request(),
-        )
-        .await;
-        assert_eq!(
-            resp.status().as_u16(),
-            302,
-            "signup response {i} must preserve the normal redirect shape"
+    let signup_ip_key = format!("signup_ip:{}", peer.ip());
+    for i in 0..10 {
+        let decision =
+            ratelimit::consume_or_throttle(pg.as_ref(), &signup_ip_key, Bucket::SIGNUP_IP)
+                .await
+                .expect("pre-drain signup rate-limit bucket");
+        assert!(
+            matches!(decision, RateLimitDecision::Allowed),
+            "pre-drain consume {i} must be allowed"
         );
     }
+
+    let email = format!("{prefix}-throttled@zeroship.test");
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", &csrf)
+        .append_pair("name", "Rate Limit")
+        .append_pair("email", &email)
+        .append_pair("password", "correct horse battery staple")
+        .finish();
+    let resp = test::call_service(
+        &app,
+        test::TestRequest::post()
+            .uri("/signup")
+            .peer_addr(peer)
+            // ntex's `TestRequest::peer_addr` does not propagate to
+            // `req.peer_addr()` (its own test asserts it stays None),
+            // so the handler can't see a per-test socket peer. The
+            // handler keys its rate-limit on the *forwarded* client IP
+            // (auth runs behind the gateway), so we inject uniqueness
+            // via X-Forwarded-For — otherwise every test would share
+            // the single `signup_ip:0.0.0.0` bucket and drain it.
+            .header("x-forwarded-for", peer.ip().to_string())
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header("cookie", format!("zsidp_csrf={csrf}"))
+            .set_payload(body)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status().as_u16(),
+        302,
+        "throttled signup response must preserve the normal redirect shape"
+    );
 
     let like = format!("{prefix}-%");
     let created: i64 = pg
@@ -166,7 +177,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
         .await
         .expect("count created signup users")
         .get(0);
-    assert_eq!(created, 10, "11th signup must be throttled before insert");
+    assert_eq!(created, 0, "throttled signup must not insert a user");
 
     pg.execute(
         "DELETE FROM zeroship.magic_links WHERE email::text LIKE $1",
