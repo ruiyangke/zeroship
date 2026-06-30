@@ -2486,6 +2486,18 @@ fn walk_schema_names(v: &Value, visit: &mut dyn FnMut(&str, SchemaSlot) -> bool)
                         }
                     }
                 }
+                Some("schema") => {
+                    // `CreateExtensionStmt … WITH SCHEMA <name>` — a bare String DefElem
+                    // arg. Confine the WITH SCHEMA target so the rendered-SQL guard
+                    // (gate 2) independently scopes it, restoring gate-1/gate-2 parity
+                    // with `createSchema` (SA-20). Strictly tighter: anything passing
+                    // gate 1 is already in scope, so this adds no false-positives.
+                    if let Some(s) = map.get("arg").and_then(json_string_node) {
+                        if !s.is_empty() && visit(&s, SchemaSlot::Object) {
+                            return true;
+                        }
+                    }
+                }
                 _ => {}
             }
             for child in map.values() {
