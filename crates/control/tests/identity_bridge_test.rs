@@ -179,7 +179,11 @@ async fn first_login_creates_principal_link_and_default_grants() {
     assert_eq!(link_count(&fx.conn, &subject).await, 1);
     assert_eq!(
         grants(&fx.conn, principal_id).await,
-        vec!["apps:deploy".to_string(), "apps:read".to_string()]
+        vec![
+            "apps:deploy".to_string(),
+            "apps:read".to_string(),
+            "apps:write".to_string(),
+        ]
     );
 
     fx.cleanup().await;
@@ -206,7 +210,11 @@ async fn idempotent_relogin_returns_same_principal_without_duplicate_rows() {
     assert_eq!(link_count(&fx.conn, &subject).await, 1);
     assert_eq!(
         grants(&fx.conn, first).await,
-        vec!["apps:deploy".to_string(), "apps:read".to_string()]
+        vec![
+            "apps:deploy".to_string(),
+            "apps:read".to_string(),
+            "apps:write".to_string(),
+        ]
     );
 
     fx.cleanup().await;
@@ -260,7 +268,11 @@ async fn unverified_email_collision_creates_distinct_principal_not_victim_takeov
     );
     assert_eq!(
         grants(&fx.conn, attacker).await,
-        vec!["apps:deploy".to_string(), "apps:read".to_string()]
+        vec![
+            "apps:deploy".to_string(),
+            "apps:read".to_string(),
+            "apps:write".to_string(),
+        ]
     );
 
     fx.cleanup().await;
@@ -289,7 +301,11 @@ async fn concurrent_first_logins_for_same_subject_collapse_to_one_link() {
     assert_eq!(user_count_by_email(&fx.conn, &email).await, 1);
     assert_eq!(
         grants(&fx.conn, a).await,
-        vec!["apps:deploy".to_string(), "apps:read".to_string()]
+        vec![
+            "apps:deploy".to_string(),
+            "apps:read".to_string(),
+            "apps:write".to_string(),
+        ]
     );
 
     fx.cleanup().await;

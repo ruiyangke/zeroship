@@ -13,7 +13,9 @@ use url::Url;
 use uuid::Uuid;
 
 const DEFAULT_SUPABASE_EMAIL_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
-const DEFAULT_CREATOR_GRANTS: [&str; 2] = ["apps:deploy", "apps:read"];
+// Device-provisioned creators need apps:write for deploy auto-create and
+// apps:deploy for publishing concrete releases.
+const DEFAULT_CREATOR_GRANTS: [&str; 3] = ["apps:write", "apps:deploy", "apps:read"];
 
 #[derive(Debug, Error)]
 pub enum IdentityBridgeError {
