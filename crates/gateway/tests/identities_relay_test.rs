@@ -1,5 +1,5 @@
 //! Live-PG test for the email-claim swap SOURCE used by the cookie /
-//! raw-Hydra / DPoP-introspection arms (relay sub-spec §7).
+//! raw-Hydra Bearer arms (relay sub-spec §7).
 //!
 //! `identities::lookup_relay_email` is what `project_pairwise` reads to swap
 //! the real email for the relay alias on every pairwise-projecting arm. The

@@ -136,16 +136,12 @@ pub struct GateState {
     /// `--db` is empty); test fixtures also rely on `None` to construct
     /// `GateState` without a live PG.
     pub db: Option<db::DbConfig>,
-    /// Tiered replay cache for `DPoP` proof `jti` claims (RFC 9449
-    /// §11.1). The local tier rejects hot repeats without a DB round-trip;
-    /// the PG tier rejects replays that land on a sibling gateway process.
-    pub dpop_jti_cache: Arc<zeroship_core::dpop::TieredJtiCache>,
     /// In-process replay cache for OIDC Back-Channel Logout
     /// `logout_token.jti` claims. Replays are answered with 200 for
     /// webhook idempotency but do not run session revocation again.
     pub logout_jti_cache: Arc<zeroship_core::logout_token::LogoutJtiCache>,
     /// Short-TTL read-through cache for the per-app family-marker revocation
-    /// read (BFF reshape R1d). The cookie / Bearer / DPoP-introspect arms each
+    /// read (BFF reshape R1d). The cookie / Bearer arms each
     /// run one per-request `is_family_revoked_since` DB read after the local
     /// token verify; this cache makes the steady-state (no-revocation) hit
     /// fully DB-free. It stores the family's latest `revoked_after`

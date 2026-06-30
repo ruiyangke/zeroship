@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! `zeroship-gate` binary entry point. Thin shell over the
 //! [`zeroship_gateway`] library: parse flags, build [`GateState`],
 //! register routes, run.
@@ -603,41 +605,18 @@ fn main() -> std::io::Result<()> {
     // Every per-request DB touch checks out a pooled connection for ONE
     // operation and releases it on drop, so no single shared connection
     // serializes gateway DB work.
-    //
-    // `dpop_jti_cache` keeps its own dedicated single connection: the
-    // `PgJtiCache` type (in zeroship-core) owns an `Arc<Client>` (which
-    // *is* `Send + Sync`), and its DPoP replay-insert path is unchanged
-    // by this slice — so it stays exactly as it was before the pool
-    // migration.
-    let (db, dpop_jti_cache): (
-        Option<zeroship_gateway::db::DbConfig>,
-        zeroship_core::dpop::TieredJtiCache,
-    ) = if pg_dsn.is_empty() {
+    let db: Option<zeroship_gateway::db::DbConfig> = if pg_dsn.is_empty() {
         tracing::warn!(
             "DATABASE_URL not set — gateway session validation disabled (all auth-gated requests will 401)"
         );
-        (None, zeroship_core::dpop::TieredJtiCache::default())
+        None
     } else {
         let db_cfg = zeroship_gateway::db::DbConfig::new(pg_dsn.clone(), db_pool_size);
         tracing::info!(
             db_pool_size = db_cfg.pool_size(),
             "gateway pg connection pool configured (per-worker)"
         );
-
-        // Dedicated single connection for the DPoP jti replay cache.
-        let (jti_client, jti_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
-            .await
-            .expect("gateway: pg connect (dpop jti cache)");
-        compio::runtime::spawn(async move {
-            if let Err(e) = jti_conn.run().await {
-                tracing::error!(error = %e, "gateway/pg dpop-jti connection ended");
-            }
-        })
-        .detach();
-        let pg = zeroship_core::dpop::PgJtiCache::new(Arc::new(jti_client));
-        let dpop_jti_cache = zeroship_core::dpop::TieredJtiCache::with_pg(pg);
-
-        (Some(db_cfg), dpop_jti_cache)
+        Some(db_cfg)
     };
 
     // OIDC RP — services every `{app}.zeroship.ai` host. The
@@ -719,7 +698,6 @@ fn main() -> std::io::Result<()> {
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp,
         db,
-        dpop_jti_cache: Arc::new(dpop_jti_cache),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
         signing_key,

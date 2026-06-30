@@ -146,7 +146,7 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 ///   gateway itself signed — so the `sub` is already trusted; this predicate is
 ///   a defense-in-depth minter-bug containment check (reject a wrapper a mint
 ///   bug failed to project), never the thing that decides trust.
-/// - The Bearer/DPoP arms NEVER consume an inbound `pws_` as identity at all —
+/// - The Bearer arm NEVER consumes an inbound `pws_` as identity at all —
 ///   they re-derive it with [`derive_pairwise`] from the verified global Hydra
 ///   subject. There is no path where an attacker-supplied `pws_` is trusted for
 ///   an authz/lookup decision on the strength of its shape.
@@ -221,8 +221,8 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 /// ## Input canonicalization (Batch A M1)
 ///
 /// The `global_user_id` argument reaches this function from two shapes across
-/// the writers/readers: the RAW Hydra `sub` string (the raw-Hydra Bearer +
-/// DPoP-introspection readers) and `Uuid::to_string()` (`/session` exchange +
+/// the writers/readers: the RAW Hydra `sub` string (the raw-Hydra Bearer
+/// reader) and `Uuid::to_string()` (`/session` exchange +
 /// `?mint=1`, `/signout`, the control disconnect-app cascade). Those are
 /// byte-identical only WHILE Hydra emits a canonical hyphenated-lowercase
 /// UUID. If Hydra ever emits a non-canonical form (uppercase / braces /

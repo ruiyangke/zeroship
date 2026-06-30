@@ -359,7 +359,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
 
     // The per-app pairwise `pws_` subject the session cookie / access token
     // carries — the family marker is keyed on `(client_id, pws_sub)` to match
-    // their `sub` (the cookie / Bearer / DPoP arms check the SAME
+    // their `sub` (the cookie / Bearer arms check the SAME
     // (client_id, sub), §8.5). When the sector is missing we cannot derive the
     // pws_; the family marker is then best-effort skipped (the anchor delete +
     // cookie clear still happen).
