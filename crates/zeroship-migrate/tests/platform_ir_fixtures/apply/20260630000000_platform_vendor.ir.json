@@ -1,0 +1,143 @@
+{
+  "ir_version": 6,
+  "name": "platform_vendor_ir",
+  "owner_app": "platform",
+  "ops": [
+    {
+      "op": "createExtension",
+      "name": "citext",
+      "ifNotExists": true
+    },
+    {
+      "op": "createSchema",
+      "name": "zeroship",
+      "ifNotExists": true
+    },
+    {
+      "op": "createRole",
+      "name": "zeroship_ir_test_app",
+      "login": true,
+      "password": "zeroship_ir_test_app",
+      "setSearchPath": [
+        "zeroship",
+        "public"
+      ],
+      "ifNotExists": true
+    },
+    {
+      "op": "createTable",
+      "name": "ir_accounts",
+      "schema": "zeroship",
+      "columns": [
+        {
+          "name": "id",
+          "type": "int",
+          "nullable": false,
+          "identity": {
+            "always": true
+          }
+        },
+        {
+          "name": "app_id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "type": "text",
+          "nullable": false
+        }
+      ],
+      "constraints": [],
+      "indexes": []
+    },
+    {
+      "op": "grant",
+      "privileges": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "ir_accounts"
+        ],
+        "schema": "zeroship"
+      },
+      "to": [
+        "zeroship_ir_test_app"
+      ]
+    },
+    {
+      "op": "enableRls",
+      "table": "ir_accounts",
+      "schema": "zeroship"
+    },
+    {
+      "op": "forceRls",
+      "table": "ir_accounts",
+      "schema": "zeroship"
+    },
+    {
+      "op": "createPolicy",
+      "name": "tenant_isolation",
+      "table": "ir_accounts",
+      "schema": "zeroship",
+      "forCmd": "all",
+      "using": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zeroship.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      },
+      "withCheck": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zeroship.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      }
+    }
+  ]
+}

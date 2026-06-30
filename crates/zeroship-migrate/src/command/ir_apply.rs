@@ -53,15 +53,362 @@
 //! ownership/version/checksum-hint defenses and the per-op guard, identically.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::apply::backend::{MigrationBackend, PostgresBackend};
+use crate::apply::drift::DriftError;
+use crate::apply::executor::{ApplyError, LockMode};
+use crate::apply::journal::{DeployRecoveryScope, PendingContract};
+use crate::approval::ApprovalScope;
+use crate::model::migration::Migration;
 use crate::render::declarative::CollectionDescriptor;
-use crate::apply::executor::LockMode;
 use crate::render::lower::{IrAuthor, LiveSchema, LoadAndLowerGuardedError};
 use crate::{
-    Approval, DeclarativeApplyError, DeclarativeError, GuardConfig, MigrationEngine, SqlDialect,
-    SqliteBackend,
+    Approval, DeclarativeApplyError, DeclarativeError, EngineError, ExecutorConfig, GuardConfig,
+    MigrationEngine, SqlDialect, SqliteBackend,
 };
+
+/// Discover committed `*.ir.json` files in a migration directory, ordered
+/// deterministically by path.
+///
+/// An empty directory, or one with no IR artifacts, returns an empty vector. The
+/// caller is responsible for deciding whether non-IR siblings are legal for that
+/// command/profile; this helper is intentionally format-neutral so the SQLite,
+/// control-plane PG, and Platform PG paths share the same IR discovery.
+///
+/// # Errors
+/// [`IrDiscoveryError`] when the directory cannot be read.
+pub fn discover_ir_files(migrations_dir: &Path) -> Result<Vec<PathBuf>, IrDiscoveryError> {
+    let mut ir_files: Vec<PathBuf> = Vec::new();
+    let read = std::fs::read_dir(migrations_dir).map_err(|e| IrDiscoveryError::Read {
+        file: migrations_dir.display().to_string(),
+        message: e.to_string(),
+    })?;
+    for entry in read {
+        let entry = entry.map_err(|e| IrDiscoveryError::Read {
+            file: migrations_dir.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(".ir.json"))
+        {
+            ir_files.push(path);
+        }
+    }
+    ir_files.sort();
+    Ok(ir_files)
+}
+
+/// A failure while discovering `*.ir.json` migration artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IrDiscoveryError {
+    /// Reading the directory failed.
+    #[error("read IR file ({file}): {message}")]
+    Read {
+        /// The path/filename.
+        file: String,
+        /// The I/O error.
+        message: String,
+    },
+}
+
+/// Mutable live facts the PG `.ir.json` apply loop advances between files.
+#[derive(Debug, Clone)]
+pub struct PostgresIrApplyState {
+    /// Table ownership registry consumed by the fail-closed IR load gate.
+    pub registry: BTreeMap<String, String>,
+    /// Live schema facts consumed by the IR lowerer.
+    pub live_schema: LiveSchema,
+}
+
+/// What a PG IR apply produced.
+#[derive(Debug, Clone, Default)]
+pub struct PostgresIrApplyOutcome {
+    /// Migration version ids applied this run.
+    pub applied: Vec<String>,
+    /// Migration version ids skipped (already journaled).
+    pub skipped: Vec<String>,
+    /// Deferred contract migration versions surfaced by completed PG online renames.
+    pub pending_contract: Vec<String>,
+    /// Full pending-contract records opened by this run.
+    pub opened_obligations: Vec<PendingContract>,
+    /// Lowered journal migrations, for set-level manifest/traceability callers.
+    pub lowered_migrations: Vec<Migration>,
+}
+
+impl PostgresIrApplyOutcome {
+    fn extend(&mut self, other: PostgresIrApplyOutcome) {
+        self.applied.extend(other.applied);
+        self.skipped.extend(other.skipped);
+        self.pending_contract.extend(other.pending_contract);
+        self.opened_obligations.extend(other.opened_obligations);
+        self.lowered_migrations.extend(other.lowered_migrations);
+    }
+}
+
+/// A failure applying a bundle's `.ir.json` set against a Postgres backend.
+#[derive(Debug, thiserror::Error)]
+pub enum PostgresIrApplyError {
+    /// Reading the migrations directory / a `.ir.json` file failed.
+    #[error("read IR file ({file}): {message}")]
+    Read {
+        /// The path/filename.
+        file: String,
+        /// The I/O error.
+        message: String,
+    },
+    /// Introspecting the live schema failed.
+    #[error("read Postgres catalog for live facts: {0}")]
+    Snapshot(#[from] DriftError),
+    /// A `.ir.json` failed the fail-closed LOAD GATE or guarded lower.
+    #[error("IR load/guarded-lower ({file}): {source}")]
+    Ir {
+        /// The `.ir.json` filename.
+        file: String,
+        /// The fail-closed gate / guard error.
+        #[source]
+        source: LoadAndLowerGuardedError,
+    },
+    /// The engine refused or failed the apply.
+    #[error("apply: {0}")]
+    Apply(#[from] DeclarativeApplyError),
+}
+
+impl From<IrDiscoveryError> for PostgresIrApplyError {
+    fn from(error: IrDiscoveryError) -> Self {
+        match error {
+            IrDiscoveryError::Read { file, message } => Self::Read { file, message },
+        }
+    }
+}
+
+impl From<IrDiscoveryError> for SqliteIrApplyError {
+    fn from(error: IrDiscoveryError) -> Self {
+        match error {
+            IrDiscoveryError::Read { file, message } => Self::Read { file, message },
+        }
+    }
+}
+
+/// Seed the PG IR apply state from the live project schema.
+///
+/// The registry and live-table facts are then advanced after each applied IR file
+/// with that file's `createTable` set, matching the control-plane deploy path's
+/// cross-file behavior.
+///
+/// # Errors
+/// [`DriftError`] if live schema introspection fails.
+pub async fn postgres_ir_apply_state(
+    backend: &PostgresBackend<'_>,
+    exec_cfg: &ExecutorConfig,
+    owner_app: &str,
+) -> Result<PostgresIrApplyState, DriftError> {
+    let live = backend.snapshot_schema(exec_cfg).await?;
+    let registry: BTreeMap<String, String> = live
+        .tables
+        .keys()
+        .map(|t| (t.clone(), owner_app.to_string()))
+        .collect();
+    let live_schema = LiveSchema {
+        tables: live.tables.keys().cloned().collect(),
+        unique_indexes: live
+            .tables
+            .values()
+            .flat_map(|t| t.indexes.iter())
+            .filter(|idx| idx.unique)
+            .map(|idx| idx.name.clone())
+            .collect(),
+        table_snapshots: live.tables.clone(),
+        table_ownership: live
+            .tables
+            .keys()
+            .map(|t| (t.clone(), owner_app.to_string()))
+            .collect(),
+        sqlite_schemas: BTreeMap::new(),
+    };
+    Ok(PostgresIrApplyState {
+        registry,
+        live_schema,
+    })
+}
+
+/// Apply all `*.ir.json` files in a directory to Postgres using an already-built
+/// executor/guard profile.
+///
+/// This is the Platform-profile entry point used by the CLI runner. It discovers
+/// IR artifacts, seeds live facts from the current catalog, holds the project
+/// advisory lock once across the whole file set, and applies each lowered plan via
+/// the shared `MigrationEngine::apply_plan_with_touched_and_depends_scoped`.
+///
+/// `project_schema` is the default schema for unqualified IR ops. `owner_app` is
+/// the server-stamped owner used by the IR load gate; Platform callers pass the
+/// fixed platform owner sentinel, while confined deploy callers use the app id.
+///
+/// # Errors
+/// [`PostgresIrApplyError`] on discovery, live introspection, guarded lower, or
+/// apply failure.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_bundle_ir_postgres(
+    backend: &PostgresBackend<'_>,
+    project_schema: &str,
+    owner_app: &str,
+    migrations_dir: &Path,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    approval: Approval,
+    applied_by: &str,
+) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
+    let ir_files = discover_ir_files(migrations_dir)?;
+    if ir_files.is_empty() {
+        return Ok(PostgresIrApplyOutcome::default());
+    }
+    let mut state = postgres_ir_apply_state(backend, exec_cfg, owner_app).await?;
+
+    backend
+        .acquire_project_lock(exec_cfg)
+        .await
+        .map_err(|e| PostgresIrApplyError::Apply(DeclarativeApplyError::Plain(
+            EngineError::Apply(e),
+        )))?;
+
+    let mut outcome = PostgresIrApplyOutcome::default();
+    let body = async {
+        for path in &ir_files {
+            let file_outcome = apply_one_ir_file_postgres(
+                backend,
+                project_schema,
+                owner_app,
+                path,
+                &mut state,
+                exec_cfg,
+                guard_cfg,
+                approval,
+                &ApprovalScope::All,
+                applied_by,
+                LockMode::AlreadyHeld,
+                None,
+            )
+            .await?;
+            outcome.extend(file_outcome);
+        }
+        Ok::<(), PostgresIrApplyError>(())
+    }
+    .await;
+
+    let unlock = backend.release_project_lock(exec_cfg).await;
+    match (body, unlock) {
+        (Ok(()), Ok(())) => Ok(outcome),
+        (Ok(()), Err(e)) => Err(PostgresIrApplyError::Apply(
+            DeclarativeApplyError::Plain(EngineError::Apply(e)),
+        )),
+        (Err(e), unlock_result) => {
+            if let Err(unlock_err) = unlock_result {
+                tracing::warn!(
+                    error = %unlock_err,
+                    project = %exec_cfg.project_id,
+                    "zeroship-migrate: failed to release project lock after PG IR apply"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Apply one PG `.ir.json` file using caller-managed state and lock mode.
+///
+/// The control-plane deploy path calls this inside its existing whole-deploy lock
+/// and recovery bracket; the Platform runner calls it through
+/// [`apply_bundle_ir_postgres`]. This is the shared load + guarded-lower +
+/// `apply_plan` core for PG IR artifacts.
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_one_ir_file_postgres(
+    backend: &PostgresBackend<'_>,
+    project_schema: &str,
+    owner_app: &str,
+    path: &Path,
+    state: &mut PostgresIrApplyState,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    approval: Approval,
+    scope: &ApprovalScope,
+    applied_by: &str,
+    lock_mode: LockMode,
+    recovery_scope: Option<&DeployRecoveryScope<'_>>,
+) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
+    let file = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("<unknown>")
+        .to_string();
+    let bytes = std::fs::read_to_string(path).map_err(|e| PostgresIrApplyError::Read {
+        file: file.clone(),
+        message: e.to_string(),
+    })?;
+
+    let mut author = IrAuthor::new(project_schema, owner_app, SqlDialect::Postgres);
+    if let Some(scope) = guard_cfg.schema_scope() {
+        author = author.with_schema_scope(scope);
+    }
+    let lowered = author
+        .load_and_lower_guarded(
+            &bytes,
+            owner_app,
+            &state.registry,
+            &state.live_schema,
+            guard_cfg,
+        )
+        .map_err(|source| PostgresIrApplyError::Ir {
+            file: file.clone(),
+            source,
+        })?;
+
+    let lowered_migrations = lowered.migrations();
+    let created_tables = lowered.created_tables.clone();
+    let outcome = MigrationEngine::new()
+        .apply_plan_with_touched_and_depends_scoped(
+            &lowered.plan.steps,
+            &lowered.touched_tables,
+            &lowered.depends_on,
+            approval,
+            scope,
+            backend,
+            exec_cfg,
+            applied_by,
+            lock_mode,
+            recovery_scope,
+        )
+        .await?;
+
+    for t in created_tables {
+        state
+            .registry
+            .entry(t.clone())
+            .or_insert_with(|| owner_app.to_string());
+        state.live_schema.tables.insert(t);
+    }
+
+    Ok(PostgresIrApplyOutcome {
+        applied: outcome.applied.applied,
+        skipped: outcome.applied.skipped,
+        pending_contract: outcome
+            .pending_contract
+            .iter()
+            .map(|m| m.version.as_str().to_string())
+            .collect(),
+        opened_obligations: outcome.opened_obligations,
+        lowered_migrations,
+    })
+}
+
+impl From<ApplyError> for PostgresIrApplyError {
+    fn from(error: ApplyError) -> Self {
+        Self::Apply(DeclarativeApplyError::Plain(EngineError::Apply(error)))
+    }
+}
 
 /// What a SQLite IR apply produced.
 #[derive(Debug, Clone, Default)]
