@@ -417,7 +417,12 @@ async fn post_native(
         form.return_to.as_deref().or(query_return_to),
         return_to::SAFE_DEFAULT,
     );
-    let client_id = native_client_id(&return_to).unwrap_or_else(|| "native-login".to_string());
+    // MED-3: do NOT derive the audit `client_id` from `return_to`. Only /authorize
+    // pre-validates that param; a direct /login hit lets an attacker forge it, and
+    // login is client-agnostic anyway (the real client binding + its audit happen at
+    // /authorize → /consent → /token). Stamp a fixed sentinel so a forged return_to
+    // cannot poison the login_failure/login_success audit label.
+    let client_id = "native".to_string();
     let client_name = native_client_name(&return_to);
 
     let cookie_header = req
