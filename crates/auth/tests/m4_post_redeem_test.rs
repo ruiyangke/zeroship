@@ -322,7 +322,7 @@ fn verify_post_redeem_with_invalid_token_renders_error_page() {
         return;
     };
     let app = init_app!(&ctx);
-    let before = verification_failure_audit_count(&ctx.pg).await;
+    let request_id = format!("m4-invalid-{}", Uuid::new_v4().simple());
     let token = format!("missing-{}", Uuid::new_v4().simple());
     let csrf = csrf_from_verify_get(&app, &token).await;
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -330,17 +330,21 @@ fn verify_post_redeem_with_invalid_token_renders_error_page() {
         .append_pair("token", &token)
         .finish();
 
-    let resp = call_post_form(
+    let resp = call_post_form_with_request_id(
         &app,
         "/verify/redeem",
         body,
         Some(format!("zsidp_csrf={csrf}")),
+        &request_id,
     )
     .await;
     assert_eq!(resp.status().as_u16(), 200);
     let html = read_body(resp).await;
     assert!(html.contains("session expired"));
-    assert_eq!(verification_failure_audit_count(&ctx.pg).await, before + 1);
+    assert_eq!(
+        verification_failure_audit_count(&ctx.pg, &request_id).await,
+        1
+    );
     });
 }
 
@@ -573,6 +577,28 @@ where
 }
 
 #[allow(clippy::future_not_send)]
+async fn call_post_form_with_request_id<S, E>(
+    app: &Pipeline<S>,
+    uri: &str,
+    body: String,
+    cookie: Option<String>,
+    request_id: &str,
+) -> ntex::web::WebResponse
+where
+    S: Service<ntex::http::Request, Response = ntex::web::WebResponse, Error = E>,
+    E: std::fmt::Debug,
+{
+    let mut req = test::TestRequest::post()
+        .uri(uri)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("x-request-id", request_id);
+    if let Some(cookie) = cookie {
+        req = req.header("cookie", cookie);
+    }
+    test::call_service(app, req.set_payload(body).to_request()).await
+}
+
+#[allow(clippy::future_not_send)]
 async fn csrf_from_verify_get<S, E>(app: &Pipeline<S>, token: &str) -> String
 where
     S: Service<ntex::http::Request, Response = ntex::web::WebResponse, Error = E>,
@@ -583,13 +609,17 @@ where
     read_set_cookie(resp.headers(), "zsidp_csrf").expect("zsidp_csrf cookie set on GET /verify")
 }
 
-async fn verification_failure_audit_count(pg: &compio_postgres::Client) -> i64 {
+async fn verification_failure_audit_count(
+    pg: &compio_postgres::Client,
+    request_id: &str,
+) -> i64 {
     pg.query_one(
         "SELECT COUNT(*) FROM zeroship.audit_events \
          WHERE event_type = 'verification_redeemed' \
            AND outcome = 'failure' \
-           AND detail->>'reason' = 'invalid_or_expired'",
-        &[],
+           AND detail->>'reason' = 'invalid_or_expired' \
+           AND request_id = $1",
+        &[&request_id],
     )
     .await
     .expect("count verification failure audit")

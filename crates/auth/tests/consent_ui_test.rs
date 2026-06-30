@@ -61,11 +61,11 @@ struct ConsentTestApp {
     http: cyper::Client,
     pg: Arc<compio_postgres::Client>,
     user_id: Uuid,
-    app_id: String,
+    app_id: Uuid,
     client_id: String,
     /// Real `zeroship.apps.id` UUID for a per-app (`oac_`) client; `None` for the
     /// builder/console clients booted via `boot`.
-    app_uuid: Option<Uuid>,
+    seeded_app_uuid: Option<Uuid>,
 }
 
 impl ConsentTestApp {
@@ -118,7 +118,8 @@ impl ConsentTestApp {
         let pg = Arc::new(pg_client);
 
         let user_id = Uuid::new_v4();
-        let app_id = format!("app-{}", Uuid::new_v4().simple());
+        let app_id = app_uuid.unwrap_or_else(Uuid::new_v4);
+        let seeded_app_uuid = (app_role.is_some() || app_uuid.is_some()).then_some(app_id);
         let email = format!("consent-{user_id}@zeroship.test");
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
@@ -136,6 +137,34 @@ impl ConsentTestApp {
             .await
             .expect("insert platform role");
         }
+        if let Some(seed_app_id) = seeded_app_uuid {
+            let plan_id = "consent-test-plan";
+            let limits = json!({
+                "cpu_ms": 1000,
+                "wall_ms": 5000,
+                "memory_mb": 128,
+                "concurrency": 10
+            });
+            pg.execute(
+                "INSERT INTO zeroship.plans \
+                     (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
+                      assignable_by_creator, runtime_limits_json) \
+                 VALUES ($1, 'Consent Test Plan', 0, 0, 0, TRUE, $2) \
+                 ON CONFLICT (id) DO NOTHING",
+                &[&plan_id, &limits],
+            )
+            .await
+            .expect("insert consent test plan");
+
+            let app_name = format!("consent-app-{}", seed_app_id.simple());
+            pg.execute(
+                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
+                 VALUES ($1, $2, $3, 'test-key', 'test-key-hash')",
+                &[&seed_app_id, &app_name, &plan_id],
+            )
+            .await
+            .expect("insert zeroship.apps");
+        }
         if let Some(role) = app_role {
             pg.execute(
                 "INSERT INTO zeroship.app_members (app_id, user_id, role, added_by) \
@@ -149,14 +178,6 @@ impl ConsentTestApp {
         // consent classifier's `client_id → app_id → app_scope_defs` resolution
         // is exercised against the real tables, not a stub.
         if let Some(app_uuid) = app_uuid {
-            let app_name = format!("scope-app-{}", app_uuid.simple());
-            pg.execute(
-                "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
-                 VALUES ($1, $2, 'test-key', 'test-key-hash')",
-                &[&app_uuid, &app_name],
-            )
-            .await
-            .expect("insert zeroship.apps");
             for s in declared {
                 let desc: Option<String> = s.description.map(ToOwned::to_owned);
                 pg.execute(
@@ -242,7 +263,7 @@ impl ConsentTestApp {
             user_id,
             app_id,
             client_id,
-            app_uuid,
+            seeded_app_uuid,
         }
     }
 
@@ -280,8 +301,8 @@ impl ConsentTestApp {
                 &[&self.client_id],
             )
             .await;
-        // zeroship.app_scope_defs rows cascade via the apps FK (ON DELETE CASCADE).
-        if let Some(app_uuid) = self.app_uuid {
+        // zeroship.app_scope_defs/app_members rows cascade via the apps FK.
+        if let Some(app_uuid) = self.seeded_app_uuid {
             let _ = self
                 .pg
                 .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_uuid])
@@ -474,7 +495,7 @@ async fn unknown_scope_rejected_not_rendered() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn user_without_scope_action_gets_decline_screen() {
-    let app = ConsentTestApp::boot(&["apps:write"], None, Some("viewer"), false).await;
+    let app = ConsentTestApp::boot(&["apps:delete"], None, Some("viewer"), false).await;
 
     let resp = app.get_consent().await;
     assert_eq!(resp.status().as_u16(), 200);

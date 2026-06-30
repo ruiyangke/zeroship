@@ -94,6 +94,23 @@ async fn pg_connect(dsn: &str) -> Client {
     client
 }
 
+async fn seed_test_plan(client: &Client) -> &'static str {
+    let plan_id = "password-reset-test-plan";
+    client
+        .execute(
+            "INSERT INTO zeroship.plans \
+                 (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
+                  runtime_limits_json) \
+             VALUES ($1, 'Password Reset Test Plan', 0, 0, 0, \
+                     '{\"cpu_ms\":1000,\"wall_ms\":5000,\"memory_mb\":128,\"concurrency\":10}'::jsonb) \
+             ON CONFLICT (id) DO NOTHING",
+            &[&plan_id],
+        )
+        .await
+        .expect("seed password reset test plan");
+    plan_id
+}
+
 async fn install_magic_links_insert_delay(client: &Client) {
     client
         .execute(
@@ -183,12 +200,14 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
 
     // gateway_sessions.app_id is UUID + FK → apps(id); seed a real app row.
     let gw_app_id = Uuid::new_v4();
+    let plan_id = seed_test_plan(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
             &[
                 &gw_app_id,
                 &format!("reset-revoke-app-{}", gw_app_id.simple()),
+                &plan_id,
                 &"k",
             ],
         )
@@ -719,10 +738,11 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .expect("insert oauth client");
 
     let app_id = Uuid::new_v4();
+    let plan_id = seed_test_plan(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
-            &[&app_id, &format!("anchor-app-{}", app_id.simple()), &"k"],
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
+            &[&app_id, &format!("anchor-app-{}", app_id.simple()), &plan_id, &"k"],
         )
         .await
         .expect("insert app");

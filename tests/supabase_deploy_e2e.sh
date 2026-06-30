@@ -39,6 +39,8 @@ GOTRUE_JWT_KEYS=""
 CONTROL_KEY="${CONTROL_KEY:-supabase-e2e-control-key}"
 WORKER_KEY="${WORKER_KEY:-supabase-e2e-worker-key-0123456789abcdef}"
 MASTER_KEY="${MASTER_KEY:-supabase-e2e-master-key-0123456789abcdef}"
+AUTH_STASH_KEY="${AUTH_STASH_KEY:-supabase-e2e-auth-stash-key-0123456789abcdef}"
+GOTRUE_EMAIL_HOOK_SECRET="${GOTRUE_EMAIL_HOOK_SECRET:-v1,whsec_c3VwYWJhc2UtZTJlLWdvdHJ1ZS1lbWFpbC1ob29rLXNlY3JldC0zMmI=}"
 APP_NAME="supabase-e2e-$(date +%s)-$RANDOM"
 
 PASS=0
@@ -56,7 +58,7 @@ dump_debug() {
   [ -n "${WORK:-}" ] || return 0
   echo "" >&2
   echo "Debug logs under $WORK" >&2
-  for log in gotrue-proxy.log control.log worker.log gate.log; do
+  for log in gotrue-proxy.log hydra-admin-stub.log auth.log control.log worker.log gate.log; do
     if [ -f "$WORK/$log" ]; then
       echo "--- tail $log ---" >&2
       tail -40 "$WORK/$log" >&2 || true
@@ -109,6 +111,8 @@ GATE_PORT="${GATE_PORT:-$(pick_port)}"
 CONTROL_PG_PORT="${CONTROL_PG_PORT:-$(pick_port)}"
 GOTRUE_PORT="${GOTRUE_PORT:-$(pick_port)}"
 GOTRUE_PROXY_PORT="${GOTRUE_PROXY_PORT:-$(pick_port)}"
+AUTH_PORT="${AUTH_PORT:-$(pick_port)}"
+HYDRA_STUB_PORT="${HYDRA_STUB_PORT:-$(pick_port)}"
 
 CONTROL_URL="http://localhost:$CONTROL_PORT"
 GATE_URL="http://localhost:$GATE_PORT"
@@ -275,7 +279,7 @@ ensure_release_bins() {
   local stale=0
   local build_stamp="$BIN/.supabase-e2e-build-stamp"
   local bin
-  for bin in zeroship zeroship-control zeroship-worker zeroship-gate; do
+  for bin in zeroship zeroship-auth zeroship-control zeroship-worker zeroship-gate; do
     [ -x "$BIN/$bin" ] || missing=1
   done
   if [ "$missing" -eq 0 ]; then
@@ -285,6 +289,8 @@ ensure_release_bins() {
       "$ROOT/crates/worker/Cargo.toml" "$ROOT/crates/worker/src"
       "$ROOT/crates/gateway/Cargo.toml" "$ROOT/crates/gateway/src"
       "$ROOT/crates/cli/Cargo.toml" "$ROOT/crates/cli/src"
+      "$ROOT/crates/auth/Cargo.toml" "$ROOT/crates/auth/src"
+      "$ROOT/crates/mailer/Cargo.toml" "$ROOT/crates/mailer/src"
       "$ROOT/crates/core/Cargo.toml" "$ROOT/crates/core/src"
       "$ROOT/crates/bundle/Cargo.toml" "$ROOT/crates/bundle/src"
       "$ROOT/crates/authz/Cargo.toml" "$ROOT/crates/authz/src"
@@ -302,7 +308,7 @@ ensure_release_bins() {
   step "Build missing/stale release binaries"
   need_cmd nix
   nix develop --command cargo build --release \
-    -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship \
+    -p zeroship-auth -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship \
     >"$WORK/cargo-build.log" 2>&1 || {
       tail -80 "$WORK/cargo-build.log" || true
       fail "release binary build failed"
@@ -323,6 +329,119 @@ ensure_starter_zship() {
   }
   [ -f "$ZSHIP" ] || fail "examples/starter did not produce dist/app.zship"
   pass "starter .zship built ($(du -k "$ZSHIP" | cut -f1)KB)"
+}
+
+start_hydra_admin_stub() {
+  cat >"$WORK/hydra_admin_stub.mjs" <<'NODE'
+import http from "node:http";
+
+const port = Number(process.argv[2]);
+const clients = new Map();
+const keys = {
+  "hydra.openid.id-token": [
+    { kid: "stub-id-eddsa", alg: "EdDSA", use: "sig" },
+    { kid: "stub-id-rs256", alg: "RS256", use: "sig" },
+  ],
+  "hydra.jwt.access-token": [
+    { kid: "stub-at-eddsa", alg: "EdDSA", use: "sig" },
+  ],
+};
+
+function send(res, status, body) {
+  const text = JSON.stringify(body);
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(text);
+}
+
+function readJson(req) {
+  return new Promise((resolve) => {
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => raw += chunk);
+    req.on("end", () => {
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url || "/", "http://127.0.0.1");
+  const keyMatch = url.pathname.match(/^\/admin\/keys\/([^/]+)(?:\/([^/]+))?$/);
+  if (keyMatch) {
+    const set = decodeURIComponent(keyMatch[1]);
+    const kid = keyMatch[2] ? decodeURIComponent(keyMatch[2]) : "";
+    keys[set] ||= [];
+    if (req.method === "GET" && !kid) return send(res, 200, { keys: keys[set] });
+    if (req.method === "POST" && !kid) {
+      const body = await readJson(req);
+      const key = { kid: body.kid || `stub-${Date.now()}`, alg: body.alg || "EdDSA", use: body.use || "sig" };
+      keys[set].unshift(key);
+      return send(res, 201, { keys: keys[set] });
+    }
+    if (req.method === "DELETE" && kid) {
+      keys[set] = keys[set].filter((key) => key.kid !== kid);
+      res.writeHead(204);
+      return res.end();
+    }
+  }
+
+  const clientMatch = url.pathname.match(/^\/admin\/clients\/([^/]+)$/);
+  if (clientMatch && req.method === "GET") {
+    const id = decodeURIComponent(clientMatch[1]);
+    if (clients.has(id)) return send(res, 200, clients.get(id));
+    return send(res, 404, { error: "not_found" });
+  }
+  if (clientMatch && req.method === "PUT") {
+    const id = decodeURIComponent(clientMatch[1]);
+    const body = await readJson(req);
+    clients.set(id, body);
+    return send(res, 200, body);
+  }
+  if (url.pathname === "/admin/clients" && req.method === "POST") {
+    const body = await readJson(req);
+    clients.set(body.client_id || `client-${Date.now()}`, body);
+    return send(res, 201, body);
+  }
+
+  send(res, 404, { error: "not_found" });
+});
+
+server.listen(port, "127.0.0.1", () => {
+  console.error(`hydra admin stub listening on 127.0.0.1:${port}`);
+});
+NODE
+
+  node "$WORK/hydra_admin_stub.mjs" "$HYDRA_STUB_PORT" >"$WORK/hydra-admin-stub.log" 2>&1 &
+  PIDS+=("$!")
+  wait_http "http://localhost:$HYDRA_STUB_PORT/admin/keys/hydra.openid.id-token" \
+    "Hydra admin stub healthy"
+}
+
+start_auth_service() {
+  start_hydra_admin_stub
+  "$BIN/zeroship-auth" \
+    --addr "0.0.0.0:$AUTH_PORT" \
+    --db-url "$CONTROL_DB_URL" \
+    --hydra-admin-url "http://127.0.0.1:$HYDRA_STUB_PORT" \
+    --hydra-public-url "http://127.0.0.1:$HYDRA_STUB_PORT" \
+    --clients-config "$ROOT/ops/auth-clients.example.toml" \
+    --dev-insecure \
+    --stash-signing-key "$AUTH_STASH_KEY" \
+    --auth-provider supabase \
+    --supabase-url "$SUPABASE_URL" \
+    --supabase-anon-key "$SUPABASE_ANON_KEY" \
+    --control-url "$CONTROL_URL" \
+    --mailer stdout \
+    --relay-forward-mailer stdout \
+    --gotrue-email-hook-secret "$GOTRUE_EMAIL_HOOK_SECRET" \
+    >"$WORK/auth.log" 2>&1 &
+  PIDS+=("$!")
+  wait_http "http://localhost:$AUTH_PORT/healthz" \
+    "zeroship-auth healthy with GoTrue Send Email hook"
 }
 
 start_prefix_proxy() {
@@ -452,7 +571,7 @@ SQL
     -e "GOTRUE_DB_DATABASE_URL=postgres://postgres:zeroship@$GOTRUE_PG_CONTAINER:5432/zeroship?sslmode=disable" \
     "${jwt_env[@]}" \
     -e GOTRUE_DISABLE_SIGNUP=false \
-    -e GOTRUE_MAILER_AUTOCONFIRM=true \
+    -e GOTRUE_MAILER_AUTOCONFIRM=false \
     -e GOTRUE_EXTERNAL_EMAIL_ENABLED=true \
     "$GOTRUE_IMAGE" auth migrate >"$WORK/gotrue-migrate.log" 2>&1 || {
       tail -80 "$WORK/gotrue-migrate.log" || true
@@ -460,7 +579,9 @@ SQL
     }
   pass "GoTrue auth schema migrated"
 
-  docker run --name "$GOTRUE_CONTAINER" --network "$NETWORK" -d -p "127.0.0.1:$GOTRUE_PORT:9999" \
+  docker run --name "$GOTRUE_CONTAINER" --network "$NETWORK" \
+    --add-host=host.docker.internal:host-gateway \
+    -d -p "127.0.0.1:$GOTRUE_PORT:9999" \
     -e GOTRUE_API_HOST=0.0.0.0 \
     -e GOTRUE_API_PORT=9999 \
     -e GOTRUE_SITE_URL="http://localhost:$GATE_PORT" \
@@ -470,8 +591,11 @@ SQL
     -e "GOTRUE_DB_DATABASE_URL=postgres://postgres:zeroship@$GOTRUE_PG_CONTAINER:5432/zeroship?sslmode=disable" \
     "${jwt_env[@]}" \
     -e GOTRUE_DISABLE_SIGNUP=false \
-    -e GOTRUE_MAILER_AUTOCONFIRM=true \
+    -e GOTRUE_MAILER_AUTOCONFIRM=false \
     -e GOTRUE_EXTERNAL_EMAIL_ENABLED=true \
+    -e GOTRUE_HOOK_SEND_EMAIL_ENABLED=true \
+    -e GOTRUE_HOOK_SEND_EMAIL_URI="http://host.docker.internal:$AUTH_PORT/hooks/gotrue/send-email" \
+    -e GOTRUE_HOOK_SEND_EMAIL_SECRETS="$GOTRUE_EMAIL_HOOK_SECRET" \
     -e GOTRUE_LOG_LEVEL=info \
     "$GOTRUE_IMAGE" auth serve >/dev/null || fail "docker run GoTrue failed"
 
@@ -547,6 +671,24 @@ query_control_db() {
   docker exec "$CONTROL_PG_CONTAINER" psql -U postgres -d zeroship -tAc "$1"
 }
 
+wait_for_gotrue_hook_mail() {
+  local email="$1"
+  local link=""
+  local i
+  for i in $(seq 1 30); do
+    if grep -q "RCPT TO (envelope): $email" "$WORK/auth.log" \
+      && grep -q "Subject: Verify your zeroship email" "$WORK/auth.log"; then
+      link="$(grep -Eo "http://localhost:${GOTRUE_PROXY_PORT}/auth/v1/verify\\?token=[^[:space:]]+" "$WORK/auth.log" | tail -1 || true)"
+      if [ -n "$link" ]; then
+        printf '%s\n' "$link"
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 step "Preflight"
 WORK="$(mktemp -d -t zs-supabase-e2e-XXXXXX)"
 mkdir -p "$WORK/blobs" "$WORK/blob-cache"
@@ -557,7 +699,7 @@ ensure_release_bins
 ensure_starter_zship
 [ "$SUPABASE_E2E_MODE" = "jwks" ] && echo "  mode: $SUPABASE_E2E_MODE"
 echo "  GoTrue image: $GOTRUE_IMAGE"
-echo "  ports: gotrue=$GOTRUE_PORT proxy=$GOTRUE_PROXY_PORT control=$CONTROL_PORT worker=$WORKER_PORT gate=$GATE_PORT pg=$CONTROL_PG_PORT"
+echo "  ports: gotrue=$GOTRUE_PORT proxy=$GOTRUE_PROXY_PORT auth=$AUTH_PORT hydra_stub=$HYDRA_STUB_PORT control=$CONTROL_PORT worker=$WORKER_PORT gate=$GATE_PORT pg=$CONTROL_PG_PORT"
 
 step "Mint Supabase API keys"
 if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
@@ -585,6 +727,7 @@ docker pull "$GOTRUE_IMAGE" >/dev/null || fail "docker pull $GOTRUE_IMAGE failed
 start_postgres "$CONTROL_PG_CONTAINER" "$CONTROL_PG_PORT"
 pass "control Postgres ready on :$CONTROL_PG_PORT"
 apply_control_migrations
+start_auth_service
 start_postgres "$GOTRUE_PG_CONTAINER"
 pass "GoTrue Postgres ready"
 start_gotrue
@@ -600,6 +743,17 @@ SIGNUP="$(post_json "$GOTRUE_URL/signup" \
   -H "apikey: $SUPABASE_ANON_KEY" \
   -H "Authorization: Bearer $SUPABASE_ANON_KEY")"
 echo "  signup response keys: $(jq -r 'keys | join(",")' <<<"$SIGNUP")"
+VERIFY_LINK="$(wait_for_gotrue_hook_mail "$EMAIL")" || fail "zeroship-auth stdout mailer did not capture GoTrue signup verify email"
+echo "  hook verify link: $VERIFY_LINK"
+grep -q 'token=hash_' <<<"$VERIFY_LINK" && fail "verify link used an unexpected test token placeholder"
+grep -q '/auth/v1/verify?token=' <<<"$VERIFY_LINK" || fail "verify link was not the Supabase /auth/v1 token_hash link: $VERIFY_LINK"
+pass "GoTrue Send Email hook called zeroship-auth and stdout mailer rendered verify email"
+VERIFY_CODE="$(curl -sS -o "$WORK/gotrue-verify.out" -w '%{http_code}' "$VERIFY_LINK" || true)"
+case "$VERIFY_CODE" in
+  2*|3*) ;;
+  *) fail "GoTrue verify link returned HTTP $VERIFY_CODE: $(cat "$WORK/gotrue-verify.out" 2>/dev/null || true)" ;;
+esac
+pass "captured GoTrue verify link confirmed the signup email"
 LOGIN="$(post_json "$GOTRUE_URL/token?grant_type=password" \
   "$(jq -nc --arg email "$EMAIL" --arg password "$PASSWORD" '{email:$email,password:$password}')" \
   -H "apikey: $SUPABASE_ANON_KEY" \

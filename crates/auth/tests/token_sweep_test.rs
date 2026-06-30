@@ -4,9 +4,12 @@
 //! a single test run (the real cron sleeps 1 h between ticks).
 
 use compio_postgres::{connect, NoTls};
+use std::sync::Mutex;
 use uuid::Uuid;
 use zeroship_auth::cron::token_sweep;
 use zeroship_auth::store::{users};
+
+static TOKEN_SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<compio_postgres::Client> {
@@ -27,6 +30,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
         eprintln!("skipping token_sweep_test (no AUTH_DB_URL)");
         return;
     };
+    let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
 
     let tag = Uuid::new_v4().simple().to_string();
     let login_email = format!("token-sweep-login-{tag}@zeroship.test");
@@ -222,6 +226,7 @@ async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
         eprintln!("skipping token_sweep rate_limits test (no AUTH_DB_URL)");
         return;
     };
+    let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
 
     let tag = Uuid::new_v4().simple().to_string();
     let stale_key = format!("login:ip:sec3-stale-{tag}");

@@ -98,6 +98,17 @@ pub struct AuthConfig {
     )]
     pub supabase_anon_key: Option<String>,
 
+    /// Standard-Webhooks symmetric secret for GoTrue's Send Email hook.
+    /// Set this to the same `v1,whsec_<base64>` value supplied to GoTrue via
+    /// `GOTRUE_HOOK_SEND_EMAIL_SECRETS`. When unset, the hook endpoint
+    /// fail-closes with 401.
+    #[arg(
+        long = "gotrue-email-hook-secret",
+        env = "AUTH_GOTRUE_EMAIL_HOOK_SECRET",
+        hide_env_values = true
+    )]
+    pub gotrue_email_hook_secret: Option<String>,
+
     /// Control-plane base URL used by browser-mediated auth flows.
     #[arg(long = "control-url", env = "CONTROL_URL")]
     pub control_url: Option<String>,
@@ -785,6 +796,7 @@ impl std::fmt::Debug for AuthConfig {
             .field("auth_provider", &self.auth_provider)
             .field("supabase_url", &self.supabase_url)
             .field("supabase_anon_key", &"<redacted>")
+            .field("gotrue_email_hook_secret", &"<redacted>")
             .field("control_url", &self.control_url)
             .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
             .field("clients_config", &self.clients_config)
