@@ -30,6 +30,9 @@ pub struct IntrospectResult {
     pub session_id: Option<String>,
     /// Absolute token expiry in UNIX seconds.
     pub exp: Option<u64>,
+    /// Issued-at timestamp in UNIX seconds, when the introspection provider
+    /// returns it.
+    pub iat: Option<u64>,
 }
 
 /// Token introspection client. Uses compio HTTP via `cyper`.
@@ -255,6 +258,8 @@ struct HydraIntrospectionResponse {
     session_id: Option<String>,
     #[serde(default)]
     exp: Option<u64>,
+    #[serde(default)]
+    iat: Option<u64>,
 }
 
 impl From<HydraIntrospectionResponse> for IntrospectResult {
@@ -269,6 +274,7 @@ impl From<HydraIntrospectionResponse> for IntrospectResult {
             email_verified: value.email_verified,
             session_id: value.sid.or(value.session_id),
             exp: value.exp,
+            iat: value.iat,
         }
     }
 }

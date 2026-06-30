@@ -75,6 +75,7 @@ impl MockHydra {
     }
 
     fn active_with_aud(sub: impl ToString, scope: &str, aud: Vec<&str>) -> Self {
+        let now = unix_now_secs();
         Self::fixed(
             200,
             json!({
@@ -83,7 +84,8 @@ impl MockHydra {
                 "scope": scope,
                 "aud": aud,
                 "client_id": "oauth-test-client",
-                "exp": unix_now_secs() + 3600,
+                "iat": now,
+                "exp": now + 3600,
             }),
         )
     }

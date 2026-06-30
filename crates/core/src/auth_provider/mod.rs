@@ -317,7 +317,7 @@ fn hydra_verified_token(result: IntrospectResult) -> Result<VerifiedToken, Verif
         provider_authz: ProviderAuthz::OAuthScope(result.scope.unwrap_or_default()),
         exp: result.exp.unwrap_or_default(),
         client_id: result.client_id,
-        iat: None,
+        iat: result.iat,
         aud: result.aud,
     })
 }
@@ -363,6 +363,7 @@ mod tests {
             email_verified: None,
             session_id: Some("sid_123".to_string()),
             exp: Some(1_800_000_000),
+            iat: Some(1_700_000_000),
         })
         .expect("active token maps");
 
@@ -376,7 +377,7 @@ mod tests {
         );
         assert_eq!(verified.exp, 1_800_000_000);
         assert_eq!(verified.client_id.as_deref(), Some("oauth-test-client"));
-        assert_eq!(verified.iat, None);
+        assert_eq!(verified.iat, Some(1_700_000_000));
         assert_eq!(
             verified.aud.as_deref(),
             Some(&["control.zeroship.ai".to_string()][..])

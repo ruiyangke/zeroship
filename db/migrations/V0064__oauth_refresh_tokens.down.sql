@@ -24,6 +24,9 @@ DROP INDEX IF EXISTS zeroship.oauth_refresh_tokens_user_idx;
 DROP INDEX IF EXISTS zeroship.oauth_refresh_tokens_family_idx;
 DROP INDEX IF EXISTS zeroship.oauth_refresh_tokens_one_active_per_family;
 DROP TABLE IF EXISTS zeroship.oauth_refresh_tokens;
+DROP TRIGGER IF EXISTS app_oauth_clients_sector_identifier_immutable ON zeroship.app_oauth_clients;
+DROP FUNCTION IF EXISTS zeroship.app_oauth_clients_reject_sector_change();
+COMMENT ON COLUMN zeroship.app_oauth_clients.sector_identifier IS NULL;
 
 ALTER TABLE zeroship.device_grants
     DROP COLUMN IF EXISTS auth_credential_version;

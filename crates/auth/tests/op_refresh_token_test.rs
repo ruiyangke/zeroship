@@ -45,6 +45,7 @@ struct Fixture {
     srv: ntex::web::test::TestServer,
     auth_base: String,
     db: Arc<Client>,
+    db_url: String,
     client_id: String,
     app_id: Uuid,
     user_id: Uuid,
@@ -102,7 +103,10 @@ impl Fixture {
         let key_dir = make_key_dir();
         let hash_key_file = key_dir.join("refresh-hmac.keys");
         let idem_key_file = key_dir.join("refresh-idem.key");
-        write_secret_file(&hash_key_file, b"1:refresh-hmac-key-material-32-bytes");
+        write_secret_file(
+            &hash_key_file,
+            b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        );
         write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
 
         let mut cfg = test_auth_config(
@@ -139,6 +143,7 @@ impl Fixture {
             auth_base: srv.url("").trim_end_matches('/').to_string(),
             srv,
             db,
+            db_url,
             client_id,
             app_id,
             user_id,
@@ -353,6 +358,100 @@ async fn legit_lost_response_retry_recovers_without_family_kill() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn concurrent_refresh_same_token_serializes_to_one_successor_without_family_kill() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+
+    let first = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
+    let second = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
+    let (first, second) = futures::join!(first, second);
+    let first = first.expect("first concurrent refresh response");
+    let second = second.expect("second concurrent refresh response");
+    assert_eq!(first.status().as_u16(), 200, "first concurrent refresh");
+    assert_eq!(second.status().as_u16(), 200, "second concurrent refresh");
+    let first = first.json::<TokenResponse>().await.expect("first json");
+    let second = second.json::<TokenResponse>().await.expect("second json");
+    assert_eq!(
+        first.refresh_token, second.refresh_token,
+        "serialized same-token retry must replay the one existing successor"
+    );
+
+    let family_id = refresh_family_id(&fx).await;
+    assert_family_not_revoked(&fx, &family_id).await;
+    let row = fx
+        .db
+        .query_one(
+            "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS rotated, \
+                    COUNT(*) FILTER (WHERE rotated_at IS NULL AND revoked_at IS NULL)::BIGINT AS live \
+             FROM zeroship.oauth_refresh_tokens WHERE refresh_family_id = $1",
+            &[&family_id],
+        )
+        .await
+        .expect("refresh family counts");
+    assert_eq!(row.get::<_, i64>("rotated"), 1);
+    assert_eq!(row.get::<_, i64>("live"), 1);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn refresh_rotation_does_not_commit_shared_request_socket_transaction() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+    let marker = format!("p5b-shared-tx-{}", Uuid::new_v4().simple());
+
+    fx.db.execute("BEGIN", &[]).await.expect("begin marker tx");
+    fx.db
+        .execute(
+            "INSERT INTO zeroship.rate_limits (bucket_key, tokens, updated_at) \
+             VALUES ($1, 0::REAL, NOW())",
+            &[&marker],
+        )
+        .await
+        .expect("insert marker inside shared transaction");
+
+    let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("refresh while shared transaction is open");
+    assert_eq!(rotated.status().as_u16(), 200);
+
+    fx.db
+        .execute("ROLLBACK", &[])
+        .await
+        .expect("rollback marker tx");
+    let persisted: i64 = fx
+        .db
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS count FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&marker],
+        )
+        .await
+        .expect("count marker")
+        .get("count");
+    let _ = fx
+        .db
+        .execute(
+            "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&marker],
+        )
+        .await;
+    assert_eq!(
+        persisted, 0,
+        "refresh rotation must not COMMIT another logical flow on the shared request socket"
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn revoke_refresh_token_kills_family_and_is_uniform() {
     let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
         return;
@@ -385,19 +484,9 @@ async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
     };
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
-    let Some(db_url) = db_url() else {
-        fx.cleanup().await;
-        return;
-    };
-    let (revoke_db, revoke_conn) = connect(&db_url, NoTls).await.expect("revoke pg connect");
-    compio::runtime::spawn(async move {
-        let _ = revoke_conn.run().await;
-    })
-    .detach();
-
     let rotate = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
     let revoke = zeroship_auth::op::refresh::revoke_user_refresh_families(
-        &revoke_db,
+        &fx.db_url,
         fx.user_id,
         "credential_bump_test",
     );

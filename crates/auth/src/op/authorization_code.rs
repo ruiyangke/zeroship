@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient, NoTls};
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION};
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
@@ -342,23 +342,40 @@ async fn token_inner(
             let code = required_param(params.code.as_deref(), "code")?;
             let code_verifier = required_param(params.code_verifier.as_deref(), "code_verifier")?;
             let client = load_client(db, client_id).await?;
-            run_token_tx(db, async {
-                exchange_authorization_code(
-                    db,
-                    issuer,
-                    cfg,
-                    &client,
-                    redirect_uri,
-                    code,
-                    code_verifier,
-                )
-                .await
-            })
-            .await
+            let mut conn = connect_dedicated_token_client(&cfg.db_url).await?;
+            let tx = conn.transaction().await.map_err(|err| {
+                tracing::error!(error = %err, "token: BEGIN failed on dedicated session");
+                OAuthError::server_error("token transaction unavailable")
+            })?;
+            let result = exchange_authorization_code(
+                &tx,
+                issuer,
+                cfg,
+                &client,
+                redirect_uri,
+                code,
+                code_verifier,
+            )
+            .await;
+            match result {
+                Ok(response) => {
+                    tx.commit().await.map_err(|err| {
+                        tracing::error!(error = %err, "token: COMMIT failed");
+                        OAuthError::server_error("token transaction failed")
+                    })?;
+                    Ok(response)
+                }
+                Err(err) => {
+                    if let Err(rollback) = tx.rollback().await {
+                        tracing::error!(error = %rollback, "token: ROLLBACK failed");
+                    }
+                    Err(err)
+                }
+            }
         }
         "refresh_token" => {
             let keys = RefreshTokenKeys::from_config(cfg)?;
-            refresh::exchange_refresh_token(db, issuer, &keys, &params, client_auth).await
+            refresh::exchange_refresh_token(&cfg.db_url, issuer, &keys, &params, client_auth).await
         }
         _ => Err(OAuthError::unsupported_grant_type(
             "grant_type is not supported",
@@ -367,41 +384,25 @@ async fn token_inner(
     result
 }
 
-async fn run_token_tx<F>(
-    db: &Client,
-    work: F,
-) -> Result<TokenResponse, OAuthError>
-where
-    F: std::future::Future<Output = Result<TokenResponse, OAuthError>>,
-{
-    db.execute("BEGIN", &[])
+async fn connect_dedicated_token_client(db_url: &str) -> Result<Client, OAuthError> {
+    let (client, connection) = compio_postgres::connect(db_url, NoTls)
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, "token: BEGIN failed");
-            OAuthError::server_error("token transaction unavailable")
+            tracing::error!(error = %err, "token: dedicated database session connect failed");
+            OAuthError::server_error("token database unavailable")
         })?;
-
-    let result = work.await;
-    match result {
-        Ok(response) => {
-            db.execute("COMMIT", &[]).await.map_err(|err| {
-                tracing::error!(error = %err, "token: COMMIT failed");
-                OAuthError::server_error("token transaction failed")
-            })?;
-            Ok(response)
+    compio::runtime::spawn(async move {
+        if let Err(err) = connection.run().await {
+            tracing::error!(error = %err, "token dedicated pg connection error");
         }
-        Err(err) => {
-            if let Err(rollback) = db.execute("ROLLBACK", &[]).await {
-                tracing::error!(error = %rollback, "token: ROLLBACK failed");
-            }
-            Err(err)
-        }
-    }
+    })
+    .detach();
+    Ok(client)
 }
 
 #[allow(clippy::future_not_send)]
 async fn exchange_authorization_code(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
     cfg: &AuthConfig,
     client: &OAuthClient,
@@ -535,7 +536,10 @@ async fn resolve_session(
     })
 }
 
-pub(super) async fn load_client(db: &Client, client_id: &str) -> Result<OAuthClient, OAuthError> {
+pub(super) async fn load_client(
+    db: &(impl GenericClient + ?Sized),
+    client_id: &str,
+) -> Result<OAuthClient, OAuthError> {
     let rows = db
         .query(
             "SELECT oc.client_id, oc.redirect_uris, oc.scopes, \
@@ -615,7 +619,7 @@ pub(crate) async fn persist_consent_grant(
 }
 
 async fn consent_covers(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     user_id: Uuid,
     client_id: &str,
     granted_scopes: &[String],

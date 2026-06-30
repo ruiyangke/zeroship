@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient};
 use uuid::Uuid;
 
 use crate::error::{AuthError, Result};
@@ -66,7 +66,10 @@ async fn release_advisory_lock(conn: &Client, key: i64) -> Result<()> {
 ///
 /// The caller must already be inside the transaction whose writes the lock
 /// protects. PostgreSQL releases this form automatically at COMMIT/ROLLBACK.
-pub async fn with_xact_advisory_lock2(conn: &Client, ns: i32, key: i32) -> Result<()> {
+pub async fn with_xact_advisory_lock2<C>(conn: &C, ns: i32, key: i32) -> Result<()>
+where
+    C: GenericClient + ?Sized,
+{
     conn.execute("SELECT pg_advisory_xact_lock($1::INT4, $2::INT4)", &[&ns, &key])
         .await
         .map_err(|e| AuthError::Db(format!("pg_advisory_xact_lock({ns},{key}): {e}")))?;
@@ -77,7 +80,10 @@ pub async fn with_xact_advisory_lock2(conn: &Client, ns: i32, key: i32) -> Resul
 ///
 /// The SQL deliberately hashes in Postgres as `hashtext(user_id::text)`, matching
 /// the P5b lock contract and all companion writers.
-pub async fn lock_refresh_user_xact(conn: &Client, user_id: Uuid) -> Result<()> {
+pub async fn lock_refresh_user_xact<C>(conn: &C, user_id: Uuid) -> Result<()>
+where
+    C: GenericClient + ?Sized,
+{
     conn.execute(
         "SELECT pg_advisory_xact_lock($1::INT4, hashtext($2::text))",
         &[&NS_USER, &user_id.to_string()],
@@ -88,7 +94,10 @@ pub async fn lock_refresh_user_xact(conn: &Client, user_id: Uuid) -> Result<()> 
 }
 
 /// Acquire the refresh hierarchy's per-family xact advisory lock.
-pub async fn lock_refresh_family_xact(conn: &Client, refresh_family_id: &str) -> Result<()> {
+pub async fn lock_refresh_family_xact<C>(conn: &C, refresh_family_id: &str) -> Result<()>
+where
+    C: GenericClient + ?Sized,
+{
     conn.execute(
         "SELECT pg_advisory_xact_lock($1::INT4, hashtext($2::text))",
         &[&NS_FAM, &refresh_family_id],

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use compio_postgres::Client;
 
+use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
 use crate::op::refresh;
 
@@ -68,10 +69,10 @@ impl TokenSweepReport {
 // `compio_postgres::Client` holds a connection handle that is `!Send`;
 // the lint is structural, not actionable (mirrors the other cron tasks).
 #[allow(clippy::future_not_send)]
-pub async fn run(db: Arc<Client>) {
+pub async fn run(db: Arc<Client>, cfg: Arc<AuthConfig>) {
     tracing::info!(interval_secs = INTERVAL_SECS, "token_sweep cron starting");
     loop {
-        match tick(&db).await {
+        match tick(&db, &cfg.db_url).await {
             Ok(report) => {
                 tracing::info!(
                     magic_links_deleted = report.magic_links_deleted,
@@ -95,7 +96,7 @@ pub async fn run(db: Arc<Client>) {
 /// Run one token sweep. Rows are eligible once either their expiry or
 /// consumption timestamp is older than the 7-day grace window.
 #[doc(hidden)]
-pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
+pub async fn tick(db: &Client, refresh_db_url: &str) -> Result<TokenSweepReport> {
     // Build the report in the initializer (every field is computed once here),
     // so there is no redundant `Default::default()` to reassign over.
     let password_resets_deleted = delete_magic_links(db, Some("reset")).await?;
@@ -120,7 +121,7 @@ pub async fn tick(db: &Client) -> Result<TokenSweepReport> {
         zeroship_core::wrapper_revocation::sweep_expired_families(db)
             .await
             .map_err(|e| AuthError::Db(format!("token_sweep zeroship.token_revocations: {e}")))?;
-    let (refresh_tokens_deleted, refresh_idem_reaped) = refresh::sweep_refresh_tokens(db)
+    let (refresh_tokens_deleted, refresh_idem_reaped) = refresh::sweep_refresh_tokens(refresh_db_url)
         .await
         .map_err(|e| AuthError::Db(format!("token_sweep zeroship.oauth_refresh_tokens: {e}")))?;
 

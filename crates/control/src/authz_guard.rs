@@ -298,7 +298,7 @@ async fn reject_revoked_platform_token(
     iat: Option<u64>,
 ) -> Result<(), web::Error> {
     let (Some(client_id), Some(iat)) = (client_id, iat) else {
-        return Ok(());
+        return Err(unauthorized_json("token_revocation_claims_missing"));
     };
     let iat = i64::try_from(iat).map_err(|_| web::error::ErrorUnauthorized("invalid token iat"))?;
     let revoked_after = cached_revoked_after_for(state, client_id, sub).await?;
