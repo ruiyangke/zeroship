@@ -222,6 +222,23 @@ impl From<DeclarativeApplyError> for DeployMigrateError {
     }
 }
 
+fn deploy_pg_ir_apply_error(e: zeroship_migrate::PostgresIrApplyError) -> DeployMigrateError {
+    match e {
+        zeroship_migrate::PostgresIrApplyError::Read { file, message } => {
+            DeployMigrateError::IrRead { file, message }
+        }
+        zeroship_migrate::PostgresIrApplyError::Snapshot(source) => {
+            DeployMigrateError::Snapshot(source)
+        }
+        zeroship_migrate::PostgresIrApplyError::Ir { file, source } => {
+            DeployMigrateError::Ir { file, source }
+        }
+        zeroship_migrate::PostgresIrApplyError::Apply(source) => {
+            DeployMigrateError::from(source)
+        }
+    }
+}
+
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`). Mirrors the
 /// engine's `quote_ident` so the schema name is never raw-interpolated.
 fn quote_ident(ident: &str) -> String {
@@ -1044,30 +1061,12 @@ async fn apply_bundle_ir_migrations(
     actor: &DeployActor,
 ) -> Result<MigrateOutcome, DeployMigrateError> {
     // Discover `*.ir.json` files, version-ordered by filename (deterministic).
-    let mut ir_files: Vec<std::path::PathBuf> = Vec::new();
-    let read = std::fs::read_dir(migrations_dir).map_err(|e| DeployMigrateError::IrRead {
-        file: migrations_dir.display().to_string(),
-        message: e.to_string(),
-    })?;
-    for entry in read {
-        let entry = entry.map_err(|e| DeployMigrateError::IrRead {
-            file: migrations_dir.display().to_string(),
-            message: e.to_string(),
-        })?;
-        let path = entry.path();
-        if path.is_file()
-            && path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".ir.json"))
-        {
-            ir_files.push(path);
-        }
-    }
+    let ir_files = zeroship_migrate::discover_ir_files(migrations_dir)
+        .map_err(zeroship_migrate::PostgresIrApplyError::from)
+        .map_err(deploy_pg_ir_apply_error)?;
     if ir_files.is_empty() {
         return Ok(MigrateOutcome::default());
     }
-    ir_files.sort();
 
     let app = app_id.to_string();
 
@@ -1080,65 +1079,7 @@ async fn apply_bundle_ir_migrations(
     // migration that touches an earlier file's table resolves ownership / inlines
     // FKs correctly. (Pre-fix these were seeded once and never advanced, so a
     // legitimate multi-file deploy FAILED CLOSED on ownership / mis-deferred FKs.)
-    let live = backend.snapshot_schema(exec_cfg).await?;
-    let mut registry: BTreeMap<String, String> =
-        live.tables.keys().map(|t| (t.clone(), app.clone())).collect();
-    // The IR-path Lower's live facts: the live table set (FK inline-vs-defer) PLUS
-    // the set of index NAMES the live catalog reports as UNIQUE. The latter is the
-    // AUTHORITATIVE source for the `dropIndex` destructive/approval gate — a drop of
-    // a live-unique index lowers `destructive + requires_approval` regardless of the
-    // IR's advisory `unique` hint (a hostile/buggy author cannot under-declare it to
-    // bypass the gate). Introspected the SAME way the differ's `render_drop_index`
-    // reads `IndexSnapshot::unique`.
-    let mut live_schema = LiveSchema {
-        tables: live.tables.keys().cloned().collect(),
-        unique_indexes: live
-            .tables
-            .values()
-            .flat_map(|t| t.indexes.iter())
-            .filter(|idx| idx.unique)
-            .map(|idx| idx.name.clone())
-            .collect(),
-        // PR2 — carry the FULL introspected per-table column structure so the PG
-        // `renameColumn` leg can reconcile the IR-carried column type against the
-        // LIVE `from` column's actual `data_type` (the IR-path mirror of the
-        // declarative `RenameHintTypeMismatch`): a rename whose IR `ty` disagrees
-        // with the live column fails closed BEFORE any dual-write is authored, and a
-        // rename whose live `from` column is absent fails closed rather than trust
-        // the IR type alone. The whole live snapshot is already in hand, so this is
-        // free; the PG expand-contract author still needs only `{from,to,ty}` to
-        // author the sequence — the snapshot is consulted ONLY for the type gate.
-        //
-        // DEPLOY-WIRING HONESTY (PG leg): populating this makes the type-gate REACH
-        // the live column on the production path — but a PG `renameColumn` still does
-        // NOT COMPLETE through this routine deploy. Its expand-contract EXPAND backfill
-        // is approval-gated; this path applies under `Approval::None` (see the loop
-        // below), so a lowered rename is REFUSED at the approval gate
-        // (`DeployMigrateError::OnlineExpand` ⇐ `OnlineError::Approval`), exactly like a
-        // destructive op. The type reconciliation is wired; the APPROVED apply is the
-        // out-of-band wave (gated on this PR). This is symmetric with the SQLite leg's
-        // not-deploy-wired note below — see the module-level "Destructive +
-        // approval-gated migrations" doc. Pinned by the control-plane e2e
-        // `deploy_migrate_renamecolumn_refused_at_approval_gate_on_routine_deploy`.
-        table_snapshots: live.tables.clone(),
-        // Every live table in this per-app schema is owned by the deploying app
-        // (the registry is seeded from exactly this set, below). Carried for
-        // completeness; the PG rename leg does not consult it (cross-app authority
-        // is enforced upstream by the IR-load gate's registry check), but populating
-        // it keeps the live-facts bundle honest rather than fabricating ownership.
-        table_ownership: live.tables.keys().map(|t| (t.clone(), app.clone())).collect(),
-        // The SQLite SDK-schema `Value`s (`sqlite_schemas`) are NOT introspectable
-        // from a PG catalog and are unused on this PG-targeted deploy path (a PG
-        // rename lowers to expand-contract, never the SQLite 12-step rebuild). The
-        // SQLite IR-rename rebuild leg is ENGINE-PROVEN (the `IrAuthor`/differ unit +
-        // temp-file e2e in `ir_rename_pr2_sqlite.rs`) but is NOT YET DEPLOY-WIRED:
-        // no production or dev/CLI path constructs a SQLite-dialect `LiveSchema` with
-        // these facts today. Wiring a SQLite IR-deploy entry point (the dev-tier peer
-        // of this PG introspection) is the CLI-rewire wave (gated on this PR). Until
-        // then a SQLite-targeted IR rename would fail closed (no `table_snapshots`/
-        // `sqlite_schemas`), never silently emit a wrong rebuild.
-        sqlite_schemas: std::collections::BTreeMap::new(),
-    };
+    let mut ir_state = zeroship_migrate::postgres_ir_apply_state(backend, exec_cfg, &app).await?;
 
     let engine = MigrationEngine::new();
     let mut applied: Vec<String> = Vec::new();
@@ -1264,108 +1205,33 @@ async fn apply_bundle_ir_migrations(
         }
 
     for path in &ir_files {
-        let file = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("<unknown>")
-            .to_string();
-        let bytes = std::fs::read_to_string(path).map_err(|e| DeployMigrateError::IrRead {
-            file: file.clone(),
-            message: e.to_string(),
-        })?;
-
-        // The FAIL-CLOSED gate + GUARD-PER-FRAGMENT lower (§6.1.1), with the
-        // deploy-target dialect (Postgres). Routing through `load_and_lower_guarded`
-        // (not plain `load_and_lower`) means a guard denial reaches the creator with
-        // the exact op-index + kind attribution, not a bare whole-`up` denial. It
-        // returns ONE `AppliedPlan` per file (§2.0 / §5.2) whose `checksum` is the
-        // dialect-neutral `Checksum::of_ir` over the op list and whose `Ddl` steps'
-        // journaled checksums are stamped with that SAME op-list anchor (§5.3 drift
-        // anchor — NOT the per-dialect rendered SQL).
-        let author = IrAuthor::new(app.clone(), app.clone(), SqlDialect::Postgres);
-        let lowered = author
-            .load_and_lower_guarded(&bytes, &app, &registry, &live_schema, guard_cfg)
-            .map_err(|source| DeployMigrateError::Ir { file: file.clone(), source })?;
-
-        // Fold this file's lowered migrations into the set-level manifest tally.
-        ir_lowered_all.extend(lowered.migrations());
-
-        // Route the file's plan through the SINGLE shared plan orchestrator
-        // `apply_plan` (§5.2 — realizing the PR0 AppliedPlan/apply_plan plumbing on
-        // the IR path), NOT the flat `engine.apply`. `LockMode::AlreadyHeld` reuses
-        // the WHOLE-deploy project advisory lock acquired before this loop (PR9a MED
-        // — §2.0.3(1)); `apply_with_lock_backend` inside re-runs the Confined guard +
-        // the destructive/approval gate under `Approval::None`, so a destructive op
-        // is refused at deploy exactly like the `.sql` path. For PR1's pure-DDL ops
-        // every step is `Ddl` (coalesced into one batch — byte-identical journaling
-        // to the pre-fix `engine.apply` path). §2.0.3 — thread the artifact's full
-        // op-list touched-set into the engine's cross-deploy pending-contract
-        // interlock. The read-back inside the held project lock fail-closed refuses
-        // ANY op (DDL or DML) touching a table with an outstanding online-rename
-        // contract from a prior deploy (mapped to a deploy error → the creator's
-        // 4xx). Because the lock is held for the WHOLE loop, that read-back sees a
-        // consistent committed obligation set across all files, never a mid-deploy
-        // interleave from a racing same-project deploy.
-        // §2.0.4 — ALSO thread the artifact's plan-level `depends_on`, so a
-        // dependent plan whose dependency's online-rename contract is still pending
-        // is fail-closed refused at APPLY (with `DEPENDENCY_PENDING_CONTRACT`),
-        // EVEN when this file touches a DIFFERENT table than the pending one (the
-        // case the touched-table refusal does not cover — the §2.0.4 double-bind).
-        let outcome = engine
-            .apply_plan_with_touched_and_depends_scoped(
-                &lowered.plan.steps,
-                &lowered.touched_tables,
-                &lowered.depends_on,
-                approval,
-                // PR9b: the per-version scope — `All` on the routine `Approval::None`
-                // deploy (a destructive op is refused at the approval gate before scope
-                // ever matters), the operator's reviewed version set on the approved
-                // surface, so an unreviewed co-bundled destructive IR op (a `dropColumn`
-                // / the C2 of an unrelated rename) is fail-closed refused with
-                // `ApprovalNotScoped` even inside the approved deploy.
-                scope,
-                backend,
-                exec_cfg,
-                &ir_actor,
-                LockMode::AlreadyHeld,
-                // PR9e — thread THIS deploy's recovery scope so a same-deploy EXPAND's
-                // obligation row + its `in_progress` recovery marker commit in ONE
-                // transaction (engine-stamped). Every outstanding obligation then
-                // ALWAYS has a marker — the obligation-vs-marker crash window
-                // (PR9d-rev finding 1) is structurally closed.
-                Some(&DeployRecoveryScope {
-                    deploy_id: &deploy_id,
-                }),
-            )
-            .await
-            .map_err(DeployMigrateError::from)?;
-        applied.extend(outcome.applied.applied);
-        skipped.extend(outcome.applied.skipped);
-        // PR7 go-live: a completed online-rename EXPAND surfaces its CONTRACT (C1/C2)
-        // as pending — applied in a SUBSEQUENT approved deploy, not this one (§2.0.2).
-        pending_contract.extend(
-            outcome
-                .pending_contract
-                .iter()
-                .map(|m| m.version.as_str().to_string()),
-        );
-
-        // PR9e — the obligation-vs-marker crash window is CLOSED structurally. The
-        // engine now writes each EXPAND's `in_progress` recovery marker in the SAME
-        // transaction as its obligation row (via the threaded `DeployRecoveryScope`
-        // above), so there is no longer any window in which an obligation is committed
-        // without its marker. The control loop only ACCUMULATES the opened obligations
-        // so a LATER same-deploy file's failure can abort exactly these (the in-process
-        // abort leg below); it no longer writes the marker itself.
-        opened_this_deploy.extend(outcome.opened_obligations.iter().cloned());
-
-        // ADVANCE the cross-file registry + live-set with THIS file's freshly-
-        // created tables (now applied), so the NEXT `.ir.json` sees them as
-        // owned-by-the-deployer + live.
-        for t in lowered.created_tables {
-            registry.entry(t.clone()).or_insert_with(|| app.clone());
-            live_schema.tables.insert(t);
-        }
+        // Shared PG IR apply core: fail-closed load, guard-per-fragment lower,
+        // `apply_plan_with_touched_and_depends_scoped`, and cross-file live-state
+        // advancement. The control loop still owns the whole-deploy lock/recovery
+        // bracket around it.
+        let outcome = zeroship_migrate::apply_one_ir_file_postgres(
+            backend,
+            &app,
+            &app,
+            path,
+            &mut ir_state,
+            exec_cfg,
+            guard_cfg,
+            approval,
+            scope,
+            &ir_actor,
+            LockMode::AlreadyHeld,
+            Some(&DeployRecoveryScope {
+                deploy_id: &deploy_id,
+            }),
+        )
+        .await
+        .map_err(deploy_pg_ir_apply_error)?;
+        applied.extend(outcome.applied);
+        skipped.extend(outcome.skipped);
+        pending_contract.extend(outcome.pending_contract);
+        opened_this_deploy.extend(outcome.opened_obligations);
+        ir_lowered_all.extend(outcome.lowered_migrations);
     }
     Ok(())
     }

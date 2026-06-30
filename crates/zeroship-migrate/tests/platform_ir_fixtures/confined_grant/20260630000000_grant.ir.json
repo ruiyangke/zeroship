@@ -1,0 +1,37 @@
+{
+  "ir_version": 6,
+  "name": "confined_grant_denied",
+  "owner_app": "app_confined",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "ir_confined_grants",
+      "schema": "zeroship",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        }
+      ],
+      "constraints": [],
+      "indexes": []
+    },
+    {
+      "op": "grant",
+      "privileges": [
+        "select"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "ir_confined_grants"
+        ],
+        "schema": "zeroship"
+      },
+      "to": [
+        "public"
+      ]
+    }
+  ]
+}

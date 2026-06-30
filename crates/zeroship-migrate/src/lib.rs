@@ -217,7 +217,9 @@ pub use model::load::{
 // LiveSchema from the app's descriptor set so an IR `renameColumn` lowers + applies
 // via `rebuild_one` end-to-end.
 pub use command::ir_apply::{
-    apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, SqliteIrApplyError,
+    apply_bundle_ir_postgres, apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog,
+    apply_one_ir_file_postgres, discover_ir_files, postgres_ir_apply_state, IrDiscoveryError,
+    PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState, SqliteIrApplyError,
     SqliteIrApplyOutcome,
 };
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-

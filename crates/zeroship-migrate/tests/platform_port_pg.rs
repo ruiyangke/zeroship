@@ -68,6 +68,34 @@ fn migrations_dir() -> PathBuf {
         .expect("db/migrations exists at repo root")
 }
 
+fn platform_up_migration_versions() -> Vec<u64> {
+    let mut versions: Vec<u64> = std::fs::read_dir(migrations_dir())
+        .expect("read db/migrations")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            if !name.starts_with('V') || !name.ends_with(".sql") || name.ends_with(".down.sql") {
+                return None;
+            }
+            name[1..]
+                .split_once("__")
+                .and_then(|(version, _)| version.parse::<u64>().ok())
+        })
+        .collect();
+    versions.sort_unstable();
+    versions
+}
+
+fn platform_migration_count() -> usize {
+    platform_up_migration_versions().len()
+}
+
+fn latest_platform_migration_version() -> u64 {
+    *platform_up_migration_versions()
+        .last()
+        .expect("db/migrations has at least one up migration")
+}
+
 /// A Platform [`RunConfig`] over the REAL `zeroship` schema with the
 /// `oauth_hydra` + `public` namespaces in the allowlist (so 0027's `CREATE SCHEMA
 /// oauth_hydra` is in-allowlist), and a UNIQUE meta (journal) schema so the journal
@@ -177,6 +205,7 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
     reset(&conn, &meta).await;
 
     let cfg = platform_cfg(&meta, /* yes */ true);
+    let expected_count = platform_migration_count();
 
     // 1. The WHOLE ported set applies with no error under Platform.
     let report = run_migrate(&cfg)
@@ -189,7 +218,10 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         }
         other => panic!("expected Migrate report, got {other:?}"),
     };
-    assert_eq!(applied, 58, "all 58 ported files applied (0045 is a gap)");
+    assert_eq!(
+        applied, expected_count,
+        "all ported db/migrations up files applied"
+    );
 
     // 2. Namespaces (the two the changelog provisions).
     assert!(namespace_exists(&conn, "zeroship").await, "zeroship schema");
@@ -251,10 +283,14 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         other => panic!("expected Migrate report, got {other:?}"),
     }
 
-    // 7. Status: all 58 applied, none pending.
+    // 7. Status: all platform migrations applied, none pending.
     match run_status(&cfg).await.expect("status reads journal") {
         RunReport::Status(status) => {
-            assert_eq!(status.applied.len(), 58, "58 applied");
+            assert_eq!(
+                status.applied.len(),
+                expected_count,
+                "all platform migrations applied"
+            );
             assert!(status.pending.is_empty(), "nothing pending");
         }
         other => panic!("expected Status report, got {other:?}"),
@@ -277,11 +313,10 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
 // untested against the REAL ported `.down.sql` files.
 //
 // This applies the whole ported set, then `run_rollback`'s the SINGLE most-recent
-// platform migration (V0059) via its real `.down.sql` under profile=Platform, and
-// asserts: the `net_ingress_bytes` cost-model row returns to its V0058 weight, the
-// journal reflects the rollback (RunReport::Rollback names V0059; status drops to
-// 57 applied with V0059 pending), and the rolled-back migration RE-APPLIES forward
-// cleanly (the down was faithful).
+// platform migration (currently V0063) via its real `.down.sql` under
+// profile=Platform, and asserts: the latest object is removed, the journal
+// reflects the rollback, and the rolled-back migration RE-APPLIES forward cleanly
+// (the down was faithful).
 //
 // V0059 is a self-contained reversible step: its up makes net_ingress_bytes
 // attribution-only (0 CU weight), and its down restores the former V0058 billable
@@ -302,14 +337,21 @@ async fn ported_set_rolls_back_the_last_platform_migration_via_its_down_sql() {
 
     // Apply the WHOLE ported set forward first (the precondition for a rollback).
     let cfg = platform_cfg(&meta, /* yes */ true);
+    let expected_count = platform_migration_count();
+    let latest_version = latest_platform_migration_version();
     match run_migrate(&cfg).await.expect("ported set applies under Platform") {
         RunReport::Migrate(outcome) => {
-            assert_eq!(outcome.applied.len(), 58, "all 58 ported files applied");
+            assert_eq!(
+                outcome.applied.len(),
+                expected_count,
+                "all ported db/migrations up files applied"
+            );
         }
         other => panic!("expected Migrate report, got {other:?}"),
     }
-    // V0058's objects still exist, and V0059 has zeroed only the net ingress
-    // attribution metric's billable weight.
+    // Earlier platform billing objects still exist, V0059 has zeroed only the net
+    // ingress attribution metric's billable weight, and the current latest table
+    // exists before rollback.
     assert!(
         table_exists(&conn, "zeroship", "app_net_grants").await,
         "V0058 materialized zeroship.app_net_grants"
@@ -323,73 +365,84 @@ async fn ported_set_rolls_back_the_last_platform_migration_via_its_down_sql() {
         Some((0, 10000)),
         "V0059 makes net_ingress_bytes attribution-only"
     );
+    assert!(
+        table_exists(&conn, "zeroship", "oauth_authorization_codes").await,
+        "V0063 materialized zeroship.oauth_authorization_codes"
+    );
 
-    // Roll back exactly the most-recently-applied migration (V0059) via its REAL
+    // Roll back exactly the most-recently-applied migration via its REAL
     // `.down.sql`. `run_rollback(.., None, Some(1))` is the `down` one-step target.
     let report = run_rollback(&cfg, None, Some(1))
         .await
         .expect("the last platform migration rolls back via its .down.sql");
     match report {
         RunReport::Rollback(outcome) => {
-            // V0059 → version 59 → the derived `mig_…` id. Exactly one step undone.
-            let expected = zeroship_migrate::migration_id_for_version(59);
+            let expected = zeroship_migrate::migration_id_for_version(latest_version);
             assert_eq!(
                 outcome.rolled_back,
                 vec![expected.as_str().to_string()],
-                "exactly V0059 was rolled back, via its real .down.sql"
+                "exactly the latest platform migration was rolled back via its real .down.sql"
             );
             assert!(
                 outcome.skipped_irreversible.is_empty(),
-                "V0059 is reversible — nothing force-skipped"
+                "the latest platform migration is reversible — nothing force-skipped"
             );
         }
         other => panic!("expected Rollback report, got {other:?}"),
     }
 
-    // The V0058 tables remain, and V0059's down restored the previous weight.
+    // The V0058 tables and V0059 billing weight remain; V0063's table was removed.
     assert!(
         table_exists(&conn, "zeroship", "app_net_grants").await,
-        "rolling back V0059 leaves zeroship.app_net_grants intact"
+        "rolling back the latest migration leaves zeroship.app_net_grants intact"
     );
     assert!(
         table_exists(&conn, "zeroship", "net_policy_catalog").await,
-        "rolling back V0059 leaves zeroship.net_policy_catalog intact"
+        "rolling back the latest migration leaves zeroship.net_policy_catalog intact"
     );
     assert_eq!(
         metric_weight(&conn, "net_ingress_bytes").await,
-        Some((1, 10000)),
-        "rolling back V0059 restores the V0058 billable net ingress weight"
+        Some((0, 10000)),
+        "rolling back the latest migration leaves V0059's attribution-only weight intact"
+    );
+    assert!(
+        !table_exists(&conn, "zeroship", "oauth_authorization_codes").await,
+        "rolling back V0063 drops zeroship.oauth_authorization_codes"
     );
 
-    // The journal reflects the rollback: 57 applied, V0059 now pending again.
+    // The journal reflects the rollback: one fewer applied, one pending.
     match run_status(&cfg).await.expect("status reads the journal post-rollback") {
         RunReport::Status(status) => {
             assert_eq!(
                 status.applied.len(),
-                57,
-                "the journal shows 57 applied after rolling back V0059"
+                expected_count - 1,
+                "the journal shows one fewer applied after rolling back the latest migration"
             );
             assert_eq!(
                 status.pending.len(),
                 1,
-                "V0059 is the single pending migration after its rollback"
+                "the latest migration is the single pending migration after rollback"
             );
         }
         other => panic!("expected Status report, got {other:?}"),
     }
 
-    // Roll-forward heals: re-applying re-runs ONLY V0059. Proves the ported
-    // down/up pair round-trips.
+    // Roll-forward heals: re-applying re-runs ONLY the latest migration. Proves the
+    // ported down/up pair round-trips.
     match run_migrate(&cfg).await.expect("re-apply heals the rolled-back step") {
         RunReport::Migrate(outcome) => {
-            assert_eq!(outcome.applied.len(), 1, "only V0059 re-applied");
+            assert_eq!(outcome.applied.len(), 1, "only the latest migration re-applied");
         }
         other => panic!("expected Migrate report, got {other:?}"),
     }
     assert_eq!(
         metric_weight(&conn, "net_ingress_bytes").await,
         Some((0, 10000)),
-        "re-applying V0059 makes net_ingress_bytes attribution-only again"
+        "re-applying the latest migration leaves V0059's attribution-only weight intact"
+    );
+    assert!(
+        table_exists(&conn, "zeroship", "oauth_authorization_codes").await,
+        "re-applying V0063 recreates zeroship.oauth_authorization_codes"
     );
 
     // Clean up the journal (leave the schemas; the next run resets them).
