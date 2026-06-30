@@ -852,21 +852,37 @@ echo "  deploy_hash: $DEPLOY_HASH"
 pass "deployed starter .zship through control using a real GoTrue access token"
 
 step "Gateway serves deployed app"
+# The gateway pulls the route registry from control on its --poll-interval (2s),
+# and a cold worker lazily loads the bundle on the first hit — so a freshly
+# deployed app is eventually-consistent at the edge. Poll for up to 90s and key
+# the retry on a CONFIRMED success (index HTML), retrying on any 404/5xx/empty
+# (route not yet propagated / bundle still loading). Capture the last status so
+# a genuine failure is debuggable rather than a bare "404".
 INDEX=""
-for _ in $(seq 1 30); do
-  INDEX="$(curl -sS "$GATE_URL/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" 2>/dev/null || true)"
-  if grep -qi '<!doctype html' <<<"$INDEX"; then
+LAST_CODE=""
+TMP_INDEX="$WORK/gateway-index.html"
+for _ in $(seq 1 90); do
+  LAST_CODE="$(curl -sS -o "$TMP_INDEX" -w '%{http_code}' "$GATE_URL/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" 2>/dev/null || true)"
+  INDEX="$(cat "$TMP_INDEX" 2>/dev/null || true)"
+  if [ "$LAST_CODE" = "200" ] && grep -qi '<!doctype html' <<<"$INDEX"; then
     break
   fi
   sleep 1
 done
-grep -qi '<!doctype html' <<<"$INDEX" || fail "gateway did not serve index.html; got: ${INDEX:0:160}"
+grep -qi '<!doctype html' <<<"$INDEX" \
+  || fail "gateway did not serve index.html after 90s (last HTTP $LAST_CODE; route-propagation/bundle-load); got: ${INDEX:0:160}"
 pass "GET /apps/$APP_NAME/ serves index.html through gateway"
 
 ASSET="$(grep -oE '/assets/[A-Za-z0-9._-]+\.js' <<<"$INDEX" | head -1 || true)"
 if [ -n "$ASSET" ]; then
-  ASSET_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$GATE_URL/apps/$APP_NAME$ASSET" -H "X-Api-Key: $API_KEY" || true)"
-  [ "$ASSET_CODE" = "200" ] || fail "gateway asset $ASSET returned HTTP $ASSET_CODE"
+  # Same eventual-consistency window applies to the asset route — retry for 200.
+  ASSET_CODE=""
+  for _ in $(seq 1 30); do
+    ASSET_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "$GATE_URL/apps/$APP_NAME$ASSET" -H "X-Api-Key: $API_KEY" || true)"
+    [ "$ASSET_CODE" = "200" ] && break
+    sleep 1
+  done
+  [ "$ASSET_CODE" = "200" ] || fail "gateway asset $ASSET returned HTTP $ASSET_CODE after retries"
   pass "gateway serves client JS asset $ASSET"
 fi
 
