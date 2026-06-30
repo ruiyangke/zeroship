@@ -62,6 +62,14 @@ pub struct AuthSection {
     pub hydra_admin_url: Option<String>,
     /// Hydra public issuer/base URL.
     pub hydra_public_url: Option<String>,
+    /// Platform auth provider backend (`hydra` or `supabase`).
+    pub auth_provider: Option<String>,
+    /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
+    pub supabase_url: Option<String>,
+    /// Supabase anon API key used by browser-side GoTrue session calls.
+    pub supabase_anon_key: Option<String>,
+    /// Control-plane base URL used by auth-service browser flows.
+    pub control_url: Option<String>,
     /// First-party OAuth client IDs trusted by the platform.
     ///
     /// `None` (key absent) means "use the compiled-in default set"; `Some(vec)`
@@ -218,6 +226,10 @@ mod tests {
 
         assert!(config.auth.hydra_admin_url.is_none());
         assert!(config.auth.hydra_public_url.is_none());
+        assert!(config.auth.auth_provider.is_none());
+        assert!(config.auth.supabase_url.is_none());
+        assert!(config.auth.supabase_anon_key.is_none());
+        assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert!(config.auth.frame_ancestor_origins.is_none());
         assert!(config.observability.log_filter.is_none());
@@ -258,6 +270,10 @@ frame_ancestor_origins = ["https://console.zeroship.ai", "https://staging-consol
 [auth]
 hydra_admin_url = "http://hydra:4445"
 hydra_public_url = "https://auth.zeroship.ai"
+auth_provider = "supabase"
+supabase_url = "https://project.supabase.test"
+supabase_anon_key = "anon-test-key"
+control_url = "https://control.zeroship.ai"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
 [observability]
@@ -275,6 +291,19 @@ log_format = "json"
         assert_eq!(
             config.auth.hydra_public_url.as_deref(),
             Some("https://auth.zeroship.ai")
+        );
+        assert_eq!(config.auth.auth_provider.as_deref(), Some("supabase"));
+        assert_eq!(
+            config.auth.supabase_url.as_deref(),
+            Some("https://project.supabase.test")
+        );
+        assert_eq!(
+            config.auth.supabase_anon_key.as_deref(),
+            Some("anon-test-key")
+        );
+        assert_eq!(
+            config.auth.control_url.as_deref(),
+            Some("https://control.zeroship.ai")
         );
         assert_eq!(
             config.auth.trusted_oauth_clients.as_deref(),
@@ -333,6 +362,10 @@ rust_log = "debug"
 
         assert!(config.auth.hydra_admin_url.is_none());
         assert!(config.auth.hydra_public_url.is_none());
+        assert!(config.auth.auth_provider.is_none());
+        assert!(config.auth.supabase_url.is_none());
+        assert!(config.auth.supabase_anon_key.is_none());
+        assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert_eq!(config.observability.log_filter.as_deref(), Some("debug"));
     }

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use zeroship_core::config::{
     parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY, DEV_TOTP_ENC_KEY,
 };
@@ -12,6 +12,23 @@ use zeroship_mailer::SmtpTls;
 
 const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
 const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
+const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AuthProviderKind {
+    Hydra,
+    Supabase,
+}
+
+impl AuthProviderKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hydra => "hydra",
+            Self::Supabase => "supabase",
+        }
+    }
+}
 
 #[derive(Clone, Parser)]
 #[command(name = "zeroship-auth")]
@@ -64,6 +81,26 @@ pub struct AuthConfig {
     /// Hydra public base URL (issuer).
     #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
     pub hydra_public_url: Option<String>,
+
+    /// Platform auth provider backend.
+    #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", value_enum)]
+    pub auth_provider: Option<AuthProviderKind>,
+
+    /// Supabase Auth / GoTrue base URL used when `--auth-provider=supabase`.
+    #[arg(long = "supabase-url", env = "SUPABASE_URL")]
+    pub supabase_url: Option<String>,
+
+    /// Supabase anon API key used by the browser-side GoTrue login.
+    #[arg(
+        long = "supabase-anon-key",
+        env = "SUPABASE_ANON_KEY",
+        hide_env_values = true
+    )]
+    pub supabase_anon_key: Option<String>,
+
+    /// Control-plane base URL used by browser-mediated auth flows.
+    #[arg(long = "control-url", env = "CONTROL_URL")]
+    pub control_url: Option<String>,
 
     /// Path to clients config TOML.
     #[arg(long, env = "AUTH_CLIENTS_CONFIG", default_value = "/etc/zeroship/auth-clients.toml")]
@@ -554,6 +591,31 @@ fn is_same_site_with_issuer(origin: &str, issuer_host: &str) -> bool {
     registrable_domain(host) == registrable_domain(issuer_host)
 }
 
+fn parse_auth_provider_overlay(raw: Option<String>) -> Result<Option<AuthProviderKind>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" => Ok(None),
+        "hydra" => Ok(Some(AuthProviderKind::Hydra)),
+        "supabase" => Ok(Some(AuthProviderKind::Supabase)),
+        other => Err(format!(
+            "unknown auth_provider value {other:?}; expected hydra|supabase"
+        )),
+    }
+}
+
+fn resolved_optional_string(cli: Option<String>, file: Option<String>) -> Option<String> {
+    let resolved = resolve_overlay_string(cli, file, None);
+    let trimmed = resolved.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 impl AuthConfig {
     /// Resolve runtime state from the parsed CLI/env + the shared `[auth]`
     /// file overlay.
@@ -567,7 +629,7 @@ impl AuthConfig {
     /// [`DEV_STASH_SIGNING_KEY`] in code (the clap default is empty so no
     /// secret leaks into `--help`); outside dev the empty key is rejected by
     /// `validate_stash_key` before this fallback would matter.
-    pub fn resolve(&mut self, auth: AuthSection) {
+    pub fn try_resolve(&mut self, auth: AuthSection) -> Result<(), String> {
         self.insecure_dev = self.dev_insecure.unwrap_or(false);
         if self.insecure_dev && self.stash_signing_key.is_empty() {
             self.stash_signing_key = DEV_STASH_SIGNING_KEY.to_string();
@@ -620,6 +682,45 @@ impl AuthConfig {
             auth.hydra_public_url,
             Some(DEFAULT_HYDRA_PUBLIC_URL),
         ));
+        let overlay_provider = parse_auth_provider_overlay(auth.auth_provider)?;
+        self.auth_provider = Some(
+            self.auth_provider
+                .or(overlay_provider)
+                .unwrap_or(AuthProviderKind::Hydra),
+        );
+        self.supabase_url = resolved_optional_string(self.supabase_url.take(), auth.supabase_url);
+        self.supabase_anon_key =
+            resolved_optional_string(self.supabase_anon_key.take(), auth.supabase_anon_key);
+        self.control_url = Some(resolve_overlay_string(
+            self.control_url.take(),
+            auth.control_url,
+            Some(DEFAULT_CONTROL_URL),
+        ));
+
+        if self.auth_provider() == AuthProviderKind::Supabase {
+            let mut missing = Vec::new();
+            if self.supabase_url().is_none() {
+                missing.push("SUPABASE_URL / --supabase-url");
+            }
+            if self.supabase_anon_key().is_none() {
+                missing.push("SUPABASE_ANON_KEY / --supabase-anon-key");
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "ZEROSHIP_AUTH_PROVIDER=supabase requires {}",
+                    missing.join(" and ")
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolve runtime state, panicking on invalid config. Existing tests and
+    /// fixtures use this convenience wrapper; real boot uses [`Self::try_resolve`]
+    /// so invalid Supabase config exits cleanly.
+    pub fn resolve(&mut self, auth: AuthSection) {
+        self.try_resolve(auth).expect("resolve auth config");
     }
 
     /// Resolved Hydra admin API base URL.
@@ -636,6 +737,30 @@ impl AuthConfig {
         self.hydra_public_url
             .as_deref()
             .unwrap_or(DEFAULT_HYDRA_PUBLIC_URL)
+    }
+
+    /// Resolved auth-provider backend.
+    #[must_use]
+    pub fn auth_provider(&self) -> AuthProviderKind {
+        self.auth_provider.unwrap_or(AuthProviderKind::Hydra)
+    }
+
+    /// Resolved Supabase Auth / GoTrue base URL.
+    #[must_use]
+    pub fn supabase_url(&self) -> Option<&str> {
+        self.supabase_url.as_deref()
+    }
+
+    /// Resolved Supabase anon API key.
+    #[must_use]
+    pub fn supabase_anon_key(&self) -> Option<&str> {
+        self.supabase_anon_key.as_deref()
+    }
+
+    /// Resolved control-plane base URL.
+    #[must_use]
+    pub fn control_url(&self) -> &str {
+        self.control_url.as_deref().unwrap_or(DEFAULT_CONTROL_URL)
     }
 
     /// External origin of this auth server (no trailing slash). Returns
@@ -657,6 +782,10 @@ impl std::fmt::Debug for AuthConfig {
             .field("db_url", &"<redacted>")
             .field("hydra_admin_url", &self.hydra_admin_url)
             .field("hydra_public_url", &self.hydra_public_url)
+            .field("auth_provider", &self.auth_provider)
+            .field("supabase_url", &self.supabase_url)
+            .field("supabase_anon_key", &"<redacted>")
+            .field("control_url", &self.control_url)
             .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
             .field("clients_config", &self.clients_config)
             .field("bootstrap", &self.bootstrap)
@@ -765,6 +894,89 @@ mod tests {
 
     fn test_config() -> AuthConfig {
         AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"])
+    }
+
+    #[test]
+    fn auth_provider_defaults_to_hydra() {
+        let mut cfg = test_config();
+        cfg.try_resolve(AuthSection::default())
+            .expect("resolve default auth config");
+
+        assert_eq!(cfg.auth_provider(), AuthProviderKind::Hydra);
+        assert_eq!(cfg.hydra_public_url(), DEFAULT_HYDRA_PUBLIC_URL);
+        assert!(cfg.supabase_url().is_none());
+        assert!(cfg.supabase_anon_key().is_none());
+        assert_eq!(cfg.control_url(), DEFAULT_CONTROL_URL);
+    }
+
+    #[test]
+    fn supabase_provider_requires_url_and_anon_key() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--auth-provider",
+            "supabase",
+        ]);
+
+        let err = cfg
+            .try_resolve(AuthSection::default())
+            .expect_err("supabase provider must fail closed without GoTrue config");
+
+        assert!(err.contains("SUPABASE_URL"), "{err}");
+        assert!(err.contains("SUPABASE_ANON_KEY"), "{err}");
+    }
+
+    #[test]
+    fn supabase_provider_resolves_with_required_fields() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--auth-provider",
+            "supabase",
+            "--supabase-url",
+            "https://project.supabase.test",
+            "--supabase-anon-key",
+            "anon-test-key",
+            "--control-url",
+            "https://control.zeroship.test",
+        ]);
+
+        cfg.try_resolve(AuthSection::default())
+            .expect("supabase provider resolves with GoTrue config");
+
+        assert_eq!(cfg.auth_provider(), AuthProviderKind::Supabase);
+        assert_eq!(cfg.supabase_url(), Some("https://project.supabase.test"));
+        assert_eq!(cfg.supabase_anon_key(), Some("anon-test-key"));
+        assert_eq!(cfg.control_url(), "https://control.zeroship.test");
+    }
+
+    #[test]
+    fn auth_file_overlay_supplies_supabase_device_config_when_unset() {
+        let file = TempFile::write(
+            "auth-supabase-overlay.toml",
+            r#"
+[auth]
+auth_provider = "supabase"
+supabase_url = "https://project.supabase.test"
+supabase_anon_key = "anon-file-key"
+control_url = "https://control-file.zeroship.test"
+"#,
+        );
+
+        let cfg = resolve_from_file(AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--config",
+            file.path.to_str().expect("utf-8 temp path"),
+        ]));
+
+        assert_eq!(cfg.auth_provider(), AuthProviderKind::Supabase);
+        assert_eq!(cfg.supabase_url(), Some("https://project.supabase.test"));
+        assert_eq!(cfg.supabase_anon_key(), Some("anon-file-key"));
+        assert_eq!(cfg.control_url(), "https://control-file.zeroship.test");
     }
 
     // The stash validator now lives in `zeroship_core::config`; these tests

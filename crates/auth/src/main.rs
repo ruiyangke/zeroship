@@ -41,7 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // this `.clone()` of `.secrets` is a small defensive snapshot for clarity.
     let file_secrets = boot.overlay.config.secrets.clone();
     let file = &boot.overlay.config;
-    cfg.resolve(file.auth.clone());
+    if let Err(message) = cfg.try_resolve(file.auth.clone()) {
+        tracing::error!("{message}");
+        std::process::exit(1);
+    }
 
     // Resolve secret-reference inputs (urn:zeroship:env|file|vault, arn:…) before
     // any guard or use. On real boot we resolve to the literal value (env/file
@@ -115,6 +118,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field(
             "hydra_public_url",
             CheckValue::Plain(cfg.hydra_public_url().to_string()),
+        );
+        report.field(
+            "auth_provider",
+            CheckValue::Plain(cfg.auth_provider().as_str().to_string()),
+        );
+        report.field(
+            "supabase_url",
+            CheckValue::Plain(cfg.supabase_url().unwrap_or("").to_string()),
+        );
+        report.field(
+            "supabase_anon_key_configured",
+            CheckValue::Secret(cfg.supabase_anon_key().is_some()),
+        );
+        report.field(
+            "control_url",
+            CheckValue::Plain(cfg.control_url().to_string()),
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field(

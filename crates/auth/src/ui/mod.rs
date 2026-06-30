@@ -202,6 +202,20 @@ pub struct DevicePage<'a> {
     pub csrf: &'a str,
 }
 
+/// `/device` page for the Supabase platform-mediated device flow. The browser
+/// signs into GoTrue, then approves the pending device grant through control.
+#[derive(Debug, Template)]
+#[template(path = "device_supabase.html")]
+pub struct SupabaseDevicePage<'a> {
+    pub user_code: &'a str,
+    pub error: Option<&'a str>,
+    pub csrf: &'a str,
+    pub script_nonce: &'a str,
+    pub supabase_auth_url_json: &'a str,
+    pub supabase_anon_key_json: &'a str,
+    pub control_approve_url_json: &'a str,
+}
+
 /// `/verify` GET page (P5-U5) — shown after a successful email-verification
 /// token redeem. Pure confirmation; no follow-up action required.
 #[derive(Debug, Template)]

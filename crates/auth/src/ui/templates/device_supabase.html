@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Authorize device · zeroship{% endblock %}
+{% block body %}
+<h2>Authorize device</h2>
+{% if let Some(err) = error %}
+  <div class="error">{{ err }}</div>
+{% endif %}
+<form id="device-approve-form" method="POST" action="/device">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label>Device code
+    <input type="text" name="user_code" value="{{ user_code }}" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required autofocus>
+  </label>
+  <label>Email
+    <input type="email" name="email" autocomplete="email" required>
+  </label>
+  <label>Password
+    <input type="password" name="password" autocomplete="current-password" required>
+  </label>
+  <button type="submit">Authorize</button>
+</form>
+<p id="device-approve-status" role="status" aria-live="polite"></p>
+<script nonce="{{ script_nonce }}">
+(() => {
+  const supabaseAuthUrl = {{ supabase_auth_url_json|safe }};
+  const supabaseAnonKey = {{ supabase_anon_key_json|safe }};
+  const controlApproveUrl = {{ control_approve_url_json|safe }};
+  const form = document.getElementById("device-approve-form");
+  const status = document.getElementById("device-approve-status");
+  const setStatus = (message, error) => {
+    status.textContent = message;
+    status.className = error ? "error" : "";
+  };
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const userCode = String(data.get("user_code") || "").trim();
+    const email = String(data.get("email") || "").trim();
+    const password = String(data.get("password") || "");
+    const csrf = String(data.get("csrf") || "");
+
+    if (!userCode || !email || !password || !csrf) {
+      setStatus("missing required fields", true);
+      return;
+    }
+
+    form.querySelector("button").disabled = true;
+    setStatus("Signing in...", false);
+
+    try {
+      const login = await fetch(`${supabaseAuthUrl}/token?grant_type=password`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "apikey": supabaseAnonKey
+        },
+        body: JSON.stringify({ email, password })
+      });
+      const session = await login.json().catch(() => ({}));
+      if (!login.ok) {
+        throw new Error(session.error_description || session.msg || "GoTrue sign-in failed");
+      }
+      if (!session.access_token || !session.refresh_token) {
+        throw new Error("GoTrue response did not include a session");
+      }
+
+      setStatus("Approving device...", false);
+      const approve = await fetch(controlApproveUrl, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+          "authorization": `Bearer ${session.access_token}`,
+          "x-zeroship-csrf": csrf
+        },
+        body: JSON.stringify({
+          user_code: userCode,
+          refresh_token: session.refresh_token,
+          csrf
+        })
+      });
+      const approved = await approve.json().catch(() => ({}));
+      if (!approve.ok) {
+        throw new Error(approved.error || "device approval failed");
+      }
+      form.reset();
+      setStatus("Device approved. You can return to the CLI.", false);
+    } catch (err) {
+      setStatus(err && err.message ? err.message : "device approval failed", true);
+      form.querySelector("button").disabled = false;
+    }
+  });
+})();
+</script>
+{% endblock %}
