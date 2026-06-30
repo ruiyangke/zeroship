@@ -35,7 +35,12 @@ use crate::error::AuthError;
 use crate::hydra_client::HydraAdmin;
 use crate::hydra_client::types::{
     AcceptConsentRequest, ConsentRequest, ConsentSession, RejectRequest,
+    OAuth2Client,
 };
+use crate::op::authorization_code::persist_consent_grant;
+use crate::return_to;
+use crate::sessions::login as session_cookie;
+use crate::store::sessions as session_store;
 use crate::store::users;
 use crate::ui::{ConsentPage, ConsentScopeView, PublicErrorMessage};
 
@@ -56,19 +61,25 @@ const RESERVED_DELEGATED_PREFIXES: &[&str] = &["platform:", "org:"];
 
 #[derive(Debug, Deserialize)]
 pub struct ConsentQuery {
-    pub consent_challenge: String,
+    pub consent_challenge: Option<String>,
+    pub return_to: Option<String>,
 }
 
 // ntex's per-thread service futures are intentionally `!Send`.
 #[allow(clippy::future_not_send)]
 pub async fn get_consent(
+    req: HttpRequest,
     query: ntex::web::types::Query<ConsentQuery>,
     admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let challenge = &query.consent_challenge;
+    let query = query.into_inner();
+    let Some(challenge) = query.consent_challenge.as_deref() else {
+        return get_consent_native(req, query.return_to.as_deref(), cfg.as_ref(), db.as_ref()).await;
+    };
 
+    // P5: delete (Hydra arm).
     let info = match admin.get_consent(challenge).await {
         Ok(i) => i,
         Err(e) => {
@@ -167,8 +178,65 @@ pub async fn get_consent(
         return reject_consent_invalid_scope(&admin, challenge, &info, db.as_ref()).await;
     }
 
-    render_consent_page(challenge, &info, db.as_ref(), &cfg, classified.can_grant, &app_scope_defs)
+    render_consent_page(challenge, None, &info, db.as_ref(), cfg.as_ref(), classified.can_grant, &app_scope_defs)
         .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn get_consent_native(
+    req: HttpRequest,
+    raw_return_to: Option<&str>,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+) -> HttpResponse {
+    let return_to = return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
+    let session = match resolve_native_session(&req, cfg, db).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            let location = return_to::login_location(&return_to::request_target(&req));
+            return return_to::see_other(&location)
+                .header("cache-control", "no-store")
+                .finish();
+        }
+        Err(resp) => return resp,
+    };
+
+    let ctx = match load_native_consent_context(db, &return_to).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            tracing::warn!(error = %err, "native consent request invalid");
+            return render_error(PublicErrorMessage::InvalidRequest);
+        }
+    };
+    let info = native_consent_request(&ctx, session.user_id);
+    let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
+        Ok(defs) => defs,
+        Err(e) => {
+            tracing::error!(error = %e, client_id = %ctx.client.client_id, "native consent app scope defs lookup failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    let classified = match classify_and_authorize(db, &info, &app_scope_defs).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, client_id = %ctx.client.client_id, "native consent grant authorization failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    if classified.has_unknown {
+        return oauth_error_redirect(&ctx, "invalid_scope");
+    }
+
+    render_consent_page(
+        &return_to,
+        Some(&return_to),
+        &info,
+        db,
+        cfg,
+        classified.can_grant,
+        &app_scope_defs,
+    )
+    .await
 }
 
 // ─── POST /consent/accept and /consent/deny ──────────────────────────────
@@ -176,7 +244,8 @@ pub async fn get_consent(
 #[derive(Debug, Deserialize)]
 pub struct ConsentDecisionForm {
     pub csrf: Option<String>,
-    pub consent_challenge: String,
+    pub consent_challenge: Option<String>,
+    pub return_to: Option<String>,
     /// HTML form checkbox: `Some("on")` when ticked, `None` when not.
     #[serde(default)]
     pub remember: Option<String>,
@@ -193,11 +262,16 @@ pub async fn post_consent_accept(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if !csrf_valid(&req, &form, &cfg) {
+    let form = form.into_inner();
+    if !csrf_valid(&req, &form, cfg.as_ref()) {
         return render_error_forbidden(PublicErrorMessage::InvalidRequest);
     }
 
-    let challenge = form.consent_challenge.as_str();
+    let Some(challenge) = form.consent_challenge.as_deref() else {
+        return post_consent_accept_native(req, &form, cfg.as_ref(), db.as_ref()).await;
+    };
+
+    // P5: delete (Hydra arm).
     let info = match admin.get_consent(challenge).await {
         Ok(i) => i,
         Err(e) => {
@@ -226,9 +300,10 @@ pub async fn post_consent_accept(
         Ok(_) => {
             return render_consent_page(
                 challenge,
+                None,
                 &info,
                 db.as_ref(),
-                &cfg,
+                cfg.as_ref(),
                 false,
                 &app_scope_defs,
             )
@@ -366,6 +441,136 @@ pub async fn post_consent_accept(
     redirect(&redirect_to)
 }
 
+#[allow(clippy::future_not_send)]
+async fn post_consent_accept_native(
+    req: HttpRequest,
+    form: &ConsentDecisionForm,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+) -> HttpResponse {
+    let return_to = return_to::sanitize(form.return_to.as_deref(), return_to::SAFE_DEFAULT);
+    let session = match resolve_native_session(&req, cfg, db).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            let consent_path = return_to::consent_location(&return_to);
+            let location = return_to::login_location(&consent_path);
+            return return_to::see_other(&location)
+                .header("cache-control", "no-store")
+                .finish();
+        }
+        Err(resp) => return resp,
+    };
+    let ctx = match load_native_consent_context(db, &return_to).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            tracing::warn!(error = %err, "POST /consent/accept native request invalid");
+            return render_error(PublicErrorMessage::InvalidRequest);
+        }
+    };
+    let info = native_consent_request(&ctx, session.user_id);
+    let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
+        Ok(defs) => defs,
+        Err(e) => {
+            tracing::error!(error = %e, client_id = %ctx.client.client_id, "POST /consent/accept native app scope defs lookup failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    match classify_and_authorize(db, &info, &app_scope_defs).await {
+        Ok(c) if c.has_unknown => return oauth_error_redirect(&ctx, "invalid_scope"),
+        Ok(c) if c.can_grant => {}
+        Ok(_) => {
+            return render_consent_page(
+                &return_to,
+                Some(&return_to),
+                &info,
+                db,
+                cfg,
+                false,
+                &app_scope_defs,
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, client_id = %ctx.client.client_id, "POST /consent/accept native authorization failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    }
+
+    let requested_scopes = sort_dedup_scopes(&ctx.requested_scope);
+    let lock_conn = match open_dedicated_auth_pg(&cfg.db_url).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::error!(error = %e, client_id = %ctx.client.client_id, "native oauth grant lock connection failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+    let lock_key = oauth_grant_lock_key(&session.user_id, &ctx.client.client_id);
+    let cumulative_scopes = match with_advisory_lock(&lock_conn, lock_key, || async {
+        let cumulative = persist_consent_grant(
+            &lock_conn,
+            session.user_id,
+            &ctx.client.client_id,
+            &requested_scopes,
+        )
+        .await
+        .map_err(AuthError::Db)?;
+
+        if cumulative.iter().any(|s| s == "email")
+            && app_id_from_client_id(&ctx.client.client_id).is_some()
+        {
+            match crate::store::relay::mint_alias_at_consent(
+                &lock_conn,
+                &ctx.client.client_id,
+                session.user_id,
+                &cfg.relay_domain,
+            )
+            .await
+            {
+                Ok(Some(alias)) => {
+                    tracing::debug!(client_id = %ctx.client.client_id, alias = %alias, "relay alias minted at native consent");
+                }
+                Ok(None) => {
+                    tracing::debug!(client_id = %ctx.client.client_id, "relay alias deferred to gateway lazy-mint (identity row not yet projected)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, client_id = %ctx.client.client_id, "relay alias mint failed at native consent (non-fatal)");
+                }
+            }
+        }
+
+        Ok(cumulative)
+    })
+    .await
+    {
+        Ok(scopes) => scopes,
+        Err(e) => {
+            tracing::error!(error = %e, client_id = %ctx.client.client_id, "POST /consent/accept native locked grant mutation failed");
+            return render_error(PublicErrorMessage::ContactSupport);
+        }
+    };
+
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "consent_accept",
+            outcome: "success",
+            user_id: Some(&session.user_id),
+            client_id: Some(&ctx.client.client_id),
+            auth_method: Some("consent"),
+            detail: json!({
+                "requested_scopes": requested_scopes,
+                "granted_scopes": cumulative_scopes,
+            }),
+            ..AuditEvent::from_request(&req)
+        },
+    )
+    .await;
+
+    return_to::see_other(&return_to)
+        .header("cache-control", "no-store")
+        .finish()
+}
+
 /// `/consent/deny` POST — validates CSRF, re-fetches the hydra challenge, and
 /// PUTs hydra-admin `/consent/reject`.
 #[allow(clippy::future_not_send)]
@@ -376,11 +581,16 @@ pub async fn post_consent_deny(
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    if !csrf_valid(&req, &form, &cfg) {
+    let form = form.into_inner();
+    if !csrf_valid(&req, &form, cfg.as_ref()) {
         return render_error_forbidden(PublicErrorMessage::InvalidRequest);
     }
 
-    let challenge = form.consent_challenge.as_str();
+    let Some(challenge) = form.consent_challenge.as_deref() else {
+        return post_consent_deny_native(req, &form, cfg.as_ref(), db.as_ref()).await;
+    };
+
+    // P5: delete (Hydra arm).
     let info = match admin.get_consent(challenge).await {
         Ok(info) => info,
         Err(e) => {
@@ -421,6 +631,46 @@ pub async fn post_consent_deny(
     }
 }
 
+#[allow(clippy::future_not_send)]
+async fn post_consent_deny_native(
+    req: HttpRequest,
+    form: &ConsentDecisionForm,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+) -> HttpResponse {
+    let return_to = return_to::sanitize(form.return_to.as_deref(), return_to::SAFE_DEFAULT);
+    let ctx = match load_native_consent_context(db, &return_to).await {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            tracing::warn!(error = %err, "POST /consent/deny native request invalid");
+            return render_error(PublicErrorMessage::InvalidRequest);
+        }
+    };
+    let subject = resolve_native_session(&req, cfg, db)
+        .await
+        .ok()
+        .flatten()
+        .map(|session| session.user_id);
+
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "consent_deny",
+            outcome: "success",
+            user_id: subject.as_ref(),
+            client_id: Some(&ctx.client.client_id),
+            auth_method: Some("consent"),
+            detail: json!({
+                "requested_scopes": sort_dedup_scopes(&ctx.requested_scope),
+            }),
+            ..AuditEvent::from_request(&req)
+        },
+    )
+    .await;
+
+    oauth_error_redirect(&ctx, "access_denied")
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────
 
 async fn open_dedicated_auth_pg(db_url: &str) -> crate::error::Result<compio_postgres::Client> {
@@ -434,6 +684,178 @@ async fn open_dedicated_auth_pg(db_url: &str) -> crate::error::Result<compio_pos
     })
     .detach();
     Ok(client)
+}
+
+#[derive(Clone, Debug)]
+struct NativeOAuthClient {
+    client_id: String,
+    client_name: String,
+    redirect_uris: Vec<String>,
+    scopes: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct NativeConsentContext {
+    return_to: String,
+    client: NativeOAuthClient,
+    redirect_uri: String,
+    requested_scope: Vec<String>,
+    state: Option<String>,
+}
+
+async fn load_native_consent_context(
+    db: &compio_postgres::Client,
+    return_to: &str,
+) -> Result<NativeConsentContext, String> {
+    let Some(return_to) = return_to::valid_path(return_to) else {
+        return Err("return_to is not a same-origin path".into());
+    };
+    let parsed = url::Url::parse(&format!("http://zeroship.local{return_to}"))
+        .map_err(|err| format!("return_to parse: {err}"))?;
+    if parsed.path() != "/authorize" {
+        return Err("return_to must target /authorize".into());
+    }
+    let mut client_id = None;
+    let mut redirect_uri = None;
+    let mut scope = None;
+    let mut state = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "client_id" => client_id = Some(value.into_owned()),
+            "redirect_uri" => redirect_uri = Some(value.into_owned()),
+            "scope" => scope = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    let client_id = client_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing client_id".to_string())?;
+    let redirect_uri = redirect_uri
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing redirect_uri".to_string())?;
+    let requested_scope = sort_dedup_scopes(
+        &scope
+            .unwrap_or_default()
+            .split_ascii_whitespace()
+            .filter(|scope| !scope.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+    );
+    let client = load_native_oauth_client(db, &client_id).await?;
+    if !client.redirect_uris.iter().any(|registered| registered == &redirect_uri) {
+        return Err("redirect_uri is not registered".into());
+    }
+    if !scopes_are_subset(&requested_scope, &client.scopes) {
+        return Err("scope is not allowed for client".into());
+    }
+    Ok(NativeConsentContext {
+        return_to: return_to.to_string(),
+        client,
+        redirect_uri,
+        requested_scope,
+        state: state.filter(|value| !value.is_empty()),
+    })
+}
+
+async fn load_native_oauth_client(
+    db: &compio_postgres::Client,
+    client_id: &str,
+) -> Result<NativeOAuthClient, String> {
+    let rows = db
+        .query(
+            "SELECT client_id, client_name, redirect_uris, scopes \
+             FROM zeroship.oauth_clients \
+             WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .map_err(|err| format!("oauth client lookup failed: {err}"))?;
+    let Some(row) = rows.first() else {
+        return Err("unknown client".into());
+    };
+    Ok(NativeOAuthClient {
+        client_id: row.get("client_id"),
+        client_name: row.get("client_name"),
+        redirect_uris: row.get("redirect_uris"),
+        scopes: sort_dedup_scopes(&row.get::<_, Vec<String>>("scopes")),
+    })
+}
+
+fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> ConsentRequest {
+    ConsentRequest {
+        challenge: ctx.return_to.clone(),
+        skip: false,
+        subject: subject.to_string(),
+        client: OAuth2Client {
+            client_id: ctx.client.client_id.clone(),
+            client_name: Some(ctx.client.client_name.clone()),
+            client_secret: None,
+            grant_types: vec!["authorization_code".into()],
+            response_types: vec!["code".into()],
+            redirect_uris: ctx.client.redirect_uris.clone(),
+            post_logout_redirect_uris: vec![],
+            scope: ctx.client.scopes.join(" "),
+            token_endpoint_auth_method: "none".into(),
+            subject_type: "public".into(),
+            access_token_strategy: None,
+            id_token_signed_response_alg: Some("EdDSA".into()),
+            audience: vec![],
+            skip_consent: false,
+            require_consent: true,
+            require_logout_consent: false,
+            frontchannel_logout_uri: None,
+            backchannel_logout_uri: None,
+        },
+        requested_scope: ctx.requested_scope.clone(),
+        requested_access_token_audience: vec![],
+        login_session_id: None,
+        context: None,
+        oidc_context: None,
+        request_url: ctx.return_to.clone(),
+    }
+}
+
+fn oauth_error_redirect(ctx: &NativeConsentContext, error: &str) -> HttpResponse {
+    let mut url = match url::Url::parse(&ctx.redirect_uri) {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::warn!(error = %err, redirect_uri = %ctx.redirect_uri, "native consent redirect_uri parse failed after registry validation");
+            return render_error(PublicErrorMessage::InvalidRequest);
+        }
+    };
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("error", error);
+        if let Some(state) = ctx.state.as_deref() {
+            query.append_pair("state", state);
+        }
+    }
+    return_to::see_other(url.as_str())
+        .header("cache-control", "no-store")
+        .finish()
+}
+
+#[allow(clippy::future_not_send)]
+async fn resolve_native_session(
+    req: &HttpRequest,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+) -> Result<Option<session_store::Session>, HttpResponse> {
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let Some(session_id) = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev) else {
+        return Ok(None);
+    };
+    session_store::validate(db, session_id).await.map_err(|err| {
+        tracing::error!(error = %err, "native consent session validation failed");
+        render_error(PublicErrorMessage::ContactSupport)
+    })
 }
 
 fn consent_subject_uuid(info: &ConsentRequest) -> Result<Uuid, String> {
@@ -615,6 +1037,7 @@ async fn revoke_hydra_consent_sessions(admin: &HydraAdmin, subject: Uuid, client
 #[allow(clippy::future_not_send)]
 async fn render_consent_page(
     challenge: &str,
+    return_to: Option<&str>,
     info: &ConsentRequest,
     db: &compio_postgres::Client,
     cfg: &AuthConfig,
@@ -625,6 +1048,7 @@ async fn render_consent_page(
     let client = load_client_display(db, info).await;
     let page = ConsentPage {
         challenge,
+        return_to: return_to.unwrap_or(""),
         csrf: &csrf_token,
         client_id: &info.client.client_id,
         client_name: &client.name,
@@ -632,6 +1056,7 @@ async fn render_consent_page(
         scopes: scope_views(&info.requested_scope, app_scope_defs),
         can_grant,
         grant_error: (!can_grant).then_some(CANNOT_GRANT),
+        is_hydra: return_to.is_none(),
     };
     let body = match page.render() {
         Ok(b) => b,

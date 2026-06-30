@@ -366,6 +366,22 @@ async fn seed_user_client(
     )
     .await
     .expect("seed app oauth client");
+    db.execute(
+        "INSERT INTO zeroship.oauth_grants \
+             (user_id, client_id, granted_scopes, granted_at, updated_at) \
+         VALUES ($1, $2, $3, NOW(), NOW())",
+        &[
+            &user_id,
+            &client_id,
+            &vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
+        ],
+    )
+    .await
+    .expect("seed oauth grant");
 }
 
 async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {

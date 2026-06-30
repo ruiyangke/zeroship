@@ -109,7 +109,7 @@ async fn challenge_stash_binds_user_and_credential_version() {
     let decoded = TotpChallenge::decode(&cookie, signing_key).expect("decode");
     assert_eq!(decoded.user_id, user.id);
     assert_eq!(decoded.credential_version, cv);
-    assert_eq!(decoded.login_challenge, "lc-xyz");
+    assert_eq!(decoded.return_to, "lc-xyz");
 
     // Bump credential_version (a password reset does this). The cookie's
     // captured version no longer matches the live row → `post_2fa` rejects it.

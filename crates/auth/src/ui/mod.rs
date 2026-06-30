@@ -42,11 +42,13 @@ use crate::{csrf, headers};
 #[template(path = "login.html")]
 pub struct LoginPage<'a> {
     pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
     pub client_name: &'a str,
     pub google_enabled: bool,
     pub github_enabled: bool,
+    pub is_hydra: bool,
 }
 
 /// `/login/2fa` challenge page (ISS-11). Rendered after a successful password
@@ -57,8 +59,10 @@ pub struct LoginPage<'a> {
 #[template(path = "totp_challenge.html")]
 pub struct TotpChallengePage<'a> {
     pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
+    pub is_hydra: bool,
 }
 
 /// `/signup` GET page. Same `login_challenge` carries through so that
@@ -133,6 +137,7 @@ pub struct LinkPage<'a> {
 #[template(path = "consent.html")]
 pub struct ConsentPage<'a> {
     pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub client_id: &'a str,
     pub client_name: &'a str,
@@ -140,6 +145,7 @@ pub struct ConsentPage<'a> {
     pub scopes: Vec<ConsentScopeView>,
     pub can_grant: bool,
     pub grant_error: Option<&'a str>,
+    pub is_hydra: bool,
 }
 
 #[derive(Debug)]
