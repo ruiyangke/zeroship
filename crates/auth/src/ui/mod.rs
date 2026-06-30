@@ -13,6 +13,7 @@ pub mod account_deletion;
 pub mod consent;
 pub mod device;
 pub mod forgot;
+pub mod gotrue_email_hook;
 pub mod link;
 pub mod login;
 pub mod logout;

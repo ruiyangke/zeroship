@@ -53,6 +53,24 @@ pub struct MagicLinkText<'a> {
     pub requesting_location: &'a str,
 }
 
+// ─── invite ──────────────────────────────────────────────────
+
+#[derive(Template, Debug)]
+#[template(path = "invite.html")]
+pub struct InviteHtml<'a> {
+    pub name: &'a str,
+    pub link: &'a str,
+    pub expires_in: &'a str,
+}
+
+#[derive(Template, Debug)]
+#[template(path = "invite.txt")]
+pub struct InviteText<'a> {
+    pub name: &'a str,
+    pub link: &'a str,
+    pub expires_in: &'a str,
+}
+
 // ─── password-reset ──────────────────────────────────────────
 
 #[derive(Template, Debug)]
@@ -68,6 +86,44 @@ pub struct PasswordResetHtml<'a> {
 pub struct PasswordResetText<'a> {
     pub name: &'a str,
     pub link: &'a str,
+    pub expires_in: &'a str,
+}
+
+// ─── email-change ────────────────────────────────────────────
+
+#[derive(Template, Debug)]
+#[template(path = "email_change.html")]
+pub struct EmailChangeHtml<'a> {
+    pub name: &'a str,
+    pub new_email: &'a str,
+    pub link: &'a str,
+    pub expires_in: &'a str,
+}
+
+#[derive(Template, Debug)]
+#[template(path = "email_change.txt")]
+pub struct EmailChangeText<'a> {
+    pub name: &'a str,
+    pub new_email: &'a str,
+    pub link: &'a str,
+    pub expires_in: &'a str,
+}
+
+// ─── reauthentication ────────────────────────────────────────
+
+#[derive(Template, Debug)]
+#[template(path = "reauthentication.html")]
+pub struct ReauthenticationHtml<'a> {
+    pub name: &'a str,
+    pub token: &'a str,
+    pub expires_in: &'a str,
+}
+
+#[derive(Template, Debug)]
+#[template(path = "reauthentication.txt")]
+pub struct ReauthenticationText<'a> {
+    pub name: &'a str,
+    pub token: &'a str,
     pub expires_in: &'a str,
 }
 
@@ -189,6 +245,47 @@ mod tests {
         .expect("render");
         assert!(html.contains("Carol"));
         assert!(html.contains("Reset password"));
+    }
+
+    #[test]
+    fn renders_invite() {
+        let text = InviteText {
+            name: "Ivy",
+            link: "https://auth.zeroship.ai/auth/v1/verify?token=invite",
+            expires_in: "24 hours",
+        }
+        .render()
+        .expect("render");
+        assert!(text.contains("Ivy"));
+        assert!(text.contains("invite"));
+    }
+
+    #[test]
+    fn renders_email_change() {
+        let html = EmailChangeHtml {
+            name: "Erin",
+            new_email: "new@example.com",
+            link: "https://auth.zeroship.ai/auth/v1/verify?token=change",
+            expires_in: "24 hours",
+        }
+        .render()
+        .expect("render");
+        assert!(html.contains("Erin"));
+        assert!(html.contains("new@example.com"));
+        assert!(html.contains("Confirm email change"));
+    }
+
+    #[test]
+    fn renders_reauthentication() {
+        let text = ReauthenticationText {
+            name: "Rae",
+            token: "123456",
+            expires_in: "10 minutes",
+        }
+        .render()
+        .expect("render");
+        assert!(text.contains("123456"));
+        assert!(text.contains("10 minutes"));
     }
 
     #[test]

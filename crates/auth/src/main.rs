@@ -132,6 +132,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CheckValue::Secret(cfg.supabase_anon_key().is_some()),
         );
         report.field(
+            "gotrue_email_hook_secret_configured",
+            CheckValue::Secret(cfg.gotrue_email_hook_secret.is_some()),
+        );
+        report.field(
             "control_url",
             CheckValue::Plain(cfg.control_url().to_string()),
         );
@@ -311,6 +315,12 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
         "AUTH_RESEND_API_KEY / --resend-api-key",
         cfg.resend_api_key.as_deref(),
         file_secrets.resend_api_key.as_deref(),
+    );
+    cfg.gotrue_email_hook_secret = resolve_optional(
+        check,
+        "AUTH_GOTRUE_EMAIL_HOOK_SECRET / --gotrue-email-hook-secret",
+        cfg.gotrue_email_hook_secret.as_deref(),
+        None,
     );
     cfg.postmark_webhook_password = resolve_optional(
         check,

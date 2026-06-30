@@ -200,6 +200,14 @@ pub fn configure(
                 web::resource("/webhooks/ses-sns")
                     .route(web::post().to(ui::webhooks::ses_sns)),
             )
+            // GoTrue Send Email hook. Server-to-server Standard-Webhooks HMAC
+            // auth, so this route is deliberately outside the browser CSRF
+            // form flow. When GoTrue enables this hook it fully bypasses its
+            // own SMTP path; the handler sends through zeroship_mailer.
+            .service(
+                web::resource("/hooks/gotrue/send-email")
+                    .route(web::post().to(ui::gotrue_email_hook::send_email)),
+            )
             // Relay inbound webhook (Slice 5b). The Postmark Inbound server
             // POSTs parsed-JSON mail sent to `{alias}@{relay_domain}`; the
             // handler resolves the alias → real inbox and re-originates the

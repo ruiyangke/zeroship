@@ -1,0 +1,8 @@
+Hi {{ name }},
+
+You have been invited to create a zeroship account.
+The link expires in {{ expires_in }}.
+
+{{ link }}
+
+If you were not expecting this invitation, you can ignore this email.

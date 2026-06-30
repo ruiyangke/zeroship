@@ -113,6 +113,7 @@ async fn backfill_does_not_promote_delegated_lone_editor_but_does_repair_self_me
     let app_self_name = format!("backfill-self-{app_self}");
     let key_d = format!("k-{app_delegated}");
     let key_s = format!("k-{app_self}");
+    let plan_id = format!("backfill-plan-{app_delegated}");
 
     let seed = async {
         client
@@ -133,9 +134,19 @@ async fn backfill_does_not_promote_delegated_lone_editor_but_does_repair_self_me
             .await?;
         client
             .execute(
-                "INSERT INTO zeroship.apps (id, name, api_key) VALUES \
-                 ($1, $3, $5), \
-                 ($2, $4, $6)",
+                "INSERT INTO zeroship.plans \
+                     (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
+                      runtime_limits_json) \
+                 VALUES ($1, 'Backfill Test Plan', 0, 0, 0, \
+                         '{\"cpu_ms\":1000,\"wall_ms\":5000,\"memory_mb\":128,\"concurrency\":10}'::jsonb)",
+                &[&plan_id],
+            )
+            .await?;
+        client
+            .execute(
+                "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES \
+                 ($1, $3, $7, $5), \
+                 ($2, $4, $7, $6)",
                 &[
                     &app_delegated,
                     &app_self,
@@ -143,6 +154,7 @@ async fn backfill_does_not_promote_delegated_lone_editor_but_does_repair_self_me
                     &app_self_name,
                     &key_d,
                     &key_s,
+                    &plan_id,
                 ],
             )
             .await?;

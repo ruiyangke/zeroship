@@ -291,11 +291,11 @@ async fn password_login_rejects_locked_user_without_session() {
         .set_payload(body)
         .to_request();
     let post_resp = test::call_service(&app, post_req).await;
-    assert_eq!(post_resp.status().as_u16(), 403);
+    assert_eq!(post_resp.status().as_u16(), 401);
     let body = String::from_utf8(test::read_body(post_resp).await.to_vec()).expect("utf8 body");
     assert!(
-        body.contains("account temporarily locked"),
-        "locked password login must render the generic locked error; body={body}"
+        body.contains("invalid email or password"),
+        "locked password login must render the generic invalid-credentials error; body={body}"
     );
 
     let state = hydra_state.lock().expect("lock hydra state");
