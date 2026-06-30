@@ -25,7 +25,17 @@ CONTROL_PG_CONTAINER="$RUN_ID-control-pg"
 GOTRUE_PG_CONTAINER="$RUN_ID-gotrue-pg"
 GOTRUE_CONTAINER="$RUN_ID-gotrue"
 
+SUPABASE_E2E_MODE="${SUPABASE_E2E_MODE:-hs256}"
+SUPABASE_E2E_MODE="${SUPABASE_E2E_MODE,,}"
+case "$SUPABASE_E2E_MODE" in
+  hs256|jwks) ;;
+  *) echo "SUPABASE_E2E_MODE must be hs256 or jwks, got: $SUPABASE_E2E_MODE" >&2; exit 1 ;;
+esac
+
 JWT_SECRET="${SUPABASE_E2E_JWT_SECRET:-zs-supabase-e2e-jwt-secret-at-least-32-bytes}"
+SUPABASE_JWT_KID="${SUPABASE_E2E_JWT_KID:-zs-supabase-e2e-rs256}"
+SUPABASE_JWT_PRIVATE_JWK=""
+GOTRUE_JWT_KEYS=""
 CONTROL_KEY="${CONTROL_KEY:-supabase-e2e-control-key}"
 WORKER_KEY="${WORKER_KEY:-supabase-e2e-worker-key-0123456789abcdef}"
 MASTER_KEY="${MASTER_KEY:-supabase-e2e-master-key-0123456789abcdef}"
@@ -105,6 +115,7 @@ GATE_URL="http://localhost:$GATE_PORT"
 SUPABASE_URL="http://localhost:$GOTRUE_PROXY_PORT"
 GOTRUE_URL="$SUPABASE_URL/auth/v1"
 SUPABASE_ISSUER="$SUPABASE_URL/auth/v1"
+SUPABASE_JWKS_URL="$GOTRUE_URL/.well-known/jwks.json"
 CONTROL_DB_URL="postgres://postgres:zeroship@localhost:$CONTROL_PG_PORT/zeroship"
 
 json_get() {
@@ -128,7 +139,74 @@ process.stdout.write(Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "
 ' "$1"
 }
 
+decode_jwt_header() {
+  node -e '
+const token = process.argv[1];
+const part = token.split(".")[0] || "";
+const padded = part + "=".repeat((4 - part.length % 4) % 4);
+process.stdout.write(Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+' "$1"
+}
+
+assert_jwt_mode_header() {
+  local token="$1"
+  local label="$2"
+  [ "$SUPABASE_E2E_MODE" = "jwks" ] || return 0
+  local header alg kid
+  header="$(decode_jwt_header "$token")"
+  alg="$(jq -r '.alg // empty' <<<"$header")"
+  kid="$(jq -r '.kid // empty' <<<"$header")"
+  echo "  $label header: alg=$alg kid=${kid:-<none>}"
+  [ "$alg" = "RS256" ] || fail "$label was signed with $alg, expected RS256"
+  [ "$kid" = "$SUPABASE_JWT_KID" ] || fail "$label kid was $kid, expected $SUPABASE_JWT_KID"
+}
+
+generate_jwks_signing_key() {
+  SUPABASE_JWT_PRIVATE_JWK="$(node - "$SUPABASE_JWT_KID" <<'NODE'
+const crypto = require("node:crypto");
+const kid = process.argv[2];
+const { privateKey } = crypto.generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicExponent: 0x10001,
+});
+const jwk = privateKey.export({ format: "jwk" });
+jwk.alg = "RS256";
+jwk.use = "sig";
+jwk.key_ops = ["sign", "verify"];
+jwk.kid = kid;
+process.stdout.write(JSON.stringify(jwk));
+NODE
+)"
+  GOTRUE_JWT_KEYS="[$SUPABASE_JWT_PRIVATE_JWK]"
+  printf '%s\n' "$SUPABASE_JWT_PRIVATE_JWK" >"$WORK/supabase-rs256-private.jwk.json"
+  printf '%s\n' "$GOTRUE_JWT_KEYS" >"$WORK/gotrue-jwt-keys.json"
+  echo "  RS256 signing kid: $SUPABASE_JWT_KID"
+  echo "  private JWK fields: $(jq -r 'keys | sort | join(",")' <<<"$SUPABASE_JWT_PRIVATE_JWK")"
+}
+
 mint_gotrue_key() {
+  if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
+    node - "$1" "$SUPABASE_ISSUER" <<'NODE'
+const crypto = require("node:crypto");
+const [role, issuer] = process.argv.slice(2);
+const privateJwk = JSON.parse(process.env.SUPABASE_JWT_PRIVATE_JWK || "{}");
+const key = crypto.createPrivateKey({ key: privateJwk, format: "jwk" });
+const b64url = (value) => Buffer.from(value).toString("base64url");
+const now = Math.floor(Date.now() / 1000);
+const header = { alg: "RS256", typ: "JWT", kid: privateJwk.kid };
+const payload = {
+  iss: issuer,
+  role,
+  iat: now,
+  exp: now + 10 * 365 * 24 * 60 * 60,
+};
+const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
+const sig = crypto.sign("RSA-SHA256", Buffer.from(signingInput), key).toString("base64url");
+process.stdout.write(`${signingInput}.${sig}`);
+NODE
+    return 0
+  fi
+
   node - "$1" "$JWT_SECRET" "$SUPABASE_ISSUER" <<'NODE'
 const crypto = require("node:crypto");
 const [role, secret, issuer] = process.argv.slice(2);
@@ -145,6 +223,22 @@ const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(
 const sig = crypto.createHmac("sha256", secret).update(signingInput).digest("base64url");
 process.stdout.write(`${signingInput}.${sig}`);
 NODE
+}
+
+verify_gotrue_jwks() {
+  [ "$SUPABASE_E2E_MODE" = "jwks" ] || return 0
+  local jwks private_fields
+  jwks="$(curl -fsS "$SUPABASE_JWKS_URL")" || fail "GoTrue JWKS endpoint was not reachable at $SUPABASE_JWKS_URL"
+  printf '%s\n' "$jwks" >"$WORK/gotrue-jwks.json"
+  jq -e --arg kid "$SUPABASE_JWT_KID" '
+    (.keys | length) == 1
+    and .keys[0].kid == $kid
+    and .keys[0].kty == "RSA"
+    and .keys[0].alg == "RS256"
+  ' <<<"$jwks" >/dev/null || fail "GoTrue JWKS did not expose the expected RS256 public key: $jwks"
+  private_fields="$(jq -r '.keys[0] | keys[] | select(. == "d" or . == "p" or . == "q" or . == "dp" or . == "dq" or . == "qi")' <<<"$jwks" | paste -sd, -)"
+  [ -z "$private_fields" ] || fail "GoTrue JWKS exposed private RSA fields: $private_fields"
+  echo "  GoTrue JWKS: $(jq -c '.keys[0] | {kid,kty,alg,use,key_ops,has_private:(has("d") or has("p") or has("q") or has("dp") or has("dq") or has("qi"))}' <<<"$jwks")"
 }
 
 post_json() {
@@ -325,6 +419,19 @@ apply_control_migrations() {
 }
 
 start_gotrue() {
+  local jwt_env=(
+    -e GOTRUE_JWT_SECRET="$JWT_SECRET"
+    -e GOTRUE_JWT_ISSUER="$SUPABASE_ISSUER"
+    -e GOTRUE_JWT_AUD=authenticated
+    -e GOTRUE_JWT_DEFAULT_GROUP_NAME=authenticated
+    -e GOTRUE_JWT_ADMIN_GROUP_NAME=service_role
+    -e GOTRUE_JWT_ADMIN_ROLES=service_role
+    -e GOTRUE_JWT_EXP=3600
+  )
+  if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
+    jwt_env+=(-e GOTRUE_JWT_KEYS="$GOTRUE_JWT_KEYS")
+  fi
+
   docker exec -i "$GOTRUE_PG_CONTAINER" psql -U postgres -d zeroship \
     -v ON_ERROR_STOP=1 -q >"$WORK/gotrue-schema.log" 2>&1 <<'SQL' || {
 CREATE SCHEMA IF NOT EXISTS auth;
@@ -343,13 +450,7 @@ SQL
     -e GOTRUE_DB_DRIVER=postgres \
     -e GOTRUE_DB_NAMESPACE=auth \
     -e "GOTRUE_DB_DATABASE_URL=postgres://postgres:zeroship@$GOTRUE_PG_CONTAINER:5432/zeroship?sslmode=disable" \
-    -e GOTRUE_JWT_SECRET="$JWT_SECRET" \
-    -e GOTRUE_JWT_ISSUER="$SUPABASE_ISSUER" \
-    -e GOTRUE_JWT_AUD=authenticated \
-    -e GOTRUE_JWT_DEFAULT_GROUP_NAME=authenticated \
-    -e GOTRUE_JWT_ADMIN_GROUP_NAME=service_role \
-    -e GOTRUE_JWT_ADMIN_ROLES=service_role \
-    -e GOTRUE_JWT_EXP=3600 \
+    "${jwt_env[@]}" \
     -e GOTRUE_DISABLE_SIGNUP=false \
     -e GOTRUE_MAILER_AUTOCONFIRM=true \
     -e GOTRUE_EXTERNAL_EMAIL_ENABLED=true \
@@ -367,13 +468,7 @@ SQL
     -e GOTRUE_DB_DRIVER=postgres \
     -e GOTRUE_DB_NAMESPACE=auth \
     -e "GOTRUE_DB_DATABASE_URL=postgres://postgres:zeroship@$GOTRUE_PG_CONTAINER:5432/zeroship?sslmode=disable" \
-    -e GOTRUE_JWT_SECRET="$JWT_SECRET" \
-    -e GOTRUE_JWT_ISSUER="$SUPABASE_ISSUER" \
-    -e GOTRUE_JWT_AUD=authenticated \
-    -e GOTRUE_JWT_DEFAULT_GROUP_NAME=authenticated \
-    -e GOTRUE_JWT_ADMIN_GROUP_NAME=service_role \
-    -e GOTRUE_JWT_ADMIN_ROLES=service_role \
-    -e GOTRUE_JWT_EXP=3600 \
+    "${jwt_env[@]}" \
     -e GOTRUE_DISABLE_SIGNUP=false \
     -e GOTRUE_MAILER_AUTOCONFIRM=true \
     -e GOTRUE_EXTERNAL_EMAIL_ENABLED=true \
@@ -383,11 +478,18 @@ SQL
   wait_http "http://localhost:$GOTRUE_PORT/health" "GoTrue healthy on raw port $GOTRUE_PORT"
   start_prefix_proxy
   wait_http "$GOTRUE_URL/health" "GoTrue healthy through Supabase /auth/v1 proxy"
+  verify_gotrue_jwks
 }
 
 start_zeroship_stack() {
   export ZEROSHIP_DEV_INSECURE=1
   export WORKER_KEY
+  local control_verify_args=(--supabase-jwt-issuer "$SUPABASE_ISSUER")
+  if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
+    control_verify_args+=(--supabase-jwks-url "$SUPABASE_JWKS_URL")
+  else
+    control_verify_args+=(--supabase-jwt-secret "$JWT_SECRET")
+  fi
 
   "$BIN/zeroship-control" --port "$CONTROL_PORT" --db "$CONTROL_DB_URL" \
     --provision-db "$CONTROL_DB_URL" \
@@ -400,8 +502,7 @@ start_zeroship_stack() {
     --supabase-url "$SUPABASE_URL" \
     --supabase-anon-key "$SUPABASE_ANON_KEY" \
     --supabase-service-role-key "$SUPABASE_SERVICE_ROLE_KEY" \
-    --supabase-jwt-secret "$JWT_SECRET" \
-    --supabase-jwt-issuer "$SUPABASE_ISSUER" \
+    "${control_verify_args[@]}" \
     --app-base-domain zeroship.localhost \
     >"$WORK/control.log" 2>&1 &
   PIDS+=("$!")
@@ -449,22 +550,33 @@ query_control_db() {
 step "Preflight"
 WORK="$(mktemp -d -t zs-supabase-e2e-XXXXXX)"
 mkdir -p "$WORK/blobs" "$WORK/blob-cache"
-for cmd in docker curl jq node openssl du find grep tail; do
+for cmd in docker curl jq node openssl du find grep paste tail; do
   need_cmd "$cmd"
 done
 ensure_release_bins
 ensure_starter_zship
+[ "$SUPABASE_E2E_MODE" = "jwks" ] && echo "  mode: $SUPABASE_E2E_MODE"
 echo "  GoTrue image: $GOTRUE_IMAGE"
 echo "  ports: gotrue=$GOTRUE_PORT proxy=$GOTRUE_PROXY_PORT control=$CONTROL_PORT worker=$WORKER_PORT gate=$GATE_PORT pg=$CONTROL_PG_PORT"
 
 step "Mint Supabase API keys"
+if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
+  generate_jwks_signing_key
+  export SUPABASE_JWT_PRIVATE_JWK
+fi
 SUPABASE_ANON_KEY="$(mint_gotrue_key anon)"
 SUPABASE_SERVICE_ROLE_KEY="$(mint_gotrue_key service_role)"
 export SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY
 echo "  anon key:         $(redact_jwt "$SUPABASE_ANON_KEY")"
 echo "  service_role key: $(redact_jwt "$SUPABASE_SERVICE_ROLE_KEY")"
 echo "  shared issuer:    $SUPABASE_ISSUER"
-echo "  HS256 secret:     ${JWT_SECRET:0:8}...<redacted>"
+if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
+  echo "  JWKS URL:         $SUPABASE_JWKS_URL"
+  assert_jwt_mode_header "$SUPABASE_ANON_KEY" "anon apikey"
+  assert_jwt_mode_header "$SUPABASE_SERVICE_ROLE_KEY" "service_role apikey"
+else
+  echo "  HS256 secret:     ${JWT_SECRET:0:8}...<redacted>"
+fi
 pass "minted anon/service_role JWT API keys"
 
 step "Bring up GoTrue + control DB"
@@ -496,6 +608,7 @@ ACCESS_TOKEN="$(json_get '.access_token' <<<"$LOGIN")"
 REFRESH_TOKEN="$(json_get '.refresh_token' <<<"$LOGIN")"
 [ -n "$ACCESS_TOKEN" ] || fail "GoTrue password grant returned no access_token: $LOGIN"
 [ -n "$REFRESH_TOKEN" ] || fail "GoTrue password grant returned no refresh_token: $LOGIN"
+assert_jwt_mode_header "$ACCESS_TOKEN" "GoTrue access token"
 GOTRUE_SUB="$(decode_jwt_payload "$ACCESS_TOKEN" | jq -r '.sub')"
 GOTRUE_ROLE="$(decode_jwt_payload "$ACCESS_TOKEN" | jq -r '.role')"
 GOTRUE_AUD="$(decode_jwt_payload "$ACCESS_TOKEN" | jq -r '.aud')"
@@ -565,6 +678,7 @@ step "Refresh GoTrue session and deploy with GoTrue bearer"
 REFRESHED="$(refresh_gotrue_session "$BOUND_REFRESH")"
 DEPLOY_ACCESS_TOKEN="$(json_get '.access_token' <<<"$REFRESHED")"
 [ -n "$DEPLOY_ACCESS_TOKEN" ] || fail "GoTrue refresh returned no access_token: $REFRESHED"
+assert_jwt_mode_header "$DEPLOY_ACCESS_TOKEN" "refreshed GoTrue access token"
 echo "  refreshed access: $(redact_jwt "$DEPLOY_ACCESS_TOKEN")"
 
 DEPLOY_OUT="$("$BIN/zeroship" deploy "$ZSHIP" \
