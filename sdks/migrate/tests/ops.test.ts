@@ -377,9 +377,10 @@ test("comment records closed COMMENT ON targets through handles and top-level AP
       comment: "User accounts",
     },
     {
+      // SA-5: a null comment (clear) normalizes to a dropped key — canonical IR
+      // maps null→None identically, so the recorder omits the slot.
       op: "comment",
       target: { kind: "column", table: "users", name: "email" },
-      comment: null,
     },
     {
       op: "comment",

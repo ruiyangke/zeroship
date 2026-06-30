@@ -232,6 +232,7 @@ export const pg: PgNamespace = {
     });
   },
   dropExtension(args) {
+    requireString(args.name, "pg.dropExtension({ name })");
     return record({ op: "dropExtension", name: args.name, ifExists: args.ifExists });
   },
   createRole(args) {

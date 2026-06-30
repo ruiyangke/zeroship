@@ -1055,7 +1055,7 @@ function recordComment(target, text) {
     compact({
       op: "comment",
       target: commentTargetToIr(target),
-      comment: text,
+      comment: text === null ? undefined : text,
     }),
   );
 }
@@ -2296,6 +2296,31 @@ export const pg = {
       privileges: args.privileges,
       on: args.on,
       from: args.from,
+    }));
+  },
+  createPolicy(args) {
+    requireString(args.name, "pg.createPolicy({ name })");
+    requireString(args.table, "pg.createPolicy({ table })");
+    return push(compact({
+      op: "createPolicy",
+      name: args.name,
+      table: args.table,
+      schema: args.schema,
+      forCmd: args.for || "all",
+      to: args.to,
+      using: resolveExpr(args.using),
+      withCheck: resolveExpr(args.withCheck),
+    }));
+  },
+  dropPolicy(args) {
+    requireString(args.name, "pg.dropPolicy({ name })");
+    requireString(args.table, "pg.dropPolicy({ table })");
+    return push(compact({
+      op: "dropPolicy",
+      name: args.name,
+      table: args.table,
+      schema: args.schema,
+      ifExists: args.ifExists,
     }));
   },
   createFunction(args) {

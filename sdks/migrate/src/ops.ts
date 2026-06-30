@@ -1095,7 +1095,7 @@ function recordComment(target: CommentTargetArg, text: string | null): void {
     compact({
       op: "comment",
       target: commentTargetToIr(target),
-      comment: text,
+      comment: text === null ? undefined : text,
     }),
   );
 }
@@ -1654,9 +1654,9 @@ function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): 
 }
 
 function normalizeOnConflict(
-  oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined,
+  oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined | null,
 ): Node | undefined {
-  if (oc === undefined) return undefined;
+  if (oc === undefined || oc === null) return undefined;
   if (oc.doUpdate === undefined) return { columns: oc.columns } as Node;
   const doUpdate: Record<string, unknown> = {};
   for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrValue(oc.doUpdate[col]);
@@ -1678,7 +1678,7 @@ function recordUpdate(table: string, args: UpdateArgs): void {
 
 function recordDel(table: string, args: DelArgs): void {
   if (args.where === undefined || args.where === null) {
-    throw structuredError("OP_INVALID", "del({ where }): where is mandatory");
+    throw structuredError("OP_INVALID", "del({ where }): where is mandatory (no unfiltered delete)");
   }
   push(
     compact({
