@@ -3355,7 +3355,11 @@ impl IrAuthor {
                 decl.lower_add_fk(table, &fk)
             }
             IrConstraintKind::Unique { columns } => {
-                let body = format!("UNIQUE ({})", quote_cols(columns));
+                // SA-17: the imperative add must spell its column list with the SAME
+                // CONDITIONAL quoting the CREATE-TABLE / fold path uses, so an
+                // imperative- and a declarative-authored UNIQUE round-trip identically
+                // against `pg_get_constraintdef` (`UNIQUE (slug)`, not `UNIQUE ("slug")`).
+                let body = format!("UNIQUE ({})", crate::render::declarative::constraintdef_cols(columns));
                 let cname =
                     name.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string);
                 // A UNIQUE add on an existing table scans + locks and can fail on
@@ -3363,7 +3367,7 @@ impl IrAuthor {
                 decl.lower_add_constraint(table, &cname, &body, true)
             }
             IrConstraintKind::Pk { columns } => {
-                let body = format!("PRIMARY KEY ({})", quote_cols(columns));
+                let body = format!("PRIMARY KEY ({})", crate::render::declarative::constraintdef_cols(columns));
                 let cname =
                     name.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string);
                 // A PK add scans + locks the whole table under ACCESS EXCLUSIVE and
@@ -4599,19 +4603,6 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
         }),
         IrDefault::Fn { .. } => None,
     }
-}
-
-/// Quote + comma-join a constraint's column list (`"a", "b"`). Each identifier is
-/// double-quoted (embedded `"` doubled) so the column list can never alter the
-/// statement structure — the SAME quoting the declarative emitter uses.
-///
-/// **Migration-first P1**: `pub(crate)` so the offline [`crate::fold`] spells a
-/// UNIQUE/PK constraint body byte-identically to the lower (`UNIQUE (cols)`).
-pub(crate) fn quote_cols(cols: &[String]) -> String {
-    cols.iter()
-        .map(|c| crate::render::dml::escape_quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Render an exclusion constraint body (`EXCLUDE USING …`) from the closed IR.
