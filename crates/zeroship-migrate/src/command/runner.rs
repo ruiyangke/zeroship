@@ -28,7 +28,7 @@ use crate::apply::executor::{
 };
 use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
-use crate::plan::loader::{load_dir, LoaderError};
+use crate::plan::loader::{load_dir, LoaderError, PLATFORM_OWNER_APP};
 use crate::ops::status::{status, status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
@@ -256,6 +256,24 @@ pub enum RunError {
     /// single-step-shape precondition test) and exists for defense in depth.
     #[error("plan shape: {0}")]
     NotSingleStep(#[from] crate::render::plan::NotSingleStep),
+    /// A Platform-profile migration directory contains both committed op-DSL IR
+    /// artifacts and SQL files. Pre-launch, a directory is exactly one migration
+    /// corpus format.
+    #[error(
+        "mixed migration corpus in '{dir}': found IR file '{ir}' and SQL file '{sql}' \
+         (a Platform migration directory must be all .ir.json or all .sql)"
+    )]
+    MixedMigrationCorpus {
+        /// The migration directory.
+        dir: String,
+        /// An example IR file seen.
+        ir: String,
+        /// An example SQL file seen.
+        sql: String,
+    },
+    /// Applying committed `.ir.json` migrations failed.
+    #[error("apply IR migrations: {0}")]
+    IrApply(#[from] crate::command::ir_apply::PostgresIrApplyError),
 }
 
 /// Load the migration directory and project each [`AppliedPlan`] down to its one
@@ -273,6 +291,61 @@ fn load_dir_flat(dir: &Path) -> Result<Vec<crate::model::migration::Migration>, 
         migrations.push(plan.single_step_migration()?.clone());
     }
     Ok(migrations)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationCorpusFormat {
+    Sql,
+    Ir,
+}
+
+/// Detect the top-level migration corpus shape for the Platform Postgres
+/// `migrate` command.
+///
+/// IR mode is selected by any `*.ir.json` file. SQL mode is selected by any
+/// `*.sql` file and then delegated to the existing loader, which owns the exact
+/// Flyway/dbmate filename grammar and hard-rejects malformed names. A mixed
+/// directory is refused before either loader runs.
+fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError> {
+    let read = std::fs::read_dir(dir).map_err(|e| {
+        RunError::Load(LoaderError::Io {
+            path: dir.display().to_string(),
+            message: e.to_string(),
+        })
+    })?;
+    let mut first_ir: Option<String> = None;
+    let mut first_sql: Option<String> = None;
+    for entry in read {
+        let entry = entry.map_err(|e| {
+            RunError::Load(LoaderError::Io {
+                path: dir.display().to_string(),
+                message: e.to_string(),
+            })
+        })?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".ir.json") {
+            first_ir.get_or_insert_with(|| name.to_string());
+        } else if name.ends_with(".sql") {
+            first_sql.get_or_insert_with(|| name.to_string());
+        }
+    }
+    match (first_ir, first_sql) {
+        (Some(ir), Some(sql)) => Err(RunError::MixedMigrationCorpus {
+            dir: dir.display().to_string(),
+            ir,
+            sql,
+        }),
+        (Some(_), None) => Ok(MigrationCorpusFormat::Ir),
+        // Preserve the existing loader as the source of truth for empty dirs,
+        // malformed SQL names, dbmate files, and stray files.
+        (None, _) => Ok(MigrationCorpusFormat::Sql),
+    }
 }
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
@@ -638,9 +711,10 @@ fn sqlite_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
 }
 
 /// `migrate` — dispatch by the `--database-url` engine, then load the dir, plan,
-/// honour the H1 destructive gate, and apply PENDING (design §9). Postgres runs
-/// the existing byte-identical path; SQLite runs the same generic engine through
-/// a hardened [`SqliteBackend`]; an unsupported URL is an honest refusal.
+/// honour the H1 destructive gate, and apply PENDING (design §9). Postgres SQL
+/// corpora run the existing path, Platform IR corpora route through the IR apply
+/// path, SQLite runs the same generic engine through a hardened [`SqliteBackend`],
+/// and an unsupported URL is an honest refusal.
 ///
 /// # Errors
 /// [`RunError`] on an unsupported engine / load / connect / a
@@ -670,8 +744,11 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
     Ok(RunReport::Migrate(outcome))
 }
 
-/// The Postgres leg of `migrate` — the existing path, byte-identical.
+/// The Postgres leg of `migrate`.
 async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    if cfg.profile == RunProfile::Platform && platform_corpus_format(&cfg.dir)? == MigrationCorpusFormat::Ir {
+        return run_migrate_pg_ir(cfg).await;
+    }
     let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
@@ -690,6 +767,34 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
         )
         .await?;
     Ok(RunReport::Migrate(outcome))
+}
+
+/// The Platform Postgres IR leg of `migrate`.
+async fn run_migrate_pg_ir(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    let conn = connect(&cfg.database_url).await?;
+    let exec_cfg = build_exec_cfg(cfg);
+    let guard_cfg = build_guard_cfg(cfg);
+    let approval = if cfg.yes {
+        Approval::Approved
+    } else {
+        Approval::None
+    };
+    let outcome = crate::command::ir_apply::apply_bundle_ir_postgres(
+        &PostgresBackend::new(&conn),
+        &cfg.project_schema,
+        PLATFORM_OWNER_APP,
+        &cfg.dir,
+        &exec_cfg,
+        &guard_cfg,
+        approval,
+        "platform-migrate-ir",
+    )
+    .await?;
+    Ok(RunReport::Migrate(ApplyOutcome {
+        applied: outcome.applied,
+        skipped: outcome.skipped,
+        recovered: Vec::new(),
+    }))
 }
 
 /// `status` — read the journal, print applied vs pending (+ rolled-back). NO DDL

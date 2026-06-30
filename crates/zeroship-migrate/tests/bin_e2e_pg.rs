@@ -20,9 +20,9 @@
 //! schema inside that throwaway db. Roles are cluster-wide and idempotent
 //! (`CREATE ROLE IF NOT EXISTS` / DO-block guards) so concurrent runs don't fight.
 //!
-//! Asserts (the compose contract): exit 0; all 58 migrations applied; a second
-//! `migrate` is an idempotent no-op (exit 0); `status` shows 58 applied / 0
-//! pending; the schema materialized — namespaces (`zeroship`/`oauth_hydra`), the
+//! Asserts (the compose contract): exit 0; all platform migrations applied; a
+//! second `migrate` is an idempotent no-op (exit 0); `status` shows all applied /
+//! 0 pending; the schema materialized — namespaces (`zeroship`/`oauth_hydra`), the
 //! service roles, the RLS policies (the inventory checks mirrored from
 //! `platform_port_pg.rs`).
 
@@ -87,6 +87,21 @@ fn migrations_dir() -> PathBuf {
         .join("../../db/migrations")
         .canonicalize()
         .expect("db/migrations exists at repo root")
+}
+
+fn platform_migration_count() -> usize {
+    std::fs::read_dir(migrations_dir())
+        .expect("read db/migrations")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().is_file()
+                && entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with('V')
+                        && name.ends_with(".sql")
+                        && !name.ends_with(".down.sql")
+                })
+        })
+        .count()
 }
 
 /// A process-wide temp "sink" CWD for `run_bin`. Auto-dump (default ON) writes
@@ -214,6 +229,7 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
     let dir = migrations_dir();
     let dir_s = dir.to_str().expect("utf-8 migrations path").to_string();
     let url = bin_database_url(&db);
+    let expected_count = platform_migration_count();
 
     // The arg vector is the EXACT compose-service surface (plus a unique
     // --meta-schema so the journal does not collide cluster-side). Defaults
@@ -245,18 +261,19 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
         "the binary `migrate` must exit 0 on a fresh DB\nstdout={stdout}\nstderr={stderr}"
     );
     assert!(
-        stdout.contains("applied 58"),
-        "the binary reports 58 applied migrations: stdout={stdout}"
+        stdout.contains(&format!("applied {expected_count}")),
+        "the binary reports all platform migrations applied: stdout={stdout}"
     );
 
     // 2. Inventory — verified against the THROWAWAY db (connect to it directly).
     let app = connect(&throwaway_dsn(&db)).await;
 
-    // 2a. The journal records all 58 applied — the compose gate's source of truth.
+    // 2a. The journal records every applied migration — the compose gate's source
+    // of truth.
     assert_eq!(
         journal_completed_count(&app, &meta).await,
-        58,
-        "the journal records 58 completed (applied) migrations"
+        expected_count as i64,
+        "the journal records all completed (applied) migrations"
     );
 
     // 2b. Namespaces.
@@ -322,11 +339,11 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
     // The journal did not grow.
     assert_eq!(
         journal_completed_count(&app, &meta).await,
-        58,
+        expected_count as i64,
         "the idempotent re-run added no journal rows"
     );
 
-    // 4. `status` reports 58 applied / 0 pending (the binary's own view).
+    // 4. `status` reports all applied / 0 pending (the binary's own view).
     let status_args = [
         "status",
         "--dir",
@@ -344,8 +361,9 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
         "`status` must exit 0\nstdout={stdout3}\nstderr={stderr3}"
     );
     assert!(
-        stdout3.contains("applied=58") && stdout3.contains("pending=0"),
-        "status shows 58 applied / 0 pending: stdout={stdout3}"
+        stdout3.contains(&format!("applied={expected_count}"))
+            && stdout3.contains("pending=0"),
+        "status shows all platform migrations applied / 0 pending: stdout={stdout3}"
     );
 
     // Teardown: drop the throwaway db (this drops its schemas + journal with it).
