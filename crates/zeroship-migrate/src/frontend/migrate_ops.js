@@ -2325,6 +2325,18 @@ export const pg = {
       ifExists: args.ifExists,
     }));
   },
+  /** The gated raw-statement escape as an explicit { sql, binds } call (vendor
+   *  spec section 2.11) — the object-arg twin of the pg.sql tagged template.
+   *  Binds are typed scalars; verbatim text is pg_query-scanned by the guard at
+   *  lower. Emits the canonical pgRaw wire op. */
+  raw(args) {
+    requireString(args.sql, "pg.raw({ sql })");
+    return push(compact({
+      op: "pgRaw",
+      sql: args.sql,
+      binds: args.binds && args.binds.length > 0 ? args.binds.map(scalarBind) : undefined,
+    }));
+  },
   /** The gated raw-statement escape (`pg.sql\`…\``, vendor spec §2.11). A tagged
    *  template whose interpolation slots accept ONLY typed binds (never identifiers
    *  / SQL) — the binds become positional placeholders, the verbatim text is

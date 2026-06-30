@@ -1,14 +1,14 @@
-//! Live-PG coverage for Platform-profile `.ir.json` discovery + apply.
+//! Live-PG coverage for the committed-IR apply core that creator deploys still use.
 //!
-//! This drives the real runner over committed op-DSL IR artifacts. The positive
-//! fixture proves Platform vendor ops apply as IR; the negative fixtures prove the
-//! Platform guard still denies host-reaching SQL and the Confined profile still
-//! denies privileged role/grant IR.
+//! Model C removed the Platform runner's committed `.ir.json` corpus branch: platform
+//! migrations are `.ts`-only and record transient IR at migrate time. The shared
+//! committed-IR apply core remains for creator/control-plane deploys, so this file
+//! keeps the Confined denial coverage and pins the runner's Platform IR refusal.
 
 use std::path::{Path, PathBuf};
 
 use compio_postgres::Client;
-use zeroship_migrate::command::runner::{run_migrate, RunConfig, RunProfile, RunReport};
+use zeroship_migrate::command::runner::{run_migrate, RunConfig, RunProfile};
 use zeroship_migrate::test_support::acquire_global_platform_resource_lock;
 use zeroship_migrate::{Approval, ExecutorConfig, GuardConfig, PostgresBackend};
 
@@ -16,7 +16,6 @@ const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_ir_test";
 const TEST_DB_NAME: &str = "zeroship_migrate_ir_test";
 
-const PLATFORM_ROLE: &str = "zeroship_ir_test_app";
 const CONFINED_ROLE: &str = "zeroship_ir_confined_role";
 
 fn dsn() -> String {
@@ -125,9 +124,6 @@ async fn reset(conn: &Client, meta: &str) {
     conn.batch_execute(
         r#"DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_ir_test_app') THEN
-    DROP OWNED BY "zeroship_ir_test_app";
-  END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_ir_confined_role') THEN
     DROP OWNED BY "zeroship_ir_confined_role";
   END IF;
@@ -142,12 +138,9 @@ END $$;"#,
     ))
     .await
     .expect("reset schemas/extensions");
-    conn.batch_execute(&format!(
-        "DROP ROLE IF EXISTS \"{PLATFORM_ROLE}\"; \
-         DROP ROLE IF EXISTS \"{CONFINED_ROLE}\";"
-    ))
-    .await
-    .expect("drop test roles");
+    conn.batch_execute(&format!("DROP ROLE IF EXISTS \"{CONFINED_ROLE}\";"))
+        .await
+        .expect("drop test roles");
 }
 
 async fn role_exists(conn: &Client, role: &str) -> bool {
@@ -155,14 +148,6 @@ async fn role_exists(conn: &Client, role: &str) -> bool {
         .query("SELECT 1 FROM pg_roles WHERE rolname = $1", &[&role])
         .await
         .expect("query pg_roles")
-        .is_empty()
-}
-
-async fn extension_exists(conn: &Client, extension: &str) -> bool {
-    !conn
-        .query("SELECT 1 FROM pg_extension WHERE extname = $1", &[&extension])
-        .await
-        .expect("query pg_extension")
         .is_empty()
 }
 
@@ -174,49 +159,6 @@ async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
         )
         .await
         .expect("query information_schema.tables")
-        .is_empty()
-}
-
-async fn rls_flags(conn: &Client, schema: &str, table: &str) -> (bool, bool) {
-    let row = conn
-        .query_one(
-            "SELECT c.relrowsecurity, c.relforcerowsecurity \
-               FROM pg_class c \
-               JOIN pg_namespace n ON n.oid = c.relnamespace \
-              WHERE n.nspname = $1 AND c.relname = $2",
-            &[&schema, &table],
-        )
-        .await
-        .expect("query RLS flags");
-    (row.get("relrowsecurity"), row.get("relforcerowsecurity"))
-}
-
-async fn policy_exists(conn: &Client, schema: &str, table: &str, policy: &str) -> bool {
-    !conn
-        .query(
-            "SELECT 1 FROM pg_policy p \
-               JOIN pg_class c ON c.oid = p.polrelid \
-               JOIN pg_namespace n ON n.oid = c.relnamespace \
-              WHERE n.nspname = $1 AND c.relname = $2 AND p.polname = $3",
-            &[&schema, &table, &policy],
-        )
-        .await
-        .expect("query pg_policy")
-        .is_empty()
-}
-
-async fn grant_exists(conn: &Client, schema: &str, table: &str, grantee: &str) -> bool {
-    !conn
-        .query(
-            "SELECT 1 FROM information_schema.role_table_grants \
-              WHERE table_schema = $1 \
-                AND table_name = $2 \
-                AND grantee = $3 \
-                AND privilege_type = 'SELECT'",
-            &[&schema, &table, &grantee],
-        )
-        .await
-        .expect("query role_table_grants")
         .is_empty()
 }
 
@@ -245,67 +187,15 @@ impl Drop for TempDir {
 }
 
 #[compio::test]
-async fn platform_ir_runner_applies_vendor_ops_and_materializes_objects() {
-    ensure_dedicated_db().await;
-    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
-    let conn = pg().await;
-    let meta = format!("platform_ir_meta_{}", token());
-    reset(&conn, &meta).await;
-
-    let cfg = platform_cfg(&fixture_dir("apply"), &meta, false);
-    let report = run_migrate(&cfg)
-        .await
-        .expect("Platform runner applies committed .ir.json vendor ops");
-    match report {
-        RunReport::Migrate(outcome) => {
-            assert!(!outcome.applied.is_empty(), "fresh IR corpus applied migrations");
-            assert!(outcome.skipped.is_empty(), "fresh IR corpus has no skips");
-        }
-        other => panic!("expected Migrate report, got {other:?}"),
-    }
-
-    assert!(extension_exists(&conn, "citext").await, "citext extension created");
-    assert!(role_exists(&conn, PLATFORM_ROLE).await, "platform test role created");
-    assert!(
-        table_exists(&conn, "zeroship", "ir_accounts").await,
-        "zeroship.ir_accounts table created"
-    );
-    let (rls, force_rls) = rls_flags(&conn, "zeroship", "ir_accounts").await;
-    assert!(rls, "RLS enabled on zeroship.ir_accounts");
-    assert!(force_rls, "RLS forced on zeroship.ir_accounts");
-    assert!(
-        policy_exists(&conn, "zeroship", "ir_accounts", "tenant_isolation").await,
-        "tenant_isolation policy created"
-    );
-    assert!(
-        grant_exists(&conn, "zeroship", "ir_accounts", PLATFORM_ROLE).await,
-        "SELECT grant materialized for platform role"
-    );
-
-    reset(&conn, &meta).await;
-    global_lock.release().await;
-}
-
-#[compio::test]
-async fn platform_ir_runner_rejects_host_reaching_op_under_platform() {
-    ensure_dedicated_db().await;
-    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
-    let conn = pg().await;
-    let meta = format!("platform_ir_denied_meta_{}", token());
-    reset(&conn, &meta).await;
-
-    let cfg = platform_cfg(&fixture_dir("denied"), &meta, true);
+async fn platform_runner_rejects_committed_ir_corpus() {
+    let cfg = platform_cfg(&fixture_dir("apply"), "platform_ir_meta_unused", false);
     let err = run_migrate(&cfg)
         .await
-        .expect_err("Platform IR must reject host-reaching ALTER SYSTEM");
-    let msg = format!("{err}").to_ascii_lowercase();
+        .expect_err("Platform runner no longer accepts committed .ir.json corpora");
     assert!(
-        msg.contains("alter system") || msg.contains("denied"),
-        "error should mention the guard denial, got: {err}"
+        format!("{err}").contains("unsupported platform migration corpus"),
+        "got: {err}"
     );
-
-    reset(&conn, &meta).await;
-    global_lock.release().await;
 }
 
 #[compio::test]
@@ -371,18 +261,19 @@ async fn confined_ir_still_denies_role_and_grant_vendor_ops() {
 }
 
 #[compio::test]
-async fn platform_runner_rejects_mixed_sql_and_ir_corpus_before_connect() {
+async fn platform_runner_rejects_mixed_ts_ir_and_sql_corpus_before_connect() {
     let tok = token();
     let dir = TempDir::new(&tok);
+    dir.write("20260630000000_mixed.ts", "export function up() {}\n");
     dir.write("20260630000000_mixed.ir.json", "{}");
     dir.write("V0001__mixed.sql", "SELECT 1;");
 
     let cfg = platform_cfg(dir.path(), "mixed_meta", false);
     let err = run_migrate(&cfg)
         .await
-        .expect_err("mixed SQL/IR corpus must be rejected before loader/apply");
+        .expect_err("mixed TS/IR/SQL corpus must be rejected before loader/apply");
     assert!(
-        format!("{err}").contains("mixed migration corpus"),
+        format!("{err}").contains("mixed platform migration corpus"),
         "got: {err}"
     );
 }

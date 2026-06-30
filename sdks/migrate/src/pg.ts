@@ -155,7 +155,7 @@ export interface PgNamespace {
   dropPolicy(args: DropPolicyArgs): Node;
   createFunction(args: CreateFunctionArgs): Node;
   dropFunction(args: DropFunctionArgs): Node;
-  pgRaw(args: PgRawArgs): Node;
+  raw(args: PgRawArgs): Node;
   sql(strings: TemplateStringsArray, ...binds: PgSqlBind[]): Node;
 }
 
@@ -338,8 +338,8 @@ export const pg: PgNamespace = {
       ifExists: args.ifExists,
     });
   },
-  pgRaw(args) {
-    requireString(args.sql, "pg.pgRaw({ sql })");
+  raw(args) {
+    requireString(args.sql, "pg.raw({ sql })");
     return record({
       op: "pgRaw",
       sql: args.sql,
