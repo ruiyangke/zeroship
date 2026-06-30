@@ -263,9 +263,16 @@ async fn oauth_guard_from_bearer(
             VerifyTokenError::MissingSubject => {
                 web::error::ErrorUnauthorized("missing oauth sub").into()
             }
+            VerifyTokenError::MissingIssuer | VerifyTokenError::UnknownIssuer(_) => {
+                web::error::ErrorUnauthorized("unknown oauth issuer").into()
+            }
             VerifyTokenError::HydraIntrospection(err) => {
                 tracing::warn!(error = %err, "control: hydra introspect failed");
                 web::error::ErrorUnauthorized("oauth introspection failed").into()
+            }
+            VerifyTokenError::PlatformVerification(err) => {
+                tracing::warn!(error = %err, "control: platform token verify failed");
+                web::error::ErrorUnauthorized("platform token verification failed").into()
             }
         })?;
     let (principal_id, token_policy) = match &verified.provider_authz {

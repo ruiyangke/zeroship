@@ -2,11 +2,15 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{connect, NoTls};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::http::StatusCode;
 use ntex::web::{self, test, HttpResponse};
 use serde::Deserialize;
@@ -18,12 +22,20 @@ use zeroship_control::{
     RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_authz::{Action, Resource};
+use zeroship_core::auth_provider::{
+    AuthProvider, DualIssuerProvider, HydraProvider, LegacyAuthProvider, PlatformConfig,
+    PlatformProvider,
+};
 
 #[allow(dead_code)]
 mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
-const OAUTH_TOKEN: &str = "fake-oauth-token";
+const LEGACY_HYDRA_ISSUER: &str = "https://hydra.zeroship.test";
+const PLATFORM_ISSUER: &str = "https://auth.zeroship.test";
+const PLATFORM_KID: &str = "platform-control-authz-kid";
+const PLATFORM_KEY_SEED: u8 = 31;
+const OAUTH_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJpc3MiOiJodHRwczovL2h5ZHJhLnplcm9zaGlwLnRlc3QifQ.";
 
 fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")
@@ -198,6 +210,21 @@ impl Drop for Fixture {
 }
 
 async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Option<Fixture> {
+    fixture_with_auth_provider(
+        hydra,
+        label,
+        user_id,
+        zeroship_control::hydra_auth_provider(&hydra.base),
+    )
+    .await
+}
+
+async fn fixture_with_auth_provider(
+    hydra: &MockHydra,
+    label: &str,
+    user_id: Uuid,
+    auth_provider: Arc<AuthProvider>,
+) -> Option<Fixture> {
     let Some(db_url) = db_url() else {
         eprintln!("[authz_guard_oauth_test] AUTH_DB_URL not set - skipping");
         return None;
@@ -243,7 +270,7 @@ async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Op
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
         pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
-        auth_provider: zeroship_control::hydra_auth_provider(&hydra.base),
+        auth_provider,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),
@@ -355,6 +382,10 @@ macro_rules! init_control {
                 .service(
                     web::resource("/raw-app/{id}")
                         .route(web::get().to(raw_app_read)),
+                )
+                .service(
+                    web::resource("/raw-app/{id}/deploy-check")
+                        .route(web::post().to(raw_app_deploy_check)),
                 ),
         )
         .await
@@ -381,8 +412,198 @@ async fn raw_app_read(
     }
 }
 
+async fn raw_app_deploy_check(
+    path: web::types::Path<String>,
+    authz: AuthzGuard,
+    state: web::types::State<Arc<AppState>>,
+) -> web::HttpResponse {
+    match authz
+        .require(
+            Action::AppsDeploy,
+            Resource::App {
+                id: path.into_inner(),
+            },
+            &state,
+        )
+        .await
+    {
+        Ok(()) => web::HttpResponse::Ok().json(&json!({
+            "principal_id": authz.principal_id.to_string(),
+        })),
+        Err(resp) => resp,
+    }
+}
+
 fn bearer() -> String {
     format!("Bearer {OAUTH_TOKEN}")
+}
+
+fn bearer_for(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+fn platform_auth_provider(jwks_url: String, hydra_admin_url: &str) -> Arc<AuthProvider> {
+    let platform = PlatformProvider::new(
+        PlatformConfig::new(PLATFORM_ISSUER, Some(jwks_url)).expect("platform config"),
+    );
+    let legacy = LegacyAuthProvider::Hydra(HydraProvider::new_with_issuer(
+        zeroship_core::hydra::HydraIntrospector::new(hydra_admin_url),
+        LEGACY_HYDRA_ISSUER,
+    ));
+    Arc::new(AuthProvider::DualIssuer(DualIssuerProvider::new(
+        platform,
+        legacy,
+    )))
+}
+
+fn platform_token(subject: Uuid, scope: &str, issuer: &str) -> String {
+    let now = unix_now_secs();
+    let claims = json!({
+        "iss": issuer,
+        "sub": subject.to_string(),
+        "aud": "control.zeroship.ai",
+        "exp": now + 3600,
+        "iat": now,
+        "nbf": now.saturating_sub(1),
+        "jti": Uuid::new_v4().to_string(),
+        "client_id": "zeroship-cli",
+        "scope": scope,
+    });
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.typ = Some("at+jwt".to_string());
+    header.kid = Some(PLATFORM_KID.to_string());
+    encode(&header, &claims, &platform_encoding_key()).expect("platform token")
+}
+
+fn platform_encoding_key() -> EncodingKey {
+    let sk = SigningKey::from_bytes(&[PLATFORM_KEY_SEED; 32]);
+    let pkcs8 = sk.to_pkcs8_der().expect("encode pkcs8");
+    EncodingKey::from_ed_der(pkcs8.as_bytes())
+}
+
+fn platform_jwks_body() -> String {
+    let sk = SigningKey::from_bytes(&[PLATFORM_KEY_SEED; 32]);
+    json!({
+        "keys": [{
+            "kid": PLATFORM_KID,
+            "kty": "OKP",
+            "alg": "EdDSA",
+            "crv": "Ed25519",
+            "x": URL_SAFE_NO_PAD.encode(sk.verifying_key().to_bytes()),
+        }]
+    })
+    .to_string()
+}
+
+struct PlatformJwksMock {
+    base: String,
+    shutdown: Option<mpsc::Sender<()>>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl PlatformJwksMock {
+    fn start() -> Self {
+        let body = Arc::new(RwLock::new(platform_jwks_body()));
+        let factory_body = body.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            ntex::rt::System::build()
+                .name("control-platform-jwks-mock")
+                .testing()
+                .build(ntex::rt::DefaultRuntime)
+                .block_on(async move {
+                    let server = web::test::server(move || {
+                        let body = factory_body.clone();
+                        async move {
+                            web::App::new().state(body).service(
+                                web::resource("/.well-known/jwks.json")
+                                    .route(web::get().to(platform_jwks_handler)),
+                            )
+                        }
+                    })
+                    .await;
+                    let addr = server.addr();
+                    started_tx.send(addr).expect("send platform jwks addr");
+                    let _ = shutdown_rx.recv();
+                    drop(server);
+                });
+        });
+        let addr = started_rx.recv().expect("platform jwks mock starts");
+        Self {
+            base: format!("http://{addr}"),
+            shutdown: Some(shutdown_tx),
+            thread: Some(thread),
+        }
+    }
+
+    fn jwks_url(&self) -> String {
+        format!("{}/.well-known/jwks.json", self.base)
+    }
+}
+
+impl Drop for PlatformJwksMock {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .body(body.read().expect("jwks body lock").clone())
+}
+
+#[compio::test]
+async fn dual_issuer_accepts_platform_deploy_and_legacy_hydra_but_rejects_unknown_issuer() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active(user_id, "apps:read");
+    let jwks = PlatformJwksMock::start();
+    let auth_provider = platform_auth_provider(jwks.jwks_url(), &hydra.base);
+    let Some(mut fx) =
+        fixture_with_auth_provider(&hydra, "dual-issuer", user_id, auth_provider).await
+    else {
+        return;
+    };
+    let app_id = create_app(&mut fx, "dual-issuer").await;
+    let app = init_control!(fx);
+
+    let platform_deploy = platform_token(user_id, "apps:deploy", PLATFORM_ISSUER);
+    let req = test::TestRequest::post()
+        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .header("authorization", bearer_for(&platform_deploy))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&test::read_body(resp).await).expect("platform body json");
+    assert_eq!(body["principal_id"], user_id.to_string());
+
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "legacy Hydra-shaped token must still verify during issuer migration"
+    );
+
+    let unknown_issuer = platform_token(user_id, "apps:read", "https://unknown-issuer.test");
+    let req = test::TestRequest::get()
+        .uri("/api/apps")
+        .header("authorization", bearer_for(&unknown_issuer))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    fx.cleanup().await;
 }
 
 #[compio::test]
