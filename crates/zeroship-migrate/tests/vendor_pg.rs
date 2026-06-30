@@ -324,6 +324,68 @@ fn render_create_function_embeds_body_verbatim() {
 }
 
 #[test]
+fn create_function_body_containing_the_dollar_tag_picks_a_collision_free_tag() {
+    // SA-14: a body that literally contains `$zsfn$` would terminate the default
+    // dollar-quoted literal early. The renderer must choose a fresh tag.
+    let op = Op::CreateFunction {
+        name: "f".into(),
+        schema: Some("zeroship".into()),
+        args: None,
+        returns: "trigger".into(),
+        language: FuncLanguage::Plpgsql,
+        replace: Some(false),
+        volatility: None,
+        body: "BEGIN RETURN '$zsfn$ literal'; END;".into(),
+    };
+    let up = render_up(&op);
+    // The default tag is NOT used (it would collide); the next-free `$zsfn0$` is.
+    assert!(up.contains("AS $zsfn0$\n"), "got: {up}");
+    assert!(up.ends_with("\n$zsfn0$"), "got: {up}");
+    // The body is still embedded verbatim.
+    assert!(up.contains("BEGIN RETURN '$zsfn$ literal'; END;"), "got: {up}");
+}
+
+#[test]
+fn drop_owned_by_rejects_empty_and_the_public_pseudo_role() {
+    // SA-15: empty list and the reserved PUBLIC role (DROP OWNED BY PUBLIC errors
+    // at apply) are refused at render, not turned into an apply-time failure.
+    assert!(render_vendor_op(&Op::DropOwnedBy { roles: vec![] }, SCHEMA).is_err());
+    assert!(render_vendor_op(
+        &Op::DropOwnedBy { roles: vec!["zeroship_auth".into(), "public".into()] },
+        SCHEMA
+    )
+    .is_err());
+    // A concrete role still renders.
+    let ok = render_up(&Op::DropOwnedBy { roles: vec!["zeroship_auth".into()] });
+    assert_eq!(ok, r#"DROP OWNED BY "zeroship_auth""#);
+}
+
+#[test]
+fn alter_role_rejects_set_plus_reset_search_path() {
+    // SA-16: setSearchPath + resetSearchPath:true is contradictory (the renderer
+    // would silently prefer RESET and drop the SET). Refuse it.
+    let op = Op::AlterRole {
+        name: "zeroship_auth".into(),
+        set_search_path: Some(vec!["zeroship".into()]),
+        reset_search_path: Some(true),
+    };
+    assert!(render_vendor_op(&op, SCHEMA).is_err());
+    // Each instruction alone still renders.
+    let set_only = render_up(&Op::AlterRole {
+        name: "zeroship_auth".into(),
+        set_search_path: Some(vec!["zeroship".into()]),
+        reset_search_path: None,
+    });
+    assert!(set_only.contains("SET search_path = "), "got: {set_only}");
+    let reset_only = render_up(&Op::AlterRole {
+        name: "zeroship_auth".into(),
+        set_search_path: None,
+        reset_search_path: Some(true),
+    });
+    assert!(reset_only.contains("RESET search_path"), "got: {reset_only}");
+}
+
+#[test]
 fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
     let platform = SchemaScope::Allowlist(vec!["zeroship".into(), "myschema".into()]);
     let mut op = Op::CreateFunction {
