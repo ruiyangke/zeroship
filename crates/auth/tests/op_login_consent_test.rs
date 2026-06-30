@@ -304,7 +304,17 @@ async fn open_redirect_guards_keep_login_and_consent_on_safe_targets() {
     let Some(fx) = Fixture::boot().await else {
         return;
     };
-    for bad in ["//evil.com", "https://evil.com", "/safe\\evil"] {
+    // Each iteration consumes a LOGIN_EIP rate-limit token (capacity 5), so keep
+    // this to ≤5 distinct full-login vectors. The exhaustive control-char matrix
+    // (NUL/TAB/CR/LF/DEL) is unit-tested in `return_to::tests`; here we prove the
+    // e2e WIRING: off-origin forms fall back, and one CRLF vector pins MED-1
+    // (an interior CR/LF must not ride a "valid" return_to into the redirect).
+    for bad in [
+        "//evil.com",
+        "https://evil.com",
+        "/safe\\evil",
+        "/me\r\nSet-Cookie: zs=1",
+    ] {
         let login_get = get(&fx, &format!("/login?return_to={}", urlencoding(bad)), None).await;
         assert_eq!(login_get.status().as_u16(), 200);
         let csrf = read_set_cookie(&login_get, "zsidp_csrf").expect("csrf");
@@ -337,7 +347,13 @@ async fn open_redirect_guards_keep_login_and_consent_on_safe_targets() {
         Some(&format!("{cookies}; zsidp_csrf={csrf}")),
     )
     .await;
-    assert_ne!(location(&accept), "https://evil.com");
+    // Rejected — never an off-origin redirect. The Location is the safe
+    // fallback or an error page, but must never be the attacker's absolute URL.
+    assert!(
+        !location(&accept).starts_with("http"),
+        "consent accept must not redirect off-origin: {}",
+        location(&accept)
+    );
 
     fx.cleanup().await;
 }
@@ -362,6 +378,53 @@ async fn consent_requires_session_and_csrf() {
     let body = form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]);
     let bad_csrf = post_form(&fx, "/consent/accept", &body, Some(&format!("{cookies}; zsidp_csrf=right"))).await;
     assert_eq!(bad_csrf.status().as_u16(), 403);
+
+    // /consent/deny is equally CSRF-gated (LOW-3): a session with a mismatched
+    // token is rejected, so a cross-site forced deny is impossible.
+    let deny_bad_csrf = post_form(
+        &fx,
+        "/consent/deny",
+        &form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]),
+        Some(&format!("{cookies}; zsidp_csrf=right")),
+    )
+    .await;
+    assert_eq!(deny_bad_csrf.status().as_u16(), 403);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn native_consent_rejects_scope_outside_client_registration() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let cookies = fx.create_session_cookie().await;
+    // The client is registered for openid/profile/email only; `payments:charge`
+    // is over-broad. `load_native_consent_context` must reject it (LOW-3) BEFORE
+    // rendering the grant form, so an attacker-widened return_to can never put a
+    // scope the client isn't allowed in front of the user to approve.
+    let over_broad = authorize_path(
+        &fx.client_id,
+        "openid email payments:charge",
+        &pkce_verifier(),
+        "state-ob",
+        Some("nonce-ob"),
+    );
+    let resp = get(
+        &fx,
+        &format!("/consent?{}", form(&[("return_to", over_broad.as_str())])),
+        Some(&cookies),
+    )
+    .await;
+    // The grant page sets a CSRF cookie; the rejection error page does not —
+    // the absence of `zsidp_csrf` proves the consent form was NOT rendered.
+    assert!(
+        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        "over-broad scope must render the error page, not the consent grant form"
+    );
+    // And it must never bounce to the RP carrying a code.
+    assert_ne!(resp.status().as_u16(), 303);
 
     fx.cleanup().await;
 }
