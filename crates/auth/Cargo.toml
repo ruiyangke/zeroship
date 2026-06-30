@@ -50,6 +50,8 @@ base64 = { workspace = true }
 # Timestamps for `auth.users` (`email_verified_at`, `locked_until`, etc.).
 # Pins must match `postgres-types`' `with-chrono-0_4` major.
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+jsonwebtoken = { workspace = true }
 # Compile-time-checked HTML templates for the login/signup/error pages.
 # No web-framework integration feature — the handler calls `.render()`
 # and stuffs the resulting `String` into an `ntex::web::HttpResponse` body.
@@ -59,12 +61,6 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 # `[package.metadata.askama]` — that mechanism only landed in 0.13+).
 askama = "0.12"
 
-# Test-only dependencies: the in-process MockProvider fixture used by
-# `tests/e2e_google.rs` + `tests/e2e_github.rs` signs JWTs with a
-# generated Ed25519 keypair and serves them as a JWKS, so we pull in
-# `jsonwebtoken` (encode side — verify side already lives in
-# `zeroship-core`) and `ed25519-dalek` (with the `pkcs8` feature so we
-# can hand the JWT encoder a PKCS#8-DER-encoded private key).
 [dev-dependencies]
 # Auth unit tests include `#[compio::test]` live-PG tests. The polling fallback
 # keeps them runnable in sandboxes that block io_uring; production builds use
@@ -75,8 +71,6 @@ compio = { workspace = true, features = ["polling"] }
 # object-safe. Only the tests need it now that the trait lives in
 # `zeroship-mailer`.
 async-trait = { workspace = true }
-jsonwebtoken = { workspace = true }
-ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 # `tests/load_test.rs` uses `futures::future::join_all` to drive N parallel
 # /login requests on the single-threaded ntex test runtime. Workspace pin.
 futures = { workspace = true }

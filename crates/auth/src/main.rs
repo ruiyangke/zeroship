@@ -155,6 +155,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
         report.field(
+            "auth_signing_key_file_configured",
+            CheckValue::Secret(cfg.auth_signing_key_file.is_some()),
+        );
+        report.field(
+            "auth_pairwise_salt_file_configured",
+            CheckValue::Secret(cfg.auth_pairwise_salt_file.is_some()),
+        );
+        report.field(
             "frame_ancestor_origins",
             CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
         );
@@ -221,6 +229,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // compose `migrate` service / `ops/db-migrate.sh`) out of band before this
     // service boots — not here.
 
+    let auth_signing_key_file = cfg.auth_signing_key_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "AUTH_SIGNING_KEY_FILE / --auth-signing-key-file is required".into(),
+        )
+    })?;
+    let auth_pairwise_salt_file = cfg.auth_pairwise_salt_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "AUTH_PAIRWISE_SALT_FILE / --auth-pairwise-salt-file is required".into(),
+        )
+    })?;
+    let op_issuer = zeroship_auth::op::Issuer::from_files(
+        auth_signing_key_file,
+        auth_pairwise_salt_file,
+        cfg.public_url(),
+    )?;
+    op_issuer.publish_active_key(&client).await?;
+    tracing::info!(
+        kid = %op_issuer.kid(),
+        issuer = %op_issuer.issuer(),
+        "platform OP signing key published"
+    );
+    let op_issuer = Arc::new(op_issuer);
+
     // 2. Bootstrap: keys + client reconciliation.
     let admin = HydraAdmin::new(cfg.hydra_admin_url());
     bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
@@ -248,7 +279,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
-    server::run(cfg, admin, db, google_jwks, mailer, relay_forward_mailer).await?;
+    server::run(
+        cfg,
+        admin,
+        db,
+        google_jwks,
+        mailer,
+        relay_forward_mailer,
+        op_issuer,
+    )
+    .await?;
     Ok::<(), Box<dyn std::error::Error>>(())
         })
 }

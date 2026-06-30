@@ -9,6 +9,7 @@ use zeroship_core::oidc_verify::JwksCache;
 use crate::config::AuthConfig;
 use crate::headers::{RequestContextMiddleware, SecurityHeaders};
 use crate::hydra_client::HydraAdmin;
+use crate::op;
 use crate::ui;
 use zeroship_mailer::{Mailer, RelayForwardMailer};
 
@@ -37,6 +38,9 @@ pub fn configure(
         cfg.service(healthz)
             .service(readyz)
             .service(style)
+            .service(op::metadata::jwks)
+            .service(op::metadata::openid_configuration)
+            .service(op::metadata::oauth_authorization_server)
             .service(
                 web::resource("/login")
                     .route(web::get().to(ui::login::get))
@@ -308,6 +312,7 @@ pub async fn run(
     google_jwks: Option<Arc<JwksCache>>,
     mailer: Arc<dyn Mailer>,
     relay_forward_mailer: RelayForwardMailer,
+    op_issuer: Arc<op::Issuer>,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();
@@ -323,6 +328,7 @@ pub async fn run(
             .state(cfg.clone())
             .state(db.clone())
             .state(mailer.clone())
+            .state(op_issuer.clone())
             // The dedicated relay-forward mailer (§5.2a). A distinct newtype
             // so `State<RelayForwardMailer>` doesn't collide with the
             // transactional `State<Arc<dyn Mailer>>`.
