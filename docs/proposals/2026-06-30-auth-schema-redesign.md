@@ -2,9 +2,9 @@
 
 **Status:** proposal, design-only. No migration code in this change.
 **Date:** 2026-06-30.
-**Scope:** auth, identity, OAuth, session, grant, token, and client tables currently created by `db/migrations/V*.sql` excluding `*.down.sql`.
+**Scope:** auth, identity, OAuth, session, grant, token, client, operator RBAC, authorization-decision, and net-policy tables currently created by `db/migrations/V*.sql` excluding `*.down.sql`.
 
-This is a pre-launch clean redesign. P1 should implement the final names directly; do not add compatibility aliases, migration shims, or old-name fallbacks.
+This is a pre-launch clean redesign. P1 should implement the final names directly; do not add compatibility aliases, migration shims, or old-name fallbacks. The Liquibase changesets in `db/migrations/` are canonical; older SQL header comments that say rows were transcribed from Rust embedded migrations are stale provenance notes, not a second source of truth.
 
 ## Schema decision (operator)
 
@@ -18,7 +18,7 @@ Signing-key custody is independent of that schema decision. The raw OP private s
 
 1. **The schema is always `zeroship`.** Table and column names express concepts; role grants and RLS express write authority, read authority, and tenant isolation.
 2. **Table names are plural snake_case nouns.** Keep current table names when they already communicate the concept. Rename only when a name is misleading, duplicated, singular, stale, or tied to Hydra/GoTrue implementation detail.
-3. **The canonical platform-user FK is `user_id`.** Every database column that references the platform user row is named `user_id` and FKs to `zeroship.users(id)`. The audit found no separate database-backed operator/principal population: current `principal_id`, `global_user_id`, and control-plane bearer `subject` paths all resolve to `zeroship.users(id)`.
+3. **The canonical platform-user FK is `user_id`.** Every database column that references the platform user row is named `user_id` and FKs to `zeroship.users(id)`. The database-backed operator/admin population is `zeroship.platform_admin_roles`: it selects operators from the platform-user pool and assigns an admin/support/billing/readonly role. Keep that layer distinct by table name because it is operator RBAC, not end-user identity. Do not keep `principal_id` in persisted tables as a speculative actor placeholder; current `principal_id`, `global_user_id`, and control-plane bearer `subject` paths that refer to a user row become `user_id`.
 4. **Keep protocol subject names only for projected or external subjects.** `pairwise_sub`, `provider_subject`, `token_subject`, `jti`, `kid`, `amr`, `acr`, and `auth_time` are allowed because they are protocol claims or projected identifiers, not platform-user FKs.
 5. **FK columns use `_id`.** Actor columns include the target noun: `created_by_user_id`, `granted_by_user_id`. Hashed secrets use `_hash`; encrypted secrets use `_enc`.
 6. **Timestamps use `_at` or established expiry wording.** Use `created_at`, `updated_at`, `revoked_at`, `expires_at`, `idle_expires_at`, `absolute_expires_at`. Rename ambiguous non-`_at` current names such as `locked_until` and `deletion_scheduled_for`.
@@ -29,32 +29,56 @@ Signing-key custody is independent of that schema decision. The raw OP private s
 
 Current ground truth: `V0001__extensions_schemas.sql` creates one `zeroship` schema and all hand-authored platform tables currently land there. `V0027__oauth_hydra_schema.sql` creates the vendor-owned `oauth_hydra` schema/role only; Hydra's own tables are not hand-authored in this repo and are retired by the OP replacement.
 
-Final layout: every table in this redesign lives under `zeroship.*`. Service ownership is still explicit, but it is encoded as GRANT policy rather than schema placement:
+Final layout: every table in this redesign lives under `zeroship.*`. Service ownership is still explicit, but it is encoded as GRANT policy rather than schema placement. The grant baseline below is the real migration state, carried forward to the renamed table names: `V0025__roles_rls.sql` for the original role model and RLS, `V0032__control_admin_role_policy_update_grant.sql` for platform-admin UPDATE, `V0035__auth_totp_2fa.sql` for TOTP tables, `V0058__app_net_grants.sql` for network policy tables, `V0060__identity_links_principal_grants.sql` for identity/control grants, and `V0061__device_grants.sql` for device authorizations. For merged tables, preserve the union of grants needed by both source tables.
 
-- `zeroship_auth` owns OP/IdP and identity authority rows: global users, upstream identity links, auth factors, IdP sessions, OAuth grants, token state, signing-key metadata, and per-app pairwise identity projections.
-- `zeroship_control` owns creator/platform control rows: app CRUD references, authoritative OAuth client registry writes, declared scope registry, deploy/PAT authorization, device authorization approval, and operator network grants.
-- `zeroship_gateway` owns edge browser session rows and reload-recovery anchors. It does not get direct grants on OP bearer-token stores or signing-key metadata.
+- `zeroship_auth` owns OP/IdP and identity authority rows where the migrations actually grant it access: global users, auth factors, IdP sessions, OAuth grants, signing-key metadata, login flows, and selected pairwise identity cleanup.
+- `zeroship_control` owns creator/platform control rows: authoritative OAuth client registry writes, declared scope registry, deploy/PAT authorization, device authorization approval, operator/admin RBAC, authorization policy surfaces, network grants, and the `identity_links` write path that merges into `federated_identities`.
+- `zeroship_gateway` owns edge browser session rows, reload-recovery anchors, pairwise identity projection, and the primary Bearer-arm revocation markers. It does not get direct grants on OP refresh/code stores, signing-key metadata, OAuth grants, OAuth clients, or client-secret verifier columns.
 - `zeroship_worker` and `zeroship_app` do not get direct grants to OP/control/gateway tables. They access platform state through native primitives and service APIs.
 
-Grant matrix for the redesigned auth/OAuth/session tables:
+Grant matrix for the redesigned tables. `S/I/U/D` mean `SELECT`/`INSERT`/`UPDATE`/`DELETE`; `-` means no direct grant.
 
 | Table(s) | `zeroship_auth` | `zeroship_control` | `zeroship_gateway` | `zeroship_worker` | `zeroship_app` | RLS/notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `zeroship.users` | read/write | read needed profile/account fields | no direct grant | no grant | no grant | User/account data stays service-mediated. Add RLS only for any future direct self-service role. |
-| `zeroship.federated_identities`, `zeroship.idp_sessions`, `zeroship.magic_links`, `zeroship.magic_completions`, `zeroship.email_verifications`, `zeroship.email_suppressions`, `zeroship.totp_credentials`, `zeroship.totp_backup_codes` | read/write | no grant by default; narrow read only for explicit admin tooling | no grant | no grant | no grant | Credential, proof, and login-flow state is auth-private. |
-| `zeroship.app_user_identities` | read/write | read for admin/debug only | narrow read/write only if gateway owns pairwise-session projection in implementation | no grant | no grant | Tenant scoped by `client_id`/app ownership; RLS mirrors `zeroship.app_secrets` style when exposed outside the auth service. |
-| `zeroship.oauth_clients` | read; read client-secret verifier column only if auth verifies confidential clients directly | read/write; owns registration | no grant | no grant | no grant | Client-secret material/verifier columns are explicitly not granted to gateway, worker, or app. Use column-level grants or a redacted view for non-secret metadata if a service later needs it. |
-| `zeroship.app_oauth_clients`, `zeroship.app_scope_defs` | read | read/write | no direct grant by default | no grant | no grant | Tenant scoped by `app_id`; use RLS for any non-control direct reads. |
-| `zeroship.oauth_grants` | read/write | read for support/admin and client lifecycle cleanup only | no grant | no grant | no grant | Secret-bearing consent/token authority table. Tenant scoped by `(user_id, client_id)`; RLS required before any non-auth write. |
-| `zeroship.oauth_authorization_codes` | read/write | no grant | no grant | no grant | no grant | Secret-bearing single-use code store; auth-private. |
-| `zeroship.oauth_refresh_tokens` | read/write | no grant except lifecycle purge jobs run as auth or a tightly scoped maintenance role | no grant | no grant | no grant | Secret-bearing refresh-token family store; auth-private. |
-| `zeroship.signing_keys` | read/write metadata | read public metadata only if control needs operator visibility | no grant | no grant | no grant | Contains public JWK and rotation status only. Raw private key custody is file/KMS, not a DB grant problem. |
-| `zeroship.token_revocations`, `zeroship.dpop_jtis`, `zeroship.rate_limits`, `zeroship.cron_state` | read/write | no grant by default | no grant by default | no grant | no grant | Token-security and auth housekeeping state. Prefer service API checks over direct cross-service reads. |
-| `zeroship.audit_events` | insert/read | read for audit/admin | no grant | no grant | no grant | Append-only trigger stays. RLS or redacted views before exposing tenant-filtered audit data. |
-| `zeroship.permission_tokens`, `zeroship.principal_grants`, `zeroship.device_authorizations`, `zeroship.app_net_grants` | narrow read/write only for OAuth/device handoff paths | read/write | no grant | no grant | no grant | Control-plane authorization state; RLS by `user_id` or `app_id` where tenant-scoped. |
-| `zeroship.sessions`, `zeroship.app_session_anchors` | narrow revocation/read as needed | no grant by default | read/write | no grant | no grant | Gateway-owned browser session credentials; tenant scoped by `app_id`; RLS required if auth/control get direct cleanup writes. |
+| `zeroship.users` | SIUD | S | - | - | - | User/account data stays service-mediated. Add RLS only for any future direct self-service role. |
+| `zeroship.platform_admin_roles` | - | SIUD | - | - | - | Operator/admin RBAC population. `V0025` grants SID; `V0032` adds U for admin upserts. |
+| `zeroship.federated_identities` | SID | SIUD | - | - | - | Final table merges old `identity_links`, so it must preserve `V0060` control SIUD for device-flow approval writes while retaining auth SID from `V0025`. |
+| `zeroship.idp_sessions` | SIUD | - | - | - | - | Auth-private IdP browser session state. |
+| `zeroship.magic_links` | SIUD | - | - | - | - | Auth-private login/reset token state. |
+| `zeroship.magic_completions` | SIUD | - | - | - | - | Auth-private cross-device completion state. |
+| `zeroship.email_verifications` | SIUD | - | - | - | - | Auth-private email verification token state. |
+| `zeroship.email_suppressions` | SI | - | - | - | - | Auth mailer suppression list. |
+| `zeroship.totp_credentials` | SIUD | - | - | - | - | Auth-owned encrypted TOTP secret. |
+| `zeroship.totp_backup_codes` | SIUD | - | - | - | - | Auth-owned single-use recovery-code hashes. |
+| `zeroship.app_user_identities` | SU | SU | SIU | - | - | Mandatory FORCE RLS. Tenant key is `client_id` after rename, checked against GUC `zeroship.tenant_client` (TEXT). Auth/control BYPASSRLS; gateway is RLS-gated. |
+| `zeroship.oauth_clients` | S | SIUD | - | - | - | Control owns registration. Client-secret verifier columns are not granted to gateway, worker, or app; use explicit column grants/redacted views if non-secret metadata is later shared. |
+| `zeroship.app_oauth_clients` | - | SI | - | - | - | Per-app client extension; no auth grant in `V0025`. |
+| `zeroship.app_scope_defs` | S | SID | - | - | - | App-declared scope registry. |
+| `zeroship.oauth_grants` | SIU | SID | - | - | - | End-user OAuth consent grant table. Control keeps INSERT/DELETE for lifecycle cleanup from `V0025`; do not downgrade to read-only by assumption. |
+| `zeroship.oauth_authorization_codes` | SIUD | - | - | - | - | New P1 OP single-use code store; auth-private. |
+| `zeroship.oauth_refresh_tokens` | SIUD | - | - | - | - | New P1 OP refresh-token family store; auth-private. |
+| `zeroship.signing_keys` | SID | - | - | - | - | Renamed from `jwk_key_state`. Public JWK/rotation metadata only; raw private key custody is file/KMS. |
+| `zeroship.token_revocations` | - | SID | SID | - | - | Primary Bearer-arm revocation mechanism. `V0025` grants gateway and control SELECT/INSERT/DELETE; auth has no grant in that baseline. |
+| `zeroship.dpop_jtis` | - | - | - | - | - | Renamed from `dpop_jti`. `V0025` grants no service role; any P1 owner change must be explicit. |
+| `zeroship.rate_limits` | SID | SD | - | - | - | Auth throttling and cleanup state; control keeps DELETE for cleanup. |
+| `zeroship.cron_state` | SI | - | - | - | - | Auth cron bookkeeping. |
+| `zeroship.audit_events` | SID | - | I | - | - | Append-only trigger remains the tamper guard; auth DELETE is only the GUC-flagged retention path. |
+| `zeroship.authz_decisions` | - | - | - | - | - | Append-only authz decision log. No explicit service grant is mapped in `V0025`; P1 must add an explicit INSERT grant for the real writer role when that path is pinned. |
+| `zeroship.permission_tokens` | - | SIU | - | - | - | Control-owned PAT/OAuth-derived control token surface. |
+| `zeroship.principal_grants` | - | SIUD | - | - | - | Control-owned deploy/control authorization grants from `V0060`; table name stays because it names authorization semantics, but the user FK column becomes `user_id`. |
+| `zeroship.device_authorizations` | - | SIUD | - | - | - | Renamed from `device_grants`; control owns the pending device authorization flow in `V0061`. |
+| `zeroship.app_net_grants` | - | SIUD | - | - | - | Operator-authorized raw-TCP egress grants from `V0058`. |
+| `zeroship.net_policy_catalog` | - | SIU | - | - | - | Operator-editable net-policy catalog from `V0058`; no worker/app direct grant. |
+| `zeroship.sessions` | SD | - | SIU | - | - | Renamed from `gateway_sessions`. Mandatory FORCE RLS on `app_id` via GUC `zeroship.tenant_app` (UUID). |
+| `zeroship.app_session_anchors` | - | - | SIUD | - | - | Mandatory FORCE RLS on `app_id` via GUC `zeroship.tenant_app` (UUID). `refresh_token_enc` is an encrypted gateway-owned reload-recovery secret. |
 
-The secret-bearing OP tables are intentionally not granted to `zeroship_worker`, `zeroship_app`, or `zeroship_gateway`: `zeroship.oauth_refresh_tokens`, `zeroship.oauth_authorization_codes`, `zeroship.signing_keys`, `zeroship.oauth_grants`, and the client-secret/verifier column(s) on `zeroship.oauth_clients`. `zeroship_auth` gets the OP tables; `zeroship_control` gets only the reads or writes its control-plane lifecycle requires.
+Mandatory RLS carried forward from `V0025`:
+
+- `zeroship.app_secrets`, `zeroship.sessions` (old `gateway_sessions`), and `zeroship.app_session_anchors` must `ENABLE` and `FORCE ROW LEVEL SECURITY` unconditionally with `tenant_isolation` policies keyed on `app_id = current_setting('zeroship.tenant_app', true)::uuid`.
+- `zeroship.app_user_identities` must `ENABLE` and `FORCE ROW LEVEL SECURITY` unconditionally with `tenant_isolation` keyed on the renamed `client_id` column: `client_id = current_setting('zeroship.tenant_client', true)`. This GUC is TEXT and carries the per-app OAuth client id (`oac_...`), not the UUID app id. Renaming `app_client_id` to `client_id` requires rewriting the policy predicate in lockstep.
+- `zeroship_auth` and `zeroship_control` remain BYPASSRLS service roles; `zeroship_gateway` is the RLS-gated direct-access role. Unset tenant GUCs fail closed because `current_setting(..., true)` returns NULL and the predicate matches no rows.
+
+The secret-bearing OP tables are intentionally not granted to `zeroship_worker`, `zeroship_app`, or `zeroship_gateway`: `zeroship.oauth_refresh_tokens`, `zeroship.oauth_authorization_codes`, `zeroship.signing_keys`, `zeroship.oauth_grants`, and the client-secret/verifier column(s) on `zeroship.oauth_clients`. Not every encrypted token secret is auth-private: `zeroship.app_session_anchors.refresh_token_enc` is intentionally readable/writable by `zeroship_gateway` under FORCE RLS, and `zeroship.device_authorizations.provider_refresh_token_enc` is control-owned device-flow state. Those encrypted columns rely on their own key-custody boundary; they are still never granted directly to worker/app roles.
 
 ### Signing-key custody requirement
 
@@ -76,11 +100,21 @@ Final columns: `id UUID NOT NULL DEFAULT gen_random_uuid()`, `email CITEXT NOT N
 
 PK/FKs: PK `id`. No FKs.
 
+### `zeroship.platform_admin_roles`
+
+Old: `zeroship.platform_admin_roles` -> `zeroship.platform_admin_roles`.
+Creating migration: `V0003__platform.sql`.
+Purpose: database-backed operator/admin RBAC population. A platform user becomes an operator by holding one row here; this is the real operator layer and should stay distinct from end-user identity/session tables.
+
+Final columns: `user_id UUID NOT NULL`, `role TEXT NOT NULL CHECK (role IN ('admin','support','billing','readonly'))`, `granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `granted_by_user_id UUID NULL` (old `granted_by`).
+
+PK/FKs: PK/FK `user_id -> zeroship.users(id) ON DELETE CASCADE`; FK `granted_by_user_id -> zeroship.users(id)`.
+
 ### `zeroship.federated_identities`
 
 Old: `zeroship.federated_identities` + `zeroship.identity_links` -> `zeroship.federated_identities`.
 Creating migrations: `V0002__auth.sql`, `V0060__identity_links_principal_grants.sql`.
-Purpose: one external provider-local subject bound to one platform user. This merges the duplicate control-plane identity bridge into the existing auth identity-link table.
+Purpose: one external provider-local subject bound to one platform user. This merges the duplicate control-plane identity bridge into the existing auth identity-link table. The merge must preserve control's `identity_links` write path for device-flow approval.
 
 Final columns: `id UUID NOT NULL DEFAULT gen_random_uuid()`, `user_id UUID NOT NULL`, `provider TEXT NOT NULL`, `provider_subject TEXT NOT NULL` (old `federated_identities.subject`; same as `identity_links.provider_subject`), `email_at_link CITEXT NULL` (old `identity_links.email` merged here), `raw_profile JSONB NULL`, `linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()` (old `identity_links.created_at`).
 
@@ -166,6 +200,8 @@ Final columns: `client_id TEXT NOT NULL` (old `app_client_id`), `user_id UUID NO
 
 PK/FKs: PK `(client_id, user_id)`; FK `client_id -> zeroship.oauth_clients(client_id) ON DELETE CASCADE`; FK `user_id -> zeroship.users(id) ON DELETE CASCADE`; index `pairwise_sub`; active unique index on `relay_email` where non-null and `revoked_at IS NULL`.
 
+RLS: `V0025` keys this table on the OAuth client id, not the app UUID. The redesign renames `app_client_id` to `client_id`, so the policy must move from `app_client_id = current_setting('zeroship.tenant_client', true)` to `client_id = current_setting('zeroship.tenant_client', true)`. Do not use `zeroship.tenant_app` for this table unless a real `app_id` column is added.
+
 ### `zeroship.oauth_grants`
 
 Old: `zeroship.oauth_grants` -> `zeroship.oauth_grants`.
@@ -210,11 +246,13 @@ Custody rule: no raw private signing key is stored in this table. `crates/auth` 
 
 Old: `zeroship.token_revocations` -> `zeroship.token_revocations`.
 Creating migration: `V0002__auth.sql`.
-Purpose: cross-node token-family revocation marker for app tokens.
+Purpose: cross-node token-family revocation marker for app tokens; this is the primary Bearer-arm revocation mechanism keyed per app/client.
 
 Final columns: `client_id TEXT NOT NULL`, `token_subject TEXT NOT NULL` (old `sub`; projected token `sub`, not a platform-user FK), `revoked_after TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
 
 PK/FKs: PK `(client_id, token_subject)`; FK `client_id -> zeroship.oauth_clients(client_id) ON DELETE CASCADE`.
+
+Behavior change: the current table has no FK. Adding the `oauth_clients` FK is an intentional OP-era tightening because every client is registered, and `ON DELETE CASCADE` means deleting a client also deletes its per-client revocation markers.
 
 ### `zeroship.dpop_jtis`
 
@@ -245,6 +283,16 @@ Purpose: auth service structured event log with append-only trigger.
 Final columns: `id BIGSERIAL NOT NULL`, `occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `event_type TEXT NOT NULL`, `outcome TEXT NOT NULL`, `actor_user_id UUID NULL`, `client_id TEXT NULL`, `request_id TEXT NULL`, `ip INET NULL`, `user_agent TEXT NULL`, `auth_method TEXT NULL`, `detail JSONB NULL`.
 
 PK/FKs: PK `id`; optional FK `actor_user_id -> zeroship.users(id)` may be added if retention/anonymization behavior allows it.
+
+### `zeroship.authz_decisions`
+
+Old: `zeroship.authz_decisions` -> `zeroship.authz_decisions`.
+Creating migration: `V0004__control.sql`.
+Purpose: append-only authorization-decision log, parallel to `audit_events`, with its own tamper trigger.
+
+Final columns: `id UUID NOT NULL DEFAULT gen_random_uuid()`, `occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `actor_user_id UUID NULL`, `token_id UUID NULL`, `action TEXT NOT NULL`, `resource_type TEXT NOT NULL`, `resource_id TEXT NULL`, `decision TEXT NOT NULL CHECK (decision IN ('allow','deny'))`, `matched_policies TEXT[] NOT NULL DEFAULT '{}'`, `request_ip INET NULL`, `request_id TEXT NULL`.
+
+PK/FKs: PK `id`; optional FK `actor_user_id -> zeroship.users(id)` and optional FK `token_id -> zeroship.permission_tokens(id)` may be added if retention/anonymization behavior allows hard references. The append-only trigger and UPDATE/DELETE/TRUNCATE revokes stay.
 
 ### `zeroship.cron_state`
 
@@ -326,6 +374,16 @@ Final columns: `app_id UUID NOT NULL`, `host TEXT NOT NULL`, `port INT NOT NULL 
 
 PK/FKs: PK `(app_id, host, port)`; FK `app_id -> zeroship.apps(id) ON DELETE CASCADE`; FK `granted_by_user_id -> zeroship.users(id)` when present.
 
+### `zeroship.net_policy_catalog`
+
+Old: `zeroship.net_policy_catalog` -> `zeroship.net_policy_catalog`.
+Creating migration: `V0058__app_net_grants.sql`.
+Purpose: operator-editable network-policy catalog, sibling to `app_net_grants`, used for wildcard/frontable-suffix validation without a binary rollout.
+
+Final columns: `key TEXT NOT NULL`, `value_json JSONB NOT NULL`, `updated_by_user_id UUID NULL` (operator edits), `updated_by_system TEXT NULL` (system/migration writes such as the old `migration:V0058` seed value), `updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`.
+
+PK/FKs: PK `key`; FK `updated_by_user_id -> zeroship.users(id)` when present.
+
 ### `zeroship.sessions`
 
 Old: `zeroship.gateway_sessions` -> `zeroship.sessions`.
@@ -335,6 +393,8 @@ Purpose: per-origin hosted-app browser session rows for the gateway's `__Host-ze
 Final columns: `id UUID NOT NULL DEFAULT gen_random_uuid()`, `user_id UUID NOT NULL`, `app_id UUID NOT NULL`, `email CITEXT NULL`, `name TEXT NULL`, `avatar_url TEXT NULL`, `email_verified BOOLEAN NOT NULL DEFAULT FALSE`, `issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`, `idle_expires_at TIMESTAMPTZ NOT NULL`, `absolute_expires_at TIMESTAMPTZ NOT NULL` (old `abs_expires_at`), `revoked_at TIMESTAMPTZ NULL`, `granted_scopes TEXT[] NOT NULL DEFAULT '{}'`, `auth_time TIMESTAMPTZ NULL`, `amr TEXT[] NOT NULL DEFAULT '{}'`.
 
 PK/FKs: PK `id`; FK `user_id -> zeroship.users(id)`; FK `app_id -> zeroship.apps(id) ON DELETE CASCADE`.
+
+RLS: mandatory `ENABLE` + `FORCE ROW LEVEL SECURITY`, keyed on `app_id = current_setting('zeroship.tenant_app', true)::uuid`, carried forward from `V0025`.
 
 ### `zeroship.app_session_anchors`
 
@@ -346,11 +406,13 @@ Final columns: `id UUID NOT NULL DEFAULT gen_random_uuid()`, `app_id UUID NOT NU
 
 PK/FKs: PK `id`; FK `app_id -> zeroship.apps(id) ON DELETE CASCADE`; FK `client_id -> zeroship.oauth_clients(client_id) ON DELETE CASCADE`; FK `user_id -> zeroship.users(id) ON DELETE CASCADE`.
 
+RLS: mandatory `ENABLE` + `FORCE ROW LEVEL SECURITY`, keyed on `app_id = current_setting('zeroship.tenant_app', true)::uuid`, carried forward from `V0025`. `refresh_token_enc` is gateway-readable encrypted refresh-family state, not an auth-private OP refresh token.
+
 ## 4. Merges and deletions
 
 | Current shape | Final shape | Decision |
 | --- | --- | --- |
-| `zeroship.identity_links` + `zeroship.federated_identities` | `zeroship.federated_identities` | Merge. The audit confirms both tables are the same concept: `(provider, provider-local subject) -> zeroship.users(id)`. `identity_links.principal_id` and `federated_identities.user_id` target the same platform user table; `identity_links.provider_subject` and `federated_identities.subject` are the same external subject. Keep the richer `federated_identities` name and column set. |
+| `zeroship.identity_links` + `zeroship.federated_identities` | `zeroship.federated_identities` | Merge. The audit confirms both tables are the same concept: `(provider, provider-local subject) -> zeroship.users(id)`. `identity_links.principal_id` and `federated_identities.user_id` target the same platform user table; `identity_links.provider_subject` and `federated_identities.subject` are the same external subject. Keep the richer `federated_identities` name and column set, and preserve control's `identity_links` SIUD write path for device-flow approval. |
 | `zeroship.device_grants` | `zeroship.device_authorizations` | Rename. The row is a pending device authorization, not an issued grant. Also remove provider-specific `gotrue_` column naming. |
 | `zeroship.oauth_grants` vs P0 `zeroship.consents` | `zeroship.oauth_grants` only | Keep `oauth_grants`. It is already the end-user consent-grant ledger and the task's grant taxonomy reserves that name for this meaning. P1 should add remembered-consent fields here instead of creating `zeroship.consents`. |
 | `zeroship.oauth_clients` + `zeroship.app_oauth_clients` | `zeroship.oauth_clients` + `zeroship.app_oauth_clients` | Keep two tables. `oauth_clients` is the authoritative generic RP/client registry; `app_oauth_clients` is the hosted-app extension with `app_id` and `sector_identifier`. Merging would force nullable app fields for console/non-app clients. Delete `hydra_client_id`. |
@@ -362,6 +424,8 @@ PK/FKs: PK `id`; FK `app_id -> zeroship.apps(id) ON DELETE CASCADE`; FK `client_
 ## 5. Full rename map
 
 This map is intentionally flat and implementation-oriented. Rows marked `delete` should not get replacement columns. Rows marked `merge` are absorbed into the target table, not kept as aliases.
+
+Migration mechanics: because this is pre-launch, implement the final names by rewriting the canonical Liquibase changesets in place and resetting dev databases. Do not add rename/backfill migrations. Any table rename or column rename in this map requires lockstep edits to the creating changeset and to `V0025__roles_rls.sql` grants/RLS policies; `V0032__control_admin_role_policy_update_grant.sql` must also be folded into the final `platform_admin_roles`/`platform_policies` grant shape.
 
 | Old object | New object | Action |
 | --- | --- | --- |
@@ -382,6 +446,11 @@ This map is intentionally flat and implementation-oriented. Rows marked `delete`
 | `zeroship.users.deletion_requested_at` | `zeroship.users.deletion_requested_at` | keep |
 | `zeroship.users.deletion_scheduled_for` | `zeroship.users.deletion_scheduled_at` | rename |
 | `zeroship.users.anonymized_at` | `zeroship.users.anonymized_at` | keep |
+| `zeroship.platform_admin_roles` | `zeroship.platform_admin_roles` | keep table; operator/admin RBAC layer |
+| `zeroship.platform_admin_roles.user_id` | `zeroship.platform_admin_roles.user_id` | keep canonical user FK |
+| `zeroship.platform_admin_roles.role` | `zeroship.platform_admin_roles.role` | keep |
+| `zeroship.platform_admin_roles.granted_at` | `zeroship.platform_admin_roles.granted_at` | keep |
+| `zeroship.platform_admin_roles.granted_by` | `zeroship.platform_admin_roles.granted_by_user_id` | rename |
 | `zeroship.federated_identities` | `zeroship.federated_identities` | keep table; merged target |
 | `zeroship.federated_identities.id` | `zeroship.federated_identities.id` | keep |
 | `zeroship.federated_identities.user_id` | `zeroship.federated_identities.user_id` | keep |
@@ -501,6 +570,18 @@ This map is intentionally flat and implementation-oriented. Rows marked `delete`
 | `zeroship.audit_events.user_agent` | `zeroship.audit_events.user_agent` | keep |
 | `zeroship.audit_events.auth_method` | `zeroship.audit_events.auth_method` | keep |
 | `zeroship.audit_events.detail` | `zeroship.audit_events.detail` | keep |
+| `zeroship.authz_decisions` | `zeroship.authz_decisions` | keep table; append-only authz decision log |
+| `zeroship.authz_decisions.id` | `zeroship.authz_decisions.id` | keep |
+| `zeroship.authz_decisions.occurred_at` | `zeroship.authz_decisions.occurred_at` | keep |
+| `zeroship.authz_decisions.actor_user_id` | `zeroship.authz_decisions.actor_user_id` | keep |
+| `zeroship.authz_decisions.token_id` | `zeroship.authz_decisions.token_id` | keep; optional FK to `permission_tokens(id)` |
+| `zeroship.authz_decisions.action` | `zeroship.authz_decisions.action` | keep |
+| `zeroship.authz_decisions.resource_type` | `zeroship.authz_decisions.resource_type` | keep |
+| `zeroship.authz_decisions.resource_id` | `zeroship.authz_decisions.resource_id` | keep |
+| `zeroship.authz_decisions.decision` | `zeroship.authz_decisions.decision` | keep |
+| `zeroship.authz_decisions.matched_policies` | `zeroship.authz_decisions.matched_policies` | keep |
+| `zeroship.authz_decisions.request_ip` | `zeroship.authz_decisions.request_ip` | keep |
+| `zeroship.authz_decisions.request_id` | `zeroship.authz_decisions.request_id` | keep |
 | `zeroship.cron_state` | `zeroship.cron_state` | keep table |
 | `zeroship.cron_state.key` | `zeroship.cron_state.key` | keep |
 | `zeroship.cron_state.last_rotated_at` | `zeroship.cron_state.last_rotated_at` | keep |
@@ -561,6 +642,12 @@ This map is intentionally flat and implementation-oriented. Rows marked `delete`
 | `zeroship.app_net_grants.granted_by` | `zeroship.app_net_grants.granted_by_user_id` | rename/type to UUID |
 | `zeroship.app_net_grants.granted_at` | `zeroship.app_net_grants.granted_at` | keep |
 | `zeroship.app_net_grants.note` | `zeroship.app_net_grants.note` | keep |
+| `zeroship.net_policy_catalog` | `zeroship.net_policy_catalog` | keep table |
+| `zeroship.net_policy_catalog.key` | `zeroship.net_policy_catalog.key` | keep |
+| `zeroship.net_policy_catalog.value_json` | `zeroship.net_policy_catalog.value_json` | keep |
+| `zeroship.net_policy_catalog.updated_by` | `zeroship.net_policy_catalog.updated_by_user_id` | rename/type to UUID for operator edits |
+| `(new)` | `zeroship.net_policy_catalog.updated_by_system` | P1 split for system/migration provenance |
+| `zeroship.net_policy_catalog.updated_at` | `zeroship.net_policy_catalog.updated_at` | keep |
 | `zeroship.gateway_sessions` | `zeroship.sessions` | rename/move |
 | `zeroship.gateway_sessions.id` | `zeroship.sessions.id` | keep |
 | `zeroship.gateway_sessions.user_id` | `zeroship.sessions.user_id` | keep |
@@ -588,10 +675,12 @@ This map is intentionally flat and implementation-oriented. Rows marked `delete`
 | `zeroship.app_session_anchors.abs_expires_at` | `zeroship.app_session_anchors.absolute_expires_at` | rename |
 | `zeroship.app_session_anchors.revoked_at` | `zeroship.app_session_anchors.revoked_at` | keep |
 
-## 6. Open questions
+## 6. Implementation notes and open questions
 
-1. **Separate operator population:** the audit did not find one. `principal_id` is only a code/authz concept today and all persisted rows target `zeroship.users(id)`. If product later requires non-user service principals/operators, add a distinct actor table then; do not keep `principal_id` in DB as a speculative placeholder now.
-2. **`app_net_grants.granted_by_user_id`:** current code writes `guard.principal_id.to_string()` into `granted_by TEXT`, so this redesign types it as `UUID` and FKs it to `zeroship.users(id)`. If P1 needs system-authored grants, add an explicit nullable `granted_by_system TEXT` or an actor-union design rather than overloading a user FK.
-3. **Final OP token table internals:** `oauth_authorization_codes` and `oauth_refresh_tokens` names are canonical here, but exact token hashing, family, reuse-detection, and status columns should be finalized in the OP AS spec. Do not create differently named tables while that spec is refined.
-4. **DPoP replay-cache ownership:** this proposal keeps `zeroship.dpop_jtis` as token-security state. If P1 proves the resource-server replay cache must be gateway-local for latency, keep the same plural table name and revisit the grants/RLS owner, not the single-schema decision.
-5. **Audit-event FKs and retention:** `zeroship.audit_events.actor_user_id` can remain nullable without a hard FK if account erasure/retention needs append-only historical rows after user deletion. The name is already clear and should not become `principal_id`.
+1. **Operator/admin population is resolved:** `zeroship.platform_admin_roles` is the database-backed operator layer. It uses `user_id` because operators are selected from the platform-user pool, while the table name and `role` enum keep operator/admin RBAC distinct from end-user identity. `principal_id` remains a code/authz term, not a persisted user FK name.
+2. **Migration mechanics:** P1 should rewrite the canonical Liquibase changesets in place and reset dev databases. In particular, `V0025__roles_rls.sql` must be re-emitted against the renamed tables/columns for every GRANT, `ENABLE ROW LEVEL SECURITY`, `FORCE ROW LEVEL SECURITY`, and policy predicate; `V0032__control_admin_role_policy_update_grant.sql` must be folded into the final platform-admin/policy grants. Do not create a rename/backfill changeset.
+3. **RLS GUC contract:** `sessions`, `app_session_anchors`, and `app_secrets` use `zeroship.tenant_app` as UUID `app_id`; `app_user_identities` uses `zeroship.tenant_client` as TEXT OAuth `client_id`. This split is part of the contract and must move with the `app_client_id` -> `client_id` rename.
+4. **`app_net_grants`/`net_policy_catalog` actor columns:** user-authored operator edits use `granted_by_user_id` / `updated_by_user_id`. System-authored catalog seeds should use an explicit system-provenance column such as `updated_by_system`, not overload a user FK with text like `migration:V0058`.
+5. **Final OP token table internals:** `oauth_authorization_codes` and `oauth_refresh_tokens` names are canonical here, but exact token hashing, family, reuse-detection, and status columns should be finalized in the OP AS spec. Do not create differently named tables while that spec is refined.
+6. **DPoP replay-cache ownership:** `V0025` grants no service role on `dpop_jti`; this proposal keeps the pluralized table name `zeroship.dpop_jtis` and treats owner/grant changes as an explicit P1 decision, not an inferred auth default.
+7. **Append-only log FKs and retention:** `zeroship.audit_events.actor_user_id` and `zeroship.authz_decisions.actor_user_id` can remain nullable without hard FKs if account erasure/retention needs append-only historical rows after user deletion. `authz_decisions.token_id` can FK to `permission_tokens(id)` only if retention semantics allow it.
