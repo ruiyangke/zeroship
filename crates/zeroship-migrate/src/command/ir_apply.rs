@@ -60,7 +60,9 @@ use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, LockMode};
 use crate::apply::journal::{DeployRecoveryScope, PendingContract};
 use crate::approval::ApprovalScope;
+use crate::frontend::{record_migration_transient, BuildError, DiscoveredMigration, RecordVia};
 use crate::model::migration::Migration;
+use crate::render::step::PlanStep;
 use crate::render::declarative::CollectionDescriptor;
 use crate::render::lower::{IrAuthor, LiveSchema, LoadAndLowerGuardedError};
 use crate::{
@@ -172,6 +174,27 @@ pub enum PostgresIrApplyError {
         /// The fail-closed gate / guard error.
         #[source]
         source: LoadAndLowerGuardedError,
+    },
+    /// Recording a trusted Platform `.ts` migration failed before transient IR
+    /// apply. The committed-IR creator path is unaffected.
+    #[error("record platform TS migration ({file}): {source}")]
+    Record {
+        /// The `.ts` filename or directory.
+        file: String,
+        /// The recorder/build-front-end error.
+        #[source]
+        source: BuildError,
+    },
+    /// Platform `.ts` migrations use the 14-digit filename prefix as the corpus
+    /// order key; duplicates are ambiguous and refused before any apply.
+    #[error("duplicate platform TS migration version {version}: files '{first}' and '{second}'")]
+    DuplicateTsVersion {
+        /// The duplicated 14-digit version prefix.
+        version: String,
+        /// The first file seen with this version.
+        first: String,
+        /// The second file seen with this version.
+        second: String,
     },
     /// The engine refused or failed the apply.
     #[error("apply: {0}")]
@@ -318,6 +341,107 @@ pub async fn apply_bundle_ir_postgres(
     }
 }
 
+/// Apply a Platform `.ts` migration corpus to Postgres by recording each source
+/// file to transient IR at migrate time, then feeding that IR through the same
+/// guarded lower + apply core as committed `.ir.json`.
+///
+/// This is Model C for trusted platform authors: `.ts` is the committed source of
+/// truth, `.ir.json` is never written, and the existing sandboxed recorder is reused
+/// as the TypeScript front-end. The project advisory lock is held once across the
+/// corpus, matching [`apply_bundle_ir_postgres`].
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_platform_ts_postgres(
+    backend: &PostgresBackend<'_>,
+    project_schema: &str,
+    owner_app: &str,
+    migrations_dir: &Path,
+    record_via: &RecordVia<'_>,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    approval: Approval,
+    applied_by: &str,
+) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
+    let ts_migrations = crate::frontend::discover_migrations(migrations_dir).map_err(|source| {
+        PostgresIrApplyError::Record {
+            file: migrations_dir.display().to_string(),
+            source,
+        }
+    })?;
+    if ts_migrations.is_empty() {
+        return Ok(PostgresIrApplyOutcome::default());
+    }
+    reject_duplicate_ts_versions(&ts_migrations)?;
+
+    let mut state = postgres_ir_apply_state(backend, exec_cfg, owner_app).await?;
+
+    backend
+        .acquire_project_lock(exec_cfg)
+        .await
+        .map_err(|e| PostgresIrApplyError::Apply(DeclarativeApplyError::Plain(
+            EngineError::Apply(e),
+        )))?;
+
+    let mut outcome = PostgresIrApplyOutcome::default();
+    let body = async {
+        for migration in &ts_migrations {
+            let display = migration
+                .ts_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            let recorded = record_migration_transient(migration, owner_app, record_via)
+                .map_err(|source| PostgresIrApplyError::Record {
+                    file: display.clone(),
+                    source,
+                })?;
+            debug_assert_eq!(recorded.stem, migration.stem);
+            debug_assert_eq!(recorded.version, migration.version);
+
+            let file_outcome = apply_one_ir_document_postgres(
+                backend,
+                project_schema,
+                owner_app,
+                &display,
+                &recorded.ir_json,
+                &mut state,
+                exec_cfg,
+                guard_cfg,
+                approval,
+                &ApprovalScope::All,
+                applied_by,
+                LockMode::AlreadyHeld,
+                None,
+                Some(PlatformTsVersionSeed {
+                    version: &migration.version,
+                }),
+            )
+            .await?;
+            outcome.extend(file_outcome);
+        }
+        Ok::<(), PostgresIrApplyError>(())
+    }
+    .await;
+
+    let unlock = backend.release_project_lock(exec_cfg).await;
+    match (body, unlock) {
+        (Ok(()), Ok(())) => Ok(outcome),
+        (Ok(()), Err(e)) => Err(PostgresIrApplyError::Apply(
+            DeclarativeApplyError::Plain(EngineError::Apply(e)),
+        )),
+        (Err(e), unlock_result) => {
+            if let Err(unlock_err) = unlock_result {
+                tracing::warn!(
+                    error = %unlock_err,
+                    project = %exec_cfg.project_id,
+                    "zeroship-migrate: failed to release project lock after Platform TS apply"
+                );
+            }
+            Err(e)
+        }
+    }
+}
+
 /// Apply one PG `.ir.json` file using caller-managed state and lock mode.
 ///
 /// The control-plane deploy path calls this inside its existing whole-deploy lock
@@ -349,22 +473,66 @@ pub async fn apply_one_ir_file_postgres(
         message: e.to_string(),
     })?;
 
+    apply_one_ir_document_postgres(
+        backend,
+        project_schema,
+        owner_app,
+        &file,
+        &bytes,
+        state,
+        exec_cfg,
+        guard_cfg,
+        approval,
+        scope,
+        applied_by,
+        lock_mode,
+        recovery_scope,
+        None,
+    )
+    .await
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PlatformTsVersionSeed<'a> {
+    version: &'a str,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_one_ir_document_postgres(
+    backend: &PostgresBackend<'_>,
+    project_schema: &str,
+    owner_app: &str,
+    file: &str,
+    bytes: &str,
+    state: &mut PostgresIrApplyState,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    approval: Approval,
+    scope: &ApprovalScope,
+    applied_by: &str,
+    lock_mode: LockMode,
+    recovery_scope: Option<&DeployRecoveryScope<'_>>,
+    platform_ts_seed: Option<PlatformTsVersionSeed<'_>>,
+) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
     let mut author = IrAuthor::new(project_schema, owner_app, SqlDialect::Postgres);
     if let Some(scope) = guard_cfg.schema_scope() {
         author = author.with_schema_scope(scope);
     }
-    let lowered = author
+    let mut lowered = author
         .load_and_lower_guarded(
-            &bytes,
+            bytes,
             owner_app,
             &state.registry,
             &state.live_schema,
             guard_cfg,
         )
         .map_err(|source| PostgresIrApplyError::Ir {
-            file: file.clone(),
+            file: file.to_string(),
             source,
         })?;
+    if let Some(seed) = platform_ts_seed {
+        restamp_platform_ts_ddl_versions(&mut lowered, seed);
+    }
 
     let lowered_migrations = lowered.migrations();
     let created_tables = lowered.created_tables.clone();
@@ -402,6 +570,86 @@ pub async fn apply_one_ir_file_postgres(
         opened_obligations: outcome.opened_obligations,
         lowered_migrations,
     })
+}
+
+fn reject_duplicate_ts_versions(
+    migrations: &[DiscoveredMigration],
+) -> Result<(), PostgresIrApplyError> {
+    let mut seen: BTreeMap<&str, &DiscoveredMigration> = BTreeMap::new();
+    for migration in migrations {
+        if let Some(first) = seen.insert(&migration.version, migration) {
+            return Err(PostgresIrApplyError::DuplicateTsVersion {
+                version: migration.version.clone(),
+                first: first
+                    .ts_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<unknown>")
+                    .to_string(),
+                second: migration
+                    .ts_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("<unknown>")
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn restamp_platform_ts_ddl_versions(
+    lowered: &mut crate::render::lower::LoweredArtifact,
+    seed: PlatformTsVersionSeed<'_>,
+) {
+    let file_version = seed
+        .version
+        .parse::<u64>()
+        .expect("DiscoveredMigration already validated a 14-digit version");
+    let mut remap = BTreeMap::new();
+    let mut ddl_index = 0usize;
+    for step in &mut lowered.plan.steps {
+        let PlanStep::Ddl(migration) = step else {
+            continue;
+        };
+        let new_version = platform_ts_ddl_fragment_id(file_version, ddl_index);
+        remap.insert(migration.version.clone(), new_version.clone());
+        migration.version = new_version;
+        ddl_index += 1;
+    }
+    if remap.is_empty() {
+        return;
+    }
+    for step in &mut lowered.plan.steps {
+        let PlanStep::Ddl(migration) = step else {
+            continue;
+        };
+        for dep in &mut migration.depends_on {
+            if let Some(new_version) = remap.get(dep) {
+                *dep = new_version.clone();
+            }
+        }
+    }
+}
+
+fn platform_ts_ddl_fragment_id(
+    file_version: u64,
+    ddl_index: usize,
+) -> crate::model::migration::MigrationId {
+    debug_assert!(
+        file_version < crate::model::migration::VERSION_CEILING,
+        "DiscoveredMigration already validated a 14-digit version"
+    );
+    let ddl_index = u64::try_from(ddl_index).expect("DDL fragment count fits in u64");
+    let mut bytes = [0u8; 16];
+    bytes[0..6].copy_from_slice(&file_version.to_be_bytes()[2..8]);
+    bytes[8..16].copy_from_slice(&ddl_index.to_be_bytes());
+    let uuid = uuid::Uuid::from_bytes(bytes);
+    crate::model::migration::MigrationId::parse(&format!(
+        "mig_{}",
+        zeroship_core::typed_id::uuid_to_base62(&uuid)
+    ))
+    .expect("derived Platform TS DDL fragment id is a valid mig_ typed id")
 }
 
 impl From<ApplyError> for PostgresIrApplyError {
