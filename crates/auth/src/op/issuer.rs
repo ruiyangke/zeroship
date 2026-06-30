@@ -65,6 +65,17 @@ pub struct AccessTokenMint<'a> {
     pub ttl_secs: Option<i64>,
 }
 
+/// Inputs for minting a platform access token whose subject is the canonical
+/// platform principal id instead of an app-sector pairwise subject.
+#[derive(Debug, Clone)]
+pub struct PrincipalAccessTokenMint<'a> {
+    pub principal_id: &'a str,
+    pub audience: &'a str,
+    pub client_id: &'a str,
+    pub scopes: &'a [String],
+    pub ttl_secs: Option<i64>,
+}
+
 /// Inputs for minting an ID token paired to an access token.
 #[derive(Debug, Clone)]
 pub struct IdTokenMint<'a> {
@@ -230,29 +241,66 @@ impl Issuer {
 
     /// Issue an RFC 9068 JWT access token.
     pub fn issue_access_token(&self, mint: &AccessTokenMint<'_>) -> Result<String> {
-        if mint.audience.is_empty() {
+        let subject = self.pairwise_subject(mint.user_id, mint.sector);
+        self.issue_access_token_with_subject(
+            &subject,
+            mint.audience,
+            mint.client_id,
+            mint.scopes,
+            mint.ttl_secs,
+        )
+    }
+
+    /// Issue an RFC 9068 access token for a platform principal. This is used by
+    /// first-party resource servers such as control where `sub` is the global
+    /// principal UUID, not an end-user pairwise app subject.
+    pub fn issue_principal_access_token(
+        &self,
+        mint: &PrincipalAccessTokenMint<'_>,
+    ) -> Result<String> {
+        self.issue_access_token_with_subject(
+            mint.principal_id,
+            mint.audience,
+            mint.client_id,
+            mint.scopes,
+            mint.ttl_secs,
+        )
+    }
+
+    fn issue_access_token_with_subject(
+        &self,
+        subject: &str,
+        audience: &str,
+        client_id: &str,
+        scopes: &[String],
+        ttl_secs: Option<i64>,
+    ) -> Result<String> {
+        if subject.trim().is_empty() {
+            return Err(AuthError::Internal("missing access-token subject".into()));
+        }
+        if audience.is_empty() {
             return Err(AuthError::Internal("missing access-token audience".into()));
         }
-        if mint.audience == mint.client_id {
+        if audience == client_id {
             return Err(AuthError::Internal(
                 "access-token aud must be a resource audience, not client_id".into(),
             ));
         }
-        if mint.client_id.is_empty() {
+        if client_id.is_empty() {
             return Err(AuthError::Internal("missing access-token client_id".into()));
         }
 
         let now = unix_timestamp()?;
-        let ttl = mint.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS);
+        let ttl = ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS);
         let claims = AccessTokenClaims {
             iss: self.issuer.clone(),
-            sub: self.pairwise_subject(mint.user_id, mint.sector),
-            aud: mint.audience.to_string(),
+            sub: subject.to_string(),
+            aud: audience.to_string(),
             exp: now + ttl,
             iat: now,
             jti: new_jti(),
-            client_id: mint.client_id.to_string(),
-            scope: mint.scopes.join(" "),
+            client_id: client_id.to_string(),
+            scope: scopes.join(" "),
         };
 
         let mut header = Header::new(Algorithm::EdDSA);

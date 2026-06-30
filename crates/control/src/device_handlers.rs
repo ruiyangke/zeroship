@@ -1,11 +1,14 @@
-//! Platform-mediated OAuth device flow for GoTrue/Supabase.
+//! Platform-mediated OAuth device flow for platform deploy tokens.
 //!
-//! This is control acting as the RFC 8628 device-authorization server for an
-//! IdP that lacks a native device grant. The durable credential bound at
-//! approval is still a real GoTrue refresh token; control only stores it
-//! encrypted until the CLI redeems the one-time grant.
+//! Control owns the RFC 8628 pending-grant rows and polling discipline because
+//! Supabase/GoTrue lacks a native device grant. The auth service owns issuance:
+//! once a browser-held upstream session approves a code, control resolves the
+//! platform principal, asks the OP to mint a platform access token, encrypts
+//! that one-time token on the grant row, and deletes the row when the CLI polls.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
@@ -27,8 +30,11 @@ const DEVICE_TTL_SECS: i64 = 600;
 const POLL_INTERVAL_SECS: i64 = 5;
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_ATTEMPTS: usize = 8;
-const DEVICE_REFRESH_AAD_PREFIX: &[u8] =
-    b"zs:control:device_grant:gotrue_refresh:v1\0";
+const DEVICE_ACCESS_TOKEN_AAD_PREFIX: &[u8] =
+    b"zs:control:device_grant:platform_access_token:v1\0";
+const PLATFORM_MINT_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const PLATFORM_TOKEN_ENDPOINT: &str = "/internal/platform-token";
+const DEPLOY_TOKEN_SCOPES: [&str; 3] = ["apps:deploy", "apps:read", "apps:write"];
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthRequest {
@@ -50,7 +56,8 @@ pub struct DeviceAuthResponse {
 #[derive(Debug, Deserialize)]
 pub struct DeviceApproveRequest {
     user_code: String,
-    refresh_token: String,
+    #[serde(default)]
+    csrf: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,12 +68,30 @@ pub struct DeviceTokenRequest {
 
 #[derive(Debug, Serialize)]
 pub struct DeviceTokenResponse {
-    refresh_token: String,
+    access_token: String,
     token_type: &'static str,
     provider: &'static str,
-    auth_url: String,
-    token_endpoint: String,
-    anon_key: String,
+    expires_in: u64,
+    scope: String,
+    principal_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PlatformMintRequest<'a> {
+    principal_id: &'a str,
+    audience: &'a str,
+    client_id: &'a str,
+    scopes: &'a [String],
+    ttl_secs: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlatformMintResponse {
+    access_token: String,
+    expires_in: u64,
+    scope: String,
+    token_type: String,
+    provider: String,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -79,7 +104,7 @@ pub async fn device_auth(
     state: State<Arc<AppState>>,
     body: Json<DeviceAuthRequest>,
 ) -> web::HttpResponse {
-    if let Err(resp) = ensure_supabase_provider(&state) {
+    if let Err(resp) = ensure_platform_device_provider(&state) {
         return resp;
     }
     let client_id = body.client_id.trim();
@@ -97,7 +122,7 @@ pub async fn device_auth(
             .query_opt(
                 "INSERT INTO zeroship.device_grants \
                     (device_code_hash, user_code, provider, scope, expires_at) \
-                 VALUES ($1, $2, 'supabase', $3, NOW() + ($4::TEXT)::INTERVAL) \
+                 VALUES ($1, $2, 'platform', $3, NOW() + ($4::TEXT)::INTERVAL) \
                  ON CONFLICT DO NOTHING \
                  RETURNING user_code",
                 &[
@@ -140,25 +165,27 @@ pub async fn device_approve(
     req: web::HttpRequest,
     body: Json<DeviceApproveRequest>,
 ) -> web::HttpResponse {
-    // P-S2c owns the browser form, including CSRF/origin hardening. This API
-    // slice models that browser as an authenticated GoTrue bearer plus the
-    // browser-held GoTrue refresh token.
+    // The auth-service browser page owns CSRF/origin hardening. This endpoint
+    // still requires an authenticated upstream bearer before it can approve a
+    // device code or ask the OP to mint a platform token.
     let verified = match verified_gotrue_bearer(&state, &req).await {
         Ok(verified) => verified,
         Err(resp) => return resp,
     };
+    let _csrf = body.csrf.as_deref();
 
     let user_code = normalize_user_code(&body.user_code);
-    if user_code.is_empty() || body.refresh_token.trim().is_empty() {
+    if user_code.is_empty() {
         return bad_request("invalid_user_code");
     }
 
     let row = match state
         .control_pg
         .query_opt(
-            "SELECT device_code_hash \
+            "SELECT device_code_hash, scope \
              FROM zeroship.device_grants \
              WHERE user_code = $1 \
+               AND provider = 'platform' \
                AND status = 'pending' \
                AND expires_at > NOW()",
             &[&user_code],
@@ -175,6 +202,7 @@ pub async fn device_approve(
         return bad_request("invalid_user_code");
     };
     let device_code_hash: String = row.get("device_code_hash");
+    let requested_scope: Option<String> = row.get("scope");
 
     let Some(supabase_url) = state.auth_provider.supabase_url() else {
         return unsupported_provider();
@@ -221,12 +249,38 @@ pub async fn device_approve(
         }
     };
 
+    let scopes = match deploy_scopes_for_principal(&state, principal_id, requested_scope.as_deref())
+        .await
+    {
+        Ok(scopes) => scopes,
+        Err(resp) => return resp,
+    };
+    let minted = match mint_platform_deploy_token(&state, principal_id, &scopes).await {
+        Ok(minted) => minted,
+        Err(resp) => return resp,
+    };
+    if minted.expires_in == 0 || minted.scope != scopes.join(" ") {
+        tracing::error!(
+            expires_in = minted.expires_in,
+            response_scope = %minted.scope,
+            expected_scope = %scopes.join(" "),
+            "control: platform token mint response metadata mismatch"
+        );
+        return internal_error();
+    }
+    if let Err(resp) =
+        verify_minted_platform_deploy_token(&state, principal_id, &scopes, &minted.access_token)
+            .await
+    {
+        return resp;
+    }
+
     let key = crypto::derive_key(state.master_key.expose_secret());
-    let aad = device_refresh_aad(&device_code_hash);
-    let refresh_enc = match crypto::encrypt(&key, &aad, body.refresh_token.as_bytes()) {
+    let aad = device_access_token_aad(&device_code_hash);
+    let access_token_enc = match crypto::encrypt(&key, &aad, minted.access_token.as_bytes()) {
         Ok(value) => value,
         Err(err) => {
-            tracing::error!(error = %err, "control: device refresh-token encrypt failed");
+            tracing::error!(error = %err, "control: device access-token encrypt failed");
             return internal_error();
         }
     };
@@ -236,12 +290,12 @@ pub async fn device_approve(
         .execute(
             "UPDATE zeroship.device_grants \
              SET principal_id = $1, \
-                 gotrue_refresh_token_enc = $2, \
+                 platform_access_token_enc = $2, \
                  status = 'approved' \
              WHERE device_code_hash = $3 \
                AND status = 'pending' \
                AND expires_at > NOW()",
-            &[&principal_id, &refresh_enc, &device_code_hash],
+            &[&principal_id, &access_token_enc, &device_code_hash],
         )
         .await
     {
@@ -287,9 +341,9 @@ pub async fn device_token(
     };
     let row = match tx
         .query_opt(
-            "SELECT status, expires_at, last_polled_at, gotrue_refresh_token_enc \
+            "SELECT status, expires_at, last_polled_at, principal_id, platform_access_token_enc \
              FROM zeroship.device_grants \
-             WHERE device_code_hash = $1 \
+             WHERE device_code_hash = $1 AND provider = 'platform' \
              FOR UPDATE",
             &[&device_code_hash],
         )
@@ -373,20 +427,33 @@ pub async fn device_token(
             oauth_error(StatusCode::BAD_REQUEST, "access_denied")
         }
         "approved" => {
-            let Some(refresh_enc) = row.get::<_, Option<Vec<u8>>>("gotrue_refresh_token_enc")
+            let Some(access_token_enc) = row.get::<_, Option<Vec<u8>>>("platform_access_token_enc")
             else {
-                tracing::error!("control: approved device grant missing refresh token");
+                tracing::error!("control: approved device grant missing platform access token");
+                let _ = tx.rollback().await;
+                return internal_error();
+            };
+            let Some(principal_id) = row.get::<_, Option<uuid::Uuid>>("principal_id") else {
+                tracing::error!("control: approved device grant missing principal_id");
                 let _ = tx.rollback().await;
                 return internal_error();
             };
             let key = crypto::derive_key(state.master_key.expose_secret());
-            let aad = device_refresh_aad(&device_code_hash);
-            let refresh_token = match crypto::decrypt(&key, &aad, &refresh_enc)
+            let aad = device_access_token_aad(&device_code_hash);
+            let access_token = match crypto::decrypt(&key, &aad, &access_token_enc)
                 .and_then(|plain| String::from_utf8(plain).map_err(|_| crypto::CryptoError::Decrypt))
             {
                 Ok(value) => value,
                 Err(err) => {
-                    tracing::error!(error = %err, "control: device refresh-token decrypt failed");
+                    tracing::error!(error = %err, "control: device access-token decrypt failed");
+                    let _ = tx.rollback().await;
+                    return internal_error();
+                }
+            };
+            let (expires_in, scope) = match platform_token_metadata(&access_token) {
+                Some(metadata) => metadata,
+                None => {
+                    tracing::error!("control: stored platform access token metadata parse failed");
                     let _ = tx.rollback().await;
                     return internal_error();
                 }
@@ -406,19 +473,13 @@ pub async fn device_token(
                 tracing::error!(error = %err, "control: approved device grant commit failed");
                 return internal_error();
             }
-            let Some(supabase_url) = state.auth_provider.supabase_url() else {
-                return unsupported_provider();
-            };
-            let Some(anon_key) = state.auth_provider.supabase_anon_key() else {
-                return unsupported_provider();
-            };
             web::HttpResponse::Ok().json(&DeviceTokenResponse {
-                refresh_token,
+                access_token,
                 token_type: "Bearer",
-                provider: "supabase",
-                auth_url: supabase_url.to_string(),
-                token_endpoint: supabase_refresh_token_endpoint(supabase_url),
-                anon_key: anon_key.to_string(),
+                provider: "platform",
+                expires_in,
+                scope,
+                principal_id: principal_id.to_string(),
             })
         }
         other => {
@@ -430,21 +491,211 @@ pub async fn device_token(
 }
 
 #[must_use]
-pub fn device_refresh_aad(device_code_hash: &str) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(DEVICE_REFRESH_AAD_PREFIX.len() + device_code_hash.len());
-    aad.extend_from_slice(DEVICE_REFRESH_AAD_PREFIX);
+pub fn device_access_token_aad(device_code_hash: &str) -> Vec<u8> {
+    let mut aad =
+        Vec::with_capacity(DEVICE_ACCESS_TOKEN_AAD_PREFIX.len() + device_code_hash.len());
+    aad.extend_from_slice(DEVICE_ACCESS_TOKEN_AAD_PREFIX);
     aad.extend_from_slice(device_code_hash.as_bytes());
     aad
 }
 
-fn ensure_supabase_provider(state: &AppState) -> Result<(), web::HttpResponse> {
+fn ensure_platform_device_provider(state: &AppState) -> Result<(), web::HttpResponse> {
     if state.auth_provider.supabase_url().is_some()
-        && state.auth_provider.supabase_anon_key().is_some()
+        && state.auth_provider.platform_issuer().is_some()
+        && !state.control_key.is_empty()
     {
         Ok(())
     } else {
         Err(unsupported_provider())
     }
+}
+
+async fn deploy_scopes_for_principal(
+    state: &AppState,
+    principal_id: uuid::Uuid,
+    requested_scope: Option<&str>,
+) -> Result<Vec<String>, web::HttpResponse> {
+    let requested = requested_deploy_scope_set(requested_scope);
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT grant_name \
+             FROM zeroship.principal_grants \
+             WHERE principal_id = $1 \
+             ORDER BY grant_name",
+            &[&principal_id],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                principal_id = %principal_id,
+                "control: device approve grant lookup failed"
+            );
+            internal_error()
+        })?;
+    let granted: HashSet<String> = rows
+        .iter()
+        .map(|row| row.get::<_, String>("grant_name"))
+        .collect();
+    Ok(DEPLOY_TOKEN_SCOPES
+        .iter()
+        .copied()
+        .filter(|scope| requested.contains(*scope) && granted.contains(*scope))
+        .map(str::to_string)
+        .collect())
+}
+
+fn requested_deploy_scope_set(raw_scope: Option<&str>) -> HashSet<&'static str> {
+    let mut requested = HashSet::new();
+    let Some(raw_scope) = raw_scope else {
+        requested.extend(DEPLOY_TOKEN_SCOPES);
+        return requested;
+    };
+    for scope in raw_scope.split_whitespace() {
+        if let Some(deploy_scope) = DEPLOY_TOKEN_SCOPES
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == scope)
+        {
+            requested.insert(deploy_scope);
+        }
+    }
+    requested
+}
+
+async fn mint_platform_deploy_token(
+    state: &AppState,
+    principal_id: uuid::Uuid,
+    scopes: &[String],
+) -> Result<PlatformMintResponse, web::HttpResponse> {
+    let Some(platform_issuer) = state.auth_provider.platform_issuer() else {
+        return Err(unsupported_provider());
+    };
+    let url = format!("{}{}", platform_issuer.trim_end_matches('/'), PLATFORM_TOKEN_ENDPOINT);
+    let principal_id_string = principal_id.to_string();
+    let body = PlatformMintRequest {
+        principal_id: &principal_id_string,
+        audience: &state.expected_oauth_audience,
+        client_id: "zeroship-cli",
+        scopes,
+        ttl_secs: None,
+    };
+    let body = serde_json::to_vec(&body).map_err(|err| {
+        tracing::error!(error = %err, "control: platform token mint request encode failed");
+        internal_error()
+    })?;
+    let client = cyper::Client::new();
+    let builder = client
+        .post(&url)
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: platform token mint request build failed");
+            internal_error()
+        })?
+        .header("content-type", "application/json")
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: platform token mint content-type failed");
+            internal_error()
+        })?
+        .header(
+            "authorization",
+            &format!("Bearer {}", state.control_key.expose_secret()),
+        )
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: platform token mint auth header failed");
+            internal_error()
+        })?;
+    let response = compio::time::timeout(PLATFORM_MINT_TIMEOUT, builder.body(body).send())
+        .await
+        .map_err(|_| {
+            tracing::error!("control: platform token mint request timed out");
+            internal_error()
+        })?
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: platform token mint transport failed");
+            internal_error()
+        })?;
+    let status = response.status().as_u16();
+    let bytes = response.bytes().await.map_err(|err| {
+        tracing::error!(error = %err, "control: platform token mint body read failed");
+        internal_error()
+    })?;
+    if !(200..300).contains(&status) {
+        tracing::error!(
+            status,
+            body = %String::from_utf8_lossy(&bytes),
+            "control: platform token mint rejected"
+        );
+        return Err(internal_error());
+    }
+    let minted: PlatformMintResponse = serde_json::from_slice(&bytes).map_err(|err| {
+        tracing::error!(error = %err, "control: platform token mint response parse failed");
+        internal_error()
+    })?;
+    if minted.provider != "platform" || !minted.token_type.eq_ignore_ascii_case("Bearer") {
+        tracing::error!(
+            provider = %minted.provider,
+            token_type = %minted.token_type,
+            "control: platform token mint response had invalid shape"
+        );
+        return Err(internal_error());
+    }
+    Ok(minted)
+}
+
+async fn verify_minted_platform_deploy_token(
+    state: &AppState,
+    principal_id: uuid::Uuid,
+    scopes: &[String],
+    access_token: &str,
+) -> Result<(), web::HttpResponse> {
+    let verified = state
+        .auth_provider
+        .verify_token(access_token)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "control: minted platform token verification failed");
+            internal_error()
+        })?;
+    let expected_subject = principal_id.to_string();
+    let expected_scope = scopes.join(" ");
+    let audience_ok = verified.aud.as_ref().is_some_and(|audiences| {
+        audiences
+            .iter()
+            .any(|audience| audience == &state.expected_oauth_audience)
+    });
+    let scope_ok = matches!(
+        &verified.provider_authz,
+        ProviderAuthz::OAuthScope(raw_scope) if raw_scope == &expected_scope
+    );
+    if verified.provider_subject != expected_subject || !audience_ok || !scope_ok {
+        tracing::error!(
+            subject = %verified.provider_subject,
+            expected_subject = %expected_subject,
+            audience_ok,
+            authz = ?verified.provider_authz,
+            expected_scope = %expected_scope,
+            "control: minted platform token claims did not match device approval"
+        );
+        return Err(internal_error());
+    }
+    Ok(())
+}
+
+fn platform_token_metadata(access_token: &str) -> Option<(u64, String)> {
+    let payload = access_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    let scope = claims
+        .get("scope")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+    let now = Utc::now().timestamp();
+    Some((exp.saturating_sub(now).max(0) as u64, scope))
 }
 
 async fn verified_gotrue_bearer(
@@ -541,13 +792,6 @@ fn verification_uri_complete(verification_uri: &str, user_code: &str) -> String 
     let mut url = url::Url::parse(verification_uri).expect("verification URI is absolute");
     url.query_pairs_mut().append_pair("user_code", user_code);
     url.to_string()
-}
-
-fn supabase_refresh_token_endpoint(supabase_url: &str) -> String {
-    format!(
-        "{}/auth/v1/token?grant_type=refresh_token",
-        supabase_url.trim_end_matches('/')
-    )
 }
 
 fn unsupported_provider() -> web::HttpResponse {

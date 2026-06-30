@@ -60,8 +60,8 @@
       if (!login.ok) {
         throw new Error(session.error_description || session.msg || "GoTrue sign-in failed");
       }
-      if (!session.access_token || !session.refresh_token) {
-        throw new Error("GoTrue response did not include a session");
+      if (!session.access_token) {
+        throw new Error("GoTrue response did not include an access token");
       }
 
       setStatus("Approving device...", false);
@@ -75,7 +75,6 @@
         },
         body: JSON.stringify({
           user_code: userCode,
-          refresh_token: session.refresh_token,
           csrf
         })
       });

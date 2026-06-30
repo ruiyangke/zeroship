@@ -56,6 +56,15 @@ impl AuthProvider {
     }
 
     #[must_use]
+    pub fn platform_issuer(&self) -> Option<&str> {
+        match self {
+            Self::Platform(provider) => Some(provider.issuer()),
+            Self::DualIssuer(provider) => Some(provider.platform_issuer()),
+            Self::Hydra(_) | Self::Supabase(_) => None,
+        }
+    }
+
+    #[must_use]
     pub fn supabase_url(&self) -> Option<&str> {
         match self {
             Self::Hydra(_) => None,
@@ -121,6 +130,11 @@ impl DualIssuerProvider {
     #[must_use]
     fn legacy_issuer(&self) -> &str {
         self.legacy.issuer()
+    }
+
+    #[must_use]
+    fn platform_issuer(&self) -> &str {
+        self.platform.issuer()
     }
 
     #[must_use]

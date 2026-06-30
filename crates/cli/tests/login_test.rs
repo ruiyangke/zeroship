@@ -122,7 +122,7 @@ fn device_grant_flow_polls_until_approved() {
     assert_eq!(requests[0].path, "/oauth2/device/auth");
     assert_eq!(
         requests[0].body,
-        "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread"
+        "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread+apps%3Awrite"
     );
     assert_eq!(requests[1].path, "/oauth2/token");
     assert!(requests[1]
@@ -158,7 +158,7 @@ fn device_grant_flow_polls_until_approved() {
 }
 
 #[test]
-fn supabase_device_flow_uses_control_then_refreshes_gotrue_session() {
+fn supabase_device_flow_uses_control_and_stores_platform_token() {
     let server = MockServer::start(vec![
         (
             200,
@@ -167,16 +167,10 @@ fn supabase_device_flow_uses_control_then_refreshes_gotrue_session() {
         (400, r#"{"error":"authorization_pending"}"#),
         (
             200,
-            r#"{"refresh_token":"bound-refresh","token_type":"Bearer","provider":"supabase","auth_url":"{{BASE_URL}}","token_endpoint":"{{BASE_URL}}/auth/v1/token?grant_type=refresh_token","anon_key":"anon-test-key"}"#,
+            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
         ),
-        (
-            200,
-            r#"{"access_token":"gotrue-access","refresh_token":"gotrue-refresh-rotated","expires_in":120,"token_type":"bearer"}"#,
-        ),
-        (200, r#"{"email":"supabase@example.com","id":"gotrue-user-id"}"#),
     ]);
     let config = tempfile::tempdir().expect("tempdir");
-    let token_endpoint = format!("{}/auth/v1/token?grant_type=refresh_token", server.url);
 
     let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
         .arg("login")
@@ -194,17 +188,19 @@ fn supabase_device_flow_uses_control_then_refreshes_gotrue_session() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Signed in as supabase@example.com"),
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Signed in as 11111111-1111-4111-8111-111111111111"),
         "stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "POST");
     assert_eq!(requests[0].path, "/api/device/auth");
     assert_header(&requests[0], "content-type", "application/json");
     assert!(requests[0].body.contains(r#""client_id":"zeroship-cli""#));
+    assert!(requests[0].body.contains("apps:write"));
     assert_eq!(requests[1].path, "/api/device/token");
     assert!(requests[1].body.contains("supabase-dev-123"));
     assert_eq!(requests[2].path, "/api/device/token");
@@ -212,24 +208,15 @@ fn supabase_device_flow_uses_control_then_refreshes_gotrue_session() {
         requests[2].at.duration_since(requests[1].at) >= Duration::from_millis(900),
         "token polling did not wait for the server interval"
     );
-    assert_eq!(
-        requests[3].path,
-        "/auth/v1/token?grant_type=refresh_token"
-    );
-    assert_header(&requests[3], "apikey", "anon-test-key");
-    assert!(requests[3].body.contains("refresh_token=bound-refresh"));
-    assert_eq!(requests[4].path, "/auth/v1/user");
-    assert_header(&requests[4], "authorization", "Bearer gotrue-access");
-    assert_header(&requests[4], "apikey", "anon-test-key");
 
     let token = read_token(config.path());
-    assert_eq!(token["access_token"], "gotrue-access");
-    assert_eq!(token["refresh_token"], "gotrue-refresh-rotated");
-    assert_eq!(token["provider"], "supabase");
+    assert_eq!(token["access_token"], "platform-access");
+    assert_eq!(token["refresh_token"], "");
+    assert_eq!(token["provider"], "platform");
     assert_eq!(token["auth_url"], server.url);
     assert_eq!(token["control_url"], server.url);
-    assert_eq!(token["token_endpoint"], token_endpoint);
-    assert_eq!(token["anon_key"], "anon-test-key");
+    assert!(token["token_endpoint"].is_null());
+    assert!(token["anon_key"].is_null());
     assert!(token["expires_at"].as_u64().expect("expires_at") > now_secs());
 }
 

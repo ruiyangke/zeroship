@@ -113,6 +113,17 @@ pub struct AuthConfig {
     #[arg(long = "control-url", env = "CONTROL_URL")]
     pub control_url: Option<String>,
 
+    /// Shared internal control-plane bearer key. Auth uses this only to gate
+    /// control -> auth internal OP mint calls; it is never exposed to browser
+    /// flows.
+    #[arg(
+        long = "control-key",
+        env = "CONTROL_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub control_key: String,
+
     /// Path to clients config TOML.
     #[arg(long, env = "AUTH_CLIENTS_CONFIG", default_value = "/etc/zeroship/auth-clients.toml")]
     pub clients_config: String,
@@ -814,6 +825,7 @@ impl std::fmt::Debug for AuthConfig {
             .field("supabase_anon_key", &"<redacted>")
             .field("gotrue_email_hook_secret", &"<redacted>")
             .field("control_url", &self.control_url)
+            .field("control_key", &"<redacted>")
             .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
             .field("clients_config", &self.clients_config)
             .field("bootstrap", &self.bootstrap)
