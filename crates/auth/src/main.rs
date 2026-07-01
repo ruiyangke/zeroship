@@ -175,6 +175,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CheckValue::Secret(cfg.refresh_idem_key_file.is_some()),
         );
         report.field(
+            "refresh_pool_size",
+            CheckValue::Plain(cfg.refresh_pool_size.to_string()),
+        );
+        report.field(
             "frame_ancestor_origins",
             CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
         );
@@ -288,23 +292,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    let refresh_pool = zeroship_auth::op::refresh::RefreshSessionPool::new(
+        cfg.db_url.clone(),
+        cfg.refresh_pool_size,
+    );
+    tracing::info!(
+        pool_size = refresh_pool.pool_size(),
+        "refresh dedicated session pool configured"
+    );
+
     // 4. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
     //    the listener is bound. `Arc<Client>` is shared for autocommit
-    //    cron work; refresh-family sweeps open dedicated sessions for
-    //    their advisory-locked transactions.
+    //    cron work; refresh-family sweeps check out bounded dedicated
+    //    sessions for their advisory-locked transactions.
     let cfg = Arc::new(cfg);
     let db = Arc::new(client);
-    cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
+    cron::spawn_all(admin.clone(), db.clone(), cfg.clone(), refresh_pool.clone());
     tracing::info!("cron tasks spawned");
 
     // 5. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
     //    OP refresh-token rotations/revokes/root issuance do not run
-    //    multi-statement transactions on this shared handle; they open
-    //    dedicated compio-postgres sessions from cfg.db_url.
+    //    multi-statement transactions on this shared handle; they check
+    //    out bounded dedicated compio-postgres sessions from refresh_pool.
     server::run(
         cfg,
         admin,
@@ -313,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mailer,
         relay_forward_mailer,
         op_issuer,
+        refresh_pool,
     )
     .await?;
     Ok::<(), Box<dyn std::error::Error>>(())

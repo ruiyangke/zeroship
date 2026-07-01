@@ -104,17 +104,21 @@ async fn logout_route_is_registered_returns_not_404() {
     let cfg_state = cfg.clone();
     let db_state = pg.clone();
     let mailer_state: Arc<dyn Mailer> = Arc::new(StdoutMailer);
+    let refresh_pool_state =
+        zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
         let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
         let mailer_state = mailer_state.clone();
+        let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
                 .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
                 .state(mailer_state)
+                .state(refresh_pool_state)
                 .configure(server::configure(false, false))
         }
     })
@@ -197,17 +201,21 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
     let cfg_state = cfg.clone();
     let db_state = pg.clone();
     let mailer_state: Arc<dyn Mailer> = Arc::new(StdoutMailer);
+    let refresh_pool_state =
+        zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
         let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
         let mailer_state = mailer_state.clone();
+        let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
                 .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
                 .state(mailer_state)
+                .state(refresh_pool_state)
                 .configure(server::configure(false, false))
         }
     })

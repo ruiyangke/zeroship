@@ -237,15 +237,19 @@ impl ConsentTestApp {
         let admin_state = admin.clone();
         let cfg_state = cfg.clone();
         let pg_state = pg.clone();
+        let refresh_pool_state =
+            zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         let auth_srv = web::test::server(move || {
             let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();
             let pg_state = pg_state.clone();
+            let refresh_pool_state = refresh_pool_state.clone();
             async move {
                 web::App::new()
                     .state(admin_state)
                     .state(cfg_state)
                     .state(pg_state)
+                    .state(refresh_pool_state)
                     .middleware(SecurityHeaders::default())
                     .configure(server::configure(false, false))
             }

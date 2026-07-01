@@ -143,17 +143,21 @@ async fn google_federation_creates_new_user() {
     let cfg_state = cfg.clone();
     let db_state = pg.clone();
     let jwks_state = google_jwks.clone();
+    let refresh_pool_state =
+        zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
         let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
         let jwks_state = jwks_state.clone();
+        let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
                 .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
                 .state(jwks_state)
+                .state(refresh_pool_state)
                 .middleware(SecurityHeaders::default())
                 .configure(server::configure(true, false))
         }
@@ -414,17 +418,21 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
     let cfg_state = cfg.clone();
     let db_state = pg.clone();
     let jwks_state = google_jwks.clone();
+    let refresh_pool_state =
+        zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
         let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
         let jwks_state = jwks_state.clone();
+        let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
                 .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
                 .state(jwks_state)
+                .state(refresh_pool_state)
                 .middleware(SecurityHeaders::default())
                 .configure(server::configure(true, false))
         }

@@ -421,6 +421,19 @@ pub struct AuthConfig {
     #[arg(long = "refresh-idem-key-file", env = "REFRESH_IDEM_KEY_FILE")]
     pub refresh_idem_key_file: Option<PathBuf>,
 
+    /// Maximum dedicated refresh-family database sessions per auth worker.
+    ///
+    /// These sessions are used only for OP refresh-token root issuance,
+    /// rotation, revoke, and refresh-family sweeps. The pool is deliberately
+    /// small: excess concurrent refresh-family transactions wait instead of
+    /// opening unbounded PostgreSQL backends.
+    #[arg(
+        long = "refresh-pool-size",
+        env = "AUTH_REFRESH_POOL_SIZE",
+        default_value = "4"
+    )]
+    pub refresh_pool_size: usize,
+
     // ─── Relay email (Slice 5 — app → user one-way forwarding) ───────────
     /// Relay alias domain. Aliases are minted as `{token}@{relay_domain}`
     /// (lowercase). Dev: `relay.zeroship.localhost`; prod: `relay.zeroship.ai`
@@ -693,6 +706,7 @@ impl AuthConfig {
         if self.insecure_dev && self.totp_enc_key.is_empty() {
             self.totp_enc_key = DEV_TOTP_ENC_KEY.to_string();
         }
+        self.refresh_pool_size = self.refresh_pool_size.max(1);
         // Console framing allowlist (immersive iframe login, §4.3/§10.1).
         // Precedence mirrors the deployment-injection pattern: a non-empty
         // CLI/env (`--frame-ancestor-origin` / `FRAME_ANCESTOR_ORIGINS`) wins;
@@ -860,6 +874,7 @@ impl std::fmt::Debug for AuthConfig {
             .field("auth_pairwise_salt_file", &self.auth_pairwise_salt_file)
             .field("refresh_hash_key_file", &self.refresh_hash_key_file)
             .field("refresh_idem_key_file", &self.refresh_idem_key_file)
+            .field("refresh_pool_size", &self.refresh_pool_size)
             .field("postmark_webhook_password", &"<redacted>")
             .field("relay_domain", &self.relay_domain)
             .field("relay_forward_mailer", &self.relay_forward_mailer)

@@ -297,6 +297,9 @@ async fn style() -> web::HttpResponse {
 ///   (sub-spec §5.2a). Built from `--relay-forward-mailer` (SMTP/stdout,
 ///   never Resend) with its own `AUTH_RELAY_SMTP_*` identity. A newtype so
 ///   `State<RelayForwardMailer>` is distinct from the transactional state.
+/// - `RefreshSessionPool` — bounded dedicated-session pool config for OP
+///   refresh-family transactions. The concrete compio-postgres pool is cached
+///   per ntex worker thread because it is `!Send`.
 ///
 /// # Errors
 ///
@@ -315,6 +318,7 @@ pub async fn run(
     mailer: Arc<dyn Mailer>,
     relay_forward_mailer: RelayForwardMailer,
     op_issuer: Arc<op::Issuer>,
+    refresh_pool: op::refresh::RefreshSessionPool,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();
@@ -331,6 +335,7 @@ pub async fn run(
             .state(db.clone())
             .state(mailer.clone())
             .state(op_issuer.clone())
+            .state(refresh_pool.clone())
             // The dedicated relay-forward mailer (§5.2a). A distinct newtype
             // so `State<RelayForwardMailer>` doesn't collide with the
             // transactional `State<Arc<dyn Mailer>>`.

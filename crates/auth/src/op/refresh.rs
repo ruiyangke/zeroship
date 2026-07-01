@@ -1,11 +1,16 @@
 //! OP refresh-token families: CLI/programmatic rotation + reuse detection.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
-use compio_postgres::{Client, GenericClient, NoTls};
+use compio_postgres::{Client, GenericClient, Pool, PoolConfig};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -28,6 +33,109 @@ const FAMILY_IDLE_DAYS: i64 = 7;
 const FAMILY_ABSOLUTE_DAYS: i64 = 30;
 const IDEM_WINDOW_SECS: i64 = 30;
 const IDEM_AAD_PREFIX: &[u8] = b"zs:auth:refresh_idem:v1\0";
+const REFRESH_POOL_CONNECTION_TIMEOUT_SECS: u64 = 30;
+
+thread_local! {
+    static REFRESH_POOLS: RefCell<HashMap<RefreshPoolKey, Rc<Pool>>> =
+        RefCell::new(HashMap::new());
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RefreshPoolKey {
+    db_url: String,
+    pool_size: usize,
+}
+
+#[derive(Clone)]
+pub struct RefreshSessionPool {
+    inner: Arc<RefreshSessionPoolInner>,
+}
+
+struct RefreshSessionPoolInner {
+    db_url: String,
+    pool_size: usize,
+    checkout_count: AtomicU64,
+}
+
+impl std::fmt::Debug for RefreshSessionPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshSessionPool")
+            .field("pool_size", &self.inner.pool_size)
+            .field(
+                "checkout_count",
+                &self.inner.checkout_count.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl RefreshSessionPool {
+    #[must_use]
+    pub fn new(db_url: impl Into<String>, pool_size: usize) -> Self {
+        Self {
+            inner: Arc::new(RefreshSessionPoolInner {
+                db_url: db_url.into(),
+                pool_size: pool_size.max(1),
+                checkout_count: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn pool_size(&self) -> usize {
+        self.inner.pool_size
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn checkout_count(&self) -> u64 {
+        self.inner.checkout_count.load(Ordering::SeqCst)
+    }
+
+    pub(crate) async fn checkout_pool(
+        &self,
+        operation: &'static str,
+    ) -> Result<Rc<Pool>, compio_postgres::Error> {
+        self.inner.checkout_count.fetch_add(1, Ordering::SeqCst);
+        let key = RefreshPoolKey {
+            db_url: self.inner.db_url.clone(),
+            pool_size: self.inner.pool_size,
+        };
+        if let Some(pool) = REFRESH_POOLS.with(|pools| pools.borrow().get(&key).cloned()) {
+            return Ok(pool);
+        }
+
+        let config = PoolConfig {
+            max_size: self.inner.pool_size,
+            min_idle: 1,
+            connection_timeout: Duration::from_secs(REFRESH_POOL_CONNECTION_TIMEOUT_SECS),
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(Pool::connect_with_config(&self.inner.db_url, config).await?);
+        pool.start_housekeeper();
+        let pool = REFRESH_POOLS.with(|pools| {
+            let mut pools = pools.borrow_mut();
+            if let Some(existing) = pools.get(&key) {
+                return Rc::clone(existing);
+            }
+            pools.insert(key, Rc::clone(&pool));
+            pool
+        });
+        tracing::info!(
+            operation,
+            pool_size = self.inner.pool_size,
+            "refresh dedicated session pool ready"
+        );
+        Ok(pool)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreauthenticatedRefresh {
+    presented_hash: TokenHash,
+    initial: RefreshRow,
+    client: OAuthClient,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct RefreshTokenKeys {
@@ -273,18 +381,30 @@ pub(super) async fn issue_root_refresh_token(
 
 #[allow(clippy::future_not_send)]
 pub(super) async fn exchange_refresh_token(
-    db_url: &str,
+    shared_db: &Client,
+    refresh_pool: &RefreshSessionPool,
     issuer: &Issuer,
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
     client_auth: &ClientAuth,
 ) -> Result<TokenResponse, OAuthError> {
-    let mut conn = connect_dedicated_oauth(db_url, "refresh rotation").await?;
+    let preauth = preauthenticate_refresh(shared_db, keys, params, client_auth).await?;
+    let pool = refresh_pool
+        .checkout_pool("refresh rotation")
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "refresh: dedicated database pool checkout failed");
+            OAuthError::server_error("refresh database unavailable")
+        })?;
+    let mut conn = pool.get().await.map_err(|err| {
+        tracing::error!(error = %err, "refresh: dedicated database session checkout failed");
+        OAuthError::server_error("refresh database unavailable")
+    })?;
     let tx = conn.transaction().await.map_err(|err| {
         tracing::error!(error = %err, "refresh: BEGIN failed on dedicated session");
         OAuthError::server_error("refresh rotation unavailable")
     })?;
-    let result = exchange_refresh_token_inner(&tx, issuer, keys, params, client_auth).await;
+    let result = exchange_refresh_token_inner(&tx, issuer, keys, params, preauth).await;
     match result {
         Ok(response) => {
             tx.commit().await.map_err(|err| {
@@ -310,13 +430,12 @@ pub(super) async fn exchange_refresh_token(
 }
 
 #[allow(clippy::future_not_send)]
-async fn exchange_refresh_token_inner(
+async fn preauthenticate_refresh(
     db: &(impl GenericClient + ?Sized),
-    issuer: &Issuer,
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
     client_auth: &ClientAuth,
-) -> Result<TokenResponse, OAuthError> {
+) -> Result<PreauthenticatedRefresh, OAuthError> {
     let raw_token = required_param(params.refresh_token.as_deref(), "refresh_token")?;
     let client_id = authenticated_client_id(db, params.client_id.as_deref(), client_auth).await?;
     let client = load_client(db, &client_id).await?;
@@ -328,6 +447,27 @@ async fn exchange_refresh_token_inner(
     let Some((presented_hash, initial)) = lookup_by_any_hash(db, keys, raw_token).await? else {
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
     };
+
+    Ok(PreauthenticatedRefresh {
+        presented_hash,
+        initial,
+        client,
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn exchange_refresh_token_inner(
+    db: &(impl GenericClient + ?Sized),
+    issuer: &Issuer,
+    keys: &RefreshTokenKeys,
+    params: &TokenRequest,
+    preauth: PreauthenticatedRefresh,
+) -> Result<TokenResponse, OAuthError> {
+    let PreauthenticatedRefresh {
+        presented_hash,
+        initial,
+        client,
+    } = preauth;
 
     lock_refresh_user_xact(db, initial.user_id).await.map_err(|err| {
         tracing::error!(
@@ -451,8 +591,18 @@ pub async fn revoke_post(
     req: HttpRequest,
     form: web::types::Form<RevokeRequest>,
     cfg: web::types::State<Arc<AuthConfig>>,
+    db: web::types::State<Arc<Client>>,
+    refresh_pool: web::types::State<RefreshSessionPool>,
 ) -> HttpResponse {
-    match revoke_inner(&req, form.into_inner(), cfg.as_ref()).await {
+    match revoke_inner(
+        &req,
+        form.into_inner(),
+        cfg.as_ref(),
+        db.as_ref(),
+        refresh_pool.get_ref(),
+    )
+    .await
+    {
         Ok(()) => HttpResponse::Ok()
             .header("cache-control", "no-store")
             .header("pragma", "no-cache")
@@ -473,6 +623,8 @@ async fn revoke_inner(
     req: &HttpRequest,
     form: RevokeRequest,
     cfg: &AuthConfig,
+    db: &Client,
+    refresh_pool: &RefreshSessionPool,
 ) -> Result<(), OAuthError> {
     let _hint = form.token_type_hint.as_deref();
     let Some(raw_token) = form.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
@@ -481,26 +633,37 @@ async fn revoke_inner(
     let client_auth =
         client_auth_from_request(req, form.client_id.as_deref(), form.client_secret.as_deref());
     let keys = RefreshTokenKeys::from_config(cfg)?;
-    let mut conn = connect_dedicated_oauth(&cfg.db_url, "refresh revoke").await?;
+    let client_id = match authenticated_client_id(db, form.client_id.as_deref(), &client_auth).await
+    {
+        Ok(client_id) => client_id,
+        Err(err) if err.error == "invalid_client" => return Err(err),
+        Err(_) => return Ok(()),
+    };
+    let client = load_client(db, &client_id).await?;
+    authenticate_for_refresh(&client, &client_auth).await?;
+    let Some((_hash, row)) = lookup_by_any_hash(db, &keys, raw_token).await? else {
+        return Ok(());
+    };
+    if row.client_id != client.client_id {
+        return Ok(());
+    }
+
+    let pool = refresh_pool
+        .checkout_pool("refresh revoke")
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "revoke: dedicated database pool checkout failed");
+            OAuthError::server_error("revoke unavailable")
+        })?;
+    let mut conn = pool.get().await.map_err(|err| {
+        tracing::error!(error = %err, "revoke: dedicated database session checkout failed");
+        OAuthError::server_error("revoke unavailable")
+    })?;
     let tx = conn.transaction().await.map_err(|err| {
         tracing::error!(error = %err, "revoke: BEGIN failed on dedicated session");
         OAuthError::server_error("revoke unavailable")
     })?;
     let result = async {
-        let client_id =
-            match authenticated_client_id(&tx, form.client_id.as_deref(), &client_auth).await {
-                Ok(client_id) => client_id,
-                Err(err) if err.error == "invalid_client" => return Err(err),
-                Err(_) => return Ok(()),
-            };
-        let client = load_client(&tx, &client_id).await?;
-        authenticate_for_refresh(&client, &client_auth).await?;
-        let Some((_hash, row)) = lookup_by_any_hash(&tx, &keys, raw_token).await? else {
-            return Ok(());
-        };
-        if row.client_id != client.client_id {
-            return Ok(());
-        }
         lock_refresh_user_xact(&tx, row.user_id).await.map_err(|err| {
             tracing::error!(error = %err, user_id = %row.user_id, "revoke user lock failed");
             OAuthError::server_error("revoke unavailable")
@@ -533,11 +696,18 @@ async fn revoke_inner(
 }
 
 pub async fn revoke_user_refresh_families(
-    db_url: &str,
+    refresh_pool: &RefreshSessionPool,
     user_id: Uuid,
     reason: &'static str,
 ) -> Result<(), String> {
-    let mut conn = connect_dedicated_string(db_url, "refresh user revoke").await?;
+    let pool = refresh_pool
+        .checkout_pool("refresh user revoke")
+        .await
+        .map_err(|err| format!("refresh user revoke pool checkout ({reason}): {err}"))?;
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|err| format!("refresh user revoke session checkout ({reason}): {err}"))?;
     let tx = conn
         .transaction()
         .await
@@ -582,9 +752,9 @@ pub async fn revoke_user_refresh_families(
     Ok(())
 }
 
-pub async fn sweep_refresh_tokens(db_url: &str) -> Result<(u64, u64), String> {
-    let family_deleted = sweep_refresh_family_delete(db_url).await?;
-    let idem_reaped = sweep_refresh_idem(db_url).await?;
+pub async fn sweep_refresh_tokens(refresh_pool: &RefreshSessionPool) -> Result<(u64, u64), String> {
+    let family_deleted = sweep_refresh_family_delete(refresh_pool).await?;
+    let idem_reaped = sweep_refresh_idem(refresh_pool).await?;
     Ok((family_deleted, idem_reaped))
 }
 
@@ -875,8 +1045,15 @@ async fn kill_family(
     Ok(())
 }
 
-async fn sweep_refresh_family_delete(db_url: &str) -> Result<u64, String> {
-    let enum_conn = connect_dedicated_string(db_url, "refresh sweep family-delete enumerate").await?;
+async fn sweep_refresh_family_delete(refresh_pool: &RefreshSessionPool) -> Result<u64, String> {
+    let enum_pool = refresh_pool
+        .checkout_pool("refresh sweep family-delete enumerate")
+        .await
+        .map_err(|err| format!("refresh sweep enumerate family-delete pool checkout: {err}"))?;
+    let enum_conn = enum_pool
+        .get()
+        .await
+        .map_err(|err| format!("refresh sweep enumerate family-delete session checkout: {err}"))?;
     let users = enum_conn
         .query(
             "SELECT DISTINCT user_id \
@@ -886,11 +1063,22 @@ async fn sweep_refresh_family_delete(db_url: &str) -> Result<u64, String> {
             &[],
         )
         .await
-        .map_err(|err| format!("refresh sweep enumerate family-delete users: {err}"))?;
+        .map_err(|err| format!("refresh sweep enumerate family-delete users: {err}"))?
+        .into_iter()
+        .map(|row| row.get::<_, Uuid>("user_id"))
+        .collect::<Vec<_>>();
+    drop(enum_conn);
+    drop(enum_pool);
     let mut deleted = 0;
-    for row in users {
-        let user_id: Uuid = row.get("user_id");
-        let mut conn = connect_dedicated_string(db_url, "refresh sweep family-delete").await?;
+    for user_id in users {
+        let pool = refresh_pool
+            .checkout_pool("refresh sweep family-delete")
+            .await
+            .map_err(|err| format!("refresh sweep family-delete pool checkout: {err}"))?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|err| format!("refresh sweep family-delete session checkout: {err}"))?;
         let tx = conn
             .transaction()
             .await
@@ -926,8 +1114,15 @@ async fn sweep_refresh_family_delete(db_url: &str) -> Result<u64, String> {
     Ok(deleted)
 }
 
-async fn sweep_refresh_idem(db_url: &str) -> Result<u64, String> {
-    let enum_conn = connect_dedicated_string(db_url, "refresh sweep idem enumerate").await?;
+async fn sweep_refresh_idem(refresh_pool: &RefreshSessionPool) -> Result<u64, String> {
+    let enum_pool = refresh_pool
+        .checkout_pool("refresh sweep idem enumerate")
+        .await
+        .map_err(|err| format!("refresh sweep enumerate idem pool checkout: {err}"))?;
+    let enum_conn = enum_pool
+        .get()
+        .await
+        .map_err(|err| format!("refresh sweep enumerate idem session checkout: {err}"))?;
     let users = enum_conn
         .query(
             "SELECT DISTINCT user_id \
@@ -936,11 +1131,22 @@ async fn sweep_refresh_idem(db_url: &str) -> Result<u64, String> {
             &[],
         )
         .await
-        .map_err(|err| format!("refresh sweep enumerate idem users: {err}"))?;
+        .map_err(|err| format!("refresh sweep enumerate idem users: {err}"))?
+        .into_iter()
+        .map(|row| row.get::<_, Uuid>("user_id"))
+        .collect::<Vec<_>>();
+    drop(enum_conn);
+    drop(enum_pool);
     let mut reaped = 0;
-    for row in users {
-        let user_id: Uuid = row.get("user_id");
-        let mut conn = connect_dedicated_string(db_url, "refresh sweep idem").await?;
+    for user_id in users {
+        let pool = refresh_pool
+            .checkout_pool("refresh sweep idem")
+            .await
+            .map_err(|err| format!("refresh sweep idem pool checkout: {err}"))?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|err| format!("refresh sweep idem session checkout: {err}"))?;
         let tx = conn
             .transaction()
             .await
@@ -975,34 +1181,6 @@ async fn sweep_refresh_idem(db_url: &str) -> Result<u64, String> {
         }
     }
     Ok(reaped)
-}
-
-async fn connect_dedicated_oauth(
-    db_url: &str,
-    operation: &'static str,
-) -> Result<Client, OAuthError> {
-    connect_dedicated_string(db_url, operation)
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, operation, "refresh dedicated database session failed");
-            OAuthError::server_error("refresh database unavailable")
-        })
-}
-
-async fn connect_dedicated_string(
-    db_url: &str,
-    operation: &'static str,
-) -> Result<Client, String> {
-    let (client, connection) = compio_postgres::connect(db_url, NoTls)
-        .await
-        .map_err(|err| format!("{operation}: connect dedicated session: {err}"))?;
-    compio::runtime::spawn(async move {
-        if let Err(err) = connection.run().await {
-            tracing::error!(error = %err, operation, "refresh dedicated pg connection error");
-        }
-    })
-    .detach();
-    Ok(client)
 }
 
 fn basic_client_auth(req: &HttpRequest) -> Option<(String, String)> {

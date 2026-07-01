@@ -15,6 +15,7 @@ use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::op::Issuer;
+use zeroship_auth::op::refresh::RefreshSessionPool;
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
@@ -45,7 +46,7 @@ struct Fixture {
     srv: ntex::web::test::TestServer,
     auth_base: String,
     db: Arc<Client>,
-    db_url: String,
+    refresh_pool: RefreshSessionPool,
     client_id: String,
     app_id: Uuid,
     user_id: Uuid,
@@ -122,17 +123,21 @@ impl Fixture {
         let cfg_state = cfg.clone();
         let db_state = db.clone();
         let issuer_state = issuer.clone();
+        let refresh_pool = RefreshSessionPool::new(db_url.clone(), 4);
+        let refresh_pool_state = refresh_pool.clone();
         let srv = web::test::server(move || {
             let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();
             let db_state = db_state.clone();
             let issuer_state = issuer_state.clone();
+            let refresh_pool_state = refresh_pool_state.clone();
             async move {
                 web::App::new()
                     .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
                     .state(issuer_state)
+                    .state(refresh_pool_state)
                     .middleware(SecurityHeaders::default())
                     .configure(server::configure(false, false))
             }
@@ -143,7 +148,7 @@ impl Fixture {
             auth_base: srv.url("").trim_end_matches('/').to_string(),
             srv,
             db,
-            db_url,
+            refresh_pool,
             client_id,
             app_id,
             user_id,
@@ -257,6 +262,28 @@ async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
         .expect("refresh row counts");
     assert_eq!(row.get::<_, i64>("rotated"), 1);
     assert_eq!(row.get::<_, i64>("live"), 1);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn garbage_refresh_token_rejects_before_dedicated_pool_checkout() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let before = fx.refresh_pool.checkout_count();
+
+    let rejected = refresh_request(&fx, "zrt_garbage-token-material-that-will-not-match", None)
+        .await
+        .expect("garbage refresh response");
+    assert_eq!(rejected.status().as_u16(), 400);
+    assert_error(rejected, "invalid_grant").await;
+    assert_eq!(
+        fx.refresh_pool.checkout_count(),
+        before,
+        "garbage refresh tokens must fail lookup before any dedicated session checkout"
+    );
 
     fx.cleanup().await;
 }
@@ -486,7 +513,7 @@ async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
     let root_refresh = root.refresh_token.expect("root refresh token");
     let rotate = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
     let revoke = zeroship_auth::op::refresh::revoke_user_refresh_families(
-        &fx.db_url,
+        &fx.refresh_pool,
         fx.user_id,
         "credential_bump_test",
     );
