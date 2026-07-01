@@ -28,13 +28,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::analysis::analyze::Advisory;
+use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
+use crate::model::expr::Expr;
 use crate::render::declarative::{
     build_table_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     FieldDescriptor, LoweredUnit,
 };
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::model::expr::Expr;
-use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
 use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod, ExclusionOperator,
     ExistenceGuard, ForEach, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
@@ -704,6 +705,8 @@ pub struct GuardedFragment {
     pub op_kind: &'static str,
     /// The single rendered SQL statement (NO trailing `;`), guarded as-is.
     pub sql: String,
+    /// Structured guard/policy advisories produced while checking this fragment.
+    pub advisories: Vec<Advisory>,
 }
 
 /// A guard DENIAL attributed to the exact op that produced the denied fragment
@@ -2496,6 +2499,19 @@ impl IrAuthor {
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut named_types = NamedTypeRegistry::default();
 
+        crate::guard::check_ir_data_security_policy(guard_cfg, ir).map_err(|err| {
+            let op_kind = ir
+                .ops
+                .get(err.op_index)
+                .map(op_kind_tag)
+                .unwrap_or("unknown");
+            FragmentGuardDenied {
+                op_index: err.op_index,
+                op_kind,
+                source: err.source,
+            }
+        })?;
+
         for (op_index, op) in ir.ops.iter().enumerate() {
             let op_kind = op_kind_tag(op);
             enforce_vendor_capability_at_lower(op, guard_scope.as_ref())?;
@@ -2542,6 +2558,7 @@ impl IrAuthor {
                 // DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
                 // is one whole statement, never broken mid-literal.
                 for stmt in &statements {
+                    let mut advisories = Vec::new();
                     if guard_cfg.trust() == TrustProfile::Trusted {
                         match op {
                             Op::PgRaw { .. } => raw_island_guard
@@ -2550,33 +2567,52 @@ impl IrAuthor {
                                     op_index,
                                     op_kind,
                                     source,
-                                })?,
+                                })
+                                .and_then(|()| {
+                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                        op_index,
+                                        op_kind,
+                                        source,
+                                    })
+                                })
+                                .map(|outcome| advisories.extend(outcome.advisories))?,
                             Op::CreateFunction { body, .. } => raw_island_guard
                                 .check_raw_island_body_backstop(body, stmt)
                                 .map_err(|source| FragmentGuardDenied {
                                     op_index,
                                     op_kind,
                                     source,
-                                })?,
+                                })
+                                .and_then(|()| {
+                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                        op_index,
+                                        op_kind,
+                                        source,
+                                    })
+                                })
+                                .map(|outcome| advisories.extend(outcome.advisories))?,
                             _ => {
-                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
                                     op_index,
                                     op_kind,
                                     source,
                                 })?;
+                                advisories.extend(outcome.advisories);
                             }
                         }
                     } else {
-                        guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                        let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
                             op_index,
                             op_kind,
                             source,
                         })?;
+                        advisories.extend(outcome.advisories);
                     }
                     fragments.push(GuardedFragment {
                         op_index,
                         op_kind,
                         sql: stmt.clone(),
+                        advisories,
                     });
                 }
                 // Byte-identity invariant: the step's `up` MUST be exactly the join
