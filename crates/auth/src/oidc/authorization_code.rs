@@ -82,6 +82,11 @@ pub(super) struct OAuthClient {
     pub client_secret_hash: Option<String>,
     pub refresh_allowed: bool,
     pub token_endpoint_auth_method: String,
+    /// P5a: gateway-brokered client — its id_token carries the global principal
+    /// subject, and the authorization_code grant enforces confidential broker
+    /// auth (see `brokered ⇒ client_secret_basic`, a DB CHECK + the load_client
+    /// refusal below).
+    pub brokered: bool,
 }
 
 impl OAuthClient {
@@ -579,6 +584,7 @@ pub(super) async fn load_client(
         .query(
             "SELECT oc.client_id, oc.redirect_uris, oc.scopes, \
                     oc.client_secret_hash, oc.refresh_allowed, oc.token_endpoint_auth_method, \
+                    oc.brokered, \
                     aoc.app_id, aoc.sector_identifier \
              FROM zeroship.oauth_clients oc \
              LEFT JOIN zeroship.app_oauth_clients aoc ON aoc.client_id = oc.client_id \
@@ -598,6 +604,22 @@ pub(super) async fn load_client(
         .ok()
         .flatten()
         .unwrap_or_else(|| client_id.to_string());
+    let brokered = row.try_get("brokered").unwrap_or(false);
+    let token_endpoint_auth_method = row
+        .try_get("token_endpoint_auth_method")
+        .unwrap_or_else(|_| "none".to_string());
+    // A2(ii): the load_client backstop of the "brokered ⇒ confidential auth"
+    // invariant (the DB CHECK is A2(i)). A brokered client that is somehow not
+    // client_secret_basic would let an app exchange a code without the broker
+    // secret and receive the global-subject id_token — fail closed.
+    if brokered && token_endpoint_auth_method != "client_secret_basic" {
+        tracing::error!(
+            client_id = %client_id,
+            token_endpoint_auth_method = %token_endpoint_auth_method,
+            "brokered client is not client_secret_basic — refusing (invariant violation)"
+        );
+        return Err(OAuthError::server_error("client misconfigured"));
+    }
     Ok(OAuthClient {
         client_id: row.get("client_id"),
         redirect_uris: row.get("redirect_uris"),
@@ -606,9 +628,8 @@ pub(super) async fn load_client(
         sector_identifier,
         client_secret_hash: row.try_get("client_secret_hash").ok().flatten(),
         refresh_allowed: row.try_get("refresh_allowed").unwrap_or(false),
-        token_endpoint_auth_method: row
-            .try_get("token_endpoint_auth_method")
-            .unwrap_or_else(|_| "none".to_string()),
+        token_endpoint_auth_method,
+        brokered,
     })
 }
 

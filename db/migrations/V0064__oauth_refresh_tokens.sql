@@ -9,7 +9,16 @@ ALTER TABLE zeroship.oauth_clients
     ADD COLUMN client_secret_hash TEXT,
     ADD COLUMN refresh_allowed BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN token_endpoint_auth_method TEXT NOT NULL DEFAULT 'none'
-        CHECK (token_endpoint_auth_method IN ('none', 'client_secret_basic', 'client_secret_post'));
+        CHECK (token_endpoint_auth_method IN ('none', 'client_secret_basic', 'client_secret_post')),
+    -- P5a: a gateway-brokered client (end-user login routed through the platform
+    -- gateway) receives the GLOBAL principal subject in its id_token, gated by an
+    -- enforced confidential broker secret on the authorization_code grant. The
+    -- CHECK is the DB backstop of the load-bearing invariant "brokered ⇒
+    -- confidential auth": a brokered client can never be provisioned as a public
+    -- ('none') client, which would leak the global subject to app code.
+    ADD COLUMN brokered BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD CONSTRAINT oauth_clients_brokered_requires_secret_basic
+        CHECK (brokered = FALSE OR token_endpoint_auth_method = 'client_secret_basic');
 
 ALTER TABLE zeroship.oauth_authorization_codes
     ADD COLUMN auth_credential_version BIGINT NOT NULL DEFAULT 0;
