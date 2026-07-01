@@ -14,7 +14,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::oidc::Issuer;
+use zeroship_auth::oidc::{AccessTokenMint, Issuer};
 use zeroship_auth::oidc::refresh::RefreshSessionPool;
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
@@ -505,6 +505,189 @@ async fn revoke_refresh_token_kills_family_and_is_uniform() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn introspect_active_access_token_returns_rfc7662_claims() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let token = issue_refresh(&fx, FULL_SCOPE).await;
+    let claims = test_issuer()
+        .verify_access_token(&token.access_token)
+        .expect("issued access token verifies");
+
+    let resp = introspect_request(
+        &fx,
+        &token.access_token,
+        Some("access_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("introspect response");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.json::<Value>().await.expect("introspection json");
+    assert_eq!(body["active"], true);
+    assert_scope_set(&body["scope"], &["openid", "profile", "email", "offline_access"]);
+    assert_eq!(body["client_id"].as_str(), Some(fx.client_id.as_str()));
+    assert_eq!(body["token_type"], "access_token");
+    assert_eq!(body["exp"], claims.exp);
+    assert_eq!(body["iat"], claims.iat);
+    assert_eq!(body["sub"].as_str(), Some(claims.sub.as_str()));
+    assert_eq!(body["aud"].as_str(), Some(claims.aud.as_str()));
+    assert_eq!(body["iss"], ISSUER);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_expired_access_token_is_inactive() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let scopes = vec!["openid".to_string(), "profile".to_string()];
+    let user_id = fx.user_id.to_string();
+    let audience = format!("app:{}", fx.app_id);
+    let expired = test_issuer()
+        .issue_access_token(&AccessTokenMint {
+            user_id: &user_id,
+            sector: SECTOR,
+            audience: &audience,
+            client_id: &fx.client_id,
+            scopes: &scopes,
+            ttl_secs: Some(-60),
+        })
+        .expect("issue expired access token");
+
+    let resp = introspect_request(
+        &fx,
+        &expired,
+        Some("access_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("introspect response");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.json::<Value>().await.expect("introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_refresh_token_before_and_after_revoke() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+
+    let active = introspect_request(
+        &fx,
+        &root_refresh,
+        Some("refresh_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("active introspect response");
+    assert_eq!(active.status().as_u16(), 200);
+    let body = active.json::<Value>().await.expect("active introspection json");
+    assert_eq!(body["active"], true);
+    assert_scope_set(&body["scope"], &["openid", "profile", "email", "offline_access"]);
+    assert_eq!(body["client_id"].as_str(), Some(fx.client_id.as_str()));
+    assert_eq!(body["token_type"], "refresh_token");
+    assert!(body["exp"].as_i64().is_some_and(|exp| exp > 0));
+    assert!(body["iat"].as_i64().is_some_and(|iat| iat > 0));
+    let expected_sub = test_issuer().pairwise_subject(&fx.user_id.to_string(), SECTOR);
+    assert_eq!(body["sub"].as_str(), Some(expected_sub.as_str()));
+    let expected_aud = format!("app:{}", fx.app_id);
+    assert_eq!(body["aud"].as_str(), Some(expected_aud.as_str()));
+    assert_eq!(body["iss"], ISSUER);
+
+    let revoke = revoke_request(&fx, &root_refresh).await.expect("revoke response");
+    assert_eq!(revoke.status().as_u16(), 200);
+    let inactive = introspect_request(
+        &fx,
+        &root_refresh,
+        Some("refresh_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("inactive introspect response");
+    assert_eq!(inactive.status().as_u16(), 200);
+    assert_eq!(
+        inactive.json::<Value>().await.expect("inactive introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_requires_valid_client_auth_before_token_status() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let token = issue_refresh(&fx, FULL_SCOPE).await;
+    let refresh_token = token.refresh_token.expect("root refresh token");
+
+    let missing = introspect_request(&fx, &refresh_token, Some("refresh_token"), None)
+        .await
+        .expect("missing-auth introspect response");
+    assert_eq!(missing.status().as_u16(), 401);
+    assert_error(missing, "invalid_client").await;
+
+    let bad = introspect_request(
+        &fx,
+        &refresh_token,
+        Some("refresh_token"),
+        Some(basic_auth_with_secret(&fx.client_id, "wrong-refresh-client-secret")),
+    )
+    .await
+    .expect("bad-auth introspect response");
+    assert_eq!(bad.status().as_u16(), 401);
+    assert_error(bad, "invalid_client").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_unknown_or_garbage_token_is_uniformly_inactive() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+
+    let resp = introspect_request(
+        &fx,
+        "not-a-token",
+        Some("access_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("garbage introspect response");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.json::<Value>().await.expect("garbage introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    fx.cleanup().await;
+}
+
+#[test]
+fn discovery_metadata_advertises_token_introspection_endpoint() {
+    let discovery = zeroship_auth::oidc::metadata::discovery_metadata(ISSUER);
+    assert_eq!(
+        discovery["introspection_endpoint"],
+        format!("{ISSUER}/introspect")
+    );
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
     let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
         return;
@@ -770,11 +953,35 @@ async fn revoke_request(fx: &Fixture, refresh_token: &str) -> Result<cyper::Resp
         .await
 }
 
+#[allow(clippy::future_not_send)]
+async fn introspect_request(
+    fx: &Fixture,
+    token: &str,
+    token_type_hint: Option<&str>,
+    authorization: Option<String>,
+) -> Result<cyper::Response, cyper::Error> {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    form.append_pair("token", token);
+    if let Some(hint) = token_type_hint {
+        form.append_pair("token_type_hint", hint);
+    }
+    let mut request = cyper::Client::new()
+        .request(http::Method::POST, format!("{}/oauth2/introspect", fx.auth_base))
+        .expect("build POST /introspect")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type");
+    if let Some(authorization) = authorization {
+        request = request.header("authorization", authorization).expect("authorization");
+    }
+    request.body(form.finish()).send().await
+}
+
 fn basic_auth(client_id: &str) -> String {
-    format!(
-        "Basic {}",
-        STANDARD.encode(format!("{client_id}:{REFRESH_CLIENT_SECRET}"))
-    )
+    basic_auth_with_secret(client_id, REFRESH_CLIENT_SECRET)
+}
+
+fn basic_auth_with_secret(client_id: &str, secret: &str) -> String {
+    format!("Basic {}", STANDARD.encode(format!("{client_id}:{secret}")))
 }
 
 async fn refresh_family_id(fx: &Fixture) -> String {
@@ -849,4 +1056,16 @@ async fn assert_error(resp: cyper::Response, expected: &str) {
         .await
         .expect("oauth error json");
     assert_eq!(body["error"], expected);
+}
+
+fn assert_scope_set(actual: &Value, expected: &[&str]) {
+    let mut actual = actual
+        .as_str()
+        .expect("scope string")
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>();
+    let mut expected = expected.to_vec();
+    actual.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
 }

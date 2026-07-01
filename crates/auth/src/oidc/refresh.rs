@@ -25,7 +25,7 @@ use crate::oidc::authorization_code::{
     clean_optional, load_client, mint_access_token, parse_scopes, required_param, scope_subset,
     sort_dedup, OAuthClient, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
 };
-use crate::oidc::{Issuer, ACCESS_TOKEN_TTL_SECS};
+use crate::oidc::{introspect, Issuer, ACCESS_TOKEN_TTL_SECS};
 
 const REFRESH_TOKEN_BYTES: usize = 32;
 const REFRESH_TOKEN_PREFIX: &str = "zrt_";
@@ -171,7 +171,9 @@ struct RefreshRow {
     client_id: String,
     user_id: Uuid,
     sub: String,
+    granted_scopes: Vec<String>,
     family_granted_scopes: Vec<String>,
+    issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     family_absolute_expires_at: DateTime<Utc>,
     rotated_at: Option<DateTime<Utc>>,
@@ -204,6 +206,7 @@ pub(super) enum ClientAuthMethod {
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/revoke").route(web::post().to(revoke_post)));
+    introspect::configure(cfg);
 }
 
 impl RefreshTokenKeys {
@@ -808,7 +811,7 @@ async fn replay_or_kill(
     Err(OAuthError::invalid_grant("refresh token is invalid"))
 }
 
-async fn authenticated_client_id(
+pub(super) async fn authenticated_client_id(
     db: &(impl GenericClient + ?Sized),
     request_client_id: Option<&str>,
     client_auth: &ClientAuth,
@@ -828,7 +831,7 @@ async fn authenticated_client_id(
     }
 }
 
-async fn authenticate_for_refresh(
+pub(super) async fn authenticate_for_refresh(
     issuer: &Issuer,
     client: &OAuthClient,
     client_auth: &ClientAuth,
@@ -866,6 +869,50 @@ async fn authenticate_for_refresh(
         }
         _ => Err(OAuthError::invalid_client("unsupported client authentication method")),
     }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ActiveRefreshToken {
+    pub scope: String,
+    pub client_id: String,
+    pub token_type: &'static str,
+    pub exp: i64,
+    pub iat: i64,
+    pub sub: String,
+    pub aud: String,
+}
+
+#[allow(clippy::future_not_send)]
+pub(super) async fn introspect_refresh_token(
+    db: &(impl GenericClient + ?Sized),
+    keys: &RefreshTokenKeys,
+    authenticated_client: &OAuthClient,
+    raw_token: &str,
+) -> Result<Option<ActiveRefreshToken>, OAuthError> {
+    let Some((_hash, row)) = lookup_by_any_hash(db, keys, raw_token).await? else {
+        return Ok(None);
+    };
+    if row.client_id != authenticated_client.client_id {
+        return Ok(None);
+    }
+    let now = Utc::now();
+    if row.rotated_at.is_some()
+        || row.revoked_at.is_some()
+        || row.expires_at <= now
+        || row.family_absolute_expires_at <= now
+        || family_has_revoked_row(db, &row.refresh_family_id).await?
+    {
+        return Ok(None);
+    }
+    Ok(Some(ActiveRefreshToken {
+        scope: row.granted_scopes.join(" "),
+        client_id: row.client_id,
+        token_type: "refresh_token",
+        exp: row.expires_at.timestamp(),
+        iat: row.issued_at.timestamp(),
+        sub: row.sub,
+        aud: authenticated_client.resource_audience(),
+    }))
 }
 
 fn verify_client_secret(client: &OAuthClient, client_auth: &ClientAuth) -> Result<(), OAuthError> {
@@ -955,19 +1002,19 @@ async fn select_refresh_row(
 
 const REFRESH_ROW_SELECT: &str = "\
     SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-           client_id, user_id, sub, family_granted_scopes, expires_at, \
+           client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
            family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
     FROM zeroship.oauth_refresh_tokens \
     WHERE token_hash = $1";
 const REFRESH_ROW_SELECT_ANY: &str = "\
     SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-           client_id, user_id, sub, family_granted_scopes, expires_at, \
+           client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
            family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
     FROM zeroship.oauth_refresh_tokens \
     WHERE token_hash = ANY($1::BYTEA[])";
 const REFRESH_ROW_SELECT_FOR_UPDATE: &str = "\
     SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-           client_id, user_id, sub, family_granted_scopes, expires_at, \
+           client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
            family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
     FROM zeroship.oauth_refresh_tokens \
     WHERE token_hash = $1 \
@@ -982,7 +1029,9 @@ fn row_to_refresh_row(row: &compio_postgres::Row) -> RefreshRow {
         client_id: row.get("client_id"),
         user_id: row.get("user_id"),
         sub: row.get("sub"),
+        granted_scopes: row.get("granted_scopes"),
         family_granted_scopes: row.get("family_granted_scopes"),
+        issued_at: row.get("issued_at"),
         expires_at: row.get("expires_at"),
         family_absolute_expires_at: row.get("family_absolute_expires_at"),
         rotated_at: row.try_get("rotated_at").ok().flatten(),
@@ -1017,7 +1066,7 @@ async fn select_live_successor(
     let rows = db
         .query(
             "SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-                    client_id, user_id, sub, family_granted_scopes, expires_at, \
+                    client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
                     family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
              FROM zeroship.oauth_refresh_tokens \
              WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL",

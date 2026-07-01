@@ -88,6 +88,7 @@ pub fn discovery_metadata(issuer: &str) -> Value {
         "end_session_endpoint": format!("{issuer}/logout"),
         "device_authorization_endpoint": format!("{issuer}/device/authorization"),
         "revocation_endpoint": format!("{issuer}/revoke"),
+        "introspection_endpoint": format!("{issuer}/introspect"),
         "jwks_uri": format!("{issuer}/.well-known/jwks.json"),
         "response_types_supported": ["code"],
         "grant_types_supported": [
