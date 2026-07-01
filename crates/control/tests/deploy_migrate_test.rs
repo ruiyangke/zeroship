@@ -609,6 +609,129 @@ async fn deploy_migrate_raw_sql_unique_index_drop_is_approval_gated() {
 }
 
 #[compio::test]
+async fn deploy_migrate_raw_sql_drop_index_inside_do_block_is_approval_gated() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let dir1 = migrations_dir(&[(
+        "V0001__create_users_unique_index.sql",
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL); \
+         CREATE UNIQUE INDEX users_email_uniq ON users (email);",
+    )]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("base table + unique index applies");
+    assert!(
+        index_is_unique(&conn, &app_id, "users_email_uniq").await,
+        "setup must create a live UNIQUE index"
+    );
+    let _ = std::fs::remove_dir_all(&dir1);
+
+    let dir2 = migrations_dir(&[(
+        "V0002__do_drop_unique_idx.sql",
+        "DO $$ BEGIN EXECUTE 'DROP INDEX users_email_uniq'; END $$;",
+    )]);
+    let expected_version = zeroship_migrate::migration_id_for_version(2)
+        .as_str()
+        .to_string();
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("reviewer plan must gate the raw .sql DO-hidden DROP INDEX");
+    assert_eq!(
+        reviewed,
+        vec![expected_version],
+        "raw .sql DO block is review-scoped because it can hide DROP INDEX"
+    );
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("routine deploy must refuse DO-hidden DROP INDEX");
+    assert!(
+        matches!(
+            err,
+            DeployMigrateError::Apply(zeroship_migrate::EngineError::ApprovalRequired)
+        ),
+        "expected approval refusal for DO-hidden DROP INDEX, got {err:?}"
+    );
+    assert!(
+        index_is_unique(&conn, &app_id, "users_email_uniq").await,
+        "refused DO-hidden DROP INDEX must leave the live UNIQUE index intact"
+    );
+    assert_eq!(journaled_count(&conn, &app_id).await, 1);
+
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+#[compio::test]
+async fn deploy_migrate_raw_sql_drop_index_inside_function_body_is_approval_gated() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let dir1 = migrations_dir(&[(
+        "V0001__create_users_unique_index.sql",
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL); \
+         CREATE UNIQUE INDEX users_email_uniq ON users (email);",
+    )]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("base table + unique index applies");
+    assert!(
+        index_is_unique(&conn, &app_id, "users_email_uniq").await,
+        "setup must create a live UNIQUE index"
+    );
+    let _ = std::fs::remove_dir_all(&dir1);
+
+    let dir2 = migrations_dir(&[(
+        "V0002__function_with_drop_unique_idx.sql",
+        "CREATE FUNCTION drop_users_email_uniq() RETURNS void LANGUAGE plpgsql AS $$ \
+         BEGIN EXECUTE 'DROP INDEX users_email_uniq'; END $$;",
+    )]);
+    let expected_version = zeroship_migrate::migration_id_for_version(2)
+        .as_str()
+        .to_string();
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("reviewer plan must gate raw .sql CREATE FUNCTION bodies");
+    assert_eq!(
+        reviewed,
+        vec![expected_version],
+        "raw .sql CREATE FUNCTION is review-scoped because its body is opaque"
+    );
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("routine deploy must refuse function-body DROP INDEX carrier");
+    assert!(
+        matches!(
+            err,
+            DeployMigrateError::Apply(zeroship_migrate::EngineError::ApprovalRequired)
+        ),
+        "expected approval refusal for function-body DROP INDEX carrier, got {err:?}"
+    );
+    assert!(
+        index_is_unique(&conn, &app_id, "users_email_uniq").await,
+        "refused function-body carrier must leave the live UNIQUE index intact"
+    );
+    assert!(
+        !function_exists(&conn, &app_id, "drop_users_email_uniq").await,
+        "refused function-body carrier must apply nothing"
+    );
+    assert_eq!(journaled_count(&conn, &app_id).await, 1);
+
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+#[compio::test]
 async fn deploy_migrate_raw_sql_unique_index_rename_then_drop_is_approval_gated() {
     let Some(conn) = admin_conn().await else {
         eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
@@ -707,7 +830,10 @@ async fn deploy_migrate_raw_sql_do_block_rename_then_drop_is_approval_gated() {
         ),
         ("V0003__drop_renamed_unique_idx.sql", "DROP INDEX tmp;"),
     ]);
-    let expected_version = zeroship_migrate::migration_id_for_version(3)
+    let expected_do_version = zeroship_migrate::migration_id_for_version(2)
+        .as_str()
+        .to_string();
+    let expected_drop_version = zeroship_migrate::migration_id_for_version(3)
         .as_str()
         .to_string();
     let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
@@ -715,8 +841,8 @@ async fn deploy_migrate_raw_sql_do_block_rename_then_drop_is_approval_gated() {
         .expect("reviewer plan must gate the raw .sql DO-hidden rename then DROP");
     assert_eq!(
         reviewed,
-        vec![expected_version],
-        "raw .sql DROP INDEX is review-scoped even when prior index mutation is hidden in DO"
+        vec![expected_do_version, expected_drop_version],
+        "raw .sql DO carriers and top-level DROP INDEX are both review-scoped"
     );
 
     let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
@@ -740,6 +866,41 @@ async fn deploy_migrate_raw_sql_do_block_rename_then_drop_is_approval_gated() {
     assert_eq!(journaled_count(&conn, &app_id).await, 1);
 
     let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+#[compio::test]
+async fn deploy_migrate_raw_sql_without_drop_or_opaque_carrier_stays_ungated() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let dir = migrations_dir(&[(
+        "V0001__create_widgets.sql",
+        "CREATE TABLE widgets (id bigint PRIMARY KEY, label text NOT NULL);",
+    )]);
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect("reviewer plan should not gate ordinary raw .sql DDL");
+    assert!(
+        reviewed.is_empty(),
+        "ordinary raw .sql DDL without DROP INDEX or opaque carriers must stay self-serve"
+    );
+
+    let outcome = apply_bundle_migrations(&admin_dsn(), &app_id, &dir)
+        .await
+        .expect("ordinary raw .sql DDL must apply without approval");
+    assert_eq!(outcome.applied.len(), 1);
+    assert!(
+        table_exists(&conn, &app_id, "widgets").await,
+        "ordinary raw .sql DDL should create the table"
+    );
+    assert_eq!(journaled_count(&conn, &app_id).await, 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
     cleanup_app(&conn, &app_id).await;
 }
 
@@ -1116,6 +1277,22 @@ async fn index_is_unique(conn: &compio_postgres::Client, app_id: &Uuid, idx: &st
         .await
         .expect("query pg_index");
     rows.first().is_some_and(|row| row.get::<_, bool>("indisunique"))
+}
+
+/// Does a function named `func` exist in the per-app schema `<app_id>`?
+async fn function_exists(conn: &compio_postgres::Client, app_id: &Uuid, func: &str) -> bool {
+    let schema = app_id.to_string();
+    let rows = conn
+        .query(
+            "SELECT 1 \
+               FROM pg_proc p \
+               JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = $1 AND p.proname = $2",
+            &[&schema, &func],
+        )
+        .await
+        .expect("query pg_proc");
+    !rows.is_empty()
 }
 
 /// Does a FOREIGN KEY constraint exist on `<app_id>.<table>`?

@@ -289,9 +289,11 @@ fn journal_error(source: zeroship_migrate::JournalError) -> DeployMigrateError {
     DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(source)))
 }
 
-/// Raw `.sql` is untrusted and can obscure index identity through opaque bodies
-/// (`DO`/dynamic SQL/functions). Do not try to infer whether a target is unique:
-/// any pending raw SQL migration containing `DROP INDEX` is approval-gated.
+/// Raw `.sql` is untrusted and can issue index drops either as a top-level
+/// `DROP INDEX` or through opaque execution carriers (`DO`, dynamic SQL,
+/// functions/procedures, trigger function references). Do not inspect inside
+/// bodies or infer whether a target is unique: any pending raw SQL migration
+/// on that execution surface is approval-gated.
 async fn prevalidate_raw_sql_drop_index_approval(
     backend: &PostgresBackend<'_>,
     exec_cfg: &ExecutorConfig,
@@ -299,7 +301,7 @@ async fn prevalidate_raw_sql_drop_index_approval(
     approval: Approval,
     scope: &ApprovalScope,
 ) -> Result<(), DeployMigrateError> {
-    let candidates = raw_sql_drop_index_migrations(migrations.iter())?;
+    let candidates = raw_sql_index_drop_gate_migrations(migrations.iter())?;
     if candidates.is_empty() {
         return Ok(());
     }
@@ -322,7 +324,7 @@ async fn prevalidate_raw_sql_drop_index_approval(
     Ok(())
 }
 
-fn raw_sql_drop_index_migrations<'a, I>(
+fn raw_sql_index_drop_gate_migrations<'a, I>(
     migrations: I,
 ) -> Result<Vec<&'a Migration>, DeployMigrateError>
 where
@@ -330,14 +332,17 @@ where
 {
     let mut gated = Vec::new();
     for migration in migrations {
-        let targets =
-            zeroship_migrate::drop_index_targets(&migration.up).map_err(|source| {
+        let requires_approval =
+            zeroship_migrate::analysis::classify::raw_sql_requires_index_drop_approval(
+                &migration.up,
+            )
+            .map_err(|source| {
                 DeployMigrateError::Load(LoaderError::Parse {
                     name: migration.name.clone(),
                     source,
                 })
             })?;
-        if !targets.is_empty() {
+        if requires_approval {
             gated.push(migration);
         }
     }
@@ -382,13 +387,13 @@ async fn pending_raw_sql_migrations<'a>(
         .collect())
 }
 
-fn raw_sql_drop_index_versions<'a, I>(
+fn raw_sql_index_drop_gate_versions<'a, I>(
     migrations: I,
 ) -> Result<BTreeSet<String>, DeployMigrateError>
 where
     I: IntoIterator<Item = &'a Migration>,
 {
-    Ok(raw_sql_drop_index_migrations(migrations)?
+    Ok(raw_sql_index_drop_gate_migrations(migrations)?
         .into_iter()
         .map(|migration| migration.version.as_str().to_string())
         .collect())
@@ -660,8 +665,8 @@ async fn apply_bundle_migrations_with_approval(
     provision_migrator(&conn, &exec_cfg).await?;
 
     // Raw `.sql` DROP INDEX is always review-scoped. Creator SQL is untrusted and
-    // can hide index-name/uniqueness changes in opaque bodies, so this leg gates
-    // every pending raw index drop instead of trying to inspect the live catalog.
+    // can hide drops in opaque execution carriers, so this leg gates top-level
+    // drops OR carrier presence instead of trying to inspect dynamic bodies.
     let backend = PostgresBackend::new(&conn);
     prevalidate_raw_sql_drop_index_approval(
         &backend,
@@ -929,7 +934,7 @@ async fn collect_bundle_facts(
     // (1) `.sql` leg: a destructive `.sql` migration's version is its own version-id;
     //     a `.sql` migration is one Ddl step whose `up` is the file body.
     let migrations = load_dir_migrations(migrations_dir)?;
-    let raw_sql_drop_gated_versions = raw_sql_drop_index_versions(migrations.iter())?;
+    let raw_sql_drop_gated_versions = raw_sql_index_drop_gate_versions(migrations.iter())?;
     for m in &migrations {
         if m.flags.destructive || raw_sql_drop_gated_versions.contains(m.version.as_str()) {
             gated.insert(m.version.as_str().to_string());
