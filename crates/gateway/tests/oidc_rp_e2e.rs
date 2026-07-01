@@ -250,6 +250,13 @@ async fn gateway_oidc_rp_full_dance() {
         public_url: "http://localhost:9092".to_string(),
         auth_signing_key_file: None,
         auth_pairwise_salt_file: None,
+        // OP refresh-token families (P5b) + gateway-brokered secret (P5a) — this
+        // Hydra-RP e2e doesn't exercise them; defaults keep the literal complete.
+        auth_broker_secret_file: None,
+        auth_broker_secret_previous_file: None,
+        refresh_hash_key_file: None,
+        refresh_idem_key_file: None,
+        refresh_pool_size: 4,
         postmark_webhook_user: None,
         postmark_webhook_password: None,
         // Relay (Slice 5) — this e2e doesn't exercise the relay path; defaults.
