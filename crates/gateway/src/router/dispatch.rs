@@ -270,9 +270,10 @@ pub async fn handle_subdomain(
     body: Bytes,
 ) -> HttpResponse {
     // `auth.zeroship.ai` is a platform-internal host, not a creator app.
-    // The gateway proxies OIDC protocol endpoints (`/oauth2/*`,
-    // `/.well-known/*`, `/userinfo`) to Ory Hydra; everything else
-    // (login UI, OAuth2 consent handlers, webhooks) goes to crates/auth.
+    // The gateway proxies legacy `/oauth2/*` paths to Hydra; the
+    // self-contained OP endpoints (`/.well-known/*`, `/userinfo`,
+    // `/authorize`, `/token`, `/revoke`) and UI/webhook surfaces go to
+    // crates/auth.
     if is_auth_host(&req) {
         return route_auth_host(req, state, body).await;
     }
@@ -304,27 +305,27 @@ pub async fn handle_subdomain(
 /// forwarded to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthUpstream {
-    /// OIDC protocol endpoints implemented by Ory Hydra.
+    /// Legacy Ory Hydra public endpoints still consumed directly by auth UI
+    /// helpers, currently under `/oauth2/*`.
     Hydra,
-    /// Login UI, OAuth2 consent handlers, and webhooks — implemented
-    /// by `crates/auth`.
+    /// Self-contained OP endpoints, login UI, OAuth2 consent handlers, and
+    /// webhooks — implemented by `crates/auth`.
     Auth,
 }
 
 /// Classify an inbound `auth.zeroship.ai` path. The protocol endpoints
-/// listed here are the public hydra contract:
+/// listed here are the self-contained OP contract implemented by `crates/auth`:
 ///
-///   * `/oauth2/auth`, `/oauth2/token`, `/oauth2/revoke`, …
 ///   * `/.well-known/openid-configuration`, `/.well-known/jwks.json`
 ///   * `/userinfo`
+///   * `/authorize`, `/token`, `/revoke`
 ///
-/// Everything else is handled by `crates/auth` (login HTML, consent
-/// callbacks, signup, password reset, …).
+/// Legacy `/oauth2/*` paths are still forwarded to the Hydra sidecar for
+/// device/logout compatibility until the broader P5f naming/cleanup pass.
+/// Everything else is handled by `crates/auth` (login HTML, consent callbacks,
+/// signup, password reset, …).
 pub(crate) fn classify_auth_path(path: &str) -> AuthUpstream {
-    if path.starts_with("/oauth2/")
-        || path.starts_with("/.well-known/")
-        || path == "/userinfo"
-    {
+    if path.starts_with("/oauth2/") {
         AuthUpstream::Hydra
     } else {
         AuthUpstream::Auth
@@ -3110,24 +3111,27 @@ mod tests {
     }
 
     #[test]
-    fn classify_auth_path_well_known_routes_to_hydra() {
+    fn classify_auth_path_well_known_routes_to_self_contained_op() {
         assert_eq!(
             classify_auth_path("/.well-known/openid-configuration"),
-            AuthUpstream::Hydra
+            AuthUpstream::Auth
         );
         assert_eq!(
             classify_auth_path("/.well-known/jwks.json"),
-            AuthUpstream::Hydra
+            AuthUpstream::Auth
         );
     }
 
     #[test]
-    fn classify_auth_path_userinfo_routes_to_hydra() {
-        assert_eq!(classify_auth_path("/userinfo"), AuthUpstream::Hydra);
+    fn classify_auth_path_userinfo_routes_to_self_contained_op() {
+        assert_eq!(classify_auth_path("/userinfo"), AuthUpstream::Auth);
     }
 
     #[test]
     fn classify_auth_path_ui_and_callbacks_route_to_auth() {
+        assert_eq!(classify_auth_path("/authorize"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/token"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/revoke"), AuthUpstream::Auth);
         assert_eq!(classify_auth_path("/login"), AuthUpstream::Auth);
         assert_eq!(classify_auth_path("/signup"), AuthUpstream::Auth);
         assert_eq!(classify_auth_path("/consent"), AuthUpstream::Auth);
