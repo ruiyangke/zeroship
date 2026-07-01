@@ -678,6 +678,72 @@ async fn deploy_migrate_raw_sql_unique_index_rename_then_drop_is_approval_gated(
 }
 
 #[compio::test]
+async fn deploy_migrate_raw_sql_do_block_rename_then_drop_is_approval_gated() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let dir1 = migrations_dir(&[(
+        "V0001__create_users_unique_index.sql",
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL); \
+         CREATE UNIQUE INDEX users_email_uniq ON users (email);",
+    )]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("base table + unique index applies");
+    assert!(
+        index_is_unique(&conn, &app_id, "users_email_uniq").await,
+        "setup must create a live UNIQUE index"
+    );
+    let _ = std::fs::remove_dir_all(&dir1);
+
+    let dir2 = migrations_dir(&[
+        (
+            "V0002__do_rename_unique_idx.sql",
+            "DO $$ BEGIN EXECUTE 'ALTER INDEX users_email_uniq RENAME TO tmp'; END $$;",
+        ),
+        ("V0003__drop_renamed_unique_idx.sql", "DROP INDEX tmp;"),
+    ]);
+    let expected_version = zeroship_migrate::migration_id_for_version(3)
+        .as_str()
+        .to_string();
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("reviewer plan must gate the raw .sql DO-hidden rename then DROP");
+    assert_eq!(
+        reviewed,
+        vec![expected_version],
+        "raw .sql DROP INDEX is review-scoped even when prior index mutation is hidden in DO"
+    );
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("routine deploy must refuse DO-hidden rename-then-DROP");
+    assert!(
+        matches!(
+            err,
+            DeployMigrateError::Apply(zeroship_migrate::EngineError::ApprovalRequired)
+        ),
+        "expected approval refusal for DO-hidden rename-then-DROP, got {err:?}"
+    );
+    assert!(
+        index_exists(&conn, &app_id, "users_email_uniq").await,
+        "refused DO-hidden rename-then-DROP must leave the original UNIQUE index in place"
+    );
+    assert!(
+        !index_exists(&conn, &app_id, "tmp").await,
+        "refused DO-hidden rename-then-DROP must apply nothing before the gate"
+    );
+    assert_eq!(journaled_count(&conn, &app_id).await, 1);
+
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+#[compio::test]
 async fn deploy_migrate_raw_sql_create_unique_then_drop_is_approval_gated() {
     let Some(conn) = admin_conn().await else {
         eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
@@ -738,7 +804,7 @@ async fn deploy_migrate_raw_sql_create_unique_then_drop_is_approval_gated() {
 }
 
 #[compio::test]
-async fn deploy_migrate_raw_sql_plain_index_drop_is_not_approval_gated() {
+async fn deploy_migrate_raw_sql_plain_index_drop_is_approval_gated() {
     let Some(conn) = admin_conn().await else {
         eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
         return;
@@ -768,23 +834,33 @@ async fn deploy_migrate_raw_sql_plain_index_drop_is_not_approval_gated() {
         "V0002__drop_plain_idx.sql",
         "DROP INDEX users_email_idx;",
     )]);
+    let expected_version = zeroship_migrate::migration_id_for_version(2)
+        .as_str()
+        .to_string();
     let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
         .await
         .expect("reviewer plan should handle raw .sql plain-index drop");
-    assert!(
-        reviewed.is_empty(),
-        "raw .sql DROP INDEX of a live plain index must not require approval"
+    assert_eq!(
+        reviewed,
+        vec![expected_version],
+        "raw .sql DROP INDEX is conservatively review-scoped even for a live plain index"
     );
 
-    let outcome = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
         .await
-        .expect("routine deploy should apply a raw .sql plain-index drop");
-    assert_eq!(outcome.applied.len(), 1);
+        .expect_err("routine deploy must refuse a raw .sql plain-index drop");
     assert!(
-        !index_exists(&conn, &app_id, "users_email_idx").await,
-        "plain index should be dropped without approval"
+        matches!(
+            err,
+            DeployMigrateError::Apply(zeroship_migrate::EngineError::ApprovalRequired)
+        ),
+        "expected approval refusal for raw .sql plain-index drop, got {err:?}"
     );
-    assert_eq!(journaled_count(&conn, &app_id).await, 2);
+    assert!(
+        index_exists(&conn, &app_id, "users_email_idx").await,
+        "refused raw .sql plain-index drop must apply nothing"
+    );
+    assert_eq!(journaled_count(&conn, &app_id).await, 1);
 
     let _ = std::fs::remove_dir_all(&dir2);
     cleanup_app(&conn, &app_id).await;
