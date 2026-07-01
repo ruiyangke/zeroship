@@ -55,9 +55,6 @@ async fn introspect_inner(
     db: &Client,
     issuer: &Issuer,
 ) -> Result<Value, OAuthError> {
-    let Some(raw_token) = form.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
-        return Err(OAuthError::invalid_request("token is required"));
-    };
     let client_auth =
         client_auth_from_request(req, form.client_id.as_deref(), form.client_secret.as_deref());
     if client_auth.method == ClientAuthMethod::None {
@@ -66,6 +63,9 @@ async fn introspect_inner(
     let client_id = authenticated_client_id(db, form.client_id.as_deref(), &client_auth).await?;
     let client = load_client(db, &client_id).await?;
     authenticate_for_refresh(issuer, &client, &client_auth).await?;
+    let Some(raw_token) = form.token.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+        return Err(OAuthError::invalid_request("token is required"));
+    };
 
     let hint = form.token_type_hint.as_deref().map(str::trim);
     let active = match hint {
