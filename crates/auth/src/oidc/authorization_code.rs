@@ -246,8 +246,9 @@ async fn authorize_inner(
         return Err(OAuthError::invalid_request("redirect_uri is not registered"));
     }
 
+    let return_to = return_to::request_target(req);
     let auth_request = AuthRequest::from_parts(
-        &return_to::request_target(req),
+        &return_to,
         Some(client_id),
         Some(redirect_uri),
         params.scope.as_deref(),

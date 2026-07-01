@@ -266,6 +266,94 @@ async fn idp_hint_google_redirects_native_authorize_to_provider_start() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn idp_hint_unconfigured_provider_falls_back_to_native_login_form() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let authorize_path = format!(
+        "{}&idp_hint=github&prompt=login",
+        authorize_path(
+            &fx.client_id,
+            "openid email",
+            &pkce_verifier(),
+            "state-idp-hint-disabled",
+            Some("nonce-idp-hint-disabled"),
+        )
+    );
+
+    let resp = get(&fx, &authorize_path, None).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let loc = location(&resp);
+    assert!(
+        !loc.starts_with("/oauth/github/start?"),
+        "disabled idp_hint must not route to github start: {loc}"
+    );
+    assert!(
+        loc.starts_with("/login?return_to="),
+        "disabled idp_hint should fall back to login, got {loc}"
+    );
+    assert_eq!(
+        relative_query_param(&loc, "return_to").as_deref(),
+        Some(authorize_path.as_str())
+    );
+
+    let login_get = get(&fx, &loc, None).await;
+    assert_eq!(login_get.status().as_u16(), 200);
+    assert!(
+        read_set_cookie(&login_get, "zsidp_csrf").is_some(),
+        "login form should render with a csrf cookie"
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn native_authorize_echoes_state_verbatim() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let state = "  tok with spaces  ";
+    let authorize_path = authorize_path(
+        &fx.client_id,
+        "openid email",
+        &verifier,
+        state,
+        Some("nonce-verbatim"),
+    );
+
+    let login_redirect = get(&fx, &authorize_path, None).await;
+    assert_eq!(login_redirect.status().as_u16(), 303);
+    let login_loc = location(&login_redirect);
+    assert!(login_loc.starts_with("/login?return_to="));
+    assert_eq!(
+        relative_query_param(&login_loc, "return_to").as_deref(),
+        Some(authorize_path.as_str())
+    );
+
+    let cookies = fx.create_session_cookie().await;
+    let consent_redirect = get(&fx, &authorize_path, Some(&cookies)).await;
+    assert_eq!(consent_redirect.status().as_u16(), 303);
+    let consent_loc = location(&consent_redirect);
+    assert!(consent_loc.starts_with("/consent?return_to="));
+    assert_eq!(
+        relative_query_param(&consent_loc, "return_to").as_deref(),
+        Some(authorize_path.as_str())
+    );
+
+    fx.insert_grant(&["openid", "email"]).await;
+    let final_authorize = get(&fx, &authorize_path, Some(&cookies)).await;
+    assert_eq!(final_authorize.status().as_u16(), 303);
+    let callback = location(&final_authorize);
+    assert!(callback.starts_with(REDIRECT_URI), "callback: {callback}");
+    assert_eq!(absolute_query_param(&callback, "state").as_deref(), Some(state));
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn consent_covered_short_circuits_and_new_scope_bounces() {
     let Some(fx) = Fixture::boot().await else {
         return;
