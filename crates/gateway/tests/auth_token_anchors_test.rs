@@ -769,6 +769,7 @@ fn leader_mint_future(
         match hydra_refresh(&oidc, &hydra).await {
             Ok(()) => Ok(anchors::RotationOk {
                 global_user_id: user_id,
+                sid: None,
                 granted_scopes: vec!["openid".into()],
                 email_verified: Some(true),
                 name: None,

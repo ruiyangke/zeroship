@@ -35,6 +35,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::hydra_client::HydraAdmin;
+use crate::oidc;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{ErrorPage, LogoutPage, PublicErrorMessage};
@@ -103,6 +104,7 @@ pub async fn post(
     admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    issuer: ntex::web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
     // 1. CSRF.
     let cookie_header = req
@@ -139,6 +141,21 @@ pub async fn post(
     if let Some(session_id) = local_session_id {
         if let Err(e) = sessions::revoke(db.as_ref(), session_id).await {
             tracing::warn!(error = %e, session_id = %session_id, "logout: local cookie session revoke failed");
+        }
+        match oidc::backchannel_logout::emit_for_session(db.as_ref(), issuer.as_ref(), session_id)
+            .await
+        {
+            Ok(report) => tracing::info!(
+                session_id = %session_id,
+                attempted = report.attempted,
+                delivered = report.delivered,
+                "logout: emitted OIDC back-channel logout tokens"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                session_id = %session_id,
+                "logout: BCL emission failed"
+            ),
         }
     }
 

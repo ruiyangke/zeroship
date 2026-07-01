@@ -46,6 +46,7 @@ async fn create_validate_revoke_roundtrip() {
         &mut client,
         &NewSession {
             user_id: &user_id_text,
+            sid: None,
             app_id,
             email: Some("test@zeroship.test"),
             name: Some("Test User"),

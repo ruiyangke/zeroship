@@ -393,6 +393,8 @@ pub struct TokenClaims {
     #[serde(default)]
     pub nonce: Option<String>,
     #[serde(default)]
+    pub sid: Option<String>,
+    #[serde(default)]
     pub at_hash: Option<String>,
     #[serde(default)]
     pub c_hash: Option<String>,

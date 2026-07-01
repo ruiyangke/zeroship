@@ -33,6 +33,7 @@ use serde_json::json;
 
 use crate::config::AuthConfig;
 use crate::csrf;
+use crate::oidc;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions::{self, SessionKind, SessionSummary};
 
@@ -108,6 +109,7 @@ pub async fn revoke(
     form: ntex::web::types::Form<RevokeForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    issuer: ntex::web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
     // 1. CSRF (double-submit cookie), same scheme as /me/unlink.
     let cookie_header = req
@@ -138,7 +140,30 @@ pub async fn revoke(
 
     // 4. Revoke — scoped to `user_id = caller` in SQL (the IDOR guard).
     match sessions::revoke_one_for_user(db.as_ref(), caller.user_id, session_id, kind).await {
-        Ok(revoked) => HttpResponse::Ok().json(&json!({ "revoked": revoked })),
+        Ok(revoked) => {
+            if revoked && kind == SessionKind::Idp {
+                match oidc::backchannel_logout::emit_for_session(
+                    db.as_ref(),
+                    issuer.as_ref(),
+                    session_id,
+                )
+                .await
+                {
+                    Ok(report) => tracing::info!(
+                        session_id = %session_id,
+                        attempted = report.attempted,
+                        delivered = report.delivered,
+                        "sessions revoke: emitted OIDC back-channel logout tokens"
+                    ),
+                    Err(e) => tracing::error!(
+                        error = %e,
+                        session_id = %session_id,
+                        "sessions revoke: BCL emission failed"
+                    ),
+                }
+            }
+            HttpResponse::Ok().json(&json!({ "revoked": revoked }))
+        }
         Err(e) => {
             tracing::error!(error = %e, "sessions::revoke_one_for_user failed");
             internal_error()

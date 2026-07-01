@@ -76,6 +76,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
         &mut client,
         &NewSession {
             user_id: &target_user,
+            sid: None,
             app_id: app_a,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
@@ -93,6 +94,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
         &mut client,
         &NewSession {
             user_id: &target_user,
+            sid: None,
             app_id: app_b,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
@@ -113,6 +115,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
         &mut client,
         &NewSession {
             user_id: &other_user,
+            sid: None,
             app_id: app_a,
             email: Some("bob@zeroship.test"),
             name: Some("Bob"),
@@ -384,7 +387,11 @@ async fn jwks(state: web::types::State<Arc<TestKey>>) -> HttpResponse {
 }
 
 fn make_key() -> TestKey {
-    let sk = SigningKey::from_bytes(&[9u8; 32]);
+    make_key_with_seed(9)
+}
+
+fn make_key_with_seed(seed: u8) -> TestKey {
+    let sk = SigningKey::from_bytes(&[seed; 32]);
     let pkcs8 = sk.to_pkcs8_der().expect("encode pkcs8");
     let encoding = EncodingKey::from_ed_der(pkcs8.as_bytes());
     let public_key_b64 = URL_SAFE_NO_PAD.encode(sk.verifying_key().to_bytes());
@@ -395,7 +402,15 @@ fn make_key() -> TestKey {
     }
 }
 
-fn sign_logout_token(key: &TestKey, issuer: &str, sub: &str, jti: &str) -> String {
+fn sign_logout_token_with(
+    key: &TestKey,
+    issuer: &str,
+    aud: &str,
+    sub: &str,
+    jti: &str,
+    sid: Option<&str>,
+    include_events: bool,
+) -> String {
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -405,15 +420,21 @@ fn sign_logout_token(key: &TestKey, issuer: &str, sub: &str, jti: &str) -> Strin
     .unwrap();
     let mut header = Header::new(Algorithm::EdDSA);
     header.kid = Some(key.kid.clone());
-    let claims = json!({
+    header.typ = Some(zeroship_core::logout_token::LOGOUT_TOKEN_TYP.into());
+    let mut claims = json!({
         "iss": issuer,
-        "aud": "gateway",
+        "aud": aud,
         "iat": now,
+        "exp": now + 120,
         "jti": jti,
-        "events": { zeroship_core::logout_token::BCL_EVENT: {} },
         "sub": sub,
-        "sid": format!("sid-{jti}"),
     });
+    if include_events {
+        claims["events"] = json!({ zeroship_core::logout_token::BCL_EVENT: {} });
+    }
+    if let Some(sid) = sid {
+        claims["sid"] = json!(sid);
+    }
     encode(&header, &claims, &key.encoding).expect("encode logout_token")
 }
 
@@ -528,6 +549,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         &mut db,
         &NewSession {
             user_id: &target_user_string,
+            sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
@@ -595,8 +617,8 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let replay_resp = test::call_service(&app, replay).await;
     assert_eq!(
         replay_resp.status(),
-        StatusCode::OK,
-        "replayed logout_token remains idempotent at the HTTP layer"
+        StatusCode::BAD_REQUEST,
+        "replayed logout_token must be rejected at the HTTP layer"
     );
     assert_eq!(
         audit_count(&db, &jti).await,
@@ -619,6 +641,296 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         .ok();
 }
 
+#[ntex::test]
+async fn handler_valid_logout_token_revokes_matching_sid_only() {
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping (no AUTH_DB_URL)");
+        return;
+    };
+
+    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+    let mut db = client;
+    let db_cfg = DbConfig::new(dsn.clone(), 4);
+
+    let key = make_key();
+    let jwks_key = Arc::new(key.clone());
+    let jwks_server = test::server(move || {
+        let jwks_key = jwks_key.clone();
+        async move {
+            web::App::new().state(jwks_key).service(
+                web::resource("/.well-known/jwks.json").route(web::get().to(jwks)),
+            )
+        }
+    })
+    .await;
+    let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
+    let issuer = auth_base.clone();
+
+    let target_user = insert_user(&db, "gateway-bcl-sid-target").await;
+    let target_user_string = target_user.to_string();
+    let app_id = Uuid::new_v4();
+    let app_name = format!("bcl-sid-{}", Uuid::new_v4().simple());
+    let oauth_client_id = format!("oac_bclsid_{}", Uuid::new_v4().simple());
+    let sector = format!("https://{app_name}.zeroship.localhost");
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
+
+    let sid = format!("sid-{}", Uuid::new_v4().simple());
+    let other_sid = format!("sid-{}", Uuid::new_v4().simple());
+    let target_session = create(
+        &mut db,
+        &NewSession {
+            user_id: &target_user_string,
+            sid: Some(&sid),
+            app_id,
+            email: Some("alice@zeroship.test"),
+            name: Some("Alice"),
+            avatar_url: None,
+            email_verified: true,
+            granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
+        },
+    )
+    .await
+    .expect("create target sid session");
+    let other_session = create(
+        &mut db,
+        &NewSession {
+            user_id: &target_user_string,
+            sid: Some(&other_sid),
+            app_id,
+            email: Some("alice@zeroship.test"),
+            name: Some("Alice"),
+            avatar_url: None,
+            email_verified: true,
+            granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
+        },
+    )
+    .await
+    .expect("create other sid session");
+
+    let jti = format!("jti-{}", Uuid::new_v4().simple());
+    let token = sign_logout_token_with_aud_and_sid(
+        &key,
+        &issuer,
+        &oauth_client_id,
+        &target_user_string,
+        &jti,
+        &sid,
+    );
+    let state = build_handler_state_with_route(
+        db_cfg,
+        &auth_base,
+        app_id,
+        &app_name,
+        &oauth_client_id,
+        &sector,
+        zeroship_core::auth::derive_pairwise_salt(b"bcl-sid-stash"),
+    );
+    let app = test::init_service(web::App::new().state(state).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/oidc/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload(format!("logout_token={token}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        validate(&mut db, target_session.id, app_id)
+            .await
+            .expect("validate target sid after BCL")
+            .is_none(),
+        "valid logout_token.sid must revoke the matching gateway session"
+    );
+    assert!(
+        validate(&mut db, other_session.id, app_id)
+            .await
+            .expect("validate other sid after BCL")
+            .is_some(),
+        "valid logout_token.sid must not revoke another session for the same user/app"
+    );
+
+    db.execute(
+        "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
+        &[&jti],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
+        &[&target_user_string],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
+        .await
+        .ok();
+    db.execute(
+        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&oauth_client_id],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
+}
+
+#[ntex::test]
+async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping (no AUTH_DB_URL)");
+        return;
+    };
+
+    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+    let mut db = client;
+    let db_cfg = DbConfig::new(dsn.clone(), 4);
+
+    let key = make_key();
+    let jwks_key = Arc::new(key.clone());
+    let jwks_server = test::server(move || {
+        let jwks_key = jwks_key.clone();
+        async move {
+            web::App::new().state(jwks_key).service(
+                web::resource("/.well-known/jwks.json").route(web::get().to(jwks)),
+            )
+        }
+    })
+    .await;
+    let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
+    let issuer = auth_base.clone();
+
+    let target_user = insert_user(&db, "gateway-bcl-invalid-target").await;
+    let target_user_string = target_user.to_string();
+    let app_id = Uuid::new_v4();
+    let app_name = format!("bcl-invalid-{}", Uuid::new_v4().simple());
+    let oauth_client_id = format!("oac_bclinvalid_{}", Uuid::new_v4().simple());
+    let sector = format!("https://{app_name}.zeroship.localhost");
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
+    let session = create(
+        &mut db,
+        &NewSession {
+            user_id: &target_user_string,
+            sid: None,
+            app_id,
+            email: Some("alice@zeroship.test"),
+            name: Some("Alice"),
+            avatar_url: None,
+            email_verified: true,
+            granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
+        },
+    )
+    .await
+    .expect("create session");
+
+    let state = build_handler_state_with_route(
+        db_cfg,
+        &auth_base,
+        app_id,
+        &app_name,
+        &oauth_client_id,
+        &sector,
+        zeroship_core::auth::derive_pairwise_salt(b"bcl-invalid-stash"),
+    );
+    let app = test::init_service(web::App::new().state(state).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
+    .await;
+
+    let wrong_aud = sign_logout_token_with_aud(
+        &key,
+        &issuer,
+        "oac_wrong_audience",
+        &target_user_string,
+        &format!("jti-{}", Uuid::new_v4().simple()),
+    );
+    let mut bad_key = make_key_with_seed(10);
+    bad_key.kid = key.kid.clone();
+    let bad_signature = sign_logout_token_with_aud(
+        &bad_key,
+        &issuer,
+        &oauth_client_id,
+        &target_user_string,
+        &format!("jti-{}", Uuid::new_v4().simple()),
+    );
+    let missing_events = sign_logout_token_with(
+        &key,
+        &issuer,
+        &oauth_client_id,
+        &target_user_string,
+        &format!("jti-{}", Uuid::new_v4().simple()),
+        None,
+        false,
+    );
+
+    for (label, token) in [
+        ("wrong audience", wrong_aud),
+        ("bad signature", bad_signature),
+        ("missing events", missing_events),
+    ] {
+        let req = test::TestRequest::post()
+            .uri("/oidc/backchannel-logout")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .set_payload(format!("logout_token={token}"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{label} logout_token must be rejected"
+        );
+        assert!(
+            validate(&mut db, session.id, app_id)
+                .await
+                .unwrap_or_else(|e| panic!("validate after {label}: {e}"))
+                .is_some(),
+            "{label} logout_token must not revoke the live session"
+        );
+    }
+
+    db.execute(
+        "DELETE FROM zeroship.gateway_sessions WHERE id = $1",
+        &[&session.id],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
+        .await
+        .ok();
+    db.execute(
+        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&oauth_client_id],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
+}
+
 // ─── Batch A fix 4: per-app BCL writes the token-family marker ──────────────
 
 /// Like [`sign_logout_token`] but with a caller-chosen `aud` (the per-app
@@ -630,25 +942,18 @@ fn sign_logout_token_with_aud(
     sub: &str,
     jti: &str,
 ) -> String {
-    let now = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    )
-    .unwrap();
-    let mut header = Header::new(Algorithm::EdDSA);
-    header.kid = Some(key.kid.clone());
-    let claims = json!({
-        "iss": issuer,
-        "aud": aud,
-        "iat": now,
-        "jti": jti,
-        "events": { zeroship_core::logout_token::BCL_EVENT: {} },
-        "sub": sub,
-        "sid": format!("sid-{jti}"),
-    });
-    encode(&header, &claims, &key.encoding).expect("encode logout_token")
+    sign_logout_token_with(key, issuer, aud, sub, jti, None, true)
+}
+
+fn sign_logout_token_with_aud_and_sid(
+    key: &TestKey,
+    issuer: &str,
+    aud: &str,
+    sub: &str,
+    jti: &str,
+    sid: &str,
+) -> String {
+    sign_logout_token_with(key, issuer, aud, sub, jti, Some(sid), true)
 }
 
 /// Build a handler `GateState` whose RouteCache is provisioned with ONE
@@ -745,6 +1050,7 @@ async fn per_app_bcl_writes_token_family_marker() {
         &mut db,
         &NewSession {
             user_id: &target_user_string,
+            sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
@@ -900,6 +1206,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         &mut db,
         &NewSession {
             user_id: &canonical_sub,
+            sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),
@@ -1063,6 +1370,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
         &mut db,
         &NewSession {
             user_id: &target_user_string,
+            sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
             name: Some("Alice"),

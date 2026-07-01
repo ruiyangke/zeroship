@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::config::AuthConfig;
 use crate::oidc::claims::scope_gated_identity_claims;
+use crate::oidc::backchannel_logout;
 use crate::oidc::refresh::{
     self, ClientAuth, ClientAuthMethod, RefreshSessionPool, RefreshTokenKeys,
 };
@@ -86,6 +87,7 @@ pub(super) struct OAuthClient {
     pub client_secret_hash: Option<String>,
     pub refresh_allowed: bool,
     pub token_endpoint_auth_method: String,
+    pub backchannel_logout_uri: Option<String>,
     /// P5a: gateway-brokered client — its id_token carries the global principal
     /// subject, and the authorization_code grant enforces confidential broker
     /// auth (see `brokered ⇒ client_secret_basic`, a DB CHECK + the load_client
@@ -111,6 +113,7 @@ struct ConsumedCode {
     nonce: Option<String>,
     user_id: Uuid,
     auth_credential_version: i64,
+    sid: String,
 }
 
 #[derive(Debug)]
@@ -275,9 +278,9 @@ async fn authorize_inner(
     db.execute(
         "INSERT INTO zeroship.oauth_authorization_codes \
             (code_hash, client_id, redirect_uri, pkce_challenge, pkce_method, \
-             requested_scopes, granted_scopes, nonce, user_id, auth_credential_version, expires_at) \
+             requested_scopes, granted_scopes, nonce, user_id, auth_credential_version, sid, expires_at) \
          VALUES ($1, $2, $3, $4, 'S256', $5, $6, $7, $8, $9, \
-                 NOW() + ($10::text || ' seconds')::interval)",
+                 $10, NOW() + ($11::text || ' seconds')::interval)",
         &[
             &code_hash,
             &client.client_id,
@@ -288,6 +291,7 @@ async fn authorize_inner(
             &nonce,
             &session.user_id,
             &session.credential_version,
+            &session.id.to_string(),
             &AUTH_CODE_TTL_SECS.to_string(),
         ],
     )
@@ -429,7 +433,7 @@ async fn exchange_authorization_code(
                AND consumed_at IS NULL \
                AND expires_at > NOW() \
              RETURNING client_id, redirect_uri, pkce_challenge, pkce_method, \
-                       granted_scopes, nonce, user_id, auth_credential_version",
+                       granted_scopes, nonce, user_id, auth_credential_version, sid",
             &[&code_hash],
         )
         .await
@@ -452,6 +456,7 @@ async fn exchange_authorization_code(
         nonce: row.try_get("nonce").ok().flatten(),
         user_id: row.get("user_id"),
         auth_credential_version: row.get("auth_credential_version"),
+        sid: row.get("sid"),
     };
 
     if consumed.client_id != client.client_id || consumed.redirect_uri != redirect_uri {
@@ -507,6 +512,7 @@ async fn exchange_authorization_code(
             issuer.issue_principal_id_token(&PrincipalIdTokenMint {
                 principal_id: &user_id,
                 client_id: &client.client_id,
+                sid: &consumed.sid,
                 nonce,
                 access_token: &access_token,
                 auth_time: None,
@@ -525,6 +531,7 @@ async fn exchange_authorization_code(
                 user_id: &user_id,
                 sector: &client.sector_identifier,
                 client_id: &client.client_id,
+                sid: &consumed.sid,
                 nonce,
                 access_token: &access_token,
                 auth_time: None,
@@ -551,6 +558,32 @@ async fn exchange_authorization_code(
     } else {
         None
     };
+
+    if id_token.is_some() {
+        let subject = if client.brokered {
+            user_id.clone()
+        } else {
+            issuer.pairwise_subject(&user_id, &client.sector_identifier)
+        };
+        backchannel_logout::record_rp_participation(
+            db,
+            consumed.user_id,
+            &consumed.sid,
+            &client.client_id,
+            &subject,
+            client.backchannel_logout_uri.as_deref(),
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                client_id = %client.client_id,
+                sid = %consumed.sid,
+                "token: BCL RP participation record failed"
+            );
+            OAuthError::server_error("session participation store unavailable")
+        })?;
+    }
 
     let refresh_token =
         if consumed.granted_scopes.iter().any(|scope| scope == "offline_access")
@@ -610,7 +643,7 @@ pub(super) async fn load_client(
         .query(
             "SELECT oc.client_id, oc.redirect_uris, oc.scopes, \
                     oc.client_secret_hash, oc.refresh_allowed, oc.token_endpoint_auth_method, \
-                    oc.brokered, \
+                    oc.brokered, oc.backchannel_logout_uri, \
                     aoc.app_id, aoc.sector_identifier \
              FROM zeroship.oauth_clients oc \
              LEFT JOIN zeroship.app_oauth_clients aoc ON aoc.client_id = oc.client_id \
@@ -660,6 +693,7 @@ pub(super) async fn load_client(
         client_secret_hash: row.try_get("client_secret_hash").ok().flatten(),
         refresh_allowed: row.try_get("refresh_allowed").unwrap_or(false),
         token_endpoint_auth_method,
+        backchannel_logout_uri: row.try_get("backchannel_logout_uri").ok().flatten(),
         brokered,
     })
 }

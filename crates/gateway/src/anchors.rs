@@ -450,6 +450,7 @@ pub struct RotationOk {
     pub avatar_url: Option<String>,
     pub auth_time: Option<i64>,
     pub amr: Vec<String>,
+    pub sid: Option<String>,
 }
 
 /// Why a coalesced family rotation failed. `Clone` so a `Shared` future can fan it out.
@@ -679,6 +680,7 @@ mod tests {
         let fut: super::SharedRotationFuture = (Box::pin(async {
             Ok(RotationOk {
                 global_user_id: Uuid::new_v4(),
+                sid: None,
                 granted_scopes: vec!["openid".into()],
                 email_verified: Some(true),
                 name: None,
