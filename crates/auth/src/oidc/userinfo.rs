@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use compio_postgres::Client;
 use ntex::http::header::AUTHORIZATION;
+use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Serialize;
 use serde_json::json;
@@ -30,7 +31,15 @@ struct UserInfoResponse {
 
 #[derive(Debug)]
 enum UserInfoError {
+    /// No usable `Authorization: Bearer` credential was presented at all —
+    /// RFC 6750 §3.1 wants a bare `Bearer` challenge (no `error`).
+    MissingToken,
+    /// A credential was presented but failed verification, or resolved to no
+    /// live user — `Bearer error="invalid_token"`.
     InvalidToken,
+    /// The access token is valid but was not issued with the `openid` scope,
+    /// so it may not be used at the UserInfo endpoint (OIDC Core §5.3).
+    InsufficientScope,
     Server,
 }
 
@@ -45,7 +54,14 @@ async fn userinfo(
             .content_type("application/json")
             .header("cache-control", "no-store")
             .json(&body),
-        Err(UserInfoError::InvalidToken) => invalid_token_response(),
+        Err(UserInfoError::MissingToken) => challenge_response(StatusCode::UNAUTHORIZED, "Bearer"),
+        Err(UserInfoError::InvalidToken) => {
+            challenge_response(StatusCode::UNAUTHORIZED, r#"Bearer error="invalid_token""#)
+        }
+        Err(UserInfoError::InsufficientScope) => challenge_response(
+            StatusCode::FORBIDDEN,
+            r#"Bearer error="insufficient_scope", scope="openid""#,
+        ),
         Err(UserInfoError::Server) => HttpResponse::InternalServerError()
             .content_type("application/json")
             .header("cache-control", "no-store")
@@ -59,12 +75,22 @@ async fn userinfo_inner(
     db: &Client,
     issuer: &Issuer,
 ) -> Result<UserInfoResponse, UserInfoError> {
-    let claims = {
-        let token = bearer_token(req).ok_or(UserInfoError::InvalidToken)?;
-        issuer
-            .verify_access_token(token)
-            .map_err(|_| UserInfoError::InvalidToken)?
+    // Distinguish "no credential" (bare challenge) from "bad credential".
+    let token = match bearer_token(req) {
+        Some(BearerToken::Present(token)) => token,
+        Some(BearerToken::Malformed) => return Err(UserInfoError::InvalidToken),
+        None => return Err(UserInfoError::MissingToken),
     };
+    let claims = issuer
+        .verify_access_token(token)
+        .map_err(|_| UserInfoError::InvalidToken)?;
+
+    // OIDC Core §5.3: the access token MUST have been issued with the `openid`
+    // scope. Without this gate a plain resource token (e.g. one minted for an
+    // `app:<id>` audience with no `openid`) would be an identity oracle.
+    if !claims.scope.split_ascii_whitespace().any(|s| s == "openid") {
+        return Err(UserInfoError::InsufficientScope);
+    }
 
     let Some(global_user_id) = global_user_id_for_pairwise_sub(db, &claims.sub).await? else {
         return Err(UserInfoError::InvalidToken);
@@ -74,9 +100,15 @@ async fn userinfo_inner(
         tracing::error!(error = %err, "userinfo: user lookup failed");
         UserInfoError::Server
     })? else {
-        tracing::debug!(user_id = %user_id, "userinfo: token subject has no active user");
+        tracing::debug!(user_id = %user_id, "userinfo: token subject has no user row");
         return Err(UserInfoError::InvalidToken);
     };
+    // A disabled/terminated account must not keep leaking identity through a
+    // still-live access token (MED-2).
+    if user.disabled_at.is_some() {
+        tracing::debug!(user_id = %user_id, "userinfo: token subject is disabled");
+        return Err(UserInfoError::InvalidToken);
+    }
 
     Ok(UserInfoResponse {
         sub: claims.sub,
@@ -102,23 +134,42 @@ async fn global_user_id_for_pairwise_sub(
             tracing::error!(error = %err, "userinfo: pairwise reverse-map lookup failed");
             UserInfoError::Server
         })?;
-    Ok(rows.first().map(|row| row.get("global_user_id")))
+    rows.first()
+        .map(|row| {
+            row.try_get::<_, Uuid>("global_user_id").map_err(|err| {
+                tracing::error!(error = %err, "userinfo: reverse-map row decode failed");
+                UserInfoError::Server
+            })
+        })
+        .transpose()
 }
 
-fn bearer_token(req: &HttpRequest) -> Option<&str> {
+/// The result of parsing the `Authorization` header: `None` = no Bearer
+/// credential offered at all; `Malformed` = a Bearer header we can't parse.
+enum BearerToken<'a> {
+    Present(&'a str),
+    Malformed,
+}
+
+fn bearer_token(req: &HttpRequest) -> Option<BearerToken<'_>> {
     let raw = req.headers().get(AUTHORIZATION)?.to_str().ok()?.trim();
     let mut parts = raw.split_ascii_whitespace();
-    let scheme = parts.next()?;
-    let token = parts.next()?;
-    if !scheme.eq_ignore_ascii_case("Bearer") || token.is_empty() || parts.next().is_some() {
+    let Some(scheme) = parts.next() else {
+        return None;
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        // A different auth scheme is not a Bearer credential for us.
         return None;
     }
-    Some(token)
+    match (parts.next(), parts.next()) {
+        (Some(token), None) if !token.is_empty() => Some(BearerToken::Present(token)),
+        _ => Some(BearerToken::Malformed),
+    }
 }
 
-fn invalid_token_response() -> HttpResponse {
-    HttpResponse::Unauthorized()
-        .header("www-authenticate", r#"Bearer error="invalid_token""#)
+fn challenge_response(status: StatusCode, www_authenticate: &str) -> HttpResponse {
+    HttpResponse::build(status)
+        .header("www-authenticate", www_authenticate)
         .header("cache-control", "no-store")
         .finish()
 }

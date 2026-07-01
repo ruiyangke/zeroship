@@ -244,7 +244,7 @@ async fn userinfo_rejects_missing_and_bad_tokens() {
     };
 
     let missing = userinfo_get(&fx, None).await.expect("missing bearer");
-    assert_invalid_token(missing).await;
+    assert_missing_token(&missing);
 
     let garbage = userinfo_get_with_authorization(&fx, "Bearer not-a-jwt")
         .await
@@ -289,6 +289,50 @@ async fn userinfo_rejects_id_token_used_as_access_token() {
     let resp = userinfo_get(&fx, Some(&token.id_token))
         .await
         .expect("id token as bearer");
+    assert_invalid_token(resp).await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn userinfo_rejects_token_without_openid_scope() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    // A validly-signed OP access token minted for the app resource audience but
+    // WITHOUT `openid` must not be usable as an identity oracle (OIDC Core §5.3).
+    let access_token = access_token_with_scopes(&fx, &fx.issuer, &["email", "profile"], Some(600));
+
+    let resp = userinfo_get(&fx, Some(&access_token))
+        .await
+        .expect("no-openid bearer");
+    assert_insufficient_scope(&resp);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn userinfo_rejects_disabled_user() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let token = issue_token(&fx, "openid email profile").await;
+
+    // Disable the account AFTER the token was minted: a still-live access token
+    // must stop leaking identity once the user is terminated (MED-2).
+    fx.db
+        .execute(
+            "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
+            &[&fx.user_id],
+        )
+        .await
+        .expect("disable user");
+
+    let resp = userinfo_get(&fx, Some(&token.access_token))
+        .await
+        .expect("disabled-user bearer");
     assert_invalid_token(resp).await;
 
     fx.cleanup().await;
@@ -563,6 +607,29 @@ async fn assert_invalid_token(resp: cyper::Response) {
     );
 }
 
+fn www_authenticate(resp: &cyper::Response) -> Option<String> {
+    resp.headers()
+        .get("www-authenticate")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+/// RFC 6750 §3.1: a request with no credential gets a bare `Bearer` challenge
+/// (no `error`), distinct from the `invalid_token` challenge for a bad one.
+fn assert_missing_token(resp: &cyper::Response) {
+    assert_eq!(resp.status().as_u16(), 401);
+    assert_eq!(www_authenticate(resp).as_deref(), Some("Bearer"));
+}
+
+/// A valid access token that lacks the `openid` scope → 403 insufficient_scope.
+fn assert_insufficient_scope(resp: &cyper::Response) {
+    assert_eq!(resp.status().as_u16(), 403);
+    assert_eq!(
+        www_authenticate(resp).as_deref(),
+        Some(r#"Bearer error="insufficient_scope", scope="openid""#)
+    );
+}
+
 fn query_param(raw_url: &str, name: &str) -> Option<String> {
     url::Url::parse(raw_url).ok()?.query_pairs().find_map(|(key, value)| {
         if key == name {
@@ -654,9 +721,21 @@ fn wrong_issuer_access_token(fx: &Fixture) -> String {
 }
 
 fn issue_access_token_with_issuer(fx: &Fixture, issuer: &Issuer, ttl_secs: Option<i64>) -> String {
+    access_token_with_scopes(fx, issuer, &["openid"], ttl_secs)
+}
+
+/// Mint a signed OP access token with an arbitrary scope set — used to build
+/// tokens the real `/token` flow won't return (e.g. no `openid`, so no paired
+/// id_token). `issuer` both signs and supplies the pairwise sub.
+fn access_token_with_scopes(
+    fx: &Fixture,
+    issuer: &Issuer,
+    scopes: &[&str],
+    ttl_secs: Option<i64>,
+) -> String {
     let user_id = fx.user_id.to_string();
     let audience = format!("app:{}", fx.app_id);
-    let scopes = vec!["openid".to_string()];
+    let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
     issuer
         .issue_access_token(&AccessTokenMint {
             user_id: &user_id,
