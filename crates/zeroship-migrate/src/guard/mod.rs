@@ -21,6 +21,8 @@
 
 pub mod denylist;
 
+use std::collections::BTreeSet;
+
 use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::{self, ObjectType};
 
@@ -29,11 +31,22 @@ use pg_query::protobuf::AlterTableType;
 use crate::analysis::analyze::Advisory;
 use crate::analysis::classify::{classify, DdlKind, ParseError, StatementClass};
 use crate::model::capability::{OperatorCapability, VendorCapabilities};
+use crate::model::ir::{MigrationIr, Op};
 use crate::model::migration::MigrationFlags;
 use crate::model::policy::{SchemaScope, TrustProfile};
+use crate::model::profile::DestructiveOps;
 use zeroship_schema::query::SqlDialect;
 use denylist::rule;
 use serde_json::Value;
+
+/// Stable data-security policy rule ids. These are policy decisions layered on
+/// the guard, not deny-list parser rules.
+pub mod data_security_rule {
+    /// `data_security.destructive_ops = "forbid"` denied a destructive operation.
+    pub const DESTRUCTIVE_OPS_FORBID: &str = "DATA_SECURITY_DESTRUCTIVE_OPS_FORBID";
+    /// `data_security.require_rls = true` denied a create-table without RLS enable.
+    pub const REQUIRE_RLS: &str = "DATA_SECURITY_REQUIRE_RLS";
+}
 
 /// The in-crate enforcement primitive for the OPERATOR-gated profiles —
 /// `Platform` (the zeroship internal posture) AND `Trusted` (the public
@@ -78,6 +91,11 @@ pub struct GuardConfig {
     /// the only way to obtain a non-empty allowlist is `platform()` or the
     /// Confined builder [`GuardConfig::with_extension_allowlist`].
     extension_allowlist: Vec<String>,
+    /// PRIVATE. Data-security obligation: new tables must have a matching
+    /// `ENABLE ROW LEVEL SECURITY` in the same IR migration.
+    require_rls: bool,
+    /// PRIVATE. Destructive DDL/DML posture for structured destructive op classes.
+    destructive_ops: DestructiveOps,
     /// PRIVATE (PHASE 4). The target SQL dialect this guard config is for.
     ///
     /// - `Postgres` (the default) — the libpg_query line-1 guard runs
@@ -106,6 +124,8 @@ impl GuardConfig {
             skip_denylist_belt: false,
             schemas: SchemaScope::Single(project_schema.into()),
             extension_allowlist: Vec::new(),
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
             // Default to the PG line-1 guard — byte-identical to before PHASE 4.
             dialect: SqlDialect::Postgres,
         }
@@ -127,6 +147,8 @@ impl GuardConfig {
             skip_denylist_belt: false,
             schemas: SchemaScope::Single(project_schema.into()),
             extension_allowlist: Vec::new(),
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
             dialect: SqlDialect::Sqlite,
         }
     }
@@ -143,6 +165,8 @@ impl GuardConfig {
             skip_denylist_belt: false,
             schemas: SchemaScope::Single(project_schema.into()),
             extension_allowlist: Vec::new(),
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
             dialect: SqlDialect::Mysql,
         }
     }
@@ -198,6 +222,26 @@ impl GuardConfig {
         self
     }
 
+    /// Tighten the guard with data-security policy knobs from a sealed profile.
+    ///
+    /// This builder is safe to expose because it can only add validation/denial
+    /// obligations to whatever trust posture the caller can already construct.
+    #[must_use]
+    pub fn with_data_security(
+        mut self,
+        require_rls: bool,
+        destructive_ops: DestructiveOps,
+    ) -> Self {
+        self.require_rls = require_rls;
+        self.destructive_ops = match destructive_ops {
+            // Approval is server-only. If a direct caller hands it to the guard,
+            // fail closed by enforcing the stricter projection.
+            DestructiveOps::RequireApproval => DestructiveOps::Forbid,
+            other => other,
+        };
+        self
+    }
+
     /// Platform profile. REQUIRES a [`OperatorCapability`] token, minted by
     /// operator-side named seams. The `_cap` arg is the in-crate enforcement;
     /// `#[non_exhaustive]` on [`TrustProfile`] is the external enforcement. This
@@ -216,6 +260,8 @@ impl GuardConfig {
             skip_denylist_belt: false,
             schemas: SchemaScope::Allowlist(schemas),
             extension_allowlist,
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
             // Platform is a PG-only posture (it fail-closes to Confined on SQLite
             // via `for_dialect`); the config itself is always PG.
             dialect: SqlDialect::Postgres,
@@ -246,6 +292,8 @@ impl GuardConfig {
             // read a stale allowlist.
             schemas: SchemaScope::Allowlist(Vec::new()),
             extension_allowlist: Vec::new(),
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
             dialect: SqlDialect::Postgres,
         }
     }
@@ -294,6 +342,18 @@ impl GuardConfig {
             // verbatim in `self.schemas`.
             TrustProfile::Confined | TrustProfile::Platform => Some(self.schemas.clone()),
         }
+    }
+
+    /// Data-security RLS requirement carried into the guard.
+    #[must_use]
+    pub const fn require_rls(&self) -> bool {
+        self.require_rls
+    }
+
+    /// Data-security destructive-op posture carried into the guard.
+    #[must_use]
+    pub const fn destructive_ops(&self) -> DestructiveOps {
+        self.destructive_ops
     }
 }
 
@@ -390,6 +450,14 @@ pub enum GuardError {
         /// The offending statement text.
         statement: String,
     },
+    /// A data-security profile knob denied the migration.
+    #[error("data_security policy '{rule}' denied: {statement}")]
+    DataSecurityPolicy {
+        /// The stable data-security rule id.
+        rule: &'static str,
+        /// The offending statement or IR op.
+        statement: String,
+    },
     /// The SQL could not be parsed (deny-by-default: it never reaches the DB).
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
@@ -480,32 +548,22 @@ impl SqlGuard {
 
         let classes = classify(sql)?;
 
-        // TRUSTED early-return — the public dbmate-like posture (Track A). The
-        // operator owns the database, so there is NO untrusted boundary: skip the
-        // deny-list, cross-schema confinement, and body walks ENTIRELY and apply
-        // arbitrary SQL. We still derive the report from `classify` (above) +
-        // `analyze` (below) so `flags_for` keeps gating destructive ops via the
-        // CLI's `--yes`. This branch is UNREACHABLE unless `trust == Trusted`,
-        // which is constructible ONLY via the operator-gated `GuardConfig::trusted`
-        // — so the Confined and Platform code paths below are byte-identical to
-        // before this profile existed.
-        if self.cfg.skips_denylist_belt() {
-            let advisories = crate::analysis::analyze::analyze(sql);
-            let destructive = classes.iter().any(|c| c.destructive);
-            return Ok(GuardReport {
-                classes,
-                destructive,
-                advisories,
-            });
-        }
-
-        // Walk the full parse tree once per statement for danger + bodies.
+        // Walk the full parse tree once per statement. The data-security policy
+        // check runs even under Trusted; the deny-list/cross-schema/body walk below
+        // is what Trusted skips.
         let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
+        let mut data_security_advisories = Vec::new();
         for raw_stmt in &parsed.protobuf.stmts {
             let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
                 continue;
             };
             let raw = stmt_text(sql, raw_stmt);
+            self.check_sql_data_security_policy(node, &raw, &mut data_security_advisories)?;
+
+            if self.cfg.skips_denylist_belt() {
+                continue;
+            }
+
             // Serialize the ONE statement subtree to JSON for the generic
             // full-tree walks (dangerous funcs + every schema reference). This
             // sidesteps `node.nodes()`, whose hand-written traversal skips
@@ -514,11 +572,30 @@ impl SqlGuard {
             self.check_node(node, &json, &raw)?;
         }
 
+        // TRUSTED early-return — the public dbmate-like posture (Track A). The
+        // operator owns the database, so there is NO untrusted boundary: skip the
+        // deny-list, cross-schema confinement, and body walks ENTIRELY and apply
+        // arbitrary SQL. We still derive the report from `classify` (above) +
+        // `analyze` (below) so `flags_for` keeps gating destructive ops via the
+        // CLI's `--yes`. Data-security policy above remains load-bearing when a
+        // direct caller explicitly tightens a Trusted config with those knobs.
+        if self.cfg.skips_denylist_belt() {
+            let mut advisories = crate::analysis::analyze::analyze(sql);
+            advisories.extend(data_security_advisories);
+            let destructive = classes.iter().any(|c| c.destructive);
+            return Ok(GuardReport {
+                classes,
+                destructive,
+                advisories,
+            });
+        }
+
         // Collect operational advisories (lock-heavy / destructive / rename /
         // missing-FK-index shapes). These are ADVISORY ONLY — see
         // `crate::analysis::analyze`; they never deny or gate. We reuse the single parse
         // already done above by re-running the analyzer engine over the SQL.
-        let advisories = crate::analysis::analyze::analyze(sql);
+        let mut advisories = crate::analysis::analyze::analyze(sql);
+        advisories.extend(data_security_advisories);
 
         let destructive = classes.iter().any(|c| c.destructive);
         Ok(GuardReport {
@@ -623,6 +700,31 @@ impl SqlGuard {
         self.check_bodies(node, raw)?;
 
         Ok(())
+    }
+
+    fn check_sql_data_security_policy(
+        &self,
+        node: &NodeEnum,
+        raw: &str,
+        advisories: &mut Vec<Advisory>,
+    ) -> Result<(), GuardError> {
+        let Some(operation) = destructive_sql_operation(node) else {
+            return Ok(());
+        };
+
+        match self.cfg.destructive_ops {
+            DestructiveOps::Forbid | DestructiveOps::RequireApproval => {
+                Err(GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    statement: format!("{operation}: {raw}"),
+                })
+            }
+            DestructiveOps::Warn => {
+                advisories.push(Advisory::destructive_ops_warn(operation, raw));
+                Ok(())
+            }
+            DestructiveOps::Allow => Ok(()),
+        }
     }
 
     /// Raw-island variant of [`Self::check_node`]. It preserves the deny-list and
@@ -1318,6 +1420,8 @@ pub(crate) fn check_raw_view_body_text(
         skip_denylist_belt: false,
         schemas,
         extension_allowlist: Vec::new(),
+        require_rls: false,
+        destructive_ops: DestructiveOps::Allow,
         dialect: SqlDialect::Postgres,
     });
     guard.check_body_text(body, raw)
@@ -1633,9 +1737,99 @@ pub fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
     }
 }
 
+/// A data-security policy failure attributed to an IR op index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IrDataSecurityError {
+    /// The op that violated the data-security policy.
+    pub op_index: usize,
+    /// The guard policy error.
+    pub source: GuardError,
+}
+
+/// Enforce data-security knobs that require the structured IR op set.
+///
+/// `require_rls` is a cross-op obligation: each `createTable` in the migration
+/// must have a matching `enableRls` for the same effective table.
+pub(crate) fn check_ir_data_security_policy(
+    cfg: &GuardConfig,
+    ir: &MigrationIr,
+) -> Result<(), IrDataSecurityError> {
+    if !cfg.require_rls {
+        return Ok(());
+    }
+
+    let enabled: BTreeSet<_> = ir
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::EnableRls { table, schema } => Some(table_key_for_policy(cfg, schema, table)),
+            _ => None,
+        })
+        .collect();
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        if let Op::CreateTable { name, schema, .. } = op {
+            let key = table_key_for_policy(cfg, schema, name);
+            if !enabled.contains(&key) {
+                return Err(IrDataSecurityError {
+                    op_index,
+                    source: GuardError::DataSecurityPolicy {
+                        rule: data_security_rule::REQUIRE_RLS,
+                        statement: format!(
+                            "createTable {name:?} must be accompanied by enableRls for the same table in this migration"
+                        ),
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn table_key_for_policy(
+    cfg: &GuardConfig,
+    schema: &Option<String>,
+    table: &str,
+) -> (String, String) {
+    let effective_schema = schema.clone().unwrap_or_else(|| match &cfg.schemas {
+        SchemaScope::Single(project_schema) => project_schema.clone(),
+        SchemaScope::Allowlist(list) if list.len() == 1 => list[0].clone(),
+        _ => String::new(),
+    });
+    (effective_schema, table.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Deny-by-default allowlist predicates (Root Cause 1)
 // ---------------------------------------------------------------------------
+
+fn destructive_sql_operation(node: &NodeEnum) -> Option<&'static str> {
+    match node {
+        NodeEnum::TruncateStmt(_) => Some("TRUNCATE"),
+        NodeEnum::DropOwnedStmt(_) => Some("DROP OWNED"),
+        NodeEnum::DropStmt(drop) => {
+            if drop.remove_type == ObjectType::ObjectTable as i32 {
+                Some("DROP TABLE")
+            } else if drop.remove_type == ObjectType::ObjectColumn as i32 {
+                Some("DROP COLUMN")
+            } else if drop.remove_type == ObjectType::ObjectSchema as i32 {
+                Some("DROP SCHEMA")
+            } else {
+                None
+            }
+        }
+        NodeEnum::AlterTableStmt(at) => at.cmds.iter().find_map(|cmd| {
+            matches!(
+                cmd.node.as_ref(),
+                Some(NodeEnum::AlterTableCmd(c))
+                    if c.subtype == AlterTableType::AtDropColumn as i32
+            )
+            .then_some("DROP COLUMN")
+        }),
+        _ => None,
+    }
+}
 
 /// The `ObjectType`s a creator migration may `DROP`. Anything else (role,
 /// schema, extension, FDW, subscription, publication, …) is denied-by-default.
@@ -2813,6 +3007,124 @@ mod tests {
         }
     }
 
+    fn ir_with(ops: Vec<Op>) -> MigrationIr {
+        MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: "data_security_probe".into(),
+            owner_app: "app_corpus".into(),
+            ops,
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        }
+    }
+
+    fn create_table(name: &str) -> Op {
+        Op::CreateTable {
+            name: name.to_string(),
+            columns: Vec::new(),
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
+        let confined = SqlGuard::new(
+            GuardConfig::confined("public")
+                .with_data_security(false, DestructiveOps::Forbid),
+        );
+        for sql in [
+            "DROP TABLE users",
+            "ALTER TABLE users DROP COLUMN email",
+            "TRUNCATE users",
+        ] {
+            assert!(
+                matches!(
+                    confined.check(sql),
+                    Err(GuardError::DataSecurityPolicy {
+                        rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                        ..
+                    })
+                ),
+                "expected destructive_ops=forbid to deny {sql}"
+            );
+        }
+
+        let platform = SqlGuard::new(
+            platform_guard_config().with_data_security(false, DestructiveOps::Forbid),
+        );
+        assert!(matches!(
+            platform.check("DROP SCHEMA public"),
+            Err(GuardError::DataSecurityPolicy {
+                rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn destructive_ops_warn_allows_and_records_structured_warning() {
+        let guard = SqlGuard::new(
+            GuardConfig::confined("public").with_data_security(false, DestructiveOps::Warn),
+        );
+
+        let report = guard.check("DROP TABLE users").expect("warn permits the drop");
+
+        assert!(report.advisories.iter().any(|a| {
+            a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+        }));
+    }
+
+    #[test]
+    fn destructive_ops_allow_is_silent_for_policy_warning() {
+        let guard = SqlGuard::new(
+            GuardConfig::confined("public").with_data_security(false, DestructiveOps::Allow),
+        );
+
+        let report = guard.check("DROP TABLE users").expect("allow permits the drop");
+
+        assert!(!report.advisories.iter().any(|a| {
+            a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+        }));
+    }
+
+    #[test]
+    fn require_rls_rejects_create_table_without_same_migration_enable() {
+        let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
+        let ir = ir_with(vec![create_table("users")]);
+
+        let err = check_ir_data_security_policy(&cfg, &ir).unwrap_err();
+
+        assert_eq!(err.op_index, 0);
+        assert!(matches!(
+            err.source,
+            GuardError::DataSecurityPolicy {
+                rule: data_security_rule::REQUIRE_RLS,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn require_rls_accepts_create_table_with_same_migration_enable() {
+        let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
+        let ir = ir_with(vec![
+            create_table("users"),
+            Op::EnableRls {
+                table: "users".to_string(),
+                schema: None,
+            },
+        ]);
+
+        check_ir_data_security_policy(&cfg, &ir).expect("matching enableRls satisfies require_rls");
+    }
+
     fn platform_author(guard_cfg: &GuardConfig) -> crate::render::lower::IrAuthor {
         let scope = guard_cfg
             .schema_scope()
@@ -2824,7 +3136,11 @@ mod tests {
     fn is_denied(g: &SqlGuard, sql: &str) -> bool {
         matches!(
             g.check(sql),
-            Err(GuardError::Denied { .. } | GuardError::CrossSchema { .. })
+            Err(
+                GuardError::Denied { .. }
+                    | GuardError::CrossSchema { .. }
+                    | GuardError::DataSecurityPolicy { .. }
+            )
         )
     }
 
@@ -2841,6 +3157,7 @@ mod tests {
         match g.check(sql) {
             Ok(_) => GuardDecision::Allow,
             Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
+            Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
             Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
             Err(GuardError::Parse(_)) => GuardDecision::Parse,
             Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {
@@ -2855,6 +3172,7 @@ mod tests {
         match guard.check_raw_island_body_backstop(body, raw) {
             Ok(()) => GuardDecision::Allow,
             Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
+            Err(GuardError::DataSecurityPolicy { rule, .. }) => GuardDecision::Denied(rule),
             Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
             Err(GuardError::Parse(_)) => GuardDecision::Parse,
             Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {

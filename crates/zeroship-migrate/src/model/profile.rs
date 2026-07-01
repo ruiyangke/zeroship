@@ -81,10 +81,10 @@ statement_timeout_ms = 60000
 table_rewrite = "allow"
 
 [data_security]
-require_rls = false
+require_rls = true
 no_hard_delete = false
 sensitive_columns = []
-destructive_ops = "allow"
+destructive_ops = "forbid"
 "#;
 
 /// A strict declarative migration policy profile.
@@ -470,8 +470,9 @@ pub enum TableRewrite {
     Allow,
 }
 
-/// Data-security obligations. Stage 1 records these; enforcement is later or
-/// server-side where the engine cannot structurally prove the claim.
+/// Data-security obligations. `require_rls` and `destructive_ops` are enforced
+/// by the guard; the remaining knobs stay server-side until the engine has a
+/// structural enforcement point for them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataSecurityConfig {
@@ -500,19 +501,70 @@ impl Default for DataSecurityConfig {
     }
 }
 
+impl DataSecurityConfig {
+    /// Polarity-correct ceiling⊓draft meet for data-security knobs.
+    ///
+    /// Obligation knobs OR/union upward. Permission knobs tighten toward the
+    /// stricter enum value; a draft that tries to loosen the ceiling is rejected
+    /// instead of silently clamped.
+    pub fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
+        if draft.destructive_ops.is_looser_than(ceiling.destructive_ops) {
+            return Err(SealError::PolicyExceedsCeiling {
+                knob: "data_security.destructive_ops",
+            });
+        }
+
+        let mut sensitive_columns = ceiling.sensitive_columns.clone();
+        for column in &draft.sensitive_columns {
+            if !sensitive_columns.contains(column) {
+                sensitive_columns.push(column.clone());
+            }
+        }
+
+        Ok(Self {
+            require_rls: ceiling.require_rls || draft.require_rls,
+            no_hard_delete: ceiling.no_hard_delete || draft.no_hard_delete,
+            sensitive_columns,
+            destructive_ops: ceiling.destructive_ops.tightest(draft.destructive_ops),
+        })
+    }
+}
+
 /// Destructive operation posture. Ordered from more restrictive to less
-/// restrictive. `RequireApproval` is recorded for server composition; the engine
-/// receives only forbid/allow after the server projects it.
+/// restrictive. `RequireApproval` is retained as a server composition value, but
+/// sealed engine configs accept only the enforceable `forbid`/`warn`/`allow`
+/// states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestructiveOps {
     /// Forbid destructive operations.
     Forbid,
+    /// Allow destructive operations and surface a structured warning.
+    Warn,
     /// Require server approval before projecting to forbid/allow.
     RequireApproval,
     /// Allow today's approval-gated behavior.
     #[default]
     Allow,
+}
+
+impl DestructiveOps {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Forbid => 0,
+            Self::Warn => 1,
+            Self::RequireApproval => 2,
+            Self::Allow => 3,
+        }
+    }
+
+    const fn tightest(self, other: Self) -> Self {
+        if self.rank() <= other.rank() { self } else { other }
+    }
+
+    const fn is_looser_than(self, ceiling: Self) -> bool {
+        self.rank() > ceiling.rank()
+    }
 }
 
 /// Polarity category for profile knobs.
@@ -624,6 +676,10 @@ impl SealedEffectiveProfile {
             SealedPosture::Confined => {
                 GuardConfig::confined(self.project_schema.clone())
                     .with_extension_allowlist(self.capabilities.extensions.clone())
+                    .with_data_security(
+                        self.data_security.require_rls,
+                        self.data_security.destructive_ops,
+                    )
             }
             SealedPosture::Platform => {
                 let cap = SealApplier::new();
@@ -631,6 +687,10 @@ impl SealedEffectiveProfile {
                     &cap,
                     self.capabilities.schemas.clone(),
                     self.capabilities.extensions.clone(),
+                )
+                .with_data_security(
+                    self.data_security.require_rls,
+                    self.data_security.destructive_ops,
                 )
             }
         }
@@ -671,11 +731,6 @@ impl PolicyCapabilities {
 
 impl DataSecurityConfig {
     fn validate_for_seal(&self) -> Result<(), SealError> {
-        if self.require_rls {
-            return Err(SealError::UnsupportedProfileKnob {
-                knob: "data_security.require_rls",
-            });
-        }
         if self.no_hard_delete {
             return Err(SealError::UnsupportedProfileKnob {
                 knob: "data_security.no_hard_delete",
@@ -686,7 +741,7 @@ impl DataSecurityConfig {
                 knob: "data_security.sensitive_columns",
             });
         }
-        if self.destructive_ops != DestructiveOps::Allow {
+        if self.destructive_ops == DestructiveOps::RequireApproval {
             return Err(SealError::UnsupportedProfileKnob {
                 knob: "data_security.destructive_ops",
             });
@@ -1099,8 +1154,14 @@ pub enum SealError {
     /// Canonical seal payload serialization failed.
     #[error("serialize sealed migration policy payload: {0}")]
     Serialize(#[source] serde_json::Error),
+    /// A draft tried to loosen a permission knob beyond the operator ceiling.
+    #[error("migration policy exceeds tier ceiling: {knob}")]
+    PolicyExceedsCeiling {
+        /// Dot-path knob that exceeded the ceiling.
+        knob: &'static str,
+    },
     /// A profile knob would claim a policy the stage-1 engine cannot enforce.
-    #[error("migration policy profile knob `{knob}` is not yet supported (M4); refusing to seal unenforced authority")]
+    #[error("migration policy profile knob `{knob}` is not yet supported by this engine; refusing to seal unenforced authority")]
     UnsupportedProfileKnob {
         /// Dot-path knob or knob family.
         knob: &'static str,
@@ -1272,6 +1333,47 @@ mod tests {
         assert_eq!(min_non_zero_timeout_ms(0, 1_000), Some(1_000));
         assert_eq!(min_non_zero_timeout_ms(3_000, 0), Some(3_000));
         assert_eq!(min_non_zero_timeout_ms(0, 0), None);
+    }
+
+    #[test]
+    fn data_security_meet_preserves_obligations_and_rejects_permission_loosen() {
+        let ceiling = DataSecurityConfig {
+            require_rls: true,
+            destructive_ops: DestructiveOps::Forbid,
+            ..DataSecurityConfig::default()
+        };
+        let loosening_draft = DataSecurityConfig {
+            require_rls: false,
+            destructive_ops: DestructiveOps::Allow,
+            ..DataSecurityConfig::default()
+        };
+
+        assert!(matches!(
+            DataSecurityConfig::meet_ceiling_draft(&ceiling, &loosening_draft),
+            Err(SealError::PolicyExceedsCeiling {
+                knob: "data_security.destructive_ops"
+            })
+        ));
+
+        let tight_draft = DataSecurityConfig {
+            require_rls: false,
+            destructive_ops: DestructiveOps::Forbid,
+            ..DataSecurityConfig::default()
+        };
+        let effective = DataSecurityConfig::meet_ceiling_draft(&ceiling, &tight_draft).unwrap();
+        assert!(effective.require_rls, "ceiling require_rls must survive draft=false");
+        assert_eq!(effective.destructive_ops, DestructiveOps::Forbid);
+
+        let ceiling = DataSecurityConfig {
+            destructive_ops: DestructiveOps::Allow,
+            ..DataSecurityConfig::default()
+        };
+        let draft = DataSecurityConfig {
+            destructive_ops: DestructiveOps::Warn,
+            ..DataSecurityConfig::default()
+        };
+        let effective = DataSecurityConfig::meet_ceiling_draft(&ceiling, &draft).unwrap();
+        assert_eq!(effective.destructive_ops, DestructiveOps::Warn);
     }
 
     #[test]
@@ -1522,24 +1624,61 @@ mod tests {
     }
 
     #[test]
-    fn sealed_profile_rejects_data_security_claims_not_yet_enforced() {
+    fn sealed_profile_accepts_data_security_claims_and_lowers_to_enforcing_guard() {
         let cap = SealApplier::new();
         let mut profile = PolicyProfile::confined();
+        profile.data_security.require_rls = true;
         profile.data_security.destructive_ops = DestructiveOps::Forbid;
 
+        let sealed = SealedProfile::mint(
+            &cap,
+            profile,
+            "app",
+            KEY,
+            b"nonce-data-security".to_vec(),
+            ISSUED_AT,
+            7,
+        )
+        .expect("require_rls/destructive_ops are now enforceable and sealable");
+        let guard_cfg = sealed.to_guard_config();
+        assert!(guard_cfg.require_rls());
+        assert_eq!(guard_cfg.destructive_ops(), DestructiveOps::Forbid);
+
+        let guard = crate::guard::SqlGuard::new(guard_cfg.clone());
         assert!(matches!(
-            SealedProfile::mint(
-                &cap,
-                profile,
-                "app",
-                KEY,
-                b"nonce-1".to_vec(),
-                ISSUED_AT,
-                7,
-            ),
-            Err(SealError::UnsupportedProfileKnob {
-                knob: "data_security.destructive_ops"
+            guard.check("DROP TABLE users"),
+            Err(crate::guard::GuardError::DataSecurityPolicy {
+                rule: crate::guard::data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                ..
             })
+        ));
+
+        let ir = crate::model::ir::MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: "missing_rls".to_string(),
+            owner_app: "app".to_string(),
+            ops: vec![crate::model::ir::Op::CreateTable {
+                name: "users".to_string(),
+                columns: Vec::new(),
+                constraints: Vec::new(),
+                indexes: Vec::new(),
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        let err = crate::guard::check_ir_data_security_policy(&guard_cfg, &ir).unwrap_err();
+        assert!(matches!(
+            err.source,
+            crate::guard::GuardError::DataSecurityPolicy {
+                rule: crate::guard::data_security_rule::REQUIRE_RLS,
+                ..
+            }
         ));
     }
 
