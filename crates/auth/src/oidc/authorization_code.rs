@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
+use crate::oidc::claims::scope_gated_identity_claims;
 use crate::oidc::refresh::{self, ClientAuth, RefreshSessionPool, RefreshTokenKeys};
 use crate::oidc::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
 use crate::return_to;
@@ -463,28 +464,32 @@ async fn exchange_authorization_code(
             .nonce
             .as_deref()
             .ok_or_else(|| OAuthError::invalid_grant("openid code is missing nonce"))?;
-        let want_email = consumed.granted_scopes.iter().any(|scope| scope == "email");
-        let want_profile = consumed.granted_scopes.iter().any(|scope| scope == "profile");
+        let wants_identity_claims = consumed
+            .granted_scopes
+            .iter()
+            .any(|scope| scope == "email" || scope == "profile");
         // Only pay the user SELECT when a granted scope actually carries identity
         // claims. A bare-`openid` (authentication-only) exchange derives `sub`
         // from the already-in-hand `user_id`, so it needs no row.
-        let user = if want_email || want_profile {
-            Some(
-                users::find_by_id(db, &user_id)
-                    .await
-                    .map_err(|err| {
-                        tracing::error!(
-                            error = %err,
-                            user_id = %user_id,
-                            "token: id-token user lookup failed"
-                        );
-                        OAuthError::server_error("id token user lookup failed")
-                    })?
-                    .ok_or_else(|| {
-                        tracing::error!(user_id = %user_id, "token: consumed code user is missing");
-                        OAuthError::server_error("id token user missing")
-                    })?,
-            )
+        let identity_claims = if wants_identity_claims {
+            let user = users::find_by_id(db, &user_id)
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        error = %err,
+                        user_id = %user_id,
+                        "token: id-token user lookup failed"
+                    );
+                    OAuthError::server_error("id token user lookup failed")
+                })?
+                .ok_or_else(|| {
+                    tracing::error!(user_id = %user_id, "token: consumed code user is missing");
+                    OAuthError::server_error("id token user missing")
+                })?;
+            Some(scope_gated_identity_claims(
+                &user,
+                consumed.granted_scopes.iter().map(String::as_str),
+            ))
         } else {
             None
         };
@@ -499,26 +504,12 @@ async fn exchange_authorization_code(
                     auth_time: None,
                     amr: None,
                     acr: None,
-                    email: if want_email {
-                        user.as_ref().map(|u| u.email.as_str())
-                    } else {
-                        None
-                    },
-                    email_verified: if want_email {
-                        user.as_ref().map(|u| u.email_verified_at.is_some())
-                    } else {
-                        None
-                    },
-                    name: if want_profile {
-                        user.as_ref().map(|u| u.name.as_str())
-                    } else {
-                        None
-                    },
-                    picture: if want_profile {
-                        user.as_ref().and_then(|u| u.avatar_url.as_deref())
-                    } else {
-                        None
-                    },
+                    email: identity_claims.as_ref().and_then(|claims| claims.email.as_deref()),
+                    email_verified: identity_claims
+                        .as_ref()
+                        .and_then(|claims| claims.email_verified),
+                    name: identity_claims.as_ref().and_then(|claims| claims.name.as_deref()),
+                    picture: identity_claims.as_ref().and_then(|claims| claims.picture.as_deref()),
                     ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
                 })
                 .map_err(|err| {
