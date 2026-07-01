@@ -213,6 +213,10 @@ fn id_token_has_nonce_and_correct_at_hash() {
             auth_time: Some(1_700_000_000),
             amr: Some(&amr),
             acr: Some("urn:zeroship:aal2"),
+            email: None,
+            email_verified: None,
+            name: None,
+            picture: None,
             ttl_secs: Some(600),
         })
         .expect("issue id token");
