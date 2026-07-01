@@ -1,10 +1,10 @@
 //! Signed, short-lived "pending 2FA" stash for the login challenge (ISS-11).
 //!
 //! When a password login succeeds for a user with a CONFIRMED TOTP credential,
-//! we must NOT `accept_login` to hydra yet — a second factor is required. But
-//! HTTP is stateless across the two POSTs (password form, then code form), so
-//! the "password was already verified for THIS user against THIS native
-//! return target" fact has to ride with the browser. We carry it in a short-lived
+//! we must NOT complete the login yet — a second factor is required. But HTTP
+//! is stateless across the two POSTs (password form, then code form), so the
+//! "password was already verified for THIS user against THIS native return
+//! target" fact has to ride with the browser. We carry it in a short-lived
 //! HMAC-signed cookie, exactly like the OAuth federation stash
 //! (`ui::oauth_stash`): the cookie is non-forgeable (MAC'd against the auth
 //! `stash_signing_key`) and self-expiring, so it is NOT a bearer session — it
@@ -40,9 +40,6 @@ pub struct TotpChallenge {
     /// (password reset / forced logout) invalidates this challenge.
     pub credential_version: i64,
     /// Validated same-origin path to redirect to once factor 2 passes.
-    ///
-    /// P5: the retained Hydra login arm temporarily stores its
-    /// `login_challenge` here until that branch is deleted.
     pub return_to: String,
     pub iat: i64,
     pub exp: i64,

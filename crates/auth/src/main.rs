@@ -1,6 +1,4 @@
-//! zeroship-auth — the `OIDC` `IdP` login UI + identity flows + hydra admin client.
-//!
-//! Companion process: `oryd/hydra` (OIDC kernel). See docs/archive/auth-server.md.
+//! zeroship-auth — the `OIDC` `IdP` login UI + identity flows.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -15,16 +13,13 @@ use zeroship_core::config::{
 };
 use zeroship_core::oidc_verify::JwksCache;
 
-use zeroship_auth::bootstrap;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 use zeroship_mailer::{
     Mailer, RelayForwardMailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
 };
-use zeroship_auth::startup_validation::validate_hydra_admin_url;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = AuthConfig::parse();
@@ -92,11 +87,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     }
-    if let Err(message) = validate_hydra_admin_url(&cfg) {
-        tracing::error!("{message}");
-        std::process::exit(1);
-    }
-
     // --check-config is a read-only DRY-RUN: resolve + report the config and
     // exit BEFORE any runtime-only validation (mailer/SMTP construction), exactly
     // like control / gateway / worker. Building the mailers enforces the
@@ -110,14 +100,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         report.field(
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
-        );
-        report.field(
-            "hydra_admin_url",
-            CheckValue::Plain(cfg.hydra_admin_url().to_string()),
-        );
-        report.field(
-            "hydra_public_url",
-            CheckValue::Plain(cfg.hydra_public_url().to_string()),
         );
         report.field(
             "auth_provider",
@@ -152,11 +134,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         );
         report.field("insecure_dev", CheckValue::Flag(cfg.insecure_dev));
-        report.field(
-            "allow_remote_hydra_admin",
-            CheckValue::Flag(cfg.allow_remote_hydra_admin),
-        );
-        report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
         report.field("op_issuer_url", CheckValue::Plain(cfg.op_issuer_url()));
         report.field(
@@ -191,7 +168,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "frame_ancestor_origins",
             CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
         );
-        report.field("clients_config", CheckValue::Plain(cfg.clients_config.clone()));
         report.field("db_configured", CheckValue::Secret(!cfg.db_url.is_empty()));
         report.field("mailer", CheckValue::Plain(cfg.mailer.clone()));
         report.field(
@@ -212,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Real boot only (past the --check-config dry-run early-return above). Mailer
-    // config validation is cheap and should fail before any DB/Hydra work, with a
+    // config validation is cheap and should fail before any DB work, with a
     // named env var, so a misconfigured SMTP block (transactional or relay-forward)
     // fails fast. The constructed drivers are threaded into `server::run` below.
     let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
@@ -296,12 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let op_issuer = Arc::new(op_issuer);
 
-    // 2. Bootstrap: keys + client reconciliation.
-    let admin = HydraAdmin::new(cfg.hydra_admin_url());
-    bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
-    tracing::info!("bootstrap complete");
-
-    // 3. Build the Google JWKS cache. Only constructed when Google OAuth
+    // 2. Build the Google JWKS cache. Only constructed when Google OAuth
     //    is wired up — the cache eagerly does nothing (lazy refresh on
     //    first verify), so we don't burn a startup roundtrip on Google.
     let google_jwks = if cfg.google_client_id.is_some() {
@@ -319,7 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "refresh dedicated session pool configured"
     );
 
-    // 4. Spawn in-process cron tasks. Detached on
+    // 3. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
     //    the listener is bound. `Arc<Client>` is shared for autocommit
@@ -327,10 +298,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    sessions for their advisory-locked transactions.
     let cfg = Arc::new(cfg);
     let db = Arc::new(client);
-    cron::spawn_all(admin.clone(), db.clone(), cfg.clone(), refresh_pool.clone());
+    cron::spawn_all(db.clone(), cfg.clone(), refresh_pool.clone());
     tracing::info!("cron tasks spawned");
 
-    // 5. Serve. `Arc`s keep the PG client + config alive across the
+    // 4. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
     //    OP refresh-token rotations/revokes/root issuance do not run
@@ -338,7 +309,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    out bounded dedicated compio-postgres sessions from refresh_pool.
     server::run(
         cfg,
-        admin,
         db,
         google_jwks,
         mailer,

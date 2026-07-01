@@ -30,8 +30,7 @@ impl LoginIneligible {
 /// Verify a local user is allowed to receive login authority.
 ///
 /// `Ok(())` means the user exists, is not disabled, and is not currently
-/// locked. Call this immediately before session minting and before Hydra
-/// skip-login acceptance.
+/// locked. Call this immediately before minting or extending login authority.
 pub async fn check_user_eligible(
     conn: &Client,
     user_id: uuid::Uuid,
