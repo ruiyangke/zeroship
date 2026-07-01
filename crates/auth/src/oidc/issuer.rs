@@ -1,11 +1,14 @@
 //! Platform JWT issuer for RFC 9068 access tokens and OIDC ID tokens.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::Client;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{
+    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
@@ -358,6 +361,52 @@ impl Issuer {
         header.kid = Some(self.kid.clone());
         let key = EncodingKey::from_ed_der(&self.private_der);
         encode(&header, &claims, &key).map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))
+    }
+
+    /// Verify this OP's own RFC 9068 JWT access token.
+    pub fn verify_access_token(&self, token: &str) -> Result<AccessTokenClaims> {
+        let header = decode_header(token)
+            .map_err(|e| AuthError::Internal(format!("access-token header decode: {e}")))?;
+        if header.typ.as_deref() != Some(ACCESS_TOKEN_TYP) {
+            return Err(AuthError::Internal("access-token typ mismatch".into()));
+        }
+        if header.alg != Algorithm::EdDSA {
+            return Err(AuthError::Internal("access-token alg mismatch".into()));
+        }
+
+        let x = self
+            .public_jwk
+            .get("x")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AuthError::Internal("OP public JWK missing x".into()))?;
+        let decoding_key = DecodingKey::from_ed_components(x)
+            .map_err(|e| AuthError::Internal(format!("access-token public key: {e}")))?;
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.algorithms = vec![Algorithm::EdDSA];
+        validation.set_issuer(&[self.issuer.as_str()]);
+        validation.validate_aud = false;
+        validation.validate_nbf = true;
+        validation.leeway = 0;
+        validation.required_spec_claims = [
+            "exp",
+            "iss",
+            "aud",
+            "sub",
+            "iat",
+            "jti",
+            "client_id",
+            "scope",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+
+        let data = decode::<AccessTokenClaims>(token, &decoding_key, &validation)
+            .map_err(|e| AuthError::Internal(format!("access-token verify: {e}")))?;
+        if data.claims.iss != self.issuer {
+            return Err(AuthError::Internal("access-token issuer mismatch".into()));
+        }
+        Ok(data.claims)
     }
 
     /// Derive the app/sector pairwise subject with the issuer's loaded salt.

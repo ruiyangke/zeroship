@@ -37,6 +37,7 @@ pub fn configure(
     move |cfg: &mut web::ServiceConfig| {
         oidc::authorization_code::configure(cfg);
         oidc::device_token::configure(cfg);
+        oidc::userinfo::configure(cfg);
         cfg.service(healthz)
             .service(readyz)
             .service(style)
