@@ -394,10 +394,10 @@ mod tests {
     use ntex::web::test;
     use zeroship_core::config::AuthSection;
 
-    fn hydra_cfg() -> Arc<AuthConfig> {
+    fn native_cfg() -> Arc<AuthConfig> {
         let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"]);
         cfg.try_resolve(AuthSection::default())
-            .expect("resolve hydra test config");
+            .expect("resolve native test config");
         Arc::new(cfg)
     }
 
@@ -478,7 +478,7 @@ mod tests {
         assert!(body.contains("x-zeroship-csrf"), "{body}");
         assert!(
             !body.contains("/oauth2/device/verify"),
-            "Supabase render must not reference Hydra verification: {body}"
+            "Supabase render must not reference native device verification: {body}"
         );
 
         let csp = headers
@@ -497,7 +497,7 @@ mod tests {
     #[ntex::test]
     async fn native_device_get_keeps_existing_page_shape() {
         let (status, _headers, body) =
-            get_device_body(hydra_cfg(), "/device?user_code=BCDF-GHJK").await;
+            get_device_body(native_cfg(), "/device?user_code=BCDF-GHJK").await;
 
         assert_eq!(status, StatusCode::OK);
         assert!(
@@ -507,7 +507,7 @@ mod tests {
         assert!(body.contains(r#"<form method="POST" action="/device">"#), "{body}");
         assert!(
             body.contains(r#"name="user_code" value="""#),
-            "Hydra GET should continue ignoring verification_uri_complete user_code: {body}"
+            "native GET should continue ignoring verification_uri_complete user_code: {body}"
         );
         assert!(!body.contains("supabaseAuthUrl"), "{body}");
         assert!(!body.contains("/api/device/approve"), "{body}");

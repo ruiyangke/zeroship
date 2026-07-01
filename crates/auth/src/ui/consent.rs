@@ -17,7 +17,6 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::AuthError;
-use crate::hydra_client::types::{ConsentRequest, OAuth2Client};
 use crate::oidc::auth_request::AuthRequest;
 use crate::oidc::authorization_code::{
     persist_consent_grant, return_to_after_prompt_interaction,
@@ -342,6 +341,19 @@ struct NativeConsentContext {
     client: NativeOAuthClient,
 }
 
+#[derive(Clone, Debug)]
+struct NativeConsentClient {
+    client_id: String,
+    client_name: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct NativeConsentRequest {
+    subject: String,
+    client: NativeConsentClient,
+    requested_scope: Vec<String>,
+}
+
 async fn load_native_consent_context(
     db: &compio_postgres::Client,
     return_to: &str,
@@ -385,37 +397,14 @@ async fn load_native_oauth_client(
     })
 }
 
-fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> ConsentRequest {
-    ConsentRequest {
-        challenge: ctx.request.return_to.clone(),
-        skip: false,
+fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> NativeConsentRequest {
+    NativeConsentRequest {
         subject: subject.to_string(),
-        client: OAuth2Client {
+        client: NativeConsentClient {
             client_id: ctx.client.client_id.clone(),
             client_name: Some(ctx.client.client_name.clone()),
-            client_secret: None,
-            grant_types: vec!["authorization_code".into()],
-            response_types: vec!["code".into()],
-            redirect_uris: ctx.client.redirect_uris.clone(),
-            post_logout_redirect_uris: vec![],
-            scope: ctx.client.scopes.join(" "),
-            token_endpoint_auth_method: "none".into(),
-            subject_type: "public".into(),
-            access_token_strategy: None,
-            id_token_signed_response_alg: Some("EdDSA".into()),
-            audience: vec![],
-            skip_consent: false,
-            require_consent: true,
-            require_logout_consent: false,
-            frontchannel_logout_uri: None,
-            backchannel_logout_uri: None,
         },
         requested_scope: ctx.request.scopes.clone(),
-        requested_access_token_audience: vec![],
-        login_session_id: None,
-        context: None,
-        oidc_context: None,
-        request_url: ctx.request.return_to.clone(),
     }
 }
 
@@ -475,7 +464,7 @@ fn scopes_are_subset(requested: &[String], previously_granted: &[String]) -> boo
 #[allow(clippy::future_not_send)]
 async fn render_consent_page(
     return_to: &str,
-    info: &ConsentRequest,
+    info: &NativeConsentRequest,
     db: &compio_postgres::Client,
     cfg: &AuthConfig,
     can_grant: bool,
@@ -696,7 +685,7 @@ fn partition_scopes(
 /// reaches native consent issuance, not just the render.
 async fn classify_and_authorize(
     db: &compio_postgres::Client,
-    info: &ConsentRequest,
+    info: &NativeConsentRequest,
     app_scope_defs: &HashMap<String, ScopeDef>,
 ) -> Result<ClassifiedScopes, String> {
     let delegated = match partition_scopes(&info.requested_scope, app_scope_defs) {
@@ -759,7 +748,7 @@ struct ClientDisplay {
 
 async fn load_client_display(
     db: &compio_postgres::Client,
-    info: &ConsentRequest,
+    info: &NativeConsentRequest,
 ) -> ClientDisplay {
     let fallback_name = info
         .client

@@ -7,10 +7,6 @@ use uuid::Uuid;
 
 use crate::error::{AuthError, Result};
 
-/// Stable process-wide lock for first-boot hydra signing-key bootstrap.
-pub const BOOTSTRAP_SIGNING_KEYS_LOCK: i64 = 0x0042_B007_A071_0001;
-/// Stable process-wide lock for first-boot hydra OAuth client reconciliation.
-pub const BOOTSTRAP_CLIENTS_LOCK: i64 = 0x0042_B007_A071_0002;
 /// Stable process-wide lock for platform OP signing-key registry reconciliation.
 pub const OP_SIGNING_KEY_BOOTSTRAP_LOCK: i64 = 0x0042_B007_A071_0003;
 
@@ -111,13 +107,7 @@ where
     Ok(())
 }
 
-/// Stable i64 advisory-lock key for one hydra JWK set.
-#[must_use]
-pub fn jwk_set_lock_key(set: &str) -> i64 {
-    stable_lock_key(b"zeroship-auth:jwk-rotation:", &[set.as_bytes()])
-}
-
-/// Stable i64 advisory-lock key for one local/Hydra OAuth grant mutation.
+/// Stable i64 advisory-lock key for one OAuth grant mutation.
 #[must_use]
 pub fn oauth_grant_lock_key(user_id: &uuid::Uuid, client_id: &str) -> i64 {
     stable_lock_key(

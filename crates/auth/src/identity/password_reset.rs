@@ -227,16 +227,12 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
 ///      user, so `anchors::read_live` returns `None` and `?mint=1` fails closed
 ///      — no fresh cookie can be minted to outrun the family marker.
 ///
-/// The Hydra refresh-grant *itself* is left for the gateway/Hydra side to age
-/// out (auth holds no `anchor_enc_key` to decrypt the per-anchor refresh
-/// family), but revoking the anchor means the gateway never touches that
-/// refresh family again, and the family marker rejects any token it could yield
-/// — so the 720h Hydra ceiling is moot.
+/// Revoking the anchor means the gateway never touches that refresh family
+/// again, and the family marker rejects any token it could yield.
 ///
 /// **F4 TOCTOU (gateway-side, closed).** A `?mint=1` rotation that read the
 /// anchor BEFORE this reset commits used to re-sign a fresh cookie even though
-/// the family was being torn down (the Hydra refresh succeeds — the grant is
-/// left alive by design above). The gateway now fails that rotation CLOSED:
+/// the family was being torn down. The gateway now fails that rotation CLOSED:
 /// `anchors::update_rotated_family` reports 0 rows when the anchor was revoked
 /// mid-rotation, and `do_refresh` re-reads the `(client_id, pws_)` family
 /// marker inside the persist tx and rejects when a marker landed at/after the

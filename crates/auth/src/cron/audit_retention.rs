@@ -4,7 +4,7 @@
 //! Buckets per proposal §15:
 //!   - Security (365d hot): `login_*`, `oauth_*`, `magic_redeemed_*`,
 //!     `verification_redeemed`, `password_changed`, `session_*`,
-//!     `key_rotation_*`, `hydra_accept_*`
+//!     `key_rotation_*`
 //!   - PII (90d): `signup`, `signup_blocked`, `verification_issued`,
 //!     `password_reset_requested`, `magic_issued`, `oauth_start`
 //!   - Debug (30d): `mailer_*`
@@ -15,11 +15,6 @@
 //! to retain a not-yet-classified event than silently delete forensic
 //! evidence).
 //!
-//! Companion: [`super::jwk_rotation`] rotates the hydra JWKS on its own
-//! ticker (different cadence, different table — kept in their own
-//! modules so a JWK-rotation incident never blocks log retention and
-//! vice versa).
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,10 +44,6 @@ const SECURITY: &[&str] = &[
     "session_revoked",
     "key_rotation_announced",
     "key_rotation_completed",
-    "hydra_accept_login",
-    "hydra_accept_consent",
-    "hydra_accept_logout",
-    "hydra_delete_session",
 ];
 
 /// PII-bearing events. 90-day hot retention — short enough to limit
@@ -82,7 +73,7 @@ const DEBUG: &[&str] = &[
 /// PG hiccup doesn't kill the cron task.
 //
 // `compio_postgres::Client` holds a connection handle that is `!Send`;
-// the lint is structural, not actionable (mirrors `jwk_rotation::run`).
+// the lint is structural, not actionable.
 #[allow(clippy::future_not_send)]
 pub async fn run(cfg: Arc<AuthConfig>) {
     let interval_secs = cfg.audit_retention_check_secs;
@@ -112,8 +103,7 @@ pub async fn run(cfg: Arc<AuthConfig>) {
 /// outlive the sweep even on its own connection.
 //
 // Holds the dedicated `compio_postgres::Client` (a `!Send` connection
-// handle) across awaits; the lint is structural, not actionable (mirrors
-// `run` / `jwk_rotation`).
+// handle) across awaits; the lint is structural, not actionable.
 #[allow(clippy::future_not_send)]
 #[doc(hidden)]
 pub async fn tick(dsn: &str) -> Result<()> {
