@@ -2,9 +2,9 @@
 //!
 //! Routes (registered in `server::configure`):
 //!
-//! - **POST `/magic/start`** — accept an email + one continuation target
-//!   (`login_challenge` or native `return_to`), issue a magic-link token,
-//!   send the email, set `__Host-zsidp_magic_csrf` at
+//! - **POST `/magic/start`** — accept an email + native `return_to`
+//!   continuation target, issue a magic-link token, send the email, set
+//!   `__Host-zsidp_magic_csrf` at
 //!   the requesting device, render the "check your email" page (with a
 //!   hidden code-entry form for cross-device completion). Always returns
 //!   200, regardless of whether the address exists or is rate-limited
@@ -14,14 +14,13 @@
 //!   code-entry form. The check-email page already embeds the same form
 //!   inside a `<details>` toggle; this route exists for direct entry.
 //!
-//! - **GET `/magic/verify?token=<token>&login_challenge=<…>`** or
-//!   `return_to=<…>` — render a POST interstitial so the token leaves the URL
-//!   before it is redeemed.
+//! - **GET `/magic/verify?token=<token>&return_to=<…>`** — render a POST
+//!   interstitial so the token leaves the URL before it is redeemed.
 //!
 //! - **POST `/magic/verify/redeem`** — redeem the magic-link token. If the
 //!   redeeming browser presents the matching `__Host-zsidp_magic_csrf`
 //!   cookie (same-device path) → mint session, then resume the continuation
-//!   target (`303 return_to` for native, `accept_login` for Hydra).
+//!   target.
 //!   If the cookie is missing or different (cross-device) → generate a
 //!   6-digit code, persist it under the magic-link's CSRF nonce, render the
 //!   code on the redeeming device.
@@ -37,7 +36,7 @@
 //! for both same-device and cross-device.
 
 use askama::Template;
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE, USER_AGENT};
+use ntex::http::header::{HeaderValue, COOKIE, SET_COOKIE, USER_AGENT};
 use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use rand::Rng;
@@ -51,8 +50,6 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::{AuthError, Result};
-use crate::hydra_client::types::AcceptLoginRequest;
-use crate::hydra_client::HydraAdmin;
 use crate::identity::email as email_validation;
 use crate::identity::eligibility;
 use crate::identity::magic_link;
@@ -132,86 +129,54 @@ fn safe_csrf_value(value: &str) -> bool {
 }
 
 const MAGIC_TARGET_RETURN_TO_PREFIX: &str = "return_to:";
-const MAGIC_TARGET_LOGIN_CHALLENGE_PREFIX: &str = "login_challenge:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MagicTarget {
-    LoginChallenge(String),
     ReturnTo(String),
 }
 
 impl MagicTarget {
-    fn from_inputs(login_challenge: Option<&str>, raw_return_to: Option<&str>) -> Option<Self> {
-        let login_challenge = non_empty(login_challenge);
+    fn from_return_to(raw_return_to: Option<&str>) -> Option<Self> {
         let raw_return_to = non_empty(raw_return_to);
-        match (login_challenge, raw_return_to) {
-            (Some(login_challenge), None) => {
-                Some(Self::LoginChallenge(login_challenge.to_string()))
-            }
-            (None, Some(raw_return_to)) => {
-                let native_return_to =
-                    return_to::sanitize(Some(raw_return_to), return_to::SAFE_DEFAULT);
-                AuthRequest::parse_return_to(&native_return_to).ok()?;
-                Some(Self::ReturnTo(native_return_to))
-            }
-            _ => None,
-        }
+        let native_return_to =
+            return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
+        AuthRequest::parse_return_to(&native_return_to).ok()?;
+        Some(Self::ReturnTo(native_return_to))
     }
 
     fn decode_store(value: &str) -> Option<Self> {
         if let Some(return_to) = value.strip_prefix(MAGIC_TARGET_RETURN_TO_PREFIX) {
-            return Self::from_inputs(None, Some(return_to));
+            return Self::from_return_to(Some(return_to));
         }
-        if let Some(login_challenge) = value.strip_prefix(MAGIC_TARGET_LOGIN_CHALLENGE_PREFIX) {
-            return Self::from_inputs(Some(login_challenge), None);
-        }
-        Self::from_inputs(Some(value), None)
+        None
     }
 
     fn encode_store(&self) -> String {
         match self {
-            Self::LoginChallenge(login_challenge) => {
-                format!("{MAGIC_TARGET_LOGIN_CHALLENGE_PREFIX}{login_challenge}")
-            }
             Self::ReturnTo(return_to) => format!("{MAGIC_TARGET_RETURN_TO_PREFIX}{return_to}"),
         }
     }
 
     fn query_key(&self) -> &'static str {
         match self {
-            Self::LoginChallenge(_) => "login_challenge",
             Self::ReturnTo(_) => "return_to",
         }
     }
 
     fn value(&self) -> &str {
         match self {
-            Self::LoginChallenge(value) | Self::ReturnTo(value) => value,
-        }
-    }
-
-    fn login_challenge(&self) -> Option<&str> {
-        match self {
-            Self::LoginChallenge(value) => Some(value.as_str()),
-            Self::ReturnTo(_) => None,
+            Self::ReturnTo(value) => value,
         }
     }
 
     fn return_to(&self) -> Option<&str> {
         match self {
-            Self::LoginChallenge(_) => None,
             Self::ReturnTo(value) => Some(value.as_str()),
         }
     }
 
     fn login_href(&self) -> String {
         match self {
-            Self::LoginChallenge(login_challenge) => {
-                let query = form_urlencoded::Serializer::new(String::new())
-                    .append_pair("login_challenge", login_challenge)
-                    .finish();
-                format!("/login?{query}")
-            }
             Self::ReturnTo(return_to) => return_to::login_location(return_to),
         }
     }
@@ -227,7 +192,6 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
 pub struct MagicStartForm {
     pub csrf: String,
     pub email: String,
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
 }
 
@@ -268,10 +232,7 @@ pub async fn start(
             StatusCode::BAD_REQUEST,
         );
     }
-    let target = match MagicTarget::from_inputs(
-        form.login_challenge.as_deref(),
-        form.return_to.as_deref(),
-    ) {
+    let target = match MagicTarget::from_return_to(form.return_to.as_deref()) {
         Some(target) => target,
         None => return render_error_page(PublicErrorMessage::InvalidRequest),
     };
@@ -411,7 +372,6 @@ pub async fn start(
 
     let page = MagicCheckEmailPage {
         csrf: &new_csrf,
-        login_challenge: target.login_challenge(),
         return_to: target.return_to(),
         csrf_nonce: &nonce,
         email: &email_norm,
@@ -438,7 +398,6 @@ pub async fn start(
 
 #[derive(Debug, Deserialize)]
 pub struct MagicAwaitQuery {
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
     pub csrf_nonce: String,
     pub email: String,
@@ -455,17 +414,13 @@ pub async fn await_code(
     query: ntex::web::types::Query<MagicAwaitQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let target = match MagicTarget::from_inputs(
-        query.login_challenge.as_deref(),
-        query.return_to.as_deref(),
-    ) {
+    let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
         Some(target) => target,
         None => return render_error_page(PublicErrorMessage::InvalidRequest),
     };
     let new_csrf = csrf::generate_token();
     let page = MagicAwaitCodePage {
         csrf: &new_csrf,
-        login_challenge: target.login_challenge(),
         return_to: target.return_to(),
         csrf_nonce: &query.csrf_nonce,
         email: &query.email,
@@ -485,7 +440,6 @@ pub async fn await_code(
 #[derive(Debug, Deserialize)]
 pub struct MagicVerifyQuery {
     pub token: String,
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
 }
 
@@ -493,7 +447,6 @@ pub struct MagicVerifyQuery {
 pub struct MagicRedeemForm {
     pub csrf: Option<String>,
     pub token: String,
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
 }
 
@@ -505,10 +458,7 @@ pub async fn verify(
     query: ntex::web::types::Query<MagicVerifyQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let target = match MagicTarget::from_inputs(
-        query.login_challenge.as_deref(),
-        query.return_to.as_deref(),
-    ) {
+    let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
         Some(target) => target,
         None => return render_error_page(PublicErrorMessage::InvalidRequest),
     };
@@ -538,7 +488,7 @@ pub async fn verify(
 /// whether the redeeming browser
 /// presents the matching `__Host-zsidp_magic_csrf` cookie:
 ///
-/// - **Same-device**: mint a session, `accept_login`, 302 to hydra.
+/// - **Same-device**: mint a session and redirect to the native authorize request.
 /// - **Cross-device**: generate a 6-digit code, persist it in
 ///   `zeroship.magic_completions`, render the code on this device for the
 ///   user to type back on the requesting device.
@@ -548,7 +498,6 @@ pub async fn verify_redeem(
     form: ntex::web::types::Form<MagicRedeemForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
-    admin: ntex::web::types::State<HydraAdmin>,
 ) -> HttpResponse {
     if !valid_magic_csrf(&req, form.csrf.as_deref(), &cfg) {
         return render_error_page_with_status(
@@ -556,10 +505,7 @@ pub async fn verify_redeem(
             StatusCode::FORBIDDEN,
         );
     }
-    let target = match MagicTarget::from_inputs(
-        form.login_challenge.as_deref(),
-        form.return_to.as_deref(),
-    ) {
+    let target = match MagicTarget::from_return_to(form.return_to.as_deref()) {
         Some(target) => target,
         None => return render_error_page(PublicErrorMessage::InvalidRequest),
     };
@@ -692,7 +638,6 @@ pub async fn verify_redeem(
     if same_device {
         same_device_finish(
             db.as_ref(),
-            &admin,
             &cfg,
             &redeemed.token_hash,
             &redeemed.reserved_at,
@@ -729,11 +674,10 @@ fn valid_magic_csrf(req: &HttpRequest, form_csrf: Option<&str>, cfg: &AuthConfig
         .is_some_and(|(cookie, form)| csrf::matches(form, cookie))
 }
 
-/// Same-device path: mint session, then resume either native authorize or Hydra.
+/// Same-device path: mint session, then resume native authorize.
 #[allow(clippy::future_not_send)]
 async fn same_device_finish(
     db: &compio_postgres::Client,
-    admin: &HydraAdmin,
     cfg: &AuthConfig,
     token_hash: &[u8],
     reserved_at: &chrono::DateTime<chrono::Utc>,
@@ -771,65 +715,6 @@ async fn same_device_finish(
         tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
     }
 
-    if let MagicTarget::ReturnTo(native_return_to) = target {
-        match magic_link::finalize_consume(db, token_hash, reserved_at).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::error!("magic_link finalize consume updated no rows");
-                return render_error_page(PublicErrorMessage::ContactSupport);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "magic_link finalize consume failed");
-                return render_error_page(PublicErrorMessage::ContactSupport);
-            }
-        }
-
-        audit::emit(
-            db,
-            &AuditEvent {
-                event_type: "magic_redeemed_same_device",
-                outcome: "success",
-                user_id: Some(&user_id),
-                auth_method: Some("magic"),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-
-        let mut resp = return_to::see_other(native_return_to);
-        resp.header(
-            SET_COOKIE,
-            session_cookie::set_cookie(&session.id, cfg.insecure_dev),
-        );
-        resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
-        resp.header("cache-control", "no-store");
-        return resp.finish();
-    }
-
-    let MagicTarget::LoginChallenge(login_challenge) = target else {
-        unreachable!("native target handled above");
-    };
-    let accept = AcceptLoginRequest {
-        subject: user_id.to_string(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        acr: Some("urn:zeroship:magic".into()),
-        amr: Some(vec!["magic".into()]),
-        ..Default::default()
-    };
-    let redirect_to = match admin.accept_login(login_challenge, &accept).await {
-        Ok(r) => r.redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, "magic accept_login failed");
-            if let Err(e) =
-                magic_link::clear_consume_pending(db, token_hash, Some(reserved_at)).await
-            {
-                tracing::warn!(error = %e, "magic_link clear pending after accept_login failure failed");
-            }
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
-    };
-
     match magic_link::finalize_consume(db, token_hash, reserved_at).await {
         Ok(true) => {}
         Ok(false) => {
@@ -854,15 +739,13 @@ async fn same_device_finish(
     )
     .await;
 
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
+    let MagicTarget::ReturnTo(native_return_to) = target;
+    let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
+    resp.header("cache-control", "no-store");
     // Clear the requesting-device cookie so a future stray click can't
     // be replayed in a same-device check.
     resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
@@ -934,7 +817,6 @@ async fn cross_device_show_code(
 pub struct MagicCompleteForm {
     pub csrf: String,
     pub csrf_nonce: String,
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
     pub code: String,
 }
@@ -949,7 +831,6 @@ pub async fn complete(
     form: ntex::web::types::Form<MagicCompleteForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
-    admin: ntex::web::types::State<HydraAdmin>,
 ) -> HttpResponse {
     // 1. CSRF.
     let cookie_header = req
@@ -964,10 +845,7 @@ pub async fn complete(
     {
         return render_error_page(PublicErrorMessage::InvalidRequest);
     }
-    let form_target = match MagicTarget::from_inputs(
-        form.login_challenge.as_deref(),
-        form.return_to.as_deref(),
-    ) {
+    let form_target = match MagicTarget::from_return_to(form.return_to.as_deref()) {
         Some(target) => target,
         None => return render_error_page(PublicErrorMessage::InvalidRequest),
     };
@@ -1181,75 +1059,6 @@ pub async fn complete(
         tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
     }
 
-    if let MagicTarget::ReturnTo(native_return_to) = &form_target {
-        match completions_store::finalize_consume(
-            db.as_ref(),
-            &form.csrf_nonce,
-            &completion.reserved_at,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::error!("magic_completions finalize consume updated no rows");
-                return render_error_page(PublicErrorMessage::ContactSupport);
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "magic_completions finalize consume failed");
-                return render_error_page(PublicErrorMessage::ContactSupport);
-            }
-        }
-
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "magic_complete",
-                outcome: "success",
-                user_id: Some(&user_id),
-                auth_method: Some("magic"),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-
-        let mut resp = return_to::see_other(native_return_to);
-        resp.header(
-            SET_COOKIE,
-            session_cookie::set_cookie(&session.id, cfg.insecure_dev),
-        );
-        resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
-        resp.header("cache-control", "no-store");
-        return resp.finish();
-    }
-
-    let MagicTarget::LoginChallenge(login_challenge) = &form_target else {
-        unreachable!("native target handled above");
-    };
-    let accept = AcceptLoginRequest {
-        subject: user_id.to_string(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        acr: Some("urn:zeroship:magic".into()),
-        amr: Some(vec!["magic".into()]),
-        ..Default::default()
-    };
-    let redirect_to = match admin.accept_login(login_challenge, &accept).await {
-        Ok(r) => r.redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, "magic complete accept_login failed");
-            if let Err(e) = completions_store::clear_consume_pending(
-                db.as_ref(),
-                &form.csrf_nonce,
-                Some(&completion.reserved_at),
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "magic_completions clear pending after accept_login failure failed");
-            }
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
-    };
-
     match completions_store::finalize_consume(
         db.as_ref(),
         &form.csrf_nonce,
@@ -1280,15 +1089,13 @@ pub async fn complete(
     )
     .await;
 
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
+    let MagicTarget::ReturnTo(native_return_to) = &form_target;
+    let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
+    resp.header("cache-control", "no-store");
     resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
     resp.finish()
 }
@@ -1585,21 +1392,10 @@ mod tests {
     const NATIVE_RETURN_TO: &str = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=openid";
 
     #[test]
-    fn magic_target_decode_store_uses_front_anchored_discriminators() {
-        let login_challenge = "lc-return_to:/oauth2/authorize?client_id=oac_123";
-        let target = MagicTarget::LoginChallenge(login_challenge.into());
-        assert_eq!(
-            MagicTarget::decode_store(&target.encode_store()),
-            Some(target)
-        );
-        assert_eq!(
-            MagicTarget::decode_store(login_challenge),
-            Some(MagicTarget::LoginChallenge(login_challenge.into()))
-        );
-
-        let return_to_with_login_challenge_text =
+    fn magic_target_decode_store_uses_front_anchored_discriminator() {
+        let return_to_with_challenge_text =
             format!("{NATIVE_RETURN_TO}&state=login_challenge%3Ainner");
-        let target = MagicTarget::ReturnTo(return_to_with_login_challenge_text);
+        let target = MagicTarget::ReturnTo(return_to_with_challenge_text);
         assert_eq!(
             MagicTarget::decode_store(&target.encode_store()),
             Some(target)
@@ -1607,12 +1403,12 @@ mod tests {
     }
 
     #[test]
-    fn magic_target_cross_variant_values_do_not_match() {
-        let native = MagicTarget::ReturnTo(NATIVE_RETURN_TO.into());
-        let challenge_with_same_text = MagicTarget::LoginChallenge(NATIVE_RETURN_TO.into());
-
-        assert_ne!(native, challenge_with_same_text);
-        assert_ne!(native.encode_store(), challenge_with_same_text.encode_store());
+    fn magic_target_decode_store_rejects_bare_values() {
+        assert_eq!(MagicTarget::decode_store(NATIVE_RETURN_TO), None);
+        assert_eq!(
+            MagicTarget::decode_store("lc-return_to:/oauth2/authorize?client_id=oac_123"),
+            None
+        );
     }
 
     #[test]

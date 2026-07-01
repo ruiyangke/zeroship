@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod common;
 
 use std::future::Future;
@@ -8,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use ntex::http::header::{CACHE_CONTROL, CONTENT_LENGTH, LOCATION, SET_COOKIE};
+use ntex::http::header::{CACHE_CONTROL, CONTENT_LENGTH, SET_COOKIE};
 use ntex::http::HeaderMap;
 use ntex::service::{Pipeline, Service};
 use ntex::web::{self, test};
@@ -392,110 +394,6 @@ fn verify_post_redeem_idempotent_second_call_returns_error() {
 }
 
 #[test]
-fn magic_verify_get_renders_interstitial_does_not_consume() {
-    run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
-        return;
-    };
-    let (email, issued) = ctx.seed_magic().await;
-    let app = init_app!(&ctx);
-    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
-
-    let resp = call_get(
-        &app,
-        &format!(
-            "/magic/verify?token={}&login_challenge={login_challenge}",
-            issued.raw
-        ),
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let body = read_body(resp).await;
-    assert!(body.contains(r#"<form method="POST" action="/magic/verify/redeem">"#));
-    assert!(body.contains(&format!(r#"name="token" value="{}""#, issued.raw)));
-    assert!(body.contains(&format!(
-        r#"name="login_challenge" value="{login_challenge}""#
-    )));
-
-    let pending: bool = ctx
-        .pg
-        .query_one(
-            "SELECT consumed_at IS NULL AND consumed_pending_at IS NULL AS pending \
-             FROM zeroship.magic_links WHERE email = $1::citext",
-            &[&email],
-        )
-        .await
-        .expect("load magic link row")
-        .get("pending");
-    assert!(pending, "GET /magic/verify must not consume the token");
-
-    ctx.cleanup_email(&email).await;
-    });
-}
-
-#[test]
-fn magic_verify_redeem_post_consumes_and_redirects() {
-    run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        eprintln!("skipping m4_post_redeem_test (no AUTH_DB_URL or PG_TEST_URL)");
-        return;
-    };
-    let (email, issued) = ctx.seed_magic().await;
-    let app = init_app!(&ctx);
-    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
-
-    let get_resp = call_get_with_cookie(
-        &app,
-        &format!(
-            "/magic/verify?token={}&login_challenge={login_challenge}",
-            issued.raw
-        ),
-        format!("zsidp_magic_csrf={}", issued.csrf_nonce),
-    )
-    .await;
-    assert_eq!(get_resp.status().as_u16(), 200);
-    let csrf = read_set_cookie(get_resp.headers(), "zsidp_magic_csrf")
-        .expect("magic csrf cookie set on GET /magic/verify");
-    assert_eq!(csrf, issued.csrf_nonce);
-
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("csrf", &csrf)
-        .append_pair("token", &issued.raw)
-        .append_pair("login_challenge", &login_challenge)
-        .finish();
-    let resp = call_post_form(
-        &app,
-        "/magic/verify/redeem",
-        body,
-        Some(format!("zsidp_magic_csrf={csrf}")),
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 302);
-    assert_eq!(header(resp.headers(), LOCATION), MAGIC_ACCEPT_REDIRECT);
-
-    let consumed: bool = ctx
-        .pg
-        .query_one(
-            "SELECT consumed_at IS NOT NULL AS consumed \
-             FROM zeroship.magic_links WHERE email = $1::citext",
-            &[&email],
-        )
-        .await
-        .expect("load consumed magic row")
-        .get("consumed");
-    assert!(consumed, "POST /magic/verify/redeem must consume the token");
-
-    let records = ctx.accepted_logins();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].challenge, login_challenge);
-    assert_eq!(records[0].body["amr"], json!(["magic"]));
-
-    ctx.cleanup_email(&email).await;
-    });
-}
-
-#[test]
 fn reset_get_html_includes_history_replace_state_script() {
     run_compio(async {
     let Some(ctx) = M4TestCtx::boot().await else {
@@ -523,7 +421,11 @@ fn cache_control_no_store_on_all_three_interstitials() {
     let verify = call_get(&app, "/verify?token=ABC").await;
     assert_eq!(header(verify.headers(), CACHE_CONTROL), "no-store");
 
-    let magic = call_get(&app, "/magic/verify?token=ABC&login_challenge=xyz").await;
+    let magic = call_get(
+        &app,
+        "/magic/verify?token=ABC&return_to=/oauth2/authorize?client_id=oac_123",
+    )
+    .await;
     assert_eq!(header(magic.headers(), CACHE_CONTROL), "no-store");
 
     let reset = call_get(&app, "/reset?token=ABC").await;

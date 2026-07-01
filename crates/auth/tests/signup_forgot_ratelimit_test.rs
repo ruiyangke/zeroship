@@ -199,69 +199,6 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
 
 #[compio::test]
 #[allow(clippy::future_not_send)]
-async fn signup_hydra_login_challenge_redirects_to_login_challenge() {
-    let Some((dsn, client)) = pg().await else {
-        eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
-        return;
-    };
-
-    let pg = Arc::new(client);
-    let cfg = Arc::new(test_cfg(&dsn));
-    let mailer = Arc::new(CountingMailer::default());
-    let mailer_state: Arc<dyn Mailer> = mailer.clone();
-    let app = test::init_service(
-        web::App::new()
-            .state(cfg.clone())
-            .state(pg.clone())
-            .state(mailer_state)
-            .service(
-                web::resource("/signup")
-                    .route(web::get().to(zeroship_auth::ui::signup::get))
-                    .route(web::post().to(zeroship_auth::ui::signup::post)),
-            ),
-    )
-    .await;
-
-    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
-    let get_resp = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri(&query_uri("/signup", "login_challenge", &login_challenge))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(get_resp.status().as_u16(), 200);
-    let csrf = read_set_cookie(get_resp.headers(), "zsidp_csrf")
-        .expect("zsidp_csrf cookie set on GET /signup");
-
-    let email = format!("signup-hydra-{}@zeroship.test", Uuid::new_v4().simple());
-    let body = signup_body(&csrf, "login_challenge", &login_challenge, &email);
-    let resp = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri("/signup")
-            .header("x-forwarded-for", unique_loopback().to_string())
-            .header("content-type", "application/x-www-form-urlencoded")
-            .header("cookie", format!("zsidp_csrf={csrf}"))
-            .set_payload(body)
-            .to_request(),
-    )
-    .await;
-
-    assert_eq!(resp.status().as_u16(), 302);
-    let loc = location(resp.headers());
-    assert_eq!(loc, query_uri("/login", "login_challenge", &login_challenge));
-    assert!(
-        !loc.contains("return_to="),
-        "Hydra signup redirect must preserve login_challenge: {loc}"
-    );
-    assert_eq!(mailer.count(), 1, "successful signup sends verification mail");
-
-    cleanup_signup_user(pg.as_ref(), &email).await;
-}
-
-#[compio::test]
-#[allow(clippy::future_not_send)]
 async fn signup_rejects_open_redirect_return_to_at_intake() {
     let Some((dsn, client)) = pg().await else {
         eprintln!("skipping signup_forgot_ratelimit_test (no AUTH_DB_URL)");
@@ -346,11 +283,11 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     )
     .await;
 
-    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
+    let return_to = native_authorize_return_to();
     let get_resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri(&query_uri("/signup", "login_challenge", &login_challenge))
+            .uri(&query_uri("/signup", "return_to", &return_to))
             .to_request(),
     )
     .await;
@@ -374,7 +311,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     let email = format!("{prefix}-throttled@zeroship.test");
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf", &csrf)
-        .append_pair("login_challenge", &login_challenge)
+        .append_pair("return_to", &return_to)
         .append_pair("name", "Rate Limit")
         .append_pair("email", &email)
         .append_pair("password", "correct horse battery staple")
@@ -469,11 +406,11 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
     )
     .await;
 
-    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
+    let return_to = native_authorize_return_to();
     let get_resp = test::call_service(
         &app,
         test::TestRequest::get()
-            .uri(&query_uri("/signup", "login_challenge", &login_challenge))
+            .uri(&query_uri("/signup", "return_to", &return_to))
             .to_request(),
     )
     .await;
@@ -483,7 +420,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
 
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf", &csrf)
-        .append_pair("login_challenge", &login_challenge)
+        .append_pair("return_to", &return_to)
         .append_pair("name", "M3_FAIL")
         .append_pair("email", &email)
         .append_pair("password", "correct horse battery staple")

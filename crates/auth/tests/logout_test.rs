@@ -17,11 +17,9 @@
 //! logout_challenge). That coverage is the followup.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
-use serde::Deserialize;
 use uuid::Uuid;
 
 use zeroship_auth::csrf;
@@ -34,48 +32,6 @@ use zeroship_mailer::{Mailer, StdoutMailer};
 
 mod common;
 use common::test_auth_config;
-
-#[derive(Debug, Clone)]
-struct MockLogoutState {
-    subject: String,
-    hydra_sid: String,
-    redirect_to: String,
-    accepted: Arc<Mutex<Vec<String>>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LogoutChallengeQuery {
-    logout_challenge: String,
-}
-
-#[allow(clippy::future_not_send)]
-async fn mock_get_logout(
-    query: web::types::Query<LogoutChallengeQuery>,
-    state: web::types::State<MockLogoutState>,
-) -> web::HttpResponse {
-    web::HttpResponse::Ok().json(&serde_json::json!({
-        "subject": state.subject,
-        "sid": state.hydra_sid,
-        "request_url": format!("https://hydra.example/logout?logout_challenge={}", query.logout_challenge),
-        "rp_initiated": true,
-        "client": null,
-    }))
-}
-
-#[allow(clippy::future_not_send)]
-async fn mock_accept_logout(
-    query: web::types::Query<LogoutChallengeQuery>,
-    state: web::types::State<MockLogoutState>,
-) -> web::HttpResponse {
-    state
-        .accepted
-        .lock()
-        .expect("lock accepted challenges")
-        .push(query.logout_challenge.clone());
-    web::HttpResponse::Ok().json(&serde_json::json!({
-        "redirect_to": state.redirect_to,
-    }))
-}
 
 #[ntex::test]
 async fn logout_route_is_registered_returns_not_404() {
@@ -249,9 +205,6 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
     assert_eq!(status, 400, "expected 400 (CSRF rejection), got {status}");
 }
 
-// Uses a mock-hydra `web::test::server`, which needs the ntex runtime/System
-// — run under `#[ntex::test]` (the sibling logout tests already do), not
-// `#[compio::test]` (no System → "System is not running" panic).
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn logout_post_revokes_local_session_cookie() {
@@ -292,35 +245,9 @@ async fn logout_post_revokes_local_session_cookie() {
     .expect("seed local session");
     let pg = Arc::new(pg_client);
 
-    let accepted = Arc::new(Mutex::new(Vec::new()));
-    let redirect_to = "https://rp.example/logout-done".to_string();
-    let hydra_state = MockLogoutState {
-        subject: user.id.to_string(),
-        hydra_sid: Uuid::new_v4().to_string(),
-        redirect_to: redirect_to.clone(),
-        accepted: accepted.clone(),
-    };
-    let hydra_srv = web::test::server(move || {
-        let hydra_state = hydra_state.clone();
-        async move {
-            web::App::new()
-                .state(hydra_state)
-                .service(
-                    web::resource("/admin/oauth2/auth/requests/logout")
-                        .route(web::get().to(mock_get_logout)),
-                )
-                .service(
-                    web::resource("/admin/oauth2/auth/requests/logout/accept")
-                        .route(web::put().to(mock_accept_logout)),
-                )
-        }
-    })
-    .await;
-
-    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
     let cfg = Arc::new(test_auth_config(
         &db_url,
-        hydra_srv.url("").trim_end_matches('/'),
+        "http://127.0.0.1:1",
         "http://127.0.0.1:4444",
     ));
     let issuer = Arc::new(
@@ -333,7 +260,6 @@ async fn logout_post_revokes_local_session_cookie() {
     );
     let app = test::init_service(
         web::App::new()
-            .state(admin)
             .state(cfg.clone())
             .state(pg.clone())
             .state(issuer)
@@ -345,10 +271,8 @@ async fn logout_post_revokes_local_session_cookie() {
     .await;
 
     let csrf = csrf::generate_token();
-    let challenge = format!("logout-{}", Uuid::new_v4().simple());
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("csrf", &csrf)
-        .append_pair("logout_challenge", &challenge)
         .finish();
     let req = test::TestRequest::post()
         .uri("/logout")
@@ -361,6 +285,11 @@ async fn logout_post_revokes_local_session_cookie() {
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 302);
+    let location = resp
+        .headers()
+        .get(ntex::http::header::LOCATION)
+        .and_then(|h| h.to_str().ok());
+    assert_eq!(location, Some("/login"));
 
     let revoked: bool = pg
         .query_one(
@@ -371,11 +300,6 @@ async fn logout_post_revokes_local_session_cookie() {
         .expect("load local session")
         .get("revoked");
     assert!(revoked, "logout must revoke the local session cookie id");
-    assert_eq!(
-        accepted.lock().expect("lock accepted challenges").as_slice(),
-        &[challenge],
-        "logout should still accept the Hydra logout challenge"
-    );
 
     pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
         .await

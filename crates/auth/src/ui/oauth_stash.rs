@@ -3,7 +3,7 @@
 //! The browser is bounced through the upstream `IdP` (`accounts.google.com`,
 //! `github.com/login/oauth/...`), so the random material we need to verify
 //! the callback — `state`, PKCE `verifier`, OIDC `nonce`, and the pending
-//! continuation target — has to ride with the browser. We stash it in a
+//! native continuation target — has to ride with the browser. We stash it in a
 //! short-lived signed cookie, MAC'd against `AuthConfig::stash_signing_key`.
 //!
 //! Cookie layout: `base64url(json).base64url(hmac-sha256)`. The HMAC
@@ -25,30 +25,18 @@ use zeroship_core::auth::hmac_sha256;
 ///
 /// `state` and `nonce` are the OAuth/OIDC CSRF + replay tokens; `verifier`
 /// is the PKCE verifier. Exactly one continuation target is present:
-/// a legacy `login_challenge` or a native `return_to`.
+/// the native `return_to`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OAuthStash {
     pub state: String,
     pub verifier: String,
     pub nonce: String,
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
     pub iat: i64,
     pub exp: i64,
 }
 
 impl OAuthStash {
-    /// Build a fresh stash with the standard 10-minute validity window.
-    #[must_use]
-    pub fn with_login_challenge(
-        state: String,
-        verifier: String,
-        nonce: String,
-        login_challenge: String,
-    ) -> Self {
-        Self::new(state, verifier, nonce, Some(login_challenge), None)
-    }
-
     /// Build a fresh native stash with the standard 10-minute validity window.
     #[must_use]
     pub fn with_return_to(
@@ -57,23 +45,21 @@ impl OAuthStash {
         nonce: String,
         return_to: String,
     ) -> Self {
-        Self::new(state, verifier, nonce, None, Some(return_to))
+        Self::new(state, verifier, nonce, Some(return_to))
     }
 
     fn new(
         state: String,
         verifier: String,
         nonce: String,
-        login_challenge: Option<String>,
         return_to: Option<String>,
     ) -> Self {
-        debug_assert!(exactly_one(login_challenge.as_deref(), return_to.as_deref()));
+        debug_assert!(has_return_to(return_to.as_deref()));
         let iat = unix_now();
         Self {
             state,
             verifier,
             nonce,
-            login_challenge,
             return_to,
             iat,
             exp: iat.saturating_add(STASH_MAX_AGE_SECS),
@@ -122,7 +108,7 @@ impl OAuthStash {
         }
         let json = URL_SAFE_NO_PAD.decode(b64).ok()?;
         let stash: Self = serde_json::from_slice(&json).ok()?;
-        if !exactly_one(stash.login_challenge.as_deref(), stash.return_to.as_deref()) {
+        if !has_return_to(stash.return_to.as_deref()) {
             return None;
         }
         let now = unix_now();
@@ -168,14 +154,8 @@ fn unix_now() -> i64 {
     i64::try_from(secs).unwrap_or(i64::MAX)
 }
 
-fn exactly_one(login_challenge: Option<&str>, return_to: Option<&str>) -> bool {
-    matches!(
-        (
-            login_challenge.filter(|value| !value.is_empty()),
-            return_to.filter(|value| !value.is_empty()),
-        ),
-        (Some(_), None) | (None, Some(_))
-    )
+fn has_return_to(return_to: Option<&str>) -> bool {
+    return_to.is_some_and(|value| !value.is_empty())
 }
 
 /// Resolve the Google stash cookie name for the current environment.
@@ -241,19 +221,6 @@ mod tests {
             state: "state-xyz".into(),
             verifier: "v".into(),
             nonce: "n".into(),
-            login_challenge: Some("lc-123".into()),
-            return_to: None,
-            iat,
-            exp,
-        }
-    }
-
-    fn sample_native_stash_at(iat: i64, exp: i64) -> OAuthStash {
-        OAuthStash {
-            state: "state-xyz".into(),
-            verifier: "v".into(),
-            nonce: "n".into(),
-            login_challenge: None,
             return_to: Some("/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb".into()),
             iat,
             exp,
@@ -303,25 +270,20 @@ mod tests {
     fn roundtrips_native_return_to() {
         let key = b"k".repeat(32);
         let now = unix_now();
-        let stash = sample_native_stash_at(now, now + 60);
+        let stash = sample_stash_at(now, now + 60);
         let encoded = stash.encode(&key);
         let decoded = OAuthStash::decode(&encoded, &key).expect("decode native stash");
         assert_eq!(decoded, stash);
-        assert!(decoded.login_challenge.is_none());
         assert_eq!(decoded.return_to, stash.return_to);
     }
 
     #[test]
-    fn rejects_stash_without_exactly_one_target() {
+    fn rejects_stash_without_return_to() {
         let key = b"k".repeat(32);
         let now = unix_now();
         let mut neither = sample_stash_at(now, now + 60);
-        neither.login_challenge = None;
+        neither.return_to = None;
         assert!(OAuthStash::decode(&neither.encode(&key), &key).is_none());
-
-        let mut both = sample_stash_at(now, now + 60);
-        both.return_to = Some("/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb".into());
-        assert!(OAuthStash::decode(&both.encode(&key), &key).is_none());
     }
 
     #[test]
