@@ -40,13 +40,13 @@
 //! ## Reload-recovery single-flight (round-6 BLOCKER)
 //!
 //! Concurrent `?mint=1` callers for the same anchor on one worker thread
-//! coalesce into ONE Hydra refresh via a per-thread in-process single-flight
+//! coalesce into ONE OP refresh via a per-thread in-process single-flight
 //! keyed on `anchor_id` ([`crate::anchors::with_single_flight`]). With the
 //! browser wrapper gone (BFF §3.1) there is no cached-wrapper short-circuit;
 //! reload-storm coalescing is the family-rotation single-flight alone. **NO db
-//! connection or lock is held across the Hydra HTTP call**: the rotation future
+//! connection or lock is held across the OP HTTP call**: the rotation future
 //! checks a pooled connection out, reads the anchor, RELEASES it, does the
-//! Hydra refresh, then checks another out to persist.
+//! OP refresh, then checks another out to persist.
 
 use std::sync::Arc;
 
@@ -264,7 +264,7 @@ pub(crate) fn same_origin_guard(
 
 /// CSRF policy for `GET /__zeroship/auth/session[?mint=1]`.
 ///
-/// `?mint=1` rotates the server-held refresh family (Hydra refresh + stored-token
+/// `?mint=1` rotates the server-held refresh family (OP refresh + stored-token
 /// rewrite + DB row write) — a state-changing operation — so it gets the SAME
 /// Origin discipline as POST `/token`: it REQUIRES both the custom `X-ZS-Auth`
 /// header (a top-level navigation cannot set it ⇒ cannot trigger a rotation) AND
@@ -324,7 +324,7 @@ pub async fn session_post(
     // FAIL FAST on the missing session signing key. The end of this handler
     // MUST `sign_session_cookie`, which 503s (`session_signing_unavailable`)
     // when `state.session_issuer` is `None`. Without this early gate that 503
-    // fires only AFTER the full Hydra code exchange + gateway-session + anchor
+    // fires only AFTER the full OP code exchange + gateway-session + anchor
     // write — wasted work and a confusing late failure. `session_issuer` is
     // `Some` exactly when the gateway has a signing key (one-to-one in
     // `main.rs`), so checking it here is the same condition the late arm would
@@ -442,7 +442,7 @@ pub(crate) async fn mint_session_from_code(
     };
 
     // 2. The id_token is LOAD-BEARING: validate sig/iss/aud(=client_id)/exp
-    //    via the gateway's Hydra JWKS. `expected_nonce=None` — the nonce is
+    //    via the gateway's OP JWKS. `expected_nonce=None` — the nonce is
     //    the SDK's own sessionStorage cross-flow guard, never echoed to the
     //    gateway. at_hash/c_hash bind the id_token to the access token + code.
     let Some(id_token) = tokens.id_token.as_deref() else {
@@ -474,7 +474,7 @@ pub(crate) async fn mint_session_from_code(
         }
     };
 
-    // 3. The global user UUID is the Hydra sub. It is stored INTERNALLY (the
+    // 3. The global user UUID is the OP sub. It is stored INTERNALLY (the
     //    anchor + the gateway session `user_id`) and projected to the per-app
     //    `pws_` for the browser — the global UUID never reaches the browser.
     let Ok(global_user_id) = Uuid::parse_str(&claims.sub) else {
@@ -534,7 +534,7 @@ pub(crate) async fn mint_session_from_code(
     //    anchor, on one pooled connection. The row carries the GLOBAL UUID
     //    (internal), the consent scopes, and the id-token auth_time/amr; the
     //    anchor carries the encrypted refresh family. NO connection is held
-    //    across any outbound call (the Hydra exchange already completed).
+    //    across any outbound call (the OP exchange already completed).
     let family_id = zeroship_core::typed_id::generate("rfam");
     // CANONICAL session/anchor key: the app UUID, NOT the subdomain slug.
     // Bound natively into the UUID `app_id` columns.
@@ -715,7 +715,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         .unwrap_or("");
 
     // 1. Fast path (no `?mint=1`): DECODE the LIVE signed session cookie LOCALLY
-    //    (signature + kid + iss + exp + app binding, no Hydra) and return the
+    //    (signature + kid + iss + exp + app binding, no OP) and return the
     //    identity projection straight from its claims. This is the steady state —
     //    a present, non-expired signed cookie needs no anchor read and no network
     //    round-trip for IDENTITY. It MUST stay coherent with the per-request
@@ -727,7 +727,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     //    one `SELECT EXISTS` when a DB is configured (skipped in smoke mode); a
     //    revoked family / non-`pws_` sub does NOT return the projection — it falls
     //    through to anchor reload-recovery below, which re-checks the family via
-    //    Hydra and ends in `login_required` for a revoked family.
+    //    OP and ends in `login_required` for a revoked family.
     if !want_mint {
         if let (Some(token), Some(verifier)) = (
             crate::oidc_rp::parse_app_session_cookie(cookie_header, state.config.insecure_dev),
@@ -778,7 +778,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     // 2. Reload-recovery (signed cookie gone/expired, or `?mint=1`): read the
     //    anchor, rotate the server-held family, re-create the gateway session,
     //    re-set the session cookie, return the projection. Released
-    //    immediately (NO conn held across the Hydra refresh).
+    //    immediately (NO conn held across the OP refresh).
     let Some(anchor_id) = anchors::parse_anchor_cookie(cookie_header, state.config.insecure_dev)
     else {
         return login_required(&route.host, state.config.insecure_dev);
@@ -811,7 +811,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         }
     };
 
-    // Rotate the server-held family via the per-node single-flight (one Hydra
+    // Rotate the server-held family via the per-node single-flight (one OP
     // refresh for N concurrent reloaders), then re-create the gateway session
     // from the rotated id-token facts.
     match rotate_family(&state, &route, &anchor).await {
@@ -978,8 +978,8 @@ fn identity_projection_ok(
 
 /// Rotate the server-held refresh family for `anchor` (the `?mint=1` /
 /// reload-recovery core). Coalesces concurrent reloaders for this anchor on
-/// THIS worker thread into ONE Hydra refresh via the per-thread single-flight.
-/// NO db connection is held across the Hydra call. The browser receives no
+/// THIS worker thread into ONE OP refresh via the per-thread single-flight.
+/// NO db connection is held across the OP call. The browser receives no
 /// wrapper — the result carries only the identity facts the handler needs to
 /// re-create the gateway session.
 #[allow(clippy::future_not_send)]
@@ -1030,9 +1030,9 @@ async fn rotate_family(
     shared.await
 }
 
-/// The coalesced refresh body: one Hydra `/oauth2/token` refresh, then persist
+/// The coalesced refresh body: one OP `/oauth2/token` refresh, then persist
 /// the rotated family (NO wrapper — the browser holds none, BFF §3.1) and
-/// return the rotated id-token facts. Holds NO db connection across the Hydra
+/// return the rotated id-token facts. Holds NO db connection across the OP
 /// call.
 #[allow(clippy::future_not_send)]
 async fn do_refresh(
@@ -1045,7 +1045,7 @@ async fn do_refresh(
         return Err(RotationError::Upstream("no database".into()));
     };
 
-    // Stamp the rotation's START instant (epoch seconds) BEFORE the Hydra
+    // Stamp the rotation's START instant (epoch seconds) BEFORE the OP
     // refresh. A per-app family marker written at-or-after this instant means a
     // teardown (H1 reset, M1 logout, signout) revoked the family DURING the
     // rotation — the fresh cookie we are about to mint carries `iat=now()`
@@ -1066,7 +1066,7 @@ async fn do_refresh(
         Err(e) => return Err(RotationError::Upstream(format!("refresh decrypt: {e}"))),
     };
 
-    // Hydra refresh — NO db connection held here.
+    // OP refresh — NO db connection held here.
     let tokens: TokenSet = match state.oidc_rp.refresh_token_public(client_id, &refresh).await {
         Ok(t) => t,
         Err(e) => {
@@ -1169,7 +1169,7 @@ async fn do_refresh(
             Err(e) => return Err(RotationError::Upstream(format!("refresh encrypt: {e}"))),
         };
     // Carry the anchor's OWN gateway-generated lineage id verbatim across the
-    // rotation — Hydra's TokenSet exposes no usable family-lineage field.
+    // rotation — OP's TokenSet exposes no usable family-lineage field.
     let family_id = anchor.refresh_family_id.clone();
     {
         let pool = match crate::db::checkout(db_cfg).await {
@@ -1183,8 +1183,8 @@ async fn do_refresh(
 
         // F4 POST-REFRESH RE-CHECK (fail-closed). Between the handler's
         // `read_live` and this persist, a concurrent H1 password reset (or M1
-        // logout / signout) may have revoked this family — and the Hydra
-        // refresh SUCCEEDS regardless (H1 deliberately leaves the Hydra grant
+        // logout / signout) may have revoked this family — and the OP
+        // refresh SUCCEEDS regardless (H1 deliberately leaves the OP grant
         // alive). Two gates close that TOCTOU window:
         //
         //   (a) the per-app family marker: if a `(client_id, pws_)` marker was

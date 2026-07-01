@@ -158,6 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
+        report.field("op_issuer_url", CheckValue::Plain(cfg.op_issuer_url()));
         report.field(
             "auth_signing_key_file_configured",
             CheckValue::Secret(cfg.auth_signing_key_file.is_some()),
@@ -281,7 +282,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let op_issuer = zeroship_auth::oidc::Issuer::from_files(
         auth_signing_key_file,
         auth_pairwise_salt_file,
-        cfg.public_url(),
+        cfg.op_issuer_url(),
     )?
     .with_broker_secrets(zeroship_auth::oidc::BrokerSecrets::from_files(
         auth_broker_secret_file,

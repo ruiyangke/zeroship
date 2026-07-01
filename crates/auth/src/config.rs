@@ -856,6 +856,16 @@ impl AuthConfig {
     pub fn public_url(&self) -> String {
         self.public_url.trim_end_matches('/').to_string()
     }
+
+    /// Public issuer URL for the self-contained OAuth/OIDC provider.
+    ///
+    /// Protocol endpoints are mounted under the fixed `/oauth2` prefix so the
+    /// OP is reverse-proxyable without owning the host root. This is the single
+    /// source for the `iss` stamped into tokens and discovery metadata.
+    #[must_use]
+    pub fn op_issuer_url(&self) -> String {
+        format!("{}/oauth2", self.public_url())
+    }
 }
 
 impl std::fmt::Debug for AuthConfig {

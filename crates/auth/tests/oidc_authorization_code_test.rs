@@ -26,7 +26,7 @@ use zeroship_auth::store::sessions as session_store;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
-const ISSUER: &str = "https://auth.zeroship.test";
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/cb";
 const SECTOR: &str = "https://app-auth-code.zeroship.test";
 
@@ -657,7 +657,7 @@ async fn send_authorize_with_scope_and_method(
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
     }
-    let url = format!("{}/authorize?{}", fx.auth_base, serializer.finish());
+    let url = format!("{}/oauth2/authorize?{}", fx.auth_base, serializer.finish());
     cyper::Client::new()
         .request(http::Method::GET, url)
         .expect("build GET /authorize")
@@ -684,7 +684,7 @@ async fn send_authorize_without_pkce(
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
     }
-    let url = format!("{}/authorize?{}", fx.auth_base, serializer.finish());
+    let url = format!("{}/oauth2/authorize?{}", fx.auth_base, serializer.finish());
     cyper::Client::new()
         .request(http::Method::GET, url)
         .expect("build GET /authorize without pkce")
@@ -721,7 +721,7 @@ async fn token_request(
         .append_pair("code_verifier", verifier)
         .finish();
     cyper::Client::new()
-        .request(http::Method::POST, format!("{}/token", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")

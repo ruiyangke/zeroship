@@ -1007,7 +1007,6 @@ mod tests {
                 worker_urls: vec![],
                 poll_interval_secs: 5,
                 worker_key: String::new(),
-                hydra_public_url: String::new(),
                 auth_ui_url: String::new(),
                 insecure_dev: true,
                 trust_proxy: false,

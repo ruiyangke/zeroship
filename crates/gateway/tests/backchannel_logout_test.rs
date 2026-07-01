@@ -19,7 +19,7 @@
 //!     filter skips the already-revoked row).
 //!
 //! The handler-level path (verify + revoke) is exercised by the
-//! Phase 7 follow-up e2e against a real hydra; for the verifier-only
+//! Phase 7 follow-up e2e against a real op; for the verifier-only
 //! check see `crates/core/src/logout_token.rs::tests`.
 
 use std::sync::Arc;
@@ -254,7 +254,7 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
 }
 
 /// Seed one `zeroship.app_session_anchors` row directly (bypassing the enc
-/// machinery — the ciphertext is opaque here; the Hydra revoke fan-out the BCL
+/// machinery — the ciphertext is opaque here; the OP revoke fan-out the BCL
 /// performs is best-effort and may fail harmlessly in the test). Returns the
 /// new anchor id.
 async fn seed_anchor(client: &Client, app_id: Uuid, client_id: &str, global_user_id: Uuid) -> Uuid {
@@ -453,7 +453,6 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
             worker_urls: vec![],
             poll_interval_secs: 5,
             worker_key: String::new(),
-            hydra_public_url: String::new(),
             auth_ui_url: auth_base.to_string(),
             insecure_dev: true,
             trust_proxy: false,
@@ -530,13 +529,13 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         let jwks_key = jwks_key.clone();
         async move {
             web::App::new().state(jwks_key).service(
-                web::resource("/.well-known/jwks.json").route(web::get().to(jwks)),
+                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
             )
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-handler-target").await;
     let target_user_string = target_user.to_string();
@@ -668,13 +667,13 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
         let jwks_key = jwks_key.clone();
         async move {
             web::App::new().state(jwks_key).service(
-                web::resource("/.well-known/jwks.json").route(web::get().to(jwks)),
+                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
             )
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-retry-target").await;
     let target_user_string = target_user.to_string();
@@ -856,13 +855,13 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
         let jwks_key = jwks_key.clone();
         async move {
             web::App::new().state(jwks_key).service(
-                web::resource("/.well-known/jwks.json").route(web::get().to(jwks)),
+                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
             )
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-sid-target").await;
     let target_user_string = target_user.to_string();
@@ -1004,13 +1003,13 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
         let jwks_key = jwks_key.clone();
         async move {
             web::App::new().state(jwks_key).service(
-                web::resource("/.well-known/jwks.json").route(web::get().to(jwks)),
+                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
             )
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-sid-fallback").await;
     let target_user_string = target_user.to_string();
@@ -1155,6 +1154,158 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
 }
 
 #[ntex::test]
+async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succeeds() {
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping (no AUTH_DB_URL)");
+        return;
+    };
+
+    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+    let mut db = client;
+    let db_cfg = DbConfig::new(dsn.clone(), 4);
+
+    let key = make_key();
+    let jwks_key = Arc::new(key.clone());
+    let jwks_server = test::server(move || {
+        let jwks_key = jwks_key.clone();
+        async move {
+            web::App::new().state(jwks_key).service(
+                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
+            )
+        }
+    })
+    .await;
+    let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
+    let issuer = format!("{auth_base}/oauth2");
+
+    let app_id = Uuid::new_v4();
+    let app_name = format!("bcl-sid-nosub-{}", Uuid::new_v4().simple());
+    let oauth_client_id = format!("oac_bclsidnosub_{}", Uuid::new_v4().simple());
+    let sector = format!("https://{app_name}.zeroship.localhost");
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
+
+    let sid = format!("sid-{}", Uuid::new_v4().simple());
+    let jti = format!("jti-{}", Uuid::new_v4().simple());
+    let token = sign_logout_token_with_aud_sid_only(&key, &issuer, &oauth_client_id, &jti, &sid);
+    let shared_jti_cache =
+        Arc::new(zeroship_core::logout_token::LogoutJtiCache::default());
+    let mut state = build_handler_state_with_route(
+        db_cfg,
+        &auth_base,
+        app_id,
+        &app_name,
+        &oauth_client_id,
+        &sector,
+        zeroship_core::auth::derive_pairwise_salt(b"bcl-sid-nosub-stash"),
+    );
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .logout_jti_cache = shared_jti_cache.clone();
+    let app = test::init_service(web::App::new().state(state).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
+    .await;
+
+    let first = test::TestRequest::post()
+        .uri("/oidc/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload(format!("logout_token={token}"))
+        .to_request();
+    let first_resp = test::call_service(&app, first).await;
+    assert!(
+        first_resp.status().is_server_error(),
+        "sid-only logout_token with no matching rows must be retryable 5xx, got {}",
+        first_resp.status()
+    );
+    assert!(
+        shared_jti_cache.is_empty(),
+        "sid-only zero-row failure must not burn the logout_token jti"
+    );
+    assert_eq!(
+        audit_count(&db, &jti).await,
+        0,
+        "sid-only zero-row failure must not emit a success audit"
+    );
+
+    let target_user = insert_user(&db, "gateway-bcl-sid-nosub-retry").await;
+    let target_user_string = target_user.to_string();
+    let session = create(
+        &mut db,
+        &NewSession {
+            user_id: &target_user_string,
+            sid: Some(&sid),
+            app_id,
+            email: Some("alice@zeroship.test"),
+            name: Some("Alice"),
+            avatar_url: None,
+            email_verified: true,
+            granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
+        },
+    )
+    .await
+    .expect("create retry session");
+
+    let retry = test::TestRequest::post()
+        .uri("/oidc/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload(format!("logout_token={token}"))
+        .to_request();
+    let retry_resp = test::call_service(&app, retry).await;
+    assert_eq!(
+        retry_resp.status(),
+        StatusCode::OK,
+        "same sid-only logout_token must be reusable after retryable zero-row failure"
+    );
+    assert!(
+        validate(&mut db, session.id, app_id)
+            .await
+            .expect("validate retry session")
+            .is_none(),
+        "retry must revoke the later matching sid session"
+    );
+    assert_eq!(
+        audit_count(&db, &jti).await,
+        1,
+        "successful retry must emit one success audit"
+    );
+    assert_eq!(shared_jti_cache.len(), 1, "successful retry burns the jti");
+
+    db.execute(
+        "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
+        &[&jti],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
+        &[&target_user_string],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
+        .await
+        .ok();
+    db.execute(
+        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&oauth_client_id],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
+}
+
+#[ntex::test]
 async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
         eprintln!("skipping (no AUTH_DB_URL)");
@@ -1177,13 +1328,13 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
         let jwks_key = jwks_key.clone();
         async move {
             web::App::new().state(jwks_key).service(
-                web::resource("/.well-known/jwks.json").route(web::get().to(jwks)),
+                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
             )
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-invalid-target").await;
     let target_user_string = target_user.to_string();
@@ -1321,6 +1472,29 @@ fn sign_logout_token_with_aud_and_sid(
     sign_logout_token_with(key, issuer, aud, sub, jti, Some(sid), true)
 }
 
+fn sign_logout_token_with_aud_sid_only(
+    key: &TestKey,
+    issuer: &str,
+    aud: &str,
+    jti: &str,
+    sid: &str,
+) -> String {
+    let now = unix_now_for_test();
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.kid = Some(key.kid.clone());
+    header.typ = Some(zeroship_core::logout_token::LOGOUT_TOKEN_TYP.into());
+    let mut claims = json!({
+        "iss": issuer,
+        "aud": aud,
+        "iat": now,
+        "exp": now + 120,
+        "jti": jti,
+        "sid": sid,
+    });
+    claims["events"] = json!({ zeroship_core::logout_token::BCL_EVENT: {} });
+    encode(&header, &claims, &key.encoding).expect("encode sid-only logout_token")
+}
+
 /// Build a handler `GateState` whose RouteCache is provisioned with ONE
 /// per-app route `(name, oauth_client_id, sector)` + a non-zero pairwise salt,
 /// so a logout_token with `aud == oauth_client_id` routes to the per-app BCL
@@ -1367,7 +1541,7 @@ fn build_handler_state_with_route(
 
 /// A per-app back-channel logout (logout_token `aud` = a per-app `oac_…`
 /// client) must write the PER-APP token-family marker keyed on `(client_id,
-/// pws_)` (Batch A fix 4), so the user's live wrapper / raw-Hydra access token
+/// pws_)` (Batch A fix 4), so the user's live wrapper / raw-OP access token
 /// for THAT app is rejected on the next request — not just their gateway
 /// sessions. We POST a real signed logout_token through the handler and assert
 /// the REAL gateway reader (`is_family_revoked_since`) — keyed exactly as the
@@ -1393,12 +1567,12 @@ async fn per_app_bcl_writes_token_family_marker() {
         async move {
             web::App::new()
                 .state(jwks_key)
-                .service(web::resource("/.well-known/jwks.json").route(web::get().to(jwks)))
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-perapp").await;
     let target_user_string = target_user.to_string();
@@ -1517,10 +1691,10 @@ async fn per_app_bcl_writes_token_family_marker() {
 }
 
 /// Batch A M1 regression — cross-arm `pws_` derivation must be invariant to the
-/// inbound Hydra `sub` SPELLING. The per-app BCL writer derives the `pws_` from
-/// the logout_token's `sub` (which Hydra controls), while a reader / the
+/// inbound OP `sub` SPELLING. The per-app BCL writer derives the `pws_` from
+/// the logout_token's `sub` (which OP controls), while a reader / the
 /// `/signout`-style writer derive it from the canonical `Uuid::to_string()`. If
-/// Hydra ever emits a NON-canonical sub (here: UPPERCASE), the writer's `pws_`
+/// OP ever emits a NON-canonical sub (here: UPPERCASE), the writer's `pws_`
 /// must STILL equal the canonical reader's `pws_`, or the BCL silently fails to
 /// revoke the live token. We sign the logout_token with the user's uppercase
 /// UUID, run the REAL handler (real writer), and assert the reader keyed on the
@@ -1546,16 +1720,16 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         async move {
             web::App::new()
                 .state(jwks_key)
-                .service(web::resource("/.well-known/jwks.json").route(web::get().to(jwks)))
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-noncanon").await;
     let canonical_sub = target_user.to_string(); // hyphenated lowercase
-    // The NON-canonical spelling Hydra could put in the logout_token `sub`.
+    // The NON-canonical spelling OP could put in the logout_token `sub`.
     let uppercase_sub = canonical_sub.to_uppercase();
     assert_ne!(
         canonical_sub, uppercase_sub,
@@ -1683,7 +1857,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
 /// marker and deleted `gateway_sessions`, but NEVER deleted the
 /// `app_session_anchors` row. The family marker rejects only tokens whose
 /// `iat < revoked_after`, so a `GET /__zeroship/auth/session?mint=1` could read
-/// the surviving anchor (`anchors::read_live` ignores the marker), run a Hydra
+/// the surviving anchor (`anchors::read_live` ignores the marker), run a OP
 /// refresh, and re-mint a fresh cookie whose `iat` post-dates the marker —
 /// silently resurrecting the session the user believed they killed.
 ///
@@ -1712,12 +1886,12 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
         async move {
             web::App::new()
                 .state(jwks_key)
-                .service(web::resource("/.well-known/jwks.json").route(web::get().to(jwks)))
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = auth_base.clone();
+    let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-anchor").await;
     let target_user_string = target_user.to_string();

@@ -25,7 +25,7 @@ use zeroship_auth::store::sessions as session_store;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
-const ISSUER: &str = "https://auth.zeroship.test";
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/cb";
 const UNREGISTERED_REDIRECT_URI: &str = "http://127.0.0.1:9999/not-registered";
 const SECTOR: &str = "https://brokered-app.zeroship.test";
@@ -385,7 +385,7 @@ async fn refresh_request(
         .append_pair("refresh_token", refresh_token)
         .finish();
     let mut req = cyper::Client::new()
-        .request(http::Method::POST, format!("{}/token", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type");
@@ -560,7 +560,7 @@ async fn send_authorize_scoped(
         .append_pair("code_challenge_method", "S256")
         .finish();
     cyper::Client::new()
-        .request(http::Method::GET, format!("{}/authorize?{query}", fx.auth_base))
+        .request(http::Method::GET, format!("{}/oauth2/authorize?{query}", fx.auth_base))
         .expect("build GET /authorize")
         .header("cookie", fx.session_cookie.clone())
         .expect("cookie")
@@ -597,7 +597,7 @@ async fn token_request(
         .append_pair("code_verifier", verifier)
         .finish();
     let mut req = cyper::Client::new()
-        .request(http::Method::POST, format!("{}/token", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type");

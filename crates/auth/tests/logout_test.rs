@@ -327,7 +327,7 @@ async fn logout_post_revokes_local_session_cookie() {
         Issuer::from_signing_key(
             &SigningKey::from_bytes(&[44u8; 32]),
             [3u8; 32],
-            "https://auth.zeroship.test".to_string(),
+            "https://auth.zeroship.test/oauth2".to_string(),
         )
         .expect("issuer"),
     );

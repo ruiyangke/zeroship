@@ -15,7 +15,7 @@
 //! resource-server access token can never be replayed as a session cookie, and
 //! the cookie — which is inert identity, never a capability — can never be
 //! presented as authorization on the Bearer arm (which recognizes only a
-//! raw-Hydra `iss`, not this token).
+//! raw OP `iss`, not this token).
 //!
 //! ## What the cookie carries — identity + scopes only, NOT a capability
 //!
@@ -70,7 +70,7 @@ pub struct SessionClaims {
     /// cookie arm rejects a cookie whose `app` does not match the resolved
     /// route's client (audience binding, same role as the wrapper `aud`/Host).
     pub app: String,
-    /// Per-app pairwise subject (`pws_…`). NEVER the global Hydra UUID.
+    /// Per-app pairwise subject (`pws_…`). NEVER the global OP UUID.
     pub sub: String,
     pub iat: i64,
     pub exp: i64,

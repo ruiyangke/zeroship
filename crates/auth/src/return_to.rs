@@ -91,7 +91,10 @@ mod tests {
     #[test]
     fn valid_path_accepts_same_origin_paths() {
         assert_eq!(valid_path("/me"), Some("/me"));
-        assert_eq!(valid_path("/authorize?client_id=x&scope=openid"), Some("/authorize?client_id=x&scope=openid"));
+        assert_eq!(
+            valid_path("/oauth2/authorize?client_id=x&scope=openid"),
+            Some("/oauth2/authorize?client_id=x&scope=openid")
+        );
         // Leading/trailing whitespace is trimmed, then accepted.
         assert_eq!(valid_path("  /me  "), Some("/me"));
     }
@@ -139,4 +142,3 @@ mod tests {
         assert_eq!(sanitize(Some("/good"), SAFE_DEFAULT), "/good");
     }
 }
-

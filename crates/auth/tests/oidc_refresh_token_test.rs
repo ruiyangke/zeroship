@@ -23,7 +23,7 @@ use zeroship_core::auth::hash_api_key;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
-const ISSUER: &str = "https://auth.zeroship.test";
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9998/cb";
 const SECTOR: &str = "https://app-refresh.zeroship.test";
 const REFRESH_CLIENT_SECRET: &str = "refresh-client-secret-32-bytes-minimum";
@@ -682,7 +682,7 @@ async fn send_authorize(
     verifier: &str,
 ) -> Result<cyper::Response, cyper::Error> {
     let url = format!(
-        "{}/authorize?{}",
+        "{}/oauth2/authorize?{}",
         fx.auth_base,
         url::form_urlencoded::Serializer::new(String::new())
             .append_pair("client_id", &fx.client_id)
@@ -719,7 +719,7 @@ async fn token_request(
         .append_pair("code_verifier", verifier)
         .finish();
     cyper::Client::new()
-        .request(http::Method::POST, format!("{}/token", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
@@ -741,7 +741,7 @@ async fn refresh_request(
         form.append_pair("scope", scope);
     }
     cyper::Client::new()
-        .request(http::Method::POST, format!("{}/token", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
@@ -759,7 +759,7 @@ async fn revoke_request(fx: &Fixture, refresh_token: &str) -> Result<cyper::Resp
         .append_pair("token_type_hint", "refresh_token")
         .finish();
     cyper::Client::new()
-        .request(http::Method::POST, format!("{}/revoke", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/revoke", fx.auth_base))
         .expect("build POST /revoke")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")

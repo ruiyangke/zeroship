@@ -1,20 +1,20 @@
 //! `POST /oidc/backchannel-logout` — OIDC BCL 1.0 RP endpoint.
 //!
-//! Hydra POSTs a signed `logout_token` JWT here when a user signs out
+//! OP POSTs a signed `logout_token` JWT here when a user signs out
 //! via `/oauth2/sessions/logout`. The gateway verifies the token (see
 //! [`zeroship_core::logout_token`]) and revokes the user's app
 //! sessions.
 //!
 //! The endpoint is registered at the gateway-host level (not per
 //! creator-app subdomain) because the URI must be stable for every
-//! `backchannel_logout_uri` registered with hydra. In production that
+//! `backchannel_logout_uri` registered with op. In production that
 //! lives at `https://api.zeroship.ai/oidc/backchannel-logout` — see
 //! `ops/auth-clients.example.toml`.
 //!
 //! Response contract:
 //! - 200 + `cache-control: no-store` on success or already-processed replay
 //! - 400 + `cache-control: no-store` on any verify failure (with a
-//!   short text body; hydra logs the body so it shows up in the auth
+//!   short text body; op logs the body so it shows up in the auth
 //!   server's debug surface)
 //! - 5xx + `cache-control: no-store` on a retryable local processing failure
 //!
@@ -47,7 +47,7 @@ pub async fn handle(
     form: Form<LogoutForm>,
     state: State<Arc<GateState>>,
 ) -> HttpResponse {
-    // `state.oidc_rp.issuer` is the canonical hydra issuer string
+    // `state.oidc_rp.issuer` is the canonical op issuer string
     // (built from `auth_ui_url` at boot, optionally overridden via
     // `OidcRp::with_issuer` in tests).
     let issuer = state.oidc_rp.issuer.clone();
@@ -59,25 +59,25 @@ pub async fn handle(
     // client it is for; a per-app client resolves to one app's subdomain so we
     // revoke only THAT app's sessions.
     //
-    // `revoke_scope` carries the app's STABLE UUID (`apps.id`) when a per-app
+    // `app_id` carries the app's STABLE UUID (`apps.id`) when a per-app
     // client matched (revoke only that app — the canonical session/anchor
-    // key), or `None` for the shared-client all-apps path.
+    // key).
     // `revoke_sector` carries that app's `sector_identifier` so the per-app
     // branch can derive the same `pws_…` the gateway projects, to write the
     // PER-APP token-family marker (Batch A fix 4) — a per-app BCL must kill the
-    // user's live wrapper / raw-Hydra access token for THAT app, not just its
+    // user's live wrapper / raw-OP access token for THAT app, not just its
     // gateway sessions. `None` sector ⇒ the marker write is skipped (no live
     // wrapper to revoke without a sector).
     let aud_candidates =
         zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
-    let Some((aud, revoke_scope, revoke_sector)) = aud_candidates
+    let Some((aud, app_id, revoke_sector)) = aud_candidates
         .iter()
         .find_map(|cand| {
             // The per-app session/anchor rows are keyed by the app's STABLE
             // UUID (`apps.id`), not the renameable subdomain slug — so the
             // per-app revoke scope carries the app id, never `route.entry.name`.
             state.routes.lookup_by_oauth_client_id(cand).map(|(id, route)| {
-                (cand.clone(), Some(id), route.entry.sector_identifier.clone())
+                (cand.clone(), id, route.entry.sector_identifier.clone())
             })
         }) else {
             tracing::warn!(
@@ -153,7 +153,7 @@ pub async fn handle(
         None => None,
     };
     // M1 fix: the anchor refresh families deleted inside the DB block, to be
-    // revoked at Hydra AFTER the connection is released (no conn held across the
+    // revoked at OP AFTER the connection is released (no conn held across the
     // outbound HTTP). Each family is paired with its global user id so we can
     // rebuild the per-family AEAD AAD for the decrypt.
     let mut anchor_families: Vec<(uuid::Uuid, crate::anchors::DeletedFamily)> = Vec::new();
@@ -162,26 +162,6 @@ pub async fn handle(
     // audit-insert calls below reborrow it immutably; every touch is sequential
     // (no overlapping borrow) and no outbound HTTP runs between them.
     if let Some(conn) = conn.as_deref_mut() {
-        let Some(app_id) = revoke_scope else {
-            tracing::warn!(
-                aud = %aud,
-                "backchannel_logout: logout_token aud is not a per-app client; \
-                 no per-app scope to revoke under RLS (no rows touched)"
-            );
-            emit_revocation_audit(
-                &*conn,
-                &aud,
-                token.sub.as_deref(),
-                token.sid.as_deref(),
-                &token.jti,
-                0,
-            )
-            .await;
-            return HttpResponse::Ok()
-                .header("cache-control", "no-store")
-                .finish();
-        };
-
         let mut revoked: u64 = 0;
         if let Some(sid) = token.sid.as_deref() {
             let users = match sessions::revoke_app_sessions_for_sid(
@@ -234,6 +214,13 @@ pub async fn handle(
                             return retryable_processing_error();
                         }
                     };
+                } else {
+                    tracing::error!(
+                        app_id = %app_id,
+                        sid = %sid,
+                        "backchannel_logout: sid matched zero sessions and logout_token has no sub fallback"
+                    );
+                    return retryable_processing_error();
                 }
             }
             for global_user_id in users {
@@ -317,15 +304,15 @@ pub async fn handle(
             .finish();
     }
 
-    // Release the pooled connection BEFORE the outbound Hydra revoke (the
+    // Release the pooled connection BEFORE the outbound OP revoke (the
     // round-6 BLOCKER invariant: no DB conn is ever held across outbound HTTP).
     drop(conn);
     drop(pool);
 
     // M1 fix (best-effort, defense-in-depth): revoke each anchor refresh family
-    // deleted above at Hydra so the rotating refresh grant is killed at the
+    // deleted above at OP so the rotating refresh grant is killed at the
     // source, not just locally. The anchor rows are already gone (the
-    // authoritative step); a Hydra hiccup here is logged, never surfaced.
+    // authoritative step); a OP hiccup here is logged, never surfaced.
     for (global_user_id, fam) in &anchor_families {
         let sub_str = global_user_id.to_string();
         let aad = anchor_aad(&fam.client_id, &sub_str);
@@ -338,7 +325,7 @@ pub async fn handle(
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "backchannel_logout: anchor refresh decrypt failed (skip Hydra revoke)"
+                    "backchannel_logout: anchor refresh decrypt failed (skip OP revoke)"
                 );
                 continue;
             }
@@ -347,7 +334,7 @@ pub async fn handle(
             // RFC 7009 §2.2: best-effort — the anchor row is already gone.
             tracing::warn!(
                 error = %e,
-                "backchannel_logout: Hydra refresh revoke best-effort failure"
+                "backchannel_logout: OP refresh revoke best-effort failure"
             );
         }
     }
@@ -366,7 +353,7 @@ fn anchor_aad(client_id: &str, sub: &str) -> Vec<u8> {
 
 /// Mount the route onto an ntex `App` factory. Registered at
 /// `POST /oidc/backchannel-logout`. The route is unconditionally
-/// available (not gated on anything) — hydra's webhook surface needs
+/// available (not gated on anything) — op's webhook surface needs
 /// a stable URL.
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(

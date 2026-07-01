@@ -33,12 +33,12 @@ pub async fn jwks(db: web::types::State<Arc<Client>>) -> HttpResponse {
 
 #[web::get("/.well-known/openid-configuration")]
 pub async fn openid_configuration(cfg: web::types::State<Arc<AuthConfig>>) -> HttpResponse {
-    discovery_response(cfg.public_url())
+    discovery_response(cfg.op_issuer_url())
 }
 
 #[web::get("/.well-known/oauth-authorization-server")]
 pub async fn oauth_authorization_server(cfg: web::types::State<Arc<AuthConfig>>) -> HttpResponse {
-    discovery_response(cfg.public_url())
+    discovery_response(cfg.op_issuer_url())
 }
 
 fn discovery_response(issuer: String) -> HttpResponse {

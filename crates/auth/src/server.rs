@@ -35,15 +35,23 @@ pub fn configure(
     github_enabled: bool,
 ) -> impl Fn(&mut web::ServiceConfig) {
     move |cfg: &mut web::ServiceConfig| {
-        oidc::authorization_code::configure(cfg);
+        cfg.service(
+            web::scope("/oauth2")
+                .configure(oidc::authorization_code::configure)
+                .configure(oidc::userinfo::configure)
+                .service(
+                    web::resource("/logout")
+                        .route(web::get().to(ui::logout::get))
+                        .route(web::post().to(ui::logout::post)),
+                )
+                .service(oidc::metadata::jwks)
+                .service(oidc::metadata::openid_configuration)
+                .service(oidc::metadata::oauth_authorization_server),
+        );
         oidc::device_token::configure(cfg);
-        oidc::userinfo::configure(cfg);
         cfg.service(healthz)
             .service(readyz)
             .service(style)
-            .service(oidc::metadata::jwks)
-            .service(oidc::metadata::openid_configuration)
-            .service(oidc::metadata::oauth_authorization_server)
             .service(
                 web::resource("/login")
                     .route(web::get().to(ui::login::get))

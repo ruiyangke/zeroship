@@ -109,7 +109,7 @@ struct StateOpts {
     /// un-provisioned (`None`/`None`) to exercise the 503 path.
     provisioned: bool,
     /// OP dial URL (loopback mock) for `OidcRp`.
-    hydra_base: String,
+    op_base: String,
     db: Option<zeroship_gateway::db::DbConfig>,
     /// Optional previous signing key (session-cookie rotation overlap).
     prev_signing: Option<SigningKey>,
@@ -119,7 +119,7 @@ impl Default for StateOpts {
     fn default() -> Self {
         Self {
             provisioned: true,
-            hydra_base: "http://127.0.0.1:1".into(),
+            op_base: "http://127.0.0.1:1".into(),
             db: None,
             prev_signing: None,
         }
@@ -151,7 +151,7 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
 
     // OidcRp dials the loopback mock for OP endpoints.
     let oidc_rp = OidcRp::new(
-        &opts.hydra_base,
+        &opts.op_base,
         BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
         b"k".repeat(32),
     )
@@ -171,8 +171,7 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
             worker_urls: vec![],
             poll_interval_secs: 5,
             worker_key: "worker-key".into(),
-            hydra_public_url: opts.hydra_base.clone(),
-            auth_ui_url: opts.hydra_base.clone(),
+            auth_ui_url: opts.op_base.clone(),
             // insecure_dev=false → prod __Host- / Strict / Secure cookies +
             // https Origin compare are exercised.
             insecure_dev: false,
@@ -278,8 +277,8 @@ async fn authorize_redirects_to_op_with_browser_pkce() {
 
     assert_eq!(resp.status().as_u16(), 302, "authorize must 302 to OP");
     let loc = header_str(&resp, "location").expect("Location header");
-    // Cross-site hop to the OP's /authorize.
-    assert!(loc.starts_with("http://127.0.0.1:1/authorize?"), "{loc}");
+    // Cross-site hop to the OP's /oauth2/authorize.
+    assert!(loc.starts_with("http://127.0.0.1:1/oauth2/authorize?"), "{loc}");
     // PER-APP public client_id (never the gateway confidential client).
     assert!(loc.contains("client_id=oac_myapp"), "{loc}");
     assert!(!loc.contains("client_id=gateway"), "{loc}");
@@ -542,7 +541,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
 
     let state = build_state(StateOpts {
         provisioned: true,
-        hydra_base: base,
+        op_base: base,
         db: Some(db.clone()),
         prev_signing: None,
     });
@@ -738,14 +737,14 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
-/// Start a loopback mock OP that answers `POST /revoke` with 200
+/// Start a loopback mock OP that answers `POST /oauth2/revoke` with 200
 /// and increments `counter`. Faithful to RFC 7009 (always 200).
 async fn start_mock_revoke(counter: Arc<AtomicU32>) -> test::TestServer {
     test::server(move || {
         let counter = counter.clone();
         async move {
             web::App::new().state(counter).service(
-                web::resource("/revoke").route(web::post().to(
+                web::resource("/oauth2/revoke").route(web::post().to(
                     |c: web::types::State<Arc<AtomicU32>>| async move {
                         c.fetch_add(1, Ordering::SeqCst);
                         web::HttpResponse::Ok().finish()
