@@ -1143,6 +1143,13 @@ mod tests {
     // session cookie, and a real `GateState` (sans live PG / hydra) and drive
     // `resolve_bearer_user_header` / the cookie arm directly.
 
+    fn test_broker_secret() -> crate::oidc_rp::BrokerSecret {
+        crate::oidc_rp::BrokerSecret::from_bytes(
+            b"gateway-router-auth-test-broker-master-32-bytes".to_vec(),
+        )
+        .expect("broker secret")
+    }
+
     /// `BlobStore` stub for the test fixture — `GateState` requires
     /// one, but the auth path never reaches it.
     #[derive(Debug, Default)]
@@ -1234,8 +1241,7 @@ mod tests {
         // OidcRp dial URL (and JWKS), with the issuer derived from it.
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             auth_ui_url,
-            "gateway",
-            "test-secret",
+            test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         );
         build_state_with_session_and_oidc_and_db(signing, oidc_rp, db)
@@ -1426,8 +1432,7 @@ mod tests {
     ) -> std::sync::Arc<crate::GateState> {
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             jwks_base,
-            "gateway",
-            "test-secret",
+            test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
         .with_issuer(HYDRA_ISS);
@@ -1648,8 +1653,7 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
-            "gateway",
-            "test-secret",
+            test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
         .with_issuer(HYDRA_ISS);
@@ -2255,8 +2259,7 @@ mod tests {
         // build_state_for_hydra with a DB so the revocation check runs.
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
-            "gateway",
-            "test-secret",
+            test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
         .with_issuer(HYDRA_ISS);
@@ -2434,8 +2437,7 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
-            "gateway",
-            "test-secret",
+            test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
         .with_issuer(HYDRA_ISS);
@@ -3690,8 +3692,7 @@ mod tests {
         let base = srv.url("").trim_end_matches('/').to_string();
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
-            "gateway",
-            "test-secret",
+            test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
         .with_issuer(HYDRA_ISS);

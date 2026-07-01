@@ -1024,8 +1024,10 @@ mod tests {
             idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
             oidc_rp: Arc::new(crate::oidc_rp::OidcRp::new(
                 "http://auth.test",
-                "gateway",
-                "test-secret",
+                crate::oidc_rp::BrokerSecret::from_bytes(
+                    b"gateway-static-test-broker-master-32-bytes".to_vec(),
+                )
+                .expect("broker secret"),
                 b"test-stash-key-32-bytes-long----".to_vec(),
             )),
             db: None,

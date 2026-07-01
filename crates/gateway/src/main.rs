@@ -24,7 +24,6 @@ use zeroship_gateway::{
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
-const DEV_GATEWAY_OIDC_SECRET: &str = "dev-secret-rotate-me-too";
 
 /// zeroship gateway startup configuration.
 #[derive(Parser)]
@@ -125,14 +124,18 @@ struct GateCli {
     #[arg(long = "auth-ui-url", env = "AUTH_UI_URL", default_value = "http://auth:9092")]
     auth_ui_url: String,
 
-    /// Gateway OIDC client secret.
+    /// File containing the shared platform broker master secret.
+    ///
+    /// Must contain the same raw bytes as auth's `AUTH_BROKER_SECRET_FILE`.
+    /// The gateway derives per-app `oac_` client secrets from this material
+    /// when brokering authorization-code, refresh, and revoke requests to the
+    /// platform OP.
     #[arg(
-        long = "gateway-oidc-secret",
-        env = "GATEWAY_OIDC_SECRET",
-        default_value = "",
-        hide_env_values = true
+        long = "gateway-broker-secret-file",
+        env = "GATEWAY_BROKER_SECRET_FILE",
+        default_value = ""
     )]
-    gateway_oidc_secret: String,
+    gateway_broker_secret_file: String,
 
     /// HMAC key for short-lived OIDC stash cookies.
     #[arg(
@@ -250,6 +253,34 @@ fn resolve_pairwise_salt(
     )
 }
 
+fn load_gateway_broker_secret_file(path: &str) -> oidc_rp::BrokerSecret {
+    if path.is_empty() {
+        tracing::error!(
+            "gateway: refusing to start without GATEWAY_BROKER_SECRET_FILE / --gateway-broker-secret-file"
+        );
+        std::process::exit(1);
+    }
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        tracing::error!(
+            error = %e,
+            path = %path,
+            "gateway: cannot read GATEWAY_BROKER_SECRET_FILE"
+        );
+        std::process::exit(1);
+    });
+    oidc_rp::BrokerSecret::from_bytes(bytes).unwrap_or_else(|message| {
+        let message = message.replace(
+            "AUTH_BROKER_SECRET_FILE",
+            "GATEWAY_BROKER_SECRET_FILE / --gateway-broker-secret-file",
+        );
+        tracing::error!(
+            error = %message,
+            "gateway: refusing to start with unsafe broker master secret"
+        );
+        std::process::exit(1);
+    })
+}
+
 fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
     let boot = bootstrap_or_exit(
@@ -325,12 +356,6 @@ fn main() -> std::io::Result<()> {
         file_secrets.database_url.as_deref(),
         cli.check_config,
     );
-    let oidc_client_secret = zeroship_core::config::obtain_secret(
-        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-        &cli.gateway_oidc_secret,
-        file_secrets.gateway_oidc_secret.as_deref(),
-        cli.check_config,
-    );
     let stash_signing_key = zeroship_core::config::obtain_secret(
         "STASH_SIGNING_KEY / --stash-signing-key",
         &cli.stash_signing_key,
@@ -350,6 +375,7 @@ fn main() -> std::io::Result<()> {
     // unresolved; the signing key is loaded from this path below.
     let signing_key_path = cli.gateway_signing_key_file;
     let prev_signing_key_path = cli.gateway_prev_signing_key_file;
+    let broker_secret_path = cli.gateway_broker_secret_file;
     let public_url = cli.gateway_public_url;
 
     if let Err(message) =
@@ -359,19 +385,7 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    if let Err(message) = require_unless_dev(
-        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-        &oidc_client_secret,
-        insecure_dev,
-    ) {
-        tracing::error!(error = %message, "gateway: refusing to start without gateway OIDC secret");
-        std::process::exit(1);
-    }
-    let oidc_client_secret = if oidc_client_secret.is_empty() {
-        DEV_GATEWAY_OIDC_SECRET.to_string()
-    } else {
-        oidc_client_secret
-    };
+    let broker_secret = load_gateway_broker_secret_file(&broker_secret_path);
 
     // STRENGTH guard. At real boot `stash_signing_key` is the resolved value,
     // so the length/sentinel checks apply to the real material. During
@@ -541,6 +555,10 @@ fn main() -> std::io::Result<()> {
             "signing_key_configured",
             CheckValue::Secret(!signing_key_path.is_empty()),
         );
+        report.field(
+            "gateway_broker_secret_file_configured",
+            CheckValue::Secret(!broker_secret_path.is_empty()),
+        );
         // Report whether the OPERATOR explicitly supplied a salt (pre-dev-
         // default), matching control — so a dev run with no salt reads "(unset)"
         // rather than masking the missing config behind the dev default.
@@ -654,8 +672,7 @@ fn main() -> std::io::Result<()> {
 
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,
-        "gateway",
-        oidc_client_secret,
+        broker_secret,
         stash_signing_key_bytes,
     ));
 
@@ -811,17 +828,26 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    static DEV_INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn restore_env_var(key: &str, old: Option<std::ffi::OsString>) {
+        match old {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be
     // overridable from the CLI. `--dev-insecure=false` resolves to false.
     // NB: `GateCli` deliberately has no `Debug` (S2 — it holds raw secret
     // strings), so we can't `.expect()` the Ok arm; match instead.
     #[test]
     fn dev_insecure_cli_false_overrides_env_one() {
-        // Single-threaded test: env set + cleared within this fn.
-        // (Edition 2021 — `set_var`/`remove_var` are safe here.)
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
+        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
         let parsed = GateCli::try_parse_from(["zeroship-gate", "--dev-insecure=false"]);
-        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
 
         let Ok(cli) = parsed else {
             panic!("parse with explicit false should succeed");
@@ -832,9 +858,11 @@ mod tests {
 
     #[test]
     fn dev_insecure_env_one_enables_when_cli_absent() {
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
+        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
         let parsed = GateCli::try_parse_from(["zeroship-gate"]);
-        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
 
         let Ok(cli) = parsed else {
             panic!("parse with env only should succeed");
@@ -901,33 +929,26 @@ mod tests {
     }
 
     #[test]
-    fn gateway_oidc_secret_rejects_missing_in_non_dev() {
-        let err = require_unless_dev(
-            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-            "",
-            false,
+    fn gateway_broker_secret_rejects_short_material() {
+        let err = oidc_rp::BrokerSecret::from_bytes(b"short".to_vec()).unwrap_err();
+        assert!(err.contains("minimum is 32 bytes"), "{err}");
+    }
+
+    #[test]
+    fn gateway_broker_secret_rejects_dev_sentinel() {
+        let err = oidc_rp::BrokerSecret::from_bytes(
+            zeroship_core::auth::DEV_BROKER_MASTER_SECRET.to_vec(),
         )
         .unwrap_err();
-        assert!(err.contains("GATEWAY_OIDC_SECRET"), "{err}");
+        assert!(err.contains("dev sentinel"), "{err}");
     }
 
     #[test]
-    fn gateway_oidc_secret_allows_missing_in_insecure_dev() {
-        assert!(
-            require_unless_dev("GATEWAY_OIDC_SECRET / --gateway-oidc-secret", "", true).is_ok()
-        );
-    }
-
-    #[test]
-    fn gateway_oidc_secret_accepts_nonempty_in_non_dev() {
-        assert!(
-            require_unless_dev(
-                "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-                "secret",
-                false
-            )
-            .is_ok()
-        );
+    fn gateway_broker_secret_accepts_strong_material() {
+        oidc_rp::BrokerSecret::from_bytes(
+            b"gateway-broker-secret-test-master-32-bytes".to_vec(),
+        )
+        .expect("strong broker master");
     }
 
     #[test]
@@ -1023,7 +1044,7 @@ mod tests {
     }
 
     // (d) `[secrets]` file tier — the gateway maps control_key/worker_key/
-    // database_url/gateway_oidc_secret/stash_signing_key through
+    // database_url/stash_signing_key through
     // `obtain_secret`. When the CLI/env value is empty, a `[secrets]` file
     // reference is used; when both are present, the CLI/env value WINS.
     // Asserted directly against the public `obtain_secret` (the exact helper

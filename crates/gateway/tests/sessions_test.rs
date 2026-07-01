@@ -38,6 +38,7 @@ async fn create_validate_revoke_roundtrip() {
     // Random ids — keeps the test repeatable on a shared DB. `app_id` is the
     // app's stable UUID (the column is UUID, bound natively).
     let app_id = Uuid::new_v4();
+    insert_app(&client, app_id).await;
     let user_id = insert_user(&client, "gateway-session").await;
     let user_id_text = user_id.to_string();
 
@@ -130,6 +131,36 @@ async fn create_validate_revoke_roundtrip() {
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await
         .ok();
+    client
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
+}
+
+async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
+    client
+        .execute(
+            "INSERT INTO zeroship.plans \
+                (id, name, runtime_limits_json, assignable_by_creator) \
+             VALUES ('free', 'Free', '{}'::jsonb, TRUE) \
+             ON CONFLICT (id) DO NOTHING",
+            &[],
+        )
+        .await
+        .expect("insert free plan");
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &app_id,
+                &format!("gateway-session-app-{}", app_id.simple()),
+                &format!("api-{app_id}"),
+                &format!("hash-{app_id}"),
+            ],
+        )
+        .await
+        .expect("insert app");
 }
 
 async fn insert_user(client: &compio_postgres::Client, label: &str) -> Uuid {
