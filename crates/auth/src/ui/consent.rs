@@ -38,7 +38,9 @@ use crate::hydra_client::types::{
     OAuth2Client,
 };
 use crate::oidc::auth_request::AuthRequest;
-use crate::oidc::authorization_code::persist_consent_grant;
+use crate::oidc::authorization_code::{
+    persist_consent_grant, return_to_after_prompt_interaction,
+};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions as session_store;
@@ -567,6 +569,7 @@ async fn post_consent_accept_native(
     )
     .await;
 
+    let return_to = return_to_after_prompt_interaction(&return_to, &["consent"]);
     return_to::see_other(&return_to)
         .header("cache-control", "no-store")
         .finish()

@@ -27,6 +27,9 @@ use crate::identity::credentials::{verify_password_credentials, CredentialError}
 use crate::identity::eligibility::{self, LoginIneligible};
 use crate::identity::totp;
 use crate::oidc::auth_request::AuthRequest;
+use crate::oidc::authorization_code::{
+    prompt_requests_login, return_to_after_prompt_interaction,
+};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
@@ -156,12 +159,16 @@ async fn get_native(
 ) -> HttpResponse {
     let return_to = return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
     let auth_request = AuthRequest::parse_return_to(&return_to).ok();
+    let force_login = auth_request
+        .as_ref()
+        .is_some_and(|request| prompt_requests_login(request.prompt.as_deref()));
     match resolve_native_session(&req, cfg, db).await {
-        Ok(Some(_)) => {
+        Ok(Some(_)) if !force_login => {
             return return_to::see_other(&return_to)
                 .header("cache-control", "no-store")
                 .finish();
         }
+        Ok(Some(_)) => {}
         Ok(None) => {}
         Err(resp) => return resp,
     }
@@ -663,7 +670,8 @@ async fn finish_login_native(
         return render_error(PublicErrorMessage::ContactSupport);
     };
 
-    let mut resp = return_to::see_other(return_to);
+    let return_to = return_to_after_prompt_interaction(return_to, &["login", "select_account"]);
+    let mut resp = return_to::see_other(&return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
