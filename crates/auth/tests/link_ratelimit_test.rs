@@ -110,7 +110,8 @@ async fn link_wrong_password_is_limited_by_fifth_attempt() {
         provider: "github".into(),
         subject: format!("github-{}", Uuid::new_v4().simple()),
         email: email.clone(),
-        login_challenge: format!("challenge-{}", Uuid::new_v4().simple()),
+        login_challenge: Some(format!("challenge-{}", Uuid::new_v4().simple())),
+        return_to: None,
         exp_unix: i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -68,22 +68,29 @@ pub struct ResolvedProfile<'a> {
 pub enum LinkOutcome {
     /// Identity already linked to this user, or auto-linked to an
     /// OAuth-only local user. The federation callback continues to
-    /// `accept_login`.
+    /// its completion arm.
     Existing { user_id: Uuid },
     /// Brand-new account created and the identity linked to it. The
-    /// federation callback continues to `accept_login`.
+    /// federation callback continues to its completion arm.
     Created { user_id: Uuid },
     /// Email collision with a locally-credentialed account. The federation
     /// callback MUST NOT call `accept_login`; it should 302 the browser to
     /// `/link?token=<pending_token>` so the user can confirm with their
     /// existing zeroship password. The pending token carries everything
-    /// `/link` POST needs (user id, provider, subject, email, the original
-    /// `login_challenge`) — signed with the stash key and 10-minute TTL.
+    /// `/link` POST needs (user id, provider, subject, email, continuation
+    /// target) — signed with the stash key and 10-minute TTL.
     NeedsConfirmation {
         pending_token: String,
         existing_email: String,
         provider: String,
     },
+}
+
+/// Continuation target to carry through a pending account-link confirmation.
+#[derive(Debug, Clone, Copy)]
+pub enum LinkResume<'a> {
+    LoginChallenge(&'a str),
+    ReturnTo(&'a str),
 }
 
 /// TTL for a `PendingLink` token, in seconds.
@@ -106,7 +113,8 @@ pub struct PendingLink {
     pub provider: String,
     pub subject: String,
     pub email: String,
-    pub login_challenge: String,
+    pub login_challenge: Option<String>,
+    pub return_to: Option<String>,
     /// Unix-seconds expiry. Signed AS PART OF the payload, so a server
     /// without clock-skew can reject expired tokens without keeping state.
     pub exp_unix: i64,
@@ -156,6 +164,9 @@ impl PendingLink {
         }
         let json = URL_SAFE_NO_PAD.decode(b64).ok()?;
         let pl: Self = serde_json::from_slice(&json).ok()?;
+        if !exactly_one(pl.login_challenge.as_deref(), pl.return_to.as_deref()) {
+            return None;
+        }
         // Expiry check — clock-skew-free because we only check against the
         // local wall-clock.
         let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
@@ -165,6 +176,16 @@ impl PendingLink {
         }
         Some(pl)
     }
+}
+
+fn exactly_one(login_challenge: Option<&str>, return_to: Option<&str>) -> bool {
+    matches!(
+        (
+            login_challenge.filter(|value| !value.is_empty()),
+            return_to.filter(|value| !value.is_empty()),
+        ),
+        (Some(_), None) | (None, Some(_))
+    )
 }
 
 /// Resolve the local user for a federation callback.
@@ -183,7 +204,7 @@ impl PendingLink {
 pub async fn resolve_or_link(
     db: &Client,
     profile: &ResolvedProfile<'_>,
-    login_challenge: &str,
+    resume: LinkResume<'_>,
     pending_signing_key: &[u8],
 ) -> Result<LinkOutcome> {
     email_validation::validate_email(profile.email)
@@ -204,7 +225,7 @@ pub async fn resolve_or_link(
             return pending_confirmation(
                 user.id,
                 profile,
-                login_challenge,
+                resume,
                 pending_signing_key,
             );
         }
@@ -279,7 +300,7 @@ pub async fn resolve_or_link(
 fn pending_confirmation(
     user_id: Uuid,
     profile: &ResolvedProfile<'_>,
-    login_challenge: &str,
+    resume: LinkResume<'_>,
     pending_signing_key: &[u8],
 ) -> Result<LinkOutcome> {
     let exp_unix = i64::try_from(
@@ -295,7 +316,14 @@ fn pending_confirmation(
         provider: profile.provider.to_string(),
         subject: profile.subject.to_string(),
         email: profile.email.to_string(),
-        login_challenge: login_challenge.to_string(),
+        login_challenge: match resume {
+            LinkResume::LoginChallenge(value) => Some(value.to_string()),
+            LinkResume::ReturnTo(_) => None,
+        },
+        return_to: match resume {
+            LinkResume::LoginChallenge(_) => None,
+            LinkResume::ReturnTo(value) => Some(value.to_string()),
+        },
         exp_unix,
     };
     Ok(LinkOutcome::NeedsConfirmation {
@@ -315,7 +343,8 @@ mod tests {
             provider: "google".into(),
             subject: "sub-abc".into(),
             email: "ada@example.com".into(),
-            login_challenge: "lc-xyz".into(),
+            login_challenge: Some("lc-xyz".into()),
+            return_to: None,
             exp_unix: i64::try_from(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -335,6 +364,29 @@ mod tests {
         assert!(encoded.contains('.'));
         let decoded = PendingLink::decode(&encoded, &key).expect("decode");
         assert_eq!(decoded, pl);
+    }
+
+    #[test]
+    fn pending_link_roundtrips_native_return_to() {
+        let key = b"k".repeat(32);
+        let mut pl = sample_pending();
+        pl.login_challenge = None;
+        pl.return_to = Some("/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb".into());
+        let encoded = pl.encode(&key);
+        let decoded = PendingLink::decode(&encoded, &key).expect("decode");
+        assert_eq!(decoded, pl);
+    }
+
+    #[test]
+    fn pending_link_rejects_without_exactly_one_target() {
+        let key = b"k".repeat(32);
+        let mut neither = sample_pending();
+        neither.login_challenge = None;
+        assert!(PendingLink::decode(&neither.encode(&key), &key).is_none());
+
+        let mut both = sample_pending();
+        both.return_to = Some("/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb".into());
+        assert!(PendingLink::decode(&both.encode(&key), &key).is_none());
     }
 
     #[test]
@@ -428,7 +480,7 @@ mod tests {
         };
 
         let key = b"k".repeat(32);
-        let outcome = resolve_or_link(&client, &profile, "lc-test", &key)
+        let outcome = resolve_or_link(&client, &profile, LinkResume::LoginChallenge("lc-test"), &key)
             .await
             .expect("resolve_or_link");
 
@@ -445,7 +497,8 @@ mod tests {
                 assert_eq!(decoded.user_id, user_id);
                 assert_eq!(decoded.email, email);
                 assert_eq!(decoded.provider, "google");
-                assert_eq!(decoded.login_challenge, "lc-test");
+                assert_eq!(decoded.login_challenge.as_deref(), Some("lc-test"));
+                assert!(decoded.return_to.is_none());
             }
             other => panic!("expected NeedsConfirmation, got {other:?}"),
         }
@@ -459,6 +512,65 @@ mod tests {
         );
 
         // Cleanup.
+        client
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+            .await
+            .ok();
+    }
+
+    #[compio::test]
+    async fn needs_confirmation_carries_native_return_to() {
+        let Some(client) = pg().await else {
+            eprintln!("skipping linker live-PG test (no AUTH_DB_URL)");
+            return;
+        };
+
+        let email = format!("linker-native-{}@example.test", Uuid::new_v4().simple());
+        let phc = crate::identity::password::hash("hunter2").expect("hash");
+        let row = client
+            .query_one(
+                "INSERT INTO zeroship.users (email, name, password_hash) \
+                 VALUES ($1::citext, $2, $3) RETURNING id",
+                &[&email, &"Native Link", &phc],
+            )
+            .await
+            .expect("seed user");
+        let user_id: Uuid = row.get("id");
+        let subject = format!("sub-{}", Uuid::new_v4().simple());
+        let profile = ResolvedProfile {
+            provider: "github",
+            subject: &subject,
+            email: &email,
+            email_verified: true,
+            name: Some("Native Link"),
+            avatar_url: None,
+            provider_trusted_for_email: true,
+            raw_profile: None,
+        };
+        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=openid";
+        let key = b"k".repeat(32);
+        let outcome = resolve_or_link(&client, &profile, LinkResume::ReturnTo(return_to), &key)
+            .await
+            .expect("resolve_or_link");
+
+        match outcome {
+            LinkOutcome::NeedsConfirmation { pending_token, .. } => {
+                let decoded = PendingLink::decode(&pending_token, &key)
+                    .expect("decode pending token");
+                assert_eq!(decoded.user_id, user_id);
+                assert_eq!(decoded.subject, subject);
+                assert!(decoded.login_challenge.is_none());
+                assert_eq!(decoded.return_to.as_deref(), Some(return_to));
+            }
+            other => panic!("expected NeedsConfirmation, got {other:?}"),
+        }
+
+        let listed = identities::list_for_user(&client, user_id).await.expect("list");
+        assert!(
+            listed.is_empty(),
+            "NeedsConfirmation must NOT create an identity row"
+        );
+
         client
             .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
             .await
@@ -497,7 +609,7 @@ mod tests {
         };
 
         let key = b"k".repeat(32);
-        let outcome = resolve_or_link(&client, &profile, "lc-test", &key)
+        let outcome = resolve_or_link(&client, &profile, LinkResume::LoginChallenge("lc-test"), &key)
             .await
             .expect("resolve_or_link");
 
@@ -551,7 +663,7 @@ mod tests {
         };
 
         let key = b"k".repeat(32);
-        let outcome = resolve_or_link(&client, &profile, "lc-test", &key)
+        let outcome = resolve_or_link(&client, &profile, LinkResume::LoginChallenge("lc-test"), &key)
             .await
             .expect("resolve_or_link");
 
@@ -568,6 +680,8 @@ mod tests {
                 assert_eq!(decoded.user_id, user_id);
                 assert_eq!(decoded.subject, subject);
                 assert_eq!(decoded.email, email);
+                assert_eq!(decoded.login_challenge.as_deref(), Some("lc-test"));
+                assert!(decoded.return_to.is_none());
             }
             other => panic!("expected NeedsConfirmation, got {other:?}"),
         }
@@ -606,7 +720,7 @@ mod tests {
             raw_profile: None,
         };
 
-        let err = resolve_or_link(&client, &profile, "lc-test", b"k")
+        let err = resolve_or_link(&client, &profile, LinkResume::LoginChallenge("lc-test"), b"k")
             .await
             .expect_err("untrusted provider email must not auto-create");
         assert!(

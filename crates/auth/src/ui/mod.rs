@@ -48,6 +48,8 @@ pub struct LoginPage<'a> {
     pub client_name: &'a str,
     pub google_enabled: bool,
     pub github_enabled: bool,
+    pub google_start_href: String,
+    pub github_start_href: String,
     pub is_hydra: bool,
 }
 

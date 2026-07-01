@@ -43,6 +43,7 @@ use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::{identities, sessions, users};
 use crate::ui::{ErrorPage, LinkPage, PublicErrorMessage};
@@ -166,21 +167,23 @@ pub async fn post(
         return render_error_page(PublicErrorMessage::SessionExpired);
     }
 
-    if let Err(e) = admin.get_login(&pending.login_challenge).await {
-        tracing::warn!(error = %e, challenge = %pending.login_challenge, "link hydra challenge validation failed");
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "oauth_link_failed",
-                outcome: "failure",
-                user_id: Some(&pending.user_id),
-                auth_method: Some(&pending.provider),
-                detail: json!({ "reason": "login_challenge_invalid" }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-        return render_error_page(PublicErrorMessage::InvalidRequest);
+    if let Some(login_challenge) = pending.login_challenge.as_deref() {
+        if let Err(e) = admin.get_login(login_challenge).await {
+            tracing::warn!(error = %e, challenge = %login_challenge, "link hydra challenge validation failed");
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "oauth_link_failed",
+                    outcome: "failure",
+                    user_id: Some(&pending.user_id),
+                    auth_method: Some(&pending.provider),
+                    detail: json!({ "reason": "login_challenge_invalid" }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            return render_error_page(PublicErrorMessage::InvalidRequest);
+        }
     }
 
     // Trusted, gateway-authored client IP (SEC-3) — not the spoofable
@@ -386,9 +389,39 @@ pub async fn post(
         tracing::warn!(error = %e, user_id = %u.id, "touch_last_login failed");
     }
 
+    if let Some(native_return_to) = pending.return_to.as_deref() {
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_link_success",
+                outcome: "success",
+                user_id: Some(&u.id),
+                auth_method: Some(&pending.provider),
+                detail: json!({
+                    "subject": pending.subject,
+                    "email": pending.email,
+                }),
+                ..AuditEvent::from_request(&req)
+            },
+        )
+        .await;
+
+        let mut resp = return_to::see_other(native_return_to);
+        resp.header(
+            SET_COOKIE,
+            session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        );
+        resp.header("cache-control", "no-store");
+        return resp.finish();
+    }
+
     // 5d. Accept the hydra login challenge — the SAME challenge the
     // original `/oauth/<provider>/start` stashed. Hydra has been pending
     // all this time.
+    let login_challenge = pending
+        .login_challenge
+        .as_deref()
+        .expect("missing login_challenge for legacy arm");
     let accept = AcceptLoginRequest {
         subject: u.id.to_string(),
         remember: Some(true),
@@ -397,7 +430,7 @@ pub async fn post(
         amr: Some(vec!["oauth".into(), "pwd".into()]),
         ..Default::default()
     };
-    let redirect_to = match admin.accept_login(&pending.login_challenge, &accept).await {
+    let redirect_to = match admin.accept_login(login_challenge, &accept).await {
         Ok(r) => r.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "accept_login failed");

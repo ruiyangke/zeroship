@@ -129,6 +129,8 @@ pub async fn get(
         client_name: info.client.client_name.as_deref().unwrap_or(&info.client.client_id),
         google_enabled: cfg.google_client_id.is_some(),
         github_enabled: cfg.github_client_id.is_some(),
+        google_start_href: oauth_start_href("/oauth/google/start", challenge, "", true),
+        github_start_href: oauth_start_href("/oauth/github/start", challenge, "", true),
         is_hydra: true,
     };
     let body = match page.render() {
@@ -936,6 +938,16 @@ fn redirect_to_login(hydra_challenge: Option<&str>, return_to: &str) -> HttpResp
         .finish()
 }
 
+fn oauth_start_href(path: &str, challenge: &str, return_to: &str, legacy: bool) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if legacy {
+        query.append_pair("login_challenge", challenge);
+    } else {
+        query.append_pair("return_to", return_to);
+    }
+    format!("{path}?{}", query.finish())
+}
+
 /// Re-render the login page with an error banner + fresh CSRF cookie, at the
 /// given HTTP status. Identical body shape for every failure mode (the only
 /// thing that varies is the visible message + status) so timing and content
@@ -950,6 +962,7 @@ fn render_login_error(
     status: u16,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
+    let legacy = is_hydra;
     let page = LoginPage {
         challenge,
         return_to,
@@ -958,6 +971,8 @@ fn render_login_error(
         client_name,
         google_enabled: cfg.google_client_id.is_some(),
         github_enabled: cfg.github_client_id.is_some(),
+        google_start_href: oauth_start_href("/oauth/google/start", challenge, return_to, legacy),
+        github_start_href: oauth_start_href("/oauth/github/start", challenge, return_to, legacy),
         is_hydra,
     };
     let body = page
@@ -985,8 +1000,10 @@ fn render_login_form_native(
         csrf: &csrf_token,
         error: err,
         client_name,
-        google_enabled: false,
-        github_enabled: false,
+        google_enabled: cfg.google_client_id.is_some(),
+        github_enabled: cfg.github_client_id.is_some(),
+        google_start_href: oauth_start_href("/oauth/google/start", "", return_to, false),
+        github_start_href: oauth_start_href("/oauth/github/start", "", return_to, false),
         is_hydra: false,
     };
     let body = page
@@ -1041,6 +1058,8 @@ mod tests {
             client_name: "Test",
             google_enabled: true,
             github_enabled: false,
+            google_start_href: oauth_start_href("/oauth/google/start", "abc", "", true),
+            github_start_href: oauth_start_href("/oauth/github/start", "abc", "", true),
             is_hydra: true,
         };
         let html = page.render().expect("render");
@@ -1065,6 +1084,8 @@ mod tests {
             client_name: "Test",
             google_enabled: false,
             github_enabled: false,
+            google_start_href: oauth_start_href("/oauth/google/start", "abc", "", true),
+            github_start_href: oauth_start_href("/oauth/github/start", "abc", "", true),
             is_hydra: true,
         };
         let html = page.render().expect("render");
@@ -1073,5 +1094,26 @@ mod tests {
             "OAuth section should be hidden"
         );
         assert!(!html.contains("or sign in with"));
+    }
+
+    #[test]
+    fn native_login_page_oauth_buttons_use_return_to() {
+        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        let page = LoginPage {
+            challenge: "",
+            return_to,
+            csrf: "xyz",
+            error: None,
+            client_name: "Test",
+            google_enabled: true,
+            github_enabled: true,
+            google_start_href: oauth_start_href("/oauth/google/start", "", return_to, false),
+            github_start_href: oauth_start_href("/oauth/github/start", "", return_to, false),
+            is_hydra: false,
+        };
+        let html = page.render().expect("render");
+        assert!(html.contains("/oauth/google/start?return_to=%2Foauth2%2Fauthorize"));
+        assert!(html.contains("/oauth/github/start?return_to=%2Foauth2%2Fauthorize"));
+        assert!(!html.contains("login_challenge="));
     }
 }
