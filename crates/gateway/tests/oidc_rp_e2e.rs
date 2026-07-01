@@ -19,7 +19,6 @@ use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::password;
 use zeroship_auth::oidc::{BrokerSecrets, Issuer};
 use zeroship_auth::server;
@@ -99,12 +98,6 @@ fn test_auth_config(db_url: &str) -> AuthConfig {
         "127.0.0.1:0",
         "--db-url",
         db_url,
-        "--hydra-admin-url",
-        "http://127.0.0.1:4445",
-        "--hydra-public-url",
-        "http://127.0.0.1:4444",
-        "--clients-config",
-        "ops/auth-clients.example.toml",
         "--dev-insecure",
         "--stash-signing-key",
         "test-stash-key-not-for-prod-32bytes!",
@@ -256,23 +249,19 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     cfg.refresh_hash_key_file = Some(hash_key_file);
     cfg.refresh_idem_key_file = Some(idem_key_file);
     let cfg = Arc::new(cfg);
-    let admin = HydraAdmin::new("http://127.0.0.1:4445");
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = {
-        let admin_state = admin.clone();
         let cfg_state = cfg.clone();
         let db_state = pg_client.clone();
         let issuer_state = issuer.clone();
         let refresh_pool_state = refresh_pool.clone();
         web::test::server(move || {
-            let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();
             let db_state = db_state.clone();
             let issuer_state = issuer_state.clone();
             let refresh_pool_state = refresh_pool_state.clone();
             async move {
                 web::App::new()
-                    .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
                     .state(issuer_state)
