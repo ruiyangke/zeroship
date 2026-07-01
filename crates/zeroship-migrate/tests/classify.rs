@@ -4,7 +4,7 @@
 //! kind, additive/destructive facets, transactionality, and the set of
 //! schemas it references. The security guard (Task 4) is built on top of this.
 
-use zeroship_migrate::classify::{classify, DdlKind};
+use zeroship_migrate::classify::{classify, DataSecurityClass, DdlKind};
 
 fn one(sql: &str) -> zeroship_migrate::classify::StatementClass {
     let mut v = classify(sql).expect("should parse");
@@ -139,8 +139,71 @@ fn dml_and_copy_and_create_extension() {
     assert_eq!(one("INSERT INTO products(id) VALUES (1)").kind, DdlKind::Dml);
     assert_eq!(one("UPDATE products SET id = 2").kind, DdlKind::Dml);
     assert_eq!(one("DELETE FROM products").kind, DdlKind::Dml);
+    assert_eq!(
+        one(
+            "MERGE INTO products USING incoming ON products.id = incoming.id \
+             WHEN MATCHED THEN UPDATE SET id = incoming.id"
+        )
+        .kind,
+        DdlKind::Dml
+    );
     assert_eq!(one("CREATE EXTENSION pgcrypto").kind, DdlKind::CreateExtension);
     assert_eq!(one("COPY products TO '/tmp/x'").kind, DdlKind::Copy);
+}
+
+#[test]
+fn data_security_trichotomy_is_explicit() {
+    assert_eq!(
+        one("CREATE TABLE products(id int primary key)").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("ALTER TABLE products ADD COLUMN sku text").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("CREATE INDEX products_sku_idx ON products(sku)").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("INSERT INTO products(id) VALUES (1)").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("DO $$ BEGIN NULL; END $$").data_security,
+        DataSecurityClass::Unknown
+    );
+}
+
+#[test]
+fn destructive_dml_holes_are_classified() {
+    for (sql, operation) in [
+        ("UPDATE products SET sku = NULL", "UPDATE without WHERE"),
+        (
+            "UPDATE products SET sku = NULL WHERE true",
+            "UPDATE with non-restrictive WHERE",
+        ),
+        ("DELETE FROM products WHERE 1=1", "DELETE with non-restrictive WHERE"),
+        (
+            "MERGE INTO products USING incoming ON products.id = incoming.id \
+             WHEN MATCHED THEN DELETE",
+            "MERGE matched DELETE",
+        ),
+    ] {
+        let c = one(sql);
+        assert_eq!(
+            c.data_security,
+            DataSecurityClass::Destructive(operation),
+            "{sql}"
+        );
+        assert_eq!(c.destructive_operation, Some(operation), "{sql}");
+    }
+
+    assert_eq!(
+        one("DELETE FROM products WHERE id = 42").data_security,
+        DataSecurityClass::Unknown,
+        "row-affecting DML with an unproven predicate is not treated as safe"
+    );
 }
 
 #[test]
