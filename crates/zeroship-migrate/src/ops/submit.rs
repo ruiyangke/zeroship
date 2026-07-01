@@ -376,6 +376,9 @@ fn denial(e: &GuardError) -> (String, String) {
         GuardError::CrossSchema { schema, statement } => {
             (format!("cross_schema:{schema}"), statement.clone())
         }
+        GuardError::DataSecurityPolicy { rule, statement } => {
+            ((*rule).to_string(), statement.clone())
+        }
         GuardError::Parse(p) => ("unparseable".to_string(), p.to_string()),
         // PHASE 4 — the raw-SQL submit path is PG-only; a SQLite Confined guard
         // refuses raw SQL outright (descriptor-diff-only). If this is ever reached,
