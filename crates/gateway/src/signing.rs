@@ -7,9 +7,8 @@
 //! the same.
 //!
 //! Why Ed25519: smallest signatures (64 bytes), constant-time
-//! verification, no curve-choice footgun, and matches the `DPoP` proof
-//! verifier in `zeroship-core` so both sides of the binding speak the
-//! same JOSE algorithm (`EdDSA` / `crv: Ed25519`).
+//! verification, no curve-choice footgun, and a compact JOSE representation
+//! (`EdDSA` / `crv: Ed25519`).
 
 use std::path::Path;
 
@@ -117,8 +116,8 @@ pub fn jwk_thumbprint_public(public: &ed25519_dalek::VerifyingKey) -> String {
 /// Compute the RFC 7638 JWK thumbprint of the signing key's public half.
 ///
 /// This is the value the gateway emits as `kid` in wrapper-token
-/// headers so `DPoP`-aware relying parties can fetch the matching JWK
-/// from the gateway's JWKS endpoint. Delegates to
+/// headers so relying parties can fetch the matching JWK from the gateway's
+/// JWKS endpoint. Delegates to
 /// [`jwk_thumbprint_public`] after extracting the public half so the
 /// canonical-JSON encoding lives in exactly one place.
 #[must_use]
