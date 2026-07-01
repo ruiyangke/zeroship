@@ -14,8 +14,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
-use crate::oidc::claims::scope_gated_identity_claims;
+use crate::oidc::auth_request::{AuthRequest, AuthRequestError};
 use crate::oidc::backchannel_logout;
+use crate::oidc::claims::scope_gated_identity_claims;
 use crate::oidc::refresh::{
     self, ClientAuth, ClientAuthMethod, RefreshSessionPool, RefreshTokenKeys,
 };
@@ -49,6 +50,8 @@ pub struct AuthorizeRequest {
     pub scope: Option<String>,
     pub state: Option<String>,
     pub nonce: Option<String>,
+    pub prompt: Option<String>,
+    pub idp_hint: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
 }
@@ -243,7 +246,19 @@ async fn authorize_inner(
         return Err(OAuthError::invalid_request("redirect_uri is not registered"));
     }
 
-    let requested_scopes = parse_scopes(params.scope.as_deref().unwrap_or(""));
+    let auth_request = AuthRequest::from_parts(
+        &return_to::request_target(req),
+        Some(client_id),
+        Some(redirect_uri),
+        params.scope.as_deref(),
+        params.state.as_deref(),
+        params.nonce.as_deref(),
+        params.prompt.as_deref(),
+        params.idp_hint.as_deref(),
+    )
+    .map_err(auth_request_oauth_error)?;
+
+    let requested_scopes = auth_request.scopes.clone();
     if !scope_subset(&requested_scopes, &client.scopes) {
         return Err(OAuthError::invalid_scope("scope is not allowed for client"));
     }
@@ -257,13 +272,13 @@ async fn authorize_inner(
         OAuthError::invalid_request("code_challenge_method must be S256")
     })?;
 
-    let nonce = clean_optional(params.nonce);
+    let nonce = auth_request.nonce.clone();
     if requested_scopes.iter().any(|scope| scope == "openid") && nonce.is_none() {
         return Err(OAuthError::invalid_request("nonce is required for openid scope"));
     }
 
     let Some(session) = resolve_session(req, cfg, db).await? else {
-        return Ok(login_redirect(req));
+        return Ok(login_redirect(req, &auth_request, cfg));
     };
 
     if consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await? {
@@ -305,7 +320,7 @@ async fn authorize_inner(
     let redirect = authorization_success_redirect(
         redirect_uri,
         &code,
-        params.state.as_deref(),
+        auth_request.state.as_deref(),
         issuer.issuer(),
     )?;
     Ok(see_other(&redirect)
@@ -859,8 +874,10 @@ fn authorization_success_redirect(
     Ok(url.to_string())
 }
 
-fn login_redirect(req: &HttpRequest) -> HttpResponse {
-    let location = return_to::login_location(&return_to::request_target(req));
+fn login_redirect(req: &HttpRequest, auth_request: &AuthRequest, cfg: &AuthConfig) -> HttpResponse {
+    let location = auth_request
+        .provider_start_location(cfg.google_client_id.is_some(), cfg.github_client_id.is_some())
+        .unwrap_or_else(|| return_to::login_location(&return_to::request_target(req)));
     see_other(&location)
         .header("cache-control", "no-store")
         .finish()
@@ -897,6 +914,19 @@ pub(super) fn oauth_error_response(err: OAuthError) -> HttpResponse {
             "error": err.error,
             "error_description": err.description,
         }))
+}
+
+fn auth_request_oauth_error(err: AuthRequestError) -> OAuthError {
+    match err {
+        AuthRequestError::MissingClientId => OAuthError::invalid_request("client_id"),
+        AuthRequestError::MissingRedirectUri => OAuthError::invalid_request("redirect_uri"),
+        AuthRequestError::InvalidRedirectUri => {
+            OAuthError::invalid_request("redirect_uri is not a valid URL")
+        }
+        AuthRequestError::ReturnToNotSameOrigin
+        | AuthRequestError::ReturnToParse
+        | AuthRequestError::WrongPath => OAuthError::invalid_request("invalid authorize request"),
+    }
 }
 
 fn authenticate_authorization_code_client(

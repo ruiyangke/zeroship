@@ -37,6 +37,7 @@ use crate::hydra_client::types::{
     AcceptConsentRequest, ConsentRequest, ConsentSession, RejectRequest,
     OAuth2Client,
 };
+use crate::oidc::auth_request::AuthRequest;
 use crate::oidc::authorization_code::persist_consent_grant;
 use crate::return_to;
 use crate::sessions::login as session_cookie;
@@ -496,7 +497,7 @@ async fn post_consent_accept_native(
         }
     }
 
-    let requested_scopes = sort_dedup_scopes(&ctx.requested_scope);
+    let requested_scopes = sort_dedup_scopes(&ctx.request.scopes);
     let lock_conn = match open_dedicated_auth_pg(&cfg.db_url).await {
         Ok(conn) => conn,
         Err(e) => {
@@ -661,7 +662,7 @@ async fn post_consent_deny_native(
             client_id: Some(&ctx.client.client_id),
             auth_method: Some("consent"),
             detail: json!({
-                "requested_scopes": sort_dedup_scopes(&ctx.requested_scope),
+                "requested_scopes": sort_dedup_scopes(&ctx.request.scopes),
             }),
             ..AuditEvent::from_request(&req)
         },
@@ -696,68 +697,27 @@ struct NativeOAuthClient {
 
 #[derive(Clone, Debug)]
 struct NativeConsentContext {
-    return_to: String,
+    request: AuthRequest,
     client: NativeOAuthClient,
-    redirect_uri: String,
-    requested_scope: Vec<String>,
-    state: Option<String>,
 }
 
 async fn load_native_consent_context(
     db: &compio_postgres::Client,
     return_to: &str,
 ) -> Result<NativeConsentContext, String> {
-    let Some(return_to) = return_to::valid_path(return_to) else {
-        return Err("return_to is not a same-origin path".into());
-    };
-    let parsed = url::Url::parse(&format!("http://zeroship.local{return_to}"))
-        .map_err(|err| format!("return_to parse: {err}"))?;
-    if parsed.path() != "/oauth2/authorize" {
-        return Err("return_to must target /oauth2/authorize".into());
-    }
-    let mut client_id = None;
-    let mut redirect_uri = None;
-    let mut scope = None;
-    let mut state = None;
-    for (key, value) in parsed.query_pairs() {
-        match key.as_ref() {
-            "client_id" => client_id = Some(value.into_owned()),
-            "redirect_uri" => redirect_uri = Some(value.into_owned()),
-            "scope" => scope = Some(value.into_owned()),
-            "state" => state = Some(value.into_owned()),
-            _ => {}
-        }
-    }
-    let client_id = client_id
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "missing client_id".to_string())?;
-    let redirect_uri = redirect_uri
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "missing redirect_uri".to_string())?;
-    let requested_scope = sort_dedup_scopes(
-        &scope
-            .unwrap_or_default()
-            .split_ascii_whitespace()
-            .filter(|scope| !scope.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
-    );
-    let client = load_native_oauth_client(db, &client_id).await?;
-    if !client.redirect_uris.iter().any(|registered| registered == &redirect_uri) {
+    let request = AuthRequest::parse_return_to(return_to).map_err(|err| err.to_string())?;
+    let client = load_native_oauth_client(db, &request.client_id).await?;
+    if !client
+        .redirect_uris
+        .iter()
+        .any(|registered| registered == &request.redirect_uri)
+    {
         return Err("redirect_uri is not registered".into());
     }
-    if !scopes_are_subset(&requested_scope, &client.scopes) {
+    if !scopes_are_subset(&request.scopes, &client.scopes) {
         return Err("scope is not allowed for client".into());
     }
-    Ok(NativeConsentContext {
-        return_to: return_to.to_string(),
-        client,
-        redirect_uri,
-        requested_scope,
-        state: state.filter(|value| !value.is_empty()),
-    })
+    Ok(NativeConsentContext { request, client })
 }
 
 async fn load_native_oauth_client(
@@ -786,7 +746,7 @@ async fn load_native_oauth_client(
 
 fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> ConsentRequest {
     ConsentRequest {
-        challenge: ctx.return_to.clone(),
+        challenge: ctx.request.return_to.clone(),
         skip: false,
         subject: subject.to_string(),
         client: OAuth2Client {
@@ -809,27 +769,27 @@ fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> ConsentR
             frontchannel_logout_uri: None,
             backchannel_logout_uri: None,
         },
-        requested_scope: ctx.requested_scope.clone(),
+        requested_scope: ctx.request.scopes.clone(),
         requested_access_token_audience: vec![],
         login_session_id: None,
         context: None,
         oidc_context: None,
-        request_url: ctx.return_to.clone(),
+        request_url: ctx.request.return_to.clone(),
     }
 }
 
 fn oauth_error_redirect(ctx: &NativeConsentContext, error: &str) -> HttpResponse {
-    let mut url = match url::Url::parse(&ctx.redirect_uri) {
+    let mut url = match url::Url::parse(&ctx.request.redirect_uri) {
         Ok(url) => url,
         Err(err) => {
-            tracing::warn!(error = %err, redirect_uri = %ctx.redirect_uri, "native consent redirect_uri parse failed after registry validation");
+            tracing::warn!(error = %err, redirect_uri = %ctx.request.redirect_uri, "native consent redirect_uri parse failed after registry validation");
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
     {
         let mut query = url.query_pairs_mut();
         query.append_pair("error", error);
-        if let Some(state) = ctx.state.as_deref() {
+        if let Some(state) = ctx.request.state.as_deref() {
             query.append_pair("state", state);
         }
     }

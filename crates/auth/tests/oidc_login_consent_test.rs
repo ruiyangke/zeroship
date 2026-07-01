@@ -73,11 +73,13 @@ impl Fixture {
         let email = format!("p4-{}@zeroship.test", Uuid::new_v4().simple());
         seed_user_client(&db, user_id, app_id, &client_id, &email).await;
 
-        let cfg = Arc::new(test_auth_config(
+        let mut cfg_inner = test_auth_config(
             &db_url,
             "http://127.0.0.1:4445",
             "http://127.0.0.1:4444",
-        ));
+        );
+        cfg_inner.google_client_id = Some("mock-google-client".into());
+        let cfg = Arc::new(cfg_inner);
         let admin = HydraAdmin::new("http://127.0.0.1:4445");
         let admin_state = admin.clone();
         let cfg_state = cfg.clone();
@@ -99,7 +101,7 @@ impl Fixture {
                     .state(issuer_state)
                     .state(refresh_pool_state)
                     .middleware(SecurityHeaders::default())
-                    .configure(server::configure(false, false))
+                    .configure(server::configure(true, false))
             }
         })
         .await;
@@ -226,6 +228,38 @@ async fn end_to_end_native_authorize_login_consent_token_flow() {
     assert!(token.scope.contains("openid"));
     assert!(!token.access_token.is_empty());
     assert!(!token.id_token.is_empty());
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn idp_hint_google_redirects_native_authorize_to_provider_start() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let authorize_path = format!(
+        "{}&idp_hint=google&prompt=login",
+        authorize_path(
+            &fx.client_id,
+            "openid email",
+            &pkce_verifier(),
+            "state-idp-hint",
+            Some("nonce-idp-hint"),
+        )
+    );
+
+    let resp = get(&fx, &authorize_path, None).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let loc = location(&resp);
+    assert!(
+        loc.starts_with("/oauth/google/start?"),
+        "idp_hint should route to google start, got {loc}"
+    );
+    assert_eq!(
+        relative_query_param(&loc, "return_to").as_deref(),
+        Some(authorize_path.as_str())
+    );
 
     fx.cleanup().await;
 }

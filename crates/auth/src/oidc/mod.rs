@@ -3,6 +3,7 @@
 //! Platform OpenID Provider primitives and closed-world OAuth endpoints.
 
 pub mod authorization_code;
+pub mod auth_request;
 pub mod backchannel_logout;
 pub mod claims;
 pub mod device_token;
