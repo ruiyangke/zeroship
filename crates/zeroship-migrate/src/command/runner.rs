@@ -47,10 +47,11 @@ pub enum RunProfile {
     /// Untrusted-equivalent: the full deny-list, single-schema.
     Confined,
     /// The public dbmate-like posture (Track A): the operator owns the DB, so the
-    /// deny-list is OFF and there is no schema confinement. The DEFAULT of the
-    /// public `zeroship-migrate` CLI. Reachable ONLY through the CLI's
-    /// `--profile trusted` flag (the single new Trusted surface) — the control
-    /// plane uses `submit_migration` (Confined) and never reaches this binary.
+    /// deny-list is OFF and there is no schema confinement. Present ONLY in the
+    /// standalone CLI/test build. Reachable ONLY through the CLI's `--profile
+    /// trusted` flag (the single new Trusted surface) — the control plane uses
+    /// `submit_migration` (Confined) and never reaches this binary.
+    #[cfg(any(test, feature = "standalone-cli"))]
     Trusted,
 }
 
@@ -692,6 +693,7 @@ fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
                 cfg.extensions.clone(),
             )
         }
+        #[cfg(any(test, feature = "standalone-cli"))]
         RunProfile::Trusted => {
             // Named CLI-runner mint seam (design §5), shared with Platform.
             let cap = OperatorCapability::new();
@@ -715,6 +717,7 @@ fn build_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
             let cap = OperatorCapability::new();
             crate::guard::GuardConfig::platform(&cap, cfg.schemas.clone(), cfg.extensions.clone())
         }
+        #[cfg(any(test, feature = "standalone-cli"))]
         RunProfile::Trusted => {
             let cap = OperatorCapability::new();
             crate::guard::GuardConfig::trusted(&cap)
@@ -1733,6 +1736,18 @@ pub struct LoadOutcome {
     pub versions: Vec<String>,
 }
 
+fn profile_allows_load(profile: RunProfile) -> bool {
+    #[cfg(any(test, feature = "standalone-cli"))]
+    {
+        profile == RunProfile::Trusted
+    }
+    #[cfg(not(any(test, feature = "standalone-cli")))]
+    {
+        let _ = profile;
+        false
+    }
+}
+
 /// `load` (a.k.a. `db:setup`) — RESTORE a dumped `schema.sql` onto a FRESH database
 /// and reconstruct the journal from the dump's applied-versions trailer, WITHOUT
 /// replaying every migration (dbmate `db:load`).
@@ -1763,7 +1778,7 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
     // ONLY under the Trusted profile (the operator owns the DB). Under
     // `confined`/`platform` it would execute raw DDL as admin and bypass the entire
     // confinement model, so refuse BEFORE any DB connection or DDL.
-    if cfg.profile != RunProfile::Trusted {
+    if !profile_allows_load(cfg.profile) {
         return Err(RunError::LoadCmd(
             "load restores a dump as admin without the guard/migrator role; \
              it is only available under --profile trusted"
