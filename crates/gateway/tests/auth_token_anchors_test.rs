@@ -14,8 +14,8 @@
 //! env-skip convention — no live PG in CI by default). The mock-Hydra
 //! single-flight test and the cookie/Origin tests run unconditionally.
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
@@ -44,6 +44,7 @@ const TEST_BROKER_MASTER: &[u8] = b"gateway-anchor-test-broker-master-32-bytes";
 const GARBAGE_REFRESH_SECRET: &str = "rt_super_secret_family_lineage_DO_NOT_LOG";
 const GARBAGE_REFRESH_BODY: &str =
     r#"{"refresh_token":"rt_super_secret_family_lineage_DO_NOT_LOG","unexpected":true}"#;
+const INITIAL_REFRESH_TOKEN: &str = "rt_initial_seed";
 
 /// Shared mock-Hydra state. Signs tokens with a fixed EdDSA key, counts
 /// refresh-grant calls (the single-flight assertion), and can be flipped to
@@ -57,14 +58,23 @@ struct MockHydra {
     /// Count of `grant_type=refresh_token` calls — the single-flight proof.
     refresh_calls: AtomicU32,
     /// When true, the next refresh-grant answers `400 invalid_grant`.
-    invalid_grant: std::sync::atomic::AtomicBool,
+    invalid_grant: AtomicBool,
     /// When true, the refresh-grant answers `200` with a body that contains
     /// a (fake) refresh_token but is NOT valid `TokenSet` JSON — exercising
     /// the malformed-but-2xx redaction path (§8.1/§8.5: tokens never logged).
-    garbage_2xx: std::sync::atomic::AtomicBool,
+    garbage_2xx: AtomicBool,
+    /// When true, the mock behaves like the self-contained OP's rotating
+    /// refresh families: only the current refresh token is accepted, a
+    /// successful refresh installs the newly returned token, and replaying an
+    /// already-rotated token returns `invalid_grant`.
+    enforce_refresh_rotation: AtomicBool,
     /// Optional artificial delay (ms) on the refresh grant — lets a test
     /// hold N concurrent minters inside ONE in-flight refresh.
     refresh_delay_ms: AtomicU32,
+    /// Refresh tokens presented to the OP, in order. The rotation regression
+    /// asserts the second request uses the first response's NEW token.
+    presented_refresh_tokens: Mutex<Vec<String>>,
+    current_refresh_token: Mutex<String>,
 }
 
 impl MockHydra {
@@ -77,10 +87,24 @@ impl MockHydra {
             user_id: Uuid::new_v4(),
             client_id: client_id.to_string(),
             refresh_calls: AtomicU32::new(0),
-            invalid_grant: std::sync::atomic::AtomicBool::new(false),
-            garbage_2xx: std::sync::atomic::AtomicBool::new(false),
+            invalid_grant: AtomicBool::new(false),
+            garbage_2xx: AtomicBool::new(false),
+            enforce_refresh_rotation: AtomicBool::new(false),
             refresh_delay_ms: AtomicU32::new(0),
+            presented_refresh_tokens: Mutex::new(Vec::new()),
+            current_refresh_token: Mutex::new(INITIAL_REFRESH_TOKEN.to_string()),
         }
+    }
+
+    fn enforce_refresh_reuse_detection(&self) {
+        self.enforce_refresh_rotation.store(true, Ordering::SeqCst);
+    }
+
+    fn presented_refresh_tokens(&self) -> Vec<String> {
+        self.presented_refresh_tokens
+            .lock()
+            .expect("presented refresh tokens mutex")
+            .clone()
     }
 
     fn jwks_json(&self) -> String {
@@ -199,11 +223,13 @@ async fn token_endpoint(
     let mut grant = String::new();
     let mut client_id = String::new();
     let mut client_secret = String::new();
+    let mut refresh_token = String::new();
     for (k, v) in url::form_urlencoded::parse(&body) {
         match k.as_ref() {
             "grant_type" => grant = v.into_owned(),
             "client_id" => client_id = v.into_owned(),
             "client_secret" => client_secret = v.into_owned(),
+            "refresh_token" => refresh_token = v.into_owned(),
             _ => {}
         }
     }
@@ -217,26 +243,61 @@ async fn token_endpoint(
             .body(r#"{"error":"invalid_client"}"#);
     }
     match grant.as_str() {
-        "authorization_code" => web::HttpResponse::Ok()
-            .header("content-type", "application/json")
-            .body(serde_json::json!({
-                "access_token": h.access_token(),
-                "id_token": h.id_token(),
-                "refresh_token": format!("rt_{}", Uuid::new_v4().simple()),
-                "token_type": "Bearer",
-                "expires_in": 3600,
-                "scope": "openid email profile offline_access",
-            }).to_string()),
+        "authorization_code" => {
+            {
+                let mut current = h
+                    .current_refresh_token
+                    .lock()
+                    .expect("current refresh token mutex");
+                *current = INITIAL_REFRESH_TOKEN.to_string();
+            }
+            web::HttpResponse::Ok()
+                .header("content-type", "application/json")
+                .body(serde_json::json!({
+                    "access_token": h.access_token(),
+                    "id_token": h.id_token(),
+                    "refresh_token": INITIAL_REFRESH_TOKEN,
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "scope": "openid email profile offline_access",
+                }).to_string())
+        }
         "refresh_token" => {
             let delay = h.refresh_delay_ms.load(Ordering::SeqCst);
             if delay > 0 {
                 ntex::time::sleep(std::time::Duration::from_millis(u64::from(delay))).await;
             }
-            h.refresh_calls.fetch_add(1, Ordering::SeqCst);
+            let refresh_call = h.refresh_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            h.presented_refresh_tokens
+                .lock()
+                .expect("presented refresh tokens mutex")
+                .push(refresh_token.clone());
             if h.invalid_grant.load(Ordering::SeqCst) {
                 return web::HttpResponse::BadRequest()
                     .header("content-type", "application/json")
                     .body(r#"{"error":"invalid_grant","error_description":"token expired"}"#);
+            }
+            let rotated_refresh_token = format!("rt_rotated_{refresh_call}");
+            if h.enforce_refresh_rotation.load(Ordering::SeqCst) {
+                let mut current = h
+                    .current_refresh_token
+                    .lock()
+                    .expect("current refresh token mutex");
+                if refresh_token != *current {
+                    h.invalid_grant.store(true, Ordering::SeqCst);
+                    return web::HttpResponse::BadRequest()
+                        .header("content-type", "application/json")
+                        .body(
+                            r#"{"error":"invalid_grant","error_description":"refresh token reuse detected"}"#,
+                        );
+                }
+                *current = rotated_refresh_token.clone();
+            } else {
+                let mut current = h
+                    .current_refresh_token
+                    .lock()
+                    .expect("current refresh token mutex");
+                *current = rotated_refresh_token.clone();
             }
             if h.garbage_2xx.load(Ordering::SeqCst) {
                 // 200 OK but NOT valid TokenSet JSON, yet carrying a (fake)
@@ -254,7 +315,7 @@ async fn token_endpoint(
                     // profile facts (name/picture). do_refresh sources identity
                     // from THIS, not the access JWT (BFF minor fix).
                     "id_token": h.rotated_id_token(),
-                    "refresh_token": format!("rt_{}", Uuid::new_v4().simple()),
+                    "refresh_token": rotated_refresh_token,
                     "token_type": "Bearer",
                     "expires_in": 3600,
                     "scope": "openid email profile offline_access",
@@ -1495,6 +1556,196 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         let avatar: Option<String> = row.try_get("avatar_url").ok();
         assert_eq!(name.as_deref(), Some(ROTATED_NAME), "audit row name = rotated");
         assert_eq!(avatar.as_deref(), Some(ROTATED_AVATAR), "audit row avatar = rotated");
+    }
+
+    cleanup_identities(&dsn, user_id).await;
+    cleanup(&dsn, user_id).await;
+}
+
+#[ntex::test]
+async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
+    // P5c regression: the self-contained OP rotates refresh families. The
+    // gateway must persist the NEW refresh token returned by the first
+    // `?mint=1`; otherwise the second mint would replay the stale token and the
+    // OP's reuse detection would kill the family with `invalid_grant`.
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip session_mint_persists_rotated_refresh_token (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    hydra.enforce_refresh_reuse_detection();
+    seed_user(&dsn, hydra.user_id).await;
+    let user_id = hydra.user_id;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db_cfg.clone()));
+    let app = test::init_service(anchors_app!(state.clone())).await;
+
+    // Establish a live anchor. The mock OP returns INITIAL_REFRESH_TOKEN from
+    // the authorization-code exchange; the browser never sees it.
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/session")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=c&code_verifier=v")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "initial session mint must succeed");
+    let anchor_cookie =
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
+    let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
+    let anchor_id =
+        anchors::parse_anchor_cookie(&anchor_pair, false).expect("anchor id parses from cookie");
+
+    // First rotation presents the initial family token and persists rt_rotated_1.
+    let req = test::TestRequest::get()
+        .uri("/__zeroship/auth/session?mint=1")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("cookie", anchor_pair.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "first rotation must succeed");
+    assert_eq!(
+        hydra.presented_refresh_tokens(),
+        vec![INITIAL_REFRESH_TOKEN.to_string()],
+        "first rotation must present the authorization-code exchange's refresh token"
+    );
+
+    {
+        let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
+        let mut conn = pool.get().await.expect("conn");
+        let anchor = anchors::read_live(
+            &mut conn,
+            Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            anchor_id,
+        )
+        .await
+        .expect("read rotated anchor")
+        .expect("anchor remains live after rotation");
+        let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{user_id}").into_bytes();
+        let plaintext = zeroship_core::crypto::decrypt(
+            &state.anchor_enc_key,
+            &aad,
+            &anchor.refresh_token_enc,
+        )
+        .expect("decrypt stored refresh token");
+        let stored = String::from_utf8(plaintext).expect("stored refresh token utf8");
+        assert_eq!(
+            stored, "rt_rotated_1",
+            "the anchor row must persist the OP's newly returned refresh token"
+        );
+    }
+
+    // Second rotation must present rt_rotated_1. If the gateway kept the stale
+    // initial token, strict mock reuse detection returns invalid_grant here.
+    let req = test::TestRequest::get()
+        .uri("/__zeroship/auth/session?mint=1")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("cookie", anchor_pair)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "second rotation must use the rotated refresh token");
+    assert_eq!(
+        hydra.presented_refresh_tokens(),
+        vec![INITIAL_REFRESH_TOKEN.to_string(), "rt_rotated_1".to_string()],
+        "second rotation must present the first rotation's NEW refresh token"
+    );
+
+    cleanup_identities(&dsn, user_id).await;
+    cleanup(&dsn, user_id).await;
+}
+
+#[ntex::test]
+async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
+    // P5c regression: OP `invalid_grant` on refresh means the rotating family is
+    // dead. The gateway must delete the server-held anchor, clear recovery
+    // cookies, and surface `login_required` rather than treating it as retryable.
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip session_mint_invalid_grant_deletes_anchor (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    seed_user(&dsn, hydra.user_id).await;
+    let user_id = hydra.user_id;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias(&dsn, user_id, &relay_email).await;
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state(&base, Some(db_cfg.clone()));
+    let app = test::init_service(anchors_app!(state.clone())).await;
+
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/session")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=c&code_verifier=v")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "initial session mint must succeed");
+    let anchor_cookie =
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
+    let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
+    let anchor_id =
+        anchors::parse_anchor_cookie(&anchor_pair, false).expect("anchor id parses from cookie");
+
+    hydra.invalid_grant.store(true, Ordering::SeqCst);
+    let req = test::TestRequest::get()
+        .uri("/__zeroship/auth/session?mint=1")
+        .header("host", APP_HOST)
+        .header("origin", format!("https://{APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("cookie", anchor_pair)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 401, "invalid_grant must require login");
+    assert!(
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=").is_none(),
+        "invalid_grant must not mint a fresh live session cookie"
+    );
+    let clear_anchor =
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor clear cookie");
+    assert!(
+        clear_anchor.contains("Max-Age=0"),
+        "anchor cookie must be cleared on invalid_grant: {clear_anchor}"
+    );
+    let clear_breadcrumb = set_cookie_with_prefix(&resp, "zs.myapp.zeroship.ai.is.authenticated=")
+        .expect("breadcrumb clear cookie");
+    assert!(
+        clear_breadcrumb.contains("Max-Age=0"),
+        "breadcrumb must be cleared on invalid_grant: {clear_breadcrumb}"
+    );
+    let body = read_json(resp).await;
+    assert_eq!(body["error"], "login_required");
+    assert_eq!(
+        hydra.presented_refresh_tokens(),
+        vec![INITIAL_REFRESH_TOKEN.to_string()],
+        "invalid_grant path must have attempted exactly one OP refresh"
+    );
+
+    {
+        let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
+        let mut conn = pool.get().await.expect("conn");
+        let anchor = anchors::read_live(
+            &mut conn,
+            Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+            anchor_id,
+        )
+        .await
+        .expect("read anchor after invalid_grant");
+        assert!(
+            anchor.is_none(),
+            "invalid_grant must delete the server-held reload-recovery anchor"
+        );
     }
 
     cleanup_identities(&dsn, user_id).await;
