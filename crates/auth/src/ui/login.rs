@@ -26,6 +26,7 @@ use crate::hydra_client::HydraAdmin;
 use crate::identity::credentials::{verify_password_credentials, CredentialError};
 use crate::identity::eligibility::{self, LoginIneligible};
 use crate::identity::totp;
+use crate::oidc::auth_request::AuthRequest;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
@@ -152,6 +153,7 @@ async fn get_native(
     db: &compio_postgres::Client,
 ) -> HttpResponse {
     let return_to = return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
+    let auth_request = AuthRequest::parse_return_to(&return_to).ok();
     match resolve_native_session(&req, cfg, db).await {
         Ok(Some(_)) => {
             return return_to::see_other(&return_to)
@@ -162,7 +164,24 @@ async fn get_native(
         Err(resp) => return resp,
     }
 
-    render_login_form_native(&return_to, &native_client_name(&return_to), cfg, None, 200)
+    if let Some(location) = auth_request.as_ref().and_then(|request| {
+        request.provider_start_location(
+            cfg.google_client_id.is_some(),
+            cfg.github_client_id.is_some(),
+        )
+    }) {
+        return return_to::see_other(&location)
+            .header("cache-control", "no-store")
+            .finish();
+    }
+
+    render_login_form_native(
+        &return_to,
+        &native_client_name(auth_request.as_ref()),
+        cfg,
+        None,
+        200,
+    )
 }
 
 fn redirect(to: &str) -> HttpResponse {
@@ -423,7 +442,8 @@ async fn post_native(
     // /authorize → /consent → /token). Stamp a fixed sentinel so a forged return_to
     // cannot poison the login_failure/login_success audit label.
     let client_id = "native".to_string();
-    let client_name = native_client_name(&return_to);
+    let auth_request = AuthRequest::parse_return_to(&return_to).ok();
+    let client_name = native_client_name(auth_request.as_ref());
 
     let cookie_header = req
         .headers()
@@ -1000,12 +1020,10 @@ async fn resolve_native_session(
     })
 }
 
-fn native_client_id(return_to: &str) -> Option<String> {
-    return_to::query_param(return_to, "client_id")
-}
-
-fn native_client_name(return_to: &str) -> String {
-    native_client_id(return_to).unwrap_or_else(|| "zeroship".to_string())
+fn native_client_name(auth_request: Option<&AuthRequest>) -> String {
+    auth_request
+        .map(|request| request.client_id.clone())
+        .unwrap_or_else(|| "zeroship".to_string())
 }
 
 #[cfg(test)]
