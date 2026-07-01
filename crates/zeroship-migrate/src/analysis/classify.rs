@@ -61,6 +61,10 @@ pub struct StatementClass {
     /// Loses data (DROP/TRUNCATE/lossy type change). The guard *flags* this;
     /// it does not deny it (the gate, built later, decides).
     pub destructive: bool,
+    /// Canonical destructive operation label when [`Self::destructive`] is true.
+    /// The data-security guard consumes this exact classifier output so the
+    /// policy gate cannot drift into a narrower hand-rolled SQL allowlist.
+    pub destructive_operation: Option<&'static str>,
     /// Cannot run inside a transaction block (CONCURRENTLY, ALTER TYPE ADD
     /// VALUE, VACUUM) — needs the two-phase apply path.
     pub non_transactional: bool,
@@ -114,11 +118,8 @@ fn classify_node(node: &NodeEnum, raw: String) -> StatementClass {
             | DdlKind::CreateFunction
             | DdlKind::CreateTrigger
     );
-    let destructive = matches!(
-        kind,
-        DdlKind::DropTable | DdlKind::DropColumn | DdlKind::DropConstraint
-    ) || is_truncate(node)
-        || is_lossy_alter_type(node);
+    let destructive_operation = destructive_operation(node);
+    let destructive = destructive_operation.is_some();
     let non_transactional = matches!(kind, DdlKind::CreateIndexConcurrently)
         || is_concurrent_drop_index(node)
         || is_alter_type_add_value(node)
@@ -128,6 +129,7 @@ fn classify_node(node: &NodeEnum, raw: String) -> StatementClass {
         kind,
         additive,
         destructive,
+        destructive_operation,
         non_transactional,
         referenced_schemas: collect_schemas(node),
         raw,
@@ -207,24 +209,66 @@ fn alter_table_kind(at: &protobuf::AlterTableStmt) -> DdlKind {
     DdlKind::Other("AlterTableStmt".to_string())
 }
 
-/// True if any `ALTER TABLE` subcommand is a lossy `ALTER COLUMN … TYPE`.
-/// Conservatively treats *every* type change as potentially lossy (the
-/// engine cannot prove a widening is lossless without column metadata).
-fn is_lossy_alter_type(node: &NodeEnum) -> bool {
-    if let NodeEnum::AlterTableStmt(at) = node {
-        return at.cmds.iter().any(|cmd| {
-            matches!(
-                cmd.node.as_ref(),
-                Some(NodeEnum::AlterTableCmd(c))
-                    if c.subtype == AlterTableType::AtAlterColumnType as i32
-            )
-        });
+/// The canonical destructive/data-lossy statement classifier.
+///
+/// Security policy (`data_security.destructive_ops`) intentionally consumes this
+/// classifier output instead of maintaining a second SQL-shape list in the guard.
+/// Keep every data-lossy shape here so plan flags, approval, warnings, and
+/// forbid-mode denials stay in lockstep.
+#[must_use]
+pub fn destructive_operation(node: &NodeEnum) -> Option<&'static str> {
+    match node {
+        NodeEnum::TruncateStmt(_) => Some("TRUNCATE"),
+        NodeEnum::DropOwnedStmt(_) => Some("DROP OWNED"),
+        NodeEnum::DropStmt(drop) => destructive_drop_operation(drop.remove_type),
+        NodeEnum::DeleteStmt(delete) if delete.where_clause.is_none() => {
+            Some("DELETE without WHERE")
+        }
+        NodeEnum::AlterTableStmt(at) => destructive_alter_table_operation(at),
+        _ => None,
     }
-    false
 }
 
-const fn is_truncate(node: &NodeEnum) -> bool {
-    matches!(node, NodeEnum::TruncateStmt(_))
+fn destructive_drop_operation(remove_type: i32) -> Option<&'static str> {
+    match ObjectType::try_from(remove_type).ok()? {
+        ObjectType::ObjectTable => Some("DROP TABLE"),
+        ObjectType::ObjectColumn => Some("DROP COLUMN"),
+        ObjectType::ObjectSchema => Some("DROP SCHEMA"),
+        ObjectType::ObjectView => Some("DROP VIEW"),
+        ObjectType::ObjectMatview => Some("DROP MATERIALIZED VIEW"),
+        ObjectType::ObjectSequence => Some("DROP SEQUENCE"),
+        ObjectType::ObjectType => Some("DROP TYPE"),
+        ObjectType::ObjectDomain => Some("DROP DOMAIN"),
+        ObjectType::ObjectFunction | ObjectType::ObjectProcedure | ObjectType::ObjectRoutine => {
+            Some("DROP FUNCTION")
+        }
+        ObjectType::ObjectIndex => Some("DROP INDEX"),
+        ObjectType::ObjectTabconstraint | ObjectType::ObjectDomconstraint => {
+            Some("DROP CONSTRAINT")
+        }
+        _ => None,
+    }
+}
+
+fn destructive_alter_table_operation(at: &protobuf::AlterTableStmt) -> Option<&'static str> {
+    at.cmds.iter().find_map(|cmd| {
+        let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
+            return None;
+        };
+        if c.subtype == AlterTableType::AtDropColumn as i32 {
+            Some("DROP COLUMN")
+        } else if c.subtype == AlterTableType::AtDropConstraint as i32 {
+            Some("DROP CONSTRAINT")
+        } else if c.subtype == AlterTableType::AtAlterColumnType as i32 {
+            Some("ALTER COLUMN TYPE")
+        } else if c.subtype == AlterTableType::AtDetachPartition as i32
+            || c.subtype == AlterTableType::AtDetachPartitionFinalize as i32
+        {
+            Some("DETACH PARTITION")
+        } else {
+            None
+        }
+    })
 }
 
 /// `DROP INDEX CONCURRENTLY` also cannot run in a transaction.

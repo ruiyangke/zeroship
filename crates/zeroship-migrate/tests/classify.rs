@@ -68,6 +68,27 @@ fn drop_constraint_is_destructive() {
     let c = one("ALTER TABLE products DROP CONSTRAINT chk");
     assert_eq!(c.kind, DdlKind::DropConstraint);
     assert!(c.destructive);
+    assert_eq!(c.destructive_operation, Some("DROP CONSTRAINT"));
+}
+
+#[test]
+fn expanded_destructive_set_is_classified_canonically() {
+    for (sql, operation) in [
+        ("DELETE FROM products", "DELETE without WHERE"),
+        ("DROP MATERIALIZED VIEW product_rollups", "DROP MATERIALIZED VIEW"),
+        ("DROP VIEW product_view", "DROP VIEW"),
+        ("DROP INDEX product_idx", "DROP INDEX"),
+        ("DROP SEQUENCE product_seq", "DROP SEQUENCE"),
+        ("DROP TYPE product_type", "DROP TYPE"),
+        ("DROP DOMAIN product_domain", "DROP DOMAIN"),
+        ("DROP FUNCTION product_fn()", "DROP FUNCTION"),
+        ("ALTER TABLE products ALTER COLUMN price TYPE int", "ALTER COLUMN TYPE"),
+        ("ALTER TABLE products DETACH PARTITION products_2026", "DETACH PARTITION"),
+    ] {
+        let c = one(sql);
+        assert!(c.destructive, "{sql} must be classified destructive");
+        assert_eq!(c.destructive_operation, Some(operation), "{sql}");
+    }
 }
 
 #[test]
