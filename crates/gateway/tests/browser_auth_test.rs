@@ -5,7 +5,7 @@
 //! These drive the REAL ntex handlers through `ntex::web::test`. The
 //! unconditional tests (authorize URL shape, 503 when un-provisioned,
 //! popup-callback page + CSP + no-reflection) need NO database. The signout revocation
-//! test stands up a loopback MOCK Hydra (counting `/oauth2/revoke` hits)
+//! test stands up a loopback MOCK OP (counting `/revoke` hits)
 //! and is DB-gated on `GATEWAY_ANCHORS_DB_URL` (the established skip
 //! convention — no live PG in CI by default), but the same-origin guard +
 //! cookie-clear parts run unconditionally.
@@ -21,7 +21,7 @@ use zeroship_gateway::{
     anchors,
     blob_cache::{BlobCache, DiskBlobCache},
     browser_auth, enforce, idempotency,
-    oidc_rp::OidcRp,
+    oidc_rp::{BrokerSecret, OidcRp},
     proxy::HashRing,
     session_token,
     sync::RouteCache,
@@ -36,7 +36,8 @@ const APP_NAME: &str = "myapp";
 const APP_UUID: &str = "0192b3c4-d5e6-7f80-9a1b-2c3d4e5f6071";
 const CLIENT_ID: &str = "oac_myapp";
 const GATEWAY_ISS: &str = "https://api.zeroship.ai";
-const HYDRA_ISS: &str = "https://auth.zeroship.ai/";
+const OP_ISS: &str = "https://auth.zeroship.ai";
+const TEST_BROKER_MASTER: &[u8] = b"gateway-browser-test-broker-master-32-bytes";
 
 // ─── BlobStore stub ──────────────────────────────────────────────────────
 
@@ -107,7 +108,7 @@ struct StateOpts {
     /// Provision the route with `Some(client_id)` + sector, or leave it
     /// un-provisioned (`None`/`None`) to exercise the 503 path.
     provisioned: bool,
-    /// Hydra dial URL (loopback mock) for `OidcRp`.
+    /// OP dial URL (loopback mock) for `OidcRp`.
     hydra_base: String,
     db: Option<zeroship_gateway::db::DbConfig>,
     /// Optional previous signing key (session-cookie rotation overlap).
@@ -148,9 +149,13 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
         None => session_token::Verifier::new(&signing_key.verifying_key(), GATEWAY_ISS.into()),
     };
 
-    // OidcRp dials the loopback mock for /oauth2/{auth,token,revoke}.
-    let oidc_rp = OidcRp::new(&opts.hydra_base, "gateway", "test-secret", b"k".repeat(32))
-        .with_issuer(HYDRA_ISS);
+    // OidcRp dials the loopback mock for OP endpoints.
+    let oidc_rp = OidcRp::new(
+        &opts.hydra_base,
+        BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
+        b"k".repeat(32),
+    )
+    .with_issuer(OP_ISS);
 
     let routes = RouteCache::new();
     routes.update(
@@ -261,7 +266,7 @@ async fn read_text(resp: ntex::web::WebResponse) -> String {
 // ─── GET /__zeroship/auth/authorize ────────────────────────────────────────────
 
 #[ntex::test]
-async fn authorize_redirects_to_hydra_with_browser_pkce() {
+async fn authorize_redirects_to_op_with_browser_pkce() {
     let state = build_state(StateOpts::default());
     let app = test::init_service(browser_app!(state)).await;
 
@@ -271,10 +276,10 @@ async fn authorize_redirects_to_hydra_with_browser_pkce() {
         .to_request();
     let resp = test::call_service(&app, req).await;
 
-    assert_eq!(resp.status().as_u16(), 302, "authorize must 302 to Hydra");
+    assert_eq!(resp.status().as_u16(), 302, "authorize must 302 to OP");
     let loc = header_str(&resp, "location").expect("Location header");
-    // Cross-site hop to Hydra's /oauth2/auth.
-    assert!(loc.starts_with("http://127.0.0.1:1/oauth2/auth?"), "{loc}");
+    // Cross-site hop to the OP's /authorize.
+    assert!(loc.starts_with("http://127.0.0.1:1/authorize?"), "{loc}");
     // PER-APP public client_id (never the gateway confidential client).
     assert!(loc.contains("client_id=oac_myapp"), "{loc}");
     assert!(!loc.contains("client_id=gateway"), "{loc}");
@@ -284,13 +289,13 @@ async fn authorize_redirects_to_hydra_with_browser_pkce() {
     assert!(loc.contains("code_challenge_method=S256"), "{loc}");
     assert!(loc.contains("state=ST_x"), "{loc}");
     assert!(loc.contains("nonce=NO_y"), "{loc}");
-    assert!(loc.contains("scope=openid+profile+read%3Abilling"), "{loc}");
+    assert!(loc.contains("scope=openid+profile+read%3Abilling+offline_access"), "{loc}");
     // redirect_uri defaults to THIS app's own popup-callback.
     assert!(
         loc.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zeroship%2Fauth%2Fpopup-callback"),
         "{loc}"
     );
-    // No prompt in the common case (so Hydra SSO skip fires).
+    // No prompt in the common case (so OP SSO skip fires).
     assert!(!loc.contains("prompt="), "default omits prompt: {loc}");
     // no-store on the redirect.
     assert_eq!(header_str(&resp, "cache-control").as_deref(), Some("no-store"));
@@ -521,16 +526,16 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
 
 /// DB-gated: seed an anchor, sign out, and assert (a) the per-app family
 /// marker is set, (b) the anchor row is deleted, (c) the cookies are
-/// cleared, (d) Hydra `/oauth2/revoke` was hit exactly once.
+/// cleared, (d) OP `/revoke` was hit exactly once.
 #[ntex::test]
-async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revoke() {
+async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke() {
     let Some(dsn) = std::env::var("GATEWAY_ANCHORS_DB_URL").ok() else {
         eprintln!("skipping (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 4);
 
-    // Loopback mock Hydra that counts /oauth2/revoke calls.
+    // Loopback mock OP that counts /revoke calls.
     let revoke_calls = Arc::new(AtomicU32::new(0));
     let mock = start_mock_revoke(revoke_calls.clone()).await;
     let base = mock.url("").trim_end_matches('/').to_string();
@@ -549,7 +554,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
     seed_user(&dsn, global_user_id).await;
 
     // Seed an anchor row with an encrypted refresh family (encrypted with
-    // the SAME AAD the gateway uses, so signout can decrypt + Hydra-revoke).
+    // the SAME AAD the gateway uses, so signout can decrypt + OP-revoke).
     let refresh_plain = "rt_seeded_family_secret";
     let aad = format!("zs-anchor-refresh:{CLIENT_ID}:{global_user_id}").into_bytes();
     let refresh_enc =
@@ -641,11 +646,11 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_hydra_revok
         .ok();
     }
 
-    // (c) Hydra /oauth2/revoke hit exactly once (best-effort revoke fired).
+    // (c) OP /revoke hit exactly once (best-effort revoke fired).
     assert_eq!(
         revoke_calls.load(Ordering::SeqCst),
         1,
-        "signout must best-effort revoke the family at Hydra exactly once"
+        "signout must best-effort revoke the family at OP exactly once"
     );
     drop(mock);
     cleanup_user(&dsn, global_user_id).await;
@@ -707,14 +712,14 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
-/// Start a loopback mock Hydra that answers `POST /oauth2/revoke` with 200
+/// Start a loopback mock OP that answers `POST /revoke` with 200
 /// and increments `counter`. Faithful to RFC 7009 (always 200).
 async fn start_mock_revoke(counter: Arc<AtomicU32>) -> test::TestServer {
     test::server(move || {
         let counter = counter.clone();
         async move {
             web::App::new().state(counter).service(
-                web::resource("/oauth2/revoke").route(web::post().to(
+                web::resource("/revoke").route(web::post().to(
                     |c: web::types::State<Arc<AtomicU32>>| async move {
                         c.fetch_add(1, Ordering::SeqCst);
                         web::HttpResponse::Ok().finish()

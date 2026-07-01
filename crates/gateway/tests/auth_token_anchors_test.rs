@@ -3,7 +3,7 @@
 //! the per-node mint single-flight, the `zeroship.app_session_anchors` store).
 //!
 //! A loopback MOCK Hydra (in-process ntex test server) serves
-//! `/.well-known/jwks.json` and `/oauth2/token` so the REAL code path runs
+//! `/.well-known/jwks.json` and `/token` so the REAL code path runs
 //! locally — the gateway's `OidcRp` dials it, verifies EdDSA-signed
 //! id/access tokens against its JWKS, and the mock COUNTS refresh-grant
 //! calls so the single-flight assertion ("N concurrent mints ⇒ exactly 1
@@ -25,7 +25,7 @@ use zeroship_gateway::{
     anchors,
     blob_cache::{BlobCache, DiskBlobCache},
     enforce, idempotency,
-    oidc_rp::OidcRp,
+    oidc_rp::{BrokerSecret, OidcRp},
     proxy::HashRing,
     session_token,
     sync::RouteCache,
@@ -34,9 +34,10 @@ use zeroship_gateway::{
 
 // ─── Mock Hydra ──────────────────────────────────────────────────────────
 
-const MOCK_ISSUER: &str = "https://auth.zeroship.ai/";
+const MOCK_ISSUER: &str = "https://auth.zeroship.ai";
+const TEST_BROKER_MASTER: &[u8] = b"gateway-anchor-test-broker-master-32-bytes";
 
-/// A malformed-but-2xx `/oauth2/token` body: it carries a refresh_token-shaped
+/// A malformed-but-2xx `/token` body: it carries a refresh_token-shaped
 /// secret but is missing the required `access_token` field, so it fails to
 /// deserialize into `TokenSet`. The secret value below MUST NOT appear in any
 /// error string the gateway surfaces or logs (§8.1/§8.5).
@@ -177,7 +178,7 @@ async fn boot_mock_hydra(hydra: Arc<MockHydra>) -> (String, ntex::web::test::Tes
             web::App::new()
                 .state(h)
                 .service(web::resource("/.well-known/jwks.json").route(web::get().to(jwks_endpoint)))
-                .service(web::resource("/oauth2/token").route(web::post().to(token_endpoint)))
+                .service(web::resource("/token").route(web::post().to(token_endpoint)))
         }
     })
     .await;
@@ -196,10 +197,24 @@ async fn token_endpoint(
     h: web::types::State<Arc<MockHydra>>,
 ) -> web::HttpResponse {
     let mut grant = String::new();
+    let mut client_id = String::new();
+    let mut client_secret = String::new();
     for (k, v) in url::form_urlencoded::parse(&body) {
-        if k == "grant_type" {
-            grant = v.into_owned();
+        match k.as_ref() {
+            "grant_type" => grant = v.into_owned(),
+            "client_id" => client_id = v.into_owned(),
+            "client_secret" => client_secret = v.into_owned(),
+            _ => {}
         }
+    }
+    let expected_secret = zeroship_core::auth::derive_broker_secret(
+        TEST_BROKER_MASTER,
+        &client_id,
+    );
+    if client_id != h.client_id || client_secret != expected_secret {
+        return web::HttpResponse::Unauthorized()
+            .header("content-type", "application/json")
+            .body(r#"{"error":"invalid_client"}"#);
     }
     match grant.as_str() {
         "authorization_code" => web::HttpResponse::Ok()
@@ -323,7 +338,7 @@ const CLIENT_ID: &str = "oac_myapp";
 /// (the `app_id` column is UUID, bound natively).
 const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
 
-/// Build a `GateState` whose `OidcRp` dials the loopback mock Hydra and
+/// Build a `GateState` whose `OidcRp` dials the loopback mock OP and
 /// whose route cache has one provisioned app (`myapp` → `oac_myapp`).
 fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> Arc<GateState> {
     let mut tmp = std::env::temp_dir();
@@ -339,10 +354,14 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
         "https://api.zeroship.ai".into(),
     );
 
-    // OidcRp dials the loopback mock for /oauth2/token + JWKS, but expects
+    // OidcRp dials the loopback mock for /token + JWKS, but expects
     // the canonical issuer the mock stamps into tokens.
-    let oidc_rp = OidcRp::new(hydra_base, "gateway", "test-secret", b"k".repeat(32))
-        .with_issuer(MOCK_ISSUER);
+    let oidc_rp = OidcRp::new(
+        hydra_base,
+        BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
+        b"k".repeat(32),
+    )
+    .with_issuer(MOCK_ISSUER);
 
     let routes = RouteCache::new();
     routes.update(
@@ -724,8 +743,8 @@ async fn coalesced_mint(
 async fn n_parallel_mints_cause_one_hydra_refresh() {
     // FAITHFUL single-flight proof WITHOUT a DB: drive the real per-node
     // single-flight ([`anchors::with_single_flight`]) + the real
-    // [`anchors::EntryGuard`] removal over a future that does a REAL Hydra
-    // `/oauth2/token` refresh against the loopback mock, and assert the mock
+    // [`anchors::EntryGuard`] removal over a future that does a REAL OP
+    // `/token` refresh against the loopback mock, and assert the mock
     // saw exactly ONE refresh for N concurrent minters.
     //
     // The coalescing key + future-sharing + guard-based removal is the
@@ -738,7 +757,12 @@ async fn n_parallel_mints_cause_one_hydra_refresh() {
     let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
 
     let oidc = Arc::new(
-        OidcRp::new(&base, "gateway", "s", b"k".repeat(32)).with_issuer(MOCK_ISSUER),
+        OidcRp::new(
+            &base,
+            BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
+            b"k".repeat(32),
+        )
+        .with_issuer(MOCK_ISSUER),
     );
     let anchor_id = Uuid::new_v4();
 
@@ -791,7 +815,12 @@ async fn cancelled_leader_does_not_leak_single_flight_entry() {
     hydra.refresh_delay_ms.store(120, Ordering::SeqCst);
     let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
     let oidc = Arc::new(
-        OidcRp::new(&base, "gateway", "s", b"k".repeat(32)).with_issuer(MOCK_ISSUER),
+        OidcRp::new(
+            &base,
+            BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
+            b"k".repeat(32),
+        )
+        .with_issuer(MOCK_ISSUER),
     );
     let anchor_id = Uuid::new_v4();
 
@@ -845,7 +874,12 @@ async fn all_awaiters_dropped_clears_single_flight_entry() {
     hydra.refresh_delay_ms.store(200, Ordering::SeqCst);
     let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
     let oidc = Arc::new(
-        OidcRp::new(&base, "gateway", "s", b"k".repeat(32)).with_issuer(MOCK_ISSUER),
+        OidcRp::new(
+            &base,
+            BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
+            b"k".repeat(32),
+        )
+        .with_issuer(MOCK_ISSUER),
     );
     let anchor_id = Uuid::new_v4();
 
@@ -878,7 +912,12 @@ async fn malformed_2xx_refresh_body_is_not_logged() {
     let hydra = Arc::new(MockHydra::new(CLIENT_ID));
     hydra.garbage_2xx.store(true, Ordering::SeqCst);
     let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
-    let oidc = OidcRp::new(&base, "gateway", "s", b"k".repeat(32)).with_issuer(MOCK_ISSUER);
+    let oidc = OidcRp::new(
+        &base,
+        BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
+        b"k".repeat(32),
+    )
+    .with_issuer(MOCK_ISSUER);
 
     let err = oidc
         .refresh_token_public(CLIENT_ID, "rt_seed")
@@ -897,7 +936,7 @@ async fn malformed_2xx_refresh_body_is_not_logged() {
     );
 }
 
-/// One real Hydra refresh-grant + local verify of the rotated access JWT —
+/// One real OP refresh-grant + local verify of the rotated access JWT —
 /// the same two steps `auth_token::do_refresh` runs (minus the DB write). The
 /// rotated raw access JWT stays server-side (BFF §2.2) — it is verified but no
 /// browser wrapper is produced from it.

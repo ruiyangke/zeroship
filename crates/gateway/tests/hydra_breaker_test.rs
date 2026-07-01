@@ -1,13 +1,13 @@
-//! Faithful integration tests for the shared, breaker-guarded Hydra client
+//! Faithful integration tests for the shared, breaker-guarded OP client
 //! (auth-sdk §8.7, round-6 MAJOR #3).
 //!
 //! These drive the REAL `OidcRp` token path (`refresh_token_public` →
-//! `post_token` → `hydra_client::call`) against a loopback MOCK Hydra (an
+//! `post_token` → `hydra_client::call`) against a loopback MOCK OP (an
 //! in-process ntex test server), exactly like `auth_token_anchors_test.rs`.
 //! Nothing about the breaker, the reused client, or the bounded timeout is
-//! stubbed — the only fake is Hydra itself, which:
+//! stubbed — the only fake is the OP itself, which:
 //!
-//! - counts EVERY `/oauth2/token` request it receives, so "fast-fail while
+//! - counts EVERY `/token` request it receives, so "fast-fail while
 //!   open ⇒ the mock sees no further call" is an exact assertion;
 //! - can be flipped to answer `400 invalid_grant` (a valid upstream response,
 //!   NOT a breaker failure);
@@ -27,15 +27,16 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_gateway::hydra_client::{BreakerState, CircuitBreaker};
-use zeroship_gateway::oidc_rp::{OidcRp, OidcRpError};
+use zeroship_gateway::oidc_rp::{BrokerSecret, OidcRp, OidcRpError};
 
 const CLIENT_ID: &str = "oac_myapp";
+const TEST_BROKER_MASTER: &[u8] = b"gateway-breaker-test-broker-master-32-bytes";
 
-/// Minimal mock Hydra `/oauth2/token`. Counts every request, and can be
+/// Minimal mock OP `/token`. Counts every request, and can be
 /// flipped to answer `invalid_grant` or to add an artificial delay.
 #[derive(Default)]
 struct MockHydra {
-    /// Total `/oauth2/token` requests received (the fast-fail proof).
+    /// Total `/token` requests received (the fast-fail proof).
     calls: AtomicU32,
     /// When true, answer `400 invalid_grant` (a valid upstream response).
     invalid_grant: AtomicBool,
@@ -72,14 +73,14 @@ async fn token_endpoint(
         )
 }
 
-/// Boot the loopback mock Hydra. Returns `(base_url, server)`.
+/// Boot the loopback mock OP. Returns `(base_url, server)`.
 async fn boot_mock(hydra: Arc<MockHydra>) -> (String, test::TestServer) {
     let srv = test::server(move || {
         let h = hydra.clone();
         async move {
             web::App::new()
                 .state(h)
-                .service(web::resource("/oauth2/token").route(web::post().to(token_endpoint)))
+                .service(web::resource("/token").route(web::post().to(token_endpoint)))
         }
     })
     .await;
@@ -90,7 +91,11 @@ async fn boot_mock(hydra: Arc<MockHydra>) -> (String, test::TestServer) {
 /// Build an `OidcRp` dialing `base`, with an explicit fast-tripping breaker
 /// and a chosen per-call timeout, so the state-machine transitions are quick.
 fn rp_with(base: &str, breaker: Arc<CircuitBreaker>, timeout: Duration) -> OidcRp {
-    OidcRp::new(base, "gateway", "s", b"k".repeat(32))
+    OidcRp::new(
+        base,
+        BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
+        b"k".repeat(32),
+    )
         .with_breaker(breaker)
         .with_hydra_timeout(timeout)
 }

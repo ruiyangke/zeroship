@@ -60,9 +60,7 @@ pub async fn handle(
     // `aud` (= the per-app `client_id`, `oac_<base62>`). Peek the token's `aud`
     // (routing only — the signature is still verified below) to learn which
     // client it is for; a per-app client resolves to one app's subdomain so we
-    // revoke only THAT app's sessions. The legacy shared `gateway` client
-    // (`state.oidc_rp.client_id`) still revokes across the subject's gateway
-    // sessions for that aud.
+    // revoke only THAT app's sessions.
     //
     // `revoke_scope` carries the app's STABLE UUID (`apps.id`) when a per-app
     // client matched (revoke only that app — the canonical session/anchor
@@ -75,11 +73,7 @@ pub async fn handle(
     // wrapper to revoke without a sector).
     let aud_candidates =
         zeroship_core::logout_token::unverified_aud_candidates(&form.logout_token);
-    let (aud, revoke_scope, revoke_sector): (
-        String,
-        Option<uuid::Uuid>,
-        Option<String>,
-    ) = aud_candidates
+    let Some((aud, revoke_scope, revoke_sector)) = aud_candidates
         .iter()
         .find_map(|cand| {
             // The per-app session/anchor rows are keyed by the app's STABLE
@@ -88,8 +82,15 @@ pub async fn handle(
             state.routes.lookup_by_oauth_client_id(cand).map(|(id, route)| {
                 (cand.clone(), Some(id), route.entry.sector_identifier.clone())
             })
-        })
-        .unwrap_or_else(|| (state.oidc_rp.client_id.clone(), None, None));
+        }) else {
+            tracing::warn!(
+                aud = ?aud_candidates,
+                "backchannel_logout: no provisioned per-app client matched logout_token audience"
+            );
+            return HttpResponse::BadRequest()
+                .header("cache-control", "no-store")
+                .body("invalid logout_token");
+        };
 
     let token = match zeroship_core::logout_token::verify(
         &state.oidc_rp.jwks,

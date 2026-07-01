@@ -44,6 +44,28 @@ async fn seed_user(client: &Client, label: &str) -> Uuid {
     user_id
 }
 
+async fn seed_oauth_client(client: &Client, client_id: &str) {
+    let redirect_uris: Vec<String> =
+        vec!["https://app.zeroship.test/__zeroship/auth/callback".into()];
+    let scopes: Vec<String> = vec!["openid".into(), "offline_access".into()];
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes, hydra_client_id, \
+                 refresh_allowed, token_endpoint_auth_method, brokered) \
+             VALUES ($1, $2, $3, $4, $1, TRUE, 'client_secret_basic', TRUE) \
+             ON CONFLICT (client_id) DO UPDATE SET \
+                redirect_uris = EXCLUDED.redirect_uris, \
+                scopes = EXCLUDED.scopes, \
+                refresh_allowed = TRUE, \
+                token_endpoint_auth_method = 'client_secret_basic', \
+                brokered = TRUE",
+            &[&client_id, &"relay fixture client", &redirect_uris, &scopes],
+        )
+        .await
+        .expect("seed oauth client");
+}
+
 async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
     let _ = client
         .execute(
@@ -54,6 +76,12 @@ async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
     let _ = client
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
         .await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await;
 }
 
 #[compio::test]
@@ -63,6 +91,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
         return;
     };
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
+    seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "relayswap").await;
     let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
     let relay_email = format!("{}@relay.zeroship.localhost", Uuid::new_v4().simple());
@@ -115,6 +144,7 @@ async fn lookup_relay_email_is_none_when_no_alias_minted() {
         return;
     };
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());
+    seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "noalias").await;
     let pairwise_sub = format!("pws_{}", &Uuid::new_v4().simple().to_string()[..20]);
 

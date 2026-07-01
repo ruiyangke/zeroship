@@ -69,6 +69,8 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     let target_user = target_user_id.to_string();
     let app_a = Uuid::new_v4();
     let app_b = Uuid::new_v4();
+    seed_app(&client, app_a, &format!("bcl-a-{}", Uuid::new_v4().simple())).await;
+    seed_app(&client, app_b, &format!("bcl-b-{}", Uuid::new_v4().simple())).await;
 
     let s_a = create(
         &mut client,
@@ -227,14 +229,22 @@ async fn seed_app(client: &Client, app_id: Uuid, name: &str) {
 /// Seed a real `zeroship.oauth_clients` row so the `app_session_anchors`
 /// FK to `oauth_clients(client_id)` is satisfied.
 async fn seed_oauth_client(client: &Client, client_id: &str) {
-    let empty: Vec<String> = vec![];
+    let redirect_uris: Vec<String> =
+        vec!["https://app.zeroship.test/__zeroship/auth/callback".into()];
+    let scopes: Vec<String> = vec!["openid".into(), "offline_access".into()];
     client
         .execute(
             "INSERT INTO zeroship.oauth_clients \
-                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
-             VALUES ($1, $2, $3, $4, $1) \
-             ON CONFLICT (client_id) DO NOTHING",
-            &[&client_id, &"BCL test client", &empty, &empty],
+                (client_id, client_name, redirect_uris, scopes, hydra_client_id, \
+                 refresh_allowed, token_endpoint_auth_method, brokered) \
+             VALUES ($1, $2, $3, $4, $1, TRUE, 'client_secret_basic', TRUE) \
+             ON CONFLICT (client_id) DO UPDATE SET \
+                redirect_uris = EXCLUDED.redirect_uris, \
+                scopes = EXCLUDED.scopes, \
+                refresh_allowed = TRUE, \
+                token_endpoint_auth_method = 'client_secret_basic', \
+                brokered = TRUE",
+            &[&client_id, &"BCL test client", &redirect_uris, &scopes],
         )
         .await
         .expect("seed oauth_client");
@@ -435,8 +445,10 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp: Arc::new(OidcRp::new(
             auth_base,
-            "gateway",
-            "test-secret",
+            zeroship_gateway::oidc_rp::BrokerSecret::from_bytes(
+                b"gateway-bcl-test-broker-master-32-bytes".to_vec(),
+            )
+            .expect("broker secret"),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )),
         db: Some(db),
@@ -499,7 +511,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = format!("{auth_base}/");
+    let issuer = auth_base.clone();
 
     let target_user = insert_user(&db, "gateway-bcl-handler-target").await;
     let target_user_string = target_user.to_string();
@@ -510,6 +522,8 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let app_name = format!("bcl-replay-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_bclreplay_{}", Uuid::new_v4().simple());
     let sector = format!("https://{app_name}.zeroship.localhost");
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
     let session = create(
         &mut db,
         &NewSession {
@@ -714,7 +728,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = format!("{auth_base}/");
+    let issuer = auth_base.clone();
 
     let target_user = insert_user(&db, "gateway-bcl-perapp").await;
     let target_user_string = target_user.to_string();
@@ -722,6 +736,8 @@ async fn per_app_bcl_writes_token_family_marker() {
     let app_name = format!("perapp-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_perappbcl_{}", Uuid::new_v4().simple());
     let sector = format!("https://{app_name}.zeroship.localhost");
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
     // A gateway session so the per-app `revoke_app_sessions_for_user` has a row.
     // Keyed by the app's stable UUID — the SAME id the route is registered
     // under below, so the handler's UUID-keyed per-app revoke matches it.
@@ -864,7 +880,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = format!("{auth_base}/");
+    let issuer = auth_base.clone();
 
     let target_user = insert_user(&db, "gateway-bcl-noncanon").await;
     let canonical_sub = target_user.to_string(); // hyphenated lowercase
@@ -878,6 +894,8 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     let app_name = format!("noncanon-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_noncanonbcl_{}", Uuid::new_v4().simple());
     let sector = format!("https://{app_name}.zeroship.localhost");
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
     create(
         &mut db,
         &NewSession {
@@ -1027,7 +1045,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     })
     .await;
     let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
-    let issuer = format!("{auth_base}/");
+    let issuer = auth_base.clone();
 
     let target_user = insert_user(&db, "gateway-bcl-anchor").await;
     let target_user_string = target_user.to_string();

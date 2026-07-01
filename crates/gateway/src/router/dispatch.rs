@@ -677,7 +677,7 @@ async fn execute_resource_tree(
     //    checks will arrive with the auth tier.
     //
     //    On miss for an HTML navigation we kick off the OIDC dance via
-    //    a 302 → hydra; API clients see a 401 with a `WWW-Authenticate`
+    //    a 302 → the platform OP; API clients see a 401 with a `WWW-Authenticate`
     //    challenge so they can prompt the user out-of-band.
     let request_id = Uuid::new_v4();
     let user_header_from_gate =
@@ -693,7 +693,11 @@ async fn execute_resource_tree(
         {
             AuthOutcome::Allowed { user_header } => user_header,
             AuthOutcome::Unauthenticated => {
-                return unauthenticated_response(&req, &state);
+                return unauthenticated_response(
+                    &req,
+                    &state,
+                    compiled_route.entry.oauth_client_id.as_deref(),
+                );
             }
             AuthOutcome::ClientNotProvisioned => {
                 return client_not_provisioned_response();
@@ -1498,7 +1502,10 @@ async fn handle_dispatch(
     // already short-circuited by `auth_satisfied` upstream, so they
     // never reach the worker.) API clients still see the 401 verbatim.
     if response.status() == ntex::http::StatusCode::UNAUTHORIZED && wants_html(&req) {
-        return start_oidc_redirect(&req, state);
+        return match route.oauth_client_id.as_deref() {
+            Some(client_id) => start_oidc_redirect(&req, state, client_id),
+            None => client_not_provisioned_response(),
+        };
     }
 
     // Add response headers.
@@ -1540,14 +1547,21 @@ fn wants_html(req: &HttpRequest) -> bool {
         .is_some_and(|v| v.contains("text/html"))
 }
 
-/// Build the unauthenticated response: 302 → `auth.zeroship.ai/oauth2/auth`
+/// Build the unauthenticated response: 302 → `auth.zeroship.ai/authorize`
 /// for HTML navigations, 401 with a `WWW-Authenticate` challenge for
 /// API clients. Sets the `__Host-zs_oidc_stash` cookie carrying PKCE,
 /// state, and the original path so `/__zeroship/auth/callback` can finish
 /// the dance.
-fn unauthenticated_response(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+fn unauthenticated_response(
+    req: &HttpRequest,
+    state: &Arc<GateState>,
+    oauth_client_id: Option<&str>,
+) -> HttpResponse {
     if wants_html(req) {
-        start_oidc_redirect(req, state)
+        match oauth_client_id {
+            Some(client_id) => start_oidc_redirect(req, state, client_id),
+            None => client_not_provisioned_response(),
+        }
     } else {
         HttpResponse::Unauthorized()
             .header("www-authenticate", "Bearer realm=\"zeroship\"")
@@ -1652,17 +1666,19 @@ async fn handle_auth_callback(
     };
     let sector_identifier = route.entry.sector_identifier.clone();
 
-    // 1. Parse query (code + state). Hydra may also send `error=...`
+    // 1. Parse query (code + state). The OP may also send `error=...`
     //    for user-denied consent; surface it directly.
     let query_str = req.uri().query().unwrap_or("");
     let mut code: Option<String> = None;
     let mut state_param: Option<String> = None;
     let mut oauth_error: Option<String> = None;
+    let mut issuer_param: Option<String> = None;
     for (k, v) in url::form_urlencoded::parse(query_str.as_bytes()) {
         match k.as_ref() {
             "code" => code = Some(v.into_owned()),
             "state" => state_param = Some(v.into_owned()),
             "error" => oauth_error = Some(v.into_owned()),
+            "iss" => issuer_param = Some(v.into_owned()),
             _ => {}
         }
     }
@@ -1675,6 +1691,14 @@ async fn handle_auth_callback(
             "missing code or state query parameter",
         );
     };
+    // RFC 9207 issuer identification. The OP emits `iss` on authorize
+    // responses; tolerate absence for mixed-version local/dev flows, but reject
+    // any present mismatch before consuming the code.
+    if let Some(issuer_param) = issuer_param.as_deref() {
+        if issuer_param != state.oidc_rp.issuer {
+            return render_callback_error(state.config.insecure_dev, "issuer mismatch");
+        }
+    }
 
     // 2. Read the signed stash cookie.
     let cookie_header = req
@@ -1686,7 +1710,7 @@ async fn handle_auth_callback(
         return render_callback_error(state.config.insecure_dev, "missing stash cookie");
     };
 
-    // 3. Exchange the code with hydra + verify the ID token.
+    // 3. Exchange the code with the OP + verify the ID token.
     let (claims, original_path, granted_scopes) = match state
         .oidc_rp
         .finish_callback(&code, &state_param, &stash)
@@ -1839,7 +1863,7 @@ fn html_escape(s: &str) -> String {
 /// Build the 302 → hydra redirect that kicks off the OIDC dance.
 /// Stash cookie carries the PKCE verifier + state + original_path so
 /// the callback can resume.
-fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>, client_id: &str) -> HttpResponse {
     let original_path = req
         .uri()
         .path_and_query()
@@ -1862,7 +1886,7 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpRespons
     let (auth_url, stash) = state
         .oidc_rp
         .build_authorize_redirect(
-            &state.oidc_rp.client_id,
+            client_id,
             &original_path,
             &redirect_uri,
         );
@@ -1922,6 +1946,13 @@ mod tests {
     use zeroship_bundle::{
         AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, ResourceEntry,
     };
+
+    fn test_broker_secret() -> crate::oidc_rp::BrokerSecret {
+        crate::oidc_rp::BrokerSecret::from_bytes(
+            b"gateway-dispatch-test-broker-master-32-bytes".to_vec(),
+        )
+        .expect("broker secret")
+    }
 
     fn manifest_with_resources(resources: HashMap<String, ResourceEntry>) -> Manifest {
         Manifest {
@@ -2041,8 +2072,7 @@ mod tests {
             idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
             oidc_rp: Arc::new(crate::oidc_rp::OidcRp::new(
                 "http://auth.test",
-                "gateway",
-                "test-secret",
+                test_broker_secret(),
                 b"test-stash-key-32-bytes-long----".to_vec(),
             )),
             db: None,
@@ -3201,7 +3231,7 @@ mod tests {
             .header("accept", "application/json")
             .to_http_request();
         let state = build_idempotency_state();
-        let resp = unauthenticated_response(&req, &state);
+        let resp = unauthenticated_response(&req, &state, Some("oac_myapp"));
         assert_eq!(resp.status(), ntex::http::StatusCode::UNAUTHORIZED);
         let wa = resp
             .headers()
@@ -3271,7 +3301,7 @@ mod tests {
             .uri("/dashboard?welcome=true")
             .to_http_request();
         let state = build_idempotency_state();
-        let resp = unauthenticated_response(&req, &state);
+        let resp = unauthenticated_response(&req, &state, Some("oac_myapp"));
         assert_eq!(resp.status(), ntex::http::StatusCode::FOUND);
         let location = resp
             .headers()
@@ -3279,10 +3309,10 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(
-            location.contains("/oauth2/auth?"),
-            "location must point at hydra's /oauth2/auth; got {location:?}"
+            location.contains("/authorize?"),
+            "location must point at the OP's /authorize; got {location:?}"
         );
-        assert!(location.contains("client_id=gateway"));
+        assert!(location.contains("client_id=oac_myapp"));
         assert!(location.contains("code_challenge="));
         // `redirect_uri` is the per-host callback path; insecure_dev=true
         // in the test fixture, so scheme is http.

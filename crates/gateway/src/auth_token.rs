@@ -292,6 +292,7 @@ struct TokenRequest {
     code_verifier: Option<String>,
     redirect_uri: Option<String>,
     refresh_token: Option<String>,
+    iss: Option<String>,
 }
 
 /// `POST /__zeroship/auth/session` — code→token exchange, then identity-only response
@@ -374,6 +375,18 @@ pub async fn session_post(
     let scheme = if state.config.insecure_dev { "http" } else { "https" };
     let default_redirect = format!("{scheme}://{}/__zeroship/auth/popup-callback", route.host);
     let redirect_uri = parsed.redirect_uri.as_deref().unwrap_or(&default_redirect);
+    // RFC 9207 issuer identification. The popup callback relays `iss` when
+    // the OP includes it; tolerate absence for mixed-version local/dev flows,
+    // but reject any present mismatch before consuming the code.
+    if let Some(iss) = parsed.iss.as_deref().filter(|iss| !iss.is_empty()) {
+        if iss != state.oidc_rp.issuer {
+            return error_response(
+                HttpResponse::BadRequest(),
+                "invalid_request",
+                "issuer mismatch",
+            );
+        }
+    }
 
     // Hand off to the shared session-mint tail (code→token exchange →
     // id_token verify → anchor encrypt → pairwise/relay projection →
@@ -1453,6 +1466,7 @@ fn parse_token_request(req: &HttpRequest, body: &[u8]) -> TokenRequest {
                 "code_verifier" => out.code_verifier = Some(v.into_owned()),
                 "redirect_uri" => out.redirect_uri = Some(v.into_owned()),
                 "refresh_token" => out.refresh_token = Some(v.into_owned()),
+                "iss" => out.iss = Some(v.into_owned()),
                 _ => {}
             }
         }

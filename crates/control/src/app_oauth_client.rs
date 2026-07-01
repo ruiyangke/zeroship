@@ -1,10 +1,9 @@
-//! Per-app public PKCE OAuth client lifecycle (auth-sdk Slice 1d, spec §1.1).
+//! Per-app brokered OAuth client lifecycle (auth-sdk Slice 1d, spec §1.1).
 //!
-//! Each hosted creator app gets its own Hydra OAuth client, created and
-//! reconciled by the control plane. The client is a **public PKCE** client
-//! (`token_endpoint_auth_method = "none"`) so the browser SDK can run the
-//! authorization-code + PKCE flow without a client secret. Its `client_id` is
-//! deterministic and stable for the life of the app: `oac_<base62-app-id>`.
+//! Each hosted creator app gets its own stable `oac_<base62-app-id>` OAuth
+//! client. The platform OP treats these clients as gateway-brokered: app code
+//! and browsers never hold a client secret, while the gateway derives and
+//! presents the per-app broker secret from the shared platform broker master.
 //!
 //! Storage (spec §1.1 round-5): the client identity lives in the EXISTING
 //! `control.oauth_clients` (the `control.oauth_grants` FK target + the
@@ -705,15 +704,16 @@ async fn upsert_db_rows(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id, refresh_allowed, \
-             token_endpoint_auth_method) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1, FALSE, 'none') \
+             token_endpoint_auth_method, brokered) \
+         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1, TRUE, 'client_secret_basic', TRUE) \
          ON CONFLICT (client_id) DO UPDATE SET \
             client_name = EXCLUDED.client_name, \
             redirect_uris = EXCLUDED.redirect_uris, \
             scopes = EXCLUDED.scopes, \
             skip_consent = EXCLUDED.skip_consent, \
-            refresh_allowed = FALSE, \
-            token_endpoint_auth_method = 'none'",
+            refresh_allowed = TRUE, \
+            token_endpoint_auth_method = 'client_secret_basic', \
+            brokered = TRUE",
         &[
             &client_id,
             &client_name,
