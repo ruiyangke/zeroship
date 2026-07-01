@@ -3174,7 +3174,14 @@ mod tests {
             "UPDATE users SET email = NULL",
             "DELETE FROM users",
             "DELETE FROM users WHERE 1=1",
+            "WITH t AS (DELETE FROM users) SELECT 1",
+            "WITH t AS (UPDATE users SET x=1) SELECT 1",
+            "DELETE FROM users WHERE 't'",
+            "DELETE FROM users WHERE true::bool",
+            "DELETE FROM users WHERE 1<2",
+            "UPDATE users SET email = NULL WHERE 1=1",
             "MERGE INTO users USING incoming ON users.id = incoming.id WHEN MATCHED THEN DELETE",
+            "WITH t AS (MERGE INTO users USING incoming ON users.id = incoming.id WHEN MATCHED THEN DELETE) SELECT 1",
         ] {
             assert!(
                 matches!(
@@ -3275,6 +3282,18 @@ mod tests {
         guard
             .check("INSERT INTO users(id) VALUES (1)")
             .expect("INSERT is not destructive");
+        guard
+            .check("SELECT * FROM users")
+            .expect("SELECT is not destructive");
+        guard
+            .check("INSERT INTO users SELECT * FROM incoming")
+            .expect("INSERT SELECT without a DML CTE is not destructive");
+        guard
+            .check("ALTER TABLE users ADD CONSTRAINT users_email_chk CHECK (email IS NOT NULL)")
+            .expect("ADD CONSTRAINT is not destructive");
+        guard
+            .check("COMMENT ON TABLE users IS 'creator table'")
+            .expect("COMMENT is not destructive");
 
         let platform = SqlGuard::new(
             platform_guard_config().with_data_security(false, DestructiveOps::Forbid),
