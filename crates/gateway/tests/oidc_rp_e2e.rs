@@ -393,8 +393,11 @@ async fn gateway_oidc_rp_full_dance() {
 
     // 6. Build the authorize redirect — sanity-check the URL shape, then
     //    follow it.
-    let (auth_url, stash) =
-        rp.build_authorize_redirect("/some/path", test_redirect);
+    let (auth_url, stash) = rp.build_authorize_redirect(
+        &test_client_id,
+        "/some/path",
+        test_redirect,
+    );
     assert!(
         auth_url.contains(&format!("client_id={test_client_id}")),
         "auth url should embed client_id: {auth_url}"
