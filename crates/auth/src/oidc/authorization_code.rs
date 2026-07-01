@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
-use crate::op::refresh::{self, ClientAuth, RefreshSessionPool, RefreshTokenKeys};
-use crate::op::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
+use crate::oidc::refresh::{self, ClientAuth, RefreshSessionPool, RefreshTokenKeys};
+use crate::oidc::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
 use crate::return_to;
 use crate::sessions::login as login_session;
 use crate::store::sessions as session_store;

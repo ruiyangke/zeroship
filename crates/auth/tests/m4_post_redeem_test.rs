@@ -113,7 +113,7 @@ struct M4TestCtx {
     cfg: Arc<zeroship_auth::config::AuthConfig>,
     admin: HydraAdmin,
     pg: Arc<compio_postgres::Client>,
-    refresh_pool: zeroship_auth::op::refresh::RefreshSessionPool,
+    refresh_pool: zeroship_auth::oidc::refresh::RefreshSessionPool,
 }
 
 impl M4TestCtx {
@@ -141,7 +141,7 @@ impl M4TestCtx {
             &hydra.base_url,
         ));
         let admin = HydraAdmin::new(hydra.base_url.clone());
-        let refresh_pool = zeroship_auth::op::refresh::RefreshSessionPool::new(db_url, 4);
+        let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url, 4);
 
         Some(Self {
             hydra,

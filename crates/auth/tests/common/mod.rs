@@ -353,7 +353,7 @@ impl Fixture {
         let cfg_state = cfg.clone();
         let db_state = pg.clone();
         let refresh_pool_state =
-            zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
+            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         // Thread the configured console origin into the route-aware security
         // headers exactly as `server::run` does in prod (§4.3), so the booted
         // fixture serves the relaxed `frame-ancestors` on the framed routes.

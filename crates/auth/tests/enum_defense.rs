@@ -124,7 +124,7 @@ async fn login_failure_responses_are_indistinguishable() {
     let cfg_state = cfg.clone();
     let db_state = pg_client.clone();
     let refresh_pool_state =
-        zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
+        zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
         let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();

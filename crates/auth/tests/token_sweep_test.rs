@@ -109,7 +109,7 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
         .await
         .expect("seed email verifications");
 
-    let refresh_pool = zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
+    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let report = token_sweep::tick(&client, &refresh_pool).await.expect("tick");
 
     assert_eq!(report.magic_links_deleted, 1);
@@ -244,7 +244,7 @@ async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
         .await
         .expect("seed rate_limits rows");
 
-    let refresh_pool = zeroship_auth::op::refresh::RefreshSessionPool::new(db_url, 4);
+    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url, 4);
     token_sweep::tick(&client, &refresh_pool).await.expect("tick");
 
     let stale_remaining: i64 = client

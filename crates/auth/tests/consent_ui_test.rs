@@ -238,7 +238,7 @@ impl ConsentTestApp {
         let cfg_state = cfg.clone();
         let pg_state = pg.clone();
         let refresh_pool_state =
-            zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
+            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         let auth_srv = web::test::server(move || {
             let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();

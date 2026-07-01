@@ -7,9 +7,9 @@ use jsonwebtoken::{decode, decode_header, encode, Algorithm, DecodingKey, Encodi
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_auth::op::issuer::oidc_at_hash;
-use zeroship_auth::op::metadata::{discovery_metadata, jwks_document};
-use zeroship_auth::op::{
+use zeroship_auth::oidc::issuer::oidc_at_hash;
+use zeroship_auth::oidc::metadata::{discovery_metadata, jwks_document};
+use zeroship_auth::oidc::{
     AccessTokenClaims, AccessTokenMint, IdTokenClaims, IdTokenMint, Issuer,
     ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
 };
