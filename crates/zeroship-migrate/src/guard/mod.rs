@@ -28,7 +28,7 @@ use pg_query::protobuf::AlterTableType;
 
 use crate::analysis::analyze::Advisory;
 use crate::analysis::classify::{classify, DdlKind, ParseError, StatementClass};
-use crate::model::capability::OperatorCapability;
+use crate::model::capability::{OperatorCapability, VendorCapabilities};
 use crate::model::migration::MigrationFlags;
 use crate::model::policy::{SchemaScope, TrustProfile};
 use zeroship_schema::query::SqlDialect;
@@ -62,6 +62,14 @@ use serde_json::Value;
 pub struct GuardConfig {
     /// PRIVATE. The trust posture. Settable only through `confined()`/`platform()`.
     trust: TrustProfile,
+    /// PRIVATE. The config-loaded capability composition the guard consults for
+    /// every widened statement class. `trust` is retained as the public posture
+    /// marker and constructor boundary; guard decisions below read these bits.
+    capabilities: VendorCapabilities,
+    /// PRIVATE. The operator-trusted belt-skip bit. This is intentionally NOT
+    /// derivable from [`VendorCapabilities::operator`]: Platform and Trusted both
+    /// grant the vendor op set, but only Trusted may skip the deny-list belt.
+    skip_denylist_belt: bool,
     /// PRIVATE. The schemas this guard permits references to. Confined ⇒
     /// `Single(project_schema)`; Platform ⇒ `Allowlist([...])`.
     schemas: SchemaScope,
@@ -94,6 +102,8 @@ impl GuardConfig {
     pub fn confined(project_schema: impl Into<String>) -> Self {
         Self {
             trust: TrustProfile::Confined,
+            capabilities: VendorCapabilities::confined(),
+            skip_denylist_belt: false,
             schemas: SchemaScope::Single(project_schema.into()),
             extension_allowlist: Vec::new(),
             // Default to the PG line-1 guard — byte-identical to before PHASE 4.
@@ -113,6 +123,8 @@ impl GuardConfig {
     pub fn confined_sqlite(project_schema: impl Into<String>) -> Self {
         Self {
             trust: TrustProfile::Confined,
+            capabilities: VendorCapabilities::confined(),
+            skip_denylist_belt: false,
             schemas: SchemaScope::Single(project_schema.into()),
             extension_allowlist: Vec::new(),
             dialect: SqlDialect::Sqlite,
@@ -127,6 +139,8 @@ impl GuardConfig {
     pub fn confined_mysql(project_schema: impl Into<String>) -> Self {
         Self {
             trust: TrustProfile::Confined,
+            capabilities: VendorCapabilities::confined(),
+            skip_denylist_belt: false,
             schemas: SchemaScope::Single(project_schema.into()),
             extension_allowlist: Vec::new(),
             dialect: SqlDialect::Mysql,
@@ -194,8 +208,12 @@ impl GuardConfig {
         schemas: Vec<String>,
         extension_allowlist: Vec<String>,
     ) -> Self {
+        let mut capabilities = VendorCapabilities::operator();
+        capabilities.schemas = schemas.clone();
         Self {
             trust: TrustProfile::Platform,
+            capabilities,
+            skip_denylist_belt: false,
             schemas: SchemaScope::Allowlist(schemas),
             extension_allowlist,
             // Platform is a PG-only posture (it fail-closes to Confined on SQLite
@@ -219,6 +237,8 @@ impl GuardConfig {
     pub(crate) fn trusted(_cap: &OperatorCapability) -> Self {
         Self {
             trust: TrustProfile::Trusted,
+            capabilities: VendorCapabilities::operator(),
+            skip_denylist_belt: true,
             // Inert: the Trusted early-return never consults `schemas` (no
             // cross-schema walk) nor `extension_allowlist` (no statement-kind
             // gate). Kept empty so a future code path can never accidentally
@@ -239,6 +259,18 @@ impl GuardConfig {
     #[must_use]
     pub(crate) fn trust(&self) -> TrustProfile {
         self.trust
+    }
+
+    /// The config-loaded capability composition the guard uses for its widened
+    /// statement classes.
+    #[must_use]
+    pub fn vendor_capabilities(&self) -> &VendorCapabilities {
+        &self.capabilities
+    }
+
+    #[must_use]
+    pub(crate) const fn skips_denylist_belt(&self) -> bool {
+        self.skip_denylist_belt
     }
 
     /// **PR10** — the schema-confinement scope this guard config enforces, for the
@@ -456,7 +488,7 @@ impl SqlGuard {
         // which is constructible ONLY via the operator-gated `GuardConfig::trusted`
         // — so the Confined and Platform code paths below are byte-identical to
         // before this profile existed.
-        if self.cfg.trust() == TrustProfile::Trusted {
+        if self.cfg.skips_denylist_belt() {
             let advisories = crate::analysis::analyze::analyze(sql);
             let destructive = classes.iter().any(|c| c.destructive);
             return Ok(GuardReport {
@@ -652,7 +684,7 @@ impl SqlGuard {
                 if role_grants_superuser(&s.options) {
                     return Err(denied(rule::SUPERUSER_ROLE, raw));
                 }
-                if self.cfg.trust() == TrustProfile::Platform {
+                if self.cfg.vendor_capabilities().allow_role {
                     return Ok(());
                 }
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
@@ -661,13 +693,13 @@ impl SqlGuard {
                 if role_grants_superuser(&s.options) {
                     return Err(denied(rule::SUPERUSER_ROLE, raw));
                 }
-                if self.cfg.trust() == TrustProfile::Platform {
+                if self.cfg.vendor_capabilities().allow_role {
                     return Ok(());
                 }
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
             }
             NodeEnum::AlterRoleSetStmt(_) | NodeEnum::DropRoleStmt(_) => {
-                if self.cfg.trust() == TrustProfile::Platform {
+                if self.cfg.vendor_capabilities().allow_role {
                     return Ok(());
                 }
                 return Err(denied(rule::ROLE_MANAGEMENT, raw));
@@ -679,7 +711,7 @@ impl SqlGuard {
                 if grant_stmt_grants_privileged_role(s) {
                     return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
                 }
-                if self.cfg.trust() == TrustProfile::Platform {
+                if self.cfg.vendor_capabilities().allow_grant {
                     return Ok(());
                 }
                 return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
@@ -688,7 +720,7 @@ impl SqlGuard {
                 if grant_role_stmt_grants_privileged_role(s) {
                     return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
                 }
-                if self.cfg.trust() == TrustProfile::Platform {
+                if self.cfg.vendor_capabilities().allow_grant {
                     return Ok(());
                 }
                 return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
@@ -697,7 +729,7 @@ impl SqlGuard {
                 if alter_default_privileges_grants_privileged_role(s) {
                     return Err(denied(rule::PRIVILEGED_ROLE_GRANT, raw));
                 }
-                if self.cfg.trust() == TrustProfile::Platform {
+                if self.cfg.vendor_capabilities().allow_grant {
                     return Ok(());
                 }
                 return Err(denied(rule::PRIVILEGE_MANAGEMENT, raw));
@@ -795,11 +827,11 @@ impl SqlGuard {
                 self.check_alter_table_cmds(at, raw)?;
             }
             NodeEnum::DropStmt(d) => {
-                let platform = self.cfg.trust() == TrustProfile::Platform;
+                let caps = self.cfg.vendor_capabilities();
                 // DROP ROLE via the DropStmt spelling — ALLOW iff Platform
                 // (§4.1; the `.down.sql` reverse of CREATE ROLE), else deny.
                 if d.remove_type == ObjectType::ObjectRole as i32 {
-                    if platform {
+                    if caps.allow_role {
                         return Ok(());
                     }
                     return Err(denied(rule::ROLE_MANAGEMENT, raw));
@@ -808,7 +840,7 @@ impl SqlGuard {
                 // Platform the extra set (schema/extension/policy — the
                 // `.down.sql`-only reverses) is also admitted (§4.1).
                 let drop_allowed = is_safe_drop_object(d.remove_type)
-                    || (platform && is_platform_drop_object(d.remove_type));
+                    || platform_drop_object_allowed(d.remove_type, caps);
                 if !drop_allowed {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
@@ -818,7 +850,7 @@ impl SqlGuard {
             // Platform, fall through to the cross-schema confinement below (the
             // schema being created is checked against the allowlist there).
             NodeEnum::CreateSchemaStmt(_) => {
-                if self.cfg.trust() != TrustProfile::Platform {
+                if !self.cfg.vendor_capabilities().allow_schema {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
@@ -826,14 +858,14 @@ impl SqlGuard {
             // Platform (§4.1; 0025 RLS policies). When Platform, fall through;
             // cross-schema confinement on the policy's table still runs below.
             NodeEnum::CreatePolicyStmt(_) => {
-                if self.cfg.trust() != TrustProfile::Platform {
+                if !self.cfg.vendor_capabilities().allow_policy {
                     return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
                 }
             }
             // DROP OWNED BY <role> — deny-by-default for Confined; ALLOW iff
             // Platform (§4.1; 0025 rollback DO-block).
             NodeEnum::DropOwnedStmt(_) => {
-                if self.cfg.trust() == TrustProfile::Platform {
+                if self.cfg.vendor_capabilities().allow_role {
                     return Ok(());
                 }
                 return Err(denied(rule::UNRECOGNIZED_DANGEROUS, raw));
@@ -897,11 +929,11 @@ impl SqlGuard {
         at: &protobuf::AlterTableStmt,
         raw: &str,
     ) -> Result<(), GuardError> {
-        let platform = self.cfg.trust() == TrustProfile::Platform;
+        let allow_rls = self.cfg.vendor_capabilities().allow_rls;
         for cmd in &at.cmds {
             if let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() {
                 let subtype_allowed = is_safe_alter_table_subtype(c.subtype)
-                    || (platform && is_platform_alter_table_subtype(c.subtype));
+                    || (allow_rls && is_platform_alter_table_subtype(c.subtype));
                 if !subtype_allowed {
                     return Err(denied(rule::UNSAFE_ALTER_TABLE_CMD, raw));
                 }
@@ -1206,8 +1238,8 @@ impl SqlGuard {
         if body_contains_superuser_role_escalation(&lower) {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
-        let platform = self.cfg.trust() == TrustProfile::Platform;
-        let needles: &[&str] = if platform {
+        let allow_role = self.cfg.vendor_capabilities().allow_role;
+        let needles: &[&str] = if allow_role {
             &["alter system"]
         } else {
             &["alter system", "create role", "create user", "drop role"]
@@ -1217,7 +1249,7 @@ impl SqlGuard {
                 return Err(denied(rule::BODY_INSPECTION, raw));
             }
         }
-        if !platform && lower.contains("search_path") {
+        if !allow_role && lower.contains("search_path") {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
         // COPY … PROGRAM hidden in a body.
@@ -1281,6 +1313,8 @@ pub(crate) fn check_raw_view_body_text(
         .unwrap_or_else(|| SchemaScope::Allowlist(Vec::new()));
     let guard = SqlGuard::new(GuardConfig {
         trust: TrustProfile::Confined,
+        capabilities: VendorCapabilities::confined(),
+        skip_denylist_belt: false,
         schemas,
         extension_allowlist: Vec::new(),
         dialect: SqlDialect::Postgres,
@@ -1622,18 +1656,22 @@ fn is_safe_drop_object(remove_type: i32) -> bool {
     .any(|t| remove_type == *t as i32)
 }
 
-/// The additional `ObjectType`s a **Platform** migration may `DROP` beyond
-/// [`is_safe_drop_object`] (design §4.1, the `.down.sql`-only reverses): role,
-/// schema, extension, policy. Confined never admits these.
-fn is_platform_drop_object(remove_type: i32) -> bool {
-    [
-        ObjectType::ObjectRole,
-        ObjectType::ObjectSchema,
-        ObjectType::ObjectExtension,
-        ObjectType::ObjectPolicy,
-    ]
-    .iter()
-    .any(|t| remove_type == *t as i32)
+/// Whether the loaded capability composition admits a DROP object class beyond
+/// [`is_safe_drop_object`] (design §4.1, the `.down.sql`-only reverses).
+fn platform_drop_object_allowed(remove_type: i32, caps: &VendorCapabilities) -> bool {
+    if remove_type == ObjectType::ObjectRole as i32 {
+        return caps.allow_role;
+    }
+    if remove_type == ObjectType::ObjectSchema as i32 {
+        return caps.allow_schema;
+    }
+    if remove_type == ObjectType::ObjectExtension as i32 {
+        return caps.allow_extension;
+    }
+    if remove_type == ObjectType::ObjectPolicy as i32 {
+        return caps.allow_policy;
+    }
+    false
 }
 
 /// The additional `AlterTableType` subtypes a **Platform** migration may use
@@ -2783,6 +2821,235 @@ mod tests {
             g.check(sql),
             Err(GuardError::Denied { .. } | GuardError::CrossSchema { .. })
         )
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum GuardDecision {
+        Allow,
+        Denied(&'static str),
+        CrossSchema,
+        Parse,
+        RawRejected,
+    }
+
+    fn decision_of(g: &SqlGuard, sql: &str) -> GuardDecision {
+        match g.check(sql) {
+            Ok(_) => GuardDecision::Allow,
+            Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
+            Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
+            Err(GuardError::Parse(_)) => GuardDecision::Parse,
+            Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {
+                GuardDecision::RawRejected
+            }
+        }
+    }
+
+    fn assert_profile_decisions(
+        site: &str,
+        sql: &str,
+        confined: GuardDecision,
+        platform: GuardDecision,
+        trusted: GuardDecision,
+    ) {
+        let profiles = [
+            ("confined", confined_guard(), confined),
+            ("platform", platform_guard(), platform),
+            ("trusted", trusted_guard(), trusted),
+        ];
+        for (profile, guard, expected) in profiles {
+            let got = decision_of(&guard, sql);
+            assert_eq!(
+                got, expected,
+                "{site} behavior lock changed for {profile}: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn m2_stage2_site_459_belt_skip_behavior_lock() {
+        assert_profile_decisions(
+            "site :459 belt-skip",
+            "COPY zeroship.t TO PROGRAM 'sh -c id'",
+            GuardDecision::Denied(rule::COPY_PROGRAM),
+            GuardDecision::Denied(rule::COPY_PROGRAM),
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_655_create_role_behavior_lock() {
+        assert_profile_decisions(
+            "site :655 create role",
+            "CREATE ROLE zeroship_auth NOLOGIN",
+            GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_664_alter_role_behavior_lock() {
+        assert_profile_decisions(
+            "site :664 alter role",
+            "ALTER ROLE zeroship_auth LOGIN",
+            GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_670_role_set_and_drop_behavior_lock() {
+        for sql in [
+            "ALTER ROLE oauth_hydra SET search_path = zeroship, public",
+            "DROP ROLE IF EXISTS oauth_hydra",
+        ] {
+            assert_profile_decisions(
+                "site :670 alter role set / drop role",
+                sql,
+                GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+                GuardDecision::Allow,
+                GuardDecision::Allow,
+            );
+        }
+    }
+
+    #[test]
+    fn m2_stage2_site_682_grant_stmt_behavior_lock() {
+        assert_profile_decisions(
+            "site :682 grant stmt",
+            "GRANT CONNECT ON DATABASE zeroship TO oauth_hydra",
+            GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_691_grant_role_stmt_behavior_lock() {
+        assert_profile_decisions(
+            "site :691 grant role stmt",
+            "GRANT zeroship_app TO oauth_hydra",
+            GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_700_alter_default_privileges_behavior_lock() {
+        assert_profile_decisions(
+            "site :700 alter default privileges",
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship GRANT SELECT ON TABLES TO zeroship_app",
+            GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_798_drop_stmt_behavior_lock() {
+        for sql in [
+            "DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_secrets",
+            "DROP SCHEMA IF EXISTS oauth_hydra CASCADE",
+            "DROP EXTENSION IF EXISTS citext",
+        ] {
+            assert_profile_decisions(
+                "site :798 platform drop object set",
+                sql,
+                GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+                GuardDecision::Allow,
+                GuardDecision::Allow,
+            );
+        }
+    }
+
+    #[test]
+    fn m2_stage2_site_821_create_schema_behavior_lock() {
+        assert_profile_decisions(
+            "site :821 create schema",
+            "CREATE SCHEMA IF NOT EXISTS oauth_hydra",
+            GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_829_create_policy_behavior_lock() {
+        assert_profile_decisions(
+            "site :829 create policy",
+            "CREATE POLICY tenant_isolation ON zeroship.app_secrets USING (true)",
+            GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_836_drop_owned_behavior_lock() {
+        assert_profile_decisions(
+            "site :836 drop owned",
+            "DROP OWNED BY zeroship_auth",
+            GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_900_rls_alter_table_behavior_lock() {
+        assert_profile_decisions(
+            "site :900 RLS alter table",
+            "ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY",
+            GuardDecision::Denied(rule::UNSAFE_ALTER_TABLE_CMD),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_site_1209_body_role_needles_behavior_lock() {
+        assert_profile_decisions(
+            "site :1209 body role needles",
+            "DO $$ BEGIN PERFORM 'create role hidden'; END $$",
+            GuardDecision::Denied(rule::ROLE_MANAGEMENT),
+            GuardDecision::Allow,
+            GuardDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
+        for (site, sql, expected_rule) in [
+            (
+                "site :651 create role SUPERUSER",
+                r#"CREATE ROLE "evil" SUPERUSER"#,
+                rule::SUPERUSER_ROLE,
+            ),
+            (
+                "site :661 alter role SUPERUSER",
+                r#"ALTER ROLE "evil" SUPERUSER"#,
+                rule::SUPERUSER_ROLE,
+            ),
+            (
+                "site :1201 body SUPERUSER token scan",
+                r#"DO $$ BEGIN EXECUTE format('ALTER ROLE %I SUPERUSER', 'evil'); END $$"#,
+                rule::BODY_INSPECTION,
+            ),
+        ] {
+            for (profile, guard) in [
+                ("confined", confined_guard()),
+                ("platform", platform_guard()),
+            ] {
+                let got = decision_of(&guard, sql);
+                assert_eq!(
+                    got,
+                    GuardDecision::Denied(expected_rule),
+                    "{site} must stay hard-denied under {profile}: {sql}"
+                );
+            }
+        }
     }
 
     // ---- M3: extract_string_literals is UTF-8-faithful ---------------------

@@ -4,6 +4,8 @@
 //! loaded strictly and resolved fail-closed, while [`SealedProfile`] is the new
 //! structural carrier the future control-plane path will pass to the engine.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
@@ -798,10 +800,13 @@ impl SealedProfile {
                 max_age_secs: verifier.max_age_secs,
             });
         }
-        // TODO(M2 stage-2): nonce seen-set for exactly-once.
         let mac = self.build_mac(&verifier.key)?;
         mac.verify_slice(&self.seal)
             .map_err(|_| SealError::InvalidSeal)?;
+        verifier.consume_nonce(
+            &self.nonce,
+            self.issued_at.saturating_add(verifier.max_age_secs),
+        )?;
         Ok(())
     }
 
@@ -835,6 +840,26 @@ impl SealedProfile {
 
     pub(crate) fn to_guard_config(&self) -> GuardConfig {
         self.effective.to_guard_config()
+    }
+
+    /// Ensure the sealed line-1 capability profile is backed by the executor's
+    /// line-2 database role. A least-privilege `migrator_<app>` role is the
+    /// DB-enforced floor; a sealed profile that grants platform-only capabilities
+    /// must not be paired with a config that will `SET ROLE` into that floor.
+    pub(crate) fn reconcile_with_executor_config(
+        &self,
+        exec_cfg: &ExecutorConfig,
+    ) -> Result<(), SealError> {
+        let Some(role) = exec_cfg.pg.migrator_role.as_deref() else {
+            return Ok(());
+        };
+        if let Some(capability) = self.effective.migrator_unbacked_capability() {
+            return Err(SealError::MigratorRoleMismatch {
+                capability,
+                role: role.to_string(),
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn apply_operational_to_executor_config(&self, exec_cfg: &mut ExecutorConfig) {
@@ -876,13 +901,74 @@ impl SealedProfile {
     }
 }
 
+impl SealedEffectiveProfile {
+    fn migrator_unbacked_capability(&self) -> Option<&'static str> {
+        let caps = &self.capabilities;
+        if caps.role.allow {
+            return Some("role");
+        }
+        if caps.grant {
+            return Some("grant");
+        }
+        if caps.schema {
+            return Some("schema");
+        }
+        if caps.rls {
+            return Some("rls");
+        }
+        if caps.policy {
+            return Some("policy");
+        }
+        if caps.extension {
+            return Some("extension");
+        }
+        if caps.raw_sql {
+            return Some("raw_sql");
+        }
+        if caps.raw_view_body {
+            return Some("raw_view_body");
+        }
+        if caps.materialized_view {
+            return Some("materialized_view");
+        }
+        if caps.cross_schema {
+            return Some("cross_schema");
+        }
+        None
+    }
+}
+
 /// Verification context for a sealed profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SealVerifier {
     key: Vec<u8>,
     current_ceiling_version: u64,
     now_unix_secs: u64,
     max_age_secs: u64,
+    consumed_nonces: NonceSeenSet,
+}
+
+impl PartialEq for SealVerifier {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.current_ceiling_version == other.current_ceiling_version
+            && self.now_unix_secs == other.now_unix_secs
+            && self.max_age_secs == other.max_age_secs
+    }
+}
+
+impl Eq for SealVerifier {}
+
+/// Process-local consumed-nonce store for the in-process MAC contract.
+///
+/// This crate has no shared durable store handle at the seal verifier layer; the
+/// durable server will need to back this with its own transactional table if the
+/// sealer/runner split across processes. The in-crate verifier still enforces
+/// exactly-once for every verifier instance and its clones within the freshness
+/// window; `issued_at`/`max_age_secs` remains the cross-restart safety bound.
+#[derive(Debug, Clone, Default)]
+struct NonceSeenSet {
+    inner: Arc<Mutex<HashMap<Vec<u8>, u64>>>,
 }
 
 impl SealVerifier {
@@ -907,7 +993,22 @@ impl SealVerifier {
             current_ceiling_version,
             now_unix_secs,
             max_age_secs: SEAL_MAX_AGE_SECS,
+            consumed_nonces: NonceSeenSet::default(),
         })
+    }
+
+    fn consume_nonce(&self, nonce: &[u8], expires_at: u64) -> Result<(), SealError> {
+        let mut seen = self
+            .consumed_nonces
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        seen.retain(|_, expiry| *expiry >= self.now_unix_secs);
+        if seen.contains_key(nonce) {
+            return Err(SealError::ReplayedNonce);
+        }
+        seen.insert(nonce.to_vec(), expires_at);
+        Ok(())
     }
 }
 
@@ -979,12 +1080,25 @@ pub enum SealError {
         /// Dot-path knob or knob family.
         knob: &'static str,
     },
+    /// The nonce was already consumed by this verifier's seen-set.
+    #[error("sealed profile nonce has already been consumed within the freshness window: re-submit required")]
+    ReplayedNonce,
+    /// The sealed line-1 capability profile is not backed by the configured
+    /// least-privilege migrator role.
+    #[error("capability not backed by migrator role `{role}`: {capability}")]
+    MigratorRoleMismatch {
+        /// Capability family that the migrator role is not allowed to exercise.
+        capability: &'static str,
+        /// The configured migrator role.
+        role: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::capability::VendorCapabilities;
+    use crate::model::policy::TrustProfile;
 
     const KEY: &[u8] = b"stage-1 test key for sealed migrate policy";
     const ISSUED_AT: u64 = 1_719_792_000;
@@ -1166,6 +1280,101 @@ mod tests {
         .unwrap();
         sealed.verify(&verifier_at(VERIFY_NOW, 7)).unwrap();
         assert_eq!(sealed.posture(), SealedPosture::Platform);
+    }
+
+    #[test]
+    fn sealed_profile_rejects_nonce_replay_within_freshness_window() {
+        let cap = SealApplier::new();
+        let sealed = SealedProfile::mint(
+            &cap,
+            PolicyProfile::platform(),
+            "app",
+            KEY,
+            b"nonce-replay".to_vec(),
+            ISSUED_AT,
+            7,
+        )
+        .unwrap();
+        let verifier = verifier_at(VERIFY_NOW, 7);
+
+        sealed.verify(&verifier).unwrap();
+        assert!(matches!(
+            sealed.verify(&verifier),
+            Err(SealError::ReplayedNonce)
+        ));
+
+        let cloned_verifier = verifier.clone();
+        assert!(matches!(
+            sealed.verify(&cloned_verifier),
+            Err(SealError::ReplayedNonce)
+        ));
+    }
+
+    #[test]
+    fn sealed_profile_to_guard_config_never_enables_belt_skip() {
+        let cap = SealApplier::new();
+        for profile in [PolicyProfile::confined(), PolicyProfile::platform()] {
+            let sealed = SealedProfile::mint(
+                &cap,
+                profile,
+                "app",
+                KEY,
+                uuid::Uuid::new_v4().as_bytes().to_vec(),
+                ISSUED_AT,
+                7,
+            )
+            .unwrap();
+            let guard = sealed.to_guard_config();
+            assert_ne!(guard.trust(), TrustProfile::Trusted);
+            assert!(
+                !guard.skips_denylist_belt(),
+                "SealedProfile lowering must never carry the Trusted belt-skip"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_profile_reconciles_platform_caps_against_migrator_role_floor() {
+        let cap = SealApplier::new();
+        let sealed = SealedProfile::mint(
+            &cap,
+            PolicyProfile::platform(),
+            "app",
+            KEY,
+            b"nonce-role-floor".to_vec(),
+            ISSUED_AT,
+            7,
+        )
+        .unwrap();
+        let exec_cfg = ExecutorConfig::new("prj_app", "app").with_migrator_role("migrator_app");
+
+        assert!(matches!(
+            sealed.reconcile_with_executor_config(&exec_cfg),
+            Err(SealError::MigratorRoleMismatch {
+                capability: "role",
+                role
+            }) if role == "migrator_app"
+        ));
+    }
+
+    #[test]
+    fn sealed_confined_profile_is_backed_by_migrator_role_floor() {
+        let cap = SealApplier::new();
+        let sealed = SealedProfile::mint(
+            &cap,
+            PolicyProfile::confined(),
+            "app",
+            KEY,
+            b"nonce-confined-floor".to_vec(),
+            ISSUED_AT,
+            7,
+        )
+        .unwrap();
+        let exec_cfg = ExecutorConfig::new("prj_app", "app").with_migrator_role("migrator_app");
+
+        sealed
+            .reconcile_with_executor_config(&exec_cfg)
+            .expect("confined sealed profile must agree with the least-privilege migrator floor");
     }
 
     #[test]

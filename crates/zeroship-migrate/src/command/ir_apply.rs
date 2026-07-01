@@ -376,6 +376,7 @@ pub async fn apply_sealed(
     applied_by: &str,
 ) -> Result<PostgresIrApplyOutcome, SealedApplyError> {
     sealed.verify(verifier)?;
+    sealed.reconcile_with_executor_config(exec_cfg)?;
     let guard_cfg = sealed.to_guard_config();
     let mut exec_cfg = exec_cfg.clone();
     sealed.apply_operational_to_executor_config(&mut exec_cfg);
