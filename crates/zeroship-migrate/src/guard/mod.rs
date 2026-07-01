@@ -21,7 +21,7 @@
 
 pub mod denylist;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::{self, ObjectType};
@@ -553,12 +553,19 @@ impl SqlGuard {
         // is what Trusted skips.
         let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
         let mut data_security_advisories = Vec::new();
+        let mut class_index = 0;
         for raw_stmt in &parsed.protobuf.stmts {
             let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
                 continue;
             };
+            let class = classes.get(class_index).ok_or_else(|| {
+                GuardError::Parse(ParseError::Syntax(
+                    "internal classifier/parse statement count mismatch".to_string(),
+                ))
+            })?;
+            class_index += 1;
             let raw = stmt_text(sql, raw_stmt);
-            self.check_sql_data_security_policy(node, &raw, &mut data_security_advisories)?;
+            self.check_sql_data_security_policy(class, &raw, &mut data_security_advisories)?;
 
             if self.cfg.skips_denylist_belt() {
                 continue;
@@ -704,11 +711,11 @@ impl SqlGuard {
 
     fn check_sql_data_security_policy(
         &self,
-        node: &NodeEnum,
+        class: &StatementClass,
         raw: &str,
         advisories: &mut Vec<Advisory>,
     ) -> Result<(), GuardError> {
-        let Some(operation) = destructive_sql_operation(node) else {
+        let Some(operation) = class.destructive_operation else {
             return Ok(());
         };
 
@@ -1748,8 +1755,12 @@ pub(crate) struct IrDataSecurityError {
 
 /// Enforce data-security knobs that require the structured IR op set.
 ///
-/// `require_rls` is a cross-op obligation: each `createTable` in the migration
-/// must have a matching `enableRls` for the same effective table.
+/// `require_rls` is a cross-op obligation over the migration's final table RLS
+/// state, not a textual co-occurrence rule. Any table this migration creates and
+/// leaves present must end RLS-enabled; any attempt to turn RLS/force off while
+/// the profile obligates RLS is refused outright. Raw SQL islands are rejected
+/// under this obligation because the guard cannot enumerate their net table
+/// state fail-closed.
 pub(crate) fn check_ir_data_security_policy(
     cfg: &GuardConfig,
     ir: &MigrationIr,
@@ -1758,33 +1769,123 @@ pub(crate) fn check_ir_data_security_policy(
         return Ok(());
     }
 
-    let enabled: BTreeSet<_> = ir
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            Op::EnableRls { table, schema } => Some(table_key_for_policy(cfg, schema, table)),
-            _ => None,
-        })
-        .collect();
-
+    let mut tables: BTreeMap<(String, String), RlsTableState> = BTreeMap::new();
     for (op_index, op) in ir.ops.iter().enumerate() {
-        if let Op::CreateTable { name, schema, .. } = op {
-            let key = table_key_for_policy(cfg, schema, name);
-            if !enabled.contains(&key) {
+        match op {
+            Op::CreateTable { name, schema, .. } => {
+                let key = table_key_for_policy(cfg, schema, name);
+                tables.insert(
+                    key,
+                    RlsTableState {
+                        exists_after: true,
+                        rls_enabled: false,
+                        last_op_index: op_index,
+                        table: name.clone(),
+                    },
+                );
+            }
+            Op::EnableRls { table, schema } => {
+                let key = table_key_for_policy(cfg, schema, table);
+                tables
+                    .entry(key)
+                    .and_modify(|state| {
+                        state.exists_after = true;
+                        state.rls_enabled = true;
+                        state.last_op_index = op_index;
+                        state.table = table.clone();
+                    })
+                    .or_insert_with(|| RlsTableState {
+                        exists_after: true,
+                        rls_enabled: true,
+                        last_op_index: op_index,
+                        table: table.clone(),
+                    });
+            }
+            Op::DisableRls { table, .. } => {
                 return Err(IrDataSecurityError {
                     op_index,
                     source: GuardError::DataSecurityPolicy {
                         rule: data_security_rule::REQUIRE_RLS,
                         statement: format!(
-                            "createTable {name:?} must be accompanied by enableRls for the same table in this migration"
+                            "disableRls {table:?} is forbidden while data_security.require_rls=true"
                         ),
                     },
                 });
             }
+            Op::NoForceRls { table, .. } => {
+                return Err(IrDataSecurityError {
+                    op_index,
+                    source: GuardError::DataSecurityPolicy {
+                        rule: data_security_rule::REQUIRE_RLS,
+                        statement: format!(
+                            "noForceRls {table:?} is forbidden while data_security.require_rls=true"
+                        ),
+                    },
+                });
+            }
+            Op::DropTable { table, schema, .. } => {
+                let key = table_key_for_policy(cfg, schema, table);
+                tables
+                    .entry(key)
+                    .and_modify(|state| {
+                        state.exists_after = false;
+                        state.rls_enabled = false;
+                        state.last_op_index = op_index;
+                        state.table = table.clone();
+                    })
+                    .or_insert_with(|| RlsTableState {
+                        exists_after: false,
+                        rls_enabled: false,
+                        last_op_index: op_index,
+                        table: table.clone(),
+                    });
+            }
+            Op::RenameTable { table, to, schema, .. } => {
+                let from = table_key_for_policy(cfg, schema, table);
+                let to_key = table_key_for_policy(cfg, schema, to);
+                if let Some(mut state) = tables.remove(&from) {
+                    state.last_op_index = op_index;
+                    state.table = to.clone();
+                    tables.insert(to_key, state);
+                }
+            }
+            Op::PgRaw { .. } => {
+                return Err(IrDataSecurityError {
+                    op_index,
+                    source: GuardError::DataSecurityPolicy {
+                        rule: data_security_rule::REQUIRE_RLS,
+                        statement: "pgRaw is forbidden while data_security.require_rls=true because raw SQL can create tables outside the structured RLS net-state check".to_string(),
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+
+    for state in tables.values() {
+        if state.exists_after && !state.rls_enabled {
+            return Err(IrDataSecurityError {
+                op_index: state.last_op_index,
+                source: GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::REQUIRE_RLS,
+                    statement: format!(
+                        "table {:?} must end this migration with row level security enabled",
+                        state.table
+                    ),
+                },
+            });
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct RlsTableState {
+    exists_after: bool,
+    rls_enabled: bool,
+    last_op_index: usize,
+    table: String,
 }
 
 fn table_key_for_policy(
@@ -1803,33 +1904,6 @@ fn table_key_for_policy(
 // ---------------------------------------------------------------------------
 // Deny-by-default allowlist predicates (Root Cause 1)
 // ---------------------------------------------------------------------------
-
-fn destructive_sql_operation(node: &NodeEnum) -> Option<&'static str> {
-    match node {
-        NodeEnum::TruncateStmt(_) => Some("TRUNCATE"),
-        NodeEnum::DropOwnedStmt(_) => Some("DROP OWNED"),
-        NodeEnum::DropStmt(drop) => {
-            if drop.remove_type == ObjectType::ObjectTable as i32 {
-                Some("DROP TABLE")
-            } else if drop.remove_type == ObjectType::ObjectColumn as i32 {
-                Some("DROP COLUMN")
-            } else if drop.remove_type == ObjectType::ObjectSchema as i32 {
-                Some("DROP SCHEMA")
-            } else {
-                None
-            }
-        }
-        NodeEnum::AlterTableStmt(at) => at.cmds.iter().find_map(|cmd| {
-            matches!(
-                cmd.node.as_ref(),
-                Some(NodeEnum::AlterTableCmd(c))
-                    if c.subtype == AlterTableType::AtDropColumn as i32
-            )
-            .then_some("DROP COLUMN")
-        }),
-        _ => None,
-    }
-}
 
 /// The `ObjectType`s a creator migration may `DROP`. Anything else (role,
 /// schema, extension, FDW, subscription, publication, …) is denied-by-default.
@@ -3042,7 +3116,13 @@ mod tests {
         for sql in [
             "DROP TABLE users",
             "ALTER TABLE users DROP COLUMN email",
+            "ALTER TABLE users DROP CONSTRAINT users_email_key",
+            "ALTER TABLE users ALTER COLUMN age TYPE smallint",
             "TRUNCATE users",
+            "DELETE FROM users",
+            "DROP MATERIALIZED VIEW users_mv",
+            "DROP VIEW users_view",
+            "DROP INDEX users_email_idx",
         ] {
             assert!(
                 matches!(
@@ -3074,11 +3154,23 @@ mod tests {
             GuardConfig::confined("public").with_data_security(false, DestructiveOps::Warn),
         );
 
-        let report = guard.check("DROP TABLE users").expect("warn permits the drop");
+        for sql in [
+            "DELETE FROM users",
+            "DROP MATERIALIZED VIEW users_mv",
+            "DROP VIEW users_view",
+            "DROP INDEX users_email_idx",
+            "ALTER TABLE users DROP CONSTRAINT users_email_key",
+        ] {
+            let report = guard.check(sql).expect("warn permits destructive SQL");
 
-        assert!(report.advisories.iter().any(|a| {
-            a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
-        }));
+            assert!(
+                report.advisories.iter().any(|a| {
+                    a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+                }),
+                "warn must record advisory for {sql}: {:?}",
+                report.advisories
+            );
+        }
     }
 
     #[test]
@@ -3092,6 +3184,20 @@ mod tests {
         assert!(!report.advisories.iter().any(|a| {
             a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
         }));
+    }
+
+    #[test]
+    fn destructive_ops_forbid_allows_clearly_non_destructive_sql() {
+        let guard = SqlGuard::new(
+            GuardConfig::confined("public").with_data_security(false, DestructiveOps::Forbid),
+        );
+
+        guard
+            .check("CREATE TABLE users(id bigint primary key)")
+            .expect("CREATE TABLE is not destructive");
+        guard
+            .check("ALTER TABLE users ADD COLUMN email text")
+            .expect("ADD COLUMN is not destructive");
     }
 
     #[test]
@@ -3123,6 +3229,87 @@ mod tests {
         ]);
 
         check_ir_data_security_policy(&cfg, &ir).expect("matching enableRls satisfies require_rls");
+    }
+
+    #[test]
+    fn require_rls_rejects_create_enable_disable_net_off() {
+        let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
+        let ir = ir_with(vec![
+            create_table("users"),
+            Op::EnableRls {
+                table: "users".to_string(),
+                schema: None,
+            },
+            Op::DisableRls {
+                table: "users".to_string(),
+                schema: None,
+            },
+        ]);
+
+        let err = check_ir_data_security_policy(&cfg, &ir).unwrap_err();
+
+        assert_eq!(err.op_index, 2);
+        assert!(matches!(
+            err.source,
+            GuardError::DataSecurityPolicy {
+                rule: data_security_rule::REQUIRE_RLS,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn require_rls_rejects_standalone_disable_and_no_force() {
+        let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
+
+        for op in [
+            Op::DisableRls {
+                table: "users".to_string(),
+                schema: None,
+            },
+            Op::NoForceRls {
+                table: "users".to_string(),
+                schema: None,
+            },
+        ] {
+            let err = check_ir_data_security_policy(&cfg, &ir_with(vec![op])).unwrap_err();
+            assert_eq!(err.op_index, 0);
+            assert!(matches!(
+                err.source,
+                GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::REQUIRE_RLS,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn require_rls_rejects_pg_raw_table_creation_island_fail_closed() {
+        let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
+        let author = platform_author(&cfg);
+        let op = Op::PgRaw {
+            sql: "CREATE TABLE zeroship.raw_users AS SELECT 1 AS id".into(),
+            binds: Vec::new(),
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(op),
+            &cfg,
+            &crate::render::lower::LiveSchema::default(),
+        ) {
+            Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "pgRaw");
+                assert!(matches!(
+                    denial.source,
+                    GuardError::DataSecurityPolicy {
+                        rule: data_security_rule::REQUIRE_RLS,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("require_rls must reject raw table-creation islands; got {other:?}"),
+        }
     }
 
     fn platform_author(guard_cfg: &GuardConfig) -> crate::render::lower::IrAuthor {

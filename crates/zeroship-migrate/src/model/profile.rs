@@ -180,6 +180,19 @@ impl PolicyProfile {
     pub const fn polarity_table() -> &'static [PolicyKnobSemantics] {
         POLICY_KNOB_SEMANTICS
     }
+
+    /// Compose the operator ceiling with the submitted draft for the
+    /// engine-enforced data-security obligations.
+    ///
+    /// Stage S2 will extend this to every policy knob. For M4, the guard-backed
+    /// data-security obligations are the load-bearing part: the composed result
+    /// is what gets sealed and later lowered to [`GuardConfig`].
+    pub fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
+        let mut effective = draft.clone();
+        effective.data_security =
+            DataSecurityConfig::meet_ceiling_draft(&ceiling.data_security, &draft.data_security)?;
+        Ok(effective)
+    }
 }
 
 /// Permission knobs in the policy profile.
@@ -508,7 +521,9 @@ impl DataSecurityConfig {
     /// stricter enum value; a draft that tries to loosen the ceiling is rejected
     /// instead of silently clamped.
     pub fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
-        if draft.destructive_ops.is_looser_than(ceiling.destructive_ops) {
+        if ceiling.destructive_ops != DestructiveOps::RequireApproval
+            && draft.destructive_ops.is_looser_than(ceiling.destructive_ops)
+        {
             return Err(SealError::PolicyExceedsCeiling {
                 knob: "data_security.destructive_ops",
             });
@@ -551,9 +566,9 @@ pub enum DestructiveOps {
 impl DestructiveOps {
     const fn rank(self) -> u8 {
         match self {
-            Self::Forbid => 0,
-            Self::Warn => 1,
-            Self::RequireApproval => 2,
+            Self::RequireApproval => 0,
+            Self::Forbid => 1,
+            Self::Warn => 2,
             Self::Allow => 3,
         }
     }
@@ -817,9 +832,36 @@ impl SealedProfile {
         issued_at: u64,
         ceiling_version: u64,
     ) -> Result<Self, SealError> {
+        Self::mint_composed(
+            _cap,
+            profile.clone(),
+            profile,
+            project_schema,
+            key,
+            nonce,
+            issued_at,
+            ceiling_version,
+        )
+    }
+
+    /// Crate-private mint seam for the server path that has a distinct operator
+    /// ceiling and submitted draft. The composed effective profile is sealed and
+    /// later lowered to the guard used by [`crate::command::ir_apply::apply_sealed`].
+    #[allow(dead_code)]
+    pub(crate) fn mint_composed(
+        _cap: &SealApplier,
+        ceiling: PolicyProfile,
+        draft: PolicyProfile,
+        project_schema: impl Into<String>,
+        key: &[u8],
+        nonce: Vec<u8>,
+        issued_at: u64,
+        ceiling_version: u64,
+    ) -> Result<Self, SealError> {
         validate_mac_key(key)?;
+        let effective_profile = PolicyProfile::meet_ceiling_draft(&ceiling, &draft)?;
         let mut sealed = Self {
-            effective: SealedEffectiveProfile::from_profile(project_schema.into(), profile)?,
+            effective: SealedEffectiveProfile::from_profile(project_schema.into(), effective_profile)?,
             nonce,
             issued_at,
             ceiling_version,
@@ -1377,6 +1419,22 @@ mod tests {
     }
 
     #[test]
+    fn data_security_meet_keeps_require_approval_stricter_than_warn() {
+        let ceiling = DataSecurityConfig {
+            destructive_ops: DestructiveOps::RequireApproval,
+            ..DataSecurityConfig::default()
+        };
+        let draft = DataSecurityConfig {
+            destructive_ops: DestructiveOps::Warn,
+            ..DataSecurityConfig::default()
+        };
+
+        let effective = DataSecurityConfig::meet_ceiling_draft(&ceiling, &draft).unwrap();
+
+        assert_eq!(effective.destructive_ops, DestructiveOps::RequireApproval);
+    }
+
+    #[test]
     fn operational_lowering_only_tightens_executor_timeouts() {
         let op = OperationalConfig::default();
         let mut exec_cfg = ExecutorConfig::new("prj_test", "app");
@@ -1680,6 +1738,135 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn sealed_profile_mints_composed_ceiling_draft_and_enforces_data_security() {
+        let cap = SealApplier::new();
+        let mut ceiling = PolicyProfile::confined();
+        ceiling.data_security.require_rls = true;
+        ceiling.data_security.destructive_ops = DestructiveOps::Forbid;
+        let mut draft = PolicyProfile::confined();
+        draft.data_security.require_rls = false;
+        draft.data_security.destructive_ops = DestructiveOps::Forbid;
+
+        let sealed = SealedProfile::mint_composed(
+            &cap,
+            ceiling,
+            draft,
+            "app",
+            KEY,
+            b"nonce-composed-data-security".to_vec(),
+            ISSUED_AT,
+            7,
+        )
+        .expect("ceiling obligations compose into the sealed profile");
+        let guard_cfg = sealed.to_guard_config();
+
+        assert!(guard_cfg.require_rls());
+        assert_eq!(guard_cfg.destructive_ops(), DestructiveOps::Forbid);
+
+        let guard = crate::guard::SqlGuard::new(guard_cfg.clone());
+        assert!(matches!(
+            guard.check("DROP INDEX users_email_idx"),
+            Err(crate::guard::GuardError::DataSecurityPolicy {
+                rule: crate::guard::data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                ..
+            })
+        ));
+
+        let ir = crate::model::ir::MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: "composed_missing_rls".to_string(),
+            owner_app: "app".to_string(),
+            ops: vec![crate::model::ir::Op::CreateTable {
+                name: "users".to_string(),
+                columns: Vec::new(),
+                constraints: Vec::new(),
+                indexes: Vec::new(),
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        let err = crate::guard::check_ir_data_security_policy(&guard_cfg, &ir).unwrap_err();
+        assert!(matches!(
+            err.source,
+            crate::guard::GuardError::DataSecurityPolicy {
+                rule: crate::guard::data_security_rule::REQUIRE_RLS,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sealed_platform_require_rls_rejects_raw_island_table_creation() {
+        let cap = SealApplier::new();
+        let ceiling = PolicyProfile::platform();
+        let mut draft = PolicyProfile::platform();
+        draft.data_security.require_rls = false;
+
+        let sealed = SealedProfile::mint_composed(
+            &cap,
+            ceiling,
+            draft,
+            "zeroship",
+            KEY,
+            b"nonce-sealed-raw-rls".to_vec(),
+            ISSUED_AT,
+            7,
+        )
+        .expect("platform ceiling composes require_rls back into the draft");
+        let guard_cfg = sealed.to_guard_config();
+        assert!(guard_cfg.require_rls());
+
+        let author = crate::render::lower::IrAuthor::new(
+            "zeroship",
+            "app_corpus",
+            zeroship_schema::query::SqlDialect::Postgres,
+        )
+        .with_schema_scope(
+            guard_cfg
+                .schema_scope()
+                .expect("sealed platform profile carries a schema scope"),
+        );
+        let ir = crate::model::ir::MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: "sealed_raw_rls".to_string(),
+            owner_app: "app_corpus".to_string(),
+            ops: vec![crate::model::ir::Op::PgRaw {
+                sql: "CREATE TABLE zeroship.raw_users AS SELECT 1 AS id".to_string(),
+                binds: Vec::new(),
+            }],
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+
+        match author.lower_guarded(
+            &ir,
+            &guard_cfg,
+            &crate::render::lower::LiveSchema::default(),
+        ) {
+            Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "pgRaw");
+                assert!(matches!(
+                    denial.source,
+                    crate::guard::GuardError::DataSecurityPolicy {
+                        rule: crate::guard::data_security_rule::REQUIRE_RLS,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("sealed require_rls profile must fail-close pgRaw table creation; got {other:?}"),
+        }
     }
 
     #[test]
