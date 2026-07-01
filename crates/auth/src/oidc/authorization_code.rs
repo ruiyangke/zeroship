@@ -463,22 +463,31 @@ async fn exchange_authorization_code(
             .nonce
             .as_deref()
             .ok_or_else(|| OAuthError::invalid_grant("openid code is missing nonce"))?;
-        let user = users::find_by_id(db, &user_id)
-            .await
-            .map_err(|err| {
-                tracing::error!(
-                    error = %err,
-                    user_id = %user_id,
-                    "token: id-token user lookup failed"
-                );
-                OAuthError::server_error("id token user lookup failed")
-            })?
-            .ok_or_else(|| {
-                tracing::error!(user_id = %user_id, "token: consumed code user is missing");
-                OAuthError::server_error("id token user missing")
-            })?;
         let want_email = consumed.granted_scopes.iter().any(|scope| scope == "email");
         let want_profile = consumed.granted_scopes.iter().any(|scope| scope == "profile");
+        // Only pay the user SELECT when a granted scope actually carries identity
+        // claims. A bare-`openid` (authentication-only) exchange derives `sub`
+        // from the already-in-hand `user_id`, so it needs no row.
+        let user = if want_email || want_profile {
+            Some(
+                users::find_by_id(db, &user_id)
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(
+                            error = %err,
+                            user_id = %user_id,
+                            "token: id-token user lookup failed"
+                        );
+                        OAuthError::server_error("id token user lookup failed")
+                    })?
+                    .ok_or_else(|| {
+                        tracing::error!(user_id = %user_id, "token: consumed code user is missing");
+                        OAuthError::server_error("id token user missing")
+                    })?,
+            )
+        } else {
+            None
+        };
         Some(
             issuer
                 .issue_id_token(&IdTokenMint {
@@ -491,22 +500,22 @@ async fn exchange_authorization_code(
                     amr: None,
                     acr: None,
                     email: if want_email {
-                        Some(user.email.as_str())
+                        user.as_ref().map(|u| u.email.as_str())
                     } else {
                         None
                     },
                     email_verified: if want_email {
-                        Some(user.email_verified_at.is_some())
+                        user.as_ref().map(|u| u.email_verified_at.is_some())
                     } else {
                         None
                     },
                     name: if want_profile {
-                        Some(user.name.as_str())
+                        user.as_ref().map(|u| u.name.as_str())
                     } else {
                         None
                     },
                     picture: if want_profile {
-                        user.avatar_url.as_deref()
+                        user.as_ref().and_then(|u| u.avatar_url.as_deref())
                     } else {
                         None
                     },
