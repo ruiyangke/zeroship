@@ -4,7 +4,7 @@
 //! loaded strictly and resolved fail-closed, while [`SealedProfile`] is the new
 //! structural carrier the future control-plane path will pass to the engine.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,11 @@ use crate::guard::GuardConfig;
 use crate::model::capability::{SealApplier, VendorCapabilities};
 
 type HmacSha256 = Hmac<Sha256>;
+
+const MIN_SEAL_MAC_KEY_BYTES: usize = 32;
+const SEAL_MAX_AGE_SECS: u64 = 15 * 60;
+const PLATFORM_LOCK_TIMEOUT_CEILING_MS: u64 = 3_000;
+const PLATFORM_STATEMENT_TIMEOUT_CEILING_MS: u64 = 60_000;
 
 /// Embedded least-privilege profile. This is also the fail-closed fallback.
 pub const CONFINED_PROFILE_TOML: &str = r#"
@@ -304,10 +309,16 @@ pub struct OperationalConfig {
     #[serde(default)]
     pub index_creation: IndexCreation,
     /// Maximum PG lock-acquisition timeout in milliseconds.
-    #[serde(default = "default_lock_timeout_ms")]
+    #[serde(
+        default = "default_lock_timeout_ms",
+        deserialize_with = "deserialize_lock_timeout_ms"
+    )]
     pub lock_timeout_ms: u64,
     /// Maximum PG statement timeout in milliseconds.
-    #[serde(default = "default_statement_timeout_ms")]
+    #[serde(
+        default = "default_statement_timeout_ms",
+        deserialize_with = "deserialize_statement_timeout_ms"
+    )]
     pub statement_timeout_ms: u64,
     /// Table rewrite posture. Stage 1 records it; guard enforcement is later.
     #[serde(default)]
@@ -328,17 +339,109 @@ impl Default for OperationalConfig {
 impl OperationalConfig {
     /// Apply the currently-backed operational knobs to an executor config clone.
     pub(crate) fn apply_to_executor_config(&self, exec_cfg: &mut ExecutorConfig) {
-        exec_cfg.pg.lock_timeout = Duration::from_millis(self.lock_timeout_ms);
-        exec_cfg.pg.statement_timeout = Duration::from_millis(self.statement_timeout_ms);
+        let lock_ceiling = duration_millis_u64(exec_cfg.pg.lock_timeout);
+        let statement_ceiling = duration_millis_u64(exec_cfg.pg.statement_timeout);
+        let lock_timeout_ms = min_non_zero_timeout_ms(self.lock_timeout_ms, lock_ceiling)
+            .unwrap_or(PLATFORM_LOCK_TIMEOUT_CEILING_MS);
+        let statement_timeout_ms =
+            min_non_zero_timeout_ms(self.statement_timeout_ms, statement_ceiling)
+                .unwrap_or(PLATFORM_STATEMENT_TIMEOUT_CEILING_MS);
+        exec_cfg.pg.lock_timeout = Duration::from_millis(lock_timeout_ms);
+        exec_cfg.pg.statement_timeout = Duration::from_millis(statement_timeout_ms);
+    }
+
+    fn validate_for_seal(&self) -> Result<(), SealError> {
+        validate_timeout_ms(
+            self.lock_timeout_ms,
+            "operational.lock_timeout_ms",
+            PLATFORM_LOCK_TIMEOUT_CEILING_MS,
+        )?;
+        validate_timeout_ms(
+            self.statement_timeout_ms,
+            "operational.statement_timeout_ms",
+            PLATFORM_STATEMENT_TIMEOUT_CEILING_MS,
+        )?;
+        if self.index_creation != IndexCreation::AllowBlocking {
+            return Err(SealError::UnsupportedProfileKnob {
+                knob: "operational.index_creation",
+            });
+        }
+        if self.table_rewrite != TableRewrite::Allow {
+            return Err(SealError::UnsupportedProfileKnob {
+                knob: "operational.table_rewrite",
+            });
+        }
+        Ok(())
     }
 }
 
 const fn default_lock_timeout_ms() -> u64 {
-    3_000
+    PLATFORM_LOCK_TIMEOUT_CEILING_MS
 }
 
 const fn default_statement_timeout_ms() -> u64 {
-    60_000
+    PLATFORM_STATEMENT_TIMEOUT_CEILING_MS
+}
+
+fn deserialize_lock_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    validate_timeout_ms(
+        value,
+        "operational.lock_timeout_ms",
+        PLATFORM_LOCK_TIMEOUT_CEILING_MS,
+    )
+    .map_err(<D::Error as serde::de::Error>::custom)
+}
+
+fn deserialize_statement_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    validate_timeout_ms(
+        value,
+        "operational.statement_timeout_ms",
+        PLATFORM_STATEMENT_TIMEOUT_CEILING_MS,
+    )
+    .map_err(<D::Error as serde::de::Error>::custom)
+}
+
+fn validate_timeout_ms(
+    value: u64,
+    knob: &'static str,
+    ceiling_ms: u64,
+) -> Result<u64, SealError> {
+    if value == 0 {
+        return Err(SealError::InvalidTimeout {
+            knob,
+            value,
+            ceiling_ms,
+        });
+    }
+    if value > ceiling_ms {
+        return Err(SealError::InvalidTimeout {
+            knob,
+            value,
+            ceiling_ms,
+        });
+    }
+    Ok(value)
+}
+
+const fn min_non_zero_timeout_ms(left: u64, right: u64) -> Option<u64> {
+    match (left, right) {
+        (0, 0) => None,
+        (0, value) | (value, 0) => Some(value),
+        (left, right) if left < right => Some(left),
+        (_, right) => Some(right),
+    }
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Index creation policy. Ordered from more restrictive to less restrictive.
@@ -428,6 +531,8 @@ pub enum PolicyMeet {
     Intersection,
     /// Ordered or numeric minimum.
     Min,
+    /// Numeric minimum where zero is treated as absent, not as the tightest value.
+    MinNonZero,
     /// Boolean OR.
     Or,
     /// Set union.
@@ -462,8 +567,8 @@ const POLICY_KNOB_SEMANTICS: &[PolicyKnobSemantics] = &[
     PolicyKnobSemantics { key: "capabilities.schemas", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Intersection },
     PolicyKnobSemantics { key: "operational.table_rewrite", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Min },
     PolicyKnobSemantics { key: "operational.index_creation", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Min },
-    PolicyKnobSemantics { key: "operational.lock_timeout_ms", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Min },
-    PolicyKnobSemantics { key: "operational.statement_timeout_ms", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Min },
+    PolicyKnobSemantics { key: "operational.lock_timeout_ms", polarity: PolicyPolarity::Permission, meet: PolicyMeet::MinNonZero },
+    PolicyKnobSemantics { key: "operational.statement_timeout_ms", polarity: PolicyPolarity::Permission, meet: PolicyMeet::MinNonZero },
     PolicyKnobSemantics { key: "data_security.require_rls", polarity: PolicyPolarity::Obligation, meet: PolicyMeet::Or },
     PolicyKnobSemantics { key: "data_security.no_hard_delete", polarity: PolicyPolarity::Obligation, meet: PolicyMeet::Or },
     PolicyKnobSemantics { key: "data_security.sensitive_columns", polarity: PolicyPolarity::Obligation, meet: PolicyMeet::Union },
@@ -474,7 +579,7 @@ const POLICY_KNOB_SEMANTICS: &[PolicyKnobSemantics] = &[
 ///
 /// There is deliberately no `Trusted` variant. The belt-skip posture is therefore
 /// unrepresentable in a [`SealedProfile`], independent of runtime checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SealedPosture {
     /// Lower to today's confined guard.
     Confined,
@@ -483,9 +588,8 @@ pub enum SealedPosture {
 }
 
 /// The resolved capability/operational state carried inside a sealed profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SealedEffectiveProfile {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SealedEffectiveProfile {
     posture: SealedPosture,
     project_schema: String,
     capabilities: PolicyCapabilities,
@@ -495,7 +599,8 @@ pub struct SealedEffectiveProfile {
 
 impl SealedEffectiveProfile {
     #[allow(dead_code)]
-    fn from_profile(project_schema: String, profile: PolicyProfile) -> Self {
+    fn from_profile(project_schema: String, profile: PolicyProfile) -> Result<Self, SealError> {
+        profile.validate_for_seal()?;
         let mut caps = profile.vendor_capabilities();
         caps.schemas.clear();
         let posture = if caps == VendorCapabilities::operator() {
@@ -503,13 +608,13 @@ impl SealedEffectiveProfile {
         } else {
             SealedPosture::Confined
         };
-        Self {
+        Ok(Self {
             posture,
             project_schema,
             capabilities: profile.capabilities,
             operational: profile.operational,
             data_security: profile.data_security,
-        }
+        })
     }
 
     fn to_guard_config(&self) -> GuardConfig {
@@ -530,23 +635,110 @@ impl SealedEffectiveProfile {
     }
 }
 
+impl PolicyProfile {
+    fn validate_for_seal(&self) -> Result<(), SealError> {
+        self.capabilities.validate_for_seal()?;
+        self.operational.validate_for_seal()?;
+        self.data_security.validate_for_seal()?;
+        Ok(())
+    }
+}
+
+impl PolicyCapabilities {
+    fn validate_for_seal(&self) -> Result<(), SealError> {
+        if !self.role.attrs.is_empty() {
+            return Err(SealError::UnsupportedProfileKnob {
+                knob: "capabilities.role.attrs",
+            });
+        }
+
+        let mut caps = self.to_vendor_capabilities();
+        caps.schemas.clear();
+        if caps == VendorCapabilities::operator() {
+            return Ok(());
+        }
+        if caps == VendorCapabilities::confined() && self.schemas.is_empty() {
+            return Ok(());
+        }
+
+        Err(SealError::UnsupportedProfileKnob {
+            knob: "capabilities.granular",
+        })
+    }
+}
+
+impl DataSecurityConfig {
+    fn validate_for_seal(&self) -> Result<(), SealError> {
+        if self.require_rls {
+            return Err(SealError::UnsupportedProfileKnob {
+                knob: "data_security.require_rls",
+            });
+        }
+        if self.no_hard_delete {
+            return Err(SealError::UnsupportedProfileKnob {
+                knob: "data_security.no_hard_delete",
+            });
+        }
+        if !self.sensitive_columns.is_empty() {
+            return Err(SealError::UnsupportedProfileKnob {
+                knob: "data_security.sensitive_columns",
+            });
+        }
+        if self.destructive_ops != DestructiveOps::Allow {
+            return Err(SealError::UnsupportedProfileKnob {
+                knob: "data_security.destructive_ops",
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 struct SealPayload<'a> {
-    effective: &'a SealedEffectiveProfile,
+    effective: SealPayloadEffective<'a>,
     nonce: &'a [u8],
     issued_at: u64,
     ceiling_version: u64,
 }
 
+#[derive(Serialize)]
+struct SealPayloadEffective<'a> {
+    posture: SealPayloadPosture,
+    project_schema: &'a str,
+    capabilities: &'a PolicyCapabilities,
+    operational: &'a OperationalConfig,
+    data_security: &'a DataSecurityConfig,
+}
+
+#[derive(Clone, Copy, Serialize)]
+enum SealPayloadPosture {
+    Confined,
+    Platform,
+}
+
+impl From<SealedPosture> for SealPayloadPosture {
+    fn from(posture: SealedPosture) -> Self {
+        match posture {
+            SealedPosture::Confined => Self::Confined,
+            SealedPosture::Platform => Self::Platform,
+        }
+    }
+}
+
 /// Authenticated, resolved profile for zeroship-operated infrastructure.
 ///
 /// The constructor is crate-private and requires [`SealApplier`]. External
-/// crates can hold and pass this opaque value, but cannot fabricate one. The
-/// symmetric MAC is an in-process contract for stage 1; if the sealer and runner
-/// split out-of-process, this should become an asymmetric signature with key
-/// rotation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// crates can hold and pass this opaque value, but cannot fabricate one,
+/// including through serde deserialization.
+///
+/// ```compile_fail
+/// let _: zeroship_migrate::SealedProfile = serde_json::from_str("{}").unwrap();
+/// ```
+///
+/// The symmetric MAC is an in-process contract for stage 1; if the sealer and
+/// runner split out-of-process, this should become an asymmetric signature with
+/// key rotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealedProfile {
     effective: SealedEffectiveProfile,
     nonce: Vec<u8>,
@@ -568,8 +760,9 @@ impl SealedProfile {
         issued_at: u64,
         ceiling_version: u64,
     ) -> Result<Self, SealError> {
+        validate_mac_key(key)?;
         let mut sealed = Self {
-            effective: SealedEffectiveProfile::from_profile(project_schema.into(), profile),
+            effective: SealedEffectiveProfile::from_profile(project_schema.into(), profile)?,
             nonce,
             issued_at,
             ceiling_version,
@@ -579,7 +772,7 @@ impl SealedProfile {
         Ok(sealed)
     }
 
-    /// Verify the MAC and ceiling freshness.
+    /// Verify the MAC, ceiling freshness, and bounded issued-at age.
     ///
     /// # Errors
     /// Returns [`SealError::SupersededCeiling`] for stale ceiling versions and
@@ -591,6 +784,21 @@ impl SealedProfile {
                 current: verifier.current_ceiling_version,
             });
         }
+        if self.issued_at > verifier.now_unix_secs {
+            return Err(SealError::IssuedInFuture {
+                issued_at: self.issued_at,
+                now: verifier.now_unix_secs,
+            });
+        }
+        let age_secs = verifier.now_unix_secs - self.issued_at;
+        if age_secs > verifier.max_age_secs {
+            return Err(SealError::StaleSeal {
+                issued_at: self.issued_at,
+                now: verifier.now_unix_secs,
+                max_age_secs: verifier.max_age_secs,
+            });
+        }
+        // TODO(M2 stage-2): nonce seen-set for exactly-once.
         let mac = self.build_mac(&verifier.key)?;
         mac.verify_slice(&self.seal)
             .map_err(|_| SealError::InvalidSeal)?;
@@ -647,9 +855,17 @@ impl SealedProfile {
     }
 
     fn build_mac(&self, key: &[u8]) -> Result<HmacSha256, SealError> {
-        let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SealError::InvalidKey)?;
+        validate_mac_key(key)?;
+        let mut mac =
+            HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
         let payload = SealPayload {
-            effective: &self.effective,
+            effective: SealPayloadEffective {
+                posture: self.effective.posture.into(),
+                project_schema: &self.effective.project_schema,
+                capabilities: &self.effective.capabilities,
+                operational: &self.effective.operational,
+                data_security: &self.effective.data_security,
+            },
             nonce: &self.nonce,
             issued_at: self.issued_at,
             ceiling_version: self.ceiling_version,
@@ -665,17 +881,48 @@ impl SealedProfile {
 pub struct SealVerifier {
     key: Vec<u8>,
     current_ceiling_version: u64,
+    now_unix_secs: u64,
+    max_age_secs: u64,
 }
 
 impl SealVerifier {
     /// Build a verifier from the active in-process MAC key and ceiling version.
-    #[must_use]
-    pub fn new(key: impl AsRef<[u8]>, current_ceiling_version: u64) -> Self {
-        Self {
-            key: key.as_ref().to_vec(),
-            current_ceiling_version,
-        }
+    ///
+    /// # Errors
+    /// Returns [`SealError::InvalidKey`] when the MAC key is shorter than 32
+    /// bytes.
+    pub fn new(key: impl AsRef<[u8]>, current_ceiling_version: u64) -> Result<Self, SealError> {
+        Self::with_now(key, current_ceiling_version, current_unix_secs())
     }
+
+    fn with_now(
+        key: impl AsRef<[u8]>,
+        current_ceiling_version: u64,
+        now_unix_secs: u64,
+    ) -> Result<Self, SealError> {
+        let key = key.as_ref();
+        validate_mac_key(key)?;
+        Ok(Self {
+            key: key.to_vec(),
+            current_ceiling_version,
+            now_unix_secs,
+            max_age_secs: SEAL_MAX_AGE_SECS,
+        })
+    }
+}
+
+fn validate_mac_key(key: &[u8]) -> Result<(), SealError> {
+    if key.len() < MIN_SEAL_MAC_KEY_BYTES {
+        return Err(SealError::InvalidKey);
+    }
+    Ok(())
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Sealed-profile verification failure.
@@ -684,9 +931,37 @@ pub enum SealError {
     /// The configured MAC key was invalid.
     #[error("invalid sealed-profile MAC key")]
     InvalidKey,
+    /// A PG timeout knob disabled the guard or exceeded the platform ceiling.
+    #[error("{knob} must be non-zero and <= {ceiling_ms} ms (got {value} ms)")]
+    InvalidTimeout {
+        /// Dot-path timeout knob.
+        knob: &'static str,
+        /// Supplied timeout in milliseconds.
+        value: u64,
+        /// Platform ceiling in milliseconds.
+        ceiling_ms: u64,
+    },
     /// The profile's MAC did not verify.
     #[error("sealed migration policy profile did not verify")]
     InvalidSeal,
+    /// The sealed profile is older than the accepted replay window.
+    #[error("sealed profile issued_at {issued_at} is older than the {max_age_secs}s replay window at verifier time {now}: re-submit required")]
+    StaleSeal {
+        /// Issued-at timestamp embedded in the seal.
+        issued_at: u64,
+        /// Verifier wall-clock timestamp.
+        now: u64,
+        /// Maximum accepted age in seconds.
+        max_age_secs: u64,
+    },
+    /// The sealed profile was issued after the verifier's wall clock.
+    #[error("sealed profile issued_at {issued_at} is in the future relative to verifier time {now}")]
+    IssuedInFuture {
+        /// Issued-at timestamp embedded in the seal.
+        issued_at: u64,
+        /// Verifier wall-clock timestamp.
+        now: u64,
+    },
     /// The profile was minted under an older ceiling generation.
     #[error("sealed profile references superseded ceiling v{sealed} (current v{current}): re-submit required")]
     SupersededCeiling {
@@ -698,6 +973,12 @@ pub enum SealError {
     /// Canonical seal payload serialization failed.
     #[error("serialize sealed migration policy payload: {0}")]
     Serialize(#[source] serde_json::Error),
+    /// A profile knob would claim a policy the stage-1 engine cannot enforce.
+    #[error("migration policy profile knob `{knob}` is not yet supported (M4); refusing to seal unenforced authority")]
+    UnsupportedProfileKnob {
+        /// Dot-path knob or knob family.
+        knob: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -706,6 +987,12 @@ mod tests {
     use crate::model::capability::VendorCapabilities;
 
     const KEY: &[u8] = b"stage-1 test key for sealed migrate policy";
+    const ISSUED_AT: u64 = 1_719_792_000;
+    const VERIFY_NOW: u64 = ISSUED_AT + 1;
+
+    fn verifier_at(now: u64, ceiling_version: u64) -> SealVerifier {
+        SealVerifier::with_now(KEY, ceiling_version, now).unwrap()
+    }
 
     #[test]
     fn policy_profile_toml_round_trips_and_matches_platform_caps() {
@@ -777,6 +1064,51 @@ mod tests {
     }
 
     #[test]
+    fn policy_profile_rejects_zero_pg_timeouts_at_load() {
+        let lock_err = PolicyProfile::from_toml(
+            r#"
+            [operational]
+            lock_timeout_ms = 0
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            lock_err.to_string().contains("operational.lock_timeout_ms"),
+            "unexpected error: {lock_err}"
+        );
+
+        let statement_err = PolicyProfile::from_toml(
+            r#"
+            [operational]
+            statement_timeout_ms = 0
+            "#,
+        )
+        .unwrap_err();
+        assert!(
+            statement_err
+                .to_string()
+                .contains("operational.statement_timeout_ms"),
+            "unexpected error: {statement_err}"
+        );
+    }
+
+    #[test]
+    fn policy_profile_rejects_pg_timeouts_above_platform_ceiling_at_load() {
+        let err = PolicyProfile::from_toml(&format!(
+            r#"
+            [operational]
+            lock_timeout_ms = {}
+            "#,
+            PLATFORM_LOCK_TIMEOUT_CEILING_MS + 1
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("<= 3000 ms"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn polarity_table_tags_permissions_and_obligations() {
         assert!(PolicyProfile::polarity_table().iter().any(|k| {
             k.key == "capabilities.role.attrs"
@@ -788,6 +1120,35 @@ mod tests {
                 && k.polarity == PolicyPolarity::Obligation
                 && k.meet == PolicyMeet::Or
         }));
+        assert!(PolicyProfile::polarity_table().iter().any(|k| {
+            k.key == "operational.lock_timeout_ms"
+                && k.polarity == PolicyPolarity::Permission
+                && k.meet == PolicyMeet::MinNonZero
+        }));
+    }
+
+    #[test]
+    fn timeout_meet_picks_smaller_non_zero_value() {
+        assert_eq!(min_non_zero_timeout_ms(3_000, 1_000), Some(1_000));
+        assert_eq!(min_non_zero_timeout_ms(0, 1_000), Some(1_000));
+        assert_eq!(min_non_zero_timeout_ms(3_000, 0), Some(3_000));
+        assert_eq!(min_non_zero_timeout_ms(0, 0), None);
+    }
+
+    #[test]
+    fn operational_lowering_only_tightens_executor_timeouts() {
+        let op = OperationalConfig::default();
+        let mut exec_cfg = ExecutorConfig::new("prj_test", "app");
+        exec_cfg.pg.lock_timeout = Duration::from_millis(500);
+        exec_cfg.pg.statement_timeout = Duration::from_millis(1_000);
+
+        op.apply_to_executor_config(&mut exec_cfg);
+
+        assert_eq!(exec_cfg.pg.lock_timeout, Duration::from_millis(500));
+        assert_eq!(
+            exec_cfg.pg.statement_timeout,
+            Duration::from_millis(1_000)
+        );
     }
 
     #[test]
@@ -799,11 +1160,11 @@ mod tests {
             "app",
             KEY,
             b"nonce-1".to_vec(),
-            1_719_792_000,
+            ISSUED_AT,
             7,
         )
         .unwrap();
-        sealed.verify(&SealVerifier::new(KEY, 7)).unwrap();
+        sealed.verify(&verifier_at(VERIFY_NOW, 7)).unwrap();
         assert_eq!(sealed.posture(), SealedPosture::Platform);
     }
 
@@ -816,13 +1177,13 @@ mod tests {
             "app",
             KEY,
             b"nonce-1".to_vec(),
-            1_719_792_000,
+            ISSUED_AT,
             7,
         )
         .unwrap();
         sealed.tamper_first_nonce_byte();
         assert!(matches!(
-            sealed.verify(&SealVerifier::new(KEY, 7)),
+            sealed.verify(&verifier_at(VERIFY_NOW, 7)),
             Err(SealError::InvalidSeal)
         ));
     }
@@ -836,15 +1197,107 @@ mod tests {
             "app",
             KEY,
             b"nonce-1".to_vec(),
-            1_719_792_000,
+            ISSUED_AT,
             7,
         )
         .unwrap();
         assert!(matches!(
-            sealed.verify(&SealVerifier::new(KEY, 8)),
+            sealed.verify(&verifier_at(VERIFY_NOW, 8)),
             Err(SealError::SupersededCeiling {
                 sealed: 7,
                 current: 8
+            })
+        ));
+    }
+
+    #[test]
+    fn sealed_profile_rejects_stale_issued_at() {
+        let cap = SealApplier::new();
+        let now = 2_000_000_000;
+        let issued_at = now - SEAL_MAX_AGE_SECS - 1;
+        let sealed = SealedProfile::mint(
+            &cap,
+            PolicyProfile::platform(),
+            "app",
+            KEY,
+            b"nonce-1".to_vec(),
+            issued_at,
+            7,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            sealed.verify(&verifier_at(now, 7)),
+            Err(SealError::StaleSeal {
+                issued_at: got_issued_at,
+                now: got_now,
+                max_age_secs: SEAL_MAX_AGE_SECS
+            }) if got_issued_at == issued_at && got_now == now
+        ));
+    }
+
+    #[test]
+    fn sealed_profile_rejects_short_mac_keys_at_constructor_and_mint() {
+        assert!(matches!(
+            SealVerifier::new(b"short", 7),
+            Err(SealError::InvalidKey)
+        ));
+
+        let cap = SealApplier::new();
+        assert!(matches!(
+            SealedProfile::mint(
+                &cap,
+                PolicyProfile::platform(),
+                "app",
+                b"",
+                b"nonce-1".to_vec(),
+                ISSUED_AT,
+                7,
+            ),
+            Err(SealError::InvalidKey)
+        ));
+    }
+
+    #[test]
+    fn sealed_profile_rejects_data_security_claims_not_yet_enforced() {
+        let cap = SealApplier::new();
+        let mut profile = PolicyProfile::confined();
+        profile.data_security.destructive_ops = DestructiveOps::Forbid;
+
+        assert!(matches!(
+            SealedProfile::mint(
+                &cap,
+                profile,
+                "app",
+                KEY,
+                b"nonce-1".to_vec(),
+                ISSUED_AT,
+                7,
+            ),
+            Err(SealError::UnsupportedProfileKnob {
+                knob: "data_security.destructive_ops"
+            })
+        ));
+    }
+
+    #[test]
+    fn sealed_profile_rejects_partial_granular_capability_claims_not_yet_enforced() {
+        let cap = SealApplier::new();
+        let mut profile = PolicyProfile::confined();
+        profile.capabilities.raw_sql = true;
+
+        assert!(matches!(
+            SealedProfile::mint(
+                &cap,
+                profile,
+                "app",
+                KEY,
+                b"nonce-1".to_vec(),
+                ISSUED_AT,
+                7,
+            ),
+            Err(SealError::UnsupportedProfileKnob {
+                knob: "capabilities.granular"
             })
         ));
     }
@@ -858,7 +1311,7 @@ mod tests {
             "app",
             KEY,
             b"nonce-1".to_vec(),
-            1_719_792_000,
+            ISSUED_AT,
             7,
         )
         .unwrap();

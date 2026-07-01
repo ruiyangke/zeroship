@@ -20,12 +20,8 @@ fn dep_features(manifest: &toml::Value, section: &str, dep: &str) -> Vec<String>
         .collect()
 }
 
-#[test]
-#[cfg(not(feature = "standalone-cli"))]
-fn standalone_cli_feature_is_off_for_default_embedder_build() {
-    assert!(!cfg!(feature = "standalone-cli"));
-}
-
+// The default-build symbol absence check is the compile_fail doctest in
+// src/lib.rs. These integration tests keep the feature-unification side honest.
 #[test]
 fn shared_infra_crates_do_not_enable_standalone_cli() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
