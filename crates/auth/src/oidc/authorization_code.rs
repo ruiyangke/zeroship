@@ -17,6 +17,7 @@ use crate::config::AuthConfig;
 use crate::oidc::auth_request::{AuthRequest, AuthRequestError};
 use crate::oidc::backchannel_logout;
 use crate::oidc::claims::scope_gated_identity_claims;
+use crate::oidc::device_token;
 use crate::oidc::refresh::{
     self, ClientAuth, ClientAuthMethod, RefreshSessionPool, RefreshTokenKeys,
 };
@@ -37,6 +38,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::resource("/authorize")
             .route(web::get().to(authorize_get))
             .route(web::post().to(authorize_post)),
+    )
+    .service(
+        web::resource("/device/authorization")
+            .route(web::post().to(device_token::device_authorization)),
     )
     .service(web::resource("/token").route(web::post().to(token_post)));
     refresh::configure(cfg);
@@ -64,6 +69,7 @@ pub struct TokenRequest {
     pub client_id: Option<String>,
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,
+    pub device_code: Option<String>,
     pub client_secret: Option<String>,
     pub scope: Option<String>,
 }
@@ -421,6 +427,10 @@ async fn token_inner(
         "refresh_token" => {
             let keys = RefreshTokenKeys::from_config(cfg)?;
             refresh::exchange_refresh_token(db, refresh_pool, issuer, &keys, &params, client_auth)
+                .await
+        }
+        device_token::DEVICE_CODE_GRANT_TYPE => {
+            device_token::exchange_device_code(&params, client_auth, cfg, db, issuer, refresh_pool)
                 .await
         }
         _ => Err(OAuthError::unsupported_grant_type(

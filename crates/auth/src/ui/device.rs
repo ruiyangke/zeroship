@@ -18,6 +18,7 @@ use crate::headers;
 use crate::hydra_client::types::AcceptDeviceUserCodeRequest;
 use crate::hydra_client::HydraAdmin;
 use crate::identity::eligibility;
+use crate::oidc::device_token::{self, DeviceApproval};
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{DevicePage, SupabaseDevicePage};
@@ -53,10 +54,9 @@ pub async fn get(
     render_form("", None, StatusCode::OK, cfg.insecure_dev)
 }
 
-/// `/device` POST — validate the typed user code through Hydra's public
-/// device-verification endpoint. Anonymous browsers are sent into the normal
-/// sign-in route; already-signed-in browsers complete the device flow by
-/// accepting the device challenge with Hydra's admin API.
+/// `/device` POST — approve either a native OP device grant or, until P4, the
+/// legacy Hydra device grant. Anonymous browsers are sent into the normal
+/// sign-in route; already-signed-in browsers complete the matching grant.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
@@ -113,6 +113,73 @@ pub async fn post(
         );
     }
 
+    let native_pending = match device_token::native_user_code_pending(db.as_ref(), user_code).await {
+        Ok(pending) => pending,
+        Err(e) => {
+            tracing::error!(error = %e, "native device user-code lookup failed");
+            return render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+                insecure_dev,
+            );
+        }
+    };
+
+    let Some(session) = current_session(&req, cfg.as_ref(), db.as_ref()).await else {
+        return redirect("/login");
+    };
+
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), session.user_id).await {
+        if !e.is_account_state() {
+            tracing::error!(error = %e, user_id = %session.user_id, "device grant eligibility check failed");
+            return render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+                insecure_dev,
+            );
+        }
+        return render_form(
+            user_code,
+            Some("account temporarily locked"),
+            StatusCode::FORBIDDEN,
+            insecure_dev,
+        );
+    }
+
+    if native_pending {
+        return match device_token::approve_user_code(
+            db.as_ref(),
+            user_code,
+            session.user_id,
+            session.id,
+            session.credential_version,
+        )
+        .await
+        {
+            Ok(DeviceApproval::Approved) => {
+                emit_device_grant_audit(db.as_ref(), &req, &session).await;
+                render_device_approved()
+            }
+            Ok(DeviceApproval::NotFound) => render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+                insecure_dev,
+            ),
+            Err(e) => {
+                tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
+                render_form(
+                    user_code,
+                    Some("invalid or expired code"),
+                    StatusCode::BAD_REQUEST,
+                    insecure_dev,
+                )
+            }
+        };
+    }
+
     let verified = match verify_user_code(cfg.hydra_public_url(), user_code).await {
         Ok(v) => v,
         Err(DeviceVerifyError::Rejected) => {
@@ -147,47 +214,12 @@ pub async fn post(
         );
     };
 
-    let Some(session) = current_session(&req, cfg.as_ref(), db.as_ref()).await else {
-        return redirect("/login");
-    };
-
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), session.user_id).await {
-        if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %session.user_id, "device grant eligibility check failed");
-            return render_form(
-                user_code,
-                Some("invalid or expired code"),
-                StatusCode::BAD_REQUEST,
-                insecure_dev,
-            );
-        }
-        return render_form(
-            user_code,
-            Some("account temporarily locked"),
-            StatusCode::FORBIDDEN,
-            insecure_dev,
-        );
-    }
-
     let accept = AcceptDeviceUserCodeRequest {
         user_code: Some(user_code.to_string()),
     };
     match admin.accept_device_user_code(&device_challenge, &accept).await {
         Ok(resp) => {
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "device_grant",
-                    outcome: "success",
-                    user_id: Some(&session.user_id),
-                    auth_method: Some("device"),
-                    detail: json!({
-                        "session_id": session.id.to_string(),
-                    }),
-                    ..AuditEvent::from_request(&req)
-                },
-            )
-            .await;
+            emit_device_grant_audit(db.as_ref(), &req, &session).await;
             redirect(&resp.redirect_to)
         }
         Err(e) => {
@@ -200,6 +232,27 @@ pub async fn post(
             )
         }
     }
+}
+
+async fn emit_device_grant_audit(
+    db: &compio_postgres::Client,
+    req: &HttpRequest,
+    session: &sessions::Session,
+) {
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "device_grant",
+            outcome: "success",
+            user_id: Some(&session.user_id),
+            auth_method: Some("device"),
+            detail: json!({
+                "session_id": session.id.to_string(),
+            }),
+            ..AuditEvent::from_request(req)
+        },
+    )
+    .await;
 }
 
 /// Double-submit CSRF check for the device-confirmation POST. Mirrors the
@@ -343,6 +396,19 @@ fn render_form(
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, insecure_dev));
     resp.body(body)
+}
+
+fn render_device_approved() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>Device approved · zeroship</title></head><body>\
+             <main><h1>zeroship</h1><h2>Device approved</h2>\
+             <p>You can return to the device that requested access.</p></main>\
+             </body></html>",
+        )
 }
 
 fn render_supabase_form(
