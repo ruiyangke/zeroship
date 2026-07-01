@@ -42,22 +42,38 @@ fn admin_dsn() -> String {
     std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| ADMIN_DSN.to_string())
 }
 
-/// The libpq-style URL the BINARY connects with, pointed at the throwaway db.
-/// (The bin takes `--database-url`; a keyword DSN works too, but the compose
-/// service uses a URL, so we mirror that.)
-fn bin_database_url(db: &str) -> String {
-    format!("postgres://postgres:zeroship@localhost:5440/{db}")
+/// A DSN for the THROWAWAY db, derived from the admin DSN by swapping the
+/// database name (so `MIGRATE_TEST_DB` host/port/creds overrides are honoured).
+fn throwaway_dsn(db: &str) -> String {
+    dsn_for_db(&admin_dsn(), db)
 }
 
-/// A keyword DSN for the THROWAWAY db, derived from the admin DSN by swapping the
-/// `dbname=` token (so `MIGRATE_TEST_DB` host/port/creds overrides are honoured).
-fn throwaway_dsn(db: &str) -> String {
-    admin_dsn()
-        .split_whitespace()
+fn dsn_for_db(dsn: &str, db: &str) -> String {
+    if let Some(url) = url_dsn_for_db(dsn, db) {
+        return url;
+    }
+
+    dsn.split_whitespace()
         .filter(|kv| !kv.starts_with("dbname="))
         .collect::<Vec<_>>()
         .join(" ")
         + &format!(" dbname={db}")
+}
+
+fn url_dsn_for_db(dsn: &str, db: &str) -> Option<String> {
+    if !(dsn.starts_with("postgres://") || dsn.starts_with("postgresql://")) {
+        return None;
+    }
+    let (base, query) = dsn.split_once('?').map_or((dsn, None), |(base, query)| {
+        (base, Some(query))
+    });
+    let slash = base.rfind('/')?;
+    let mut out = format!("{}{}", &base[..slash + 1], db);
+    if let Some(query) = query {
+        out.push('?');
+        out.push_str(query);
+    }
+    Some(out)
 }
 
 async fn connect(dsn: &str) -> Client {
@@ -228,7 +244,7 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
 
     let dir = migrations_dir();
     let dir_s = dir.to_str().expect("utf-8 migrations path").to_string();
-    let url = bin_database_url(&db);
+    let url = throwaway_dsn(&db);
     let expected_count = platform_migration_count();
 
     // The arg vector is the EXACT compose-service surface (plus a unique
