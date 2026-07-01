@@ -6680,6 +6680,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-authn"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "compio-postgres",
+ "ed25519-dalek",
+ "jsonwebtoken",
+ "ntex",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "zeroship-authz",
+ "zeroship-core",
+]
+
+[[package]]
 name = "zeroship-authz"
 version = "0.1.0"
 dependencies = [
@@ -6750,6 +6770,7 @@ dependencies = [
  "uuid",
  "zeroize",
  "zeroship-auth",
+ "zeroship-authn",
  "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",

@@ -1282,16 +1282,16 @@ fn main() -> std::io::Result<()> {
 
     let pat_issuer = if signing_key_file.is_empty() {
         tracing::warn!("control: using dev-only PAT signing key");
-        Arc::new(token_handlers::PatIssuer::dev_insecure())
+        Arc::new(zeroship_authn::PatIssuer::dev_insecure())
     } else {
-        let signing_key = token_handlers::load_signing_key_from_path(
+        let signing_key = zeroship_authn::load_signing_key_from_path(
             std::path::Path::new(&signing_key_file),
         )
         .map_err(|err| {
             tracing::error!(error = %err, "control: failed to load PAT signing key");
             std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
         })?;
-        Arc::new(token_handlers::PatIssuer::new(&signing_key).map_err(|err| {
+        Arc::new(zeroship_authn::PatIssuer::new(&signing_key).map_err(|err| {
             tracing::error!(error = %err, "control: failed to initialize PAT issuer");
             std::io::Error::new(std::io::ErrorKind::InvalidInput, err)
         })?)

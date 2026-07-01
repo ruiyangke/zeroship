@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{Duration, Utc};
 use compio_postgres::{connect, NoTls};
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::SigningKey;
@@ -18,8 +19,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
-    api, authz_guard::AuthzGuard, token_handlers, AppState, EnvStore, Quota,
-    RateLimiter, Registry, SecretString, StripeStore,
+    api, authz_guard::AuthzGuard, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    StripeStore,
 };
 use zeroship_authz::{Action, Resource};
 use zeroship_core::auth_provider::{
@@ -271,7 +272,7 @@ async fn fixture_with_auth_provider(
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
+        pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
         auth_provider,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
@@ -650,6 +651,101 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
         )
         .await
         .expect("cleanup platform token revocation marker");
+    fx.cleanup().await;
+}
+
+#[compio::test]
+async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_platform_token() {
+    let user_id = Uuid::new_v4();
+    let hydra = MockHydra::active(user_id, "apps:read apps:deploy");
+    let jwks = PlatformJwksMock::start();
+    let auth_provider = platform_auth_provider(jwks.jwks_url(), &hydra.base);
+    let Some(fx) =
+        fixture_with_auth_provider(&hydra, "bearer-verifier", user_id, auth_provider).await
+    else {
+        return;
+    };
+
+    let oauth = fx
+        .state
+        .bearer_verifier()
+        .verify_bearer(OAUTH_TOKEN, None, "direct-oauth".to_string())
+        .await
+        .expect("OAuth bearer verifies directly");
+    assert_eq!(oauth.principal_id, user_id);
+    assert_eq!(oauth.token_id, None);
+    assert!(oauth.token_policy.is_some());
+
+    let token_id = Uuid::new_v4();
+    let policy_json = json!({
+        "name": "direct-bearer-verifier-pat",
+        "statements": [],
+    });
+    let policy_hash = zeroship_authz::policy_hash(&policy_json);
+    let expires_at = Utc::now() + Duration::hours(1);
+    let pat = fx
+        .state
+        .pat_issuer
+        .issue(token_id, user_id, policy_hash.clone(), expires_at)
+        .expect("issue direct PAT");
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.permission_tokens \
+                (id, owner_id, kind, name, policies, policy_hash, expires_at) \
+             VALUES ($1, $2, 'pat', 'direct-bearer-verifier-pat', $3, $4, $5)",
+            &[&token_id, &user_id, &policy_json, &policy_hash, &expires_at],
+        )
+        .await
+        .expect("insert direct PAT row");
+    let pat_principal = fx
+        .state
+        .bearer_verifier()
+        .verify_bearer(
+            &pat,
+            Some("127.0.0.1".parse().expect("test IP parses")),
+            "direct-pat".to_string(),
+        )
+        .await
+        .expect("PAT bearer verifies directly");
+    assert_eq!(pat_principal.principal_id, user_id);
+    assert_eq!(pat_principal.token_id, Some(token_id));
+    assert!(pat_principal.token_policy.is_none());
+
+    let platform = platform_token(user_id, "apps:deploy", PLATFORM_ISSUER);
+    fx.state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+             VALUES ('zeroship-cli', $1, NOW()) \
+             ON CONFLICT (client_id, sub) DO UPDATE \
+             SET revoked_after = EXCLUDED.revoked_after",
+            &[&user_id.to_string()],
+        )
+        .await
+        .expect("insert direct platform token revocation marker");
+    assert!(
+        fx.state
+            .bearer_verifier()
+            .verify_bearer(&platform, None, "direct-revoked".to_string())
+            .await
+            .is_err(),
+        "revoked platform bearer must be rejected by BearerVerifier"
+    );
+
+    let _ = fx
+        .state
+        .control_pg
+        .execute("DELETE FROM zeroship.permission_tokens WHERE id = $1", &[&token_id])
+        .await;
+    let _ = fx
+        .state
+        .control_pg
+        .execute(
+            "DELETE FROM zeroship.token_revocations WHERE client_id = 'zeroship-cli' AND sub = $1",
+            &[&user_id.to_string()],
+        )
+        .await;
     fx.cleanup().await;
 }
 

@@ -222,7 +222,7 @@ pub struct AppState {
     /// Ed25519 issuer/verifier for first-party Personal Access Tokens.
     /// Control uses the same key material as the gateway's
     /// `--signing-key-file` wrapper-token issuer for P9 v1.
-    pub pat_issuer: Arc<token_handlers::PatIssuer>,
+    pub pat_issuer: Arc<zeroship_authn::PatIssuer>,
     /// Platform auth-provider token verifier for third-party OAuth bearer
     /// access tokens. Used only after local PAT verification fails.
     pub auth_provider: Arc<zeroship_core::auth_provider::AuthProvider>,
@@ -269,6 +269,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Build the shared bearer verifier from the only control-plane state
+    /// needed by the PAT + OAuth bearer path.
+    #[must_use]
+    pub fn bearer_verifier(&self) -> zeroship_authn::BearerVerifier {
+        zeroship_authn::BearerVerifier::new(
+            Arc::clone(&self.pat_issuer),
+            Arc::clone(&self.control_pg),
+            Arc::clone(&self.auth_provider),
+            self.trusted_oauth_clients.clone(),
+            self.expected_oauth_audience.clone(),
+        )
+    }
+
     /// Return whether `client_id` is configured as a trusted OAuth client.
     #[must_use]
     pub fn is_trusted(&self, client_id: &str) -> bool {

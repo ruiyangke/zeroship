@@ -202,6 +202,7 @@ zeroship-metering = { path = "crates/metering" }
 zeroship-runtime = { path = "crates/runtime" }
 zeroship-runtime-macros = { path = "crates/runtime-macros" }
 zeroship-auth = { path = "crates/auth" }
+zeroship-authn = { path = "crates/authn" }
 zeroship-authz = { path = "crates/authz" }
 zeroship-mailer = { path = "crates/mailer" }
 # Control plane — declared here only so the P7 capstone e2e crate

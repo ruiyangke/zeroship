@@ -35,6 +35,7 @@ harness = false
 [dependencies]
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
+zeroship-authn = { workspace = true }
 zeroship-authz = { workspace = true }
 # Builder OAuth bootstrap reuses auth/control migrations for
 # `control.oauth_clients` in dev-mode startup.
