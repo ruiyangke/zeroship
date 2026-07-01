@@ -36,6 +36,8 @@ const BROKER_PREVIOUS: &[u8] = b"p5a-previous-broker-master-secret-32-bytes";
 struct TokenResponse {
     access_token: String,
     id_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -117,11 +119,26 @@ impl Fixture {
             .expect("cookie pair")
             .to_string();
 
-        let cfg = Arc::new(test_auth_config(
+        let mut cfg = test_auth_config(
             &db_url,
             "http://127.0.0.1:4445",
             "http://127.0.0.1:4444",
-        ));
+        );
+        // Refresh-token issuance (offline_access) needs the HMAC + idempotency
+        // keys — brokered clients keep the refresh anchor, so the fixture must
+        // configure them for the MED-2 refresh path.
+        let key_dir = std::env::temp_dir().join(format!("p5a-broker-keys-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&key_dir).expect("key dir");
+        let hash_key_file = key_dir.join("refresh-hmac.keys");
+        let idem_key_file = key_dir.join("refresh-idem.key");
+        write_owner_only(
+            &hash_key_file,
+            b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        );
+        write_owner_only(&idem_key_file, b"refresh-idem-key-material-32-bytes");
+        cfg.refresh_hash_key_file = Some(hash_key_file);
+        cfg.refresh_idem_key_file = Some(idem_key_file);
+        let cfg = Arc::new(cfg);
         let admin = HydraAdmin::new("http://127.0.0.1:4445");
         let admin_state = admin.clone();
         let cfg_state = cfg.clone();
@@ -299,6 +316,95 @@ async fn brokered_client_still_enforces_exact_redirect_match() {
     fx.cleanup().await;
 }
 
+// MED-2: a brokered client authenticates the REFRESH grant by derive-and-compare
+// (it has no stored secret hash). Without the brokered-first branch in
+// authenticate_for_refresh, a brokered refresh would fail against the NULL hash.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn brokered_refresh_grant_requires_broker_secret() {
+    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);
+
+    // Mint a refresh token via the brokered authz_code flow (offline_access + secret).
+    let resp = send_authorize_scoped(&fx, REDIRECT_URI, &verifier, "openid offline_access")
+        .await
+        .expect("authorize response");
+    assert_eq!(resp.status().as_u16(), 303, "authorize status");
+    let code = query_param(&location(&resp), "code").expect("code in redirect");
+    let tokens = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&secret))
+        .await
+        .expect("token response");
+    let refresh_token = tokens
+        .refresh_token
+        .expect("brokered client with offline_access issues a refresh token");
+
+    // WITHOUT the broker secret → invalid_client (the pinned MED-2 failure).
+    let no_secret = refresh_request(&fx, &refresh_token, None)
+        .await
+        .expect("refresh without secret");
+    assert_eq!(no_secret.status().as_u16(), 400);
+    assert_eq!(
+        no_secret.json::<Value>().await.expect("json")["error"],
+        "invalid_client",
+        "brokered refresh without the broker secret must be invalid_client"
+    );
+
+    // WITH the derived broker secret → rotates successfully (proves the
+    // brokered-first derive-and-compare path is wired for refresh).
+    let ok = refresh_request(&fx, &refresh_token, Some(&secret))
+        .await
+        .expect("refresh with secret");
+    assert_eq!(
+        ok.status().as_u16(),
+        200,
+        "brokered refresh WITH the broker secret must succeed"
+    );
+    // The refresh grant returns access + refresh + scope (no id_token), so parse
+    // as a generic value rather than the authz_code TokenResponse shape.
+    let rotated = ok.json::<Value>().await.expect("refresh json");
+    assert!(
+        rotated["access_token"].as_str().is_some_and(|t| !t.is_empty()),
+        "brokered refresh must return a new access token: {rotated}"
+    );
+
+    fx.cleanup().await;
+}
+
+#[allow(clippy::future_not_send)]
+async fn refresh_request(
+    fx: &Fixture,
+    refresh_token: &str,
+    broker_secret: Option<&str>,
+) -> Result<cyper::Response, cyper::Error> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", "refresh_token")
+        .append_pair("client_id", &fx.client_id)
+        .append_pair("refresh_token", refresh_token)
+        .finish();
+    let mut req = cyper::Client::new()
+        .request(http::Method::POST, format!("{}/token", fx.auth_base))
+        .expect("build POST /token")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type");
+    if let Some(secret) = broker_secret {
+        let basic = STANDARD.encode(format!("{}:{secret}", fx.client_id));
+        req = req
+            .header("authorization", format!("Basic {basic}"))
+            .expect("authorization");
+    }
+    req.body(body).send().await
+}
+
+fn write_owner_only(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, bytes).expect("write secret file");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .expect("chmod 0600 secret file");
+}
+
 fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("CONTROL_TEST_DB"))
@@ -347,18 +453,21 @@ async fn seed_user_client(
     )
     .await
     .expect("seed app");
-    let scopes = vec!["openid".to_string()];
-    let token_endpoint_auth_method = if kind.is_brokered() {
+    // Brokered clients allow offline_access + refresh (the gateway's oac_
+    // clients keep the 30-day refresh anchor) so the MED-2 refresh path is
+    // exercisable; existing tests request narrower scopes and are unaffected.
+    let scopes = vec!["openid".to_string(), "offline_access".to_string()];
+    let brokered = kind.is_brokered();
+    let token_endpoint_auth_method = if brokered {
         "client_secret_basic"
     } else {
         "none"
     };
-    let brokered = kind.is_brokered();
     db.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id, \
-             token_endpoint_auth_method, brokered) \
-         VALUES ($1, 'P5a brokered OP test', $2, $3, FALSE, $1, $4, $5)",
+             token_endpoint_auth_method, brokered, refresh_allowed) \
+         VALUES ($1, 'P5a brokered OP test', $2, $3, FALSE, $1, $4, $5, $5)",
         &[
             &client_id,
             &vec![REDIRECT_URI.to_string()],
@@ -429,11 +538,21 @@ async fn send_authorize(
     redirect_uri: &str,
     verifier: &str,
 ) -> Result<cyper::Response, cyper::Error> {
+    send_authorize_scoped(fx, redirect_uri, verifier, "openid").await
+}
+
+#[allow(clippy::future_not_send)]
+async fn send_authorize_scoped(
+    fx: &Fixture,
+    redirect_uri: &str,
+    verifier: &str,
+    scope: &str,
+) -> Result<cyper::Response, cyper::Error> {
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &fx.client_id)
         .append_pair("response_type", "code")
-        .append_pair("scope", "openid")
+        .append_pair("scope", scope)
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("state", "state-123")
         .append_pair("nonce", &nonce)

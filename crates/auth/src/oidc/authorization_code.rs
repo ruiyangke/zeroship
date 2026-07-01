@@ -870,10 +870,24 @@ fn authenticate_authorization_code_client(
     client: &OAuthClient,
     client_auth: &ClientAuth,
 ) -> Result<(), OAuthError> {
+    // The authorization_code grant authenticates ONLY brokered clients (public
+    // `oac_` clients are PKCE-only). Non-brokered → no secret check here.
     if !client.brokered {
         return Ok(());
     }
+    authenticate_brokered_client(issuer, client, client_auth)
+}
 
+/// Confidential broker-secret authentication for a brokered client, shared by
+/// the authorization_code grant AND the refresh grant (`authenticate_for_refresh`).
+/// A brokered client MUST present the per-app broker secret (HKDF-derived from
+/// the platform master, verified by derive-and-compare); this is the control
+/// that keeps the global-subject id_token out of app-controlled code.
+pub(super) fn authenticate_brokered_client(
+    issuer: &Issuer,
+    client: &OAuthClient,
+    client_auth: &ClientAuth,
+) -> Result<(), OAuthError> {
     if !matches!(client_auth.method, ClientAuthMethod::Basic | ClientAuthMethod::Post) {
         return Err(OAuthError::invalid_client(
             "broker client authentication required",

@@ -388,7 +388,7 @@ pub(super) async fn exchange_refresh_token(
     params: &TokenRequest,
     client_auth: &ClientAuth,
 ) -> Result<TokenResponse, OAuthError> {
-    let preauth = preauthenticate_refresh(shared_db, keys, params, client_auth).await?;
+    let preauth = preauthenticate_refresh(issuer, shared_db, keys, params, client_auth).await?;
     let pool = refresh_pool
         .checkout_pool("refresh rotation")
         .await
@@ -431,6 +431,7 @@ pub(super) async fn exchange_refresh_token(
 
 #[allow(clippy::future_not_send)]
 async fn preauthenticate_refresh(
+    issuer: &Issuer,
     db: &(impl GenericClient + ?Sized),
     keys: &RefreshTokenKeys,
     params: &TokenRequest,
@@ -439,7 +440,7 @@ async fn preauthenticate_refresh(
     let raw_token = required_param(params.refresh_token.as_deref(), "refresh_token")?;
     let client_id = authenticated_client_id(db, params.client_id.as_deref(), client_auth).await?;
     let client = load_client(db, &client_id).await?;
-    authenticate_for_refresh(&client, client_auth).await?;
+    authenticate_for_refresh(issuer, &client, client_auth).await?;
     if !client.refresh_allowed {
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
     }
@@ -592,6 +593,7 @@ pub async fn revoke_post(
     form: web::types::Form<RevokeRequest>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<Client>>,
+    issuer: web::types::State<Arc<Issuer>>,
     refresh_pool: web::types::State<RefreshSessionPool>,
 ) -> HttpResponse {
     match revoke_inner(
@@ -599,6 +601,7 @@ pub async fn revoke_post(
         form.into_inner(),
         cfg.as_ref(),
         db.as_ref(),
+        issuer.as_ref(),
         refresh_pool.get_ref(),
     )
     .await
@@ -624,6 +627,7 @@ async fn revoke_inner(
     form: RevokeRequest,
     cfg: &AuthConfig,
     db: &Client,
+    issuer: &Issuer,
     refresh_pool: &RefreshSessionPool,
 ) -> Result<(), OAuthError> {
     let _hint = form.token_type_hint.as_deref();
@@ -640,7 +644,7 @@ async fn revoke_inner(
         Err(_) => return Ok(()),
     };
     let client = load_client(db, &client_id).await?;
-    authenticate_for_refresh(&client, &client_auth).await?;
+    authenticate_for_refresh(issuer, &client, &client_auth).await?;
     let Some((_hash, row)) = lookup_by_any_hash(db, &keys, raw_token).await? else {
         return Ok(());
     };
@@ -825,9 +829,22 @@ async fn authenticated_client_id(
 }
 
 async fn authenticate_for_refresh(
+    issuer: &Issuer,
     client: &OAuthClient,
     client_auth: &ClientAuth,
 ) -> Result<(), OAuthError> {
+    // Brokered-first (MED-2): a brokered client authenticates by derive-and-
+    // compare against the per-app broker secret, NOT a stored hash (it has none
+    // — client_secret_hash is NULL). Without this branch the client_secret_basic
+    // arm below would verify against the NULL hash and brokered refresh would be
+    // a fail-closed dead-end (the gateway's oac_ clients keep the refresh anchor).
+    if client.brokered {
+        return crate::oidc::authorization_code::authenticate_brokered_client(
+            issuer,
+            client,
+            client_auth,
+        );
+    }
     match client.token_endpoint_auth_method.as_str() {
         "none" => {
             if client_auth.method != ClientAuthMethod::None {
