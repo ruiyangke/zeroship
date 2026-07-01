@@ -3,34 +3,24 @@
 mod common;
 
 use std::future::Future;
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::sync::Arc;
 
-use ntex::http::header::{CACHE_CONTROL, CONTENT_LENGTH, SET_COOKIE};
+use ntex::http::header::{CACHE_CONTROL, SET_COOKIE};
 use ntex::http::HeaderMap;
 use ntex::service::{Pipeline, Service};
 use ntex::web::{self, test};
-use serde_json::{json, Value};
-use uuid::Uuid;
 
 use common::test_auth_config;
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::{magic_link, verification};
 use zeroship_auth::server;
-use zeroship_auth::store::{users};
-
-const MAGIC_ACCEPT_REDIRECT: &str = "https://client.example/callback?code=magic";
+use zeroship_auth::store::users;
+use uuid::Uuid;
 
 macro_rules! init_app {
     ($ctx:expr) => {
         test::init_service(
             web::App::new()
-                .state($ctx.admin.clone())
                 .state($ctx.cfg.clone())
                 .state($ctx.pg.clone())
                 .state($ctx.refresh_pool.clone())
@@ -52,68 +42,8 @@ fn run_compio<F: Future<Output = ()>>(future: F) {
         .block_on(future);
 }
 
-#[derive(Clone, Debug)]
-struct HydraAcceptRecord {
-    challenge: String,
-    body: Value,
-}
-
-struct BlockingHydra {
-    base_url: String,
-    records: Arc<Mutex<Vec<HydraAcceptRecord>>>,
-    shutdown: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl BlockingHydra {
-    fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock hydra");
-        listener
-            .set_nonblocking(true)
-            .expect("set mock hydra nonblocking");
-        let addr = listener.local_addr().expect("mock hydra addr");
-        let records = Arc::new(Mutex::new(Vec::new()));
-        let records_for_thread = records.clone();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_for_thread = shutdown.clone();
-        let handle = thread::spawn(move || {
-            while !shutdown_for_thread.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => handle_hydra_stream(&mut stream, &records_for_thread),
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-        Self {
-            base_url: format!("http://{addr}"),
-            records,
-            shutdown,
-            handle: Some(handle),
-        }
-    }
-}
-
-impl Drop for BlockingHydra {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-        let _ = std::net::TcpStream::connect(
-            self.base_url
-                .strip_prefix("http://")
-                .expect("mock hydra http URL"),
-        );
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
 struct M4TestCtx {
-    hydra: BlockingHydra,
     cfg: Arc<zeroship_auth::config::AuthConfig>,
-    admin: HydraAdmin,
     pg: Arc<compio_postgres::Client>,
     refresh_pool: zeroship_auth::oidc::refresh::RefreshSessionPool,
 }
@@ -136,19 +66,11 @@ impl M4TestCtx {
         .detach();
         let pg = Arc::new(pg_client);
 
-        let hydra = BlockingHydra::start();
-        let cfg = Arc::new(test_auth_config(
-            &db_url,
-            &hydra.base_url,
-            &hydra.base_url,
-        ));
-        let admin = HydraAdmin::new(hydra.base_url.clone());
+        let cfg = Arc::new(test_auth_config(&db_url));
         let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url, 4);
 
         Some(Self {
-            hydra,
             cfg,
-            admin,
             pg,
             refresh_pool,
         })
@@ -220,9 +142,6 @@ impl M4TestCtx {
             .await;
     }
 
-    fn accepted_logins(&self) -> Vec<HydraAcceptRecord> {
-        self.hydra.records.lock().expect("lock hydra records").clone()
-    }
 }
 
 #[test]
@@ -555,71 +474,6 @@ fn read_set_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn handle_hydra_stream(stream: &mut std::net::TcpStream, records: &Arc<Mutex<Vec<HydraAcceptRecord>>>) {
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 1024];
-    let mut header_end = None;
-    while header_end.is_none() {
-        let Ok(n) = stream.read(&mut tmp) else { return };
-        if n == 0 {
-            return;
-        }
-        buf.extend_from_slice(&tmp[..n]);
-        header_end = find_header_end(&buf);
-    }
-    let header_end = header_end.expect("header end checked");
-    let (target, content_len) = {
-        let headers = String::from_utf8_lossy(&buf[..header_end]);
-        let mut lines = headers.lines();
-        let request_line = lines.next().unwrap_or("");
-        let target = request_line
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or("")
-            .to_string();
-        let content_len = lines
-            .filter_map(|line| line.split_once(':'))
-            .find_map(|(name, value)| {
-                if name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()) {
-                    value.trim().parse::<usize>().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
-        (target, content_len)
-    };
-    while buf.len() < header_end + content_len {
-        let Ok(n) = stream.read(&mut tmp) else { return };
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&tmp[..n]);
-    }
-    let body_bytes = &buf[header_end..buf.len().min(header_end + content_len)];
-    let body = serde_json::from_slice(body_bytes).unwrap_or_else(|_| json!({}));
-    let challenge = target
-        .split_once('?')
-        .and_then(|(_, query)| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .find(|(name, _)| name == "login_challenge")
-                .map(|(_, value)| value.into_owned())
-        })
-        .unwrap_or_default();
-    records
-        .lock()
-        .expect("lock mock hydra records")
-        .push(HydraAcceptRecord { challenge, body });
-
-    let response_body = json!({ "redirect_to": MAGIC_ACCEPT_REDIRECT }).to_string();
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        response_body.len(),
-        response_body
-    );
-    let _ = stream.write_all(response.as_bytes());
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {

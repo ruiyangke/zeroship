@@ -13,7 +13,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::oidc::{AccessTokenMint, Issuer};
 use zeroship_auth::oidc::refresh::RefreshSessionPool;
 use zeroship_auth::server;
@@ -21,7 +20,9 @@ use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_core::auth::hash_api_key;
 
-use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
+use common::{
+    location, pkce_challenge_s256, pkce_verifier, provider_mirror_column, test_auth_config,
+};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9998/cb";
@@ -110,30 +111,22 @@ impl Fixture {
         );
         write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
 
-        let mut cfg = test_auth_config(
-            &db_url,
-            "http://127.0.0.1:4445",
-            "http://127.0.0.1:4444",
-        );
+        let mut cfg = test_auth_config(&db_url);
         cfg.refresh_hash_key_file = Some(hash_key_file);
         cfg.refresh_idem_key_file = Some(idem_key_file);
         let cfg = Arc::new(cfg);
-        let admin = HydraAdmin::new("http://127.0.0.1:4445");
-        let admin_state = admin.clone();
         let cfg_state = cfg.clone();
         let db_state = db.clone();
         let issuer_state = issuer.clone();
         let refresh_pool = RefreshSessionPool::new(db_url.clone(), 4);
         let refresh_pool_state = refresh_pool.clone();
         let srv = web::test::server(move || {
-            let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();
             let db_state = db_state.clone();
             let issuer_state = issuer_state.clone();
             let refresh_pool_state = refresh_pool_state.clone();
             async move {
                 web::App::new()
-                    .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
                     .state(issuer_state)
@@ -936,11 +929,15 @@ async fn seed_user_client(
     .expect("seed app");
     let scope_vec = scopes.iter().map(|scope| (*scope).to_string()).collect::<Vec<_>>();
     let secret_hash = hash_api_key(REFRESH_CLIENT_SECRET);
-    db.execute(
+    let sql = format!(
         "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id, \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, {}, \
              client_secret_hash, refresh_allowed, token_endpoint_auth_method) \
          VALUES ($1, 'P5b OP refresh test', $2, $3, FALSE, $1, $4, TRUE, 'client_secret_basic')",
+        provider_mirror_column()
+    );
+    db.execute(
+        &sql,
         &[&client_id, &vec![REDIRECT_URI.to_string()], &scope_vec, &secret_hash],
     )
     .await

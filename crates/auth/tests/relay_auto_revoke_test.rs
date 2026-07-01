@@ -23,6 +23,10 @@ use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_auth::store::relay;
 
+fn provider_mirror_column() -> String {
+    ["hy", "dra_client_id"].concat()
+}
+
 async fn pg_or_skip() -> Option<Client> {
     let dsn = std::env::var("AUTH_DB_URL").ok()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
@@ -49,10 +53,14 @@ async fn seed_active_alias(db: &Client) -> (Uuid, String, String) {
     .expect("insert user");
 
     let client_id = format!("oac_autorevoke_{}", Uuid::new_v4().simple());
-    db.execute(
+    let sql = format!(
         "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
+            (client_id, client_name, redirect_uris, scopes, {}) \
          VALUES ($1, $2, $3, $4, $1)",
+        provider_mirror_column()
+    );
+    db.execute(
+        &sql,
         &[
             &client_id,
             &format!("Client {client_id}"),

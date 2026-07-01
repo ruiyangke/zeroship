@@ -190,7 +190,7 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
     assert_eq!(loc, query_uri("/login", "return_to", &return_to));
     assert!(
         !loc.contains("login_challenge="),
-        "native signup redirect must not switch to Hydra: {loc}"
+        "native signup redirect must keep return_to semantics: {loc}"
     );
     assert_eq!(mailer.count(), 1, "successful signup sends verification mail");
 

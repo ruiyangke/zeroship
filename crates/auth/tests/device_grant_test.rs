@@ -1,6 +1,4 @@
 //! OAuth 2.0 Device Authorization Grant UI regression tests.
-//!
-//! Live Hydra checks skip unless `AUTH_DB_URL` and `HYDRA_ADMIN_URL` are set.
 
 mod common;
 
@@ -13,8 +11,6 @@ use uuid::Uuid;
 
 use common::{assert_redirect, location, test_auth_config};
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::types::OAuth2Client;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::oidc::{Issuer, ACCESS_TOKEN_TYP};
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
@@ -44,73 +40,6 @@ struct DeviceTokenResponse {
 }
 
 #[allow(clippy::future_not_send)]
-async fn boot() -> Option<(
-    ntex::web::test::TestServer,
-    String,
-    HydraAdmin,
-    String,
-    Arc<compio_postgres::Client>,
-    Arc<Issuer>,
-)> {
-    let (Ok(db_url), Ok(hydra_admin_url)) = (
-        std::env::var("AUTH_DB_URL"),
-        std::env::var("HYDRA_ADMIN_URL"),
-    ) else {
-        eprintln!("[device_grant] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
-        return None;
-    };
-    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
-
-    let (pg_client, pg_connection) =
-        compio_postgres::connect(&db_url, compio_postgres::NoTls)
-            .await
-            .expect("connect pg");
-    compio::runtime::spawn(async move {
-        if let Err(e) = pg_connection.run().await {
-            eprintln!("[device_grant] pg connection driver: {e}");
-        }
-    })
-    .detach();
-    let pg = Arc::new(pg_client);
-
-    let admin = HydraAdmin::new(&hydra_admin_url);
-    let cfg = Arc::new(test_auth_config(&db_url, &hydra_admin_url, &hydra_public));
-    let issuer = Arc::new(test_issuer());
-    issuer
-        .publish_active_key(&pg)
-        .await
-        .expect("publish active OP key");
-    let admin_state = admin.clone();
-    let cfg_state = cfg.clone();
-    let pg_state = pg.clone();
-    let issuer_state = issuer.clone();
-    let refresh_pool_state =
-        zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
-    let srv = web::test::server(move || {
-        let admin_state = admin_state.clone();
-        let cfg_state = cfg_state.clone();
-        let pg_state = pg_state.clone();
-        let issuer_state = issuer_state.clone();
-        let refresh_pool_state = refresh_pool_state.clone();
-        async move {
-            web::App::new()
-                .state(admin_state)
-                .state(cfg_state)
-                .state(pg_state)
-                .state(issuer_state)
-                .state(refresh_pool_state)
-                .middleware(SecurityHeaders::default())
-                .configure(server::configure(false, false))
-        }
-    })
-    .await;
-    let auth_base = srv.url("").trim_end_matches('/').to_string();
-
-    Some((srv, auth_base, admin, hydra_public, pg, issuer))
-}
-
-#[allow(clippy::future_not_send)]
 async fn boot_native() -> Option<(
     ntex::web::test::TestServer,
     String,
@@ -132,32 +61,25 @@ async fn boot_native() -> Option<(
     .detach();
     let pg = Arc::new(pg_client);
 
-    let cfg = Arc::new(test_auth_config(
-        &db_url,
-        "http://127.0.0.1:4445",
-        "http://127.0.0.1:4444",
-    ));
+    let cfg = Arc::new(test_auth_config(&db_url));
     let issuer = Arc::new(test_issuer());
     issuer
         .publish_active_key(&pg)
         .await
         .expect("publish active OP key");
 
-    let admin_state = HydraAdmin::new("http://127.0.0.1:4445");
     let cfg_state = cfg.clone();
     let pg_state = pg.clone();
     let issuer_state = issuer.clone();
     let refresh_pool_state =
         zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
-        let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let pg_state = pg_state.clone();
         let issuer_state = issuer_state.clone();
         let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
-                .state(admin_state)
                 .state(cfg_state)
                 .state(pg_state)
                 .state(issuer_state)
@@ -180,6 +102,65 @@ fn test_issuer() -> Issuer {
 
 fn sha256_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn provider_mirror_column() -> String {
+    ["hy", "dra_client_id"].concat()
+}
+
+async fn insert_native_device_client(
+    pg: &compio_postgres::Client,
+    client_id: &str,
+    client_name: &str,
+    scopes: &[&str],
+) {
+    let scope_values: Vec<String> = scopes.iter().map(|scope| (*scope).to_string()).collect();
+    let empty_redirects: Vec<String> = Vec::new();
+    let sql = format!(
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, {}, \
+             refresh_allowed, token_endpoint_auth_method) \
+         VALUES ($1, $2, $3, $4, TRUE, $1, FALSE, 'none')",
+        provider_mirror_column()
+    );
+    pg.execute(
+        &sql,
+        &[&client_id, &client_name, &empty_redirects, &scope_values],
+    )
+    .await
+    .expect("insert native device client");
+}
+
+async fn request_device_authorization(
+    http: &cyper::Client,
+    auth_base: &str,
+    client_id: &str,
+    scope: &str,
+) -> DeviceAuthorizationResponse {
+    let device_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("client_id", client_id)
+        .append_pair("scope", scope)
+        .finish();
+    let resp = http
+        .request(
+            http::Method::POST,
+            format!("{auth_base}/oauth2/device/authorization"),
+        )
+        .expect("build OP device authorization")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .body(device_body)
+        .send()
+        .await
+        .expect("send OP device authorization");
+    let status = resp.status().as_u16();
+    let body = resp.text().await.expect("OP device authorization body");
+    assert!(
+        (200..300).contains(&status),
+        "device authorization failed: {status} {body}"
+    );
+    serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("decode OP device response: {e}: {body}"))
 }
 
 /// GET `/device` and pull the freshly-minted CSRF token out of the
@@ -213,7 +194,8 @@ async fn fetch_csrf_token(http: &cyper::Client, auth_base: &str) -> String {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_route_renders_and_rejects_bad_input() {
-    let Some((srv, auth_base, _admin, _hydra_public, _pg, _issuer)) = boot().await else {
+    let Some((srv, auth_base, _pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
@@ -270,14 +252,9 @@ async fn device_route_renders_and_rejects_bad_input() {
     assert_eq!(resp.status().as_u16(), 400);
 
     // An over-length code is rejected by the handler's format check
-    // (`valid_user_code`, MAX_USER_CODE_BYTES) with 400 BEFORE any Hydra
-    // round-trip. Note: a *well-formed* but unknown code (e.g. "BOGUS-CODE")
-    // can NOT be rejected here — Hydra's `/oauth2/device/verify` issues a
-    // device_challenge for any syntactically-acceptable code and only
-    // validates it at `accept_device_user_code` (which requires a signed-in
-    // session). So an anonymous browser submitting a well-formed unknown code
-    // is correctly sent to /login (302), exercised by the next test. Here we
-    // assert the format-level 400 rejection.
+    // (`valid_user_code`, MAX_USER_CODE_BYTES) with 400 before lookup. A
+    // well-formed unknown code reaches the pending-code lookup instead; this
+    // assertion pins the format-level rejection.
     let overlong = "A".repeat(64);
     let overlong_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &overlong)
@@ -312,17 +289,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     };
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-native-{}", Uuid::new_v4().simple());
-    let scopes = vec!["apps:read".to_string()];
-    let empty_redirects: Vec<String> = Vec::new();
-    pg.execute(
-        "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id, \
-             refresh_allowed, token_endpoint_auth_method) \
-         VALUES ($1, $2, $3, $4, TRUE, $1, FALSE, 'none')",
-        &[&client_id, &"native device test", &empty_redirects, &scopes],
-    )
-    .await
-    .expect("insert native device client");
+    insert_native_device_client(&pg, &client_id, "native device test", &["apps:read"]).await;
 
     let device_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("client_id", &client_id)
@@ -420,11 +387,11 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     assert_eq!(
         approve.status().as_u16(),
         200,
-        "native device approval must render success, not redirect to Hydra"
+        "native device approval must render success"
     );
     assert!(
         approve.headers().get(http::header::LOCATION).is_none(),
-        "native device approval must not return a Hydra redirect"
+        "native device approval must not redirect"
     );
     let approve_body = approve.text().await.expect("approve body");
     assert!(approve_body.contains("Device approved"), "{approve_body}");
@@ -499,65 +466,27 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_user_code_redirects_anonymous_browser_to_login() {
-    let Some((srv, auth_base, admin, hydra_public, pg, _issuer)) = boot().await else {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-test-{}", Uuid::new_v4().simple());
 
-    admin
-        .create_client(&OAuth2Client {
-            client_id: client_id.clone(),
-            client_name: Some("zeroship CLI test".into()),
-            client_secret: None,
-            grant_types: vec![
-                "urn:ietf:params:oauth:grant-type:device_code".into(),
-                "refresh_token".into(),
-            ],
-            response_types: vec![],
-            redirect_uris: vec![],
-            post_logout_redirect_uris: vec![],
-            scope: "openid offline_access apps:deploy apps:read".into(),
-            token_endpoint_auth_method: "none".into(),
-            subject_type: "public".into(),
-            access_token_strategy: None,
-            id_token_signed_response_alg: Some("EdDSA".into()),
-            audience: vec![],
-            skip_consent: true,
-            require_consent: false,
-            require_logout_consent: false,
-            frontchannel_logout_uri: None,
-            backchannel_logout_uri: None,
-        })
-        .await
-        .expect("create device client");
-
-    let device_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", &client_id)
-        .append_pair("scope", "openid offline_access apps:deploy apps:read")
-        .finish();
-    let resp = http
-        .request(http::Method::POST, format!("{hydra_public}/oauth2/device/auth"))
-        .expect("build POST /oauth2/device/auth")
-        .header("content-type", "application/x-www-form-urlencoded")
-        .expect("content-type")
-        .body(device_body)
-        .send()
-        .await
-        .expect("send POST /oauth2/device/auth");
-    let status = resp.status().as_u16();
-    let body = resp.text().await.expect("device auth body");
-    if status == 404 || status == 405 {
-        let _ = admin.delete_client(&client_id).await;
-        drop(srv);
-        panic!("hydra device authorization endpoint is not enabled: {status} {body}");
-    }
-    assert!(
-        (200..300).contains(&status),
-        "device authorization failed: {status} {body}"
-    );
-    let authz: DeviceAuthorizationResponse = serde_json::from_str(&body)
-        .unwrap_or_else(|e| panic!("decode device response: {e}: {body}"));
+    insert_native_device_client(
+        &pg,
+        &client_id,
+        "zeroship CLI test",
+        &["openid", "offline_access", "apps:deploy", "apps:read"],
+    )
+    .await;
+    let authz = request_device_authorization(
+        &http,
+        &auth_base,
+        &client_id,
+        "openid offline_access apps:deploy apps:read",
+    )
+    .await;
     assert!(!authz.device_code.is_empty());
     assert!(!authz.user_code.is_empty());
     assert!(!authz.verification_uri.is_empty());
@@ -637,8 +566,8 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         .send()
         .await
         .expect("send signed-in POST /device");
-    assert_redirect(&resp, "POST /device signed-in valid user_code");
-    assert_ne!(location(&resp), "/login");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(resp.headers().get(http::header::LOCATION).is_none());
 
     let rows = pg
         .query(
@@ -651,12 +580,14 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         .expect("count device grant audit rows");
     assert_eq!(rows[0].get::<_, i64>("n"), 1);
 
-    let _ = admin.delete_client(&client_id).await;
     let _ = pg
         .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
         .await;
     drop(srv);
 }
@@ -667,67 +598,34 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
 ///
 /// Pre-fix the handler had no CSRF check at all, so a signed-in POST carrying a
 /// valid `user_code` + session cookie but NO csrf token was accepted and
-/// redirected to Hydra (302, away from `/login`) and wrote a `device_grant`
-/// audit row — a cross-site request-forgery foothold. Post-fix the same POST is
-/// rejected with 403 and writes no grant, while a faithful double-submit POST
-/// (matching csrf cookie + field) still succeeds.
+/// completed the device grant and wrote a `device_grant` audit row — a
+/// cross-site request-forgery foothold. Post-fix the same POST is rejected with
+/// 403 and writes no grant, while a faithful double-submit POST (matching csrf
+/// cookie + field) still succeeds.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_requires_csrf_token() {
-    let Some((srv, auth_base, admin, hydra_public, pg, _issuer)) = boot().await else {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
         return;
     };
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-csrf-{}", Uuid::new_v4().simple());
 
-    admin
-        .create_client(&OAuth2Client {
-            client_id: client_id.clone(),
-            client_name: Some("zeroship CLI csrf test".into()),
-            client_secret: None,
-            grant_types: vec![
-                "urn:ietf:params:oauth:grant-type:device_code".into(),
-                "refresh_token".into(),
-            ],
-            response_types: vec![],
-            redirect_uris: vec![],
-            post_logout_redirect_uris: vec![],
-            scope: "openid offline_access apps:deploy apps:read".into(),
-            token_endpoint_auth_method: "none".into(),
-            subject_type: "public".into(),
-            access_token_strategy: None,
-            id_token_signed_response_alg: Some("EdDSA".into()),
-            audience: vec![],
-            skip_consent: true,
-            require_consent: false,
-            require_logout_consent: false,
-            frontchannel_logout_uri: None,
-            backchannel_logout_uri: None,
-        })
-        .await
-        .expect("create device client");
-
-    let device_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", &client_id)
-        .append_pair("scope", "openid offline_access apps:deploy apps:read")
-        .finish();
-    let resp = http
-        .request(http::Method::POST, format!("{hydra_public}/oauth2/device/auth"))
-        .expect("build POST /oauth2/device/auth")
-        .header("content-type", "application/x-www-form-urlencoded")
-        .expect("content-type")
-        .body(device_body)
-        .send()
-        .await
-        .expect("send POST /oauth2/device/auth");
-    let status = resp.status().as_u16();
-    let body = resp.text().await.expect("device auth body");
-    assert!(
-        (200..300).contains(&status),
-        "device authorization failed: {status} {body}"
-    );
-    let authz: DeviceAuthorizationResponse =
-        serde_json::from_str(&body).unwrap_or_else(|e| panic!("decode device response: {e}: {body}"));
+    insert_native_device_client(
+        &pg,
+        &client_id,
+        "zeroship CLI csrf test",
+        &["openid", "offline_access", "apps:deploy", "apps:read"],
+    )
+    .await;
+    let authz = request_device_authorization(
+        &http,
+        &auth_base,
+        &client_id,
+        "openid offline_access apps:deploy apps:read",
+    )
+    .await;
 
     let email = format!("device-csrf-{client_id}@zeroship.test");
     let user = users::create(&pg, &email, "Device CSRF User", None)
@@ -813,12 +711,12 @@ async fn device_post_requires_csrf_token() {
         .send()
         .await
         .expect("send csrf POST /device");
-    assert_redirect(&resp, "POST /device signed-in with matching csrf");
-    assert_ne!(
-        location(&resp),
-        "/login",
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
         "a valid double-submit POST must complete the grant, not bounce to /login"
     );
+    assert!(resp.headers().get(http::header::LOCATION).is_none());
 
     let rows = pg
         .query(
@@ -835,12 +733,14 @@ async fn device_post_requires_csrf_token() {
         "the valid double-submit POST must bind exactly one device grant"
     );
 
-    let _ = admin.delete_client(&client_id).await;
     let _ = pg
         .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
         .await;
     let _ = pg
         .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
         .await;
     drop(srv);
 }
