@@ -19,6 +19,7 @@ use crate::oidc::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
 use crate::return_to;
 use crate::sessions::login as login_session;
 use crate::store::sessions as session_store;
+use crate::store::users;
 
 const AUTH_CODE_TTL_SECS: i64 = 60;
 const PKCE_METHOD_S256: &str = "S256";
@@ -462,6 +463,22 @@ async fn exchange_authorization_code(
             .nonce
             .as_deref()
             .ok_or_else(|| OAuthError::invalid_grant("openid code is missing nonce"))?;
+        let user = users::find_by_id(db, &user_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    user_id = %user_id,
+                    "token: id-token user lookup failed"
+                );
+                OAuthError::server_error("id token user lookup failed")
+            })?
+            .ok_or_else(|| {
+                tracing::error!(user_id = %user_id, "token: consumed code user is missing");
+                OAuthError::server_error("id token user missing")
+            })?;
+        let want_email = consumed.granted_scopes.iter().any(|scope| scope == "email");
+        let want_profile = consumed.granted_scopes.iter().any(|scope| scope == "profile");
         Some(
             issuer
                 .issue_id_token(&IdTokenMint {
@@ -473,6 +490,26 @@ async fn exchange_authorization_code(
                     auth_time: None,
                     amr: None,
                     acr: None,
+                    email: if want_email {
+                        Some(user.email.as_str())
+                    } else {
+                        None
+                    },
+                    email_verified: if want_email {
+                        Some(user.email_verified_at.is_some())
+                    } else {
+                        None
+                    },
+                    name: if want_profile {
+                        Some(user.name.as_str())
+                    } else {
+                        None
+                    },
+                    picture: if want_profile {
+                        user.avatar_url.as_deref()
+                    } else {
+                        None
+                    },
                     ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
                 })
                 .map_err(|err| {

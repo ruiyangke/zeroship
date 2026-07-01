@@ -52,6 +52,14 @@ pub struct IdTokenClaims {
     pub amr: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email_verified: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
 }
 
 /// Inputs for minting an access token.
@@ -87,6 +95,10 @@ pub struct IdTokenMint<'a> {
     pub auth_time: Option<i64>,
     pub amr: Option<&'a [String]>,
     pub acr: Option<&'a str>,
+    pub email: Option<&'a str>,
+    pub email_verified: Option<bool>,
+    pub name: Option<&'a str>,
+    pub picture: Option<&'a str>,
     pub ttl_secs: Option<i64>,
 }
 
@@ -335,6 +347,10 @@ impl Issuer {
             auth_time: mint.auth_time,
             amr: mint.amr.map(<[String]>::to_vec),
             acr: mint.acr.map(str::to_string),
+            email: mint.email.map(str::to_string),
+            email_verified: mint.email_verified,
+            name: mint.name.map(str::to_string),
+            picture: mint.picture.map(str::to_string),
         };
 
         let mut header = Header::new(Algorithm::EdDSA);

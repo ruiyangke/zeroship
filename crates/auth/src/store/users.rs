@@ -81,7 +81,10 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
 ///
 /// Returns `AuthError::Db` on PG failure (parse failure is NOT an error —
 /// it's a `None`, since the subject string is attacker-influenced).
-pub async fn find_by_id(conn: &Client, id: &str) -> Result<Option<UserRow>> {
+pub async fn find_by_id(
+    conn: &(impl GenericClient + ?Sized),
+    id: &str,
+) -> Result<Option<UserRow>> {
     let Ok(uuid) = uuid::Uuid::parse_str(id) else {
         return Ok(None);
     };

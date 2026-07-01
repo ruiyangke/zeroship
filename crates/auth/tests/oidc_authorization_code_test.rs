@@ -39,6 +39,12 @@ struct TokenResponse {
     scope: String,
 }
 
+struct SeededUserProfile {
+    email: String,
+    name: String,
+    avatar_url: String,
+}
+
 struct Fixture {
     srv: ntex::web::test::TestServer,
     auth_base: String,
@@ -47,12 +53,20 @@ struct Fixture {
     client_id: String,
     app_id: Uuid,
     user_id: Uuid,
+    user_email: String,
+    user_name: String,
+    user_avatar_url: String,
     session_cookie: String,
 }
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot() -> Option<Self> {
+        Self::boot_with_email_verified(true).await
+    }
+
+    #[allow(clippy::future_not_send)]
+    async fn boot_with_email_verified(email_verified: bool) -> Option<Self> {
         let Some(db_url) = db_url() else {
             eprintln!("[op_authorization_code_test] skip (AUTH_DB_URL or CONTROL_TEST_DB unset)");
             return None;
@@ -76,7 +90,8 @@ impl Fixture {
         let app_id = Uuid::new_v4();
         let client_id = format!("oac_p3_{}", Uuid::new_v4().simple());
         let app_name = format!("p3-auth-code-{}", Uuid::new_v4().simple());
-        seed_user_client(&db, user_id, app_id, &app_name, &client_id).await;
+        let user_profile =
+            seed_user_client(&db, user_id, app_id, &app_name, &client_id, email_verified).await;
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
@@ -136,6 +151,9 @@ impl Fixture {
             client_id,
             app_id,
             user_id,
+            user_email: user_profile.email,
+            user_name: user_profile.name,
+            user_avatar_url: user_profile.avatar_url,
             session_cookie,
         })
     }
@@ -210,6 +228,126 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
         .expect("second token response");
     assert_eq!(replay.status().as_u16(), 400, "code must be one-use");
     assert_error(replay, "invalid_grant").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+
+    let authorize = send_authorize_with_scope(
+        &fx,
+        REDIRECT_URI,
+        &verifier,
+        Some(&nonce),
+        "openid email profile",
+    )
+    .await
+    .expect("authorize response");
+    assert_eq!(authorize.status().as_u16(), 303);
+    let code = query_param(&location(&authorize), "code").expect("code in redirect");
+    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
+        .await
+        .expect("token response");
+
+    let jwks = jwks_document(&fx.db).await.expect("jwks");
+    let id = verify_with_jwks::<Value>(
+        &jwks,
+        &token.id_token,
+        fx.issuer.issuer(),
+        &fx.client_id,
+        ID_TOKEN_TYP,
+    )
+    .expect("verify id token");
+    assert_eq!(id["email"].as_str(), Some(fx.user_email.as_str()));
+    assert_eq!(id["email_verified"].as_bool(), Some(true));
+    assert_eq!(id["name"].as_str(), Some(fx.user_name.as_str()));
+    assert_eq!(id["picture"].as_str(), Some(fx.user_avatar_url.as_str()));
+
+    let access = verify_with_jwks::<Value>(
+        &jwks,
+        &token.access_token,
+        fx.issuer.issuer(),
+        &format!("app:{}", fx.app_id),
+        ACCESS_TOKEN_TYP,
+    )
+    .expect("verify access token");
+    assert_identity_claims_absent(&access);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn id_token_omits_identity_claims_without_email_and_profile_scopes() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+
+    let authorize = send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid")
+        .await
+        .expect("authorize response");
+    assert_eq!(authorize.status().as_u16(), 303);
+    let code = query_param(&location(&authorize), "code").expect("code in redirect");
+    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
+        .await
+        .expect("token response");
+    assert_eq!(token.scope, "openid");
+
+    let jwks = jwks_document(&fx.db).await.expect("jwks");
+    let id = verify_with_jwks::<Value>(
+        &jwks,
+        &token.id_token,
+        fx.issuer.issuer(),
+        &fx.client_id,
+        ID_TOKEN_TYP,
+    )
+    .expect("verify id token");
+    assert_identity_claims_absent(&id);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn id_token_email_verified_false_for_unverified_user() {
+    let Some(fx) = Fixture::boot_with_email_verified(false).await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+
+    let authorize =
+        send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid email")
+            .await
+            .expect("authorize response");
+    assert_eq!(authorize.status().as_u16(), 303);
+    let code = query_param(&location(&authorize), "code").expect("code in redirect");
+    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
+        .await
+        .expect("token response");
+
+    let jwks = jwks_document(&fx.db).await.expect("jwks");
+    let id = verify_with_jwks::<Value>(
+        &jwks,
+        &token.id_token,
+        fx.issuer.issuer(),
+        &fx.client_id,
+        ID_TOKEN_TYP,
+    )
+    .expect("verify id token");
+    assert_eq!(id["email"].as_str(), Some(fx.user_email.as_str()));
+    assert_eq!(id["email_verified"].as_bool(), Some(false));
+    assert!(!id.as_object().expect("claims object").contains_key("name"));
+    assert!(!id.as_object().expect("claims object").contains_key("picture"));
 
     fx.cleanup().await;
 }
@@ -317,12 +455,15 @@ async fn seed_user_client(
     app_id: Uuid,
     app_name: &str,
     client_id: &str,
-) {
+    email_verified: bool,
+) -> SeededUserProfile {
     let email = format!("p3-{}@zeroship.test", Uuid::new_v4().simple());
+    let name = format!("P3 User {}", Uuid::new_v4().simple());
+    let avatar_url = format!("https://cdn.zeroship.test/avatars/{user_id}.png");
     db.execute(
-        "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
-         VALUES ($1, $2::citext, NOW(), 'P3 User')",
-        &[&user_id, &email],
+        "INSERT INTO zeroship.users (id, email, email_verified_at, name, avatar_url) \
+         VALUES ($1, $2::citext, CASE WHEN $3 THEN NOW() ELSE NULL END, $4, $5)",
+        &[&user_id, &email, &email_verified, &name, &avatar_url],
     )
     .await
     .expect("seed user");
@@ -386,6 +527,11 @@ async fn seed_user_client(
     )
     .await
     .expect("seed oauth grant");
+    SeededUserProfile {
+        email,
+        name,
+        avatar_url,
+    }
 }
 
 async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
@@ -441,12 +587,31 @@ async fn send_authorize(
     nonce: Option<&str>,
     state: Option<&str>,
 ) -> Result<cyper::Response, cyper::Error> {
-    send_authorize_with_method(fx, redirect_uri, verifier, "S256", nonce.or(Some("nonce-123")))
+    send_authorize_with_scope_and_method(
+        fx,
+        redirect_uri,
+        verifier,
+        "S256",
+        nonce.or(Some("nonce-123")),
+        "openid profile email",
+    )
+    .await
+    .map(|resp| {
+        let _ = state;
+        resp
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn send_authorize_with_scope(
+    fx: &Fixture,
+    redirect_uri: &str,
+    verifier: &str,
+    nonce: Option<&str>,
+    scope: &str,
+) -> Result<cyper::Response, cyper::Error> {
+    send_authorize_with_scope_and_method(fx, redirect_uri, verifier, "S256", nonce, scope)
         .await
-        .map(|resp| {
-            let _ = state;
-            resp
-        })
 }
 
 #[allow(clippy::future_not_send)]
@@ -457,11 +622,31 @@ async fn send_authorize_with_method(
     method: &str,
     nonce: Option<&str>,
 ) -> Result<cyper::Response, cyper::Error> {
+    send_authorize_with_scope_and_method(
+        fx,
+        redirect_uri,
+        verifier,
+        method,
+        nonce,
+        "openid profile email",
+    )
+    .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn send_authorize_with_scope_and_method(
+    fx: &Fixture,
+    redirect_uri: &str,
+    verifier: &str,
+    method: &str,
+    nonce: Option<&str>,
+    scope: &str,
+) -> Result<cyper::Response, cyper::Error> {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer
         .append_pair("client_id", &fx.client_id)
         .append_pair("response_type", "code")
-        .append_pair("scope", "openid profile email")
+        .append_pair("scope", scope)
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("state", "state-123")
         .append_pair("code_challenge", &pkce_challenge_s256(verifier))
@@ -574,6 +759,16 @@ async fn assert_error(resp: cyper::Response, expected: &str) {
         .await
         .expect("oauth error json");
     assert_eq!(body["error"], expected);
+}
+
+fn assert_identity_claims_absent(claims: &Value) {
+    let object = claims.as_object().expect("claims object");
+    for claim in ["email", "email_verified", "name", "picture"] {
+        assert!(
+            !object.contains_key(claim),
+            "identity claim {claim} must be absent"
+        );
+    }
 }
 
 fn verify_with_jwks<T: DeserializeOwned>(
