@@ -29,7 +29,9 @@ use pg_query::protobuf::{self, ObjectType};
 use pg_query::protobuf::AlterTableType;
 
 use crate::analysis::analyze::Advisory;
-use crate::analysis::classify::{classify, DdlKind, ParseError, StatementClass};
+use crate::analysis::classify::{
+    classify, DataSecurityClass, DdlKind, ParseError, StatementClass,
+};
 use crate::model::capability::{OperatorCapability, VendorCapabilities};
 use crate::model::ir::{MigrationIr, Op};
 use crate::model::migration::MigrationFlags;
@@ -44,6 +46,9 @@ use serde_json::Value;
 pub mod data_security_rule {
     /// `data_security.destructive_ops = "forbid"` denied a destructive operation.
     pub const DESTRUCTIVE_OPS_FORBID: &str = "DATA_SECURITY_DESTRUCTIVE_OPS_FORBID";
+    /// `data_security.destructive_ops = "forbid"` denied an unclassified operation.
+    pub const UNCLASSIFIED_OP_DENIED_UNDER_FORBID: &str =
+        "DATA_SECURITY_UNCLASSIFIED_OP_DENIED_UNDER_FORBID";
     /// `data_security.require_rls = true` denied a create-table without RLS enable.
     pub const REQUIRE_RLS: &str = "DATA_SECURITY_REQUIRE_RLS";
 }
@@ -715,19 +720,30 @@ impl SqlGuard {
         raw: &str,
         advisories: &mut Vec<Advisory>,
     ) -> Result<(), GuardError> {
-        let Some(operation) = class.destructive_operation else {
-            return Ok(());
-        };
-
         match self.cfg.destructive_ops {
-            DestructiveOps::Forbid | DestructiveOps::RequireApproval => {
-                Err(GuardError::DataSecurityPolicy {
+            DestructiveOps::Forbid | DestructiveOps::RequireApproval => match class.data_security {
+                DataSecurityClass::NonDestructive => Ok(()),
+                DataSecurityClass::Destructive(operation) => Err(GuardError::DataSecurityPolicy {
                     rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
                     statement: format!("{operation}: {raw}"),
-                })
-            }
+                }),
+                DataSecurityClass::Unknown => Err(GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::UNCLASSIFIED_OP_DENIED_UNDER_FORBID,
+                    statement: format!(
+                        "unclassified operation denied under destructive_ops=forbid: {raw}"
+                    ),
+                }),
+            },
             DestructiveOps::Warn => {
-                advisories.push(Advisory::destructive_ops_warn(operation, raw));
+                match class.data_security {
+                    DataSecurityClass::NonDestructive => {}
+                    DataSecurityClass::Destructive(operation) => {
+                        advisories.push(Advisory::destructive_ops_warn(operation, raw));
+                    }
+                    DataSecurityClass::Unknown => {
+                        advisories.push(Advisory::destructive_ops_unknown_warn(raw));
+                    }
+                }
                 Ok(())
             }
             DestructiveOps::Allow => Ok(()),
@@ -3149,6 +3165,42 @@ mod tests {
     }
 
     #[test]
+    fn destructive_ops_forbid_denies_dml_holes_and_unknowns_fail_closed() {
+        let guard = SqlGuard::new(
+            GuardConfig::confined("public").with_data_security(false, DestructiveOps::Forbid),
+        );
+
+        for sql in [
+            "UPDATE users SET email = NULL",
+            "DELETE FROM users",
+            "DELETE FROM users WHERE 1=1",
+            "MERGE INTO users USING incoming ON users.id = incoming.id WHEN MATCHED THEN DELETE",
+        ] {
+            assert!(
+                matches!(
+                    guard.check(sql),
+                    Err(GuardError::DataSecurityPolicy {
+                        rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                        ..
+                    })
+                ),
+                "expected destructive_ops=forbid to deny destructive DML hole {sql}"
+            );
+        }
+
+        assert!(
+            matches!(
+                guard.check("DO $$ BEGIN NULL; END $$"),
+                Err(GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::UNCLASSIFIED_OP_DENIED_UNDER_FORBID,
+                    ..
+                })
+            ),
+            "unclassified statements must be denied under destructive_ops=forbid"
+        );
+    }
+
+    #[test]
     fn destructive_ops_warn_allows_and_records_structured_warning() {
         let guard = SqlGuard::new(
             GuardConfig::confined("public").with_data_security(false, DestructiveOps::Warn),
@@ -3171,6 +3223,25 @@ mod tests {
                 report.advisories
             );
         }
+    }
+
+    #[test]
+    fn destructive_ops_warn_allows_and_records_unknown_warning() {
+        let guard = SqlGuard::new(
+            GuardConfig::confined("public").with_data_security(false, DestructiveOps::Warn),
+        );
+
+        let report = guard
+            .check("DO $$ BEGIN NULL; END $$")
+            .expect("warn permits unclassified SQL with an advisory");
+
+        assert!(
+            report.advisories.iter().any(|a| {
+                a.rule == crate::analysis::analyze::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN
+            }),
+            "warn must record advisory for unclassified SQL: {:?}",
+            report.advisories
+        );
     }
 
     #[test]
@@ -3198,6 +3269,22 @@ mod tests {
         guard
             .check("ALTER TABLE users ADD COLUMN email text")
             .expect("ADD COLUMN is not destructive");
+        guard
+            .check("CREATE INDEX users_email_idx ON users(email)")
+            .expect("CREATE INDEX is not destructive");
+        guard
+            .check("INSERT INTO users(id) VALUES (1)")
+            .expect("INSERT is not destructive");
+
+        let platform = SqlGuard::new(
+            platform_guard_config().with_data_security(false, DestructiveOps::Forbid),
+        );
+        platform
+            .check("CREATE SCHEMA IF NOT EXISTS oauth_hydra")
+            .expect("CREATE SCHEMA is not destructive");
+        platform
+            .check("ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY")
+            .expect("ENABLE RLS is not destructive");
     }
 
     #[test]

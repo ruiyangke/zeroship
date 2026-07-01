@@ -7,7 +7,9 @@
 //! guard (`crate::guard`) is built on top of this.
 
 use pg_query::protobuf::node::Node as NodeEnum;
-use pg_query::protobuf::{self, AlterTableType, ObjectType};
+use pg_query::protobuf::{
+    self, AExprKind, AlterTableType, BoolExprType, CmdType, MergeMatchKind, ObjectType,
+};
 use pg_query::NodeRef;
 
 /// Error parsing SQL for classification.
@@ -51,6 +53,36 @@ pub enum DdlKind {
     Other(String),
 }
 
+/// Data-security classification for `data_security.destructive_ops`.
+///
+/// This is deliberately a trichotomy, not `Option<destructive_label>`:
+/// - [`Self::NonDestructive`] means the classifier positively recognizes the
+///   statement as non-data-lossy.
+/// - [`Self::Destructive`] is a known destructive/data-lossy operation.
+/// - [`Self::Unknown`] is neither. `forbid` must deny this class fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataSecurityClass {
+    /// Positively recognized as non-data-lossy. Other guard layers may still
+    /// deny it for privilege, confinement, RCE, or policy reasons.
+    NonDestructive,
+    /// Known destructive/data-lossy operation, with its canonical label.
+    Destructive(&'static str),
+    /// Not positively classified. This is denied under `destructive_ops=forbid`
+    /// and warned under `destructive_ops=warn`.
+    Unknown,
+}
+
+impl DataSecurityClass {
+    /// Canonical destructive operation label, when this class is destructive.
+    #[must_use]
+    pub const fn destructive_operation(self) -> Option<&'static str> {
+        match self {
+            Self::Destructive(operation) => Some(operation),
+            Self::NonDestructive | Self::Unknown => None,
+        }
+    }
+}
+
 /// One classified statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementClass {
@@ -65,6 +97,8 @@ pub struct StatementClass {
     /// The data-security guard consumes this exact classifier output so the
     /// policy gate cannot drift into a narrower hand-rolled SQL allowlist.
     pub destructive_operation: Option<&'static str>,
+    /// Definite trichotomy used by `data_security.destructive_ops`.
+    pub data_security: DataSecurityClass,
     /// Cannot run inside a transaction block (CONCURRENTLY, ALTER TYPE ADD
     /// VALUE, VACUUM) — needs the two-phase apply path.
     pub non_transactional: bool,
@@ -118,7 +152,8 @@ fn classify_node(node: &NodeEnum, raw: String) -> StatementClass {
             | DdlKind::CreateFunction
             | DdlKind::CreateTrigger
     );
-    let destructive_operation = destructive_operation(node);
+    let data_security = data_security_class(node);
+    let destructive_operation = data_security.destructive_operation();
     let destructive = destructive_operation.is_some();
     let non_transactional = matches!(kind, DdlKind::CreateIndexConcurrently)
         || is_concurrent_drop_index(node)
@@ -130,6 +165,7 @@ fn classify_node(node: &NodeEnum, raw: String) -> StatementClass {
         additive,
         destructive,
         destructive_operation,
+        data_security,
         non_transactional,
         referenced_schemas: collect_schemas(node),
         raw,
@@ -177,6 +213,7 @@ fn kind_of(node: &NodeEnum) -> DdlKind {
         NodeEnum::InsertStmt(_)
         | NodeEnum::UpdateStmt(_)
         | NodeEnum::DeleteStmt(_)
+        | NodeEnum::MergeStmt(_)
         | NodeEnum::TruncateStmt(_) => DdlKind::Dml,
         other => DdlKind::Other(node_variant_name(other)),
     }
@@ -217,14 +254,259 @@ fn alter_table_kind(at: &protobuf::AlterTableStmt) -> DdlKind {
 /// forbid-mode denials stay in lockstep.
 #[must_use]
 pub fn destructive_operation(node: &NodeEnum) -> Option<&'static str> {
+    data_security_class(node).destructive_operation()
+}
+
+/// Trichotomy used by `data_security.destructive_ops`.
+///
+/// `forbid` must allow only [`DataSecurityClass::NonDestructive`]. The positive
+/// allowlist here is intentionally explicit; every statement shape in neither
+/// the destructive set nor this allowlist is [`DataSecurityClass::Unknown`].
+#[must_use]
+pub fn data_security_class(node: &NodeEnum) -> DataSecurityClass {
+    if let Some(operation) = destructive_operation_inner(node) {
+        return DataSecurityClass::Destructive(operation);
+    }
+    if is_non_destructive_statement(node) {
+        return DataSecurityClass::NonDestructive;
+    }
+    DataSecurityClass::Unknown
+}
+
+fn destructive_operation_inner(node: &NodeEnum) -> Option<&'static str> {
     match node {
         NodeEnum::TruncateStmt(_) => Some("TRUNCATE"),
         NodeEnum::DropOwnedStmt(_) => Some("DROP OWNED"),
         NodeEnum::DropStmt(drop) => destructive_drop_operation(drop.remove_type),
-        NodeEnum::DeleteStmt(delete) if delete.where_clause.is_none() => {
-            Some("DELETE without WHERE")
+        NodeEnum::UpdateStmt(update) => destructive_update_operation(update),
+        NodeEnum::DeleteStmt(delete) => destructive_delete_operation(delete),
+        NodeEnum::MergeStmt(merge) if merge_has_matched_delete(merge) => {
+            Some("MERGE matched DELETE")
         }
         NodeEnum::AlterTableStmt(at) => destructive_alter_table_operation(at),
+        _ => None,
+    }
+}
+
+fn is_non_destructive_statement(node: &NodeEnum) -> bool {
+    match node {
+        NodeEnum::CreateStmt(_)
+        | NodeEnum::IndexStmt(_)
+        | NodeEnum::RenameStmt(_)
+        | NodeEnum::CommentStmt(_)
+        | NodeEnum::ViewStmt(_)
+        | NodeEnum::CreateTableAsStmt(_)
+        | NodeEnum::RefreshMatViewStmt(_)
+        | NodeEnum::CreateEnumStmt(_)
+        | NodeEnum::CompositeTypeStmt(_)
+        | NodeEnum::CreateRangeStmt(_)
+        | NodeEnum::AlterEnumStmt(_)
+        | NodeEnum::AlterTypeStmt(_)
+        | NodeEnum::CreateDomainStmt(_)
+        | NodeEnum::AlterDomainStmt(_)
+        | NodeEnum::CreateSeqStmt(_)
+        | NodeEnum::AlterSeqStmt(_)
+        | NodeEnum::CreateExtensionStmt(_)
+        | NodeEnum::CreateFunctionStmt(_)
+        | NodeEnum::AlterFunctionStmt(_)
+        | NodeEnum::CreateTrigStmt(_)
+        | NodeEnum::CreateRoleStmt(_)
+        | NodeEnum::AlterRoleStmt(_)
+        | NodeEnum::AlterRoleSetStmt(_)
+        | NodeEnum::DropRoleStmt(_)
+        | NodeEnum::GrantStmt(_)
+        | NodeEnum::GrantRoleStmt(_)
+        | NodeEnum::AlterDefaultPrivilegesStmt(_)
+        | NodeEnum::CreateSchemaStmt(_)
+        | NodeEnum::CreatePolicyStmt(_)
+        | NodeEnum::CopyStmt(_)
+        | NodeEnum::VariableSetStmt(_)
+        | NodeEnum::TransactionStmt(_)
+        | NodeEnum::SelectStmt(_)
+        | NodeEnum::InsertStmt(_)
+        | NodeEnum::VacuumStmt(_)
+        | NodeEnum::ClusterStmt(_)
+        | NodeEnum::ReindexStmt(_) => true,
+        NodeEnum::AlterTableStmt(at) => alter_table_is_non_destructive(at),
+        _ => false,
+    }
+}
+
+fn alter_table_is_non_destructive(at: &protobuf::AlterTableStmt) -> bool {
+    at.cmds.iter().all(|cmd| {
+        let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
+            return false;
+        };
+        let subtype = c.subtype;
+        [
+            AlterTableType::AtAddColumn,
+            AlterTableType::AtColumnDefault,
+            AlterTableType::AtCookedColumnDefault,
+            AlterTableType::AtDropNotNull,
+            AlterTableType::AtSetNotNull,
+            AlterTableType::AtSetStatistics,
+            AlterTableType::AtSetOptions,
+            AlterTableType::AtResetOptions,
+            AlterTableType::AtSetStorage,
+            AlterTableType::AtSetCompression,
+            AlterTableType::AtAddIndex,
+            AlterTableType::AtAddConstraint,
+            AlterTableType::AtAlterConstraint,
+            AlterTableType::AtValidateConstraint,
+            AlterTableType::AtAddIndexConstraint,
+            AlterTableType::AtSetRelOptions,
+            AlterTableType::AtResetRelOptions,
+            AlterTableType::AtSetIdentity,
+            AlterTableType::AtDropIdentity,
+            AlterTableType::AtAddIdentity,
+            AlterTableType::AtAttachPartition,
+            AlterTableType::AtEnableRowSecurity,
+            AlterTableType::AtForceRowSecurity,
+            AlterTableType::AtNoForceRowSecurity,
+            AlterTableType::AtDisableRowSecurity,
+        ]
+        .iter()
+        .any(|allowed| subtype == *allowed as i32)
+    })
+}
+
+fn destructive_update_operation(update: &protobuf::UpdateStmt) -> Option<&'static str> {
+    match update.where_clause.as_deref().and_then(|n| n.node.as_ref()) {
+        None => Some("UPDATE without WHERE"),
+        Some(where_clause) if is_static_true_expr(where_clause) => {
+            Some("UPDATE with non-restrictive WHERE")
+        }
+        Some(_) => None,
+    }
+}
+
+fn destructive_delete_operation(delete: &protobuf::DeleteStmt) -> Option<&'static str> {
+    match delete.where_clause.as_deref().and_then(|n| n.node.as_ref()) {
+        None => Some("DELETE without WHERE"),
+        Some(where_clause) if is_static_true_expr(where_clause) => {
+            Some("DELETE with non-restrictive WHERE")
+        }
+        Some(_) => None,
+    }
+}
+
+fn merge_has_matched_delete(merge: &protobuf::MergeStmt) -> bool {
+    merge.merge_when_clauses.iter().any(|clause| {
+        matches!(
+            clause.node.as_ref(),
+            Some(NodeEnum::MergeWhenClause(c))
+                if c.match_kind == MergeMatchKind::MergeWhenMatched as i32
+                    && c.command_type == CmdType::CmdDelete as i32
+        )
+    })
+}
+
+fn is_static_true_expr(node: &NodeEnum) -> bool {
+    match node {
+        NodeEnum::AConst(c) => const_bool(c) == Some(true),
+        NodeEnum::AExpr(expr) => {
+            expr.kind == AExprKind::AexprOp as i32
+                && operator_is(expr.name.as_slice(), "=")
+                && expr
+                    .lexpr
+                    .as_ref()
+                    .and_then(|n| n.node.as_ref())
+                    .and_then(const_value)
+                    .zip(
+                        expr.rexpr
+                            .as_ref()
+                            .and_then(|n| n.node.as_ref())
+                            .and_then(const_value),
+                    )
+                    .is_some_and(|(left, right)| left == right)
+        }
+        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::AndExpr as i32 => expr
+            .args
+            .iter()
+            .all(|arg| arg.node.as_ref().is_some_and(is_static_true_expr)),
+        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::OrExpr as i32 => expr
+            .args
+            .iter()
+            .any(|arg| arg.node.as_ref().is_some_and(is_static_true_expr)),
+        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::NotExpr as i32 => expr
+            .args
+            .first()
+            .and_then(|arg| arg.node.as_ref())
+            .is_some_and(is_static_false_expr),
+        _ => false,
+    }
+}
+
+fn is_static_false_expr(node: &NodeEnum) -> bool {
+    match node {
+        NodeEnum::AConst(c) => const_bool(c) == Some(false),
+        NodeEnum::AExpr(expr) => {
+            expr.kind == AExprKind::AexprOp as i32
+                && operator_is(expr.name.as_slice(), "=")
+                && expr
+                    .lexpr
+                    .as_ref()
+                    .and_then(|n| n.node.as_ref())
+                    .and_then(const_value)
+                    .zip(
+                        expr.rexpr
+                            .as_ref()
+                            .and_then(|n| n.node.as_ref())
+                            .and_then(const_value),
+                    )
+                    .is_some_and(|(left, right)| left != right)
+        }
+        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::AndExpr as i32 => expr
+            .args
+            .iter()
+            .any(|arg| arg.node.as_ref().is_some_and(is_static_false_expr)),
+        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::OrExpr as i32 => expr
+            .args
+            .iter()
+            .all(|arg| arg.node.as_ref().is_some_and(is_static_false_expr)),
+        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::NotExpr as i32 => expr
+            .args
+            .first()
+            .and_then(|arg| arg.node.as_ref())
+            .is_some_and(is_static_true_expr),
+        _ => false,
+    }
+}
+
+fn operator_is(name: &[protobuf::Node], op: &str) -> bool {
+    name.iter()
+        .filter_map(|n| string_value(n.node.as_ref()))
+        .next_back()
+        .is_some_and(|s| s == op)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConstValue {
+    Bool(bool),
+    Int(i32),
+    Float(String),
+    String(String),
+}
+
+fn const_value(node: &NodeEnum) -> Option<ConstValue> {
+    let NodeEnum::AConst(c) = node else {
+        return None;
+    };
+    if c.isnull {
+        return None;
+    }
+    match c.val.as_ref()? {
+        protobuf::a_const::Val::Boolval(v) => Some(ConstValue::Bool(v.boolval)),
+        protobuf::a_const::Val::Ival(v) => Some(ConstValue::Int(v.ival)),
+        protobuf::a_const::Val::Fval(v) => Some(ConstValue::Float(v.fval.clone())),
+        protobuf::a_const::Val::Sval(v) => Some(ConstValue::String(v.sval.clone())),
+        protobuf::a_const::Val::Bsval(v) => Some(ConstValue::String(v.bsval.clone())),
+    }
+}
+
+fn const_bool(c: &protobuf::AConst) -> Option<bool> {
+    match c.val.as_ref()? {
+        protobuf::a_const::Val::Boolval(v) => Some(v.boolval),
         _ => None,
     }
 }
