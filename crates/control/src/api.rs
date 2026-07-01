@@ -860,6 +860,7 @@ async fn run_deploy_migrations(
                 | DME::ProvisionSchema(_)
                 | DME::ProvisionRole(_)
                 | DME::Snapshot(_)
+                | DME::RawSqlDropIndexCatalog(_)
                 | DME::IrRead { .. } => {
                     (StatusCode::SERVICE_UNAVAILABLE, "migration_infrastructure")
                 }

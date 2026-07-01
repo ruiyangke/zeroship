@@ -2049,7 +2049,7 @@ mod tests {
 
         let guard = crate::guard::SqlGuard::new(guard_cfg.clone());
         assert!(matches!(
-            guard.check("DROP INDEX users_email_idx"),
+            guard.check("DROP VIEW users_view"),
             Err(crate::guard::GuardError::DataSecurityPolicy {
                 rule: crate::guard::data_security_rule::DESTRUCTIVE_OPS_FORBID,
                 ..

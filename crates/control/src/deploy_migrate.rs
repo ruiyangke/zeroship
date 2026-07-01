@@ -92,7 +92,7 @@
 //!      production/dev entry point instead of failing closed before lowering.
 //! Until both land, an online rename is engine-proven (PR2) but not go-live-wired.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use uuid::Uuid;
@@ -102,8 +102,8 @@ use zeroship_migrate::{
     compute_manifest, connect, load_dir_migrations, provision_migrator, recognizes_contract_apply,
     Approval, ApprovalScope, ApplyError, ConnectError, DeclarativeApplyError, DriftError,
     EngineError, ExecutorConfig, IrAuthor, LiveSchema, LoadAndLowerGuardedError, LoaderError,
-    LockMode, MigrationBackend, MigrationEngine, PlanStep, PostgresBackend, RenameStep, RoleError,
-    SqlDialect,
+    LockMode, Migration, MigrationBackend, MigrationEngine, Phase, PlanStep, PostgresBackend,
+    RenameStep, RoleError, SqlDialect,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -138,6 +138,10 @@ pub enum DeployMigrateError {
     /// Provisioning the least-privilege `migrator_<app_id>` role failed.
     #[error("deploy-migrate provision role: {0}")]
     ProvisionRole(#[from] RoleError),
+    /// Introspecting the live catalog for raw `.sql` `DROP INDEX` approval gating
+    /// failed.
+    #[error("deploy-migrate raw .sql DROP INDEX catalog lookup: {0}")]
+    RawSqlDropIndexCatalog(compio_postgres::Error),
     /// Loading / parsing the reconstructed migration directory failed (bad
     /// filename grammar, duplicate version, orphan down, unparseable body, …).
     #[error("deploy-migrate load migrations: {0}")]
@@ -279,6 +283,165 @@ fn deploy_pg_ir_apply_error(e: zeroship_migrate::PostgresIrApplyError) -> Deploy
 /// engine's `quote_ident` so the schema name is never raw-interpolated.
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn journal_error(source: zeroship_migrate::JournalError) -> DeployMigrateError {
+    DeployMigrateError::Apply(EngineError::Apply(ApplyError::Journal(source)))
+}
+
+/// Raw `.sql` uses text-derived flags, so `DROP INDEX` cannot know whether the
+/// target is unique. Close that gap at the deploy leg, where the live app schema
+/// is available: a pending raw SQL migration that drops a live UNIQUE index is
+/// treated as approval-gated without mutating the migration's checksum-bearing
+/// flags.
+async fn prevalidate_raw_sql_unique_drop_approval(
+    conn: &compio_postgres::Client,
+    backend: &PostgresBackend<'_>,
+    exec_cfg: &ExecutorConfig,
+    migrations: &[Migration],
+    approval: Approval,
+    scope: &ApprovalScope,
+) -> Result<(), DeployMigrateError> {
+    let candidates = raw_sql_drop_index_candidates(migrations)?;
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let pending = pending_raw_sql_migrations(backend, exec_cfg, candidates).await?;
+    let gated =
+        raw_sql_unique_drop_versions(conn, &exec_cfg.project_schema, pending.into_iter()).await?;
+    if gated.is_empty() {
+        return Ok(());
+    }
+    if approval != Approval::Approved {
+        return Err(DeployMigrateError::from(EngineError::ApprovalRequired));
+    }
+    if let Some(unscoped) = gated.iter().find(|version| !scope.admits(version)) {
+        return Err(DeployMigrateError::from(EngineError::ApprovalNotScoped {
+            version: unscoped.clone(),
+        }));
+    }
+    Ok(())
+}
+
+fn raw_sql_drop_index_candidates(
+    migrations: &[Migration],
+) -> Result<Vec<&Migration>, DeployMigrateError> {
+    let mut out = Vec::new();
+    for migration in migrations {
+        let targets =
+            zeroship_migrate::drop_index_targets(&migration.up).map_err(|source| {
+                DeployMigrateError::Load(LoaderError::Parse {
+                    name: migration.name.clone(),
+                    source,
+                })
+            })?;
+        if !targets.is_empty() {
+            out.push(migration);
+        }
+    }
+    Ok(out)
+}
+
+async fn pending_raw_sql_migrations<'a>(
+    backend: &PostgresBackend<'_>,
+    exec_cfg: &ExecutorConfig,
+    migrations: Vec<&'a Migration>,
+) -> Result<Vec<&'a Migration>, DeployMigrateError> {
+    backend.ensure_journal(exec_cfg).await.map_err(journal_error)?;
+    let applied = backend.applied(exec_cfg).await.map_err(journal_error)?;
+    let completed: BTreeSet<String> = applied
+        .iter()
+        .filter(|entry| entry.phase == Phase::Completed)
+        .map(|entry| entry.version.clone())
+        .collect();
+    let superseded: BTreeSet<String> = backend
+        .superseded_versions(exec_cfg)
+        .await
+        .map_err(journal_error)?
+        .into_iter()
+        .collect();
+    let latest_repeatable = backend
+        .latest_completed_checksums(exec_cfg)
+        .await
+        .map_err(journal_error)?;
+
+    Ok(migrations
+        .into_iter()
+        .filter(|m| {
+            if m.flags.repeatable {
+                match latest_repeatable.get(m.version.as_str()) {
+                    Some(prev) => prev != m.checksum.as_str(),
+                    None => true,
+                }
+            } else {
+                !completed.contains(m.version.as_str()) && !superseded.contains(m.version.as_str())
+            }
+        })
+        .collect())
+}
+
+async fn raw_sql_unique_drop_versions<'a, I>(
+    conn: &compio_postgres::Client,
+    project_schema: &str,
+    migrations: I,
+) -> Result<BTreeSet<String>, DeployMigrateError>
+where
+    I: IntoIterator<Item = &'a Migration>,
+{
+    let mut gated = BTreeSet::new();
+    for migration in migrations {
+        if raw_sql_drops_live_unique_index(conn, project_schema, migration).await? {
+            gated.insert(migration.version.as_str().to_string());
+        }
+    }
+    Ok(gated)
+}
+
+async fn raw_sql_drops_live_unique_index(
+    conn: &compio_postgres::Client,
+    project_schema: &str,
+    migration: &Migration,
+) -> Result<bool, DeployMigrateError> {
+    let targets =
+        zeroship_migrate::drop_index_targets(&migration.up).map_err(|source| {
+            DeployMigrateError::Load(LoaderError::Parse {
+                name: migration.name.clone(),
+                source,
+            })
+        })?;
+    for target in targets {
+        let schema = target.schema.as_deref().unwrap_or(project_schema);
+        // Confined guard/least-privilege role own cross-schema denial. This gate
+        // only resolves the app schema's live integrity guarantees.
+        if schema != project_schema {
+            continue;
+        }
+        if live_index_is_unique(conn, schema, &target.name).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn live_index_is_unique(
+    conn: &compio_postgres::Client,
+    schema: &str,
+    index: &str,
+) -> Result<bool, DeployMigrateError> {
+    let rows = conn
+        .query(
+            "SELECT x.indisunique \
+               FROM pg_index x \
+               JOIN pg_class ic ON ic.oid = x.indexrelid \
+               JOIN pg_namespace n ON n.oid = ic.relnamespace \
+              WHERE n.nspname = $1 \
+                AND ic.relname = $2 \
+                AND x.indisvalid = true",
+            &[&schema, &index],
+        )
+        .await
+        .map_err(DeployMigrateError::RawSqlDropIndexCatalog)?;
+    Ok(rows.first().is_some_and(|row| row.get::<_, bool>("indisunique")))
 }
 
 /// Provision the app's per-app role + schema and apply the bundle's pending
@@ -546,6 +709,20 @@ async fn apply_bundle_migrations_with_approval(
     //     control/auth/other schemas.
     provision_migrator(&conn, &exec_cfg).await?;
 
+    // Raw `.sql` DROP INDEX needs live catalog help: text-derived flags cannot
+    // distinguish UNIQUE from plain indexes. Gate pending UNIQUE-index drops here
+    // before any migration can apply; leave plain-index drops ungated.
+    let backend = PostgresBackend::new(&conn);
+    prevalidate_raw_sql_unique_drop_approval(
+        &conn,
+        &backend,
+        &exec_cfg,
+        &migrations,
+        approval,
+        scope,
+    )
+    .await?;
+
     // (b.5) PR9c HIGH — BUNDLE-LEVEL PRE-APPLY SCOPE GATE (no half-state). Under an
     //       APPROVED deploy, refuse the WHOLE bundle BEFORE applying ANY file if a
     //       co-bundled destructive / online-rename-EXPAND step's version is OUTSIDE the
@@ -609,7 +786,6 @@ async fn apply_bundle_migrations_with_approval(
     // P6a genericized `MigrationEngine::apply` over `MigrationBackend`; the
     // platform/control deploy path is Postgres, so wrap the connection in the
     // PG backend (behavior-identical to the pre-seam `&Client` call).
-    let backend = PostgresBackend::new(&conn);
     let outcome = engine
         .apply_verified_scoped(
             &migrations,
@@ -806,6 +982,9 @@ async fn collect_bundle_facts(
     let migrations = load_dir_migrations(migrations_dir)?;
     for m in &migrations {
         if m.flags.destructive {
+            gated.insert(m.version.as_str().to_string());
+        }
+        if raw_sql_drops_live_unique_index(conn, &schema, m).await? {
             gated.insert(m.version.as_str().to_string());
         }
         ddl_up_by_version.insert(m.version.as_str().to_string(), m.up.clone());

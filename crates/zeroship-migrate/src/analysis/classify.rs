@@ -111,6 +111,15 @@ pub struct StatementClass {
     pub raw: String,
 }
 
+/// One `DROP INDEX` target extracted from a raw SQL statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropIndexTarget {
+    /// Explicit schema qualifier, when the SQL used `DROP INDEX schema.name`.
+    pub schema: Option<String>,
+    /// Bare index name.
+    pub name: String,
+}
+
 /// Classify every statement in `sql`, one [`StatementClass`] per statement,
 /// in source order.
 ///
@@ -125,6 +134,40 @@ pub fn classify(sql: &str) -> Result<Vec<StatementClass>, ParseError> {
         };
         let raw = raw_statement_text(sql, raw_stmt);
         out.push(classify_node(node, raw));
+    }
+    Ok(out)
+}
+
+/// Extract top-level `DROP INDEX` targets from raw SQL using the same real
+/// PostgreSQL parse tree the guard consumes.
+///
+/// SQL text cannot say whether an index is unique; callers with a live database
+/// can use these names to resolve `pg_index.indisunique` at apply/review time.
+///
+/// # Errors
+/// [`ParseError::Syntax`] if `libpg_query` cannot parse the input.
+pub fn drop_index_targets(sql: &str) -> Result<Vec<DropIndexTarget>, ParseError> {
+    let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
+    let mut out = Vec::new();
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(NodeEnum::DropStmt(drop)) =
+            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        else {
+            continue;
+        };
+        if drop.remove_type != ObjectType::ObjectIndex as i32 {
+            continue;
+        }
+        for obj in &drop.objects {
+            let Some(parts) = qualified_name_parts(obj.node.as_ref()) else {
+                continue;
+            };
+            let Some(name) = parts.last().cloned() else {
+                continue;
+            };
+            let schema = (parts.len() >= 2).then(|| parts[0].clone());
+            out.push(DropIndexTarget { schema, name });
+        }
     }
     Ok(out)
 }
@@ -304,7 +347,7 @@ fn first_destructive_tree_node(v: &Value) -> Option<&'static str> {
         "DeleteStmt" => Some("DELETE"),
         "TruncateStmt" => Some("TRUNCATE"),
         "DropOwnedStmt" => Some("DROP OWNED"),
-        "DropStmt" => Some(destructive_drop_json_operation(body).unwrap_or("DROP")),
+        "DropStmt" => destructive_drop_json_operation(body),
         "MergeWhenClause" if merge_when_clause_json_is_matched_delete(body) => {
             Some("MERGE matched DELETE")
         }
@@ -363,6 +406,10 @@ fn is_non_destructive_statement(node: &NodeEnum) -> bool {
         | NodeEnum::VacuumStmt(_)
         | NodeEnum::ClusterStmt(_)
         | NodeEnum::ReindexStmt(_) => true,
+        // SQL text cannot tell whether a dropped index is unique. Treat the
+        // index drop itself as reversible structure; declarative/IR authors gate
+        // UNIQUE index drops from live index metadata via MigrationFlags.
+        NodeEnum::DropStmt(drop) if drop.remove_type == ObjectType::ObjectIndex as i32 => true,
         NodeEnum::AlterTableStmt(at) => alter_table_is_non_destructive(at),
         _ => false,
     }
@@ -409,7 +456,6 @@ fn destructive_drop_operation(remove_type: i32) -> Option<&'static str> {
         ObjectType::ObjectFunction | ObjectType::ObjectProcedure | ObjectType::ObjectRoutine => {
             Some("DROP FUNCTION")
         }
-        ObjectType::ObjectIndex => Some("DROP INDEX"),
         ObjectType::ObjectTabconstraint | ObjectType::ObjectDomconstraint => {
             Some("DROP CONSTRAINT")
         }
@@ -597,6 +643,21 @@ fn push_unique(seen: &mut Vec<String>, s: String) {
 fn string_value(node: Option<&NodeEnum>) -> Option<String> {
     match node {
         Some(NodeEnum::String(s)) => Some(s.sval.clone()),
+        _ => None,
+    }
+}
+
+fn qualified_name_parts(node: Option<&NodeEnum>) -> Option<Vec<String>> {
+    match node {
+        Some(NodeEnum::List(list)) => {
+            let parts: Vec<String> = list
+                .items
+                .iter()
+                .filter_map(|i| string_value(i.node.as_ref()))
+                .collect();
+            (!parts.is_empty()).then_some(parts)
+        }
+        Some(NodeEnum::String(s)) if !s.sval.is_empty() => Some(vec![s.sval.clone()]),
         _ => None,
     }
 }

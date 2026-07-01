@@ -3138,7 +3138,6 @@ mod tests {
             "DELETE FROM users",
             "DROP MATERIALIZED VIEW users_mv",
             "DROP VIEW users_view",
-            "DROP INDEX users_email_idx",
         ] {
             assert!(
                 matches!(
@@ -3151,6 +3150,14 @@ mod tests {
                 "expected destructive_ops=forbid to deny {sql}"
             );
         }
+
+        let report = confined
+            .check("DROP INDEX users_email_idx")
+            .expect("plain DROP INDEX is reversible structure");
+        assert!(
+            !report.destructive,
+            "plain DROP INDEX must not be classified as destructive SQL"
+        );
 
         let platform = SqlGuard::new(
             platform_guard_config().with_data_security(false, DestructiveOps::Forbid),
@@ -3217,7 +3224,6 @@ mod tests {
             "DELETE FROM users",
             "DROP MATERIALIZED VIEW users_mv",
             "DROP VIEW users_view",
-            "DROP INDEX users_email_idx",
             "ALTER TABLE users DROP CONSTRAINT users_email_key",
         ] {
             let report = guard.check(sql).expect("warn permits destructive SQL");
@@ -3230,6 +3236,17 @@ mod tests {
                 report.advisories
             );
         }
+
+        let report = guard
+            .check("DROP INDEX users_email_idx")
+            .expect("warn permits non-destructive DROP INDEX SQL");
+        assert!(
+            !report.advisories.iter().any(|a| {
+                a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+            }),
+            "plain DROP INDEX must not record a destructive_ops warning: {:?}",
+            report.advisories
+        );
     }
 
     #[test]

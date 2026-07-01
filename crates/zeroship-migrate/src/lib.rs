@@ -131,8 +131,8 @@ pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
 pub use analysis::classify::{
-    classify, relations_touched, DdlKind, OwnershipNeed, ParseError, StatementClass,
-    TouchedRelation,
+    classify, drop_index_targets, relations_touched, DdlKind, DropIndexTarget, OwnershipNeed,
+    ParseError, StatementClass, TouchedRelation,
 };
 pub use render::declarative::{
     desired_snapshot, desired_snapshot_for_dialect, dsl_to_pg_data_type, sqlite_canonical_type,
