@@ -64,5 +64,7 @@
 </div>
 {% if is_hydra %}
   <p><a href="/signup?login_challenge={{ challenge }}">Create an account</a></p>
+{% else %}
+  <p><a href="/signup?return_to={{ return_to|urlencode_strict }}">Create an account</a></p>
 {% endif %}
 {% endblock %}

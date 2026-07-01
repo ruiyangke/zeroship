@@ -1582,6 +1582,39 @@ fn email_domain(email: &str) -> &str {
 mod tests {
     use super::*;
 
+    const NATIVE_RETURN_TO: &str = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=openid";
+
+    #[test]
+    fn magic_target_decode_store_uses_front_anchored_discriminators() {
+        let login_challenge = "lc-return_to:/oauth2/authorize?client_id=oac_123";
+        let target = MagicTarget::LoginChallenge(login_challenge.into());
+        assert_eq!(
+            MagicTarget::decode_store(&target.encode_store()),
+            Some(target)
+        );
+        assert_eq!(
+            MagicTarget::decode_store(login_challenge),
+            Some(MagicTarget::LoginChallenge(login_challenge.into()))
+        );
+
+        let return_to_with_login_challenge_text =
+            format!("{NATIVE_RETURN_TO}&state=login_challenge%3Ainner");
+        let target = MagicTarget::ReturnTo(return_to_with_login_challenge_text);
+        assert_eq!(
+            MagicTarget::decode_store(&target.encode_store()),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn magic_target_cross_variant_values_do_not_match() {
+        let native = MagicTarget::ReturnTo(NATIVE_RETURN_TO.into());
+        let challenge_with_same_text = MagicTarget::LoginChallenge(NATIVE_RETURN_TO.into());
+
+        assert_ne!(native, challenge_with_same_text);
+        assert_ne!(native.encode_store(), challenge_with_same_text.encode_store());
+    }
+
     #[test]
     fn user_agent_str_caps_long_values() {
         let raw = "A".repeat(121);

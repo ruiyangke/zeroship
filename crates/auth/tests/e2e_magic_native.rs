@@ -308,6 +308,44 @@ async fn cleanup_email(pg: &compio_postgres::Client, email: &str) {
         .await;
 }
 
+async fn assert_magic_start_rejects_invalid_return_to(fx: &MagicFixture, bad_return_to: &str) {
+    let email = format!(
+        "magic-invalid-return-to-{}@zeroship.test",
+        Uuid::new_v4().simple()
+    );
+    let (resp, _) = start_magic(fx, &email, "return_to", bad_return_to).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.expect("read invalid request body");
+    assert!(
+        body.contains("invalid_request"),
+        "bad return_to should render InvalidRequest, body={body}"
+    );
+
+    let magic_links: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.magic_links WHERE email = $1::citext",
+            &[&email.as_str()],
+        )
+        .await
+        .expect("count magic links")
+        .get(0);
+    let completions: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*) FROM zeroship.magic_completions WHERE email = $1::citext",
+            &[&email.as_str()],
+        )
+        .await
+        .expect("count magic completions")
+        .get(0);
+    assert_eq!(magic_links, 0, "invalid return_to must not issue a token");
+    assert_eq!(
+        completions, 0,
+        "invalid return_to must not persist completion"
+    );
+}
+
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_same_device_native_resumes_authorize_without_accept_login() {
@@ -551,6 +589,26 @@ async fn magic_start_rejects_open_redirect_return_to_without_persisting() {
             .get(0);
         assert_eq!(magic_links, 0, "invalid return_to must not issue a token");
         assert_eq!(completions, 0, "invalid return_to must not persist completion");
+    }
+
+    assert_eq!(fx.mailer.count(), 0, "invalid return_to must not send mail");
+    assert_eq!(fx.hydra_accept_count(), 0);
+    drop(fx.srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn magic_start_rejects_wrong_path_and_crlf_return_to_without_persisting() {
+    let Some(fx) = MagicFixture::boot().await else {
+        eprintln!("[e2e_magic_native invalid-return-to] skip (need AUTH_DB_URL)");
+        return;
+    };
+
+    for bad_return_to in [
+        "/me",
+        "/oauth2/authorize?client_id=oac_123\r\nLocation: https://evil.com",
+    ] {
+        assert_magic_start_rejects_invalid_return_to(&fx, bad_return_to).await;
     }
 
     assert_eq!(fx.mailer.count(), 0, "invalid return_to must not send mail");
