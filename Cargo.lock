@@ -6882,6 +6882,7 @@ dependencies = [
  "flume 0.11.1",
  "futures",
  "hex",
+ "hmac 0.12.1",
  "indexmap 2.14.0",
  "landlock",
  "libc",
