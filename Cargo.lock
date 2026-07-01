@@ -6771,6 +6771,7 @@ dependencies = [
  "cyper",
  "ed25519-dalek",
  "hex",
+ "hkdf",
  "hmac 0.12.1",
  "http",
  "indexmap 2.14.0",

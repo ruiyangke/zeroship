@@ -87,6 +87,24 @@ pub struct PrincipalAccessTokenMint<'a> {
     pub ttl_secs: Option<i64>,
 }
 
+/// Inputs for minting an ID token whose subject is the canonical platform
+/// principal id instead of an app-sector pairwise subject.
+#[derive(Debug, Clone)]
+pub struct PrincipalIdTokenMint<'a> {
+    pub principal_id: &'a str,
+    pub client_id: &'a str,
+    pub nonce: &'a str,
+    pub access_token: &'a str,
+    pub auth_time: Option<i64>,
+    pub amr: Option<&'a [String]>,
+    pub acr: Option<&'a str>,
+    pub email: Option<&'a str>,
+    pub email_verified: Option<bool>,
+    pub name: Option<&'a str>,
+    pub picture: Option<&'a str>,
+    pub ttl_secs: Option<i64>,
+}
+
 /// Inputs for minting an ID token paired to an access token.
 #[derive(Debug, Clone)]
 pub struct IdTokenMint<'a> {
@@ -105,6 +123,64 @@ pub struct IdTokenMint<'a> {
     pub ttl_secs: Option<i64>,
 }
 
+/// Current + optional previous broker master secrets used to authenticate
+/// gateway-brokered authorization-code exchanges.
+#[derive(Clone)]
+pub struct BrokerSecrets {
+    current: Vec<u8>,
+    previous: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for BrokerSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerSecrets")
+            .field("current", &"<redacted>")
+            .field("previous_configured", &self.previous.is_some())
+            .finish()
+    }
+}
+
+impl BrokerSecrets {
+    /// Construct a validated broker-secret set from raw master-secret bytes.
+    pub fn new(current: Vec<u8>, previous: Option<Vec<u8>>) -> Result<Self> {
+        zeroship_core::auth::validate_broker_master(&current)
+            .map_err(AuthError::Config)?;
+        if let Some(previous) = previous.as_ref() {
+            zeroship_core::auth::validate_broker_master(previous)
+                .map_err(AuthError::Config)?;
+        }
+        Ok(Self { current, previous })
+    }
+
+    /// Load and validate broker master secrets from owner-only files.
+    pub fn from_files(current_file: &Path, previous_file: Option<&Path>) -> Result<Self> {
+        let current =
+            signing::load_broker_master_secret(current_file, "AUTH_BROKER_SECRET_FILE")?;
+        let previous = previous_file
+            .map(|path| {
+                signing::load_broker_master_secret(
+                    path,
+                    "AUTH_BROKER_SECRET_PREVIOUS_FILE",
+                )
+            })
+            .transpose()?;
+        Self::new(current, previous)
+    }
+
+    /// Constant-time check of a presented per-client broker secret against the
+    /// current and rotation-window previous master secrets.
+    #[must_use]
+    pub fn verify_client_secret(&self, client_id: &str, presented: &str) -> bool {
+        let current = zeroship_core::auth::derive_broker_secret(&self.current, client_id);
+        let current_ok = zeroship_core::auth::validate_control_key(presented, &current);
+        let previous_ok = self.previous.as_ref().is_some_and(|previous| {
+            let expected = zeroship_core::auth::derive_broker_secret(previous, client_id);
+            zeroship_core::auth::validate_control_key(presented, &expected)
+        });
+        current_ok || previous_ok
+    }
+}
+
 /// Platform OP signer. Holds the PKCS#8 DER private key in memory, never in DB.
 pub struct Issuer {
     private_der: Vec<u8>,
@@ -112,6 +188,7 @@ pub struct Issuer {
     issuer: String,
     pairwise_salt: [u8; 32],
     public_jwk: serde_json::Value,
+    broker_secrets: Option<BrokerSecrets>,
 }
 
 impl std::fmt::Debug for Issuer {
@@ -119,6 +196,7 @@ impl std::fmt::Debug for Issuer {
         f.debug_struct("oidc::Issuer")
             .field("kid", &self.kid)
             .field("issuer", &self.issuer)
+            .field("broker_secrets_configured", &self.broker_secrets.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -161,7 +239,16 @@ impl Issuer {
             issuer,
             pairwise_salt,
             public_jwk,
+            broker_secrets: None,
         })
+    }
+
+    /// Attach validated broker master secrets used by brokered clients on the
+    /// authorization-code grant.
+    #[must_use]
+    pub fn with_broker_secrets(mut self, broker_secrets: BrokerSecrets) -> Self {
+        self.broker_secrets = Some(broker_secrets);
+        self
     }
 
     /// Reconcile the file-backed public key into `zeroship.signing_keys`.
@@ -327,33 +414,88 @@ impl Issuer {
 
     /// Issue an OIDC Core ID token paired with an access token.
     pub fn issue_id_token(&self, mint: &IdTokenMint<'_>) -> Result<String> {
-        if mint.client_id.is_empty() {
+        let subject = self.pairwise_subject(mint.user_id, mint.sector);
+        self.issue_id_token_with_subject(
+            &subject,
+            mint.client_id,
+            mint.nonce,
+            mint.access_token,
+            mint.auth_time,
+            mint.amr,
+            mint.acr,
+            mint.email,
+            mint.email_verified,
+            mint.name,
+            mint.picture,
+            mint.ttl_secs,
+        )
+    }
+
+    /// Issue an OIDC Core ID token for a platform principal. This is used only
+    /// by gateway-brokered login after the broker secret has authenticated the
+    /// code exchange; app-facing access tokens remain pairwise.
+    pub fn issue_principal_id_token(&self, mint: &PrincipalIdTokenMint<'_>) -> Result<String> {
+        self.issue_id_token_with_subject(
+            mint.principal_id,
+            mint.client_id,
+            mint.nonce,
+            mint.access_token,
+            mint.auth_time,
+            mint.amr,
+            mint.acr,
+            mint.email,
+            mint.email_verified,
+            mint.name,
+            mint.picture,
+            mint.ttl_secs,
+        )
+    }
+
+    fn issue_id_token_with_subject(
+        &self,
+        subject: &str,
+        client_id: &str,
+        nonce: &str,
+        access_token: &str,
+        auth_time: Option<i64>,
+        amr: Option<&[String]>,
+        acr: Option<&str>,
+        email: Option<&str>,
+        email_verified: Option<bool>,
+        name: Option<&str>,
+        picture: Option<&str>,
+        ttl_secs: Option<i64>,
+    ) -> Result<String> {
+        if subject.trim().is_empty() {
+            return Err(AuthError::Internal("missing id-token subject".into()));
+        }
+        if client_id.is_empty() {
             return Err(AuthError::Internal("missing id-token aud/client_id".into()));
         }
-        if mint.nonce.is_empty() {
+        if nonce.is_empty() {
             return Err(AuthError::Internal("missing id-token nonce".into()));
         }
-        if mint.access_token.is_empty() {
+        if access_token.is_empty() {
             return Err(AuthError::Internal("missing paired access token".into()));
         }
 
         let now = unix_timestamp()?;
-        let ttl = mint.ttl_secs.unwrap_or(ID_TOKEN_TTL_SECS);
+        let ttl = ttl_secs.unwrap_or(ID_TOKEN_TTL_SECS);
         let claims = IdTokenClaims {
             iss: self.issuer.clone(),
-            sub: self.pairwise_subject(mint.user_id, mint.sector),
-            aud: mint.client_id.to_string(),
+            sub: subject.to_string(),
+            aud: client_id.to_string(),
             exp: now + ttl,
             iat: now,
-            nonce: mint.nonce.to_string(),
-            at_hash: oidc_at_hash(mint.access_token),
-            auth_time: mint.auth_time,
-            amr: mint.amr.map(<[String]>::to_vec),
-            acr: mint.acr.map(str::to_string),
-            email: mint.email.map(str::to_string),
-            email_verified: mint.email_verified,
-            name: mint.name.map(str::to_string),
-            picture: mint.picture.map(str::to_string),
+            nonce: nonce.to_string(),
+            at_hash: oidc_at_hash(access_token),
+            auth_time,
+            amr: amr.map(<[String]>::to_vec),
+            acr: acr.map(str::to_string),
+            email: email.map(str::to_string),
+            email_verified,
+            name: name.map(str::to_string),
+            picture: picture.map(str::to_string),
         };
 
         let mut header = Header::new(Algorithm::EdDSA);
@@ -413,6 +555,16 @@ impl Issuer {
     #[must_use]
     pub fn pairwise_subject(&self, user_id: &str, sector: &str) -> String {
         zeroship_core::auth::derive_pairwise(&self.pairwise_salt, user_id, sector)
+    }
+
+    /// Verify a brokered client's presented derived broker secret.
+    pub fn verify_broker_secret(&self, client_id: &str, presented: &str) -> Result<bool> {
+        let Some(secrets) = self.broker_secrets.as_ref() else {
+            return Err(AuthError::Config(
+                "AUTH_BROKER_SECRET_FILE is required for brokered clients".into(),
+            ));
+        };
+        Ok(secrets.verify_client_secret(client_id, presented))
     }
 
     #[must_use]

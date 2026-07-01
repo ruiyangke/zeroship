@@ -48,6 +48,24 @@ pub fn load_pairwise_salt_secret(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Load raw broker master-secret bytes from a file.
+///
+/// The returned bytes are validated by `zeroship_core::auth::validate_broker_master`
+/// before the issuer accepts them.
+pub fn load_broker_master_secret(path: &Path, label: &str) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        AuthError::Config(format!("read {label} {}: {e}", path.display()))
+    })?;
+    reject_insecure_permissions(path, label)?;
+    if bytes.is_empty() {
+        return Err(AuthError::Config(format!(
+            "{label} {} is empty",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
 #[cfg(unix)]
 fn reject_insecure_permissions(path: &Path, label: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;

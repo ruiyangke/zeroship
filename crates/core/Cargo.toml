@@ -13,6 +13,7 @@ indexmap = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
+hkdf = { workspace = true }
 hex = { workspace = true }
 # PKCE verifier generation (shared with gateway OIDC RP + auth tests).
 rand = "0.8"

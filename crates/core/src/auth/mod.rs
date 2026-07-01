@@ -10,6 +10,7 @@ pub use trusted_clients::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -18,6 +19,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub const ZEROSHIP_USER_MAX_AGE_SECS: u64 = 60;
 pub const ZEROSHIP_USER_FUTURE_SKEW_SECS: u64 = 5;
+pub const DEV_BROKER_MASTER_SECRET: &[u8] = b"dev-broker-master-secret-never-use-prod";
+
+const BROKER_SECRET_HKDF_SALT: &[u8] = b"zeroship:broker-secret:v1";
 
 /// Constant-time comparison to prevent timing attacks.
 /// Returns true if `provided` and `expected` are equal.
@@ -74,6 +78,48 @@ pub fn hash_api_key(key: &str) -> String {
 pub fn validate_api_key(provided: &str, stored_hash: &str) -> bool {
     let computed = hash_api_key(provided);
     validate_control_key(&computed, stored_hash)
+}
+
+/// Derive the gateway-presented per-client broker secret from the platform
+/// broker master secret.
+///
+/// The OP never stores per-client broker secret hashes. Brokered clients are
+/// authenticated by deriving this value from the configured current/previous
+/// platform master and comparing the presented secret in constant time.
+#[must_use]
+pub fn derive_broker_secret(master: &[u8], client_id: &str) -> String {
+    let hk = Hkdf::<Sha256>::new(Some(BROKER_SECRET_HKDF_SALT), master);
+    let mut out = [0u8; 32];
+    hk.expand(client_id.as_bytes(), &mut out)
+        .expect("HKDF-SHA256 expands 32 bytes");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(out)
+}
+
+/// Validate broker master-secret material before auth-service boot proceeds.
+///
+/// The input is raw file bytes, not a display string. It must carry at least
+/// 256 bits of material and must not be the all-zero value or the development
+/// sentinel.
+///
+/// # Errors
+///
+/// Returns a startup-facing error message when the candidate is weak.
+pub fn validate_broker_master(master: &[u8]) -> Result<(), String> {
+    if master.len() < 32 {
+        return Err(format!(
+            "AUTH_BROKER_SECRET_FILE decodes to {} bytes; minimum is 32 bytes",
+            master.len()
+        ));
+    }
+    if master.iter().all(|byte| *byte == 0) {
+        return Err("AUTH_BROKER_SECRET_FILE is all zero; refusing weak broker secret".into());
+    }
+    if master == DEV_BROKER_MASTER_SECRET {
+        return Err(
+            "AUTH_BROKER_SECRET_FILE is the dev sentinel; refusing broker secret".into(),
+        );
+    }
+    Ok(())
 }
 
 /// Strip the `Bearer ` prefix from an Authorization header value.
@@ -390,6 +436,29 @@ mod tests {
     #[test]
     fn control_key_equal() {
         assert!(validate_control_key("secret", "secret"));
+    }
+
+    #[test]
+    fn broker_secret_derivation_is_deterministic_and_domain_separated() {
+        let master = b"broker-master-secret-32-bytes-minimum-aa";
+        let other_master = b"broker-master-secret-32-bytes-minimum-bb";
+        let client_a = "oac_app_a";
+        let client_b = "oac_app_b";
+
+        let a = derive_broker_secret(master, client_a);
+        assert_eq!(a, derive_broker_secret(master, client_a));
+        assert_ne!(a, derive_broker_secret(master, client_b));
+        assert_ne!(a, derive_broker_secret(other_master, client_a));
+        assert!(!a.contains(client_a), "derived secret must not embed client_id");
+    }
+
+    #[test]
+    fn broker_master_validation_rejects_weak_material() {
+        assert!(validate_broker_master(b"short").is_err());
+        assert!(validate_broker_master(&[0u8; 32]).is_err());
+        assert!(validate_broker_master(DEV_BROKER_MASTER_SECRET).is_err());
+        validate_broker_master(b"broker-master-secret-32-bytes-minimum-ok")
+            .expect("strong broker master");
     }
 
     #[test]

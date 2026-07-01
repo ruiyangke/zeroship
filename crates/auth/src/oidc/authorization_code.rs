@@ -15,8 +15,12 @@ use uuid::Uuid;
 
 use crate::config::AuthConfig;
 use crate::oidc::claims::scope_gated_identity_claims;
-use crate::oidc::refresh::{self, ClientAuth, RefreshSessionPool, RefreshTokenKeys};
-use crate::oidc::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
+use crate::oidc::refresh::{
+    self, ClientAuth, ClientAuthMethod, RefreshSessionPool, RefreshTokenKeys,
+};
+use crate::oidc::{
+    AccessTokenMint, IdTokenMint, Issuer, PrincipalIdTokenMint, ACCESS_TOKEN_TTL_SECS,
+};
 use crate::return_to;
 use crate::sessions::login as login_session;
 use crate::store::sessions as session_store;
@@ -352,6 +356,7 @@ async fn token_inner(
             let code = required_param(params.code.as_deref(), "code")?;
             let code_verifier = required_param(params.code_verifier.as_deref(), "code_verifier")?;
             let client = load_client(db, client_id).await?;
+            authenticate_authorization_code_client(issuer, &client, client_auth)?;
             let pool = refresh_pool
                 .checkout_pool("token authorization_code")
                 .await
@@ -498,30 +503,51 @@ async fn exchange_authorization_code(
         } else {
             None
         };
-        Some(
-            issuer
-                .issue_id_token(&IdTokenMint {
-                    user_id: &user_id,
-                    sector: &client.sector_identifier,
-                    client_id: &client.client_id,
-                    nonce,
-                    access_token: &access_token,
-                    auth_time: None,
-                    amr: None,
-                    acr: None,
-                    email: identity_claims.as_ref().and_then(|claims| claims.email.as_deref()),
-                    email_verified: identity_claims
-                        .as_ref()
-                        .and_then(|claims| claims.email_verified),
-                    name: identity_claims.as_ref().and_then(|claims| claims.name.as_deref()),
-                    picture: identity_claims.as_ref().and_then(|claims| claims.picture.as_deref()),
-                    ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
-                })
-                .map_err(|err| {
-                    tracing::error!(error = %err, "token: id-token mint failed");
-                    OAuthError::server_error("id token mint failed")
-                })?,
-        )
+        let token = if client.brokered {
+            issuer.issue_principal_id_token(&PrincipalIdTokenMint {
+                principal_id: &user_id,
+                client_id: &client.client_id,
+                nonce,
+                access_token: &access_token,
+                auth_time: None,
+                amr: None,
+                acr: None,
+                email: identity_claims.as_ref().and_then(|claims| claims.email.as_deref()),
+                email_verified: identity_claims
+                    .as_ref()
+                    .and_then(|claims| claims.email_verified),
+                name: identity_claims.as_ref().and_then(|claims| claims.name.as_deref()),
+                picture: identity_claims.as_ref().and_then(|claims| claims.picture.as_deref()),
+                ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
+            })
+        } else {
+            issuer.issue_id_token(&IdTokenMint {
+                user_id: &user_id,
+                sector: &client.sector_identifier,
+                client_id: &client.client_id,
+                nonce,
+                access_token: &access_token,
+                auth_time: None,
+                amr: None,
+                acr: None,
+                email: identity_claims.as_ref().and_then(|claims| claims.email.as_deref()),
+                email_verified: identity_claims
+                    .as_ref()
+                    .and_then(|claims| claims.email_verified),
+                name: identity_claims.as_ref().and_then(|claims| claims.name.as_deref()),
+                picture: identity_claims.as_ref().and_then(|claims| claims.picture.as_deref()),
+                ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
+            })
+        }
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                brokered = client.brokered,
+                "token: id-token mint failed"
+            );
+            OAuthError::server_error("id token mint failed")
+        })?;
+        Some(token)
     } else {
         None
     };
@@ -832,6 +858,50 @@ pub(super) fn oauth_error_response(err: OAuthError) -> HttpResponse {
             "error": err.error,
             "error_description": err.description,
         }))
+}
+
+fn authenticate_authorization_code_client(
+    issuer: &Issuer,
+    client: &OAuthClient,
+    client_auth: &ClientAuth,
+) -> Result<(), OAuthError> {
+    if !client.brokered {
+        return Ok(());
+    }
+
+    if !matches!(client_auth.method, ClientAuthMethod::Basic | ClientAuthMethod::Post) {
+        return Err(OAuthError::invalid_client(
+            "broker client authentication required",
+        ));
+    }
+    let Some(auth_client_id) = client_auth.client_id.as_deref() else {
+        return Err(OAuthError::invalid_client(
+            "client authentication is missing client_id",
+        ));
+    };
+    if auth_client_id != client.client_id {
+        return Err(OAuthError::invalid_client("client authentication mismatch"));
+    }
+    let Some(secret) = client_auth.client_secret.as_deref() else {
+        return Err(OAuthError::invalid_client(
+            "broker client secret is required",
+        ));
+    };
+    let ok = issuer.verify_broker_secret(&client.client_id, secret).map_err(|err| {
+        tracing::error!(
+            error = %err,
+            client_id = %client.client_id,
+            "broker secret verification unavailable"
+        );
+        OAuthError::server_error("broker secret unavailable")
+    })?;
+    if ok {
+        Ok(())
+    } else {
+        Err(OAuthError::invalid_client(
+            "broker client authentication failed",
+        ))
+    }
 }
 
 pub(super) fn mint_access_token(

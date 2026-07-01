@@ -12,7 +12,7 @@ pub mod signing;
 pub mod userinfo;
 
 pub use issuer::{
-    AccessTokenClaims, AccessTokenMint, IdTokenClaims, IdTokenMint, Issuer,
-    PrincipalAccessTokenMint, ACCESS_TOKEN_TYP, ACCESS_TOKEN_TTL_SECS, ID_TOKEN_TYP,
-    ID_TOKEN_TTL_SECS,
+    AccessTokenClaims, AccessTokenMint, BrokerSecrets, IdTokenClaims, IdTokenMint, Issuer,
+    PrincipalAccessTokenMint, PrincipalIdTokenMint, ACCESS_TOKEN_TYP, ACCESS_TOKEN_TTL_SECS,
+    ID_TOKEN_TYP, ID_TOKEN_TTL_SECS,
 };
