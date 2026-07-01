@@ -392,6 +392,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         &mut sess_client,
         &NewSession {
             user_id: &claims.sub,
+            sid: claims.sid.as_deref(),
             app_id,
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),

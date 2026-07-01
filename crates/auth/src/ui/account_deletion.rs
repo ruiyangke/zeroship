@@ -25,13 +25,14 @@ use crate::config::AuthConfig;
 use crate::cron::account_reaper::GRACE_DAYS;
 use crate::csrf;
 use crate::hydra_client::HydraAdmin;
+use crate::oidc;
 use crate::sessions::login as session_cookie;
+use crate::store::sessions;
 use crate::store::users::{self, UserRow};
 use zeroship_mailer::templates::{
     build_email, AccountDeletionRequestedHtml, AccountDeletionRequestedText,
 };
 use zeroship_mailer::{Address, Mailer};
-use crate::store::sessions;
 
 #[derive(Debug, Deserialize)]
 pub struct CsrfForm {
@@ -51,6 +52,7 @@ pub async fn request(
     db: web::types::State<Arc<compio_postgres::Client>>,
     admin: web::types::State<HydraAdmin>,
     mailer: web::types::State<Arc<dyn Mailer>>,
+    issuer: web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf, cfg.insecure_dev) {
         return redirect_to_login();
@@ -75,6 +77,19 @@ pub async fn request(
     let subject = user.id.to_string();
     if let Err(e) = admin.delete_login_sessions(&subject).await {
         tracing::warn!(error = %e, user_id = %user.id, "account-deletion hydra login-session revocation failed");
+    }
+    match oidc::backchannel_logout::emit_for_user(db.as_ref(), issuer.as_ref(), user.id).await {
+        Ok(report) => tracing::info!(
+            user_id = %user.id,
+            attempted = report.attempted,
+            delivered = report.delivered,
+            "account-deletion: emitted OIDC back-channel logout tokens"
+        ),
+        Err(e) => tracing::error!(
+            error = %e,
+            user_id = %user.id,
+            "account-deletion: BCL emission failed"
+        ),
     }
 
     // Confirm/undo email (best-effort: a send failure must not change the

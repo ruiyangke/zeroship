@@ -1,6 +1,6 @@
 //! Platform JWT issuer for RFC 9068 access tokens and OIDC ID tokens.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,10 +21,14 @@ use crate::oidc::signing;
 pub const ACCESS_TOKEN_TYP: &str = "at+jwt";
 /// OIDC ID-token type header. OIDC permits omitting it; zeroship stamps it.
 pub const ID_TOKEN_TYP: &str = "JWT";
+/// OIDC Back-Channel Logout token type header.
+pub const LOGOUT_TOKEN_TYP: &str = "logout+jwt";
 /// Default short-lived platform access token lifetime.
 pub const ACCESS_TOKEN_TTL_SECS: i64 = 15 * 60;
 /// Default ID-token lifetime; not longer than the paired access token.
 pub const ID_TOKEN_TTL_SECS: i64 = 15 * 60;
+/// Short logout-token lifetime. The BCL spec recommends at most two minutes.
+pub const LOGOUT_TOKEN_TTL_SECS: i64 = 2 * 60;
 
 /// RFC 9068 JWT access-token claims.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +51,7 @@ pub struct IdTokenClaims {
     pub aud: String,
     pub exp: i64,
     pub iat: i64,
+    pub sid: String,
     pub nonce: String,
     pub at_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +68,21 @@ pub struct IdTokenClaims {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub picture: Option<String>,
+}
+
+/// OIDC Back-Channel Logout 1.0 logout-token claims.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogoutTokenClaims {
+    pub iss: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+    pub aud: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+    pub events: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
 }
 
 /// Inputs for minting an access token.
@@ -93,6 +113,7 @@ pub struct PrincipalAccessTokenMint<'a> {
 pub struct PrincipalIdTokenMint<'a> {
     pub principal_id: &'a str,
     pub client_id: &'a str,
+    pub sid: &'a str,
     pub nonce: &'a str,
     pub access_token: &'a str,
     pub auth_time: Option<i64>,
@@ -111,6 +132,7 @@ pub struct IdTokenMint<'a> {
     pub user_id: &'a str,
     pub sector: &'a str,
     pub client_id: &'a str,
+    pub sid: &'a str,
     pub nonce: &'a str,
     pub access_token: &'a str,
     pub auth_time: Option<i64>,
@@ -120,6 +142,15 @@ pub struct IdTokenMint<'a> {
     pub email_verified: Option<bool>,
     pub name: Option<&'a str>,
     pub picture: Option<&'a str>,
+    pub ttl_secs: Option<i64>,
+}
+
+/// Inputs for minting an OIDC Back-Channel Logout token.
+#[derive(Debug, Clone)]
+pub struct LogoutTokenMint<'a> {
+    pub client_id: &'a str,
+    pub sub: Option<&'a str>,
+    pub sid: Option<&'a str>,
     pub ttl_secs: Option<i64>,
 }
 
@@ -418,6 +449,7 @@ impl Issuer {
         self.issue_id_token_with_subject(
             &subject,
             mint.client_id,
+            mint.sid,
             mint.nonce,
             mint.access_token,
             mint.auth_time,
@@ -438,6 +470,7 @@ impl Issuer {
         self.issue_id_token_with_subject(
             mint.principal_id,
             mint.client_id,
+            mint.sid,
             mint.nonce,
             mint.access_token,
             mint.auth_time,
@@ -455,6 +488,7 @@ impl Issuer {
         &self,
         subject: &str,
         client_id: &str,
+        sid: &str,
         nonce: &str,
         access_token: &str,
         auth_time: Option<i64>,
@@ -472,6 +506,9 @@ impl Issuer {
         if client_id.is_empty() {
             return Err(AuthError::Internal("missing id-token aud/client_id".into()));
         }
+        if sid.trim().is_empty() {
+            return Err(AuthError::Internal("missing id-token sid".into()));
+        }
         if nonce.is_empty() {
             return Err(AuthError::Internal("missing id-token nonce".into()));
         }
@@ -487,6 +524,7 @@ impl Issuer {
             aud: client_id.to_string(),
             exp: now + ttl,
             iat: now,
+            sid: sid.to_string(),
             nonce: nonce.to_string(),
             at_hash: oidc_at_hash(access_token),
             auth_time,
@@ -500,6 +538,50 @@ impl Issuer {
 
         let mut header = Header::new(Algorithm::EdDSA);
         header.typ = Some(ID_TOKEN_TYP.into());
+        header.kid = Some(self.kid.clone());
+        let key = EncodingKey::from_ed_der(&self.private_der);
+        encode(&header, &claims, &key).map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))
+    }
+
+    /// Issue an OIDC Back-Channel Logout 1.0 logout token.
+    pub fn issue_logout_token(&self, mint: &LogoutTokenMint<'_>) -> Result<String> {
+        if mint.client_id.trim().is_empty() {
+            return Err(AuthError::Internal(
+                "missing logout-token aud/client_id".into(),
+            ));
+        }
+        if mint.sub.is_none() && mint.sid.is_none() {
+            return Err(AuthError::Internal(
+                "logout-token requires sub, sid, or both".into(),
+            ));
+        }
+        if mint.sub.is_some_and(|sub| sub.trim().is_empty()) {
+            return Err(AuthError::Internal("empty logout-token sub".into()));
+        }
+        if mint.sid.is_some_and(|sid| sid.trim().is_empty()) {
+            return Err(AuthError::Internal("empty logout-token sid".into()));
+        }
+
+        let now = unix_timestamp()?;
+        let ttl = mint.ttl_secs.unwrap_or(LOGOUT_TOKEN_TTL_SECS);
+        let mut events = BTreeMap::new();
+        events.insert(
+            zeroship_core::logout_token::BCL_EVENT.to_string(),
+            serde_json::json!({}),
+        );
+        let claims = LogoutTokenClaims {
+            iss: self.issuer.clone(),
+            sub: mint.sub.map(str::to_string),
+            aud: mint.client_id.to_string(),
+            iat: now,
+            exp: now + ttl,
+            jti: new_jti(),
+            events,
+            sid: mint.sid.map(str::to_string),
+        };
+
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.typ = Some(LOGOUT_TOKEN_TYP.into());
         header.kid = Some(self.kid.clone());
         let key = EncodingKey::from_ed_der(&self.private_der);
         encode(&header, &claims, &key).map_err(|e| AuthError::Internal(format!("jwt encode: {e}")))

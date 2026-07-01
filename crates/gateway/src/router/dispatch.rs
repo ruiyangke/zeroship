@@ -1759,6 +1759,7 @@ async fn handle_auth_callback(
             avatar_url: claims.picture.as_deref(),
             email_verified: claims.email_verified.unwrap_or(false),
             granted_scopes: &granted_scopes,
+            sid: claims.sid.as_deref(),
             // Carry the OIDC auth_time/amr onto the cookie session so the SPA
             // projection + step-up gate read them off this row (BFF §2.2/§5.3).
             auth_time: claims.auth_time,

@@ -208,6 +208,7 @@ fn id_token_has_nonce_and_correct_at_hash() {
             user_id: &user_id,
             sector: SECTOR_A,
             client_id: CLIENT_ID,
+            sid: "sid-foundation",
             nonce: "nonce-123",
             access_token: &access_token,
             auth_time: Some(1_700_000_000),
@@ -224,6 +225,7 @@ fn id_token_has_nonce_and_correct_at_hash() {
     let claims = verify_id_with_jwks(&local_jwks(&issuer), &id_token, issuer.issuer(), CLIENT_ID)
         .expect("verify id token");
     assert_eq!(claims.sub, issuer.pairwise_subject(&user_id, SECTOR_A));
+    assert_eq!(claims.sid, "sid-foundation");
     assert_eq!(claims.nonce, "nonce-123");
     assert_eq!(claims.at_hash, oidc_at_hash(&access_token));
     assert_eq!(claims.auth_time, Some(1_700_000_000));

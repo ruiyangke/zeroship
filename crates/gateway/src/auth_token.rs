@@ -565,6 +565,7 @@ pub(crate) async fn mint_session_from_code(
                 avatar_url: claims.picture.as_deref(),
                 email_verified: claims.email_verified.unwrap_or(false),
                 granted_scopes: &scopes,
+                sid: claims.sid.as_deref(),
                 auth_time: claims.auth_time,
                 amr: &amr,
             },
@@ -854,6 +855,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                         avatar_url: rotated.avatar_url.as_deref(),
                         email_verified: rotated.email_verified.unwrap_or(false),
                         granted_scopes: &rotated.granted_scopes,
+                        sid: rotated.sid.as_deref(),
                         auth_time: rotated.auth_time,
                         amr: &rotated.amr,
                     },
@@ -1117,6 +1119,9 @@ async fn do_refresh(
         .as_ref()
         .and_then(|c| c.auth_time)
         .or(raw.auth_time);
+    let sid = id_claims
+        .as_ref()
+        .and_then(|c| c.sid.clone());
     let amr = id_claims
         .as_ref()
         .and_then(|c| c.amr.clone())
@@ -1211,6 +1216,7 @@ async fn do_refresh(
         avatar_url,
         auth_time,
         amr,
+        sid,
     })
 }
 

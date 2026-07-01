@@ -19,16 +19,18 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use zeroship_auth::csrf;
 use zeroship_auth::hydra_client::HydraAdmin;
+use zeroship_auth::oidc::Issuer;
 use zeroship_auth::server;
-use zeroship_mailer::{Mailer, StdoutMailer};
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions, users};
+use zeroship_mailer::{Mailer, StdoutMailer};
 
 mod common;
 use common::test_auth_config;
@@ -321,11 +323,20 @@ async fn logout_post_revokes_local_session_cookie() {
         hydra_srv.url("").trim_end_matches('/'),
         "http://127.0.0.1:4444",
     ));
+    let issuer = Arc::new(
+        Issuer::from_signing_key(
+            &SigningKey::from_bytes(&[44u8; 32]),
+            [3u8; 32],
+            "https://auth.zeroship.test".to_string(),
+        )
+        .expect("issuer"),
+    );
     let app = test::init_service(
         web::App::new()
             .state(admin)
             .state(cfg.clone())
             .state(pg.clone())
+            .state(issuer)
             .service(
                 web::resource("/logout")
                     .route(web::post().to(zeroship_auth::ui::logout::post)),

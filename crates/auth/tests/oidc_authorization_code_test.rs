@@ -56,6 +56,7 @@ struct Fixture {
     user_email: String,
     user_name: String,
     user_avatar_url: String,
+    session_id: Uuid,
     session_cookie: String,
 }
 
@@ -154,6 +155,7 @@ impl Fixture {
             user_email: user_profile.email,
             user_name: user_profile.name,
             user_avatar_url: user_profile.avatar_url,
+            session_id: session.id,
             session_cookie,
         })
     }
@@ -220,6 +222,7 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
     )
     .expect("verify id token");
     assert_eq!(id.sub, access.sub);
+    assert_eq!(id.sid, fx.session_id.to_string());
     assert_eq!(id.nonce, nonce);
     assert_eq!(id.at_hash, oidc_at_hash(&token.access_token));
 

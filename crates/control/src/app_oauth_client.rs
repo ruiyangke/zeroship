@@ -687,6 +687,16 @@ async fn upsert_db_rows(
     let scopes: Vec<&str> = scope_allowlist.split_whitespace().collect();
     let redirect_uris: Vec<&str> = redirect_uris.iter().map(String::as_str).collect();
     let created_by: Option<Uuid> = None;
+    let bcl_uri = backchannel_logout_uri(
+        sector
+            .split_once("://")
+            .map(|(scheme, _)| scheme)
+            .unwrap_or("https"),
+        sector
+            .split_once("://")
+            .map(|(_, host)| host)
+            .unwrap_or(sector),
+    );
 
     let tx = pg
         .transaction()
@@ -704,8 +714,9 @@ async fn upsert_db_rows(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
              skip_consent, created_by, hydra_client_id, refresh_allowed, \
-             token_endpoint_auth_method, brokered) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1, TRUE, 'client_secret_basic', TRUE) \
+             token_endpoint_auth_method, brokered, backchannel_logout_uri) \
+         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1, TRUE, \
+                 'client_secret_basic', TRUE, $7) \
          ON CONFLICT (client_id) DO UPDATE SET \
             client_name = EXCLUDED.client_name, \
             redirect_uris = EXCLUDED.redirect_uris, \
@@ -713,7 +724,8 @@ async fn upsert_db_rows(
             skip_consent = EXCLUDED.skip_consent, \
             refresh_allowed = TRUE, \
             token_endpoint_auth_method = 'client_secret_basic', \
-            brokered = TRUE",
+            brokered = TRUE, \
+            backchannel_logout_uri = EXCLUDED.backchannel_logout_uri",
         &[
             &client_id,
             &client_name,
@@ -721,6 +733,7 @@ async fn upsert_db_rows(
             &scopes,
             &created_by,
             &first_party,
+            &bcl_uri,
         ],
     )
     .await
