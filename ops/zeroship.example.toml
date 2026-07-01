@@ -13,19 +13,10 @@
 # plaintext literal there is rejected at startup.
 
 [auth]
-# Hydra admin API base URL used by control for OAuth client management,
-# builder bootstrap, and bearer-token introspection.
-# Optional; absent => compiled default.
-# Precedence: CLI flag > env > this file > default.
-hydra_admin_url = "http://hydra:4445"
-
-# Hydra public issuer/base URL used by control and gateway for OIDC
-# protocol endpoints and token verification.
-# Optional; absent => compiled default.
-# Precedence: CLI flag > env > this file > default.
-hydra_public_url = "https://auth.zeroship.ai"
-
-# First-party OAuth client IDs that skip Hydra consent for the first-party
+# The native OP public origin is supplied to the auth service through
+# AUTH_PUBLIC_URL. This shared overlay does not define that key.
+#
+# First-party OAuth client IDs that skip native OP consent for the first-party
 # CONSOLE only. (The old gateway POST /__zeroship/auth/password first-party gate
 # this value also fed is GONE — the immersive iframe login replaced it; the
 # anti-clickjacking gate is now the browser-enforced `frame_ancestor_origins`
