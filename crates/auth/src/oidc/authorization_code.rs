@@ -630,7 +630,12 @@ pub(super) async fn load_client(
         .ok()
         .flatten()
         .unwrap_or_else(|| client_id.to_string());
-    let brokered = row.try_get("brokered").unwrap_or(false);
+    // A security-gating flag (global-vs-pairwise subject) must never be
+    // *guessed* on a decode error — fail closed to server_error, don't default.
+    let brokered = row.try_get::<_, bool>("brokered").map_err(|err| {
+        tracing::error!(error = %err, client_id = %client_id, "brokered flag decode failed");
+        OAuthError::server_error("client registry unavailable")
+    })?;
     let token_endpoint_auth_method = row
         .try_get("token_endpoint_auth_method")
         .unwrap_or_else(|_| "none".to_string());
