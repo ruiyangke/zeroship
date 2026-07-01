@@ -2,16 +2,15 @@
 //!
 //! Flow:
 //!
-//!   1. **start** — `?login_challenge=…` arrives on the auth server. We
+//!   1. **start** — `?return_to=…` arrives on the auth server. We
 //!      generate PKCE+state+nonce via [`identity::oauth::google`], stash
-//!      them (plus the `login_challenge`) in a signed cookie, and 302 to
+//!      them (plus the `return_to`) in a signed cookie, and 302 to
 //!      `accounts.google.com/o/oauth2/v2/auth`.
 //!   2. **callback** — `?code=…&state=…` arrives back. We re-read the
 //!      stash, verify state, exchange the code for an ID token, verify
 //!      that against Google's JWKS, resolve / create the local user via
-//!      [`identity::linker`], create an `zeroship.idp_sessions` row, and finally
-//!      call hydra's `accept_login` to hand control back to the OIDC
-//!      pipeline. The `IdP` session cookie is dropped on the same
+//!      [`identity::linker`], create an `zeroship.idp_sessions` row, and
+//!      redirect back to the native OIDC pipeline. The `IdP` session cookie is dropped on the same
 //!      response so subsequent SSO requests skip the login form.
 //!
 //! Route gating: the auth server only registers these routes when
@@ -30,8 +29,6 @@ use zeroship_core::oidc_verify::JwksCache;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
-use crate::hydra_client::types::AcceptLoginRequest;
-use crate::hydra_client::HydraAdmin;
 use crate::identity::eligibility;
 use crate::identity::linker::{self, LinkOutcome, LinkResume, ResolvedProfile};
 use crate::identity::oauth::google::{self, GoogleIdentity};
@@ -49,7 +46,6 @@ const ACR_GOOGLE: &str = "urn:zeroship:google";
 
 #[derive(Debug, Deserialize)]
 pub struct StartQuery {
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
 }
 
@@ -96,13 +92,6 @@ pub async fn start(
             auth_start.nonce.clone(),
             native_return_to,
         )
-    } else if let Some(login_challenge) = query.login_challenge.as_deref() {
-        OAuthStash::with_login_challenge(
-            auth_start.state.clone(),
-            auth_start.verifier,
-            auth_start.nonce.clone(),
-            login_challenge.to_string(),
-        )
     } else {
         return render_error(PublicErrorMessage::InvalidRequest);
     };
@@ -124,20 +113,18 @@ pub async fn start(
 // ─── /oauth/google/callback ──────────────────────────────────────────────
 
 /// Finish the Google OAuth dance — verify state, exchange code, link, then
-/// hand off to hydra.
+/// resume the native authorize request.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::future_not_send)]
 pub async fn callback(
     req: HttpRequest,
     query: ntex::web::types::Query<CallbackQuery>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     jwks: ntex::web::types::State<Arc<JwksCache>>,
 ) -> HttpResponse {
     // Read + verify stash cookie. We need this even on the upstream-error
-    // path so we can report which login_challenge failed (and clear the
-    // cookie).
+    // path so we can clear the cookie.
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -217,24 +204,6 @@ pub async fn callback(
         return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     }
 
-    if let Some(login_challenge) = stash.login_challenge.as_deref() {
-        if let Err(e) = admin.get_login(login_challenge).await {
-            tracing::warn!(error = %e, challenge = %login_challenge, "google callback hydra challenge validation failed");
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "oauth_callback_failure",
-                    outcome: "failure",
-                    auth_method: Some(PROVIDER),
-                    detail: json!({ "reason": "login_challenge_invalid" }),
-                    ..AuditEvent::from_request(&req)
-                },
-            )
-            .await;
-            return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
-        }
-    }
-
     // Token exchange + ID-token verify.
     let id = match google::complete_callback(
         &cfg,
@@ -272,11 +241,10 @@ pub async fn callback(
     let raw_profile = serde_json::to_value(&id).ok();
     let profile = build_resolved_profile(&id, raw_profile.as_ref());
 
-    let resume = match (stash.login_challenge.as_deref(), stash.return_to.as_deref()) {
-        (Some(login_challenge), None) => LinkResume::LoginChallenge(login_challenge),
-        (None, Some(native_return_to)) => LinkResume::ReturnTo(native_return_to),
-        _ => return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg),
+    let Some(native_return_to) = stash.return_to.as_deref() else {
+        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
+    let resume = LinkResume::ReturnTo(native_return_to);
     let outcome = match linker::resolve_or_link(
         db.as_ref(),
         &profile,
@@ -309,8 +277,7 @@ pub async fn callback(
         LinkOutcome::NeedsConfirmation { pending_token, .. } => {
             // Email collided with a locally-credentialed user. Bounce to
             // /link?token=… so the user can confirm with their existing
-            // zeroship password — do NOT accept_login here; hydra stays
-            // pending until /link POST resolves the challenge.
+            // zeroship password before the native authorize request resumes.
             audit::emit(
                 db.as_ref(),
                 &AuditEvent {
@@ -395,58 +362,6 @@ pub async fn callback(
         }
     };
 
-    if let Some(native_return_to) = stash.return_to.as_deref() {
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "oauth_callback_success",
-                outcome: "success",
-                user_id: Some(&user_id),
-                auth_method: Some(PROVIDER),
-                detail: json!({
-                    "subject": id.subject,
-                    "created": created,
-                    "hd": id.hd,
-                }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-
-        let mut resp = return_to::see_other(native_return_to);
-        resp.header(
-            SET_COOKIE,
-            session_cookie::set_cookie(&session.id, cfg.insecure_dev),
-        );
-        resp.header(
-            SET_COOKIE,
-            clear_stash_cookie(google_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
-        );
-        resp.header("cache-control", "no-store");
-        return resp.finish();
-    }
-
-    // Accept the hydra login challenge.
-    let login_challenge = stash
-        .login_challenge
-        .as_deref()
-        .expect("missing login_challenge for legacy arm");
-    let accept = AcceptLoginRequest {
-        subject: user_id.to_string(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        acr: Some(ACR_GOOGLE.into()),
-        amr: Some(vec!["oauth".into()]),
-        ..Default::default()
-    };
-    let redirect_to = match admin.accept_login(login_challenge, &accept).await {
-        Ok(r) => r.redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, "accept_login failed");
-            return render_error_clearing(PublicErrorMessage::ContactSupport, &cfg);
-        }
-    };
-
     audit::emit(
         db.as_ref(),
         &AuditEvent {
@@ -464,15 +379,7 @@ pub async fn callback(
     )
     .await;
 
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(&redirect_to)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
-    // Drop the IdP session cookie + clear the now-spent stash on the same
-    // response. ntex's `header()` appends, so two SET_COOKIE values both
-    // make it onto the wire.
+    let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
@@ -481,6 +388,7 @@ pub async fn callback(
         SET_COOKIE,
         clear_stash_cookie(google_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
     );
+    resp.header("cache-control", "no-store");
     resp.finish()
 }
 

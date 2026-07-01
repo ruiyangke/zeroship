@@ -184,13 +184,6 @@ impl MagicFixture {
         self.hydra_state.accepts.load(Ordering::SeqCst)
     }
 
-    fn hydra_challenges(&self) -> Vec<String> {
-        self.hydra_state
-            .challenges
-            .lock()
-            .expect("lock hydra challenges")
-            .clone()
-    }
 }
 
 fn native_authorize_return_to() -> String {
@@ -491,58 +484,6 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
     assert_eq!(location(&complete_resp), return_to);
     assert!(read_set_cookie(&complete_resp, "zsidp_session").is_some());
     assert_eq!(fx.hydra_accept_count(), 0, "native complete must not call Hydra");
-
-    cleanup_email(&fx.pg, &email).await;
-    drop(fx.srv);
-}
-
-#[ntex::test]
-#[allow(clippy::future_not_send)]
-async fn magic_hydra_arm_still_accepts_login_and_redirects() {
-    let Some(fx) = MagicFixture::boot().await else {
-        eprintln!("[e2e_magic_native hydra regression] skip (need AUTH_DB_URL)");
-        return;
-    };
-    let email = format!("magic-hydra-{}@zeroship.test", Uuid::new_v4().simple());
-    let login_challenge = format!("lc-{}", Uuid::new_v4().simple());
-
-    let (start_resp, _) = start_magic(&fx, &email, "login_challenge", &login_challenge).await;
-    assert_eq!(start_resp.status().as_u16(), 200);
-    let magic_cookie = read_set_cookie(&start_resp, "zsidp_magic_csrf")
-        .expect("magic csrf cookie on hydra start");
-    let link = fx.mailer.last_magic_link();
-    assert_eq!(link_param(&link, "login_challenge"), login_challenge);
-
-    let token = link_param(&link, "token");
-    let redeem_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("csrf", &magic_cookie)
-        .append_pair("token", &token)
-        .append_pair("login_challenge", &login_challenge)
-        .finish();
-    let redeem_resp = fx
-        .http
-        .request(
-            http::Method::POST,
-            &format!("{}/magic/verify/redeem", fx.auth_base),
-        )
-        .expect("build hydra redeem")
-        .header("content-type", "application/x-www-form-urlencoded")
-        .expect("content-type")
-        .header("cookie", format!("zsidp_magic_csrf={magic_cookie}"))
-        .expect("cookie")
-        .body(redeem_body)
-        .send()
-        .await
-        .expect("send hydra redeem");
-
-    assert_eq!(redeem_resp.status().as_u16(), 302);
-    assert_eq!(
-        location(&redeem_resp),
-        "https://hydra.example/after-login?login_verifier=ok"
-    );
-    assert!(read_set_cookie(&redeem_resp, "zsidp_session").is_some());
-    assert_eq!(fx.hydra_accept_count(), 1);
-    assert_eq!(fx.hydra_challenges(), vec![login_challenge.clone()]);
 
     cleanup_email(&fx.pg, &email).await;
     drop(fx.srv);

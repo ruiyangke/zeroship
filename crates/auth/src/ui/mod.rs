@@ -41,7 +41,6 @@ use crate::{csrf, headers};
 #[derive(Debug, Template)]
 #[template(path = "login.html")]
 pub struct LoginPage<'a> {
-    pub challenge: &'a str,
     pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
@@ -50,29 +49,23 @@ pub struct LoginPage<'a> {
     pub github_enabled: bool,
     pub google_start_href: String,
     pub github_start_href: String,
-    pub is_hydra: bool,
 }
 
 /// `/login/2fa` challenge page (ISS-11). Rendered after a successful password
-/// verify for a user with a CONFIRMED TOTP credential, BEFORE `accept_login`.
-/// The `challenge` is hydra's pending `login_challenge`; the signed
+/// verify for a user with a CONFIRMED TOTP credential. The signed
 /// `__Host-zsidp_2fa` cookie (set alongside) attests factor 1 passed.
 #[derive(Debug, Template)]
 #[template(path = "totp_challenge.html")]
 pub struct TotpChallengePage<'a> {
-    pub challenge: &'a str,
     pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
-    pub is_hydra: bool,
 }
 
-/// `/signup` GET page. Carries exactly one continuation target: Hydra's
-/// `login_challenge` or native `return_to`.
+/// `/signup` GET page. Carries the native continuation target.
 #[derive(Debug, Template)]
 #[template(path = "signup.html")]
 pub struct SignupPage<'a> {
-    pub challenge: &'a str,
     pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
@@ -138,7 +131,6 @@ pub struct LinkPage<'a> {
 #[derive(Debug, Template)]
 #[template(path = "consent.html")]
 pub struct ConsentPage<'a> {
-    pub challenge: &'a str,
     pub return_to: &'a str,
     pub csrf: &'a str,
     pub client_id: &'a str,
@@ -147,7 +139,6 @@ pub struct ConsentPage<'a> {
     pub scopes: Vec<ConsentScopeView>,
     pub can_grant: bool,
     pub grant_error: Option<&'a str>,
-    pub is_hydra: bool,
 }
 
 #[derive(Debug)]
@@ -176,7 +167,6 @@ pub struct LinkedIdentity<'a> {
 #[template(path = "magic_check_email.html")]
 pub struct MagicCheckEmailPage<'a> {
     pub csrf: &'a str,
-    pub login_challenge: Option<&'a str>,
     pub return_to: Option<&'a str>,
     pub csrf_nonce: &'a str,
     pub email: &'a str,
@@ -189,7 +179,6 @@ pub struct MagicCheckEmailPage<'a> {
 #[template(path = "magic_await_code.html")]
 pub struct MagicAwaitCodePage<'a> {
     pub csrf: &'a str,
-    pub login_challenge: Option<&'a str>,
     pub return_to: Option<&'a str>,
     pub csrf_nonce: &'a str,
     pub email: &'a str,
@@ -315,19 +304,12 @@ pub struct ResetPage<'a> {
     pub error: Option<&'a str>,
 }
 
-/// `/logout` GET page (RP-initiated logout, RFC OIDC §5 — RP redirects
-/// to hydra's `end_session_endpoint`, hydra issues a `logout_challenge`
-/// and 302s here). Renders a CSRF-protected confirm form; the POST
-/// handler calls hydra's `accept_logout` and redirects to the
-/// post-logout `redirect_to`.
+/// `/logout` GET page. Renders a CSRF-protected confirm form; the POST
+/// handler revokes the native IdP session cookie.
 #[derive(Debug, Template)]
 #[template(path = "logout.html")]
 pub struct LogoutPage<'a> {
-    pub challenge: &'a str,
     pub csrf: &'a str,
-    /// `Some(name)` when the RP that initiated logout published a
-    /// human-readable `client_name`. `None` for hydra-internal flows
-    /// (e.g. session-cleanup without a specific RP context).
     pub client_name: Option<&'a str>,
     pub error: Option<&'a str>,
 }

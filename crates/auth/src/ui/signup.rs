@@ -1,10 +1,7 @@
 //! `/signup` GET + POST handlers.
 //!
 //! Signup creates the `zeroship.users` row, then redirects back to `/login`
-//! with the same continuation target (`login_challenge` for Hydra or
-//! `return_to` for native OP). Email verification is a Phase 5 addition; for
-//! Phase 2 we just create the row and let the user proceed straight to
-//! `/login`.
+//! with the same native OP `return_to` continuation target.
 //!
 //! Account-enumeration defense: a duplicate-email INSERT is treated the
 //! same as a fresh INSERT (same redirect, same status, same response). The
@@ -30,14 +27,11 @@ use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
 use zeroship_mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use zeroship_mailer::{Address, Mailer};
 
-const MAX_LOGIN_CHALLENGE_BYTES: usize = 256;
 const MAX_RETURN_TO_BYTES: usize = 4096;
 const MAX_SIGNUP_NAME_CHARS: usize = 200;
 
 #[derive(Debug, Deserialize)]
 pub struct SignupQuery {
-    #[serde(default)]
-    pub login_challenge: Option<String>,
     #[serde(default)]
     pub return_to: Option<String>,
 }
@@ -45,7 +39,6 @@ pub struct SignupQuery {
 #[derive(Debug, Deserialize)]
 pub struct SignupForm {
     pub csrf: String,
-    pub login_challenge: Option<String>,
     pub return_to: Option<String>,
     pub name: String,
     pub email: String,
@@ -70,7 +63,6 @@ pub async fn get(
     };
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
-        challenge: continuation.login_challenge(),
         return_to: continuation.return_to(),
         csrf: &csrf_token,
         error: None,
@@ -291,42 +283,23 @@ pub async fn post(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SignupContinuation {
-    LoginChallenge(String),
     ReturnTo(String),
 }
 
 impl SignupContinuation {
     fn from_query(query: &SignupQuery) -> Result<Self, SignupContinuationError> {
-        Self::from_inputs(
-            query.login_challenge.as_deref(),
-            None,
-            query.return_to.as_deref(),
-            None,
-        )
+        Self::from_inputs(query.return_to.as_deref(), None)
     }
 
     fn from_post(query: &SignupQuery, form: &SignupForm) -> Result<Self, SignupContinuationError> {
-        Self::from_inputs(
-            query.login_challenge.as_deref(),
-            form.login_challenge.as_deref(),
-            query.return_to.as_deref(),
-            form.return_to.as_deref(),
-        )
+        Self::from_inputs(query.return_to.as_deref(), form.return_to.as_deref())
     }
 
     fn from_inputs(
-        query_login_challenge: Option<&str>,
-        form_login_challenge: Option<&str>,
         query_return_to: Option<&str>,
         form_return_to: Option<&str>,
     ) -> Result<Self, SignupContinuationError> {
         let mut targets = Vec::new();
-
-        for login_challenge in [query_login_challenge, form_login_challenge] {
-            if let Some(login_challenge) = bounded_login_challenge(login_challenge) {
-                targets.push(Self::LoginChallenge(login_challenge.to_string()));
-            }
-        }
 
         for return_to in [query_return_to, form_return_to] {
             if let Some(return_to) = bounded_return_to(return_to)? {
@@ -341,16 +314,8 @@ impl SignupContinuation {
         }
     }
 
-    fn login_challenge(&self) -> &str {
-        match self {
-            Self::LoginChallenge(login_challenge) => login_challenge,
-            Self::ReturnTo(_) => "",
-        }
-    }
-
     fn return_to(&self) -> &str {
         match self {
-            Self::LoginChallenge(_) => "",
             Self::ReturnTo(return_to) => return_to,
         }
     }
@@ -361,11 +326,6 @@ struct SignupContinuationError;
 
 fn redirect_to_login(continuation: &SignupContinuation) -> HttpResponse {
     let to = match continuation {
-        SignupContinuation::LoginChallenge(challenge) => {
-            let challenge_enc: String =
-                form_urlencoded::byte_serialize(challenge.as_bytes()).collect();
-            format!("/login?login_challenge={challenge_enc}")
-        }
         SignupContinuation::ReturnTo(return_to) => {
             let return_to_enc: String =
                 form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
@@ -378,12 +338,6 @@ fn redirect_to_login(continuation: &SignupContinuation) -> HttpResponse {
         HeaderValue::from_str(&to).unwrap_or_else(|_| HeaderValue::from_static("/login")),
     );
     resp.finish()
-}
-
-fn bounded_login_challenge(challenge: Option<&str>) -> Option<&str> {
-    challenge
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= MAX_LOGIN_CHALLENGE_BYTES)
 }
 
 fn bounded_return_to(return_to: Option<&str>) -> Result<Option<String>, SignupContinuationError> {
@@ -431,9 +385,6 @@ fn render_signup_error_with_status(
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
-        challenge: continuation
-            .map(SignupContinuation::login_challenge)
-            .unwrap_or(""),
         return_to: continuation.map(SignupContinuation::return_to).unwrap_or(""),
         csrf: &csrf_token,
         error: Some(err),
@@ -472,16 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn redirect_to_login_url_encodes_challenge() {
-        let continuation = SignupContinuation::LoginChallenge("foo&malicious=value".into());
-        let resp = redirect_to_login(&continuation);
-        assert_eq!(
-            location(&resp),
-            "/login?login_challenge=foo%26malicious%3Dvalue"
-        );
-    }
-
-    #[test]
     fn redirect_to_login_url_encodes_return_to() {
         let return_to =
             "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
@@ -494,23 +435,17 @@ mod tests {
     }
 
     #[test]
-    fn signup_continuation_accepts_exactly_one_hydra_or_native_target() {
+    fn signup_continuation_accepts_exactly_one_native_target() {
         let return_to =
             "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
         assert_eq!(
-            SignupContinuation::from_inputs(Some("lc-123"), None, None, None),
-            Ok(SignupContinuation::LoginChallenge("lc-123".into()))
-        );
-        assert_eq!(
-            SignupContinuation::from_inputs(None, None, Some(return_to), None),
+            SignupContinuation::from_inputs(Some(return_to), None),
             Ok(SignupContinuation::ReturnTo(return_to.into()))
         );
-        assert!(SignupContinuation::from_inputs(None, None, None, None).is_err());
+        assert!(SignupContinuation::from_inputs(None, None).is_err());
         assert!(SignupContinuation::from_inputs(
-            Some("lc-123"),
-            None,
             Some(return_to),
-            None
+            Some(return_to)
         )
         .is_err());
     }
@@ -519,16 +454,10 @@ mod tests {
     fn signup_continuation_rejects_invalid_return_to_at_intake() {
         for bad in ["//evil.com", "https://evil.com", "/me"] {
             assert!(
-                SignupContinuation::from_inputs(None, None, Some(bad), None).is_err(),
+                SignupContinuation::from_inputs(Some(bad), None).is_err(),
                 "must reject {bad:?}"
             );
         }
-    }
-
-    #[test]
-    fn signup_continuation_rejects_oversized_challenge() {
-        let challenge = "a".repeat(257);
-        assert!(SignupContinuation::from_inputs(Some(&challenge), None, None, None).is_err());
     }
 
     #[test]

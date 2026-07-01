@@ -1,87 +1,45 @@
-//! `/logout` GET + POST handlers — RP-initiated logout flow.
+//! `/logout` GET + POST handlers for the native OP session logout flow.
 //!
-//! OIDC Session Management §5 / RFC 9207: the RP redirects the
-//! user-agent to hydra's `end_session_endpoint`
-//! (`/oauth2/sessions/logout`) with an `id_token_hint`. Hydra validates
-//! the hint, issues a `logout_challenge`, and 302s here. We render a
-//! CSRF-protected confirm form; on POST we call hydra admin's
-//! `accept_logout` and 302 to the post-logout `redirect_to`.
-//!
-//! Algorithm:
-//!
-//! 1. **GET `/logout?logout_challenge=<…>`** — fetch the logout request
-//!    from hydra (`get_logout`). On success render [`LogoutPage`] with
-//!    a fresh CSRF cookie. On hydra error render an error page.
-//!
-//! 2. **POST `/logout`** — validate the CSRF double-submit, call
-//!    `accept_logout(challenge)`. Hydra returns a `redirect_to` —
-//!    that's the RP's `post_logout_redirect_uri` (or hydra's
-//!    default if the RP didn't supply one). Best-effort revoke
-//!    the local `zeroship.idp_sessions` row keyed by the IdP session cookie,
-//!    and also attempt the historical Hydra-`sid` revoke.
-//!
-//! No "Stay signed in" reject path: hydra has no
-//! `reject_logout` admin endpoint. If the user wants to abandon the
-//! logout dance they close the tab; hydra times the challenge out.
+//! GET renders a CSRF-protected confirmation form. POST validates the
+//! double-submit token, revokes the local `zeroship.idp_sessions` row keyed by
+//! the IdP session cookie, emits OIDC back-channel logout tokens for that
+//! native session, clears the browser cookie, and sends the browser back to
+//! `/login`.
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::hydra_client::HydraAdmin;
 use crate::oidc;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{ErrorPage, LogoutPage, PublicErrorMessage};
 
 #[derive(Debug, Deserialize)]
-pub struct LogoutQuery {
-    pub logout_challenge: String,
-}
+pub struct LogoutQuery {}
 
 #[derive(Debug, Deserialize)]
 pub struct LogoutForm {
     pub csrf: String,
-    pub logout_challenge: String,
 }
 
-/// `/logout?logout_challenge=<…>` GET — render the confirmation form.
+/// `/logout` GET — render the confirmation form.
 //
 // ntex's per-thread service futures are intentionally `!Send`.
 #[allow(clippy::future_not_send)]
 pub async fn get(
-    query: ntex::web::types::Query<LogoutQuery>,
-    admin: ntex::web::types::State<HydraAdmin>,
+    _query: ntex::web::types::Query<LogoutQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let challenge = &query.logout_challenge;
-
-    // Fetch the logout request from hydra. This validates the
-    // challenge exists + isn't stale, and surfaces the optional RP
-    // client_name we render on the confirmation page.
-    let info = match admin.get_logout(challenge).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(error = %e, challenge = %challenge, "logout challenge fetch failed");
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-    };
-
     let csrf_token = csrf::generate_token();
-    let client_name = info
-        .client
-        .as_ref()
-        .and_then(|c| c.client_name.as_deref().or(Some(c.client_id.as_str())));
     let page = LogoutPage {
-        challenge,
         csrf: &csrf_token,
-        client_name,
+        client_name: None,
         error: None,
     };
     let body = page
@@ -94,14 +52,12 @@ pub async fn get(
     resp.body(body)
 }
 
-/// `/logout` POST — validate CSRF, accept the logout at hydra, 302 to
-/// hydra's post-logout `redirect_to`. Best-effort revoke the local IdP
-/// session row from the browser cookie so the cookie stops resolving.
+/// `/logout` POST — validate CSRF and revoke the local IdP session row from
+/// the browser cookie so the cookie stops resolving.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
     form: ntex::web::types::Form<LogoutForm>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
     issuer: ntex::web::types::State<Arc<oidc::Issuer>>,
@@ -121,23 +77,6 @@ pub async fn post(
         return render_error(PublicErrorMessage::InvalidRequest);
     }
 
-    let challenge = form.logout_challenge.as_str();
-
-    // 2. Re-fetch — we want the authoritative subject + sid for the
-    //    audit event and the local-session revoke step. The form's
-    //    challenge is attacker-controlled.
-    let info = match admin.get_logout(challenge).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(error = %e, challenge = %challenge, "POST /logout: get_logout failed");
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-    };
-
-    // 3. Best-effort: revoke the local zeroship.idp_sessions row from the
-    //    cookie the browser is actually presenting. Failures are
-    //    non-fatal — hydra's accept_logout still tears down hydra's
-    //    own session.
     if let Some(session_id) = local_session_id {
         if let Err(e) = sessions::revoke(db.as_ref(), session_id).await {
             tracing::warn!(error = %e, session_id = %session_id, "logout: local cookie session revoke failed");
@@ -159,52 +98,29 @@ pub async fn post(
         }
     }
 
-    // 4. Best-effort compatibility with Hydra sessions that happen to
-    //    carry the local UUID as `sid`; Hydra still needs its row gone,
-    //    and older flows may have aligned the two ids.
-    if let Ok(sid) = Uuid::parse_str(&info.sid) {
-        if let Err(e) = sessions::revoke(db.as_ref(), sid).await {
-            tracing::warn!(error = %e, sid = %info.sid, "logout: local session revoke failed");
-        }
-    } else {
-        tracing::debug!(sid = %info.sid, "logout: sid is not a UUID (probably hydra-internal); skipping local revoke");
-    }
-
-    // 5. Accept the logout at hydra.
-    let resp = match admin.accept_logout(challenge).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(error = %e, "accept_logout failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-
-    // 6. Audit. Best-effort — failure here doesn't fail the response.
-    let subject = info.subject.clone();
+    // Audit. Best-effort — failure here doesn't fail the response.
     audit::emit(
         db.as_ref(),
         &AuditEvent {
             event_type: "logout",
             outcome: "success",
             user_id: None,
-            client_id: info.client.as_ref().map(|c| c.client_id.as_str()),
+            client_id: None,
             auth_method: None,
             detail: serde_json::json!({
-                "subject": subject,
-                "rp_initiated": info.rp_initiated,
+                "session_id": local_session_id.map(|id| id.to_string()),
             }),
             ..AuditEvent::from_request(&req)
         },
     )
     .await;
 
-    // 7. 302 + clear the IdP session cookie so the browser drops it
-    //    immediately (don't wait for Max-Age expiry).
+    // 302 + clear the IdP session cookie so the browser drops it immediately
+    // (don't wait for Max-Age expiry).
     let mut http_resp = HttpResponse::Found();
     http_resp.header(
         LOCATION,
-        HeaderValue::from_str(&resp.redirect_to)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
+        HeaderValue::from_static("/login"),
     );
     http_resp.header(
         SET_COOKIE,

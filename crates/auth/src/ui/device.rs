@@ -2,7 +2,6 @@
 //! user-code entry (RFC 8628).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
@@ -15,8 +14,6 @@ use crate::audit::{self, AuditEvent};
 use crate::config::{AuthConfig, AuthProviderKind};
 use crate::csrf;
 use crate::headers;
-use crate::hydra_client::types::AcceptDeviceUserCodeRequest;
-use crate::hydra_client::HydraAdmin;
 use crate::identity::eligibility;
 use crate::oidc::device_token::{self, DeviceApproval};
 use crate::sessions::login as session_cookie;
@@ -54,14 +51,13 @@ pub async fn get(
     render_form("", None, StatusCode::OK, cfg.insecure_dev)
 }
 
-/// `/device` POST — approve either a native OP device grant or, until P4, the
-/// legacy Hydra device grant. Anonymous browsers are sent into the normal
-/// sign-in route; already-signed-in browsers complete the matching grant.
+/// `/device` POST — approve a native OP device grant. Anonymous browsers are
+/// sent into the normal sign-in route; already-signed-in browsers complete the
+/// matching grant.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
     form: ntex::web::types::Form<DeviceForm>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
@@ -84,8 +80,8 @@ pub async fn post(
         );
     }
 
-    // CSRF double-submit — enforced FIRST, before any Hydra round-trip or
-    // state change, exactly like the login/signup/consent/reset siblings.
+    // CSRF double-submit — enforced FIRST, before any state change, exactly
+    // like the login/signup/consent/reset siblings.
     if !csrf_valid(&req, &form, insecure_dev) {
         return render_form(
             "",
@@ -148,82 +144,36 @@ pub async fn post(
         );
     }
 
-    if native_pending {
-        return match device_token::approve_user_code(
-            db.as_ref(),
-            user_code,
-            session.user_id,
-            session.id,
-            session.credential_version,
-        )
-        .await
-        {
-            Ok(DeviceApproval::Approved) => {
-                emit_device_grant_audit(db.as_ref(), &req, &session).await;
-                render_device_approved()
-            }
-            Ok(DeviceApproval::NotFound) => render_form(
-                user_code,
-                Some("invalid or expired code"),
-                StatusCode::BAD_REQUEST,
-                insecure_dev,
-            ),
-            Err(e) => {
-                tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
-                render_form(
-                    user_code,
-                    Some("invalid or expired code"),
-                    StatusCode::BAD_REQUEST,
-                    insecure_dev,
-                )
-            }
-        };
-    }
-
-    let verified = match verify_user_code(cfg.hydra_public_url(), user_code).await {
-        Ok(v) => v,
-        Err(DeviceVerifyError::Rejected) => {
-            return render_form(
-                user_code,
-                Some("invalid or expired code"),
-                StatusCode::BAD_REQUEST,
-                insecure_dev,
-            );
-        }
-        Err(DeviceVerifyError::Hydra(e)) => {
-            tracing::warn!(error = %e, "device user-code verification failed");
-            return render_form(
-                user_code,
-                Some("invalid or expired code"),
-                StatusCode::BAD_REQUEST,
-                insecure_dev,
-            );
-        }
-    };
-
-    let Some(device_challenge) = verified.device_challenge else {
-        tracing::warn!(
-            location = ?verified.location,
-            "device verification response had no device_challenge"
-        );
+    if !native_pending {
         return render_form(
             user_code,
             Some("invalid or expired code"),
             StatusCode::BAD_REQUEST,
             insecure_dev,
         );
-    };
+    }
 
-    let accept = AcceptDeviceUserCodeRequest {
-        user_code: Some(user_code.to_string()),
-    };
-    match admin.accept_device_user_code(&device_challenge, &accept).await {
-        Ok(resp) => {
+    match device_token::approve_user_code(
+        db.as_ref(),
+        user_code,
+        session.user_id,
+        session.id,
+        session.credential_version,
+    )
+    .await
+    {
+        Ok(DeviceApproval::Approved) => {
             emit_device_grant_audit(db.as_ref(), &req, &session).await;
-            redirect(&resp.redirect_to)
+            render_device_approved()
         }
+        Ok(DeviceApproval::NotFound) => render_form(
+            user_code,
+            Some("invalid or expired code"),
+            StatusCode::BAD_REQUEST,
+            insecure_dev,
+        ),
         Err(e) => {
-            tracing::warn!(error = %e, "accept device user code failed");
+            tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
             render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -273,79 +223,6 @@ fn csrf_valid(req: &HttpRequest, form: &DeviceForm, insecure_dev: bool) -> bool 
         .is_some_and(|cookie| csrf::matches(form_token, cookie))
 }
 
-#[derive(Debug)]
-struct VerifiedDeviceCode {
-    location: String,
-    device_challenge: Option<String>,
-}
-
-#[derive(Debug)]
-enum DeviceVerifyError {
-    Rejected,
-    Hydra(String),
-}
-
-#[allow(clippy::future_not_send)]
-async fn verify_user_code(
-    hydra_public: &str,
-    user_code: &str,
-) -> Result<VerifiedDeviceCode, DeviceVerifyError> {
-    let q = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("user_code", user_code)
-        .finish();
-    let url = format!(
-        "{}/oauth2/device/verify?{}",
-        hydra_public.trim_end_matches('/'),
-        q,
-    );
-    let res = cyper::Client::new()
-        .request(http::Method::GET, url)
-        .map_err(|e| DeviceVerifyError::Hydra(format!("build GET /oauth2/device/verify: {e}")))?
-        .send_with_timeout(Duration::from_secs(10))
-        .await
-        .map_err(|_| DeviceVerifyError::Hydra("GET /oauth2/device/verify: timeout".into()))?
-        .map_err(|e| DeviceVerifyError::Hydra(format!("GET /oauth2/device/verify: {e}")))?;
-
-    let status = res.status().as_u16();
-    if status == 400 || status == 404 {
-        return Err(DeviceVerifyError::Rejected);
-    }
-    if !(300..400).contains(&status) {
-        let body = res.text().await.unwrap_or_else(|_| "<no body>".into());
-        return Err(DeviceVerifyError::Hydra(format!(
-            "GET /oauth2/device/verify -> {status}: {body}"
-        )));
-    }
-
-    let location = res
-        .headers()
-        .get(LOCATION)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let device_challenge = query_param(&location, "device_challenge");
-    Ok(VerifiedDeviceCode {
-        location,
-        device_challenge,
-    })
-}
-
-trait SendWithTimeout {
-    async fn send_with_timeout(
-        self,
-        timeout: Duration,
-    ) -> std::result::Result<cyper::Result<cyper::Response>, compio::time::Elapsed>;
-}
-
-impl SendWithTimeout for cyper::RequestBuilder {
-    async fn send_with_timeout(
-        self,
-        timeout: Duration,
-    ) -> std::result::Result<cyper::Result<cyper::Response>, compio::time::Elapsed> {
-        compio::time::timeout(timeout, self.send()).await
-    }
-}
-
 async fn current_session(
     req: &HttpRequest,
     cfg: &AuthConfig,
@@ -358,14 +235,6 @@ async fn current_session(
         .unwrap_or("");
     let session_id = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev)?;
     sessions::validate(db, session_id).await.ok().flatten()
-}
-
-fn query_param(raw_url: &str, key: &str) -> Option<String> {
-    let parsed = url::Url::parse(raw_url).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.into_owned())
 }
 
 fn redirect(to: &str) -> HttpResponse {
@@ -626,7 +495,7 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn hydra_device_get_keeps_existing_page_shape() {
+    async fn native_device_get_keeps_existing_page_shape() {
         let (status, _headers, body) =
             get_device_body(hydra_cfg(), "/device?user_code=BCDF-GHJK").await;
 

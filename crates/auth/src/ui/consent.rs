@@ -1,22 +1,7 @@
 //! `/consent` GET plus consent decision POST handlers.
-//!
-//! Two paths share this file:
-//!
-//! - **First-party fast path**: `client.skip_consent` clients accept silently
-//!   only for first use or scopes already recorded in `zeroship.oauth_grants`.
-//!   Only this path consults the `zeroship.oauth_grants` subset/delta logic.
-//! - **Third-party / per-app UI** (`skip_consent = false`): render Allow/Deny
-//!   forms with human-readable Phase 10 scope labels and CSRF protection, then
-//!   PUT the decision to hydra-admin. These clients render the **full requested
-//!   scope set** on every prompt — they do NOT compute a delta against the prior
-//!   grant. No-reprompt is delegated entirely to Hydra's opt-in `remember`
-//!   checkbox: a remembered grant makes Hydra skip the consent challenge before
-//!   this handler ever runs. On accept the request is UNIONed into the
-//!   `zeroship.oauth_grants` ledger (the single source of truth), never replacing
-//!   the prior grant (spec §5.2/§5.4).
 
 use askama::Template;
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
+use ntex::http::header::{COOKIE, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
@@ -32,11 +17,7 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::AuthError;
-use crate::hydra_client::HydraAdmin;
-use crate::hydra_client::types::{
-    AcceptConsentRequest, ConsentRequest, ConsentSession, RejectRequest,
-    OAuth2Client,
-};
+use crate::hydra_client::types::{ConsentRequest, OAuth2Client};
 use crate::oidc::auth_request::AuthRequest;
 use crate::oidc::authorization_code::{
     persist_consent_grant, return_to_after_prompt_interaction,
@@ -44,12 +25,8 @@ use crate::oidc::authorization_code::{
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions as session_store;
-use crate::store::users;
 use crate::ui::{ConsentPage, ConsentScopeView, PublicErrorMessage};
 
-/// Hydra's "remember this consent" window when the user ticks the checkbox.
-/// Matches the proposal §10.3 spec (30 days).
-const REMEMBER_FOR_SECS: i64 = 60 * 60 * 24 * 30;
 const CANNOT_GRANT: &str = "you cannot grant this permission";
 
 /// Reserved OIDC identity scopes — namespace (b), platform-defined, always
@@ -64,7 +41,6 @@ const RESERVED_DELEGATED_PREFIXES: &[&str] = &["platform:", "org:"];
 
 #[derive(Debug, Deserialize)]
 pub struct ConsentQuery {
-    pub consent_challenge: Option<String>,
     pub return_to: Option<String>,
 }
 
@@ -73,116 +49,11 @@ pub struct ConsentQuery {
 pub async fn get_consent(
     req: HttpRequest,
     query: ntex::web::types::Query<ConsentQuery>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     let query = query.into_inner();
-    let Some(challenge) = query.consent_challenge.as_deref() else {
-        return get_consent_native(req, query.return_to.as_deref(), cfg.as_ref(), db.as_ref()).await;
-    };
-
-    // P5: delete (Hydra arm).
-    let info = match admin.get_consent(challenge).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(error = %e, challenge = %challenge, "consent challenge fetch failed");
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-    };
-
-    let subject = match consent_subject_uuid(&info) {
-        Ok(subject) => subject,
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "consent subject parse failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-    let requested_scopes = sort_dedup_scopes(&info.requested_scope);
-
-    if info.client.skip_consent {
-        let lock_conn = match open_dedicated_auth_pg(&cfg.db_url).await {
-            Ok(conn) => conn,
-            Err(e) => {
-                tracing::error!(error = %e, challenge = %challenge, "oauth grant lock connection failed");
-                return render_error(PublicErrorMessage::ContactSupport);
-            }
-        };
-        let lock_key = oauth_grant_lock_key(&subject, &info.client.client_id);
-        let lock_result = with_advisory_lock(&lock_conn, lock_key, || async {
-            let prior_grant = load_oauth_grant(&lock_conn, subject, &info.client.client_id)
-                .await
-                .map_err(AuthError::Db)?;
-            match prior_grant {
-                None => {
-                    let redirect_to = silent_accept(&admin, challenge, &info, db.as_ref()).await?;
-                    if let Err(e) = upsert_oauth_grant(
-                        &lock_conn,
-                        subject,
-                        &info.client.client_id,
-                        &requested_scopes,
-                    )
-                    .await
-                    {
-                        revoke_hydra_consent_sessions(&admin, subject, &info.client.client_id)
-                            .await;
-                        return Err(AuthError::Db(e));
-                    }
-                    Ok(Some(redirect(&redirect_to)))
-                }
-                Some(previously_granted)
-                    if scopes_are_subset(&requested_scopes, &previously_granted) =>
-                {
-                    let redirect_to = silent_accept(&admin, challenge, &info, db.as_ref()).await?;
-                    if let Err(e) = touch_oauth_grant(&lock_conn, subject, &info.client.client_id)
-                        .await
-                    {
-                        revoke_hydra_consent_sessions(&admin, subject, &info.client.client_id)
-                            .await;
-                        return Err(AuthError::Db(e));
-                    }
-                    Ok(Some(redirect(&redirect_to)))
-                }
-                Some(_) => Ok(None),
-            }
-        })
-        .await;
-
-        match lock_result {
-            Ok(Some(resp)) => return resp,
-            Ok(None) => {}
-            Err(e) => {
-                tracing::error!(error = %e, challenge = %challenge, "oauth grant locked silent accept failed");
-                return render_error(PublicErrorMessage::ContactSupport);
-            }
-        }
-    }
-
-    let app_scope_defs = match load_app_scope_defs(db.as_ref(), &info.client.client_id).await {
-        Ok(defs) => defs,
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "consent app scope defs lookup failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-
-    let classified = match classify_and_authorize(db.as_ref(), &info, &app_scope_defs).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "consent grant authorization failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-
-    // An Unknown scope (declared by no app, not in the platform vocabulary) is
-    // rejected with `invalid_scope` so the RP gets a proper OAuth error
-    // redirect — never silently dropped (spec §5.2 round-2/3).
-    if classified.has_unknown {
-        return reject_consent_invalid_scope(&admin, challenge, &info, db.as_ref()).await;
-    }
-
-    render_consent_page(challenge, None, &info, db.as_ref(), cfg.as_ref(), classified.can_grant, &app_scope_defs)
-        .await
+    get_consent_native(req, query.return_to.as_deref(), cfg.as_ref(), db.as_ref()).await
 }
 
 #[allow(clippy::future_not_send)]
@@ -230,15 +101,7 @@ async fn get_consent_native(
         return oauth_error_redirect(&ctx, "invalid_scope");
     }
 
-    render_consent_page(
-        &return_to,
-        Some(&return_to),
-        &info,
-        db,
-        cfg,
-        classified.can_grant,
-        &app_scope_defs,
-    )
+    render_consent_page(&return_to, &info, db, cfg, classified.can_grant, &app_scope_defs)
     .await
 }
 
@@ -247,21 +110,18 @@ async fn get_consent_native(
 #[derive(Debug, Deserialize)]
 pub struct ConsentDecisionForm {
     pub csrf: Option<String>,
-    pub consent_challenge: Option<String>,
     pub return_to: Option<String>,
     /// HTML form checkbox: `Some("on")` when ticked, `None` when not.
     #[serde(default)]
     pub remember: Option<String>,
 }
 
-/// `/consent/accept` POST — validates CSRF, re-fetches the hydra challenge,
-/// verifies the grantor can delegate every recognized Phase 10 scope, and PUTs
-/// hydra-admin `/consent/accept`.
+/// `/consent/accept` POST — validates CSRF, verifies the grantor can delegate
+/// every recognized Phase 10 scope, and persists the native OP grant.
 #[allow(clippy::future_not_send)]
 pub async fn post_consent_accept(
     req: HttpRequest,
     form: ntex::web::types::Form<ConsentDecisionForm>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
@@ -270,178 +130,7 @@ pub async fn post_consent_accept(
         return render_error_forbidden(PublicErrorMessage::InvalidRequest);
     }
 
-    let Some(challenge) = form.consent_challenge.as_deref() else {
-        return post_consent_accept_native(req, &form, cfg.as_ref(), db.as_ref()).await;
-    };
-
-    // P5: delete (Hydra arm).
-    let info = match admin.get_consent(challenge).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(error = %e, challenge = %challenge, "POST /consent/accept: get_consent failed");
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-    };
-
-    // Re-classify on the accept path — never trust the client. The identical
-    // partition runs here so a self-grantable app-declared scope reaches
-    // `accept_consent`, a delegated scope the subject cannot delegate re-renders
-    // CANNOT_GRANT, and an Unknown scope is rejected with `invalid_scope` (spec
-    // §5.2: the load-bearing enforcement is the POST path, not just the render).
-    let app_scope_defs = match load_app_scope_defs(db.as_ref(), &info.client.client_id).await {
-        Ok(defs) => defs,
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept app scope defs lookup failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-    match classify_and_authorize(db.as_ref(), &info, &app_scope_defs).await {
-        Ok(c) if c.has_unknown => {
-            return reject_consent_invalid_scope(&admin, challenge, &info, db.as_ref()).await;
-        }
-        Ok(c) if c.can_grant => {}
-        Ok(_) => {
-            return render_consent_page(
-                challenge,
-                None,
-                &info,
-                db.as_ref(),
-                cfg.as_ref(),
-                false,
-                &app_scope_defs,
-            )
-            .await;
-        }
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept authorization failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    }
-
-    let subject = match consent_subject_uuid(&info) {
-        Ok(subject) => subject,
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept subject parse failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-    let id_token_claims =
-        build_id_token_claims(db.as_ref(), &info.subject, &info.requested_scope).await;
-    let remember = form.remember.is_some();
-    let accept = AcceptConsentRequest {
-        grant_scope: info.requested_scope.clone(),
-        grant_access_token_audience: info.requested_access_token_audience.clone(),
-        remember: Some(remember),
-        remember_for: Some(if remember { REMEMBER_FOR_SECS } else { 0 }),
-        session: Some(ConsentSession {
-            id_token: Some(id_token_claims),
-            // §13 "session.access_token leakage" — intentionally empty.
-            access_token: None,
-        }),
-    };
-
-    let requested_scopes = sort_dedup_scopes(&info.requested_scope);
-    let lock_conn = match open_dedicated_auth_pg(&cfg.db_url).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "oauth grant lock connection failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-    let lock_key = oauth_grant_lock_key(&subject, &info.client.client_id);
-    let redirect_to = match with_advisory_lock(&lock_conn, lock_key, || async {
-        // Compute the cumulative grant UNDER the lock so a concurrent accept
-        // can't read a stale prior set. Spec §5.2/§5.4: the ledger is the single
-        // source of truth and accept UNIONs the request into the prior grant —
-        // an incremental step-up (`requestScopes` / `getAccessTokenWithPopup`)
-        // whose authorize-time `requested_scope` is a strict SUBSET of the prior
-        // grant must NOT drop the previously-granted scopes.
-        let prior = load_oauth_grant(&lock_conn, subject, &info.client.client_id)
-            .await
-            .map_err(AuthError::Db)?
-            .unwrap_or_default();
-        let cumulative_scopes = union_scopes(&prior, &requested_scopes);
-
-        let redirect_to = match admin.accept_consent(challenge, &accept).await {
-            Ok(resp) => resp.redirect_to,
-            Err(e) => {
-                tracing::error!(error = %e, "accept_consent failed");
-                return Err(e);
-            }
-        };
-
-        if let Err(e) = upsert_oauth_grant(
-            &lock_conn,
-            subject,
-            &info.client.client_id,
-            &cumulative_scopes,
-        )
-        .await
-        {
-            revoke_hydra_consent_sessions(&admin, subject, &info.client.client_id).await;
-            return Err(AuthError::Db(e));
-        }
-
-        // Relay alias mint (Slice 5b, sub-spec §2/§6.1). When the EMAIL scope is
-        // granted to a per-app end-user client, mint (or reuse) the user's relay
-        // alias under THIS grant's advisory lock — off the per-request hot path,
-        // exactly one alias per (app, user), re-grant-stable. Keyed on the row
-        // the gateway wrote (`app_client_id` = the `oac_` client_id). Best-
-        // effort: a mint failure must NOT fail the consent (the grant is already
-        // committed; the gateway lazily mints on a read-through miss, §7.1).
-        if cumulative_scopes.iter().any(|s| s == "email")
-            && app_id_from_client_id(&info.client.client_id).is_some()
-        {
-            match crate::store::relay::mint_alias_at_consent(
-                &lock_conn,
-                &info.client.client_id,
-                subject,
-                &cfg.relay_domain,
-            )
-            .await
-            {
-                Ok(Some(alias)) => {
-                    tracing::debug!(client_id = %info.client.client_id, alias = %alias, "relay alias minted at consent");
-                }
-                Ok(None) => {
-                    tracing::debug!(client_id = %info.client.client_id, "relay alias deferred to gateway lazy-mint (identity row not yet projected)");
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, client_id = %info.client.client_id, "relay alias mint failed at consent (non-fatal — gateway lazy-mint covers it)");
-                }
-            }
-        }
-
-        Ok(redirect_to)
-    })
-    .await
-    {
-        Ok(redirect_to) => redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "POST /consent/accept locked grant mutation failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-
-    // Audit the consent decision — symmetric with consent_deny so both
-    // outcomes of a consent prompt are recorded.
-    audit::emit(
-        db.as_ref(),
-        &AuditEvent {
-            event_type: "consent_accept",
-            outcome: "success",
-            user_id: Some(&subject),
-            client_id: Some(&info.client.client_id),
-            auth_method: Some("consent"),
-            detail: json!({
-                "requested_scopes": requested_scopes,
-            }),
-            ..AuditEvent::from_request(&req)
-        },
-    )
-    .await;
-
-    redirect(&redirect_to)
+    post_consent_accept_native(req, &form, cfg.as_ref(), db.as_ref()).await
 }
 
 #[allow(clippy::future_not_send)]
@@ -482,15 +171,7 @@ async fn post_consent_accept_native(
         Ok(c) if c.has_unknown => return oauth_error_redirect(&ctx, "invalid_scope"),
         Ok(c) if c.can_grant => {}
         Ok(_) => {
-            return render_consent_page(
-                &return_to,
-                Some(&return_to),
-                &info,
-                db,
-                cfg,
-                false,
-                &app_scope_defs,
-            )
+            return render_consent_page(&return_to, &info, db, cfg, false, &app_scope_defs)
             .await;
         }
         Err(e) => {
@@ -575,13 +256,12 @@ async fn post_consent_accept_native(
         .finish()
 }
 
-/// `/consent/deny` POST — validates CSRF, re-fetches the hydra challenge, and
-/// PUTs hydra-admin `/consent/reject`.
+/// `/consent/deny` POST — validates CSRF and returns the native OP error
+/// redirect.
 #[allow(clippy::future_not_send)]
 pub async fn post_consent_deny(
     req: HttpRequest,
     form: ntex::web::types::Form<ConsentDecisionForm>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
@@ -590,49 +270,7 @@ pub async fn post_consent_deny(
         return render_error_forbidden(PublicErrorMessage::InvalidRequest);
     }
 
-    let Some(challenge) = form.consent_challenge.as_deref() else {
-        return post_consent_deny_native(req, &form, cfg.as_ref(), db.as_ref()).await;
-    };
-
-    // P5: delete (Hydra arm).
-    let info = match admin.get_consent(challenge).await {
-        Ok(info) => info,
-        Err(e) => {
-            tracing::warn!(error = %e, challenge = %challenge, "POST /consent/deny: get_consent failed");
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-    };
-
-    let reject = RejectRequest {
-        error: "access_denied".into(),
-        error_description: Some("user denied consent".into()),
-        status_code: Some(403),
-    };
-    match admin.reject_consent(challenge, &reject).await {
-        Ok(resp) => {
-            let subject = consent_subject_uuid(&info).ok();
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "consent_deny",
-                    outcome: "success",
-                    user_id: subject.as_ref(),
-                    client_id: Some(&info.client.client_id),
-                    auth_method: Some("consent"),
-                    detail: json!({
-                        "requested_scopes": sort_dedup_scopes(&info.requested_scope),
-                    }),
-                    ..AuditEvent::from_request(&req)
-                },
-            )
-            .await;
-            redirect(&resp.redirect_to)
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "reject_consent failed");
-            render_error(PublicErrorMessage::ContactSupport)
-        }
-    }
+    post_consent_deny_native(req, &form, cfg.as_ref(), db.as_ref()).await
 }
 
 #[allow(clippy::future_not_send)]
@@ -821,10 +459,6 @@ async fn resolve_native_session(
     })
 }
 
-fn consent_subject_uuid(info: &ConsentRequest) -> Result<Uuid, String> {
-    Uuid::parse_str(&info.subject).map_err(|e| format!("consent subject is not a UUID: {e}"))
-}
-
 fn sort_dedup_scopes(scopes: &[String]) -> Vec<String> {
     let mut sorted = scopes.to_vec();
     sorted.sort();
@@ -838,169 +472,9 @@ fn scopes_are_subset(requested: &[String], previously_granted: &[String]) -> boo
         .all(|scope| previously_granted.binary_search(scope).is_ok())
 }
 
-/// Sorted-deduped union of two scope sets. Used on the accept path to fold the
-/// freshly-requested scopes into the prior grant so the single source-of-truth
-/// ledger (`zeroship.oauth_grants`) accumulates rather than being overwritten by
-/// an incremental (subset) step-up request (spec §5.2/§5.4).
-fn union_scopes(a: &[String], b: &[String]) -> Vec<String> {
-    let mut out = a.to_vec();
-    out.extend_from_slice(b);
-    out.sort();
-    out.dedup();
-    out
-}
-
-async fn load_oauth_grant(
-    db: &compio_postgres::Client,
-    user_id: Uuid,
-    client_id: &str,
-) -> Result<Option<Vec<String>>, String> {
-    let rows = db
-        .query(
-            "SELECT granted_scopes \
-             FROM zeroship.oauth_grants \
-             WHERE user_id = $1 AND client_id = $2",
-            &[&user_id, &client_id],
-        )
-        .await
-        .map_err(|e| format!("select zeroship.oauth_grants: {e}"))?;
-
-    Ok(rows
-        .first()
-        .map(|row| sort_dedup_scopes(&row.get::<_, Vec<String>>("granted_scopes"))))
-}
-
-async fn upsert_oauth_grant(
-    db: &compio_postgres::Client,
-    user_id: Uuid,
-    client_id: &str,
-    granted_scopes: &[String],
-) -> Result<(), String> {
-    let granted_scopes = sort_dedup_scopes(granted_scopes);
-    db.execute(
-        "INSERT INTO zeroship.oauth_grants \
-             (user_id, client_id, granted_scopes, granted_at, updated_at) \
-         VALUES ($1, $2, $3, NOW(), NOW()) \
-         ON CONFLICT (user_id, client_id) DO UPDATE \
-         SET granted_scopes = EXCLUDED.granted_scopes, \
-             updated_at = NOW()",
-        &[&user_id, &client_id, &granted_scopes],
-    )
-    .await
-    .map_err(|e| format!("upsert zeroship.oauth_grants: {e}"))?;
-    Ok(())
-}
-
-async fn touch_oauth_grant(
-    db: &compio_postgres::Client,
-    user_id: Uuid,
-    client_id: &str,
-) -> Result<(), String> {
-    db.execute(
-        "UPDATE zeroship.oauth_grants SET last_used_at = NOW() \
-         WHERE user_id = $1 AND client_id = $2",
-        &[&user_id, &client_id],
-    )
-    .await
-    .map_err(|e| format!("touch zeroship.oauth_grants: {e}"))?;
-    Ok(())
-}
-
-/// Silently accept consent after the caller has already decided the request is
-/// eligible for the first-party fast path.
-#[allow(clippy::future_not_send)]
-async fn silent_accept(
-    admin: &HydraAdmin,
-    challenge: &str,
-    info: &ConsentRequest,
-    db: &compio_postgres::Client,
-) -> crate::error::Result<String> {
-    let id_token_claims = build_id_token_claims(db, &info.subject, &info.requested_scope).await;
-    let accept = AcceptConsentRequest {
-        grant_scope: info.requested_scope.clone(),
-        grant_access_token_audience: info.requested_access_token_audience.clone(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        session: Some(ConsentSession {
-            id_token: Some(id_token_claims),
-            access_token: None,
-        }),
-    };
-
-    match admin.accept_consent(challenge, &accept).await {
-        Ok(resp) => Ok(resp.redirect_to),
-        Err(e) => {
-            tracing::error!(error = %e, "accept_consent (silent) failed");
-            Err(e)
-        }
-    }
-}
-
-/// Reject the consent challenge with the OAuth `invalid_scope` error so the RP
-/// receives a spec-compliant error redirect (spec §5.2). Used when any
-/// requested scope is `Unknown` — neither identity, app-declared, nor platform
-/// vocabulary. Falls back to a rendered error page if Hydra reject fails.
-#[allow(clippy::future_not_send)]
-async fn reject_consent_invalid_scope(
-    admin: &HydraAdmin,
-    challenge: &str,
-    info: &ConsentRequest,
-    db: &compio_postgres::Client,
-) -> HttpResponse {
-    let reject = RejectRequest {
-        error: "invalid_scope".into(),
-        error_description: Some("requested scope is not declared by this app".into()),
-        status_code: Some(400),
-    };
-    match admin.reject_consent(challenge, &reject).await {
-        Ok(resp) => {
-            let subject = consent_subject_uuid(info).ok();
-            audit::emit(
-                db,
-                &AuditEvent {
-                    event_type: "consent_invalid_scope",
-                    outcome: "rejected",
-                    user_id: subject.as_ref(),
-                    client_id: Some(&info.client.client_id),
-                    auth_method: Some("consent"),
-                    detail: json!({
-                        "requested_scopes": sort_dedup_scopes(&info.requested_scope),
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await;
-            redirect(&resp.redirect_to)
-        }
-        Err(e) => {
-            tracing::error!(error = %e, challenge = %challenge, "reject_consent (invalid_scope) failed");
-            render_error(PublicErrorMessage::InvalidRequest)
-        }
-    }
-}
-
-async fn revoke_hydra_consent_sessions(admin: &HydraAdmin, subject: Uuid, client_id: &str) {
-    let subject = subject.to_string();
-    if let Err(e) = admin
-        .delete(
-            "/admin/oauth2/auth/sessions/consent",
-            &[("subject", subject.as_str()), ("client", client_id)],
-        )
-        .await
-    {
-        tracing::error!(
-            error = %e,
-            subject = %subject,
-            client_id = %client_id,
-            "consent: failed to compensate hydra consent accept after local grant write failure"
-        );
-    }
-}
-
 #[allow(clippy::future_not_send)]
 async fn render_consent_page(
-    challenge: &str,
-    return_to: Option<&str>,
+    return_to: &str,
     info: &ConsentRequest,
     db: &compio_postgres::Client,
     cfg: &AuthConfig,
@@ -1010,8 +484,7 @@ async fn render_consent_page(
     let csrf_token = csrf::generate_token();
     let client = load_client_display(db, info).await;
     let page = ConsentPage {
-        challenge,
-        return_to: return_to.unwrap_or(""),
+        return_to,
         csrf: &csrf_token,
         client_id: &info.client.client_id,
         client_name: &client.name,
@@ -1019,7 +492,6 @@ async fn render_consent_page(
         scopes: scope_views(&info.requested_scope, app_scope_defs),
         can_grant,
         grant_error: (!can_grant).then_some(CANNOT_GRANT),
-        is_hydra: return_to.is_none(),
     };
     let body = match page.render() {
         Ok(b) => b,
@@ -1221,7 +693,7 @@ fn partition_scopes(
 /// scopes and app-declared scopes) is always grantable by the authenticated
 /// subject and never touches `load_platform_policies`. Applied identically on
 /// the GET render path and the POST accept path so a self-grantable app scope
-/// reaches `accept_consent`, not just the render.
+/// reaches native consent issuance, not just the render.
 async fn classify_and_authorize(
     db: &compio_postgres::Client,
     info: &ConsentRequest,
@@ -1406,51 +878,6 @@ fn csrf_valid(
     cookie_token
         .as_deref()
         .is_some_and(|cookie| csrf::matches(form_token, cookie))
-}
-
-/// Build the `id_token` claims object based on which scopes the user granted.
-/// Claims appear only when their corresponding OIDC scope is in
-/// `granted_scope`; hydra supplies `sub` itself.
-#[allow(clippy::future_not_send)]
-async fn build_id_token_claims(
-    db: &compio_postgres::Client,
-    subject: &str,
-    granted_scope: &[String],
-) -> serde_json::Value {
-    let user = match users::find_by_id(db, subject).await {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::warn!(error = %e, subject = %subject, "consent: users::find_by_id failed");
-            None
-        }
-    };
-
-    let mut claims = serde_json::Map::new();
-    if let Some(u) = user.as_ref() {
-        if granted_scope.iter().any(|s| s == "email") {
-            claims.insert("email".into(), json!(u.email));
-            claims.insert(
-                "email_verified".into(),
-                json!(u.email_verified_at.is_some()),
-            );
-        }
-        if granted_scope.iter().any(|s| s == "profile") {
-            claims.insert("name".into(), json!(u.name));
-            if let Some(p) = u.avatar_url.as_ref() {
-                claims.insert("picture".into(), json!(p));
-            }
-        }
-    }
-    serde_json::Value::Object(claims)
-}
-
-fn redirect(to: &str) -> HttpResponse {
-    let mut r = HttpResponse::Found();
-    r.header(
-        LOCATION,
-        HeaderValue::from_str(to).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
-    r.finish()
 }
 
 fn render_error(message: PublicErrorMessage) -> HttpResponse {
