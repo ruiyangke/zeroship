@@ -225,6 +225,7 @@ impl OidcRp {
         code: &str,
         state_param: &str,
         stash_cookie: &str,
+        expected_client_id: &str,
     ) -> Result<(TokenClaims, String, Vec<String>), OidcRpError> {
         // 1. Decode + verify stash cookie.
         let stash = Stash::decode(stash_cookie, &self.stash_signing_key)
@@ -235,6 +236,17 @@ impl OidcRp {
         //    by value — mismatch → reject).
         if state_param != stash.state {
             return Err(OidcRpError::StateMismatch);
+        }
+
+        // 2b. Bind the exchange to THIS route's per-app client. The stash was
+        //     minted with the route's `oauth_client_id`; the session is later
+        //     projected under the caller's route client_id + sector. Enforce
+        //     the two agree as an INVARIANT (not merely an emergent property of
+        //     __Host- cookie origin-isolation): a stash whose client_id does not
+        //     match the route it is being redeemed on is a per-app-isolation
+        //     violation — fail closed (cross-tenant identity/PII bind otherwise).
+        if stash.client_id != expected_client_id {
+            return Err(OidcRpError::ClientMismatch);
         }
 
         // 3. POST /token with the code + PKCE verifier + brokered client auth.
@@ -744,6 +756,8 @@ pub enum OidcRpError {
     StashInvalid,
     #[error("state parameter mismatch")]
     StateMismatch,
+    #[error("stash client_id does not match the route it is redeemed on")]
+    ClientMismatch,
     #[error("token exchange: {0}")]
     TokenExchange(String),
     #[error("verify id_token: {0}")]

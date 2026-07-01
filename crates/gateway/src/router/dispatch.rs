@@ -1713,7 +1713,7 @@ async fn handle_auth_callback(
     // 3. Exchange the code with the OP + verify the ID token.
     let (claims, original_path, granted_scopes) = match state
         .oidc_rp
-        .finish_callback(&code, &state_param, &stash)
+        .finish_callback(&code, &state_param, &stash, &client_id)
         .await
     {
         Ok(p) => p,
@@ -1844,6 +1844,7 @@ fn oidc_callback_public_error(e: &oidc_rp::OidcRpError) -> &'static str {
         }
         oidc_rp::OidcRpError::StashInvalid
         | oidc_rp::OidcRpError::StateMismatch
+        | oidc_rp::OidcRpError::ClientMismatch
         | oidc_rp::OidcRpError::TokenExchange(_)
         | oidc_rp::OidcRpError::VerifyIdToken(_) => "sign-in could not be completed",
     }
