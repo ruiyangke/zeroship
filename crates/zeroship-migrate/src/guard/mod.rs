@@ -234,6 +234,7 @@ impl GuardConfig {
     /// inert empty shapes so the struct stays uniform. This is the single place
     /// `TrustProfile::Trusted` is named.
     #[must_use]
+    #[cfg(any(test, feature = "standalone-cli"))]
     pub(crate) fn trusted(_cap: &OperatorCapability) -> Self {
         Self {
             trust: TrustProfile::Trusted,
@@ -1238,7 +1239,7 @@ impl SqlGuard {
         if body_contains_superuser_role_escalation(&lower) {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
-        let allow_role = self.cfg.vendor_capabilities().allow_role;
+        let allow_role = self.cfg.trust() == TrustProfile::Platform;
         let needles: &[&str] = if allow_role {
             &["alter system"]
         } else {
@@ -2790,8 +2791,12 @@ mod tests {
         )
     }
 
+    fn confined_guard_config() -> GuardConfig {
+        GuardConfig::confined("zeroship")
+    }
+
     fn confined_guard() -> SqlGuard {
-        SqlGuard::new(GuardConfig::confined("zeroship"))
+        SqlGuard::new(confined_guard_config())
     }
 
     fn vendor_ir(op: crate::model::ir::Op) -> crate::model::ir::MigrationIr {
@@ -2835,6 +2840,20 @@ mod tests {
     fn decision_of(g: &SqlGuard, sql: &str) -> GuardDecision {
         match g.check(sql) {
             Ok(_) => GuardDecision::Allow,
+            Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
+            Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
+            Err(GuardError::Parse(_)) => GuardDecision::Parse,
+            Err(GuardError::SqliteRawSqlRejected | GuardError::MysqlRawSqlRejected) => {
+                GuardDecision::RawRejected
+            }
+        }
+    }
+
+    fn raw_body_backstop_decision(cfg: &GuardConfig, body: &str) -> GuardDecision {
+        let guard = SqlGuard::new(cfg.clone());
+        let raw = "CREATE FUNCTION public.f() RETURNS void LANGUAGE plpgsql AS $$...$$";
+        match guard.check_raw_island_body_backstop(body, raw) {
+            Ok(()) => GuardDecision::Allow,
             Err(GuardError::Denied { rule, .. }) => GuardDecision::Denied(rule),
             Err(GuardError::CrossSchema { .. }) => GuardDecision::CrossSchema,
             Err(GuardError::Parse(_)) => GuardDecision::Parse,
@@ -3017,6 +3036,63 @@ mod tests {
             GuardDecision::Allow,
             GuardDecision::Allow,
         );
+    }
+
+    #[test]
+    fn m2_stage2_site_1209_raw_island_body_backstop_behavior_lock() {
+        let body = "BEGIN PERFORM 'not sql create role hidden'; PERFORM 'touch search_path'; END;";
+        assert_eq!(
+            raw_body_backstop_decision(&confined_guard_config(), body),
+            GuardDecision::Denied(rule::BODY_INSPECTION),
+            "Confined raw-island body backstop must deny role/search_path needles"
+        );
+        assert_eq!(
+            raw_body_backstop_decision(&platform_guard_config(), body),
+            GuardDecision::Allow,
+            "Platform is the only posture whose body-token backstop relaxes role/search_path needles"
+        );
+        assert_eq!(
+            raw_body_backstop_decision(&trusted_guard_config(), body),
+            GuardDecision::Denied(rule::BODY_INSPECTION),
+            "Trusted raw-island body backstop must match the pre-refactor non-Platform decision"
+        );
+
+        let cfg = trusted_guard_config();
+        let author = trusted_author();
+        let op = crate::model::ir::Op::CreateFunction {
+            name: "raw_body_role_needles".into(),
+            schema: Some("public".into()),
+            args: None,
+            returns: "void".into(),
+            language: crate::model::ir::FuncLanguage::Plpgsql,
+            replace: Some(true),
+            volatility: None,
+            body: body.into(),
+        };
+
+        match author.lower_guarded(
+            &vendor_ir(op),
+            &cfg,
+            &crate::render::lower::LiveSchema::default(),
+        ) {
+            Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+                assert_eq!(denial.op_kind, "createFunction");
+                assert!(
+                    matches!(
+                        denial.source,
+                        GuardError::Denied {
+                            rule: rule::BODY_INSPECTION,
+                            ..
+                        }
+                    ),
+                    "Trusted createFunction must route through the raw-island body backstop, got {:?}",
+                    denial.source
+                );
+            }
+            other => panic!(
+                "Trusted createFunction role/search_path body must be denied through lower_guarded; got {other:?}"
+            ),
+        }
     }
 
     #[test]

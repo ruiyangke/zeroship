@@ -780,23 +780,24 @@ impl SealedProfile {
     /// Returns [`SealError::SupersededCeiling`] for stale ceiling versions and
     /// [`SealError::InvalidSeal`] for tampering or the wrong key.
     pub fn verify(&self, verifier: &SealVerifier) -> Result<(), SealError> {
+        let now_unix_secs = verifier.now_unix_secs();
         if self.ceiling_version != verifier.current_ceiling_version {
             return Err(SealError::SupersededCeiling {
                 sealed: self.ceiling_version,
                 current: verifier.current_ceiling_version,
             });
         }
-        if self.issued_at > verifier.now_unix_secs {
+        if self.issued_at > now_unix_secs {
             return Err(SealError::IssuedInFuture {
                 issued_at: self.issued_at,
-                now: verifier.now_unix_secs,
+                now: now_unix_secs,
             });
         }
-        let age_secs = verifier.now_unix_secs - self.issued_at;
+        let age_secs = now_unix_secs - self.issued_at;
         if age_secs > verifier.max_age_secs {
             return Err(SealError::StaleSeal {
                 issued_at: self.issued_at,
-                now: verifier.now_unix_secs,
+                now: now_unix_secs,
                 max_age_secs: verifier.max_age_secs,
             });
         }
@@ -943,16 +944,16 @@ impl SealedEffectiveProfile {
 pub struct SealVerifier {
     key: Vec<u8>,
     current_ceiling_version: u64,
-    now_unix_secs: u64,
     max_age_secs: u64,
     consumed_nonces: NonceSeenSet,
+    #[cfg(test)]
+    now_override: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl PartialEq for SealVerifier {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key
             && self.current_ceiling_version == other.current_ceiling_version
-            && self.now_unix_secs == other.now_unix_secs
             && self.max_age_secs == other.max_age_secs
     }
 }
@@ -978,23 +979,46 @@ impl SealVerifier {
     /// Returns [`SealError::InvalidKey`] when the MAC key is shorter than 32
     /// bytes.
     pub fn new(key: impl AsRef<[u8]>, current_ceiling_version: u64) -> Result<Self, SealError> {
-        Self::with_now(key, current_ceiling_version, current_unix_secs())
-    }
-
-    fn with_now(
-        key: impl AsRef<[u8]>,
-        current_ceiling_version: u64,
-        now_unix_secs: u64,
-    ) -> Result<Self, SealError> {
         let key = key.as_ref();
         validate_mac_key(key)?;
         Ok(Self {
             key: key.to_vec(),
             current_ceiling_version,
-            now_unix_secs,
             max_age_secs: SEAL_MAX_AGE_SECS,
             consumed_nonces: NonceSeenSet::default(),
+            #[cfg(test)]
+            now_override: None,
         })
+    }
+
+    #[cfg(test)]
+    fn with_now(
+        key: impl AsRef<[u8]>,
+        current_ceiling_version: u64,
+        now_unix_secs: u64,
+    ) -> Result<Self, SealError> {
+        let mut verifier = Self::new(key, current_ceiling_version)?;
+        verifier.now_override = Some(Arc::new(std::sync::atomic::AtomicU64::new(
+            now_unix_secs,
+        )));
+        Ok(verifier)
+    }
+
+    fn now_unix_secs(&self) -> u64 {
+        #[cfg(test)]
+        if let Some(now) = &self.now_override {
+            return now.load(std::sync::atomic::Ordering::SeqCst);
+        }
+
+        current_unix_secs()
+    }
+
+    #[cfg(test)]
+    fn set_now_for_test(&self, now_unix_secs: u64) {
+        let Some(now) = &self.now_override else {
+            panic!("set_now_for_test requires a verifier built with with_now");
+        };
+        now.store(now_unix_secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn consume_nonce(&self, nonce: &[u8], expires_at: u64) -> Result<(), SealError> {
@@ -1003,7 +1027,8 @@ impl SealVerifier {
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        seen.retain(|_, expiry| *expiry >= self.now_unix_secs);
+        let now_unix_secs = self.now_unix_secs();
+        seen.retain(|_, expiry| *expiry >= now_unix_secs);
         if seen.contains_key(nonce) {
             return Err(SealError::ReplayedNonce);
         }
@@ -1442,6 +1467,35 @@ mod tests {
                 now: got_now,
                 max_age_secs: SEAL_MAX_AGE_SECS
             }) if got_issued_at == issued_at && got_now == now
+        ));
+    }
+
+    #[test]
+    fn sealed_profile_verify_uses_verify_time_not_construction_time() {
+        let cap = SealApplier::new();
+        let constructed_at = 2_000_000_000;
+        let verify_at = constructed_at + SEAL_MAX_AGE_SECS + 1;
+        let sealed = SealedProfile::mint(
+            &cap,
+            PolicyProfile::platform(),
+            "app",
+            KEY,
+            b"nonce-verify-time".to_vec(),
+            constructed_at,
+            7,
+        )
+        .unwrap();
+        let verifier = verifier_at(constructed_at, 7);
+
+        verifier.set_now_for_test(verify_at);
+
+        assert!(matches!(
+            sealed.verify(&verifier),
+            Err(SealError::StaleSeal {
+                issued_at,
+                now,
+                max_age_secs: SEAL_MAX_AGE_SECS
+            }) if issued_at == constructed_at && now == verify_at
         ));
     }
 

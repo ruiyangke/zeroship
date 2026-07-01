@@ -170,6 +170,30 @@ pub enum DeployMigrateError {
         /// The I/O error.
         message: String,
     },
+    /// Recording a platform `.ts` migration failed before transient IR apply.
+    /// Routine creator deploys carry committed `.ir.json`, but the shared apply
+    /// error type can still surface this variant.
+    #[error("deploy-migrate record platform TS migration ({file}): {source}")]
+    IrRecord {
+        /// The `.ts` filename or directory.
+        file: String,
+        /// The recorder/build-front-end error.
+        #[source]
+        source: zeroship_migrate::frontend::BuildError,
+    },
+    /// Platform `.ts` migrations had duplicate 14-digit order prefixes.
+    #[error(
+        "deploy-migrate duplicate platform TS migration version {version}: \
+         files '{first}' and '{second}'"
+    )]
+    DuplicateTsVersion {
+        /// The duplicated 14-digit version prefix.
+        version: String,
+        /// The first file seen with this version.
+        first: String,
+        /// The second file seen with this version.
+        second: String,
+    },
     /// Introspecting the live schema (to build the IR ownership registry + the
     /// FK-inline live-table set) failed.
     #[error("deploy-migrate live snapshot: {0}")]
@@ -233,6 +257,18 @@ fn deploy_pg_ir_apply_error(e: zeroship_migrate::PostgresIrApplyError) -> Deploy
         zeroship_migrate::PostgresIrApplyError::Ir { file, source } => {
             DeployMigrateError::Ir { file, source }
         }
+        zeroship_migrate::PostgresIrApplyError::Record { file, source } => {
+            DeployMigrateError::IrRecord { file, source }
+        }
+        zeroship_migrate::PostgresIrApplyError::DuplicateTsVersion {
+            version,
+            first,
+            second,
+        } => DeployMigrateError::DuplicateTsVersion {
+            version,
+            first,
+            second,
+        },
         zeroship_migrate::PostgresIrApplyError::Apply(source) => {
             DeployMigrateError::from(source)
         }
