@@ -110,15 +110,6 @@ impl AuthRequest {
         prompt: Option<&str>,
         idp_hint: Option<&str>,
     ) -> Result<Self, AuthRequestError> {
-        let Some(return_to) = return_to::valid_path(return_to) else {
-            return Err(AuthRequestError::ReturnToNotSameOrigin);
-        };
-        let parsed = url::Url::parse(&format!("http://zeroship.local{return_to}"))
-            .map_err(|_| AuthRequestError::ReturnToParse)?;
-        if parsed.path() != "/oauth2/authorize" {
-            return Err(AuthRequestError::WrongPath);
-        }
-
         let client_id = required(client_id, AuthRequestError::MissingClientId)?;
         let redirect_uri = required(redirect_uri, AuthRequestError::MissingRedirectUri)?;
         url::Url::parse(&redirect_uri).map_err(|_| AuthRequestError::InvalidRedirectUri)?;
@@ -128,8 +119,8 @@ impl AuthRequest {
             client_id,
             redirect_uri,
             scopes: parse_scopes(scope.unwrap_or("")),
-            state: clean_optional(state),
-            nonce: clean_optional(nonce),
+            state: drop_empty(state),
+            nonce: drop_empty(nonce),
             prompt: clean_optional(prompt),
             idp_hint: clean_optional(idp_hint),
         })
@@ -176,6 +167,12 @@ fn clean_optional(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+fn drop_empty(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn parse_scopes(scope: &str) -> Vec<String> {
     let mut scopes = scope
         .split_ascii_whitespace()
@@ -205,8 +202,8 @@ mod tests {
             ("client_id", "oac_123"),
             ("redirect_uri", "https://app.zeroship.test/callback"),
             ("scope", "email openid email"),
-            ("state", "st-1"),
-            ("nonce", "nc-1"),
+            ("state", " st-1 "),
+            ("nonce", " nc-1 "),
             ("prompt", "login"),
             ("idp_hint", "google"),
         ]))
@@ -218,10 +215,24 @@ mod tests {
             request.scopes,
             vec!["email".to_string(), "openid".to_string()]
         );
-        assert_eq!(request.state.as_deref(), Some("st-1"));
-        assert_eq!(request.nonce.as_deref(), Some("nc-1"));
+        assert_eq!(request.state.as_deref(), Some(" st-1 "));
+        assert_eq!(request.nonce.as_deref(), Some(" nc-1 "));
         assert_eq!(request.prompt.as_deref(), Some("login"));
         assert_eq!(request.idp_hint.as_deref(), Some("google"));
+
+        let direct = AuthRequest::from_parts(
+            "/oauth2/authorize?state=a\\b",
+            Some("oac_123"),
+            Some("https://app.zeroship.test/callback"),
+            Some("openid"),
+            Some("a\\b"),
+            Some("nc-1"),
+            None,
+            None,
+        )
+        .expect("direct authorize params should not validate request target as return_to");
+        assert_eq!(direct.return_to, "/oauth2/authorize?state=a\\b");
+        assert_eq!(direct.state.as_deref(), Some("a\\b"));
     }
 
     #[test]
