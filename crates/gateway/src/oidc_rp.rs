@@ -139,6 +139,7 @@ impl OidcRp {
     #[must_use]
     pub fn build_authorize_redirect(
         &self,
+        client_id: &str,
         original_path: &str,
         redirect_uri: &str,
     ) -> (String, String) {
@@ -152,6 +153,7 @@ impl OidcRp {
 
         let stash = Stash {
             state: state.clone(),
+            client_id: client_id.to_string(),
             verifier,
             nonce: nonce.clone(),
             original_path: original_path.to_string(),
@@ -164,7 +166,7 @@ impl OidcRp {
         // values). The result is `application/x-www-form-urlencoded`
         // which is the historical query-string convention.
         let mut q = url::form_urlencoded::Serializer::new(String::new());
-        q.append_pair("client_id", &self.client_id);
+        q.append_pair("client_id", client_id);
         q.append_pair("response_type", "code");
         q.append_pair("scope", "openid offline_access email profile");
         q.append_pair("redirect_uri", redirect_uri);
@@ -222,7 +224,7 @@ impl OidcRp {
             .append_pair("grant_type", "authorization_code")
             .append_pair("code", code)
             .append_pair("redirect_uri", &stash.redirect_uri)
-            .append_pair("client_id", &self.client_id)
+            .append_pair("client_id", &stash.client_id)
             .append_pair("client_secret", &self.client_secret)
             .append_pair("code_verifier", &stash.verifier)
             .finish();
@@ -829,6 +831,7 @@ pub struct BrowserAuthorizeParams<'a> {
 #[derive(Debug, Serialize, Deserialize)]
 struct Stash {
     state: String,
+    client_id: String,
     verifier: String,
     nonce: String,
     original_path: String,
@@ -1063,6 +1066,7 @@ mod tests {
     fn make_stash() -> Stash {
         Stash {
             state: "s".into(),
+            client_id: "gateway".into(),
             verifier: "v".into(),
             nonce: "n".into(),
             original_path: "/p".into(),
@@ -1079,6 +1083,7 @@ mod tests {
             b"signing-key-1234".to_vec(),
         );
         let (url, stash) = rp.build_authorize_redirect(
+            "gateway",
             "/some/path",
             "https://myapp.zeroship.ai/__zeroship/auth/callback",
         );
@@ -1260,7 +1265,7 @@ mod tests {
             "secret",
             b"k".repeat(32),
         );
-        let (url, _) = rp.build_authorize_redirect("/", "https://app/cb");
+        let (url, _) = rp.build_authorize_redirect("gateway", "/", "https://app/cb");
         // No double slash before `/oauth2/auth`.
         assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"));
     }

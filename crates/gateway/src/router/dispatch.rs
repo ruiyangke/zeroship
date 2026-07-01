@@ -1861,7 +1861,11 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpRespons
 
     let (auth_url, stash) = state
         .oidc_rp
-        .build_authorize_redirect(&original_path, &redirect_uri);
+        .build_authorize_redirect(
+            &state.oidc_rp.client_id,
+            &original_path,
+            &redirect_uri,
+        );
 
     let mut builder = HttpResponse::Found();
     builder.header("location", auth_url);
