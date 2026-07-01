@@ -7,10 +7,11 @@
 //! guard (`crate::guard`) is built on top of this.
 
 use pg_query::protobuf::node::Node as NodeEnum;
-use pg_query::protobuf::{
-    self, AExprKind, AlterTableType, BoolExprType, CmdType, MergeMatchKind, ObjectType,
-};
+use pg_query::protobuf::{self, AlterTableType, CmdType, MergeMatchKind, ObjectType};
 use pg_query::NodeRef;
+use serde_json::Value;
+
+use crate::analysis::tree_walk::first_matching_node;
 
 /// Error parsing SQL for classification.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -267,6 +268,15 @@ pub fn data_security_class(node: &NodeEnum) -> DataSecurityClass {
     if let Some(operation) = destructive_operation_inner(node) {
         return DataSecurityClass::Destructive(operation);
     }
+    let Ok(json) = serde_json::to_value(node) else {
+        return DataSecurityClass::Unknown;
+    };
+    if let Some(operation) = first_destructive_tree_node(&json) {
+        return DataSecurityClass::Destructive(operation);
+    }
+    if has_tree_disqualifier(&json) {
+        return DataSecurityClass::Unknown;
+    }
     if is_non_destructive_statement(node) {
         return DataSecurityClass::NonDestructive;
     }
@@ -286,6 +296,32 @@ fn destructive_operation_inner(node: &NodeEnum) -> Option<&'static str> {
         NodeEnum::AlterTableStmt(at) => destructive_alter_table_operation(at),
         _ => None,
     }
+}
+
+fn first_destructive_tree_node(v: &Value) -> Option<&'static str> {
+    first_matching_node(v, &|key, body| match key {
+        "UpdateStmt" => Some("UPDATE"),
+        "DeleteStmt" => Some("DELETE"),
+        "TruncateStmt" => Some("TRUNCATE"),
+        "DropOwnedStmt" => Some("DROP OWNED"),
+        "DropStmt" => Some(destructive_drop_json_operation(body).unwrap_or("DROP")),
+        "MergeWhenClause" if merge_when_clause_json_is_matched_delete(body) => {
+            Some("MERGE matched DELETE")
+        }
+        "AlterTableCmd" => destructive_alter_table_cmd_json_operation(body),
+        _ => None,
+    })
+}
+
+fn has_tree_disqualifier(v: &Value) -> bool {
+    first_matching_node(v, &|key, body| match key {
+        // A non-delete MERGE is still row-affecting DML, but it is not a
+        // known data-loss shape. Do not vouch for it as NonDestructive.
+        "MergeStmt" => Some(()),
+        "AlterTableStmt" if !alter_table_json_is_non_destructive(body) => Some(()),
+        _ => None,
+    })
+    .is_some()
 }
 
 fn is_non_destructive_statement(node: &NodeEnum) -> bool {
@@ -337,57 +373,16 @@ fn alter_table_is_non_destructive(at: &protobuf::AlterTableStmt) -> bool {
         let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
             return false;
         };
-        let subtype = c.subtype;
-        [
-            AlterTableType::AtAddColumn,
-            AlterTableType::AtColumnDefault,
-            AlterTableType::AtCookedColumnDefault,
-            AlterTableType::AtDropNotNull,
-            AlterTableType::AtSetNotNull,
-            AlterTableType::AtSetStatistics,
-            AlterTableType::AtSetOptions,
-            AlterTableType::AtResetOptions,
-            AlterTableType::AtSetStorage,
-            AlterTableType::AtSetCompression,
-            AlterTableType::AtAddIndex,
-            AlterTableType::AtAddConstraint,
-            AlterTableType::AtAlterConstraint,
-            AlterTableType::AtValidateConstraint,
-            AlterTableType::AtAddIndexConstraint,
-            AlterTableType::AtSetRelOptions,
-            AlterTableType::AtResetRelOptions,
-            AlterTableType::AtSetIdentity,
-            AlterTableType::AtDropIdentity,
-            AlterTableType::AtAddIdentity,
-            AlterTableType::AtAttachPartition,
-            AlterTableType::AtEnableRowSecurity,
-            AlterTableType::AtForceRowSecurity,
-            AlterTableType::AtNoForceRowSecurity,
-            AlterTableType::AtDisableRowSecurity,
-        ]
-        .iter()
-        .any(|allowed| subtype == *allowed as i32)
+        alter_table_subtype_is_non_destructive(c.subtype)
     })
 }
 
-fn destructive_update_operation(update: &protobuf::UpdateStmt) -> Option<&'static str> {
-    match update.where_clause.as_deref().and_then(|n| n.node.as_ref()) {
-        None => Some("UPDATE without WHERE"),
-        Some(where_clause) if is_static_true_expr(where_clause) => {
-            Some("UPDATE with non-restrictive WHERE")
-        }
-        Some(_) => None,
-    }
+fn destructive_update_operation(_update: &protobuf::UpdateStmt) -> Option<&'static str> {
+    Some("UPDATE")
 }
 
-fn destructive_delete_operation(delete: &protobuf::DeleteStmt) -> Option<&'static str> {
-    match delete.where_clause.as_deref().and_then(|n| n.node.as_ref()) {
-        None => Some("DELETE without WHERE"),
-        Some(where_clause) if is_static_true_expr(where_clause) => {
-            Some("DELETE with non-restrictive WHERE")
-        }
-        Some(_) => None,
-    }
+fn destructive_delete_operation(_delete: &protobuf::DeleteStmt) -> Option<&'static str> {
+    Some("DELETE")
 }
 
 fn merge_has_matched_delete(merge: &protobuf::MergeStmt) -> bool {
@@ -399,116 +394,6 @@ fn merge_has_matched_delete(merge: &protobuf::MergeStmt) -> bool {
                     && c.command_type == CmdType::CmdDelete as i32
         )
     })
-}
-
-fn is_static_true_expr(node: &NodeEnum) -> bool {
-    match node {
-        NodeEnum::AConst(c) => const_bool(c) == Some(true),
-        NodeEnum::AExpr(expr) => {
-            expr.kind == AExprKind::AexprOp as i32
-                && operator_is(expr.name.as_slice(), "=")
-                && expr
-                    .lexpr
-                    .as_ref()
-                    .and_then(|n| n.node.as_ref())
-                    .and_then(const_value)
-                    .zip(
-                        expr.rexpr
-                            .as_ref()
-                            .and_then(|n| n.node.as_ref())
-                            .and_then(const_value),
-                    )
-                    .is_some_and(|(left, right)| left == right)
-        }
-        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::AndExpr as i32 => expr
-            .args
-            .iter()
-            .all(|arg| arg.node.as_ref().is_some_and(is_static_true_expr)),
-        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::OrExpr as i32 => expr
-            .args
-            .iter()
-            .any(|arg| arg.node.as_ref().is_some_and(is_static_true_expr)),
-        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::NotExpr as i32 => expr
-            .args
-            .first()
-            .and_then(|arg| arg.node.as_ref())
-            .is_some_and(is_static_false_expr),
-        _ => false,
-    }
-}
-
-fn is_static_false_expr(node: &NodeEnum) -> bool {
-    match node {
-        NodeEnum::AConst(c) => const_bool(c) == Some(false),
-        NodeEnum::AExpr(expr) => {
-            expr.kind == AExprKind::AexprOp as i32
-                && operator_is(expr.name.as_slice(), "=")
-                && expr
-                    .lexpr
-                    .as_ref()
-                    .and_then(|n| n.node.as_ref())
-                    .and_then(const_value)
-                    .zip(
-                        expr.rexpr
-                            .as_ref()
-                            .and_then(|n| n.node.as_ref())
-                            .and_then(const_value),
-                    )
-                    .is_some_and(|(left, right)| left != right)
-        }
-        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::AndExpr as i32 => expr
-            .args
-            .iter()
-            .any(|arg| arg.node.as_ref().is_some_and(is_static_false_expr)),
-        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::OrExpr as i32 => expr
-            .args
-            .iter()
-            .all(|arg| arg.node.as_ref().is_some_and(is_static_false_expr)),
-        NodeEnum::BoolExpr(expr) if expr.boolop == BoolExprType::NotExpr as i32 => expr
-            .args
-            .first()
-            .and_then(|arg| arg.node.as_ref())
-            .is_some_and(is_static_true_expr),
-        _ => false,
-    }
-}
-
-fn operator_is(name: &[protobuf::Node], op: &str) -> bool {
-    name.iter()
-        .filter_map(|n| string_value(n.node.as_ref()))
-        .next_back()
-        .is_some_and(|s| s == op)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ConstValue {
-    Bool(bool),
-    Int(i32),
-    Float(String),
-    String(String),
-}
-
-fn const_value(node: &NodeEnum) -> Option<ConstValue> {
-    let NodeEnum::AConst(c) = node else {
-        return None;
-    };
-    if c.isnull {
-        return None;
-    }
-    match c.val.as_ref()? {
-        protobuf::a_const::Val::Boolval(v) => Some(ConstValue::Bool(v.boolval)),
-        protobuf::a_const::Val::Ival(v) => Some(ConstValue::Int(v.ival)),
-        protobuf::a_const::Val::Fval(v) => Some(ConstValue::Float(v.fval.clone())),
-        protobuf::a_const::Val::Sval(v) => Some(ConstValue::String(v.sval.clone())),
-        protobuf::a_const::Val::Bsval(v) => Some(ConstValue::String(v.bsval.clone())),
-    }
-}
-
-fn const_bool(c: &protobuf::AConst) -> Option<bool> {
-    match c.val.as_ref()? {
-        protobuf::a_const::Val::Boolval(v) => Some(v.boolval),
-        _ => None,
-    }
 }
 
 fn destructive_drop_operation(remove_type: i32) -> Option<&'static str> {
@@ -532,25 +417,98 @@ fn destructive_drop_operation(remove_type: i32) -> Option<&'static str> {
     }
 }
 
+fn destructive_drop_json_operation(body: &Value) -> Option<&'static str> {
+    json_i32_field(body, "remove_type").and_then(destructive_drop_operation)
+}
+
 fn destructive_alter_table_operation(at: &protobuf::AlterTableStmt) -> Option<&'static str> {
     at.cmds.iter().find_map(|cmd| {
         let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
             return None;
         };
-        if c.subtype == AlterTableType::AtDropColumn as i32 {
-            Some("DROP COLUMN")
-        } else if c.subtype == AlterTableType::AtDropConstraint as i32 {
-            Some("DROP CONSTRAINT")
-        } else if c.subtype == AlterTableType::AtAlterColumnType as i32 {
-            Some("ALTER COLUMN TYPE")
-        } else if c.subtype == AlterTableType::AtDetachPartition as i32
-            || c.subtype == AlterTableType::AtDetachPartitionFinalize as i32
-        {
-            Some("DETACH PARTITION")
-        } else {
-            None
-        }
+        destructive_alter_table_subtype_operation(c.subtype)
     })
+}
+
+fn destructive_alter_table_cmd_json_operation(body: &Value) -> Option<&'static str> {
+    json_i32_field(body, "subtype").and_then(destructive_alter_table_subtype_operation)
+}
+
+fn destructive_alter_table_subtype_operation(subtype: i32) -> Option<&'static str> {
+    if subtype == AlterTableType::AtDropColumn as i32 {
+        Some("DROP COLUMN")
+    } else if subtype == AlterTableType::AtDropConstraint as i32 {
+        Some("DROP CONSTRAINT")
+    } else if subtype == AlterTableType::AtAlterColumnType as i32 {
+        Some("ALTER COLUMN TYPE")
+    } else if subtype == AlterTableType::AtDetachPartition as i32
+        || subtype == AlterTableType::AtDetachPartitionFinalize as i32
+    {
+        Some("DETACH PARTITION")
+    } else {
+        None
+    }
+}
+
+fn alter_table_json_is_non_destructive(body: &Value) -> bool {
+    let Some(cmds) = body.get("cmds").and_then(Value::as_array) else {
+        return false;
+    };
+    cmds.iter().all(|cmd| {
+        variant_body(cmd, "AlterTableCmd")
+            .and_then(|body| json_i32_field(body, "subtype"))
+            .is_some_and(alter_table_subtype_is_non_destructive)
+    })
+}
+
+fn alter_table_subtype_is_non_destructive(subtype: i32) -> bool {
+    [
+        AlterTableType::AtAddColumn,
+        AlterTableType::AtColumnDefault,
+        AlterTableType::AtCookedColumnDefault,
+        AlterTableType::AtDropNotNull,
+        AlterTableType::AtSetNotNull,
+        AlterTableType::AtSetStatistics,
+        AlterTableType::AtSetOptions,
+        AlterTableType::AtResetOptions,
+        AlterTableType::AtSetStorage,
+        AlterTableType::AtSetCompression,
+        AlterTableType::AtAddIndex,
+        AlterTableType::AtAddConstraint,
+        AlterTableType::AtAlterConstraint,
+        AlterTableType::AtValidateConstraint,
+        AlterTableType::AtAddIndexConstraint,
+        AlterTableType::AtSetRelOptions,
+        AlterTableType::AtResetRelOptions,
+        AlterTableType::AtSetIdentity,
+        AlterTableType::AtDropIdentity,
+        AlterTableType::AtAddIdentity,
+        AlterTableType::AtAttachPartition,
+        AlterTableType::AtEnableRowSecurity,
+        AlterTableType::AtForceRowSecurity,
+        AlterTableType::AtNoForceRowSecurity,
+        AlterTableType::AtDisableRowSecurity,
+    ]
+    .iter()
+    .any(|allowed| subtype == *allowed as i32)
+}
+
+fn merge_when_clause_json_is_matched_delete(body: &Value) -> bool {
+    json_i32_field(body, "match_kind") == Some(MergeMatchKind::MergeWhenMatched as i32)
+        && json_i32_field(body, "command_type") == Some(CmdType::CmdDelete as i32)
+}
+
+fn json_i32_field(body: &Value, field: &str) -> Option<i32> {
+    body.get(field)
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok())
+}
+
+fn variant_body<'a>(node: &'a Value, key: &str) -> Option<&'a Value> {
+    let object = node.as_object()?;
+    object
+        .get(key)
+        .or_else(|| object.get("node").and_then(|inner| inner.get(key)))
 }
 
 /// `DROP INDEX CONCURRENTLY` also cannot run in a transaction.
