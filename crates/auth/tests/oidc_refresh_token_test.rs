@@ -539,6 +539,36 @@ async fn introspect_active_access_token_returns_rfc7662_claims() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn introspect_access_token_is_confined_to_authenticated_client() {
+    let Some(fx_a) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let Some(fx_b) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        fx_a.cleanup().await;
+        return;
+    };
+    let token_b = issue_refresh(&fx_b, FULL_SCOPE).await;
+
+    let resp = introspect_request(
+        &fx_a,
+        &token_b.access_token,
+        Some("access_token"),
+        Some(basic_auth(&fx_a.client_id)),
+    )
+    .await
+    .expect("cross-client access introspect response");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.json::<Value>().await.expect("cross-client introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    fx_b.cleanup().await;
+    fx_a.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn introspect_expired_access_token_is_inactive() {
     let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
         return;
@@ -626,6 +656,111 @@ async fn introspect_refresh_token_before_and_after_revoke() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn introspect_refresh_token_is_confined_to_authenticated_client() {
+    let Some(fx_a) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let Some(fx_b) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        fx_a.cleanup().await;
+        return;
+    };
+    let token_b = issue_refresh(&fx_b, FULL_SCOPE).await;
+    let refresh_b = token_b.refresh_token.expect("client B refresh token");
+
+    let resp = introspect_request(
+        &fx_a,
+        &refresh_b,
+        Some("refresh_token"),
+        Some(basic_auth(&fx_a.client_id)),
+    )
+    .await
+    .expect("cross-client refresh introspect response");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.json::<Value>().await.expect("cross-client introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    fx_b.cleanup().await;
+    fx_a.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_rotated_refresh_token_is_inactive() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+
+    let rotated = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("refresh rotation response");
+    assert_eq!(rotated.status().as_u16(), 200);
+    let rotated = rotated.json::<TokenResponse>().await.expect("refresh json");
+    assert_ne!(rotated.refresh_token.as_deref(), Some(root_refresh.as_str()));
+
+    let inactive = introspect_request(
+        &fx,
+        &root_refresh,
+        Some("refresh_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("rotated refresh introspect response");
+    assert_eq!(inactive.status().as_u16(), 200);
+    assert_eq!(
+        inactive.json::<Value>().await.expect("inactive introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_reuse_detected_refresh_family_is_inactive() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let root = issue_refresh(&fx, FULL_SCOPE).await;
+    let root_refresh = root.refresh_token.expect("root refresh token");
+    let first = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("first refresh rotation");
+    assert_eq!(first.status().as_u16(), 200);
+    let first = first.json::<TokenResponse>().await.expect("first refresh json");
+    let child_refresh = first.refresh_token.expect("child refresh token");
+    let family_id = refresh_family_id(&fx).await;
+    expire_idempotency_window(&fx, &family_id).await;
+
+    let replay = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE))
+        .await
+        .expect("refresh replay response");
+    assert_eq!(replay.status().as_u16(), 400);
+    assert_error(replay, "invalid_grant").await;
+    assert_family_revoked(&fx, &family_id).await;
+
+    let inactive = introspect_request(
+        &fx,
+        &child_refresh,
+        Some("refresh_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("reuse-detected family introspect response");
+    assert_eq!(inactive.status().as_u16(), 200);
+    assert_eq!(
+        inactive.json::<Value>().await.expect("inactive introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn introspect_requires_valid_client_auth_before_token_status() {
     let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
         return;
@@ -649,6 +784,28 @@ async fn introspect_requires_valid_client_auth_before_token_status() {
     .expect("bad-auth introspect response");
     assert_eq!(bad.status().as_u16(), 401);
     assert_error(bad, "invalid_client").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn introspect_authenticates_before_missing_token_validation() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+
+    let unauthenticated = introspect_form_request(&fx, None, None, None)
+        .await
+        .expect("unauthenticated no-token introspect response");
+    assert_eq!(unauthenticated.status().as_u16(), 401);
+    assert_error(unauthenticated, "invalid_client").await;
+
+    let authenticated = introspect_form_request(&fx, None, None, Some(basic_auth(&fx.client_id)))
+        .await
+        .expect("authenticated no-token introspect response");
+    assert_eq!(authenticated.status().as_u16(), 400);
+    assert_error(authenticated, "invalid_request").await;
 
     fx.cleanup().await;
 }
@@ -960,8 +1117,20 @@ async fn introspect_request(
     token_type_hint: Option<&str>,
     authorization: Option<String>,
 ) -> Result<cyper::Response, cyper::Error> {
+    introspect_form_request(fx, Some(token), token_type_hint, authorization).await
+}
+
+#[allow(clippy::future_not_send)]
+async fn introspect_form_request(
+    fx: &Fixture,
+    token: Option<&str>,
+    token_type_hint: Option<&str>,
+    authorization: Option<String>,
+) -> Result<cyper::Response, cyper::Error> {
     let mut form = url::form_urlencoded::Serializer::new(String::new());
-    form.append_pair("token", token);
+    if let Some(token) = token {
+        form.append_pair("token", token);
+    }
     if let Some(hint) = token_type_hint {
         form.append_pair("token_type_hint", hint);
     }
