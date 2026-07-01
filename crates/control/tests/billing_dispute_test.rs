@@ -51,7 +51,7 @@ use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::notify::{BillingNotificationKind, RecordingNotifier};
 use zeroship_control::refund::{issue_refund, NativeRefundProvider, RefundDestination, RefundOutcome};
 use zeroship_control::{
-    stripe_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    stripe_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
 
@@ -122,7 +122,7 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
             auth_provider: zeroship_control::hydra_auth_provider("http://127.0.0.1:9"),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             metering_provider: zeroship_control::metering::provider::build_provider(

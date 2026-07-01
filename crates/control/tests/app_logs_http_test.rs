@@ -95,7 +95,7 @@ async fn build_test_state(db_url: &str, worker_urls: Vec<String>) -> Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
             auth_provider: zeroship_control::hydra_auth_provider("http://127.0.0.1:9"),
             logout_jti_cache: Arc::new(
                 zeroship_core::logout_token::LogoutJtiCache::default(),

@@ -1,17 +1,13 @@
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use ntex::http::Payload;
 use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
-use zeroship_core::auth_provider::{ProviderAuthz, VerifyTokenError};
-use zeroship_core::wrapper_revocation::{
-    family_revoked_at, revoked_after_for, RevocationCache, REVOCATION_CACHE_MAX_ENTRIES,
-};
+use zeroship_authn::VerifiedPrincipal;
 
 use crate::{http_util, AppState};
 
@@ -173,63 +169,12 @@ async fn guard_from_bearer(
     let Some(raw) = zeroship_core::auth::extract_bearer(header) else {
         return Ok(None);
     };
-    let claims = match state.pat_issuer.verify(raw) {
-        Ok(claims) => claims,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "control: bearer was not a valid PAT; trying OAuth introspection"
-            );
-            return oauth_guard_from_bearer(raw, state, request_ip, request_id).await;
-        }
-    };
-    let token_id = Uuid::parse_str(&claims.jti)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid bearer token id"))?;
-    let owner_id = Uuid::parse_str(&claims.owner)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid bearer owner"))?;
-
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT owner_id FROM zeroship.permission_tokens \
-             WHERE id = $1 \
-               AND owner_id = $2 \
-               AND policy_hash = $3 \
-               AND kind = 'pat' \
-               AND revoked_at IS NULL \
-               AND (expires_at IS NULL OR expires_at > NOW())",
-            &[&token_id, &owner_id, &claims.policy_hash],
-        )
+    state
+        .bearer_verifier()
+        .verify_bearer(raw, request_ip, request_id)
         .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "control: permission token lookup failed");
-            web::error::ErrorInternalServerError("permission token lookup failed")
-        })?;
-    let row = rows
-        .first()
-        .ok_or_else(|| web::error::ErrorUnauthorized("permission token not active"))?;
-    let principal_id: Uuid = row.get("owner_id");
-
-    if let Err(err) = state
-        .control_pg
-        .execute(
-            "UPDATE zeroship.permission_tokens SET last_used_at = NOW() WHERE id = $1",
-            &[&token_id],
-        )
-        .await
-    {
-        tracing::warn!(error = %err, "control: permission token last_used_at update failed");
-    }
-
-    Ok(Some(AuthzGuard {
-        principal_id,
-        token_id: Some(token_id),
-        token_policy: None,
-        mfa_verified: false,
-        mfa_age_seconds: None,
-        request_ip,
-        request_id,
-    }))
+        .map(AuthzGuard::from)
+        .map(Some)
 }
 
 fn request_id(req: &HttpRequest) -> String {
@@ -252,205 +197,16 @@ fn now_unix() -> Result<i64, String> {
     .map_err(|err| format!("clock overflow: {err}"))
 }
 
-const CONTROL_REVOCATION_CACHE_TTL_SECS: u64 = 10;
-
-static CONTROL_REVOCATION_CACHE: OnceLock<RevocationCache> = OnceLock::new();
-
-fn control_revocation_cache() -> &'static RevocationCache {
-    CONTROL_REVOCATION_CACHE.get_or_init(|| {
-        RevocationCache::with_ttl_and_capacity(
-            CONTROL_REVOCATION_CACHE_TTL_SECS,
-            REVOCATION_CACHE_MAX_ENTRIES,
-        )
-    })
-}
-
-async fn cached_revoked_after_for(
-    state: &AppState,
-    client_id: &str,
-    sub: &str,
-) -> Result<Option<i64>, web::Error> {
-    let cache = control_revocation_cache();
-    let now = Instant::now();
-    if let Some(cached) = cache.get(client_id, sub, now) {
-        return Ok(cached);
-    }
-
-    let revoked_after = revoked_after_for(&state.control_pg, client_id, sub)
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                error = %err,
-                client_id,
-                sub,
-                "control: token revocation lookup failed"
-            );
-            unauthorized_json("revocation_check_failed")
-        })?;
-    cache.store(client_id, sub, revoked_after, now);
-    Ok(revoked_after)
-}
-
-async fn reject_revoked_platform_token(
-    state: &AppState,
-    client_id: Option<&str>,
-    sub: &str,
-    iat: Option<u64>,
-) -> Result<(), web::Error> {
-    let (Some(client_id), Some(iat)) = (client_id, iat) else {
-        return Err(unauthorized_json("token_revocation_claims_missing"));
-    };
-    let iat = i64::try_from(iat).map_err(|_| web::error::ErrorUnauthorized("invalid token iat"))?;
-    let revoked_after = cached_revoked_after_for(state, client_id, sub).await?;
-    if family_revoked_at(revoked_after, iat) {
-        return Err(unauthorized_json("token_revoked"));
-    }
-    Ok(())
-}
-
-async fn oauth_guard_from_bearer(
-    token: &str,
-    state: &AppState,
-    request_ip: Option<IpAddr>,
-    request_id: String,
-) -> Result<Option<AuthzGuard>, web::Error> {
-    let verified = state
-        .auth_provider
-        .verify_token(token)
-        .await
-        .map_err(|err| match err {
-            VerifyTokenError::InactiveToken => unauthorized_json("inactive_token"),
-            VerifyTokenError::MissingSubject => {
-                web::error::ErrorUnauthorized("missing oauth sub").into()
-            }
-            VerifyTokenError::MissingIssuer | VerifyTokenError::UnknownIssuer(_) => {
-                web::error::ErrorUnauthorized("unknown oauth issuer").into()
-            }
-            VerifyTokenError::HydraIntrospection(err) => {
-                tracing::warn!(error = %err, "control: hydra introspect failed");
-                web::error::ErrorUnauthorized("oauth introspection failed").into()
-            }
-            VerifyTokenError::PlatformVerification(err) => {
-                tracing::warn!(error = %err, "control: platform token verify failed");
-                web::error::ErrorUnauthorized("platform token verification failed").into()
-            }
-        })?;
-    let (principal_id, token_policy) = match &verified.provider_authz {
-        ProviderAuthz::OAuthScope(raw_scope) => {
-            if !verified.aud.as_ref().is_some_and(|audiences| {
-                audiences
-                    .iter()
-                    .any(|audience| audience == &state.expected_oauth_audience)
-            }) {
-                return Err(unauthorized_json("wrong_audience"));
-            }
-            reject_revoked_platform_token(
-                state,
-                verified.client_id.as_deref(),
-                &verified.provider_subject,
-                verified.iat,
-            )
-            .await?;
-
-            let principal_id = Uuid::parse_str(&verified.provider_subject)
-                .map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
-            let token_policy = policy_from_scope_string(raw_scope, "invalid oauth scope")?;
-            (principal_id, token_policy)
+impl From<VerifiedPrincipal> for AuthzGuard {
+    fn from(principal: VerifiedPrincipal) -> Self {
+        Self {
+            principal_id: principal.principal_id,
+            token_id: principal.token_id,
+            token_policy: principal.token_policy,
+            mfa_verified: principal.mfa_verified,
+            mfa_age_seconds: principal.mfa_age_seconds,
+            request_ip: principal.request_ip,
+            request_id: principal.request_id,
         }
-        ProviderAuthz::GoTrueRole(role) => {
-            if role != "authenticated" {
-                return Err(web::error::ErrorUnauthorized("unauthenticated gotrue role").into());
-            }
-
-            let principal_id =
-                resolve_supabase_principal(state, &verified.provider_subject).await?;
-            let grants = load_principal_grants(state, principal_id).await?;
-            let raw_scope = grants.join(" ");
-            let token_policy =
-                policy_from_scope_string(&raw_scope, "invalid principal grant")?;
-            (principal_id, token_policy)
-        }
-    };
-
-    Ok(Some(AuthzGuard {
-        principal_id,
-        token_id: None,
-        token_policy: Some(token_policy),
-        mfa_verified: false,
-        mfa_age_seconds: None,
-        request_ip,
-        request_id,
-    }))
-}
-
-fn policy_from_scope_string(
-    raw_scope: &str,
-    error: &'static str,
-) -> Result<authz::Policy, web::Error> {
-    let scopes =
-        authz::parse_scope_string(raw_scope).map_err(|_| web::error::ErrorUnauthorized(error))?;
-    Ok(authz::scopes_to_policy(&scopes))
-}
-
-async fn resolve_supabase_principal(
-    state: &AppState,
-    provider_subject: &str,
-) -> Result<Uuid, web::Error> {
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT principal_id \
-             FROM zeroship.identity_links \
-             WHERE provider = 'supabase' AND provider_subject = $1",
-            &[&provider_subject],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                error = %err,
-                "control: supabase identity link lookup failed"
-            );
-            web::error::ErrorInternalServerError("identity link lookup failed")
-        })?;
-    // P-S2: links created during device-flow approval (JIT provisioning);
-    // this slice is read-side only.
-    let row = rows
-        .first()
-        .ok_or_else(|| web::error::ErrorUnauthorized("unlinked supabase principal"))?;
-    Ok(row.get("principal_id"))
-}
-
-async fn load_principal_grants(
-    state: &AppState,
-    principal_id: Uuid,
-) -> Result<Vec<String>, web::Error> {
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT grant_name \
-             FROM zeroship.principal_grants \
-             WHERE principal_id = $1 \
-             ORDER BY grant_name",
-            &[&principal_id],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                error = %err,
-                "control: principal grant lookup failed"
-            );
-            web::error::ErrorInternalServerError("principal grant lookup failed")
-        })?;
-    Ok(rows
-        .iter()
-        .map(|row| row.get::<_, String>("grant_name"))
-        .collect())
-}
-
-fn unauthorized_json(error: &'static str) -> web::Error {
-    web::error::InternalError::from_response(
-        error,
-        HttpResponse::Unauthorized().json(&json!({ "error": error })),
-    )
-    .into()
+    }
 }

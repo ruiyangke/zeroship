@@ -1,0 +1,24 @@
+[package]
+name = "zeroship-authn"
+version = "0.1.0"
+edition = "2021"
+description = "Shared control-plane bearer authentication primitives"
+
+[dependencies]
+base64 = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+compio-postgres = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
+jsonwebtoken = { workspace = true }
+ntex = { workspace = true }
+rand = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zeroship-authz = { workspace = true }
+zeroship-core = { workspace = true }
+
+[lints]
+workspace = true
