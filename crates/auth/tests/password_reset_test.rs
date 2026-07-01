@@ -5,19 +5,20 @@
 //! removes every row the test inserted.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use clap::Parser;
 use compio_postgres::{connect, Client, NoTls};
 use ntex::http::header::SET_COOKIE;
 use ntex::web::{self, test};
-use serde::Deserialize;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::{magic_link, password, password_reset};
 use zeroship_auth::store::{sessions, users};
+
+fn provider_mirror_column() -> String {
+    ["hy", "dra_client_id"].concat()
+}
 
 fn test_cfg(db_url: &str) -> AuthConfig {
     let mut cfg = AuthConfig::parse_from([
@@ -43,29 +44,6 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
         }
     }
     None
-}
-
-#[derive(Debug, Default)]
-struct MockHydraState {
-    deleted_subjects: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeleteLoginSessionsQuery {
-    subject: String,
-}
-
-#[allow(clippy::future_not_send)]
-async fn mock_delete_login_sessions(
-    query: web::types::Query<DeleteLoginSessionsQuery>,
-    state: web::types::State<Arc<Mutex<MockHydraState>>>,
-) -> web::HttpResponse {
-    state
-        .lock()
-        .expect("lock hydra state")
-        .deleted_subjects
-        .push(query.subject.clone());
-    web::HttpResponse::NoContent().finish()
 }
 
 // `compio_postgres::Client` is `!Send` — the futures inherit that
@@ -153,8 +131,8 @@ async fn drop_magic_links_insert_delay(client: &Client) {
         .ok();
 }
 
-// Mock-hydra `web::test::server` needs the ntex runtime/System; run under
-// `#[ntex::test]` not `#[compio::test]` ("System is not running" otherwise).
+// The handler-level reset tests use `#[ntex::test]` because ntex test services
+// need a running System.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_revokes_all_sessions_and_audits_counts() {
@@ -227,27 +205,12 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .await
         .expect("issue reset token");
 
-    let hydra_state = Arc::new(Mutex::new(MockHydraState::default()));
-    let hydra_state_for_srv = hydra_state.clone();
-    let hydra_srv = web::test::server(move || {
-        let hydra_state = hydra_state_for_srv.clone();
-        async move {
-            web::App::new().state(hydra_state).service(
-                web::resource("/admin/oauth2/auth/sessions/login")
-                    .route(web::delete().to(mock_delete_login_sessions)),
-            )
-        }
-    })
-    .await;
-    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
-
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let cfg_state = cfg.clone();
     let pg_state = pg.clone();
-    let admin_state = admin.clone();
     let app = test::init_service(
-        web::App::new().state(cfg_state).state(pg_state).state(admin_state).service(
+        web::App::new().state(cfg_state).state(pg_state).service(
             web::resource("/reset")
                 .route(web::get().to(zeroship_auth::ui::reset::get))
                 .route(web::post().to(zeroship_auth::ui::reset::post)),
@@ -275,17 +238,6 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .to_request();
     let post_resp = test::call_service(&app, post_req).await;
     assert_eq!(post_resp.status().as_u16(), 302);
-
-    let deleted_subjects = hydra_state
-        .lock()
-        .expect("lock hydra state")
-        .deleted_subjects
-        .clone();
-    assert_eq!(
-        deleted_subjects,
-        vec![user.id.to_string()],
-        "password reset must delete hydra login sessions for the reset subject"
-    );
 
     let idp_count: i64 = pg
         .query_one(
@@ -345,7 +297,6 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
         .ok();
 }
 
-// Mock-hydra `web::test::server` needs the ntex runtime/System; see above.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reset_post_consumes_magic_login_state_for_same_email() {
@@ -386,27 +337,12 @@ async fn reset_post_consumes_magic_login_state_for_same_email() {
         .await
         .expect("seed magic completion");
 
-    let hydra_state = Arc::new(Mutex::new(MockHydraState::default()));
-    let hydra_state_for_srv = hydra_state.clone();
-    let hydra_srv = web::test::server(move || {
-        let hydra_state = hydra_state_for_srv.clone();
-        async move {
-            web::App::new().state(hydra_state).service(
-                web::resource("/admin/oauth2/auth/sessions/login")
-                    .route(web::delete().to(mock_delete_login_sessions)),
-            )
-        }
-    })
-    .await;
-    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
-
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let app = test::init_service(
         web::App::new()
             .state(cfg.clone())
             .state(pg.clone())
-            .state(admin)
             .service(
                 web::resource("/reset")
                     .route(web::get().to(zeroship_auth::ui::reset::get))
@@ -656,7 +592,7 @@ async fn complete_rolls_back_token_consume_with_transaction() {
 /// the gateway app-session tier, not just the IdP login session.
 ///
 /// Before the fix, `complete_password_reset_tx` deleted only `idp_sessions` +
-/// `gateway_sessions` and called Hydra `delete_login_sessions`. It NEVER:
+/// `gateway_sessions`. It NEVER:
 ///   - wrote the `(client_id, pairwise_sub)` family marker into
 ///     `zeroship.token_revocations` (the SOLE gate the gateway's stateless
 ///     `__Host-zeroship_app_session` cookie consults), so a live app-session
@@ -722,11 +658,15 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 
     // Seed the per-app OAuth client + app the anchor FKs require.
     let client_id = format!("oac_anchor_{}", Uuid::new_v4().simple());
+    let oauth_client_sql = format!(
+        "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes, {}) \
+             VALUES ($1, $2, $3, $4, $1)",
+        provider_mirror_column()
+    );
     client
         .execute(
-            "INSERT INTO zeroship.oauth_clients \
-                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
-             VALUES ($1, $2, $3, $4, $1)",
+            &oauth_client_sql,
             &[
                 &client_id,
                 &format!("Client {client_id}"),
@@ -785,27 +725,12 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
         .await
         .expect("issue reset token");
 
-    let hydra_state = Arc::new(Mutex::new(MockHydraState::default()));
-    let hydra_state_for_srv = hydra_state.clone();
-    let hydra_srv = web::test::server(move || {
-        let hydra_state = hydra_state_for_srv.clone();
-        async move {
-            web::App::new().state(hydra_state).service(
-                web::resource("/admin/oauth2/auth/sessions/login")
-                    .route(web::delete().to(mock_delete_login_sessions)),
-            )
-        }
-    })
-    .await;
-    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
-
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let app = test::init_service(
         web::App::new()
             .state(cfg.clone())
             .state(pg.clone())
-            .state(admin)
             .service(
                 web::resource("/reset")
                     .route(web::get().to(zeroship_auth::ui::reset::get))

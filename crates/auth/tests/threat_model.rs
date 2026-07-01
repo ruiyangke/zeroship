@@ -9,34 +9,37 @@
 //! 5. `login_rate_limit_kicks_in` — `LOGIN_EIP` bucket throttles the 6th attempt
 //! 6. `session_id_rotates_post_login_success` — session cookie value differs across two logins
 //!
-//! Rows like "Open redirect on `redirect_uri`" and "Refresh-token reuse" are
-//! [hydra]-owned per §13 and live outside this harness.
-//!
-//! Every test skips when `AUTH_DB_URL` and `HYDRA_ADMIN_URL` aren't both set
-//! (mirroring `e2e_password.rs`).
+//! Every test skips when `AUTH_DB_URL` is unset.
 
 use uuid::Uuid;
 
 mod common;
 use common::{
-    cleanup_rate_limits_like, cleanup_user, location, read_set_cookie, rewrite_to_hydra_loopback,
-    CookieJar, Fixture, TEST_CONSOLE_ORIGIN,
+    cleanup_rate_limits_like, cleanup_user, read_set_cookie, CookieJar, Fixture,
+    TEST_CONSOLE_ORIGIN,
 };
+
+fn login_url(fx: &Fixture, return_to: &str) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("return_to", return_to)
+        .finish();
+    format!("{}/login?{query}", fx.auth_base)
+}
 
 // ─── Tests ───────────────────────────────────────────────────────────────
 
 /// §13 "Login CSRF": POST /login without the `csrf` form field must reject.
-/// The handler short-circuits before any DB or hydra call, returning the
+/// The handler short-circuits before any DB-backed login work, returning the
 /// re-rendered login form at status 400.
 #[ntex::test]
 async fn login_csrf_missing_field_rejected() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::csrf_missing] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+        eprintln!("[threat_model::csrf_missing] skip (need AUTH_DB_URL)");
         return;
     };
 
-    let challenge = fx.fresh_challenge().await;
-    let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);
+    let return_to = fx.fresh_challenge().await;
+    let login_url = login_url(&fx, &return_to);
 
     // First GET /login so we have a cookie — but we intentionally omit the
     // `csrf` form field, so the cookie/form match must fail.
@@ -83,12 +86,12 @@ async fn login_csrf_missing_field_rejected() {
 #[ntex::test]
 async fn login_csrf_mismatched_token_rejected() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::csrf_mismatch] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+        eprintln!("[threat_model::csrf_mismatch] skip (need AUTH_DB_URL)");
         return;
     };
 
-    let challenge = fx.fresh_challenge().await;
-    let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);
+    let return_to = fx.fresh_challenge().await;
+    let login_url = login_url(&fx, &return_to);
 
     let resp = fx
         .http
@@ -147,13 +150,13 @@ async fn login_csrf_mismatched_token_rejected() {
 #[ntex::test]
 async fn login_clickjacking_headers_present() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::clickjacking] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+        eprintln!("[threat_model::clickjacking] skip (need AUTH_DB_URL)");
         return;
     };
 
     // (a) The FRAMED route `/login` GET: relaxed frame-ancestors, NO XFO.
-    let challenge = fx.fresh_challenge().await;
-    let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);
+    let return_to = fx.fresh_challenge().await;
+    let login_url = login_url(&fx, &return_to);
     let resp = fx
         .http
         .request(http::Method::GET, &login_url)
@@ -184,8 +187,8 @@ async fn login_clickjacking_headers_present() {
     );
 
     // (b) A NON-framed route (`/healthz`) keeps the fail-closed default. We use
-    // /healthz because it needs no Hydra challenge and is always registered;
-    // the route-aware middleware decides framed-vs-strict purely on the path.
+    // /healthz because it needs no auth context and is always registered; the
+    // route-aware middleware decides framed-vs-strict purely on the path.
     let health_url = format!("{}/healthz", fx.auth_base);
     let resp = fx
         .http
@@ -236,12 +239,12 @@ async fn login_clickjacking_headers_present() {
 #[ntex::test]
 async fn login_referrer_policy_set() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::referrer] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+        eprintln!("[threat_model::referrer] skip (need AUTH_DB_URL)");
         return;
     };
 
-    let challenge = fx.fresh_challenge().await;
-    let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);
+    let return_to = fx.fresh_challenge().await;
+    let login_url = login_url(&fx, &return_to);
     let resp = fx
         .http
         .request(http::Method::GET, &login_url)
@@ -270,7 +273,7 @@ async fn login_referrer_policy_set() {
 #[ntex::test]
 async fn login_rate_limit_kicks_in() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::rate_limit] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+        eprintln!("[threat_model::rate_limit] skip (need AUTH_DB_URL)");
         return;
     };
 
@@ -288,8 +291,8 @@ async fn login_rate_limit_kicks_in() {
 
     let mut last_status: u16 = 0;
     for i in 1..=6 {
-        let challenge = fx.fresh_challenge().await;
-        let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);
+        let return_to = fx.fresh_challenge().await;
+        let login_url = login_url(&fx, &return_to);
 
         let resp = fx
             .http
@@ -344,8 +347,8 @@ async fn login_rate_limit_kicks_in() {
 // `Fixture` carries `!Send` ntex/cyper handles.
 #[allow(clippy::future_not_send)]
 async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
-    let challenge = fx.fresh_challenge().await;
-    let login_url = format!("{}/login?login_challenge={challenge}", fx.auth_base);
+    let return_to = fx.fresh_challenge().await;
+    let login_url = login_url(fx, &return_to);
 
     let resp = fx
         .http
@@ -384,28 +387,12 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
         .expect("send POST");
     assert_eq!(
         resp.status().as_u16(),
-        302,
-        "POST /login expected 302 success, got {}",
+        303,
+        "POST /login expected 303 success, got {}",
         resp.status()
     );
     let sid = read_set_cookie(&resp, "zsidp_session")
         .expect("zsidp_session cookie set on POST /login success");
-
-    // Drain the hydra redirect so the consumed login_challenge doesn't
-    // linger in a half-completed state — important for the second
-    // login, which needs a new challenge.
-    let to_hydra = location(&resp);
-    if !to_hydra.is_empty() {
-        let to_hydra_local = rewrite_to_hydra_loopback(&to_hydra);
-        // Best-effort — we don't assert on the outcome; we just want
-        // hydra to clean up the consumed challenge.
-        let _ = fx
-            .http
-            .request(http::Method::GET, &to_hydra_local)
-            .expect("build hydra follow")
-            .send()
-            .await;
-    }
     sid
 }
 
@@ -415,7 +402,7 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
 #[ntex::test]
 async fn session_id_rotates_post_login_success() {
     let Some(fx) = Fixture::boot("threat").await else {
-        eprintln!("[threat_model::rotate] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+        eprintln!("[threat_model::rotate] skip (need AUTH_DB_URL)");
         return;
     };
 

@@ -12,14 +12,16 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::{password, totp};
 use zeroship_auth::oidc::Issuer;
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions as session_store, totp as totp_store};
 
-use common::{location, pkce_challenge_s256, pkce_verifier, read_set_cookie, test_auth_config};
+use common::{
+    location, pkce_challenge_s256, pkce_verifier, provider_mirror_column, read_set_cookie,
+    test_auth_config,
+};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/native-cb";
@@ -73,29 +75,21 @@ impl Fixture {
         let email = format!("p4-{}@zeroship.test", Uuid::new_v4().simple());
         seed_user_client(&db, user_id, app_id, &client_id, &email).await;
 
-        let mut cfg_inner = test_auth_config(
-            &db_url,
-            "http://127.0.0.1:4445",
-            "http://127.0.0.1:4444",
-        );
+        let mut cfg_inner = test_auth_config(&db_url);
         cfg_inner.google_client_id = Some("mock-google-client".into());
         let cfg = Arc::new(cfg_inner);
-        let admin = HydraAdmin::new("http://127.0.0.1:4445");
-        let admin_state = admin.clone();
         let cfg_state = cfg.clone();
         let db_state = db.clone();
         let issuer_state = issuer.clone();
         let refresh_pool_state =
             zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         let srv = web::test::server(move || {
-            let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();
             let db_state = db_state.clone();
             let issuer_state = issuer_state.clone();
             let refresh_pool_state = refresh_pool_state.clone();
             async move {
                 web::App::new()
-                    .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
                     .state(issuer_state)
@@ -935,10 +929,14 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
         "email".to_string(),
         "read:notes".to_string(),
     ];
-    db.execute(
+    let sql = format!(
         "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id) \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, {}) \
          VALUES ($1, 'P4 native OP test', $2, $3, FALSE, $1)",
+        provider_mirror_column()
+    );
+    db.execute(
+        &sql,
         &[&client_id, &vec![REDIRECT_URI.to_string()], &scopes],
     )
     .await

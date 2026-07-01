@@ -1,6 +1,5 @@
-//! Magic-link native-completion coverage for de-Hydra P3.
+//! Magic-link native-completion coverage.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,12 +7,10 @@ use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use ntex::http::header::{LOCATION, SET_COOKIE};
 use ntex::web;
-use serde::Deserialize;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::csrf;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
@@ -51,40 +48,12 @@ impl Mailer for CaptureMailer {
     }
 }
 
-#[derive(Debug, Default)]
-struct MockHydraState {
-    accepts: AtomicUsize,
-    challenges: Mutex<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AcceptLoginQuery {
-    login_challenge: String,
-}
-
-async fn mock_accept_login(
-    query: web::types::Query<AcceptLoginQuery>,
-    state: web::types::State<Arc<MockHydraState>>,
-) -> web::HttpResponse {
-    state.accepts.fetch_add(1, Ordering::SeqCst);
-    state
-        .challenges
-        .lock()
-        .expect("lock hydra challenges")
-        .push(query.login_challenge.clone());
-    web::HttpResponse::Ok()
-        .content_type("application/json")
-        .body(r#"{"redirect_to":"https://hydra.example/after-login?login_verifier=ok"}"#)
-}
-
 struct MagicFixture {
     srv: ntex::web::test::TestServer,
-    _hydra_srv: ntex::web::test::TestServer,
     auth_base: String,
     pg: Arc<compio_postgres::Client>,
     http: cyper::Client,
     mailer: Arc<CaptureMailer>,
-    hydra_state: Arc<MockHydraState>,
 }
 
 impl MagicFixture {
@@ -104,30 +73,12 @@ impl MagicFixture {
         .detach();
         let pg = Arc::new(pg_client);
 
-        let hydra_state = Arc::new(MockHydraState::default());
-        let hydra_state_for_srv = hydra_state.clone();
-        let hydra_srv = web::test::server(move || {
-            let hydra_state = hydra_state_for_srv.clone();
-            async move {
-                web::App::new().state(hydra_state).service(
-                    web::resource("/admin/oauth2/auth/requests/login/accept")
-                        .route(web::put().to(mock_accept_login)),
-                )
-            }
-        })
-        .await;
-        let hydra_admin_url = hydra_srv.url("").trim_end_matches('/').to_string();
-
         let mut cfg = AuthConfig::parse_from([
             "zeroship-auth",
             "--addr",
             "127.0.0.1:0",
             "--db-url",
             &db_url,
-            "--hydra-admin-url",
-            &hydra_admin_url,
-            "--hydra-public-url",
-            "http://127.0.0.1:4444",
             "--dev-insecure",
             "--stash-signing-key",
             "test-stash-key-not-for-prod-32bytes!",
@@ -143,21 +94,17 @@ impl MagicFixture {
 
         let mailer = Arc::new(CaptureMailer::default());
         let mailer_state: Arc<dyn Mailer> = mailer.clone();
-        let admin = HydraAdmin::new(&hydra_admin_url);
         let cfg_state = cfg.clone();
         let pg_state = pg.clone();
-        let admin_state = admin.clone();
         let srv = web::test::server(move || {
             let cfg_state = cfg_state.clone();
             let pg_state = pg_state.clone();
             let mailer_state = mailer_state.clone();
-            let admin_state = admin_state.clone();
             async move {
                 web::App::new()
                     .state(cfg_state)
                     .state(pg_state)
                     .state(mailer_state)
-                    .state(admin_state)
                     .configure(server::configure(false, false))
             }
         })
@@ -166,22 +113,16 @@ impl MagicFixture {
 
         Some(Self {
             srv,
-            _hydra_srv: hydra_srv,
             auth_base,
             pg,
             http: cyper::Client::new(),
             mailer,
-            hydra_state,
         })
     }
 
     fn magic_url(&self, path_and_query: &str) -> String {
         let parsed = url::Url::parse(path_and_query).expect("magic link URL");
         format!("{}{}?{}", self.auth_base, parsed.path(), parsed.query().unwrap_or(""))
-    }
-
-    fn hydra_accept_count(&self) -> usize {
-        self.hydra_state.accepts.load(Ordering::SeqCst)
     }
 
 }
@@ -392,7 +333,6 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
     assert_eq!(redeem_resp.status().as_u16(), 303);
     assert_eq!(location(&redeem_resp), return_to);
     assert!(read_set_cookie(&redeem_resp, "zsidp_session").is_some());
-    assert_eq!(fx.hydra_accept_count(), 0, "native arm must not call Hydra");
 
     cleanup_email(&fx.pg, &email).await;
     drop(fx.srv);
@@ -449,7 +389,6 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
         .await
         .expect("send cross-device redeem");
     assert_eq!(redeem_resp.status().as_u16(), 200);
-    assert_eq!(fx.hydra_accept_count(), 0, "redeem device must not call Hydra");
 
     let code: String = fx
         .pg
@@ -483,7 +422,6 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
     assert_eq!(complete_resp.status().as_u16(), 303);
     assert_eq!(location(&complete_resp), return_to);
     assert!(read_set_cookie(&complete_resp, "zsidp_session").is_some());
-    assert_eq!(fx.hydra_accept_count(), 0, "native complete must not call Hydra");
 
     cleanup_email(&fx.pg, &email).await;
     drop(fx.srv);
@@ -533,7 +471,6 @@ async fn magic_start_rejects_open_redirect_return_to_without_persisting() {
     }
 
     assert_eq!(fx.mailer.count(), 0, "invalid return_to must not send mail");
-    assert_eq!(fx.hydra_accept_count(), 0);
     drop(fx.srv);
 }
 
@@ -553,6 +490,5 @@ async fn magic_start_rejects_wrong_path_and_crlf_return_to_without_persisting() 
     }
 
     assert_eq!(fx.mailer.count(), 0, "invalid return_to must not send mail");
-    assert_eq!(fx.hydra_accept_count(), 0);
     drop(fx.srv);
 }

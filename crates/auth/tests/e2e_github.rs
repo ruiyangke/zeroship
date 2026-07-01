@@ -22,7 +22,6 @@ use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::linker::PendingLink;
 use zeroship_auth::identity::password;
 use zeroship_auth::server;
@@ -64,8 +63,6 @@ fn relative_query_param(raw_path: &str, key: &str) -> Option<String> {
         .map(|(_, value)| value.into_owned())
 }
 
-fn test_admin(base: impl Into<String>) -> HydraAdmin { HydraAdmin::new(base) }
-
 // ─── Shared bootstrap ────────────────────────────────────────────────────
 
 struct NativeGithubFixture {
@@ -94,11 +91,7 @@ impl NativeGithubFixture {
         .detach();
         let pg = Arc::new(pg_client);
 
-        let mut cfg_inner = test_auth_config(
-            &db_url,
-            "http://127.0.0.1:9",
-            "http://127.0.0.1:4444",
-        );
+        let mut cfg_inner = test_auth_config(&db_url);
         cfg_inner.github_client_id = Some("mock-github-client".into());
         cfg_inner.github_client_secret = Some("mock-github-secret".into());
         cfg_inner.github_redirect_uri = "http://placeholder/oauth/github/callback".to_string();
@@ -108,19 +101,16 @@ impl NativeGithubFixture {
         cfg_inner.github_emails_url = mock.github_emails_url();
         let cfg = Arc::new(cfg_inner);
 
-        let admin_state = test_admin("http://127.0.0.1:9");
         let cfg_state = cfg.clone();
         let db_state = pg.clone();
         let refresh_pool_state =
             zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         let srv = web::test::server(move || {
-            let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();
             let db_state = db_state.clone();
             let refresh_pool_state = refresh_pool_state.clone();
             async move {
                 web::App::new()
-                    .state(admin_state)
                     .state(cfg_state)
                     .state(db_state)
                     .state(refresh_pool_state)

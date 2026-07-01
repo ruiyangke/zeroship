@@ -1,20 +1,10 @@
 //! `/logout` regression coverage.
 //!
 //! Pre-fix (bug #2): `crates/auth/src/server.rs` did not register a
-//! handler for `/logout`, so any GET / POST returned 404. This blocked
-//! every RP-initiated logout (`ops/hydra.yaml.urls.logout` 302s the
-//! user-agent here).
+//! handler for `/logout`, so any GET / POST returned 404.
 //!
-//! Post-fix: GET `/logout?logout_challenge=…` is wired to a handler. If
-//! hydra rejects the challenge as invalid we render a 400 HTML error
-//! page; if hydra accepts the challenge we render a 200 confirmation
-//! form. Either way: NOT 404.
-//!
-//! The "happy path with a real hydra-issued logout_challenge" test
-//! lives in the integration e2e harness — it requires driving a full
-//! login flow first to obtain an `id_token` to hand to
-//! `/oauth2/sessions/logout` (the only way to mint a real
-//! logout_challenge). That coverage is the followup.
+//! Post-fix: GET `/logout` is wired to the native confirmation form and POST
+//! `/logout` handles local session revocation. Either way: NOT 404.
 
 use std::sync::Arc;
 
@@ -23,7 +13,6 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::csrf;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::oidc::Issuer;
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
@@ -35,15 +24,10 @@ use common::test_auth_config;
 
 #[ntex::test]
 async fn logout_route_is_registered_returns_not_404() {
-    let (Ok(db_url), Ok(hydra_admin_url)) = (
-        std::env::var("AUTH_DB_URL"),
-        std::env::var("HYDRA_ADMIN_URL"),
-    ) else {
-        eprintln!("[logout_test] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("[logout_test] skip (need AUTH_DB_URL)");
         return;
     };
-    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
@@ -56,25 +40,32 @@ async fn logout_route_is_registered_returns_not_404() {
     .detach();
     let pg = Arc::new(pg_client);
 
-    let admin = HydraAdmin::new(&hydra_admin_url);
-    let cfg = Arc::new(test_auth_config(&db_url, &hydra_admin_url, &hydra_public));
-    let admin_state = admin.clone();
+    let cfg = Arc::new(test_auth_config(&db_url));
+    let issuer = Arc::new(
+        Issuer::from_signing_key(
+            &SigningKey::from_bytes(&[44u8; 32]),
+            [3u8; 32],
+            "https://auth.zeroship.test/oauth2".to_string(),
+        )
+        .expect("issuer"),
+    );
     let cfg_state = cfg.clone();
     let db_state = pg.clone();
+    let issuer_state = issuer.clone();
     let mailer_state: Arc<dyn Mailer> = Arc::new(StdoutMailer);
     let refresh_pool_state =
         zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
-        let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
+        let issuer_state = issuer_state.clone();
         let mailer_state = mailer_state.clone();
         let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
-                .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
+                .state(issuer_state)
                 .state(mailer_state)
                 .state(refresh_pool_state)
                 .configure(server::configure(false, false))
@@ -83,17 +74,12 @@ async fn logout_route_is_registered_returns_not_404() {
     .await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-    // Drive `/logout?logout_challenge=does-not-exist`. The handler is
-    // registered, so the response is the 400 HTML error page hydra
-    // surfaced when it couldn't resolve the fake challenge. Pre-fix
-    // the route was unmapped → ntex returned 404. The regression-
-    // failing assertion is on the absence of 404.
+    // Drive `/logout`. The handler is registered, so the response is the
+    // confirmation form. Pre-fix the route was unmapped -> ntex returned 404.
+    // The regression-failing assertion is on the absence of 404.
     let http = cyper::Client::new();
     let resp = http
-        .request(
-            http::Method::GET,
-            &format!("{auth_base}/logout?logout_challenge=test-fake-challenge-does-not-exist"),
-        )
+        .request(http::Method::GET, &format!("{auth_base}/logout"))
         .expect("build GET /logout")
         .send()
         .await
@@ -102,15 +88,12 @@ async fn logout_route_is_registered_returns_not_404() {
     let status = resp.status().as_u16();
     assert_ne!(
         status, 404,
-        "/logout MUST be registered — pre-fix it returned 404, blocking every RP-initiated logout (hydra's urls.logout points here)"
+        "/logout MUST be registered — pre-fix it returned 404"
     );
 
-    // Post-fix we either render a confirm form (200) when hydra
-    // accepts the challenge OR an error page (400) when it doesn't.
-    // The fake challenge above lands in the 400 arm.
     assert!(
         status == 200 || status == 400,
-        "expected 200 (form) or 400 (hydra rejected fake challenge); got {status}"
+        "expected 200 (form) or 400 (error page); got {status}"
     );
 
     // Body is HTML, not the ntex 404 fallback.
@@ -132,15 +115,10 @@ async fn logout_route_is_registered_returns_not_404() {
 /// 405 (route exists, method missing). Cover that.
 #[ntex::test]
 async fn logout_post_is_registered_returns_not_404_or_405() {
-    let (Ok(db_url), Ok(hydra_admin_url)) = (
-        std::env::var("AUTH_DB_URL"),
-        std::env::var("HYDRA_ADMIN_URL"),
-    ) else {
-        eprintln!("[logout_test] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("[logout_test] skip (need AUTH_DB_URL)");
         return;
     };
-    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
@@ -153,25 +131,32 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
     .detach();
     let pg = Arc::new(pg_client);
 
-    let admin = HydraAdmin::new(&hydra_admin_url);
-    let cfg = Arc::new(test_auth_config(&db_url, &hydra_admin_url, &hydra_public));
-    let admin_state = admin.clone();
+    let cfg = Arc::new(test_auth_config(&db_url));
+    let issuer = Arc::new(
+        Issuer::from_signing_key(
+            &SigningKey::from_bytes(&[44u8; 32]),
+            [3u8; 32],
+            "https://auth.zeroship.test/oauth2".to_string(),
+        )
+        .expect("issuer"),
+    );
     let cfg_state = cfg.clone();
     let db_state = pg.clone();
+    let issuer_state = issuer.clone();
     let mailer_state: Arc<dyn Mailer> = Arc::new(StdoutMailer);
     let refresh_pool_state =
         zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
-        let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
+        let issuer_state = issuer_state.clone();
         let mailer_state = mailer_state.clone();
         let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
-                .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
+                .state(issuer_state)
                 .state(mailer_state)
                 .state(refresh_pool_state)
                 .configure(server::configure(false, false))
@@ -181,7 +166,7 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
     let auth_base = srv.url("").trim_end_matches('/').to_string();
 
     let http = cyper::Client::new();
-    let body = "csrf=missing&logout_challenge=fake";
+    let body = "csrf=missing";
     let resp = http
         .request(http::Method::POST, &format!("{auth_base}/logout"))
         .expect("build POST /logout")
@@ -245,11 +230,7 @@ async fn logout_post_revokes_local_session_cookie() {
     .expect("seed local session");
     let pg = Arc::new(pg_client);
 
-    let cfg = Arc::new(test_auth_config(
-        &db_url,
-        "http://127.0.0.1:1",
-        "http://127.0.0.1:4444",
-    ));
+    let cfg = Arc::new(test_auth_config(&db_url));
     let issuer = Arc::new(
         Issuer::from_signing_key(
             &SigningKey::from_bytes(&[44u8; 32]),

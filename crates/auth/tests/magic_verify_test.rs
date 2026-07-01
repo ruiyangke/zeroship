@@ -8,7 +8,6 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::magic_link;
 
 fn test_cfg(db_url: &str) -> AuthConfig {
@@ -59,12 +58,10 @@ async fn verify_get_without_magic_cookie_does_not_consume_token() {
 
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
-    let admin = HydraAdmin::new("http://127.0.0.1:1");
     let app = test::init_service(
         web::App::new()
             .state(cfg)
             .state(pg.clone())
-            .state(admin)
             .service(
                 web::resource("/magic/verify")
                     .route(web::get().to(zeroship_auth::ui::magic::verify)),
