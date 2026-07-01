@@ -181,17 +181,28 @@ impl PolicyProfile {
         POLICY_KNOB_SEMANTICS
     }
 
-    /// Compose the operator ceiling with the submitted draft for the
-    /// engine-enforced data-security obligations.
+    /// Compose the operator ceiling with the submitted draft.
     ///
-    /// Stage S2 will extend this to every policy knob. For M4, the guard-backed
-    /// data-security obligations are the load-bearing part: the composed result
-    /// is what gets sealed and later lowered to [`GuardConfig`].
+    /// Permission knobs meet by tightening toward the smaller surface
+    /// (boolean-AND, set intersection, ordered/numeric minimum) and reject a
+    /// draft that tries to exceed the ceiling. Obligation knobs meet by unioning
+    /// upward so ceiling requirements cannot be removed by the draft.
     pub fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
-        let mut effective = draft.clone();
-        effective.data_security =
-            DataSecurityConfig::meet_ceiling_draft(&ceiling.data_security, &draft.data_security)?;
-        Ok(effective)
+        Ok(Self {
+            extends: None,
+            capabilities: PolicyCapabilities::meet_ceiling_draft(
+                &ceiling.capabilities,
+                &draft.capabilities,
+            )?,
+            operational: OperationalConfig::meet_ceiling_draft(
+                &ceiling.operational,
+                &draft.operational,
+            )?,
+            data_security: DataSecurityConfig::meet_ceiling_draft(
+                &ceiling.data_security,
+                &draft.data_security,
+            )?,
+        })
     }
 }
 
@@ -288,6 +299,56 @@ impl PolicyCapabilities {
             schemas: self.schemas.clone(),
         }
     }
+
+    fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
+        Ok(Self {
+            extension: meet_bool_permission(
+                "capabilities.extension",
+                ceiling.extension,
+                draft.extension,
+            )?,
+            schema: meet_bool_permission("capabilities.schema", ceiling.schema, draft.schema)?,
+            role: RoleCapabilityConfig::meet_ceiling_draft(&ceiling.role, &draft.role)?,
+            grant: meet_bool_permission("capabilities.grant", ceiling.grant, draft.grant)?,
+            rls: meet_bool_permission("capabilities.rls", ceiling.rls, draft.rls)?,
+            policy: meet_bool_permission("capabilities.policy", ceiling.policy, draft.policy)?,
+            function: meet_bool_permission(
+                "capabilities.function",
+                ceiling.function,
+                draft.function,
+            )?,
+            raw_sql: meet_bool_permission(
+                "capabilities.raw_sql",
+                ceiling.raw_sql,
+                draft.raw_sql,
+            )?,
+            raw_view_body: meet_bool_permission(
+                "capabilities.raw_view_body",
+                ceiling.raw_view_body,
+                draft.raw_view_body,
+            )?,
+            materialized_view: meet_bool_permission(
+                "capabilities.materialized_view",
+                ceiling.materialized_view,
+                draft.materialized_view,
+            )?,
+            cross_schema: meet_bool_permission(
+                "capabilities.cross_schema",
+                ceiling.cross_schema,
+                draft.cross_schema,
+            )?,
+            extensions: meet_string_permission_set(
+                "capabilities.extensions",
+                &ceiling.extensions,
+                &draft.extensions,
+            )?,
+            schemas: meet_string_permission_set(
+                "capabilities.schemas",
+                &ceiling.schemas,
+                &draft.schemas,
+            )?,
+        })
+    }
 }
 
 /// Role capability plus attribute allowlist placeholder.
@@ -301,6 +362,23 @@ pub struct RoleCapabilityConfig {
     /// enum and therefore rejected by serde.
     #[serde(default)]
     pub attrs: Vec<RoleAttribute>,
+}
+
+impl RoleCapabilityConfig {
+    fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
+        Ok(Self {
+            allow: meet_bool_permission(
+                "capabilities.role.allow",
+                ceiling.allow,
+                draft.allow,
+            )?,
+            attrs: meet_role_attribute_permission_set(
+                "capabilities.role.attrs",
+                &ceiling.attrs,
+                &draft.attrs,
+            )?,
+        })
+    }
 }
 
 /// Role attributes the future SB-2 guard may admit. `SUPERUSER` remains
@@ -352,6 +430,36 @@ impl Default for OperationalConfig {
 }
 
 impl OperationalConfig {
+    fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
+        if draft.index_creation.is_looser_than(ceiling.index_creation) {
+            return Err(SealError::PolicyExceedsCeiling {
+                knob: "operational.index_creation",
+            });
+        }
+        if draft.table_rewrite.is_looser_than(ceiling.table_rewrite) {
+            return Err(SealError::PolicyExceedsCeiling {
+                knob: "operational.table_rewrite",
+            });
+        }
+
+        Ok(Self {
+            index_creation: ceiling.index_creation.tightest(draft.index_creation),
+            lock_timeout_ms: meet_timeout_ms(
+                ceiling.lock_timeout_ms,
+                draft.lock_timeout_ms,
+                "operational.lock_timeout_ms",
+                PLATFORM_LOCK_TIMEOUT_CEILING_MS,
+            )?,
+            statement_timeout_ms: meet_timeout_ms(
+                ceiling.statement_timeout_ms,
+                draft.statement_timeout_ms,
+                "operational.statement_timeout_ms",
+                PLATFORM_STATEMENT_TIMEOUT_CEILING_MS,
+            )?,
+            table_rewrite: ceiling.table_rewrite.tightest(draft.table_rewrite),
+        })
+    }
+
     /// Apply the currently-backed operational knobs to an executor config clone.
     pub(crate) fn apply_to_executor_config(&self, exec_cfg: &mut ExecutorConfig) {
         let lock_ceiling = duration_millis_u64(exec_cfg.pg.lock_timeout);
@@ -459,6 +567,65 @@ fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+fn meet_bool_permission(
+    knob: &'static str,
+    ceiling: bool,
+    draft: bool,
+) -> Result<bool, SealError> {
+    if draft && !ceiling {
+        return Err(SealError::PolicyExceedsCeiling { knob });
+    }
+    Ok(ceiling && draft)
+}
+
+fn meet_string_permission_set(
+    knob: &'static str,
+    ceiling: &[String],
+    draft: &[String],
+) -> Result<Vec<String>, SealError> {
+    let mut effective = Vec::new();
+    for item in draft {
+        if !ceiling.contains(item) {
+            return Err(SealError::PolicyExceedsCeiling { knob });
+        }
+        if !effective.contains(item) {
+            effective.push(item.clone());
+        }
+    }
+    Ok(effective)
+}
+
+fn meet_role_attribute_permission_set(
+    knob: &'static str,
+    ceiling: &[RoleAttribute],
+    draft: &[RoleAttribute],
+) -> Result<Vec<RoleAttribute>, SealError> {
+    let mut effective = Vec::new();
+    for attr in draft {
+        if !ceiling.contains(attr) {
+            return Err(SealError::PolicyExceedsCeiling { knob });
+        }
+        if !effective.contains(attr) {
+            effective.push(*attr);
+        }
+    }
+    Ok(effective)
+}
+
+fn meet_timeout_ms(
+    ceiling: u64,
+    draft: u64,
+    knob: &'static str,
+    platform_ceiling_ms: u64,
+) -> Result<u64, SealError> {
+    validate_timeout_ms(ceiling, knob, platform_ceiling_ms)?;
+    validate_timeout_ms(draft, knob, platform_ceiling_ms)?;
+    if draft > ceiling {
+        return Err(SealError::PolicyExceedsCeiling { knob });
+    }
+    Ok(draft)
+}
+
 /// Index creation policy. Ordered from more restrictive to less restrictive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -468,6 +635,23 @@ pub enum IndexCreation {
     /// Allow today's blocking transactional index creation.
     #[default]
     AllowBlocking,
+}
+
+impl IndexCreation {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::RequireConcurrent => 0,
+            Self::AllowBlocking => 1,
+        }
+    }
+
+    const fn tightest(self, other: Self) -> Self {
+        if self.rank() <= other.rank() { self } else { other }
+    }
+
+    const fn is_looser_than(self, ceiling: Self) -> bool {
+        self.rank() > ceiling.rank()
+    }
 }
 
 /// Table rewrite policy. Ordered from more restrictive to less restrictive.
@@ -481,6 +665,24 @@ pub enum TableRewrite {
     /// Allow today's behavior.
     #[default]
     Allow,
+}
+
+impl TableRewrite {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Forbid => 0,
+            Self::Warn => 1,
+            Self::Allow => 2,
+        }
+    }
+
+    const fn tightest(self, other: Self) -> Self {
+        if self.rank() <= other.rank() { self } else { other }
+    }
+
+    const fn is_looser_than(self, ceiling: Self) -> bool {
+        self.rank() > ceiling.rank()
+    }
 }
 
 /// Data-security obligations. `require_rls` and `destructive_ops` are enforced
@@ -999,6 +1201,34 @@ impl SealedProfile {
     }
 }
 
+/// Seal an already-composed effective profile for shared-infra apply.
+///
+/// This is the public server seam over the crate-private [`SealedProfile::mint`]
+/// constructor. It generates the nonce and issued-at timestamp internally,
+/// validates the MAC key, and can only produce a [`SealedProfile`], whose
+/// posture type has no `Trusted`/belt-skip variant.
+///
+/// # Errors
+/// Returns [`SealError`] when the key is invalid or the effective profile claims
+/// a knob the engine cannot yet enforce.
+pub fn seal_effective_profile(
+    effective: PolicyProfile,
+    project_schema: &str,
+    mac_key: &[u8],
+    ceiling_version: u64,
+) -> Result<SealedProfile, SealError> {
+    let cap = SealApplier::new();
+    SealedProfile::mint(
+        &cap,
+        effective,
+        project_schema,
+        mac_key,
+        uuid::Uuid::new_v4().as_bytes().to_vec(),
+        current_unix_secs(),
+        ceiling_version,
+    )
+}
+
 impl SealedEffectiveProfile {
     fn migrator_unbacked_capability(&self) -> Option<&'static str> {
         let caps = &self.capabilities;
@@ -1432,6 +1662,57 @@ mod tests {
         let effective = DataSecurityConfig::meet_ceiling_draft(&ceiling, &draft).unwrap();
 
         assert_eq!(effective.destructive_ops, DestructiveOps::RequireApproval);
+    }
+
+    #[test]
+    fn public_seam_composes_and_seals_tighter_profile_without_trusted_posture() {
+        let ceiling = PolicyProfile::confined();
+        let mut draft = PolicyProfile::confined();
+        draft.operational.lock_timeout_ms = 1_000;
+        draft.data_security.require_rls = true;
+        draft.data_security.destructive_ops = DestructiveOps::Forbid;
+
+        let effective = crate::PolicyProfile::meet_ceiling_draft(&ceiling, &draft)
+            .expect("tighter draft should compose under the ceiling");
+
+        assert_eq!(effective.operational.lock_timeout_ms, 1_000);
+        assert!(effective.data_security.require_rls);
+        assert_eq!(effective.data_security.destructive_ops, DestructiveOps::Forbid);
+        assert_eq!(effective.vendor_capabilities(), VendorCapabilities::confined());
+
+        let sealed = crate::seal_effective_profile(effective, "app", KEY, 7)
+            .expect("composed effective profile should seal through the public seam");
+        sealed.verify(&SealVerifier::new(KEY, 7).unwrap()).unwrap();
+        assert_eq!(sealed.posture(), SealedPosture::Confined);
+
+        let guard_cfg = sealed.to_guard_config();
+        assert_ne!(guard_cfg.trust(), TrustProfile::Trusted);
+        assert!(!guard_cfg.skips_denylist_belt());
+        assert!(guard_cfg.require_rls());
+        assert_eq!(guard_cfg.destructive_ops(), DestructiveOps::Forbid);
+
+        let guard = crate::guard::SqlGuard::new(guard_cfg);
+        assert!(matches!(
+            guard.check("DROP TABLE users"),
+            Err(crate::guard::GuardError::DataSecurityPolicy {
+                rule: crate::guard::data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn policy_profile_meet_rejects_draft_permission_escalation() {
+        let ceiling = PolicyProfile::confined();
+        let mut draft = PolicyProfile::confined();
+        draft.capabilities.raw_sql = true;
+
+        assert!(matches!(
+            PolicyProfile::meet_ceiling_draft(&ceiling, &draft),
+            Err(SealError::PolicyExceedsCeiling {
+                knob: "capabilities.raw_sql"
+            })
+        ));
     }
 
     #[test]
@@ -1893,17 +2174,8 @@ mod tests {
 
     #[test]
     fn sealed_profile_type_has_no_trusted_posture() {
-        let cap = SealApplier::new();
-        let sealed = SealedProfile::mint(
-            &cap,
-            PolicyProfile::platform(),
-            "app",
-            KEY,
-            b"nonce-1".to_vec(),
-            ISSUED_AT,
-            7,
-        )
-        .unwrap();
+        let sealed = crate::seal_effective_profile(PolicyProfile::platform(), "app", KEY, 7)
+            .unwrap();
         match sealed.posture() {
             SealedPosture::Confined | SealedPosture::Platform => {}
         }
