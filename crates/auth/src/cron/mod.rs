@@ -28,7 +28,7 @@ pub fn spawn_all(
     admin: HydraAdmin,
     db: Arc<compio_postgres::Client>,
     cfg: Arc<AuthConfig>,
-    refresh_pool: crate::op::refresh::RefreshSessionPool,
+    refresh_pool: crate::oidc::refresh::RefreshSessionPool,
 ) {
     let db_jwk = db.clone();
     let cfg_jwk = cfg.clone();

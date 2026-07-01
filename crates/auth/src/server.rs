@@ -9,7 +9,7 @@ use zeroship_core::oidc_verify::JwksCache;
 use crate::config::AuthConfig;
 use crate::headers::{RequestContextMiddleware, SecurityHeaders};
 use crate::hydra_client::HydraAdmin;
-use crate::op;
+use crate::oidc;
 use crate::ui;
 use zeroship_mailer::{Mailer, RelayForwardMailer};
 
@@ -35,14 +35,14 @@ pub fn configure(
     github_enabled: bool,
 ) -> impl Fn(&mut web::ServiceConfig) {
     move |cfg: &mut web::ServiceConfig| {
-        op::authorization_code::configure(cfg);
-        op::device_token::configure(cfg);
+        oidc::authorization_code::configure(cfg);
+        oidc::device_token::configure(cfg);
         cfg.service(healthz)
             .service(readyz)
             .service(style)
-            .service(op::metadata::jwks)
-            .service(op::metadata::openid_configuration)
-            .service(op::metadata::oauth_authorization_server)
+            .service(oidc::metadata::jwks)
+            .service(oidc::metadata::openid_configuration)
+            .service(oidc::metadata::oauth_authorization_server)
             .service(
                 web::resource("/login")
                     .route(web::get().to(ui::login::get))
@@ -317,8 +317,8 @@ pub async fn run(
     google_jwks: Option<Arc<JwksCache>>,
     mailer: Arc<dyn Mailer>,
     relay_forward_mailer: RelayForwardMailer,
-    op_issuer: Arc<op::Issuer>,
-    refresh_pool: op::refresh::RefreshSessionPool,
+    op_issuer: Arc<oidc::Issuer>,
+    refresh_pool: oidc::refresh::RefreshSessionPool,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();

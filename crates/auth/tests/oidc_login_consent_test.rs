@@ -14,7 +14,7 @@ use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::{password, totp};
-use zeroship_auth::op::Issuer;
+use zeroship_auth::oidc::Issuer;
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions as session_store, totp as totp_store};
@@ -84,7 +84,7 @@ impl Fixture {
         let db_state = db.clone();
         let issuer_state = issuer.clone();
         let refresh_pool_state =
-            zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
+            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         let srv = web::test::server(move || {
             let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();

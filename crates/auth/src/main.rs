@@ -265,7 +265,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "REFRESH_IDEM_KEY_FILE / --refresh-idem-key-file is required".into(),
         )
     })?;
-    let op_issuer = zeroship_auth::op::Issuer::from_files(
+    let op_issuer = zeroship_auth::oidc::Issuer::from_files(
         auth_signing_key_file,
         auth_pairwise_salt_file,
         cfg.public_url(),
@@ -292,7 +292,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let refresh_pool = zeroship_auth::op::refresh::RefreshSessionPool::new(
+    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(
         cfg.db_url.clone(),
         cfg.refresh_pool_size,
     );

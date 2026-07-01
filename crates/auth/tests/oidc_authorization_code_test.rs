@@ -15,9 +15,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::op::issuer::oidc_at_hash;
-use zeroship_auth::op::metadata::jwks_document;
-use zeroship_auth::op::{
+use zeroship_auth::oidc::issuer::oidc_at_hash;
+use zeroship_auth::oidc::metadata::jwks_document;
+use zeroship_auth::oidc::{
     AccessTokenClaims, IdTokenClaims, Issuer, ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
 };
 use zeroship_auth::server;
@@ -108,7 +108,7 @@ impl Fixture {
         let db_state = db.clone();
         let issuer_state = issuer.clone();
         let refresh_pool_state =
-            zeroship_auth::op::refresh::RefreshSessionPool::new(db_url.clone(), 4);
+            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
         let srv = web::test::server(move || {
             let admin_state = admin_state.clone();
             let cfg_state = cfg_state.clone();

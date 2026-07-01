@@ -37,7 +37,7 @@ use crate::hydra_client::types::{
     AcceptConsentRequest, ConsentRequest, ConsentSession, RejectRequest,
     OAuth2Client,
 };
-use crate::op::authorization_code::persist_consent_grant;
+use crate::oidc::authorization_code::persist_consent_grant;
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions as session_store;

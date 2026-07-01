@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_auth::op::{Issuer, PrincipalAccessTokenMint, ACCESS_TOKEN_TTL_SECS};
+use zeroship_auth::oidc::{Issuer, PrincipalAccessTokenMint, ACCESS_TOKEN_TTL_SECS};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
     authz_guard::AuthzGuard, device_handlers, token_handlers, AppState, EnvStore, Quota,

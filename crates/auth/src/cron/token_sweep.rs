@@ -12,7 +12,7 @@ use std::time::Duration;
 use compio_postgres::Client;
 
 use crate::error::{AuthError, Result};
-use crate::op::refresh;
+use crate::oidc::refresh;
 
 const INTERVAL_SECS: u64 = 60 * 60;
 

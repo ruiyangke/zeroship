@@ -12,7 +12,7 @@ use sha2::{Digest, Sha512};
 
 use crate::advisory_lock::{with_advisory_lock, OP_SIGNING_KEY_BOOTSTRAP_LOCK};
 use crate::error::{AuthError, Result};
-use crate::op::signing;
+use crate::oidc::signing;
 
 /// RFC 9068 access-token type header.
 pub const ACCESS_TOKEN_TYP: &str = "at+jwt";
@@ -101,7 +101,7 @@ pub struct Issuer {
 
 impl std::fmt::Debug for Issuer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("op::Issuer")
+        f.debug_struct("oidc::Issuer")
             .field("kid", &self.kid)
             .field("issuer", &self.issuer)
             .finish_non_exhaustive()

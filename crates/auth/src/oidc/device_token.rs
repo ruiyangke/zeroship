@@ -10,7 +10,7 @@ use zeroship_authz::Scope;
 use zeroship_core::auth::{extract_bearer, validate_control_key};
 
 use crate::config::AuthConfig;
-use crate::op::{Issuer, PrincipalAccessTokenMint, ACCESS_TOKEN_TTL_SECS};
+use crate::oidc::{Issuer, PrincipalAccessTokenMint, ACCESS_TOKEN_TTL_SECS};
 
 pub const INTERNAL_PLATFORM_TOKEN_PATH: &str = "/internal/platform-token";
 

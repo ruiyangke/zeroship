@@ -21,11 +21,11 @@ use zeroship_core::typed_id;
 
 use crate::advisory_lock::{lock_refresh_family_xact, lock_refresh_user_xact};
 use crate::config::AuthConfig;
-use crate::op::authorization_code::{
+use crate::oidc::authorization_code::{
     clean_optional, load_client, mint_access_token, parse_scopes, required_param, scope_subset,
     sort_dedup, OAuthClient, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
 };
-use crate::op::{Issuer, ACCESS_TOKEN_TTL_SECS};
+use crate::oidc::{Issuer, ACCESS_TOKEN_TTL_SECS};
 
 const REFRESH_TOKEN_BYTES: usize = 32;
 const REFRESH_TOKEN_PREFIX: &str = "zrt_";

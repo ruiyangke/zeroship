@@ -14,8 +14,8 @@ use serde_json::Value;
 use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::hydra_client::HydraAdmin;
-use zeroship_auth::op::Issuer;
-use zeroship_auth::op::refresh::RefreshSessionPool;
+use zeroship_auth::oidc::Issuer;
+use zeroship_auth::oidc::refresh::RefreshSessionPool;
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
@@ -512,7 +512,7 @@ async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let rotate = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
-    let revoke = zeroship_auth::op::refresh::revoke_user_refresh_families(
+    let revoke = zeroship_auth::oidc::refresh::revoke_user_refresh_families(
         &fx.refresh_pool,
         fx.user_id,
         "credential_bump_test",
