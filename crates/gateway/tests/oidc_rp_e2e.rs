@@ -356,8 +356,21 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let code = query_param(&cb_url, "code").expect("code param");
     let state = query_param(&cb_url, "state").expect("state param");
 
+    // MAJOR-1 regression: redeeming this stash under a DIFFERENT route client_id
+    // must fail closed (per-app isolation is an enforced invariant, not merely an
+    // emergent property of __Host- cookie origin-isolation). The client check is
+    // before the code exchange, so the one-time code is untouched for the real
+    // call below.
+    let mismatch = rp
+        .finish_callback(&code, &state, &stash, "oac_someotherapp000000000000")
+        .await;
+    assert!(
+        matches!(mismatch, Err(zeroship_gateway::oidc_rp::OidcRpError::ClientMismatch)),
+        "stash redeemed under a mismatched route client_id must fail ClientMismatch, got {mismatch:?}"
+    );
+
     let (claims, original_path, granted_scopes) = rp
-        .finish_callback(&code, &state, &stash)
+        .finish_callback(&code, &state, &stash, &client_id)
         .await
         .expect("finish_callback");
     assert_eq!(original_path, "/some/path");
