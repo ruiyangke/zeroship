@@ -101,9 +101,9 @@ use zeroship_migrate::plan::pending::PendingContractRefusal;
 use zeroship_migrate::{
     compute_manifest, connect, load_dir_migrations, provision_migrator, recognizes_contract_apply,
     Approval, ApprovalScope, ApplyError, ConnectError, DeclarativeApplyError, DriftError,
-    EngineError, ExecutorConfig, IrAuthor, LiveSchema, LoadAndLowerGuardedError, LoaderError,
-    LockMode, Migration, MigrationBackend, MigrationEngine, Phase, PlanStep, PostgresBackend,
-    RenameStep, RoleError, SqlDialect,
+    DdlKind, EngineError, ExecutorConfig, IrAuthor, LiveSchema, LoadAndLowerGuardedError,
+    LoaderError, LockMode, Migration, MigrationBackend, MigrationEngine, Phase, PlanStep,
+    PostgresBackend, RenameStep, RoleError, SqlDialect,
 };
 
 /// What a successful deploy-migrate produced (for logging / the deploy log).
@@ -291,9 +291,10 @@ fn journal_error(source: zeroship_migrate::JournalError) -> DeployMigrateError {
 
 /// Raw `.sql` uses text-derived flags, so `DROP INDEX` cannot know whether the
 /// target is unique. Close that gap at the deploy leg, where the live app schema
-/// is available: a pending raw SQL migration that drops a live UNIQUE index is
-/// treated as approval-gated without mutating the migration's checksum-bearing
-/// flags.
+/// is available: a pending raw SQL migration that drops a live UNIQUE index, or
+/// drops an index name made ambiguous by earlier in-batch index create/rename
+/// statements, is treated as approval-gated without mutating the migration's
+/// checksum-bearing flags.
 async fn prevalidate_raw_sql_unique_drop_approval(
     conn: &compio_postgres::Client,
     backend: &PostgresBackend<'_>,
@@ -306,7 +307,8 @@ async fn prevalidate_raw_sql_unique_drop_approval(
     if candidates.is_empty() {
         return Ok(());
     }
-    let pending = pending_raw_sql_migrations(backend, exec_cfg, candidates).await?;
+    let pending =
+        pending_raw_sql_migrations(backend, exec_cfg, migrations.iter().collect()).await?;
     let gated =
         raw_sql_unique_drop_versions(conn, &exec_cfg.project_schema, pending.into_iter()).await?;
     if gated.is_empty() {
@@ -388,19 +390,55 @@ async fn raw_sql_unique_drop_versions<'a, I>(
 where
     I: IntoIterator<Item = &'a Migration>,
 {
+    let migrations: Vec<&'a Migration> = migrations.into_iter().collect();
+    let fail_closed_for_ambiguous_names = raw_sql_bundle_may_mutate_index_names(&migrations)?;
+
     let mut gated = BTreeSet::new();
     for migration in migrations {
-        if raw_sql_drops_live_unique_index(conn, project_schema, migration).await? {
+        if raw_sql_drop_index_requires_approval(
+            conn,
+            project_schema,
+            migration,
+            fail_closed_for_ambiguous_names,
+        )
+        .await?
+        {
             gated.insert(migration.version.as_str().to_string());
         }
     }
     Ok(gated)
 }
 
-async fn raw_sql_drops_live_unique_index(
+fn raw_sql_bundle_may_mutate_index_names(
+    migrations: &[&Migration],
+) -> Result<bool, DeployMigrateError> {
+    for migration in migrations {
+        let classes = zeroship_migrate::classify(&migration.up).map_err(|source| {
+            DeployMigrateError::Load(LoaderError::Parse {
+                name: migration.name.clone(),
+                source,
+            })
+        })?;
+        if classes.iter().any(|class| {
+            matches!(
+                &class.kind,
+                DdlKind::CreateIndex | DdlKind::CreateIndexConcurrently
+            ) || matches!(
+                &class.kind,
+                DdlKind::Other(kind) if kind.starts_with("RenameStmt(")
+            )
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn raw_sql_drop_index_requires_approval(
     conn: &compio_postgres::Client,
     project_schema: &str,
     migration: &Migration,
+    fail_closed_for_ambiguous_names: bool,
 ) -> Result<bool, DeployMigrateError> {
     let targets =
         zeroship_migrate::drop_index_targets(&migration.up).map_err(|source| {
@@ -416,18 +454,21 @@ async fn raw_sql_drops_live_unique_index(
         if schema != project_schema {
             continue;
         }
-        if live_index_is_unique(conn, schema, &target.name).await? {
-            return Ok(true);
+        match live_index_uniqueness(conn, schema, &target.name).await? {
+            Some(true) => return Ok(true),
+            Some(false) => {}
+            None if fail_closed_for_ambiguous_names => return Ok(true),
+            None => {}
         }
     }
     Ok(false)
 }
 
-async fn live_index_is_unique(
+async fn live_index_uniqueness(
     conn: &compio_postgres::Client,
     schema: &str,
     index: &str,
-) -> Result<bool, DeployMigrateError> {
+) -> Result<Option<bool>, DeployMigrateError> {
     let rows = conn
         .query(
             "SELECT x.indisunique \
@@ -441,7 +482,7 @@ async fn live_index_is_unique(
         )
         .await
         .map_err(DeployMigrateError::RawSqlDropIndexCatalog)?;
-    Ok(rows.first().is_some_and(|row| row.get::<_, bool>("indisunique")))
+    Ok(rows.first().map(|row| row.get::<_, bool>("indisunique")))
 }
 
 /// Provision the app's per-app role + schema and apply the bundle's pending
@@ -980,11 +1021,10 @@ async fn collect_bundle_facts(
     // (1) `.sql` leg: a destructive `.sql` migration's version is its own version-id;
     //     a `.sql` migration is one Ddl step whose `up` is the file body.
     let migrations = load_dir_migrations(migrations_dir)?;
+    let raw_sql_drop_gated_versions =
+        raw_sql_unique_drop_versions(conn, &schema, migrations.iter()).await?;
     for m in &migrations {
-        if m.flags.destructive {
-            gated.insert(m.version.as_str().to_string());
-        }
-        if raw_sql_drops_live_unique_index(conn, &schema, m).await? {
+        if m.flags.destructive || raw_sql_drop_gated_versions.contains(m.version.as_str()) {
             gated.insert(m.version.as_str().to_string());
         }
         ddl_up_by_version.insert(m.version.as_str().to_string(), m.up.clone());

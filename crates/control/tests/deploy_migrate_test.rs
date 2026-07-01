@@ -609,6 +609,135 @@ async fn deploy_migrate_raw_sql_unique_index_drop_is_approval_gated() {
 }
 
 #[compio::test]
+async fn deploy_migrate_raw_sql_unique_index_rename_then_drop_is_approval_gated() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let dir1 = migrations_dir(&[(
+        "V0001__create_users_unique_index.sql",
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL); \
+         CREATE UNIQUE INDEX users_email_uniq ON users (email);",
+    )]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("base table + unique index applies");
+    assert!(
+        index_is_unique(&conn, &app_id, "users_email_uniq").await,
+        "setup must create a live UNIQUE index"
+    );
+    let _ = std::fs::remove_dir_all(&dir1);
+
+    let dir2 = migrations_dir(&[
+        (
+            "V0002__rename_unique_idx.sql",
+            "ALTER INDEX users_email_uniq RENAME TO users_email_tmp;",
+        ),
+        (
+            "V0003__drop_renamed_unique_idx.sql",
+            "DROP INDEX users_email_tmp;",
+        ),
+    ]);
+    let expected_version = zeroship_migrate::migration_id_for_version(3)
+        .as_str()
+        .to_string();
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("reviewer plan must see the renamed raw .sql UNIQUE-index drop");
+    assert_eq!(
+        reviewed,
+        vec![expected_version],
+        "raw .sql rename-then-DROP of a live UNIQUE index must be review-scoped"
+    );
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("routine deploy must refuse rename-then-DROP of a UNIQUE index");
+    assert!(
+        matches!(
+            err,
+            DeployMigrateError::Apply(zeroship_migrate::EngineError::ApprovalRequired)
+        ),
+        "expected approval refusal for raw .sql rename-then-DROP, got {err:?}"
+    );
+    assert!(
+        index_exists(&conn, &app_id, "users_email_uniq").await,
+        "refused rename-then-DROP must leave the original UNIQUE index in place"
+    );
+    assert!(
+        !index_exists(&conn, &app_id, "users_email_tmp").await,
+        "refused rename-then-DROP must apply nothing before the gate"
+    );
+    assert_eq!(journaled_count(&conn, &app_id).await, 1);
+
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+#[compio::test]
+async fn deploy_migrate_raw_sql_create_unique_then_drop_is_approval_gated() {
+    let Some(conn) = admin_conn().await else {
+        eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
+        return;
+    };
+    let app_id = fresh_app_id();
+    cleanup_app(&conn, &app_id).await;
+
+    let dir1 = migrations_dir(&[(
+        "V0001__create_users.sql",
+        "CREATE TABLE users (id bigint PRIMARY KEY, email text NOT NULL);",
+    )]);
+    apply_bundle_migrations(&admin_dsn(), &app_id, &dir1)
+        .await
+        .expect("base table applies");
+    let _ = std::fs::remove_dir_all(&dir1);
+
+    let dir2 = migrations_dir(&[
+        (
+            "V0002__create_unique_idx.sql",
+            "CREATE UNIQUE INDEX users_email_tmp ON users (email);",
+        ),
+        (
+            "V0003__drop_created_unique_idx.sql",
+            "DROP INDEX users_email_tmp;",
+        ),
+    ]);
+    let expected_version = zeroship_migrate::migration_id_for_version(3)
+        .as_str()
+        .to_string();
+    let reviewed = plan_reviewed_versions(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect("reviewer plan must see the created-then-dropped raw .sql UNIQUE index");
+    assert_eq!(
+        reviewed,
+        vec![expected_version],
+        "raw .sql CREATE UNIQUE INDEX then DROP INDEX must be review-scoped"
+    );
+
+    let err = apply_bundle_migrations(&admin_dsn(), &app_id, &dir2)
+        .await
+        .expect_err("routine deploy must refuse CREATE UNIQUE INDEX then DROP INDEX");
+    assert!(
+        matches!(
+            err,
+            DeployMigrateError::Apply(zeroship_migrate::EngineError::ApprovalRequired)
+        ),
+        "expected approval refusal for raw .sql create-then-DROP, got {err:?}"
+    );
+    assert!(
+        !index_exists(&conn, &app_id, "users_email_tmp").await,
+        "refused create-then-DROP must apply nothing before the gate"
+    );
+    assert_eq!(journaled_count(&conn, &app_id).await, 1);
+
+    let _ = std::fs::remove_dir_all(&dir2);
+    cleanup_app(&conn, &app_id).await;
+}
+
+#[compio::test]
 async fn deploy_migrate_raw_sql_plain_index_drop_is_not_approval_gated() {
     let Some(conn) = admin_conn().await else {
         eprintln!("SKIP: zeroship_migrate_test :5440 unreachable");
