@@ -67,13 +67,13 @@ pub struct TotpChallengePage<'a> {
     pub is_hydra: bool,
 }
 
-/// `/signup` GET page. Same `login_challenge` carries through so that
-/// after account creation we can flow straight back into hydra's
-/// `accept_login`.
+/// `/signup` GET page. Carries exactly one continuation target: Hydra's
+/// `login_challenge` or native `return_to`.
 #[derive(Debug, Template)]
 #[template(path = "signup.html")]
 pub struct SignupPage<'a> {
     pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
 }

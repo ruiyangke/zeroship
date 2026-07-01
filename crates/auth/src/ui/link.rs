@@ -42,6 +42,7 @@ use crate::identity::email as email_validation;
 use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
+use crate::oidc::auth_request::AuthRequest;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
@@ -406,6 +407,11 @@ pub async fn post(
         )
         .await;
 
+        let Some(native_return_to) = validated_native_return_to(native_return_to) else {
+            tracing::warn!("link native return_to failed use-time validation");
+            return render_error_page(PublicErrorMessage::InvalidRequest);
+        };
+
         let mut resp = return_to::see_other(native_return_to);
         resp.header(
             SET_COOKIE,
@@ -508,6 +514,35 @@ fn render_link_error_with_status(
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
+}
+
+fn validated_native_return_to(return_to: &str) -> Option<&str> {
+    AuthRequest::parse_return_to(return_to).ok()?;
+    return_to::valid_path(return_to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_native_return_to;
+
+    #[test]
+    fn native_return_to_guard_rejects_open_redirects_at_use_time() {
+        for bad in ["//evil.com", "https://evil.com"] {
+            assert_eq!(validated_native_return_to(bad), None);
+        }
+    }
+
+    #[test]
+    fn native_return_to_guard_requires_authorize_path() {
+        assert_eq!(validated_native_return_to("/me"), None);
+    }
+
+    #[test]
+    fn native_return_to_guard_accepts_same_origin_authorize_path() {
+        let return_to =
+            "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        assert_eq!(validated_native_return_to(return_to), Some(return_to));
+    }
 }
 
 fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
