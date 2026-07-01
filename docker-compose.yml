@@ -2,9 +2,9 @@
 # *.zeroship.localhost dev domain.
 #
 # ⚠️  DEV ONLY — NOT for production. Hardcodes weak secrets (platform-key,
-#     master-key, worker-key), runs every service with --dev-insecure (admin /
-#     internal auth relaxed), and publishes the privileged hydra admin API
-#     (:4445). All of this is gated behind --dev-insecure and a private box.
+#     master-key, worker-key), and runs every service with --dev-insecure
+#     (admin / internal auth relaxed). All of this is gated behind
+#     --dev-insecure and a private box.
 #
 # Usage:
 #   docker compose build && docker compose pull   # build/pull all images AHEAD
@@ -73,11 +73,11 @@ services:
       timeout: 5s
       retries: 10
 
-  # Platform schema migrations (control/auth/platform schemas). One-shot, like
-  # hydra-migrate: runs the `zeroship-migrate` binary against the shared DB then
-  # exits 0. control/auth gate on its successful completion, so they only ever
-  # boot against a fully-migrated schema. Hydra owns its own schema separately
-  # (hydra-migrate). Hand-authored Flyway-style migrations live in db/migrations/.
+  # Platform schema migrations (control/auth/platform schemas). One-shot: runs
+  # the `zeroship-migrate` binary against the shared DB then exits 0.
+  # control/auth gate on its successful completion, so they only ever boot
+  # against a fully-migrated schema. Hand-authored Flyway-style migrations live
+  # in db/migrations/.
   #
   # Runs the SAME `zeroship-platform:dev` image the native services use (the
   # Dockerfile builds + installs the `zeroship-migrate` bin), under the
@@ -110,13 +110,12 @@ services:
     # All five native services share ONE built image (built+tagged once,
     # not five times) — they differ only by `command`.
     image: zeroship-platform:dev
-    # Self-heal transient boot races (hydra-admin not ready yet; concurrent
-    # first-boot migrations with auth on the shared control/authz schema).
+    # Self-heal transient first-boot races with auth on the shared
+    # control/authz schema.
     restart: on-failure
-    # Secrets (--db / --control-key / --master-key) and the Hydra URLs
-    # (--hydra-public-url / --hydra-admin-url) are NOT passed as flags: they come
-    # from ops/zeroship.toml ([secrets] env references + [auth]), mounted at the
-    # well-known path below. The flags that remain are genuinely per-binary
+    # Secrets (--db / --control-key / --master-key) are NOT passed as flags:
+    # they come from ops/zeroship.toml ([secrets] env references), mounted at
+    # the well-known path below. The flags that remain are genuinely per-binary
     # operational args the config schema does not cover.
     command: >
       zeroship-control
@@ -124,7 +123,6 @@ services:
         --bind 0.0.0.0
         --blob-store /data/bundles
         --dev-insecure
-        --allow-remote-hydra-admin
         --app-base-domain zeroship.localhost
         --bootstrap-console
         --console-host console.zeroship.localhost
@@ -180,8 +178,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      hydra:
-        condition: service_started
 
   gateway:
     build: .
@@ -222,9 +218,8 @@ services:
       ZEROSHIP_DATABASE_URL: postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship
       ZEROSHIP_CONTROL_KEY: platform-key
       ZEROSHIP_WORKER_KEY: worker-key
-      # OAuth2 client_secret registered for the `gateway` client in
-      # ops/auth-clients.example.toml. The gateway exchanges this on
-      # the per-app OIDC code-exchange (Phase 3 §10.2).
+      # OAuth2 client_secret for the `gateway` client. The gateway exchanges
+      # this on the per-app OIDC code-exchange (Phase 3 §10.2).
       GATEWAY_OIDC_SECRET: ${GATEWAY_OIDC_SECRET:-dev-secret-rotate-me-too}
       # HMAC key signing the per-request __Host-zs_oidc_stash cookie.
       # Tampering is rejected at decode time; rotating this key
@@ -351,25 +346,24 @@ services:
     volumes:
       - redis-data:/data
 
-  # zeroship-auth — OIDC IdP UI + RP in front of the hydra kernel. The gateway
-  # redirects unauthenticated end users to it (gateway's
+  # zeroship-auth — native OIDC OP + UI. The gateway redirects
+  # unauthenticated end users to it (gateway's
   # --auth-ui-url http://auth.zeroship.localhost). Binds loopback by default, so
   # compose passes --addr 0.0.0.0:9092 to be reachable across the network.
   auth:
     build: .
     image: zeroship-platform:dev
-    # Self-heal the transient race where auth starts before hydra's admin API
-    # is accepting connections (client-side bootstrap of JWKs/clients).
+    # Self-heal transient first-boot races while migrations settle.
     restart: on-failure
-    # Secret (--db-url), the Hydra URLs (--hydra-public-url / --hydra-admin-url),
-    # and the console `frame-ancestors` allowlist all come from ops/zeroship.toml
-    # ([secrets].auth_db_url env ref + [auth].{hydra_*,frame_ancestor_origins}),
-    # mounted at the well-known path below — not literal flags / env.
+    # Secret (--db-url) and the console `frame-ancestors` allowlist come from
+    # ops/zeroship.toml ([secrets].auth_db_url env ref +
+    # [auth].frame_ancestor_origins), mounted at the well-known path below.
+    # AUTH_PUBLIC_URL is set here because the auth issuer is an auth-service
+    # runtime setting, not part of the shared TOML overlay.
     command: >
       zeroship-auth
         --addr 0.0.0.0:9092
         --dev-insecure
-        --allow-remote-hydra-admin
         --relay-forward-mailer stdout
         --bootstrap
     environment:
@@ -377,17 +371,15 @@ services:
       # [secrets].auth_db_url = "urn:zeroship:env:AUTH_DB_URL" reference (auth's
       # flag is --db-url, a separate slot from the control/gateway/worker --db).
       AUTH_DB_URL: postgres://zeroship_auth:zeroship_auth@postgres:5432/zeroship
+      # Native OP issuer base; discovery/JWKS and token `iss` use
+      # `${AUTH_PUBLIC_URL}/oauth2`.
+      AUTH_PUBLIC_URL: https://auth.zeroship.localhost
     ports:
       - "9092:9092"
     volumes:
-      # hydra_admin_url / hydra_public_url / frame_ancestor_origins all come from
-      # the shared [auth] overlay, auto-discovered at the well-known path (no
-      # --hydra-* flags, no FRAME_ANCESTOR_ORIGINS env — the file is the source).
+      # frame_ancestor_origins comes from the shared [auth] overlay,
+      # auto-discovered at the well-known path.
       - ./ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
-      # Declarative OIDC client config (localhost dev variant); auth reconciles
-      # it against hydra admin at boot. Mounted at the well-known
-      # --clients-config default path.
-      - ./ops/auth-clients-dev.toml:/etc/zeroship/auth-clients.toml:ro
     security_opt:
       - seccomp:unconfined
     depends_on:
@@ -395,59 +387,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-      hydra:
-        condition: service_started
-
-  # ory/hydra — OIDC kernel sidecar for crates/auth.
-  # public port 4444 (proxied by Caddy at auth.zeroship.localhost/oauth2/* +
-  #                   /.well-known/*)
-  # admin port 4445 (production: loopback only; in compose we share the network)
-  # Config lives at ops/hydra-dev.yaml (localhost issuer); secrets come from env.
-  hydra:
-    image: oryd/hydra:v25.4.0
-    depends_on:
-      postgres:
-        condition: service_healthy
-      hydra-migrate:
-        condition: service_completed_successfully
-    environment:
-      # Connect as the dedicated oauth_hydra role (provisioned by the
-      # `migrate` service, V0027): its default search_path is
-      # `oauth_hydra, public`, so Hydra reads/writes its own `oauth_hydra`
-      # schema, isolated from the platform `zeroship` schema.
-      DSN: postgres://oauth_hydra:zeroship@postgres:5432/zeroship?sslmode=disable
-      SECRETS_SYSTEM: ${SECRETS_SYSTEM:-dev-secret-please-change-this-please}
-      SECRETS_COOKIE: ${SECRETS_COOKIE:-dev-secret-please-change-this-please}
-    volumes:
-      - ./ops/hydra-dev.yaml:/etc/config/hydra/hydra.yaml:ro
-    command: serve all --dev --config /etc/config/hydra/hydra.yaml
-    ports:
-      - "4444:4444"
-      # Admin port 4445 IS mapped for dev convenience (running smoke
-      # tests like `cargo test -p zeroship-auth --test
-      # hydra_client_smoke` from the host). In production we bind to
-      # 127.0.0.1 and gate access via firewall — the admin API is
-      # privileged and must never face the public internet.
-      - "4445:4445"
-
-  # One-shot migrator. Runs hydra's own schema migrations into its DEDICATED
-  # `oauth_hydra` schema (provisioned — schema + least-priv `oauth_hydra` role +
-  # search_path — by the `migrate` service, V0027). Hydra
-  # connects AS that role, so its hydra_* tables land in oauth_hydra, isolated
-  # from the platform `zeroship` schema. Gated on `migrate` so the schema/role
-  # exist first (also fixes the prior race where this could run before the
-  # schema existed and scatter tables into public/zeroship).
-  hydra-migrate:
-    image: oryd/hydra:v25.4.0
-    depends_on:
-      postgres:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    environment:
-      DSN: postgres://oauth_hydra:zeroship@postgres:5432/zeroship?sslmode=disable
-    command: migrate sql up -e --yes
-    restart: on-failure
 
   # zeroship-sandbox — the sandbox/preview backend now lives in the STANDALONE
   # `zeroship-sandbox` project (sibling repo), NOT in this compose. It is built
@@ -496,8 +435,6 @@ services:
       gateway:
         condition: service_started
       auth:
-        condition: service_started
-      hydra:
         condition: service_started
 
 volumes:
