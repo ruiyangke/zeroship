@@ -148,9 +148,9 @@ fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Op
 /// closed), NEVER the real one. A DB checkout/read failure also yields `None`
 /// (fail closed): the projection must never leak the real email on a blip.
 ///
-/// `pub(crate)` so the DPoP-exchange handler reuses the SAME fail-closed
-/// email-swap source (Batch A fix 1) rather than duplicate the pooled-read
-/// logic — keeping every mint path's email projection byte-for-byte identical.
+/// `pub(crate)` so every mint path reuses the SAME fail-closed email-swap
+/// source (Batch A fix 1) rather than duplicate the pooled-read logic —
+/// keeping each email projection byte-for-byte identical.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn relay_alias_for(
     db_cfg: &crate::db::DbConfig,
@@ -603,7 +603,7 @@ pub(crate) async fn mint_session_from_code(
         let _session_id = session.id;
 
         // 6c. Persist the per-app pairwise mapping into `app_user_identities`,
-        //     SYMMETRIC with the DPoP/Bearer arms (`project_pairwise` →
+        //     SYMMETRIC with the Bearer arm (`project_pairwise` →
         //     `identities::upsert`). The cookie mint is the DEFAULT
         //     `@zeroship/auth` BFF path; without this row the H1 password-reset
         //     teardown — whose family-marker CTE JOINs `app_user_identities` to
@@ -611,7 +611,7 @@ pub(crate) async fn mint_session_from_code(
         //     for a cookie-only user, so the victim's live
         //     `__Host-zeroship_app_session` cookie would outlive the reset for its
         //     full TTL (security finding F1). Best-effort / log-and-continue,
-        //     EXACTLY like the DPoP/Bearer arms: the `pws_` is already projected
+        //     EXACTLY like the Bearer arm: the `pws_` is already projected
         //     and the cookie is the live credential, so a mapping write failure
         //     must not fail the mint — it only degrades reset-time eviction, which
         //     the credential_version / anchor-revoke arms still backstop.
@@ -1039,7 +1039,7 @@ async fn do_refresh(
     };
 
     // Verify the rotated RAW access JWT LOCALLY via the gateway JWKS (no
-    // per-mint introspection). The raw JWT stays server-side — it never leaves
+    // per-mint remote validation). The raw JWT stays server-side — it never leaves
     // the gateway and is never handed to the browser.
     let raw = match state.oidc_rp.verify_access_token(&tokens.access_token).await {
         Ok(c) => c,
@@ -1363,14 +1363,14 @@ pub async fn issue_interactive_session_cookie(
 
     // Persist the per-app `(client_id, global_user, pws_)` mapping into
     // `app_user_identities`, SYMMETRIC with the SDK popup minter
-    // (`mint_session_from_code` step 6c) and the DPoP/Bearer arms
+    // (`mint_session_from_code` step 6c) and the Bearer arm
     // (`project_pairwise`). H1's password-reset teardown
     // (`password_reset::complete`) learns each `(client_id, pws_)` family to
     // revoke by JOINing `app_user_identities`; without this row the INTERACTIVE
     // login cookie minted here would survive a reset for its full TTL — the
     // cookie arm's SOLE revocation gate is that family marker (security finding
     // 0.0, the F1 missed sibling). Best-effort / log-and-continue, EXACTLY like
-    // the SDK + DPoP/Bearer paths: the `pws_` is already projected and the cookie
+    // the SDK + Bearer paths: the `pws_` is already projected and the cookie
     // is the live credential, so a mapping write failure must not fail the mint —
     // it only degrades reset-time eviction.
     match crate::db::checkout(db_cfg).await {

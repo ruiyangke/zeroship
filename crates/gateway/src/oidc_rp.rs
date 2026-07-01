@@ -49,7 +49,7 @@ pub struct OidcRp {
     /// HMAC-SHA256 key used to sign the `__Host-zs_oidc_stash` cookie body.
     /// Must be at least 32 random bytes in prod.
     pub stash_signing_key: Vec<u8>,
-    /// Shared circuit breaker for ALL outbound Hydra token/introspect/revoke
+    /// Shared circuit breaker for ALL outbound Hydra token/revoke
     /// calls (auth-sdk §8.7, round-6 MAJOR #3). `Arc`-shared so a Hydra
     /// brownout observed on one ntex worker thread trips the breaker for
     /// every thread — the reused `cyper::Client` itself is per-worker-thread
@@ -317,70 +317,6 @@ impl OidcRp {
         Ok((claims, stash.original_path, granted_scopes))
     }
 
-    /// Introspect an access token at hydra's `/oauth2/introspect`
-    /// endpoint (RFC 7662). Returns the parsed response; callers MUST
-    /// check `.active` before trusting any other field — hydra emits a
-    /// 200 with `{"active": false}` for revoked/expired/unknown tokens.
-    ///
-    /// Used by the gateway's DPoP-bound resource-server path: a worker
-    /// request carrying `Authorization: DPoP <access_token>` triggers
-    /// proof verification (`core::dpop::verify`) followed by this
-    /// introspection call so the gateway can resolve `sub`/`email`
-    /// from a hydra-issued opaque access token without a local JWT.
-    ///
-    /// # Errors
-    ///
-    /// [`OidcRpError::TokenExchange`] on transport error, non-2xx
-    /// status, or JSON parse failure. (`active: false` is NOT an error
-    /// — that's a valid response indicating the token isn't usable.)
-    pub async fn introspect_token(
-        &self,
-        access_token: &str,
-    ) -> Result<IntrospectionResponse, OidcRpError> {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine as _;
-
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("token", access_token)
-            .finish();
-        let url = format!(
-            "{}/oauth2/introspect",
-            self.auth_ui_url.trim_end_matches('/')
-        );
-
-        // Basic auth header — hydra requires confidential-client auth on
-        // /oauth2/introspect regardless of the token's own client_id.
-        let creds = format!("{}:{}", self.client_id, self.client_secret);
-        let auth = format!("Basic {}", B64.encode(&creds));
-
-        // Reused, breaker-guarded, bounded-timeout client (§8.7).
-        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
-            client
-                .request(http::Method::POST, &url)?
-                .header("content-type", "application/x-www-form-urlencoded")?
-                .header("authorization", &auth)?
-                .body(body)
-                .send()
-                .await
-        })
-        .await
-        .map_err(|e| OidcRpError::from_hydra(e, "introspect"))?;
-
-        let status = resp.status().as_u16();
-        let resp_body = resp
-            .text()
-            .await
-            .map_err(|e| OidcRpError::TokenExchange(format!("introspect read: {e}")))?;
-        if !(200..300).contains(&status) {
-            return Err(OidcRpError::TokenExchange(format!(
-                "introspect HTTP {status}: {resp_body}"
-            )));
-        }
-        serde_json::from_str(&resp_body).map_err(|e| {
-            OidcRpError::TokenExchange(format!("introspect parse: {e}\nbody: {resp_body}"))
-        })
-    }
-
     /// Exchange an authorization code for tokens as a PUBLIC PKCE client
     /// (auth-sdk Slice 1b, `POST /__zeroship/auth/token`). Unlike
     /// [`OidcRp::finish_callback`] (the interactive cookie flow, which uses
@@ -571,7 +507,7 @@ impl OidcRp {
     }
 
     /// Verify a **raw Hydra access JWT** (RFC 9068) locally against the
-    /// gateway's JWKS cache — no introspection round-trip. Used by the
+    /// gateway's JWKS cache — no remote validation round-trip. Used by the
     /// Bearer arm's raw-Hydra path (§1.3, slice 1c) for non-browser
     /// clients that hold a Hydra access token directly (CLI,
     /// server-to-server). The browser never takes this path — it holds a
@@ -778,47 +714,6 @@ async fn verify_access_jwt(
     })
 }
 
-/// Subset of an RFC 7662 introspection response (hydra's
-/// `/oauth2/introspect`). Only `active` is mandatory; everything else
-/// is `Option` because hydra omits fields when the token is inactive
-/// or when no value is bound. Callers MUST gate on `.active` before
-/// reading any other field.
-#[derive(Debug, Clone, Deserialize)]
-pub struct IntrospectionResponse {
-    /// `true` iff the access token is currently valid (not revoked, not
-    /// expired, recognised by the AS).
-    pub active: bool,
-    /// Subject (user id) the access token represents.
-    #[serde(default)]
-    pub sub: Option<String>,
-    /// `OAuth2` `client_id` the token was issued to.
-    #[serde(default)]
-    pub client_id: Option<String>,
-    /// User's email address (when the `email` scope was granted).
-    #[serde(default)]
-    pub email: Option<String>,
-    /// Whether the user's email is verified at the `IdP`.
-    #[serde(default)]
-    pub email_verified: Option<bool>,
-    /// User's display name (when the `profile` scope was granted).
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Space-separated list of granted scopes.
-    #[serde(default)]
-    pub scope: Option<String>,
-    /// Absolute expiry (UNIX seconds).
-    #[serde(default)]
-    pub exp: Option<i64>,
-    /// Token issued-at (UNIX seconds). RFC 7662 §2.2 optional field; Hydra
-    /// emits it. The DPoP introspection-fallback arm needs it for the
-    /// per-app family-marker revocation check (`is_family_revoked_since`):
-    /// a token whose `iat` predates the marker is rejected. When Hydra omits
-    /// it, the arm fails CLOSED (treats it as epoch `0`), so any live family
-    /// marker rejects the token rather than silently skipping the check.
-    #[serde(default)]
-    pub iat: Option<i64>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum OidcRpError {
     #[error("stash cookie invalid or tampered")]
@@ -841,7 +736,7 @@ pub enum OidcRpError {
 impl OidcRpError {
     /// Map a [`HydraError`](crate::hydra_client::HydraError) from the shared
     /// breaker-guarded client into an `OidcRpError`, tagging it with the
-    /// `context` of the call site (`"token"`, `"introspect"`, `"revoke"`) so
+    /// `context` of the call site (`"token"`, `"revoke"`) so
     /// the surfaced `Display` still identifies WHICH Hydra call failed — the
     /// per-site discriminator the pre-shared-client code carried in its
     /// inline `format!` prefixes. The brownout-vs-transport distinction is

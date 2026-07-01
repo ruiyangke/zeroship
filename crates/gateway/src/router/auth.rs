@@ -28,7 +28,7 @@ pub(crate) enum AuthOutcome {
     /// Policy required `User`/`Admin` and no valid session was found.
     /// Caller decides between a 401 (API) and a 302 → hydra (HTML).
     Unauthenticated,
-    /// A request resolved a real user (cookie / raw-Hydra / DPoP-introspect)
+    /// A request resolved a real user (cookie / raw-Hydra Bearer)
     /// but the route has no `sector_identifier` yet, so the gateway CANNOT
     /// derive the per-app pairwise `pws_…` (auth-sdk Slice 4, §6.2). We FAIL
     /// CLOSED — never project the global UUID into `ZeroShip-User.id` — and
@@ -64,8 +64,8 @@ enum RevocationDecision {
     Unavailable,
 }
 
-/// Family-marker revocation gate for the three per-request auth arms (cookie /
-/// raw-Hydra Bearer / DPoP-introspect), routed through the short-TTL
+/// Family-marker revocation gate for the per-request auth arms (cookie /
+/// raw-Hydra Bearer), routed through the short-TTL
 /// read-through cache (R1d).
 ///
 /// On a FRESH cache hit the decision is computed LOCALLY (`revoked_after >
@@ -167,7 +167,7 @@ pub(crate) async fn resolve_auth(
     oauth_client_id: Option<&str>,
     sector_identifier: Option<&str>,
 ) -> AuthOutcome {
-    // Resolve identity first (DPoP / Bearer / cookie arms, untouched).
+    // Resolve identity first (Bearer / cookie arms, untouched).
     let outcome = resolve_auth_inner(
         req,
         state,
@@ -270,45 +270,8 @@ async fn resolve_auth_inner(
 ) -> AuthOutcome {
     use zeroship_bundle::AuthLevel;
 
-    // 0. DPoP-bound access tokens take precedence over the cookie path.
-    //    A request that presents `Authorization: DPoP <token>` plus a
-    //    `DPoP:` proof header is opting into RFC 9449 sender-constrained
-    //    resource access. We verify the proof + introspect the token
-    //    here; anything else (no Authorization header, a Bearer header,
-    //    a malformed DPoP header) falls through to the cookie session
-    //    resolution below.
-    //
-    //    Note: full token binding (`cnf.jkt` ↔ proof thumbprint) is
-    //    deferred — hydra doesn't currently issue `cnf.jkt` on access
-    //    tokens, so Phase 7 ships proof-of-possession verification only.
-    //    Phase 8+ adds the binding step.
-    let dpop_user_header =
-        resolve_dpop_user_header(req, state, request_id, oauth_client_id, sector_identifier).await;
-    match dpop_user_header {
-        DpopOutcome::Allowed(header) => {
-            // DPoP succeeded — short-circuit. We treat a DPoP-authed request
-            // as fully authenticated regardless of policy (anon or user).
-            return AuthOutcome::Allowed {
-                user_header: Some(header),
-            };
-        }
-        DpopOutcome::ClientNotProvisioned => {
-            // A valid DPoP-introspected user, but no sector_identifier yet ⇒
-            // cannot derive the per-app pws_. Fail closed (§6.2).
-            return AuthOutcome::ClientNotProvisioned;
-        }
-        DpopOutcome::None => {}
-    }
-    // If an Authorization: DPoP header WAS present but verification
-    // failed, treat the request as unauthenticated rather than falling
-    // back to cookies — a client that asserted DPoP cannot then claim
-    // a different identity via a session cookie.
-    if has_dpop_authorization(req) {
-        return AuthOutcome::Unauthenticated;
-    }
-
-    // 1. Bearer arm (§1.3, slice 1c). Ordered AFTER the DPoP arm and
-    //    BEFORE the cookie arm. Serves NON-BROWSER OAuth clients (CLI /
+    // 1. Bearer arm (§1.3, slice 1c). Ordered BEFORE the cookie arm.
+    //    Serves NON-BROWSER OAuth clients (CLI /
     //    server-to-server) presenting a raw Hydra access JWT; the SPA uses
     //    the signed session cookie, not Bearer. Discriminates the raw-Hydra
     //    access JWT from the reserved API-key path:
@@ -348,8 +311,8 @@ async fn resolve_auth_inner(
             AuthLevel::Anon => {
                 return AuthOutcome::Allowed { user_header: None };
             }
-            // INTENTIONAL (round-3 decision, mirrors the DPoP precedent at
-            // step 0): on a `User`/`Admin` route an Invalid Bearer 401s and
+            // INTENTIONAL (round-3 decision): on a `User`/`Admin` route an
+            // Invalid Bearer 401s and
             // does NOT fall through to the cookie arm — even if the request
             // also carries a valid cookie session. A client that presented
             // (and failed) a user-session Bearer cannot silently re-assert a
@@ -429,7 +392,7 @@ async fn resolve_auth_inner(
 /// No custom-header requirement here (unlike `auth_token::same_origin_guard`):
 /// the dispatch path serves raw-JS deploys that legitimately POST a plain form,
 /// so the browser-set `Origin` (which page script cannot forge cross-site)
-/// carries the defense. Bearer/DPoP-authenticated requests never reach this
+/// carries the defense. Bearer-authenticated requests never reach this
 /// gate — they are resolved on the earlier arms and carry an explicit,
 /// non-auto-attached `Authorization` header that is itself CSRF-proof.
 fn cookie_csrf_rejected(req: &HttpRequest, insecure_dev: bool) -> bool {
@@ -585,262 +548,6 @@ async fn project_pairwise(
     }
 
     PairwiseProjection::Projected { pws, relay_email }
-}
-
-/// Whether the request carries an `Authorization: DPoP <token>` header.
-/// We branch on this so a failed `DPoP` verification doesn't silently
-/// fall back to the cookie path.
-fn has_dpop_authorization(req: &HttpRequest) -> bool {
-    req.headers()
-        .get(http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| s.starts_with("DPoP "))
-}
-
-/// Outcome of the DPoP arm ([`resolve_dpop_user_header`]).
-#[derive(Debug)]
-enum DpopOutcome {
-    /// A verified DPoP-bound user (raw-Hydra introspection). Carries the
-    /// signed `ZeroShip-User` header. The introspected global UUID `sub` is
-    /// projected to the per-app `pws_` (§6.2).
-    Allowed(String),
-    /// A verified raw-Hydra-introspected user, but the route has no
-    /// `sector_identifier` yet ⇒ no `pws_` derivation possible. Fail
-    /// closed (`503`) rather than project the global UUID.
-    ClientNotProvisioned,
-    /// No DPoP credential (or it failed verification / replay / binding).
-    /// `resolve_auth` falls through to the Bearer/cookie arms unless an
-    /// `Authorization: DPoP` header was present (then it 401s).
-    None,
-}
-
-/// Resolve the `ZeroShip-User` header from a DPoP-bound access token.
-///
-/// This is the **non-browser** DPoP path (CLI / server-to-server): the
-/// access token is a RAW Hydra opaque token, introspected here. The SPA
-/// does not use DPoP — it rides the signed session cookie.
-///
-/// Returns `Some(header)` when:
-///   1. `Authorization: DPoP <token>` is present, AND
-///   2. The `DPoP:` proof header is present, AND
-///   3. The proof verifies (signature, htm, htu, iat, ath), AND
-///   4. The proof's `jti` has not been seen before in the freshness
-///      window (replay defense), AND
-///   5. Hydra's `/oauth2/introspect` returns `active: true` AND the
-///      introspected `client_id` equals the route's expected
-///      `oauth_client_id` (no `cnf.jkt` enforcement — hydra doesn't surface
-///      it on access tokens — but the per-app `client_id` binding closes the
-///      cross-app token-confusion gap).
-///
-/// Returns [`DpopOutcome::None`] for "no `DPoP` token in this request"
-/// AND for every failure mode above. The caller distinguishes the two
-/// via [`has_dpop_authorization`].
-///
-/// ## Pairwise projection (auth-sdk Slice 4, §6.2)
-///
-/// The introspected token carries the GLOBAL Hydra UUID `sub`, so it
-/// projects to the per-app `pws_` via [`project_pairwise`] before
-/// encoding the header — and fails closed
-/// ([`DpopOutcome::ClientNotProvisioned`] → `503`) when the route has no
-/// `sector_identifier` yet, so the global UUID is never emitted.
-async fn resolve_dpop_user_header(
-    req: &HttpRequest,
-    state: &Arc<GateState>,
-    request_id: &Uuid,
-    oauth_client_id: Option<&str>,
-    sector_identifier: Option<&str>,
-) -> DpopOutcome {
-    // 1. Authorization: DPoP <token>
-    let Some(auth_header) = req
-        .headers()
-        .get(http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    else {
-        return DpopOutcome::None;
-    };
-    let Some(access_token) = auth_header.strip_prefix("DPoP ") else {
-        return DpopOutcome::None;
-    };
-
-    // 2. DPoP proof header
-    let Some(proof) = req.headers().get("dpop").and_then(|v| v.to_str().ok()) else {
-        tracing::warn!("Authorization: DPoP present but DPoP proof header missing");
-        return DpopOutcome::None;
-    };
-
-    // 3. Build expected htu = scheme://host/path (RFC 9449 §4.2 — query
-    //    and fragment stripped). `Host` is the client-visible host so
-    //    it matches what the client signed into the proof.
-    let scheme = if state.config.insecure_dev { "http" } else { "https" };
-    let host = req
-        .headers()
-        .get(http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-    let path = req.uri().path();
-    let expected_uri = format!("{scheme}://{host}{path}");
-    let method = req.method().as_str();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    // 4. Verify the proof (signature + htm + htu + iat + ath).
-    let verified = match zeroship_core::dpop::verify(
-        proof,
-        method,
-        &expected_uri,
-        Some(access_token),
-        now,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "DPoP proof verification failed");
-            return DpopOutcome::None;
-        }
-    };
-
-    // 5. jti replay protection — 120 s freshness window matches the
-    //    accepted clock skew on the proof's iat claim.
-    match state.dpop_jti_cache.insert(&verified.jti, now, 120).await {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::warn!(jti = %verified.jti, "DPoP jti replay detected");
-            return DpopOutcome::None;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "DPoP jti replay check failed");
-            return DpopOutcome::None;
-        }
-    }
-
-    // 6. Introspect the access token as a raw hydra opaque token (the
-    //    non-browser DPoP path: CLI / server-to-server). Hydra's response
-    //    carries the user identity claims when `active: true`. No `cnf.jkt`
-    //    enforcement here — hydra doesn't currently surface `cnf.jkt` on
-    //    access tokens, so binding is proof-of-possession only (the proof's
-    //    `ath` claim already binds the proof to this specific access token in
-    //    step 4) plus the per-app `client_id` binding enforced below (6c).
-    let info = match state.oidc_rp.introspect_token(access_token).await {
-        Ok(i) if i.active => i,
-        Ok(_) => {
-            tracing::warn!("DPoP access token introspected as inactive");
-            return DpopOutcome::None;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "DPoP introspect call failed");
-            return DpopOutcome::None;
-        }
-    };
-    if !matches!(info.sub.as_deref(), Some(sub) if !sub.is_empty()) {
-        tracing::warn!("DPoP introspection response missing sub");
-        return DpopOutcome::None;
-    }
-
-    // 6c. Per-app binding (Slice 4 token-confusion fix). The DPoP wrapper
-    //     fast-path (6a) binds via `aud == Host` + `cnf.jkt`; this raw-opaque
-    //     fallback has neither, so an opaque DPoP-bound token active for app A,
-    //     replayed at app B's host with a valid proof, would otherwise be
-    //     accepted as B (and projected to B's sector). We close that gap by
-    //     binding the introspected token to the route's expected client, the
-    //     SAME `client_id`-claim binding the raw-Hydra Bearer arm enforces
-    //     (RFC 9068 §3 / RFC 7662 `client_id`).
-    //
-    //     When the route has no `oauth_client_id` (un-provisioned app, 1d
-    //     fills it) we cannot bind to a missing client — exactly the Bearer
-    //     arm's posture (it returns `Invalid` rather than accept an unbound
-    //     token). Here we reject the DPoP credential (`None`); the caller then
-    //     401s (a request that asserted DPoP cannot re-assert via cookie). The
-    //     ClientNotProvisioned 503 is reserved for the DOWNSTREAM no-sector
-    //     case (6.2), reached only once the token is already bound.
-    let Some(expected_client_id) = oauth_client_id else {
-        tracing::warn!(
-            "DPoP introspection succeeded but route has no oauth_client_id — \
-             cannot bind token to a client; rejecting"
-        );
-        return DpopOutcome::None;
-    };
-    if info.client_id.as_deref() != Some(expected_client_id) {
-        tracing::warn!(
-            token_client_id = ?info.client_id,
-            expected = %expected_client_id,
-            "DPoP introspected token client_id does not match route client — \
-             rejecting (cross-app token confusion)"
-        );
-        return DpopOutcome::None;
-    }
-
-    // 6d. Cross-node PER-APP family-marker revocation (spec §8.5), the SAME
-    //     check the raw-Hydra Bearer arm runs. Hydra `active: true` (step 6b)
-    //     only reflects GLOBAL revocation; the per-app `zeroship.token_revocations`
-    //     marker is keyed on `(client_id, pws_)` — the SAME key the WRITERS
-    //     (/signout + control's disconnect-app cascade) use — so revoking a
-    //     user on app A must also reject their DPoP-bound opaque token on app
-    //     A's path here. We project the per-app `pws_` FIRST and key the marker
-    //     check on it (Batch A fix 3): pre-fix this keyed on the GLOBAL Hydra
-    //     `sub` while the writer keyed on `pws_`, so a real revocation never
-    //     matched the live token.
-    //
-    //     The pairwise derivation needs the route's `sector_identifier`; with
-    //     no sector we cannot derive the `pws_` (and the downstream projection
-    //     would fail closed anyway), so fail closed (503) BEFORE the marker
-    //     check rather than key on the global UUID. `iat` comes from the
-    //     introspection response (RFC 7662 §2.2); when Hydra omits it we fail
-    //     CLOSED (epoch `0`), so any live family marker rejects rather than
-    //     silently skipping the check. We hold the pooled connection only
-    //     across this lookup — never across the introspection HTTP call above.
-    let Some(sector) = sector_identifier else {
-        return DpopOutcome::ClientNotProvisioned;
-    };
-    // `info.sub` is already confirmed `Some(non-empty)` above.
-    // `derive_pairwise` canonicalizes a UUID `sub` (Batch A M1), so the `pws_`
-    // derived from the RAW introspection `info.sub` is byte-identical to the
-    // canonical-form writers' marker regardless of Hydra's sub spelling.
-    let global_sub = info.sub.as_deref().unwrap_or_default();
-    let pws_sub =
-        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
-    if let Some(db_cfg) = state.db.as_ref() {
-        let iat = info.iat.unwrap_or(0);
-        // Routed through the short-TTL read-through `revocation_cache` (R1d) —
-        // same as the cookie/Bearer arms.
-        match family_revocation_decision(state, db_cfg, expected_client_id, &pws_sub, iat).await {
-            RevocationDecision::NotRevoked => {}
-            RevocationDecision::Revoked => {
-                tracing::warn!(
-                    client_id = %expected_client_id,
-                    sub = %pws_sub,
-                    "DPoP introspection family revoked after iat — rejecting"
-                );
-                return DpopOutcome::None;
-            }
-            // Fail-closed: cache-miss + DB error rejects as before.
-            RevocationDecision::Unavailable => return DpopOutcome::None,
-        }
-    }
-
-    // 7. Build the `ZeroShip-User` header from the introspection result.
-    //    The introspected `sub` is the GLOBAL Hydra UUID — project it to
-    //    the per-app `pws_` (§6.2) so the worker header never carries the
-    //    global id. `project_pairwise` re-derives the SAME `pws_sub` (pure
-    //    deterministic HMAC) and additionally upserts the reverse-lookup row +
-    //    reads the email-swap alias.
-    let mut owned = build_worker_user_from_introspection(&info);
-    match project_pairwise(state, Some(expected_client_id), Some(sector), &owned.id).await {
-        PairwiseProjection::Projected { pws, relay_email } => {
-            owned.id = pws;
-            // Email-claim swap (§7): project the relay alias, never the real
-            // email. No active alias ⇒ empty (fail closed).
-            owned.email = relay_email.unwrap_or_default();
-        }
-        PairwiseProjection::Unprovisioned => return DpopOutcome::ClientNotProvisioned,
-    }
-    let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-    DpopOutcome::Allowed(oidc_rp::encode_user_header(
-        &user,
-        &state.config.worker_key,
-        *request_id,
-    ))
 }
 
 /// Outcome of the Bearer arm ([`resolve_bearer_user_header`]). The five
@@ -1015,7 +722,7 @@ async fn resolve_bearer_user_header(
         // route's client.
         if let Some(db_cfg) = state.db.as_ref() {
             // Routed through the short-TTL read-through `revocation_cache`
-            // (R1d) — same as the cookie/DPoP arms. A fresh hit decides
+            // (R1d) — same as the cookie arm. A fresh hit decides
             // locally with no DB round-trip; a miss loads + caches the marker.
             match family_revocation_decision(
                 state,
@@ -1097,23 +804,6 @@ fn build_worker_user_from_access_claims(claims: &crate::oidc_rp::AccessClaims) -
     }
 }
 
-/// Materialise a `WorkerUser` from a hydra introspection response.
-///
-/// Caller MUST have already gated on `info.active == true`. Used by the
-/// DPoP introspection path (the raw-Hydra opaque token, introspected).
-fn build_worker_user_from_introspection(
-    info: &crate::oidc_rp::IntrospectionResponse,
-) -> OwnedWorkerUser {
-    OwnedWorkerUser {
-        id: info.sub.clone().unwrap_or_default(),
-        email: info.email.clone().unwrap_or_default(),
-        name: info.name.clone().unwrap_or_default(),
-        email_verified: info.email_verified.unwrap_or(false),
-        // Introspection fallback: scopes come from the response `scope` field.
-        scopes: split_scope_claim(info.scope.as_deref().unwrap_or_default()),
-    }
-}
-
 /// Owned counterpart to [`oidc_rp::WorkerUser`] — the public type
 /// borrows, but our build sites need to hold the strings somewhere on
 /// the stack so the borrow stays valid through
@@ -1180,12 +870,12 @@ enum CookieOutcome {
 ///     the session verifier's typ gate).
 ///  3. Defense-in-depth: the cookie `sub` MUST be a `pws_…` pairwise subject
 ///     (every minter projects it; a non-`pws_` cookie is a mint bug → reject).
-///  4. Revocation gate — the SAME per-app family marker the Bearer/DPoP arms
+///  4. Revocation gate — the SAME per-app family marker the Bearer arm
 ///     use: `is_family_revoked_since(client_id, pws_, iat)`. This is a direct
 ///     `SELECT EXISTS` (NOT cached): a revoked `(client_id, pws_)` family rejects
 ///     a still-valid signed cookie, at the cost of one revocation DB round-trip
 ///     per request. Skipped when no DB is configured (smoke mode), exactly like
-///     the Bearer/DPoP arms — so a valid signed cookie authenticates with
+///     the Bearer arm — so a valid signed cookie authenticates with
 ///     `db = None` and ZERO DB calls.
 ///  5. Emit `ZeroShip-User` DIRECTLY from the cookie claims (`id = pws_`, relay
 ///     alias `email`, `scopes`). The relay-alias swap + `pws_` projection
@@ -1236,7 +926,7 @@ async fn resolve_app_session_user_header_inner(
         }
     };
 
-    // Self-describing-subject invariant (matches the Bearer/DPoP arms): the
+    // Self-describing-subject invariant (matches the Bearer arm): the
     // cookie `sub` is ALWAYS a per-app `pws_…` (every minter projects it). A
     // non-`pws_` sub means a mint path failed to project — hard-reject so the
     // global identity can never leak through the session cookie.
@@ -1250,7 +940,7 @@ async fn resolve_app_session_user_header_inner(
 
     // Revocation gate — the per-app family marker (spec §8.5), keyed on
     // `(client_id, pws_)` with `iat` as the binding instant. The SAME mechanism
-    // the Bearer/DPoP arms use: a revoked family rejects a still-valid signed
+    // the Bearer arm uses: a revoked family rejects a still-valid signed
     // cookie. Routed through the short-TTL read-through `revocation_cache`
     // (R1d): a fresh cache hit decides `> iat` LOCALLY with NO DB round-trip,
     // so the steady-state (no-revocation) cookie request is fully DB-free —
@@ -1379,54 +1069,7 @@ mod tests {
         assert_eq!(extract_session_cookie(Some(&prod_header), true), None);
     }
 
-    // ─── DPoP detection ─────────────────────────────────────────────
-    //
-    // `has_dpop_authorization` is the discriminator that decides
-    // whether `resolve_auth`'s DPoP arm short-circuits to
-    // `Unauthenticated` on a failed proof or falls through to the
-    // cookie path. Mis-classifying a DPoP request as Bearer (or vice
-    // versa) is the difference between "client gets a fresh login
-    // page" and "client gets a silent fallback to a stolen cookie".
-
-    #[test]
-    fn has_dpop_authorization_detects_dpop_scheme() {
-        let req = ntex::web::test::TestRequest::default()
-            .header(http::header::AUTHORIZATION, "DPoP abc.def.ghi")
-            .to_http_request();
-        assert!(has_dpop_authorization(&req));
-    }
-
-    #[test]
-    fn has_dpop_authorization_rejects_bearer() {
-        // Bearer is NOT DPoP — the DPoP arm must not fire for a
-        // plain bearer token (Phase 7 deliberately doesn't accept
-        // bearer; future API-key flows will live on a different path).
-        let req = ntex::web::test::TestRequest::default()
-            .header(http::header::AUTHORIZATION, "Bearer abc")
-            .to_http_request();
-        assert!(!has_dpop_authorization(&req));
-    }
-
-    #[test]
-    fn has_dpop_authorization_returns_false_when_absent() {
-        let req = ntex::web::test::TestRequest::default().to_http_request();
-        assert!(!has_dpop_authorization(&req));
-    }
-
-    #[test]
-    fn has_dpop_authorization_rejects_case_variants() {
-        // `Authorization` scheme tokens are technically case-insensitive
-        // per RFC 7235, but RFC 9449 §7.1 spells the scheme as `DPoP`
-        // and we follow that literal — keeping the match strict means
-        // a typo / lower-case variant doesn't accidentally take the
-        // DPoP path with a malformed proof and silently 401.
-        let req = ntex::web::test::TestRequest::default()
-            .header(http::header::AUTHORIZATION, "dpop abc")
-            .to_http_request();
-        assert!(!has_dpop_authorization(&req));
-    }
-
-    // ─── Worker-user builders (raw-Hydra / introspection) ─────────────
+    // ─── Worker-user builders (raw-Hydra Bearer) ─────────────────────
     //
     // The surviving arms map their verified claims straight onto a
     // `WorkerUser`. A regression in the field mapping (e.g. losing
@@ -1473,30 +1116,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_worker_user_from_introspection_maps_all_fields() {
-        // The DPoP introspection path builds the WorkerUser from the hydra
-        // `/oauth2/introspect` response. A field-rename break here would
-        // silently corrupt the worker's authenticated-user view.
-        let info = crate::oidc_rp::IntrospectionResponse {
-            active: true,
-            sub: Some("usr_xyz".into()),
-            client_id: Some("gateway".into()),
-            email: Some("u@x.test".into()),
-            email_verified: Some(true),
-            name: Some("Bob".into()),
-            scope: Some("openid email".into()),
-            exp: Some(0),
-            iat: Some(0),
-        };
-        let owned = build_worker_user_from_introspection(&info);
-        assert_eq!(owned.id, "usr_xyz");
-        assert_eq!(owned.email, "u@x.test");
-        assert_eq!(owned.name, "Bob");
-        assert!(owned.email_verified);
-        assert_eq!(owned.scopes, vec!["openid".to_string(), "email".to_string()]);
-    }
-
     /// The raw-Hydra Bearer arm carries `scope` from the access-token claims
     /// onto `WorkerUser.scopes`.
     #[test]
@@ -1518,12 +1137,11 @@ mod tests {
         assert_eq!(owned.scopes, vec!["openid".to_string(), "read:billing".to_string()]);
     }
 
-    // ─── DPoP / Bearer / cookie GateState fixtures ────────────────────
+    // ─── Bearer / cookie GateState fixtures ───────────────────────────
     //
-    // The integration tests below build a real DPoP proof, a real raw-Hydra
-    // access token / signed session cookie, and a real `GateState` (sans live
-    // PG / hydra) and drive `resolve_dpop_user_header` / `resolve_bearer_user_
-    // header` / the cookie arm directly.
+    // The integration tests below build a real raw-Hydra access token / signed
+    // session cookie, and a real `GateState` (sans live PG / hydra) and drive
+    // `resolve_bearer_user_header` / the cookie arm directly.
 
     /// `BlobStore` stub for the test fixture — `GateState` requires
     /// one, but the auth path never reaches it.
@@ -1678,7 +1296,6 @@ mod tests {
             ),
             oidc_rp: StdArc::new(oidc_rp),
             db,
-            dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: StdArc::new(
                 zeroship_core::logout_token::LogoutJtiCache::default(),
             ),
@@ -1695,54 +1312,9 @@ mod tests {
         })
     }
 
-    /// Sign a `DPoP` proof with the supplied Ed25519 client key, bound
-    /// to the given htm/htu/access-token. Mirrors the test-helper
-    /// used in `zeroship_core::dpop::tests` — we duplicate it here to
-    /// keep the test self-contained (the core helper is `cfg(test)`
-    /// private to that module).
-    fn sign_dpop_proof(
-        client_key: &ed25519_dalek::SigningKey,
-        htm: &str,
-        htu: &str,
-        access_token: &str,
-        now: i64,
-    ) -> String {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        use base64::Engine as _;
-        use ed25519_dalek::Signer;
-        use sha2::{Digest, Sha256};
-
-        let pk = client_key.verifying_key();
-        let x = URL_SAFE_NO_PAD.encode(pk.to_bytes());
-        let jwk = serde_json::json!({
-            "kty": "OKP",
-            "crv": "Ed25519",
-            "x": x,
-        });
-        let header = serde_json::json!({
-            "typ": "dpop+jwt",
-            "alg": "EdDSA",
-            "jwk": jwk,
-        });
-        let ath = URL_SAFE_NO_PAD.encode(Sha256::digest(access_token.as_bytes()));
-        let body = serde_json::json!({
-            "jti": uuid::Uuid::new_v4().to_string(),
-            "htm": htm,
-            "htu": htu,
-            "iat": now,
-            "ath": ath,
-        });
-        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-        let body_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&body).unwrap());
-        let signing_input = format!("{header_b64}.{body_b64}");
-        let sig = client_key.sign(signing_input.as_bytes());
-        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
-        format!("{signing_input}.{sig_b64}")
-    }
-
     // ─── Bearer arm (slice 1c) ────────────────────────────────────────
     //
-    // The Bearer arm sits between the DPoP arm and the cookie arm. It
+    // The Bearer arm sits before the cookie arm. It
     // recognizes a raw Hydra access JWT (`iss == oidc_rp.issuer`, verified
     // locally via the gateway JWKS) for non-browser clients — plus the
     // reserved API-key path (any other `iss`). These tests exercise
@@ -2537,444 +2109,6 @@ mod tests {
         drop(srv);
     }
 
-    // ─── DPoP introspection per-app binding (Slice 4 token-confusion
-    //     fix) ──────────────────────────────────────────────────────────────
-    //
-    // The raw-opaque DPoP introspection path (the non-browser DPoP arm) binds
-    // the introspected `client_id` to the route's expected `oauth_client_id` —
-    // mirroring the raw-Hydra Bearer arm — since it has no `aud`/`cnf.jkt` to
-    // bind on. These tests drive the REAL `resolve_dpop_user_header` against a
-    // loopback `/oauth2/introspect` mock (same harness shape as
-    // `start_jwks_server`):
-    //
-    //   - client_id mismatch (token issued to app A, presented at app B) →
-    //     rejected (`DpopOutcome::None`), no global UUID projected.
-    //   - client_id match → `Allowed`, sub projected to the per-app `pws_`.
-    //   - route un-provisioned (`oauth_client_id == None`) → rejected,
-    //     consistent with the Bearer arm refusing to bind an unbound token.
-
-    /// Spin up a loopback Hydra `/oauth2/introspect` mock returning `body`
-    /// verbatim. `OidcRp::introspect_token` POSTs to `{auth_ui_url}/oauth2/
-    /// introspect`, so the gateway must be built with `auth_ui_url` = this
-    /// server's base URL.
-    async fn start_introspect_server(
-        body: serde_json::Value,
-    ) -> ntex::web::test::TestServer {
-        let body = std::sync::Arc::new(body);
-        let body_for_server = body.clone();
-        ntex::web::test::server(move || {
-            let body = body_for_server.clone();
-            async move {
-                ntex::web::App::new().state(body).service(
-                    ntex::web::resource("/oauth2/introspect").route(
-                        ntex::web::post().to(
-                            |body: ntex::web::types::State<
-                                std::sync::Arc<serde_json::Value>,
-                            >| async move {
-                                ntex::web::HttpResponse::Ok().json(body.get_ref().as_ref())
-                            },
-                        ),
-                    ),
-                )
-            }
-        })
-        .await
-    }
-
-    /// Build a state whose `OidcRp` introspection endpoint dials
-    /// `introspect_base` — a DPoP access token routes through the introspection
-    /// path (the non-browser DPoP arm). `db: None` keeps the pairwise projection
-    /// a pure HMAC (no PG round-trip) while still exercising the real
-    /// `project_pairwise`.
-    fn build_state_for_introspection(
-        gateway_signing: ed25519_dalek::SigningKey,
-        introspect_base: &str,
-    ) -> std::sync::Arc<crate::GateState> {
-        build_state_for_introspection_with_db(gateway_signing, introspect_base, None)
-    }
-
-    /// Same as [`build_state_for_introspection`] but with a `db` so the
-    /// introspection arm's per-app family-marker revocation check runs
-    /// against a live `zeroship.token_revocations` (mirrors the Bearer arm's
-    /// `build_state_with_session_and_oidc_and_db`). PG-gated tests pass
-    /// `Some(db)`; the others keep `None` (pairwise stays a pure HMAC). The
-    /// session-cookie issuer/verifier are built from the gateway key; the DPoP
-    /// path here always routes through introspection.
-    fn build_state_for_introspection_with_db(
-        gateway_signing: ed25519_dalek::SigningKey,
-        introspect_base: &str,
-        db: Option<crate::db::DbConfig>,
-    ) -> std::sync::Arc<crate::GateState> {
-        use std::sync::Arc as StdArc;
-
-        let oidc_rp = crate::oidc_rp::OidcRp::new(
-            introspect_base,
-            "gateway",
-            "test-secret",
-            b"test-stash-key-32-bytes-long----".to_vec(),
-        );
-
-        let mut tmp = std::env::temp_dir();
-        tmp.push(format!("zsgate-dpop-introspect-{}", uuid::Uuid::new_v4().simple()));
-        let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
-
-        // BFF R1b — session-cookie issuer/verifier from the gateway key; the
-        // DPoP path here always routes through introspection.
-        let session_issuer =
-            crate::session_token::Issuer::new(&gateway_signing, "https://api.zeroship.ai".into())
-                .expect("session issuer");
-        let session_verifier = crate::session_token::Verifier::new(
-            &gateway_signing.verifying_key(),
-            "https://api.zeroship.ai".into(),
-        );
-
-        StdArc::new(crate::GateState {
-            config: crate::GateConfig {
-                control_url: String::new(),
-                control_key: String::new(),
-                worker_urls: vec![],
-                poll_interval_secs: 5,
-                worker_key: "wk".into(),
-                hydra_public_url: String::new(),
-                auth_ui_url: oidc_rp.auth_ui_url.clone(),
-                insecure_dev: true,
-                trust_proxy: false,
-                public_url: "https://api.zeroship.ai".into(),
-            },
-            routes: crate::sync::RouteCache::new(),
-            hash_ring: crate::proxy::HashRing::new(vec!["http://0.0.0.0:0".into()], 1),
-            rate_limiters: crate::enforce::RateLimitRegistry::new(1, 1),
-            per_rule_rate_limits: crate::enforce::PerRuleRateLimitRegistry::new(),
-            concurrency: crate::enforce::ConcurrencyRegistry::new(1),
-            blob_store: StdArc::new(StubBlobStore),
-            blob_cache: crate::blob_cache::BlobCache::new(8 * 1024 * 1024),
-            disk_cache: disk,
-            idempotency_store: StdArc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
-            oidc_rp: StdArc::new(oidc_rp),
-            db,
-            dpop_jti_cache: StdArc::new(zeroship_core::dpop::TieredJtiCache::default()),
-            logout_jti_cache: StdArc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
-            revocation_cache: StdArc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
-            signing_key: Some(StdArc::new(gateway_signing)),
-            prev_signing_key: None,
-            session_issuer: Some(StdArc::new(session_issuer)),
-            session_verifier: Some(StdArc::new(session_verifier)),
-            anchor_enc_key: [0u8; 32],
-            pairwise_salt: [0u8; 32],
-            meter: StdArc::new(zeroship_metering::Meter::new()),
-        })
-    }
-
-    /// Build a DPoP request carrying an OPAQUE (non-JWT) access token + a real
-    /// RFC 9449 proof signed by `client_key`, bound to `http://{host}{path}`.
-    fn opaque_dpop_req(
-        client_key: &ed25519_dalek::SigningKey,
-        access_token: &str,
-        host: &str,
-        path: &str,
-    ) -> ntex::web::HttpRequest {
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let htu = format!("http://{host}{path}");
-        let proof = sign_dpop_proof(client_key, "GET", &htu, access_token, now);
-        ntex::web::test::TestRequest::default()
-            .uri(path)
-            .header(http::header::HOST, host)
-            .header(http::header::AUTHORIZATION, format!("DPoP {access_token}"))
-            .header("dpop", proof)
-            .to_http_request()
-    }
-
-    #[ntex::test]
-    async fn resolve_dpop_introspection_rejects_client_id_mismatch() {
-        // A DPoP-bound opaque token active for app A ("oac_app_a"), replayed at
-        // app B's host with a VALID proof, must be rejected — the introspected
-        // client_id does not match the route's expected client. Pre-fix this
-        // was accepted and projected to B's sector (cross-app token confusion).
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let srv = start_introspect_server(serde_json::json!({
-            "active": true,
-            "sub": "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001",
-            "client_id": "oac_app_a",
-            "email": "user@example.com",
-            "email_verified": true,
-            "name": "Hydra User",
-            "scope": "openid email",
-        }))
-        .await;
-        let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_introspection(gateway_signing, &base);
-
-        let host = "appb.zeroship.ai";
-        let req = opaque_dpop_req(&client_key, "ht_opaque_app_a", host, "/api/me");
-        let request_id = Uuid::new_v4();
-        // Route bound to app B; token says app A.
-        let outcome = resolve_dpop_user_header(
-            &req,
-            &state,
-            &request_id,
-            Some("oac_app_b"),
-            Some("https://appb.zeroship.ai"),
-        )
-        .await;
-        assert!(
-            matches!(outcome, DpopOutcome::None),
-            "DPoP introspection client_id mismatch must reject (None), got {outcome:?}"
-        );
-
-        drop(srv);
-    }
-
-    #[ntex::test]
-    async fn resolve_dpop_introspection_accepts_matching_client_id() {
-        // Matching client_id → Allowed, and the GLOBAL Hydra UUID sub is
-        // projected to the per-app pws_ for THIS route's client/sector (never
-        // emitted on the worker header).
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0002";
-        let srv = start_introspect_server(serde_json::json!({
-            "active": true,
-            "sub": global_sub,
-            "client_id": "oac_myapp",
-            "email": "user@example.com",
-            "email_verified": true,
-            "name": "Hydra User",
-            "scope": "openid email",
-        }))
-        .await;
-        let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_introspection(gateway_signing, &base);
-
-        let host = "myapp.zeroship.ai";
-        let sector = "https://myapp.zeroship.ai";
-        let req = opaque_dpop_req(&client_key, "ht_opaque_myapp", host, "/api/me");
-        let request_id = Uuid::new_v4();
-        let outcome = resolve_dpop_user_header(
-            &req,
-            &state,
-            &request_id,
-            Some("oac_myapp"),
-            Some(sector),
-        )
-        .await;
-        let DpopOutcome::Allowed(header) = outcome else {
-            panic!("expected Allowed on matching client_id, got {outcome:?}");
-        };
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            &header,
-        )
-        .expect("MAC verifies");
-        let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        let expected_pws =
-            zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
-        assert_eq!(user["id"], expected_pws, "sub must project to the per-app pws_");
-        assert!(expected_pws.starts_with("pws_"), "id must be a pws_, got {expected_pws}");
-        assert!(
-            !json.contains(global_sub),
-            "global UUID leaked into ZeroShip-User: {json}"
-        );
-
-        drop(srv);
-    }
-
-    #[ntex::test]
-    async fn resolve_dpop_introspection_rejects_when_route_unprovisioned() {
-        // No route client (oauth_client_id == None): we cannot bind the
-        // introspected token to a client. Consistent with the Bearer arm
-        // (which refuses an unbound token rather than accept it), the DPoP
-        // introspection fallback rejects — it does NOT fall through to the
-        // no-sector ClientNotProvisioned 503 (that is the downstream §6.2
-        // case, reached only once a token is already bound).
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let srv = start_introspect_server(serde_json::json!({
-            "active": true,
-            "sub": "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0003",
-            "client_id": "oac_app_a",
-            "scope": "openid",
-        }))
-        .await;
-        let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_introspection(gateway_signing, &base);
-
-        let req = opaque_dpop_req(&client_key, "ht_opaque", "appx.zeroship.ai", "/api/me");
-        let request_id = Uuid::new_v4();
-        let outcome =
-            resolve_dpop_user_header(&req, &state, &request_id, None, None).await;
-        assert!(
-            matches!(outcome, DpopOutcome::None),
-            "un-provisioned route must reject the introspection fallback (None), got {outcome:?}"
-        );
-
-        drop(srv);
-    }
-
-    #[ntex::test]
-    async fn resolve_dpop_introspection_rejects_revoked_family() {
-        // PARITY with the raw-Hydra Bearer arm's family-marker revocation
-        // (`bearer_raw_hydra_revocation_is_per_app_not_global`): a DPoP-bound
-        // OPAQUE token whose `(client_id, sub)` family was revoked-since-before
-        // the token's `iat` must be rejected on the introspection fallback —
-        // Hydra `active: true` only covers GLOBAL revocation, not the per-app
-        // family marker. Pre-fix this path trusted `active` alone and let a
-        // per-app-revoked DPoP token through.
-        //
-        // This test proves BOTH halves of the Bearer parity claim:
-        //   1. REJECT: revoking (oac_app_a, sub) rejects app A's DPoP token.
-        //   2. PER-APP SCOPING: the SAME global sub on app B (oac_app_b) stays
-        //      Allowed — the 6d key is `(client_id, sub)`, not just `sub`, so a
-        //      regression that dropped the client_id (made 6d global) would
-        //      let arm 2 fail (app B wrongly rejected).
-        //
-        // PG-gated: needs a live `zeroship.token_revocations` (skip when
-        // AUTH_DB_URL is unset), exactly like the Bearer revocation tests.
-        let Some(db) = connect_auth_db().await else {
-            eprintln!("skipping (no AUTH_DB_URL)");
-            return;
-        };
-        let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-
-        let client_a = "oac_app_a";
-        let client_b = "oac_app_b";
-        let host_a = "app-a.zeroship.ai";
-        let host_b = "app-b.zeroship.ai";
-        let sector_a = "https://app-a.zeroship.ai";
-        let sector_b = "https://app-b.zeroship.ai";
-        // ONE global Hydra sub presented to both apps — exactly the Bearer
-        // test's shape (same `sub`, two `client_id`s).
-        let global_sub = format!("0192f1aa-bbbb-7ccc-8ddd-{:012x}", rand_suffix());
-        // `iat` strictly in the past so a `revoke_family` stamped NOW() is
-        // `revoked_after > to_timestamp(iat)` → the token is rejected.
-        let now = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .unwrap();
-        let iat = now - 60;
-
-        // Two introspection servers / states, one per client_id, each
-        // returning the SAME global sub but its own client_id claim.
-        let srv_a = start_introspect_server(serde_json::json!({
-            "active": true,
-            "sub": global_sub,
-            "client_id": client_a,
-            "email": "user@example.com",
-            "email_verified": true,
-            "name": "Hydra User",
-            "scope": "openid email",
-            "iat": iat,
-        }))
-        .await;
-        let srv_b = start_introspect_server(serde_json::json!({
-            "active": true,
-            "sub": global_sub,
-            "client_id": client_b,
-            "email": "user@example.com",
-            "email_verified": true,
-            "name": "Hydra User",
-            "scope": "openid email",
-            "iat": iat,
-        }))
-        .await;
-        let base_a = srv_a.url("").trim_end_matches('/').to_string();
-        let base_b = srv_b.url("").trim_end_matches('/').to_string();
-        let state_a =
-            build_state_for_introspection_with_db(gateway_signing.clone(), &base_a, Some(db.clone()));
-        let state_b =
-            build_state_for_introspection_with_db(gateway_signing, &base_b, Some(db.clone()));
-
-        let request_id = Uuid::new_v4();
-
-        // Before revocation: app A Allowed (matching client_id, no marker).
-        let pre = resolve_dpop_user_header(
-            &opaque_dpop_req(&client_key, "ht_opaque_revoke", host_a, "/api/me"),
-            &state_a,
-            &request_id,
-            Some(client_a),
-            Some(sector_a),
-        )
-        .await;
-        assert!(
-            matches!(pre, DpopOutcome::Allowed(_)),
-            "pre-revocation DPoP introspection token must be Allowed, got {pre:?}"
-        );
-
-        // Batch A fix 3: the introspection arm now projects the per-app pws_
-        // BEFORE the marker check and keys on `(client_id, pws_)` — the SAME
-        // key the WRITERS use. Derive each app's pws_ under ITS sector (the
-        // states' salt is all-zero, the same salt the arm uses) and revoke ONLY
-        // app A's family.
-        let pws_a = zeroship_core::auth::derive_pairwise(&state_a.pairwise_salt, &global_sub, sector_a);
-        let pws_b = zeroship_core::auth::derive_pairwise(&state_b.pairwise_salt, &global_sub, sector_b);
-        {
-            let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
-            zeroship_core::wrapper_revocation::revoke_family(&conn, client_a, &pws_a)
-                .await
-                .expect("revoke_family app A");
-        }
-        // R1d: the pre-revocation read warmed `(client_a, pws_a)` as "not
-        // revoked"; bust it the way the real same-node writer does so the next
-        // read reloads the just-written marker rather than serving the stale
-        // negative entry through its TTL.
-        state_a.revocation_cache.invalidate(client_a, &pws_a);
-
-        // Arm 1 — REJECT: app A token now rejected (None). The new family
-        // check fires before the pairwise projection / Allowed.
-        let post_a = resolve_dpop_user_header(
-            &opaque_dpop_req(&client_key, "ht_opaque_revoke2", host_a, "/api/me"),
-            &state_a,
-            &request_id,
-            Some(client_a),
-            Some(sector_a),
-        )
-        .await;
-        assert!(
-            matches!(post_a, DpopOutcome::None),
-            "revoked (oac_app_a, sub) family must reject app A's DPoP introspection token, got {post_a:?}"
-        );
-
-        // Arm 2 — PER-APP SCOPING: the SAME global sub on app B is NOT in the
-        // revoked family `(oac_app_b, sub)` → still Allowed. Proves the 6d key
-        // is per-app, not global; a regression dropping client_id would reject
-        // here.
-        let post_b = resolve_dpop_user_header(
-            &opaque_dpop_req(&client_key, "ht_opaque_revoke3", host_b, "/api/me"),
-            &state_b,
-            &request_id,
-            Some(client_b),
-            Some(sector_b),
-        )
-        .await;
-        assert!(
-            matches!(post_b, DpopOutcome::Allowed(_)),
-            "app A revocation must NOT revoke the same sub on app B (per-app, not global), got {post_b:?}"
-        );
-
-        let pool = crate::db::checkout(&db).await.expect("pool checkout");
-        let conn = pool.get().await.expect("pool checkout");
-        conn.execute(
-            "DELETE FROM zeroship.token_revocations WHERE sub = ANY($1)",
-            &[&vec![pws_a, pws_b]],
-        )
-        .await
-        .ok();
-        drop(conn);
-        drop(srv_a);
-        drop(srv_b);
-    }
-
     /// 48-bit pseudo-random suffix for a unique-per-run global sub: the
     /// unique sub avoids cross-run assertion taint (a stale row from an
     /// earlier run keys on a different sub). Stale rows are not cleaned up on
@@ -3096,7 +2230,7 @@ mod tests {
     // ─── Per-app family-marker revocation (§8.5, major regressions) ───────
     //
     // PG-gated: these need a live `auth` schema with `zeroship.token_revocations`
-    // (skip when AUTH_DB_URL is unset, mirroring the DPoP revocation test).
+    // (skip when AUTH_DB_URL is unset).
     // They cover the MAJOR finding that revocation is PER-APP — revoking a
     // user on app A does NOT revoke the same sub on app B — keyed on the
     // TEXT `(client_id, pws_)` family marker (the old UUID-only denylist
@@ -3283,8 +2417,8 @@ mod tests {
 
     // ─── Invalid-Bearer does NOT fall back to a valid cookie (minor) ──────
     //
-    // Documents the round-3 decision (mirroring the DPoP precedent): on a
-    // User/Admin route an Invalid raw-Hydra Bearer 401s and is NOT silently
+    // Documents the round-3 decision: on a User/Admin route an Invalid
+    // raw-Hydra Bearer 401s and is NOT silently
     // rescued by a valid cookie session. DB-free under R1b — the cookie is a
     // SIGNED `zeroship-sess+jwt` verified locally, so the test mints a real signed
     // cookie (genuinely valid) and proves the Bearer still wins the 401.
@@ -3473,7 +2607,7 @@ mod tests {
     //
     // These cover the four properties of the consistent `pws_` projection:
     // (1) cross-app divergence (same user, two apps → different pws_);
-    // (2) cross-arm + re-login consistency (cookie vs raw-Hydra vs DPoP →
+    // (2) cross-arm + re-login consistency (cookie vs raw-Hydra Bearer →
     //     the SAME pws_ for the same (user, app));
     // (3) the global UUID is ABSENT from every outward `ZeroShip-User`;
     // (4) fail-closed 503 when the route has no sector yet.
@@ -4033,7 +3167,7 @@ mod tests {
 
     /// A revoked `(client_id, pws_)` family marker makes the cookie arm reject a
     /// still-valid signed cookie — revocation works STATELESSLY (the same cached
-    /// per-app marker the Bearer/DPoP arms use). PG-gated.
+    /// per-app marker the Bearer arm uses). PG-gated.
     #[compio::test]
     async fn cookie_arm_rejects_revoked_family_statelessly() {
         let Some(db) = connect_auth_db().await else {
@@ -4523,22 +3657,19 @@ mod tests {
         );
     }
 
-    // ─── Batch A fix 3: revocation cross-arm parity ───────────────────────
+    // ─── Batch A fix 3: Bearer revocation parity ──────────────────────────
 
     /// Write the family marker the EXACT way `/signout` does — keyed on
     /// `(client_id, pws_)` where `pws_ = derive_pairwise(salt, global_uuid,
-    /// sector)` — then assert that BOTH a still-live raw-Hydra Bearer token AND
-    /// a DPoP-introspected token for the SAME `(client_id, user)` are now
-    /// rejected. Pre-fix these arms keyed the lookup on the GLOBAL UUID while
-    /// the writer keyed on `pws_`, so a real signout never matched a live token
-    /// (the MAJOR cross-arm namespace mismatch). PG-gated.
+    /// sector)` — then assert that a still-live raw-Hydra Bearer token for the
+    /// same `(client_id, user)` is rejected. Pre-fix the lookup used the GLOBAL
+    /// UUID while the writer keyed on `pws_`, so a real signout never matched a
+    /// live token. PG-gated.
     ///
-    /// `#[ntex::test]` (not `#[compio::test]`) because it stands up
-    /// `ntex::web::test::server` JWKS + introspection mocks — the same harness
-    /// the sibling raw-Hydra / introspection revocation tests use — and that
-    /// requires the ntex runtime (a `compio::test` would nest runtimes).
+    /// `#[ntex::test]` (not `#[compio::test]`) because it stands up an
+    /// `ntex::web::test::server` JWKS mock, which requires the ntex runtime.
     #[ntex::test]
-    async fn revocation_keyed_on_pws_rejects_raw_hydra_and_dpop_introspection() {
+    async fn revocation_keyed_on_pws_rejects_raw_hydra_bearer() {
         let Some(db) = connect_auth_db().await else {
             eprintln!("skipping (no AUTH_DB_URL)");
             return;
@@ -4546,17 +3677,15 @@ mod tests {
 
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let client_key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
 
         let client_id = "oac_revparity";
         let host = "myapp.zeroship.ai";
         let sector = "https://myapp.zeroship.ai";
         let global_sub = format!("0192f1aa-bbbb-7ccc-8ddd-{:012x}", rand_suffix());
 
-        // (a) RAW-HYDRA BEARER arm. Build a state whose oidc_rp JWKS serves the
-        // Hydra key. Both test builders default to an all-zero `pairwise_salt`,
-        // so we read the SAME salt the arms will use off the built state and
-        // derive the WRITER's pws_ from it — no fragile Arc mutation.
+        // Build a state whose oidc_rp JWKS serves the Hydra key. Read the SAME
+        // salt the Bearer arm will use off the built state and derive the
+        // WRITER's pws_ from it — no fragile Arc mutation.
         let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
         let oidc_rp = crate::oidc_rp::OidcRp::new(
@@ -4567,7 +3696,7 @@ mod tests {
         )
         .with_issuer(HYDRA_ISS);
         let bearer_state =
-            build_state_with_session_and_oidc_and_db(gateway_signing.clone(), oidc_rp, Some(db.clone()));
+            build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, Some(db.clone()));
 
         // The pws_ the WRITER (/signout) keys on — derive_pairwise under the
         // route's sector with the SAME salt the arm uses (read off the state).
@@ -4608,48 +3737,6 @@ mod tests {
             "a still-live raw-Hydra Bearer must be rejected by the pws_-keyed marker, got {outcome:?}"
         );
 
-        // (b) DPoP-INTROSPECTION arm. Introspection mock returns the SAME
-        // global sub + the route client_id; the arm projects pws_ and keys the
-        // marker check on it.
-        let srv_i = start_introspect_server(serde_json::json!({
-            "active": true,
-            "sub": global_sub,
-            "client_id": client_id,
-            "email": "user@example.com",
-            "email_verified": true,
-            "name": "Hydra User",
-            "scope": "openid email",
-            "iat": i64::try_from(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            )
-            .unwrap()
-                - 60,
-        }))
-        .await;
-        let base_i = srv_i.url("").trim_end_matches('/').to_string();
-        // Same all-zero default salt as `bearer_state`, so the introspection
-        // arm derives the SAME pws_ the marker was written under.
-        let intro_state =
-            build_state_for_introspection_with_db(gateway_signing, &base_i, Some(db.clone()));
-        debug_assert_eq!(intro_state.pairwise_salt, bearer_state.pairwise_salt);
-
-        let dpop_req = opaque_dpop_req(&client_key, "ht_opaque_revparity", host, "/api/me");
-        let outcome = resolve_dpop_user_header(
-            &dpop_req,
-            &intro_state,
-            &request_id,
-            Some(client_id),
-            Some(sector),
-        )
-        .await;
-        assert!(
-            matches!(outcome, DpopOutcome::None),
-            "a DPoP-introspected token must be rejected by the pws_-keyed marker, got {outcome:?}"
-        );
-
         // Cleanup.
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
         let conn = pool.get().await.expect("pool get");
@@ -4660,6 +3747,5 @@ mod tests {
         .await
         .ok();
         drop(srv);
-        drop(srv_i);
     }
 }
