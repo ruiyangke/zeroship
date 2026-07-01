@@ -86,6 +86,17 @@ pub mod test_support;
 /// ```compile_fail
 /// let _raw = zeroship_migrate::apply_standalone;
 /// ```
+///
+/// The standalone Trusted runner profile is likewise absent from default/server
+/// builds.
+///
+/// ```compile_fail
+/// let _trusted = zeroship_migrate::command::runner::RunProfile::Trusted;
+/// ```
+///
+/// ```compile_fail
+/// let _trusted_guard = zeroship_migrate::guard::GuardConfig::trusted;
+/// ```
 #[cfg(all(doctest, not(feature = "standalone-cli")))]
 pub struct StandaloneCliFeatureAbsent;
 
