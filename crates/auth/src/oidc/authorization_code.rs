@@ -316,30 +316,46 @@ async fn authorize_inner(
     let requested_scopes = auth_request.scopes.clone();
     let prompt = PromptValues::parse(auth_request.prompt.as_deref());
     if prompt.invalid_none_combo {
-        let redirect = authorization_error_redirect(
-            &auth_request.redirect_uri,
-            "invalid_request",
-            auth_request.state.as_deref(),
-            issuer.issuer(),
-        )?;
-        return Ok(error_see_other(&redirect));
+        return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
     }
 
     if !scope_subset(&requested_scopes, &client.scopes) {
+        if prompt.none {
+            return prompt_none_error_see_other(&auth_request, issuer, "invalid_scope");
+        }
         return Err(OAuthError::invalid_scope("scope is not allowed for client"));
     }
 
     // C1: PKCE is mandatory for every client and S256 is the only method.
-    let code_challenge = required_param(params.code_challenge.as_deref(), "code_challenge")?;
+    let code_challenge = match required_param(params.code_challenge.as_deref(), "code_challenge") {
+        Ok(code_challenge) => code_challenge,
+        Err(err) => {
+            if prompt.none {
+                return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
+            }
+            return Err(err);
+        }
+    };
     if !zeroship_core::pkce::is_valid_s256_challenge(code_challenge) {
+        if prompt.none {
+            return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
+        }
         return Err(OAuthError::invalid_request("code_challenge must be S256 base64url"));
     }
-    require_eq(params.code_challenge_method.as_deref(), PKCE_METHOD_S256, || {
+    if let Err(err) = require_eq(params.code_challenge_method.as_deref(), PKCE_METHOD_S256, || {
         OAuthError::invalid_request("code_challenge_method must be S256")
-    })?;
+    }) {
+        if prompt.none {
+            return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
+        }
+        return Err(err);
+    }
 
     let nonce = auth_request.nonce.clone();
     if requested_scopes.iter().any(|scope| scope == "openid") && nonce.is_none() {
+        if prompt.none {
+            return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
+        }
         return Err(OAuthError::invalid_request("nonce is required for openid scope"));
     }
 
@@ -365,7 +381,18 @@ async fn authorize_inner(
                 return Ok(error_see_other(&redirect));
             }
         };
-        if !consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await? {
+        let consent_covers =
+            match consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await {
+                Ok(consent_covers) => consent_covers,
+                Err(_) => {
+                    return prompt_none_error_see_other(
+                        &auth_request,
+                        issuer,
+                        "interaction_required",
+                    );
+                }
+            };
+        if !consent_covers {
             let redirect = authorization_error_redirect(
                 &auth_request.redirect_uri,
                 "consent_required",
@@ -374,8 +401,13 @@ async fn authorize_inner(
             )?;
             return Ok(error_see_other(&redirect));
         }
-        touch_consent_grant(db, session.user_id, &client.client_id).await?;
-        return issue_authorization_code(
+        if touch_consent_grant(db, session.user_id, &client.client_id)
+            .await
+            .is_err()
+        {
+            return prompt_none_error_see_other(&auth_request, issuer, "interaction_required");
+        }
+        return match issue_authorization_code(
             db,
             issuer,
             &client,
@@ -383,7 +415,11 @@ async fn authorize_inner(
             &session,
             code_challenge,
         )
-        .await;
+        .await
+        {
+            Ok(resp) => Ok(resp),
+            Err(_) => prompt_none_error_see_other(&auth_request, issuer, "interaction_required"),
+        };
     }
 
     if prompt.login || prompt.select_account {
@@ -1026,6 +1062,20 @@ fn authorization_error_redirect(
         query.append_pair("iss", issuer);
     }
     Ok(url.to_string())
+}
+
+fn prompt_none_error_see_other(
+    auth_request: &AuthRequest,
+    issuer: &Issuer,
+    error: &str,
+) -> Result<HttpResponse, OAuthError> {
+    let redirect = authorization_error_redirect(
+        &auth_request.redirect_uri,
+        error,
+        auth_request.state.as_deref(),
+        issuer.issuer(),
+    )?;
+    Ok(error_see_other(&redirect))
 }
 
 fn error_see_other(location: &str) -> HttpResponse {
