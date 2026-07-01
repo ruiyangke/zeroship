@@ -62,6 +62,7 @@ use crate::apply::journal::{DeployRecoveryScope, PendingContract};
 use crate::approval::ApprovalScope;
 use crate::frontend::{record_migration_transient, BuildError, DiscoveredMigration, RecordVia};
 use crate::model::migration::Migration;
+use crate::model::profile::{SealError, SealVerifier, SealedProfile};
 use crate::render::step::PlanStep;
 use crate::render::declarative::CollectionDescriptor;
 use crate::render::lower::{IrAuthor, LiveSchema, LoadAndLowerGuardedError};
@@ -199,6 +200,17 @@ pub enum PostgresIrApplyError {
     /// The engine refused or failed the apply.
     #[error("apply: {0}")]
     Apply(#[from] DeclarativeApplyError),
+}
+
+/// A failure on the sealed shared-infra apply path.
+#[derive(Debug, thiserror::Error)]
+pub enum SealedApplyError {
+    /// The sealed profile did not authenticate or was stale.
+    #[error("sealed migration policy profile refused: {0}")]
+    Seal(#[from] SealError),
+    /// The existing guarded IR apply path failed after seal verification.
+    #[error(transparent)]
+    Apply(#[from] PostgresIrApplyError),
 }
 
 impl From<IrDiscoveryError> for PostgresIrApplyError {
@@ -339,6 +351,76 @@ pub async fn apply_bundle_ir_postgres(
             Err(e)
         }
     }
+}
+
+/// Apply a committed `.ir.json` bundle to Postgres through a sealed
+/// shared-infra policy profile.
+///
+/// Stage M2-1 deliberately delegates to the existing `GuardConfig` apply path
+/// after verifying the in-process MAC and ceiling version. The sealed profile can
+/// lower only to today's `Confined` or `Platform` guard; `Trusted` is not
+/// representable in [`SealedProfile`].
+///
+/// # Errors
+/// [`SealedApplyError::Seal`] when the seal is invalid or stale, otherwise the
+/// underlying [`PostgresIrApplyError`] from [`apply_bundle_ir_postgres`].
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_sealed(
+    backend: &PostgresBackend<'_>,
+    sealed: SealedProfile,
+    verifier: &SealVerifier,
+    owner_app: &str,
+    migrations_dir: &Path,
+    exec_cfg: &ExecutorConfig,
+    approval: Approval,
+    applied_by: &str,
+) -> Result<PostgresIrApplyOutcome, SealedApplyError> {
+    sealed.verify(verifier)?;
+    let guard_cfg = sealed.to_guard_config();
+    let mut exec_cfg = exec_cfg.clone();
+    sealed.apply_operational_to_executor_config(&mut exec_cfg);
+    apply_bundle_ir_postgres(
+        backend,
+        sealed.project_schema(),
+        owner_app,
+        migrations_dir,
+        &exec_cfg,
+        &guard_cfg,
+        approval,
+        applied_by,
+    )
+    .await
+    .map_err(SealedApplyError::Apply)
+}
+
+/// Raw standalone Postgres IR convenience for user-owned databases.
+///
+/// This is intentionally absent from default/server builds. It takes a raw
+/// [`GuardConfig`] and performs no seal verification; only the standalone CLI
+/// feature may link it.
+#[cfg(feature = "standalone-cli")]
+#[allow(clippy::too_many_arguments)]
+pub async fn apply_standalone(
+    backend: &PostgresBackend<'_>,
+    project_schema: &str,
+    owner_app: &str,
+    migrations_dir: &Path,
+    exec_cfg: &ExecutorConfig,
+    guard_cfg: &GuardConfig,
+    approval: Approval,
+    applied_by: &str,
+) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
+    apply_bundle_ir_postgres(
+        backend,
+        project_schema,
+        owner_app,
+        migrations_dir,
+        exec_cfg,
+        guard_cfg,
+        approval,
+        applied_by,
+    )
+    .await
 }
 
 /// Apply a Platform `.ts` migration corpus to Postgres by recording each source

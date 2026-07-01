@@ -81,6 +81,14 @@ pub mod render;
 #[doc(hidden)]
 pub mod test_support;
 
+/// Default/server builds do not link the raw standalone apply convenience.
+///
+/// ```compile_fail
+/// let _raw = zeroship_migrate::apply_standalone;
+/// ```
+#[cfg(all(doctest, not(feature = "standalone-cli")))]
+pub struct StandaloneCliFeatureAbsent;
+
 pub use analysis::{analyze, classify};
 
 // ---------------------------------------------------------------------------
@@ -150,6 +158,12 @@ pub use guard::{
     PgGuard, SqlGuard, SqliteDescriptorGuard,
 };
 pub use model::policy::{SchemaScope, TrustProfile};
+pub use model::profile::{
+    DataSecurityConfig, DestructiveOps, IndexCreation, OperationalConfig, PolicyCapabilities,
+    PolicyKnobSemantics, PolicyMeet, PolicyPolarity, PolicyProfile, RoleAttribute,
+    RoleCapabilityConfig, SealError, SealVerifier, SealedPosture, SealedProfile, TableRewrite,
+    CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
+};
 // The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
 // path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.
 pub use zeroship_schema::query::SqlDialect;
@@ -218,10 +232,12 @@ pub use model::load::{
 // via `rebuild_one` end-to-end.
 pub use command::ir_apply::{
     apply_bundle_ir_postgres, apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog,
-    apply_one_ir_file_postgres, discover_ir_files, postgres_ir_apply_state, IrDiscoveryError,
-    PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState, SqliteIrApplyError,
-    SqliteIrApplyOutcome,
+    apply_one_ir_file_postgres, apply_sealed, discover_ir_files, postgres_ir_apply_state,
+    IrDiscoveryError, PostgresIrApplyError, PostgresIrApplyOutcome, PostgresIrApplyState,
+    SealedApplyError, SqliteIrApplyError, SqliteIrApplyOutcome,
 };
+#[cfg(feature = "standalone-cli")]
+pub use command::ir_apply::apply_standalone;
 // The IR-path DDL Lower phase (§6/§6.4/§6.5): compiles a validated, ownership-
 // checked `MigrationIr` to migrations, reusing the SHARED snapshot-builder +
 // declarative render seam so its SQL is byte-identical to the differ's path.
