@@ -19,6 +19,15 @@ use common::{
     TEST_CONSOLE_ORIGIN,
 };
 
+fn unique_test_client_ip() -> String {
+    let id = Uuid::new_v4();
+    let bytes = id.as_bytes();
+    let ip = format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2]);
+    ip.parse::<std::net::IpAddr>()
+        .expect("generated test client IP must parse");
+    ip
+}
+
 fn login_url(fx: &Fixture, return_to: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("return_to", return_to)
@@ -277,17 +286,15 @@ async fn login_rate_limit_kicks_in() {
         return;
     };
 
-    // Unique email so we don't collide with concurrent / leftover state in
-    // the bucket from other tests.
+    // Unique email and client IP so we don't collide with concurrent /
+    // leftover rate-limit state from other tests.
     let email = format!("ratelimit-{}@zeroship.test", Uuid::new_v4().simple());
+    let xff_ip = unique_test_client_ip();
 
-    // Clean the EIP bucket entries for this email explicitly. The IP bucket
-    // (login:ip:127.0.0.1) is shared across all tests this session; its
-    // capacity (60/hour) is large enough that the other tests in this
-    // binary won't drain it ahead of us.
     let eip_pat = format!("login:eip:{email}:%");
     let email_pat = format!("login:email:{email}");
-    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
+    let ip_pat = format!("login:ip:{xff_ip}");
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat, &ip_pat]).await;
 
     let mut last_status: u16 = 0;
     for i in 1..=6 {
@@ -298,6 +305,8 @@ async fn login_rate_limit_kicks_in() {
             .http
             .request(http::Method::GET, &login_url)
             .expect("build GET")
+            .header("X-Forwarded-For", xff_ip.as_str())
+            .expect("xff")
             .send()
             .await
             .expect("send GET");
@@ -317,6 +326,8 @@ async fn login_rate_limit_kicks_in() {
             .expect("ct")
             .header("cookie", format!("zsidp_csrf={csrf}"))
             .expect("cookie")
+            .header("X-Forwarded-For", xff_ip.as_str())
+            .expect("xff")
             .body(body)
             .send()
             .await
@@ -335,8 +346,8 @@ async fn login_rate_limit_kicks_in() {
         "6th attempt for same (email, ip) must be rate-limited (429); got {last_status}"
     );
 
-    // Cleanup the EIP bucket so re-runs of this test don't carry state.
-    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
+    // Cleanup rate-limit buckets so re-runs of this test don't carry state.
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat, &ip_pat]).await;
 
     fx.cleanup().await;
 }
@@ -346,7 +357,7 @@ async fn login_rate_limit_kicks_in() {
 //
 // `Fixture` carries `!Send` ntex/cyper handles.
 #[allow(clippy::future_not_send)]
-async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
+async fn one_login(fx: &Fixture, email: &str, password: &str, xff_ip: &str) -> String {
     let return_to = fx.fresh_challenge().await;
     let login_url = login_url(fx, &return_to);
 
@@ -354,6 +365,8 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
         .http
         .request(http::Method::GET, &login_url)
         .expect("build GET")
+        .header("X-Forwarded-For", xff_ip)
+        .expect("xff")
         .send()
         .await
         .expect("send GET");
@@ -381,6 +394,8 @@ async fn one_login(fx: &Fixture, email: &str, password: &str) -> String {
         .expect("ct")
         .header("cookie", jar.header())
         .expect("cookie")
+        .header("X-Forwarded-For", xff_ip)
+        .expect("xff")
         .body(body)
         .send()
         .await
@@ -408,6 +423,7 @@ async fn session_id_rotates_post_login_success() {
 
     // Seed a user.
     let email = format!("rotate-{}@zeroship.test", Uuid::new_v4().simple());
+    let xff_ip = unique_test_client_ip();
     let password = "rotation-test-password-1234567890";
     let phc = compio::runtime::spawn_blocking({
         let pw = password.to_string();
@@ -428,10 +444,11 @@ async fn session_id_rotates_post_login_success() {
     // both succeed.
     let eip_pat = format!("login:eip:{email}:%");
     let email_pat = format!("login:email:{email}");
-    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
+    let ip_pat = format!("login:ip:{xff_ip}");
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat, &ip_pat]).await;
 
-    let sid1 = one_login(&fx, &email, password).await;
-    let sid2 = one_login(&fx, &email, password).await;
+    let sid1 = one_login(&fx, &email, password, &xff_ip).await;
+    let sid2 = one_login(&fx, &email, password, &xff_ip).await;
 
     assert_ne!(
         sid1, sid2,
@@ -442,7 +459,7 @@ async fn session_id_rotates_post_login_success() {
 
     // Cleanup.
     cleanup_user(&fx.pg, &email).await;
-    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat]).await;
+    cleanup_rate_limits_like(&fx.pg, &[&eip_pat, &email_pat, &ip_pat]).await;
 
     fx.cleanup().await;
 }
