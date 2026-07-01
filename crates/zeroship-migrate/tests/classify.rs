@@ -74,7 +74,7 @@ fn drop_constraint_is_destructive() {
 #[test]
 fn expanded_destructive_set_is_classified_canonically() {
     for (sql, operation) in [
-        ("DELETE FROM products", "DELETE without WHERE"),
+        ("DELETE FROM products", "DELETE"),
         ("DROP MATERIALIZED VIEW product_rollups", "DROP MATERIALIZED VIEW"),
         ("DROP VIEW product_view", "DROP VIEW"),
         ("DROP INDEX product_idx", "DROP INDEX"),
@@ -178,12 +178,13 @@ fn data_security_trichotomy_is_explicit() {
 #[test]
 fn destructive_dml_holes_are_classified() {
     for (sql, operation) in [
-        ("UPDATE products SET sku = NULL", "UPDATE without WHERE"),
-        (
-            "UPDATE products SET sku = NULL WHERE true",
-            "UPDATE with non-restrictive WHERE",
-        ),
-        ("DELETE FROM products WHERE 1=1", "DELETE with non-restrictive WHERE"),
+        ("UPDATE products SET sku = NULL", "UPDATE"),
+        ("UPDATE products SET sku = NULL WHERE true", "UPDATE"),
+        ("UPDATE products SET sku = NULL WHERE 1=1", "UPDATE"),
+        ("DELETE FROM products WHERE 1=1", "DELETE"),
+        ("DELETE FROM products WHERE 't'", "DELETE"),
+        ("DELETE FROM products WHERE true::bool", "DELETE"),
+        ("DELETE FROM products WHERE 1<2", "DELETE"),
         (
             "MERGE INTO products USING incoming ON products.id = incoming.id \
              WHEN MATCHED THEN DELETE",
@@ -201,9 +202,60 @@ fn destructive_dml_holes_are_classified() {
 
     assert_eq!(
         one("DELETE FROM products WHERE id = 42").data_security,
-        DataSecurityClass::Unknown,
-        "row-affecting DML with an unproven predicate is not treated as safe"
+        DataSecurityClass::Destructive("DELETE"),
+        "row-affecting DELETE is destructive even when it has a predicate"
     );
+}
+
+#[test]
+fn nested_destructive_ctes_are_classified_by_whole_tree_walk() {
+    for (sql, operation) in [
+        (
+            "WITH t AS (DELETE FROM products RETURNING id) SELECT 1",
+            "DELETE",
+        ),
+        (
+            "WITH t AS (UPDATE products SET sku = NULL RETURNING id) SELECT 1",
+            "UPDATE",
+        ),
+        (
+            "INSERT INTO products_archive \
+             WITH t AS (DELETE FROM products RETURNING id, sku) SELECT * FROM t",
+            "DELETE",
+        ),
+        (
+            "WITH t AS (MERGE INTO products USING incoming ON products.id = incoming.id \
+             WHEN MATCHED THEN DELETE RETURNING products.id) SELECT 1",
+            "MERGE matched DELETE",
+        ),
+    ] {
+        let c = one(sql);
+        assert_eq!(
+            c.data_security,
+            DataSecurityClass::Destructive(operation),
+            "{sql}"
+        );
+        assert_eq!(c.destructive_operation, Some(operation), "{sql}");
+    }
+}
+
+#[test]
+fn non_destructive_allowlist_survives_whole_tree_walk() {
+    for sql in [
+        "SELECT * FROM products",
+        "INSERT INTO products(id) VALUES (1)",
+        "INSERT INTO products SELECT * FROM incoming",
+        "CREATE TABLE products(id int primary key)",
+        "ALTER TABLE products ADD COLUMN sku text",
+        "CREATE INDEX products_sku_idx ON products(sku)",
+        "ALTER TABLE products ENABLE ROW LEVEL SECURITY",
+    ] {
+        assert_eq!(
+            one(sql).data_security,
+            DataSecurityClass::NonDestructive,
+            "{sql}"
+        );
+    }
 }
 
 #[test]

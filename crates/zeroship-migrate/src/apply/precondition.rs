@@ -66,8 +66,9 @@ use compio_postgres::Client;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
-use crate::conn::ExecutorConfig;
+use crate::analysis::tree_walk::first_dml_node;
 use crate::apply::executor::{ApplyError, PreconditionVerdict};
+use crate::conn::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::model::migration::Migration;
 use crate::model::precondition::{OnUnmet, Precondition};
@@ -404,26 +405,6 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
     }
 
     Ok(())
-}
-
-/// The first data-modifying statement node key found anywhere in the serialized
-/// parse tree, or `None`. DML nodes serialize as the `PascalCase` variant keys
-/// `InsertStmt`/`UpdateStmt`/`DeleteStmt`/`MergeStmt` (e.g. a `DeleteStmt` nested
-/// in a CTE's `with_clause`).
-fn first_dml_node(v: &Value) -> Option<&'static str> {
-    const DML_NODES: &[&str] = &["InsertStmt", "UpdateStmt", "DeleteStmt", "MergeStmt"];
-    match v {
-        Value::Object(map) => {
-            for &k in DML_NODES {
-                if map.contains_key(k) {
-                    return Some(k);
-                }
-            }
-            map.values().find_map(first_dml_node)
-        }
-        Value::Array(items) => items.iter().find_map(first_dml_node),
-        _ => None,
-    }
 }
 
 /// True if any object node in the serialized tree carries `key` (used to detect a
