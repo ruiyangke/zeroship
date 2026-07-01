@@ -533,6 +533,54 @@ async fn prompt_none_combined_with_login_redirects_invalid_request_to_rp() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn prompt_none_invalid_pkce_redirects_error_to_rp_without_rendering() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer
+        .append_pair("client_id", &fx.client_id)
+        .append_pair("response_type", "code")
+        .append_pair("scope", "openid email")
+        .append_pair("redirect_uri", REDIRECT_URI)
+        .append_pair("state", "state-none-invalid-pkce")
+        .append_pair("nonce", "nonce-none-invalid-pkce")
+        .append_pair("prompt", "none")
+        .append_pair("code_challenge", "not-a-valid-s256-challenge")
+        .append_pair("code_challenge_method", "S256");
+    let authorize_path = format!("/oauth2/authorize?{}", serializer.finish());
+
+    let resp = get(&fx, &authorize_path, None).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    assert!(
+        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        "prompt=none invalid request must not render local UI"
+    );
+    let loc = location(&resp);
+    assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
+    assert_eq!(
+        absolute_query_param(&loc, "error").as_deref(),
+        Some("invalid_request")
+    );
+    assert_eq!(
+        absolute_query_param(&loc, "state").as_deref(),
+        Some("state-none-invalid-pkce")
+    );
+    assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
+    let body = resp.text().await.expect("prompt=none redirect body");
+    assert!(
+        body.is_empty()
+            || (!body.contains("\"error\"")
+                && !body.contains("error_description")
+                && !body.contains("<form")),
+        "prompt=none invalid request rendered a local body: {body}"
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn prompt_login_forces_login_screen_even_with_valid_session() {
     let Some(fx) = Fixture::boot().await else {
         return;
