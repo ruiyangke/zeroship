@@ -176,9 +176,11 @@ pub struct LinkedIdentity<'a> {
 #[template(path = "magic_check_email.html")]
 pub struct MagicCheckEmailPage<'a> {
     pub csrf: &'a str,
-    pub login_challenge: &'a str,
+    pub login_challenge: Option<&'a str>,
+    pub return_to: Option<&'a str>,
     pub csrf_nonce: &'a str,
     pub email: &'a str,
+    pub login_href: String,
 }
 
 /// `/magic/await` GET — alternate landing for the cross-device code-entry
@@ -187,9 +189,11 @@ pub struct MagicCheckEmailPage<'a> {
 #[template(path = "magic_await_code.html")]
 pub struct MagicAwaitCodePage<'a> {
     pub csrf: &'a str,
-    pub login_challenge: &'a str,
+    pub login_challenge: Option<&'a str>,
+    pub return_to: Option<&'a str>,
     pub csrf_nonce: &'a str,
     pub email: &'a str,
+    pub login_href: String,
 }
 
 /// `/magic/verify` cross-device branch — displays a 6-digit code on the
