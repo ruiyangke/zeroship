@@ -12,10 +12,11 @@
 //! `ops/auth-clients.example.toml`.
 //!
 //! Response contract:
-//! - 200 + `cache-control: no-store` on success
+//! - 200 + `cache-control: no-store` on success or already-processed replay
 //! - 400 + `cache-control: no-store` on any verify failure (with a
 //!   short text body; hydra logs the body so it shows up in the auth
 //!   server's debug surface)
+//! - 5xx + `cache-control: no-store` on a retryable local processing failure
 //!
 //! Phase 7 U1.2.
 
@@ -106,20 +107,16 @@ pub async fn handle(
     };
 
     let now_secs = unix_now_secs();
-    if !state.logout_jti_cache.insert(
-        &token.jti,
-        now_secs,
-        zeroship_core::logout_token::LOGOUT_JTI_TTL_SECS,
-    ) {
+    if state.logout_jti_cache.contains(&token.jti, now_secs) {
         tracing::warn!(
             jti = %token.jti,
             sub = ?token.sub,
             sid = ?token.sid,
-            "backchannel_logout: replayed logout_token jti; skipping revocation"
+            "backchannel_logout: replayed logout_token jti; already processed"
         );
-        return HttpResponse::BadRequest()
+        return HttpResponse::Ok()
             .header("cache-control", "no-store")
-            .body("invalid logout_token");
+            .finish();
     }
 
     // Revoke. The verifier guarantees at least one of sub/sid is present.
@@ -137,17 +134,20 @@ pub async fn handle(
             Ok(p) => Some(p),
             Err(e) => {
                 tracing::error!(error = %e, "backchannel_logout: pg pool checkout failed");
-                None
+                return retryable_processing_error();
             }
         },
-        None => None,
+        None => {
+            tracing::error!("backchannel_logout: gateway has no DB configured");
+            return retryable_processing_error();
+        }
     };
     let mut conn = match pool.as_ref() {
         Some(pool) => match pool.get().await {
             Ok(c) => Some(c),
             Err(e) => {
                 tracing::error!(error = %e, "backchannel_logout: pg pool checkout failed");
-                None
+                return retryable_processing_error();
             }
         },
         None => None,
@@ -200,36 +200,44 @@ pub async fn handle(
                         sid = %sid,
                         "backchannel_logout: revoke_app_sessions_for_sid failed"
                     );
-                    Vec::new()
+                    return retryable_processing_error();
                 }
             };
             revoked = users.len() as u64;
-            for global_user_id in users {
-                teardown_per_app_user(
-                    &mut *conn,
-                    &state,
-                    &aud,
-                    app_id,
-                    revoke_sector.as_deref(),
-                    global_user_id,
-                    &mut anchor_families,
-                )
-                .await;
-            }
-        } else if let Some(sub) = token.sub.as_deref() {
-            let global_user_id = match uuid::Uuid::parse_str(sub) {
-                Ok(id) => Some(id),
-                Err(_) => {
+            if users.is_empty() {
+                if let Some(sub) = token.sub.as_deref() {
                     tracing::warn!(
                         app_id = %app_id,
+                        sid = %sid,
                         sub = %sub,
-                        "backchannel_logout: sub is not a UUID; skipping per-app teardown"
+                        "backchannel_logout: sid matched zero sessions; falling back to app-scoped sub revoke"
                     );
-                    None
+                    revoked = match revoke_by_sub(
+                        &mut *conn,
+                        &state,
+                        &aud,
+                        app_id,
+                        revoke_sector.as_deref(),
+                        sub,
+                        &mut anchor_families,
+                    )
+                    .await
+                    {
+                        Ok(revoked) => revoked,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                app_id = %app_id,
+                                sid = %sid,
+                                "backchannel_logout: sub fallback revocation failed"
+                            );
+                            return retryable_processing_error();
+                        }
+                    };
                 }
-            };
-            if let Some(global_user_id) = global_user_id {
-                teardown_per_app_user(
+            }
+            for global_user_id in users {
+                if let Err(e) = teardown_per_app_user(
                     &mut *conn,
                     &state,
                     &aud,
@@ -238,18 +246,39 @@ pub async fn handle(
                     global_user_id,
                     &mut anchor_families,
                 )
-                .await;
-            }
-            revoked = sessions::revoke_app_sessions_for_user(&mut *conn, app_id, sub)
                 .await
-                .unwrap_or_else(|e| {
+                {
+                    tracing::error!(
+                        error = %e,
+                        app_id = %app_id,
+                        sid = %sid,
+                        "backchannel_logout: sid-scoped teardown failed"
+                    );
+                    return retryable_processing_error();
+                }
+            }
+        } else if let Some(sub) = token.sub.as_deref() {
+            revoked = match revoke_by_sub(
+                &mut *conn,
+                &state,
+                &aud,
+                app_id,
+                revoke_sector.as_deref(),
+                sub,
+                &mut anchor_families,
+            )
+            .await
+            {
+                Ok(revoked) => revoked,
+                Err(e) => {
                     tracing::error!(
                         error = %e,
                         app_id = %app_id,
                         "backchannel_logout: revoke_app_sessions_for_user failed"
                     );
-                    0
-                });
+                    return retryable_processing_error();
+                }
+            };
         }
 
         tracing::info!(
@@ -269,12 +298,23 @@ pub async fn handle(
         )
         .await;
     } else {
-        // The `--db ""` smoke-mode case; nothing to revoke. Still
-        // return 200 because the verifier did its job and there's
-        // nothing for the operator to retry.
+        return retryable_processing_error();
+    }
+
+    if !state.logout_jti_cache.insert(
+        &token.jti,
+        now_secs,
+        zeroship_core::logout_token::LOGOUT_JTI_TTL_SECS,
+    ) {
         tracing::warn!(
-            "backchannel_logout: gateway has no DB configured; verify succeeded but no sessions to revoke"
+            jti = %token.jti,
+            sub = ?token.sub,
+            sid = ?token.sid,
+            "backchannel_logout: logout_token jti was processed concurrently"
         );
+        return HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .finish();
     }
 
     // Release the pooled connection BEFORE the outbound Hydra revoke (the
@@ -342,6 +382,47 @@ fn unix_now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn retryable_processing_error() -> HttpResponse {
+    HttpResponse::ServiceUnavailable()
+        .header("cache-control", "no-store")
+        .body("temporary logout processing failure")
+}
+
+async fn revoke_by_sub(
+    conn: &mut compio_postgres::Client,
+    state: &GateState,
+    client_id: &str,
+    app_id: uuid::Uuid,
+    sector: Option<&str>,
+    sub: &str,
+    anchor_families: &mut Vec<(uuid::Uuid, crate::anchors::DeletedFamily)>,
+) -> Result<u64, crate::error::GatewayError> {
+    let global_user_id = match uuid::Uuid::parse_str(sub) {
+        Ok(id) => Some(id),
+        Err(_) => {
+            tracing::warn!(
+                app_id = %app_id,
+                sub = %sub,
+                "backchannel_logout: sub is not a UUID; skipping per-app teardown"
+            );
+            None
+        }
+    };
+    if let Some(global_user_id) = global_user_id {
+        teardown_per_app_user(
+            conn,
+            state,
+            client_id,
+            app_id,
+            sector,
+            global_user_id,
+            anchor_families,
+        )
+        .await?;
+    }
+    sessions::revoke_app_sessions_for_user(conn, app_id, sub).await
+}
+
 async fn teardown_per_app_user(
     conn: &mut compio_postgres::Client,
     state: &GateState,
@@ -350,7 +431,7 @@ async fn teardown_per_app_user(
     sector: Option<&str>,
     global_user_id: uuid::Uuid,
     anchor_families: &mut Vec<(uuid::Uuid, crate::anchors::DeletedFamily)>,
-) {
+) -> Result<(), crate::error::GatewayError> {
     let global_sub = global_user_id.to_string();
     if let Some(sector) = sector {
         let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &global_sub, sector);
@@ -361,6 +442,9 @@ async fn teardown_per_app_user(
                 client_id = %client_id,
                 "backchannel_logout: per-app token-family marker write failed"
             );
+            return Err(crate::error::GatewayError::Db(format!(
+                "backchannel_logout token-family marker: {e}"
+            )));
         }
         state.revocation_cache.invalidate(client_id, &pws);
     } else {
@@ -381,8 +465,10 @@ async fn teardown_per_app_user(
                 app_id = %app_id,
                 "backchannel_logout: anchor delete_all_for_user failed"
             );
+            return Err(e);
         }
     }
+    Ok(())
 }
 
 async fn emit_revocation_audit(

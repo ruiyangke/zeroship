@@ -138,6 +138,22 @@ impl LogoutJtiCache {
         true
     }
 
+    /// Return whether `jti` is already in the live replay window without marking
+    /// a new token consumed.
+    ///
+    /// This is used by receivers that can only burn a `jti` after downstream
+    /// processing succeeds: a transient processing failure must remain retryable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned.
+    #[must_use]
+    pub fn contains(&self, jti: &str, now_secs: i64) -> bool {
+        let mut guard = self.inner.lock().expect("poisoned");
+        guard.retain(|_, expires_at| *expires_at > now_secs);
+        guard.contains_key(jti)
+    }
+
     /// Current live entry count.
     ///
     /// # Panics
