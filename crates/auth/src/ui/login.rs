@@ -1072,6 +1072,7 @@ mod tests {
             "github button should be absent"
         );
         assert!(html.contains("Sign in with Google"));
+        assert!(html.contains(r#"/signup?login_challenge=abc"#));
     }
 
     #[test]
@@ -1114,6 +1115,12 @@ mod tests {
         let html = page.render().expect("render");
         assert!(html.contains("/oauth/google/start?return_to=%2Foauth2%2Fauthorize"));
         assert!(html.contains("/oauth/github/start?return_to=%2Foauth2%2Fauthorize"));
+        assert!(
+            html.contains(
+                "/signup?return_to=%2Foauth2%2Fauthorize%3Fclient_id%3Doac_123%26redirect_uri%3Dhttps%253A%252F%252Fapp.test%252Fcb"
+            ),
+            "native signup link should preserve return_to"
+        );
         assert!(!html.contains("login_challenge="));
     }
 }
