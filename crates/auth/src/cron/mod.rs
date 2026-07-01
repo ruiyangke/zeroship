@@ -28,6 +28,7 @@ pub fn spawn_all(
     admin: HydraAdmin,
     db: Arc<compio_postgres::Client>,
     cfg: Arc<AuthConfig>,
+    refresh_pool: crate::op::refresh::RefreshSessionPool,
 ) {
     let db_jwk = db.clone();
     let cfg_jwk = cfg.clone();
@@ -47,9 +48,9 @@ pub fn spawn_all(
     .detach();
 
     let db_token_sweep = db.clone();
-    let cfg_token_sweep = cfg.clone();
+    let refresh_pool_token_sweep = refresh_pool;
     compio::runtime::spawn(async move {
-        token_sweep::run(db_token_sweep, cfg_token_sweep).await;
+        token_sweep::run(db_token_sweep, refresh_pool_token_sweep).await;
     })
     .detach();
 

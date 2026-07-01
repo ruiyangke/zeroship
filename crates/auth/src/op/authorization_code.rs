@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::{Client, GenericClient, NoTls};
+use compio_postgres::{Client, GenericClient};
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION};
 use ntex::http::StatusCode;
 use ntex::web::{self, HttpRequest, HttpResponse};
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::config::AuthConfig;
-use crate::op::refresh::{self, ClientAuth, RefreshTokenKeys};
+use crate::op::refresh::{self, ClientAuth, RefreshSessionPool, RefreshTokenKeys};
 use crate::op::{AccessTokenMint, IdTokenMint, Issuer, ACCESS_TOKEN_TTL_SECS};
 use crate::return_to;
 use crate::sessions::login as login_session;
@@ -306,6 +306,7 @@ pub async fn token_post(
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<Client>>,
     issuer: web::types::State<Arc<Issuer>>,
+    refresh_pool: web::types::State<RefreshSessionPool>,
 ) -> HttpResponse {
     let params = form.into_inner();
     let client_auth = refresh::client_auth_from_request(
@@ -319,6 +320,7 @@ pub async fn token_post(
         cfg.as_ref(),
         db.as_ref(),
         issuer.as_ref(),
+        refresh_pool.get_ref(),
     )
     .await
     {
@@ -334,6 +336,7 @@ async fn token_inner(
     cfg: &AuthConfig,
     db: &Client,
     issuer: &Issuer,
+    refresh_pool: &RefreshSessionPool,
 ) -> Result<TokenResponse, OAuthError> {
     let result = match params.grant_type.as_str() {
         "authorization_code" => {
@@ -342,7 +345,17 @@ async fn token_inner(
             let code = required_param(params.code.as_deref(), "code")?;
             let code_verifier = required_param(params.code_verifier.as_deref(), "code_verifier")?;
             let client = load_client(db, client_id).await?;
-            let mut conn = connect_dedicated_token_client(&cfg.db_url).await?;
+            let pool = refresh_pool
+                .checkout_pool("token authorization_code")
+                .await
+                .map_err(|err| {
+                    tracing::error!(error = %err, "token: dedicated database pool checkout failed");
+                    OAuthError::server_error("token database unavailable")
+                })?;
+            let mut conn = pool.get().await.map_err(|err| {
+                tracing::error!(error = %err, "token: dedicated database session checkout failed");
+                OAuthError::server_error("token database unavailable")
+            })?;
             let tx = conn.transaction().await.map_err(|err| {
                 tracing::error!(error = %err, "token: BEGIN failed on dedicated session");
                 OAuthError::server_error("token transaction unavailable")
@@ -375,29 +388,14 @@ async fn token_inner(
         }
         "refresh_token" => {
             let keys = RefreshTokenKeys::from_config(cfg)?;
-            refresh::exchange_refresh_token(&cfg.db_url, issuer, &keys, &params, client_auth).await
+            refresh::exchange_refresh_token(db, refresh_pool, issuer, &keys, &params, client_auth)
+                .await
         }
         _ => Err(OAuthError::unsupported_grant_type(
             "grant_type is not supported",
         )),
     };
     result
-}
-
-async fn connect_dedicated_token_client(db_url: &str) -> Result<Client, OAuthError> {
-    let (client, connection) = compio_postgres::connect(db_url, NoTls)
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "token: dedicated database session connect failed");
-            OAuthError::server_error("token database unavailable")
-        })?;
-    compio::runtime::spawn(async move {
-        if let Err(err) = connection.run().await {
-            tracing::error!(error = %err, "token dedicated pg connection error");
-        }
-    })
-    .detach();
-    Ok(client)
 }
 
 #[allow(clippy::future_not_send)]

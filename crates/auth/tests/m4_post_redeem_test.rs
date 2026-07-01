@@ -31,6 +31,7 @@ macro_rules! init_app {
                 .state($ctx.admin.clone())
                 .state($ctx.cfg.clone())
                 .state($ctx.pg.clone())
+                .state($ctx.refresh_pool.clone())
                 .middleware(SecurityHeaders::default())
                 .configure(server::configure(false, false)),
         )
@@ -112,6 +113,7 @@ struct M4TestCtx {
     cfg: Arc<zeroship_auth::config::AuthConfig>,
     admin: HydraAdmin,
     pg: Arc<compio_postgres::Client>,
+    refresh_pool: zeroship_auth::op::refresh::RefreshSessionPool,
 }
 
 impl M4TestCtx {
@@ -139,12 +141,14 @@ impl M4TestCtx {
             &hydra.base_url,
         ));
         let admin = HydraAdmin::new(hydra.base_url.clone());
+        let refresh_pool = zeroship_auth::op::refresh::RefreshSessionPool::new(db_url, 4);
 
         Some(Self {
             hydra,
             cfg,
             admin,
             pg,
+            refresh_pool,
         })
     }
 
