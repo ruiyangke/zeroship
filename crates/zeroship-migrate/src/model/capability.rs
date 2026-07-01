@@ -35,6 +35,12 @@ use crate::model::policy::{SchemaScope, TrustProfile};
 #[derive(Debug, Clone)]
 pub(crate) struct OperatorCapability(());
 
+/// Stage-M2 name for the zero-sized token that gates sealed shared-infra apply.
+///
+/// This is an alias, not a second forgeable token: it remains `pub(crate)`, and
+/// external crates still cannot name or construct it.
+pub(crate) type SealApplier = OperatorCapability;
+
 impl OperatorCapability {
     /// Crate-private mint. Callers should use the named runner/shadow seams rather
     /// than minting ad hoc tokens.
