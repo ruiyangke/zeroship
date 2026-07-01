@@ -7,6 +7,7 @@ pub mod auth_request;
 pub mod backchannel_logout;
 pub mod claims;
 pub mod device_token;
+pub mod introspect;
 pub mod issuer;
 pub mod metadata;
 pub mod refresh;
