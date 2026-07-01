@@ -172,6 +172,59 @@ pub fn drop_index_targets(sql: &str) -> Result<Vec<DropIndexTarget>, ParseError>
     Ok(out)
 }
 
+/// Whether raw `.sql` must use the deploy-time DROP-INDEX approval gate.
+///
+/// This is deliberately narrower than [`classify`] and is used only by the
+/// control-plane raw `.sql` deploy gate. A raw migration requires approval when
+/// it contains a top-level `DROP INDEX`, or when it contains an opaque execution
+/// carrier (`DO`, `CREATE FUNCTION`/`CREATE PROCEDURE`, trigger function
+/// references). Bodies and dynamic SQL are not inspected here: their presence is
+/// the reviewed surface because they can issue `DROP INDEX` in text the parser
+/// cannot prove safe.
+///
+/// # Errors
+/// [`ParseError::Syntax`] if `libpg_query` cannot parse the input.
+pub fn raw_sql_requires_index_drop_approval(sql: &str) -> Result<bool, ParseError> {
+    let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+            continue;
+        };
+        if is_top_level_drop_index(node) || has_opaque_execution_carrier(node) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn is_top_level_drop_index(node: &NodeEnum) -> bool {
+    matches!(node, NodeEnum::DropStmt(drop) if drop.remove_type == ObjectType::ObjectIndex as i32)
+}
+
+fn has_opaque_execution_carrier(node: &NodeEnum) -> bool {
+    node_is_opaque_execution_carrier(node)
+        || node
+            .nodes()
+            .into_iter()
+            .any(|(node, _depth, _ctx, _field)| node_ref_is_opaque_execution_carrier(node))
+}
+
+fn node_is_opaque_execution_carrier(node: &NodeEnum) -> bool {
+    match node {
+        NodeEnum::DoStmt(_) | NodeEnum::CreateFunctionStmt(_) => true,
+        NodeEnum::CreateTrigStmt(trigger) => !trigger.funcname.is_empty(),
+        _ => false,
+    }
+}
+
+fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
+    match node {
+        NodeRef::DoStmt(_) | NodeRef::CreateFunctionStmt(_) => true,
+        NodeRef::CreateTrigStmt(trigger) => !trigger.funcname.is_empty(),
+        _ => false,
+    }
+}
+
 /// Slice the original source for a single statement using `libpg_query`'s
 /// reported `stmt_location`/`stmt_len` (byte offsets into the input). A zero
 /// `stmt_len` (single trailing statement) means "to end of input".
