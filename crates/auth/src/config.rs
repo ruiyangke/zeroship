@@ -407,6 +407,26 @@ pub struct AuthConfig {
     #[arg(long = "auth-pairwise-salt-file", env = "AUTH_PAIRWISE_SALT_FILE")]
     pub auth_pairwise_salt_file: Option<PathBuf>,
 
+    /// Platform broker master-secret source file.
+    ///
+    /// Required on real boot. Brokered OAuth clients do not store per-client
+    /// secret hashes; the OP derives a per-client broker secret from this
+    /// ≥256-bit master secret and the client_id, then verifies the gateway's
+    /// presented secret on the authorization-code grant.
+    #[arg(long = "auth-broker-secret-file", env = "AUTH_BROKER_SECRET_FILE")]
+    pub auth_broker_secret_file: Option<PathBuf>,
+
+    /// Previous platform broker master-secret source file for rotation.
+    ///
+    /// Optional. During a rolling rotation, code exchanges may authenticate
+    /// against either the current or previous broker master secret. Remove this
+    /// after every gateway has rolled to the current secret.
+    #[arg(
+        long = "auth-broker-secret-previous-file",
+        env = "AUTH_BROKER_SECRET_PREVIOUS_FILE"
+    )]
+    pub auth_broker_secret_previous_file: Option<PathBuf>,
+
     /// Refresh-token HMAC keyring file.
     ///
     /// The OP stores only HMAC-SHA256 refresh-token verifiers in Postgres.
@@ -872,6 +892,11 @@ impl std::fmt::Debug for AuthConfig {
             .field("public_url", &self.public_url)
             .field("auth_signing_key_file", &self.auth_signing_key_file)
             .field("auth_pairwise_salt_file", &self.auth_pairwise_salt_file)
+            .field("auth_broker_secret_file", &self.auth_broker_secret_file)
+            .field(
+                "auth_broker_secret_previous_file",
+                &self.auth_broker_secret_previous_file,
+            )
             .field("refresh_hash_key_file", &self.refresh_hash_key_file)
             .field("refresh_idem_key_file", &self.refresh_idem_key_file)
             .field("refresh_pool_size", &self.refresh_pool_size)

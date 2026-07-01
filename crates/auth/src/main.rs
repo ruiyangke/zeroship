@@ -167,6 +167,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CheckValue::Secret(cfg.auth_pairwise_salt_file.is_some()),
         );
         report.field(
+            "auth_broker_secret_file_configured",
+            CheckValue::Secret(cfg.auth_broker_secret_file.is_some()),
+        );
+        report.field(
+            "auth_broker_secret_previous_file_configured",
+            CheckValue::Secret(cfg.auth_broker_secret_previous_file.is_some()),
+        );
+        report.field(
             "refresh_hash_key_file_configured",
             CheckValue::Secret(cfg.refresh_hash_key_file.is_some()),
         );
@@ -255,6 +263,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "AUTH_PAIRWISE_SALT_FILE / --auth-pairwise-salt-file is required".into(),
         )
     })?;
+    let auth_broker_secret_file = cfg.auth_broker_secret_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "AUTH_BROKER_SECRET_FILE / --auth-broker-secret-file is required".into(),
+        )
+    })?;
     cfg.refresh_hash_key_file.as_deref().ok_or_else(|| {
         AuthError::Config(
             "REFRESH_HASH_KEY_FILE / --refresh-hash-key-file is required".into(),
@@ -269,7 +282,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth_signing_key_file,
         auth_pairwise_salt_file,
         cfg.public_url(),
-    )?;
+    )?
+    .with_broker_secrets(zeroship_auth::oidc::BrokerSecrets::from_files(
+        auth_broker_secret_file,
+        cfg.auth_broker_secret_previous_file.as_deref(),
+    )?);
     op_issuer.publish_active_key(&client).await?;
     tracing::info!(
         kid = %op_issuer.kid(),
