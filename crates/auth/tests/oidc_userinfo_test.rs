@@ -1,4 +1,4 @@
-//! OIDC Core §5.3 `/userinfo` tests.
+//! OIDC Core §5.3 `/oauth2/userinfo` tests.
 
 mod common;
 
@@ -26,7 +26,7 @@ use zeroship_auth::store::sessions as session_store;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
-const ISSUER: &str = "https://auth.zeroship.test";
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const WRONG_ISSUER: &str = "https://wrong-auth.zeroship.test";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/cb";
 const SECTOR: &str = "https://app-userinfo.zeroship.test";
@@ -524,7 +524,7 @@ async fn send_authorize_with_scope(
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
     }
-    let url = format!("{}/authorize?{}", fx.auth_base, serializer.finish());
+    let url = format!("{}/oauth2/authorize?{}", fx.auth_base, serializer.finish());
     cyper::Client::new()
         .request(http::Method::GET, url)
         .expect("build GET /authorize")
@@ -549,7 +549,7 @@ async fn exchange_code(
         .append_pair("code_verifier", verifier)
         .finish();
     let resp = cyper::Client::new()
-        .request(http::Method::POST, format!("{}/token", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
@@ -575,7 +575,7 @@ async fn userinfo_get_with_authorization(
     authorization: &str,
 ) -> Result<cyper::Response, cyper::Error> {
     let req = cyper::Client::new()
-        .request(http::Method::GET, format!("{}/userinfo", fx.auth_base))
+        .request(http::Method::GET, format!("{}/oauth2/userinfo", fx.auth_base))
         .expect("build GET /userinfo");
     let req = if authorization.is_empty() {
         req
@@ -589,7 +589,7 @@ async fn userinfo_get_with_authorization(
 #[allow(clippy::future_not_send)]
 async fn userinfo_post(fx: &Fixture, token: &str) -> Result<cyper::Response, cyper::Error> {
     cyper::Client::new()
-        .request(http::Method::POST, format!("{}/userinfo", fx.auth_base))
+        .request(http::Method::POST, format!("{}/oauth2/userinfo", fx.auth_base))
         .expect("build POST /userinfo")
         .header("authorization", format!("Bearer {token}"))
         .expect("authorization")

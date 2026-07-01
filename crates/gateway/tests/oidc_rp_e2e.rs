@@ -1,11 +1,11 @@
 //! Gateway OIDC RP end-to-end test against the platform OP.
 //!
-//! This is the P5a-3b-ii shape: no Hydra admin/client registration. The test
+//! This is the P5a-3b-ii shape: no OP admin/client registration. The test
 //! seeds a per-app brokered `oac_` client directly in `zeroship.oauth_clients`,
 //! boots `crates/auth` in-process with a broker master secret, then drives the
-//! native OP `/authorize` + `/login` flow. `OidcRp::finish_callback` exchanges
-//! the code as that per-app client by deriving the broker secret from the same
-//! master and verifies the OP id_token (`iss` without trailing slash,
+//! native OP `/oauth2/authorize` + `/login` flow. `OidcRp::finish_callback`
+//! exchanges the code as that per-app client by deriving the broker secret from the same
+//! master and verifies the OP id_token (`iss` with the fixed `/oauth2` prefix,
 //! `aud = oac_...`).
 
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use zeroship_auth::server;
 use zeroship_gateway::oidc_rp::{BrokerSecret, OidcRp};
 use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate, NewSession};
 
-const ISSUER: &str = "https://auth.zeroship.ai";
+const ISSUER: &str = "https://auth.zeroship.ai/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/__zeroship/auth/callback";
 const SECTOR: &str = "https://gateway-e2e.zeroship.test";
 const PASSWORD: &str = "gateway-test-password-with-enough-bytes-1234";
@@ -294,7 +294,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
 
     let (auth_url, stash) =
         rp.build_authorize_redirect(&client_id, "/some/path", REDIRECT_URI);
-    assert!(auth_url.starts_with(&format!("{auth_base}/authorize?")), "{auth_url}");
+    assert!(auth_url.starts_with(&format!("{auth_base}/oauth2/authorize?")), "{auth_url}");
     assert!(auth_url.contains(&format!("client_id={client_id}")), "{auth_url}");
     assert!(auth_url.contains("scope=openid+offline_access+email+profile"), "{auth_url}");
 

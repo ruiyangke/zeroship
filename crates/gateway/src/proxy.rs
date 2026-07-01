@@ -660,16 +660,16 @@ fn find_crlf(buf: &[u8]) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Generic HTTP proxy — used for `auth.zeroship.ai` → hydra / crates/auth
+// Generic HTTP proxy — used for `auth.zeroship.ai` → op / crates/auth
 // ---------------------------------------------------------------------------
 //
 // Unlike `forward_to_worker_dispatch`, which packages requests into a JSON
 // envelope for the worker kernel, this path is a transparent HTTP/1.1
 // reverse proxy: it preserves the request method, path+query, headers,
 // and body verbatim, then streams the response back. Set-Cookie and
-// Location headers MUST pass through untouched — Hydra's session cookie
+// Location headers MUST pass through untouched — OP's session cookie
 // (scoped to `auth.zeroship.ai`) and its OAuth2 302 redirects depend on
-// the client seeing them as if they came directly from hydra.
+// the client seeing them as if they came directly from op.
 
 /// Hop-by-hop headers from RFC 7230 §6.1. These are NOT forwarded in
 /// either direction (request to upstream, or response back to client).
@@ -691,7 +691,7 @@ const HOP_BY_HOP: &[&str] = &[
 
 /// Forward an HTTP/1.1 request to `upstream_base` and return the response
 /// verbatim. `upstream_base` is the full base URL of the upstream
-/// (scheme/host/optional-port, e.g., `http://hydra:4444`); the inbound
+/// (scheme/host/optional-port, e.g., `http://op:4444`); the inbound
 /// request's path+query and method/headers/body are used as-is.
 pub async fn forward_http(
     upstream_base: &str,
@@ -842,8 +842,8 @@ mod forward_http_tests {
     #[test]
     fn extract_host_with_port_includes_port() {
         assert_eq!(
-            extract_host_with_port("http://hydra:4444"),
-            "hydra:4444"
+            extract_host_with_port("http://op:4444"),
+            "op:4444"
         );
     }
 
@@ -852,7 +852,7 @@ mod forward_http_tests {
         // The url crate normalizes :80 / :443 away when they're the
         // default for the scheme — that's fine for forwarding because
         // upstream will still resolve the host.
-        assert_eq!(extract_host_with_port("http://hydra"), "hydra");
+        assert_eq!(extract_host_with_port("http://op"), "op");
     }
 
     #[test]
@@ -870,11 +870,11 @@ mod forward_http_tests {
             ("Accept".to_string(), "application/json".to_string()),
         ];
         let body = b"x=1";
-        let req = build_forward_request("POST", "/oauth2/token", "hydra:4444", &headers, body);
+        let req = build_forward_request("POST", "/oauth2/token", "op:4444", &headers, body);
         let s = String::from_utf8(req).unwrap();
 
         assert!(s.starts_with("POST /oauth2/token HTTP/1.1\r\n"));
-        assert!(s.contains("Host: hydra:4444\r\n"));
+        assert!(s.contains("Host: op:4444\r\n"));
         assert!(s.contains("Cookie: abc=1\r\n"));
         assert!(s.contains("Accept: application/json\r\n"));
         // Hop-by-hop and host headers from the inbound side must be dropped.

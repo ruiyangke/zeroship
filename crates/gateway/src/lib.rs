@@ -21,7 +21,7 @@ pub mod db;
 pub mod dispatch;
 pub mod enforce;
 pub mod error;
-pub mod hydra_client;
+pub mod op_client;
 pub mod identities;
 pub mod idempotency;
 pub mod oidc_rp;
@@ -50,11 +50,8 @@ pub struct GateConfig {
     /// workers can verify forwarded identity was not forged by an attacker
     /// with direct network access. Empty disables both checks (dev only).
     pub worker_key: String,
-    /// Upstream URL for the legacy Ory Hydra public endpoints that remain
-    /// mounted under `auth.zeroship.ai/oauth2/*`.
-    pub hydra_public_url: String,
     /// Upstream URL for `crates/auth` — the self-contained OP
-    /// (`/.well-known/*`, `/userinfo`, `/authorize`, `/token`, `/revoke`),
+    /// (`/oauth2/*`, `/oauth2/.well-known/*`),
     /// login/signup UI, OAuth2 consent handlers, and webhook surfaces.
     pub auth_ui_url: String,
     /// Dev-only flag. When true the gateway emits cookies without the

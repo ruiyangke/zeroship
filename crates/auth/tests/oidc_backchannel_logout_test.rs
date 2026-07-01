@@ -14,7 +14,7 @@ use zeroship_auth::oidc::{
 };
 use zeroship_auth::store::sessions as session_store;
 
-const ISSUER: &str = "https://auth.zeroship.test";
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
 fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")

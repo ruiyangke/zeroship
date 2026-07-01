@@ -10,9 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_overlay_string,
-    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT,
-    DEV_STASH_SIGNING_KEY,
+    bootstrap_or_exit, parse_bool_flag, require_unless_dev, validate_stash_key,
+    CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::{
@@ -22,8 +21,6 @@ use zeroship_gateway::{
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
 
 /// zeroship gateway startup configuration.
 #[derive(Parser)]
@@ -83,7 +80,7 @@ struct GateCli {
 
     /// Maximum number of pooled PostgreSQL connections the gateway
     /// keeps open for session/anchor/revocation work. Bounds concurrent
-    /// DB fan-out so a Hydra brownout (or any stalled query) cannot pile
+    /// DB fan-out so a OP brownout (or any stalled query) cannot pile
     /// up unbounded checkouts. Ignored when `--db` is empty.
     #[arg(long = "db-pool-size", env = "DB_POOL_SIZE", default_value_t = 16)]
     db_pool_size: usize,
@@ -115,10 +112,6 @@ struct GateCli {
         default_value = "https://api.zeroship.ai"
     )]
     gateway_public_url: String,
-
-    /// Hydra public issuer/base URL.
-    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
-    hydra_public_url: Option<String>,
 
     /// Upstream URL for the auth service UI and OAuth surfaces.
     #[arg(long = "auth-ui-url", env = "AUTH_UI_URL", default_value = "http://auth:9092")]
@@ -299,12 +292,6 @@ fn main() -> std::io::Result<()> {
 
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
-    let hydra_public_url = resolve_overlay_string(
-        cli.hydra_public_url,
-        file.auth.hydra_public_url.clone(),
-        Some(DEFAULT_HYDRA_PUBLIC_URL),
-    );
-
     let port = cli.port;
     let bind_host = cli.bind;
     let control_url = cli.control;
@@ -522,10 +509,6 @@ fn main() -> std::io::Result<()> {
             CheckValue::Plain(boot.overlay.source.to_string()),
         );
         report.field("control_url", CheckValue::Plain(control_url));
-        report.field(
-            "hydra_public_url",
-            CheckValue::Plain(hydra_public_url),
-        );
         report.field("auth_ui_url", CheckValue::Plain(auth_ui_url));
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
@@ -650,7 +633,7 @@ fn main() -> std::io::Result<()> {
     // refresh family never sits in PG in plaintext. Domain-separated by the
     // derive prefix; rotating the stash key rotates this key too (acceptable
     // pre-launch — a roll just forces re-login, which the anchor design
-    // already tolerates via Hydra invalid_grant → login_required).
+    // already tolerates via OP invalid_grant → login_required).
     let anchor_enc_key = {
         let seed = format!(
             "anchor-refresh-enc:{}",
@@ -698,7 +681,6 @@ fn main() -> std::io::Result<()> {
             worker_urls,
             poll_interval_secs: poll_interval,
             worker_key,
-            hydra_public_url,
             auth_ui_url,
             insecure_dev,
             trust_proxy,
@@ -789,7 +771,7 @@ fn main() -> std::io::Result<()> {
             )
             // auth-sdk Slice 1b-browser — the browser-facing auth HTTP
             // surface. Same mounting discipline (BEFORE the subdomain
-            // catch-all). `/authorize` 302s to Hydra (the one cross-site
+            // catch-all). `/authorize` 302s to OP (the one cross-site
             // hop); `/popup-callback` serves the same-origin relay page;
             // `/signout` revokes + clears (fixes the live bug).
             .service(

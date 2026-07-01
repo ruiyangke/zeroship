@@ -712,8 +712,8 @@ async fn load_native_consent_context(
     };
     let parsed = url::Url::parse(&format!("http://zeroship.local{return_to}"))
         .map_err(|err| format!("return_to parse: {err}"))?;
-    if parsed.path() != "/authorize" {
-        return Err("return_to must target /authorize".into());
+    if parsed.path() != "/oauth2/authorize" {
+        return Err("return_to must target /oauth2/authorize".into());
     }
     let mut client_id = None;
     let mut redirect_uri = None;

@@ -21,7 +21,7 @@ use zeroship_auth::store::{sessions as session_store, totp as totp_store};
 
 use common::{location, pkce_challenge_s256, pkce_verifier, read_set_cookie, test_auth_config};
 
-const ISSUER: &str = "https://auth.zeroship.test";
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/native-cb";
 const SECTOR: &str = "https://native-app.zeroship.test";
 const PASSWORD: &str = "correct native password phrase";
@@ -612,7 +612,7 @@ fn authorize_path(client_id: &str, scope: &str, verifier: &str, state: &str, non
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
     }
-    format!("/authorize?{}", serializer.finish())
+    format!("/oauth2/authorize?{}", serializer.finish())
 }
 
 #[allow(clippy::future_not_send)]
@@ -650,7 +650,7 @@ async fn exchange_code(fx: &Fixture, code: &str, verifier: &str) -> TokenRespons
         ("redirect_uri", REDIRECT_URI),
         ("code_verifier", verifier),
     ]);
-    let resp = post_form(fx, "/token", &body, None).await;
+    let resp = post_form(fx, "/oauth2/token", &body, None).await;
     assert_eq!(resp.status().as_u16(), 200, "token status");
     resp.json::<TokenResponse>().await.expect("token json")
 }

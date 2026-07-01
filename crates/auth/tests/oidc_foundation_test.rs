@@ -1,12 +1,16 @@
 //! P1a platform OP token-issuance foundation tests.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use clap::Parser;
 use compio_postgres::{connect, Client, NoTls};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::{decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use ntex::web;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use uuid::Uuid;
+use zeroship_auth::config::AuthConfig;
 use zeroship_auth::oidc::issuer::oidc_at_hash;
 use zeroship_auth::oidc::metadata::{discovery_metadata, jwks_document};
 use zeroship_auth::oidc::{
@@ -14,7 +18,7 @@ use zeroship_auth::oidc::{
     ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
 };
 
-const ISSUER: &str = "https://auth.zeroship.test";
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const CLIENT_ID: &str = "oac_testclient";
 const RESOURCE_AUD: &str = "app:00000000-0000-0000-0000-000000000001";
 const SECTOR_A: &str = "https://app-a.zeroship.test";
@@ -27,6 +31,23 @@ fn test_issuer() -> Issuer {
 
 fn scopes() -> Vec<String> {
     vec!["openid".into(), "profile".into(), "email".into()]
+}
+
+fn test_config(public_url: &str) -> AuthConfig {
+    let mut cfg = AuthConfig::parse_from([
+        "zeroship-auth",
+        "--addr",
+        "127.0.0.1:0",
+        "--db-url",
+        "postgres://unused",
+        "--dev-insecure",
+        "--stash-signing-key",
+        "test-stash-key-not-for-prod-32bytes!",
+        "--public-url",
+        public_url,
+    ]);
+    cfg.resolve(zeroship_core::config::AuthSection::default());
+    cfg
 }
 
 fn access_mint<'a>(user_id: &'a str, scopes: &'a [String]) -> AccessTokenMint<'a> {
@@ -189,9 +210,65 @@ async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency()
     let issuer_url = url::Url::parse(discovery["issuer"].as_str().unwrap()).unwrap();
     let jwks_url = url::Url::parse(discovery["jwks_uri"].as_str().unwrap()).unwrap();
     assert_eq!(jwks_url.host_str(), issuer_url.host_str());
-    assert_eq!(jwks_url.path(), "/.well-known/jwks.json");
+    assert_eq!(jwks_url.path(), "/oauth2/.well-known/jwks.json");
     assert_eq!(discovery["id_token_signing_alg_values_supported"], json!(["EdDSA"]));
     assert_eq!(discovery["code_challenge_methods_supported"], json!(["S256"]));
+}
+
+#[test]
+fn discovery_metadata_advertises_fixed_oauth2_mount() {
+    let public_url = "https://auth.zeroship.test";
+    let issuer = format!("{public_url}/oauth2");
+    let discovery = discovery_metadata(&issuer);
+
+    assert_eq!(discovery["issuer"], issuer);
+    for (field, suffix) in [
+        ("authorization_endpoint", "/authorize"),
+        ("token_endpoint", "/token"),
+        ("userinfo_endpoint", "/userinfo"),
+        ("revocation_endpoint", "/revoke"),
+        ("device_authorization_endpoint", "/device/authorization"),
+        ("end_session_endpoint", "/logout"),
+        ("jwks_uri", "/.well-known/jwks.json"),
+    ] {
+        let url = discovery[field].as_str().expect("endpoint string");
+        assert_eq!(url, format!("{issuer}{suffix}"));
+        assert!(
+            url.starts_with("https://auth.zeroship.test/oauth2/"),
+            "{field} must stay under /oauth2: {url}"
+        );
+    }
+}
+
+#[ntex::test]
+async fn discovery_is_served_from_oauth2_well_known_path() {
+    let cfg = Arc::new(test_config("https://auth.zeroship.test"));
+    let app = web::test::init_service(
+        web::App::new().state(cfg).service(
+            web::scope("/oauth2")
+                .service(zeroship_auth::oidc::metadata::openid_configuration),
+        ),
+    )
+    .await;
+    let req = web::test::TestRequest::get()
+        .uri("/oauth2/.well-known/openid-configuration")
+        .to_request();
+    let resp = web::test::call_service(&app, req).await;
+    assert_eq!(resp.status(), ntex::http::StatusCode::OK);
+    let body = web::test::read_body(resp).await;
+    let discovery: Value = serde_json::from_slice(&body).expect("discovery JSON");
+
+    let issuer = "https://auth.zeroship.test/oauth2";
+    assert_eq!(discovery["issuer"], issuer);
+    assert_eq!(
+        discovery["authorization_endpoint"],
+        format!("{issuer}/authorize")
+    );
+    assert_eq!(discovery["token_endpoint"], format!("{issuer}/token"));
+    assert_eq!(
+        discovery["jwks_uri"],
+        format!("{issuer}/.well-known/jwks.json")
+    );
 }
 
 #[test]

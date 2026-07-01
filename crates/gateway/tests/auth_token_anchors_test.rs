@@ -2,16 +2,16 @@
 //! browser-token CORE (`POST /__zeroship/auth/token`, `GET /__zeroship/auth/session`,
 //! the per-node mint single-flight, the `zeroship.app_session_anchors` store).
 //!
-//! A loopback MOCK Hydra (in-process ntex test server) serves
+//! A loopback MOCK OP (in-process ntex test server) serves
 //! `/.well-known/jwks.json` and `/token` so the REAL code path runs
 //! locally — the gateway's `OidcRp` dials it, verifies EdDSA-signed
 //! id/access tokens against its JWKS, and the mock COUNTS refresh-grant
 //! calls so the single-flight assertion ("N concurrent mints ⇒ exactly 1
-//! Hydra refresh") is exact. No stubs of the issuer or the single-flight.
+//! OP refresh") is exact. No stubs of the issuer or the single-flight.
 //!
 //! The DB-backed handler tests (token-exchange → anchor row →
 //! session?mint=1) are gated on `GATEWAY_ANCHORS_DB_URL` (the established
-//! env-skip convention — no live PG in CI by default). The mock-Hydra
+//! env-skip convention — no live PG in CI by default). The mock-OP
 //! single-flight test and the cookie/Origin tests run unconditionally.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -32,7 +32,7 @@ use zeroship_gateway::{
     GateConfig, GateState,
 };
 
-// ─── Mock Hydra ──────────────────────────────────────────────────────────
+// ─── Mock OP ──────────────────────────────────────────────────────────
 
 const MOCK_ISSUER: &str = "https://auth.zeroship.ai";
 const TEST_BROKER_MASTER: &[u8] = b"gateway-anchor-test-broker-master-32-bytes";
@@ -46,10 +46,10 @@ const GARBAGE_REFRESH_BODY: &str =
     r#"{"refresh_token":"rt_super_secret_family_lineage_DO_NOT_LOG","unexpected":true}"#;
 const INITIAL_REFRESH_TOKEN: &str = "rt_initial_seed";
 
-/// Shared mock-Hydra state. Signs tokens with a fixed EdDSA key, counts
+/// Shared mock-OP state. Signs tokens with a fixed EdDSA key, counts
 /// refresh-grant calls (the single-flight assertion), and can be flipped to
 /// answer `invalid_grant` (anchor-dead path).
-struct MockHydra {
+struct MockOP {
     signing: SigningKey,
     kid: String,
     /// The global user UUID every token's `sub` carries.
@@ -79,7 +79,7 @@ struct MockHydra {
     refresh_id_token: AtomicBool,
 }
 
-impl MockHydra {
+impl MockOP {
     fn new(client_id: &str) -> Self {
         let signing = SigningKey::from_bytes(&[42u8; 32]);
         let kid = zeroship_gateway::signing::jwk_thumbprint(&signing);
@@ -230,15 +230,15 @@ fn now_secs() -> i64 {
     .unwrap()
 }
 
-/// Boot the loopback mock-Hydra HTTP server. Returns `(base_url, server)`.
-async fn boot_mock_hydra(hydra: Arc<MockHydra>) -> (String, ntex::web::test::TestServer) {
+/// Boot the loopback mock OP HTTP server. Returns `(base_url, server)`.
+async fn boot_mock_op(op: Arc<MockOP>) -> (String, ntex::web::test::TestServer) {
     let srv = test::server(move || {
-        let h = hydra.clone();
+        let h = op.clone();
         async move {
             web::App::new()
                 .state(h)
-                .service(web::resource("/.well-known/jwks.json").route(web::get().to(jwks_endpoint)))
-                .service(web::resource("/token").route(web::post().to(token_endpoint)))
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks_endpoint)))
+                .service(web::resource("/oauth2/token").route(web::post().to(token_endpoint)))
         }
     })
     .await;
@@ -246,7 +246,7 @@ async fn boot_mock_hydra(hydra: Arc<MockHydra>) -> (String, ntex::web::test::Tes
     (base, srv)
 }
 
-async fn jwks_endpoint(h: web::types::State<Arc<MockHydra>>) -> web::HttpResponse {
+async fn jwks_endpoint(h: web::types::State<Arc<MockOP>>) -> web::HttpResponse {
     web::HttpResponse::Ok()
         .header("content-type", "application/json")
         .body(h.jwks_json())
@@ -254,7 +254,7 @@ async fn jwks_endpoint(h: web::types::State<Arc<MockHydra>>) -> web::HttpRespons
 
 async fn token_endpoint(
     body: ntex::util::Bytes,
-    h: web::types::State<Arc<MockHydra>>,
+    h: web::types::State<Arc<MockOP>>,
 ) -> web::HttpResponse {
     let mut grant = String::new();
     let mut client_id = String::new();
@@ -441,9 +441,9 @@ const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
 
 /// Build a `GateState` whose `OidcRp` dials the loopback mock OP and
 /// whose route cache has one provisioned app (`myapp` → `oac_myapp`).
-fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> Arc<GateState> {
+fn build_state(op_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> Arc<GateState> {
     build_state_with_route(
-        hydra_base,
+        op_base,
         db,
         APP_UUID,
         APP_NAME,
@@ -453,7 +453,7 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
 }
 
 fn build_state_with_route(
-    hydra_base: &str,
+    op_base: &str,
     db: Option<zeroship_gateway::db::DbConfig>,
     app_uuid: &str,
     app_name: &str,
@@ -476,7 +476,7 @@ fn build_state_with_route(
     // OidcRp dials the loopback mock for /token + JWKS, but expects
     // the canonical issuer the mock stamps into tokens.
     let oidc_rp = OidcRp::new(
-        hydra_base,
+        op_base,
         BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
         b"k".repeat(32),
     )
@@ -496,8 +496,7 @@ fn build_state_with_route(
             worker_urls: vec![],
             poll_interval_secs: 5,
             worker_key: "worker-key".into(),
-            hydra_public_url: hydra_base.to_string(),
-            auth_ui_url: hydra_base.to_string(),
+            auth_ui_url: op_base.to_string(),
             // insecure_dev = false so we exercise the prod __Host- / Strict
             // / Secure cookie attributes and the https Origin compare.
             insecure_dev: false,
@@ -603,12 +602,12 @@ async fn read_json(resp: ntex::web::WebResponse) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("json body")
 }
 
-// ─── DB-independent tests (loopback Hydra only) ──────────────────────────
+// ─── DB-independent tests (loopback OP only) ──────────────────────────
 
 #[ntex::test]
 async fn foreign_origin_is_rejected_no_cors_reflection() {
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let (base, _srv) = boot_mock_hydra(hydra).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let (base, _srv) = boot_mock_op(op).await;
     let state = build_state(&base, None);
 
     let app = test::init_service(anchors_app!(state)).await;
@@ -645,8 +644,8 @@ async fn foreign_origin_is_rejected_no_cors_reflection() {
 
 #[ntex::test]
 async fn token_missing_custom_header_is_rejected() {
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let (base, _srv) = boot_mock_hydra(hydra).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let (base, _srv) = boot_mock_op(op).await;
     let state = build_state(&base, None);
     let app = test::init_service(anchors_app!(state)).await;
 
@@ -664,8 +663,8 @@ async fn token_missing_custom_header_is_rejected() {
 
 #[ntex::test]
 async fn session_mint_without_custom_header_is_rejected() {
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let (base, _srv) = boot_mock_hydra(hydra).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let (base, _srv) = boot_mock_op(op).await;
     let state = build_state(&base, None);
     let app = test::init_service(anchors_app!(state)).await;
 
@@ -713,8 +712,8 @@ fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> Stri
 /// fast path.
 #[ntex::test]
 async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let (base, _srv) = boot_mock_hydra(hydra).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let (base, _srv) = boot_mock_op(op).await;
     let state = build_state(&base, None);
     assert!(state.db.is_none(), "fixture must have no DB for the DB-free proof");
 
@@ -747,8 +746,8 @@ async fn session_get_fast_path_honors_valid_pairwise_cookie_db_free() {
 /// leak inconsistency this fix closes.
 #[ntex::test]
 async fn session_get_fast_path_rejects_non_pairwise_sub() {
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let (base, _srv) = boot_mock_hydra(hydra).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let (base, _srv) = boot_mock_op(op).await;
     let state = build_state(&base, None);
 
     // A global-UUID-shaped sub (NO `pws_` prefix) — what a broken minter or a
@@ -785,15 +784,15 @@ async fn session_get_fast_path_rejects_non_pairwise_sub() {
 }
 
 /// REGRESSION (review minor #5): POST `/__zeroship/auth/session` must FAIL FAST when
-/// the gateway has no session signing key — BEFORE the Hydra code exchange + the
+/// the gateway has no session signing key — BEFORE the OP code exchange + the
 /// gateway-session + anchor write. With `session_issuer = None` AND `db = None`,
 /// the old ordering hit the `db_unavailable` 503 first (the signing-key 503 fired
 /// only at the very end, in `sign_session_cookie`). The early gate makes the
 /// missing-key case surface as `session_signing_unavailable` up front.
 #[ntex::test]
 async fn session_post_fails_fast_without_signing_key() {
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let (base, _srv) = boot_mock_hydra(hydra).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let (base, _srv) = boot_mock_op(op).await;
 
     // Build a state with NO signing key (so no session issuer/verifier) and no
     // DB — the exact ordering the fail-fast gate must win.
@@ -820,7 +819,7 @@ async fn session_post_fails_fast_without_signing_key() {
     assert_eq!(
         resp.status().as_u16(),
         503,
-        "missing signing key must 503 before any Hydra/DB work"
+        "missing signing key must 503 before any OP/DB work"
     );
     let body = read_json(resp).await;
     assert_eq!(
@@ -830,23 +829,23 @@ async fn session_post_fails_fast_without_signing_key() {
 }
 
 /// Build the SAME coalesced future `auth_token::rotate_family` builds for a
-/// leader: a Hydra refresh-grant wrapped in the REAL `anchors::EntryGuard` so
+/// leader: a OP refresh-grant wrapped in the REAL `anchors::EntryGuard` so
 /// the single-flight entry is removed when the future body is dropped — NOT
 /// when any one task survives. This is the exact round-6 BLOCKER mechanism.
 /// Post-BFF the rotation yields identity facts (a `RotationOk`), NOT a browser
 /// wrapper; the coalescing mechanism it exercises is unchanged.
 fn leader_mint_future(
     oidc: Arc<OidcRp>,
-    hydra: Arc<MockHydra>,
+    op: Arc<MockOP>,
     anchor_id: Uuid,
 ) -> anchors::SharedRotationFuture {
     use futures::FutureExt as _;
-    let user_id = hydra.user_id;
+    let user_id = op.user_id;
     (Box::pin(async move {
         // The guard's Drop removes the entry on resolution OR cancellation —
         // identical to `auth_token::rotate_family`'s leader future.
         let _guard = anchors::EntryGuard::new(anchor_id);
-        match hydra_refresh(&oidc, &hydra).await {
+        match op_refresh(&oidc, &op).await {
             Ok(()) => Ok(anchors::RotationOk {
                 global_user_id: user_id,
                 sid: None,
@@ -869,20 +868,20 @@ fn leader_mint_future(
 /// so this faithfully exercises the blocker fix (no leader-only removal).
 async fn coalesced_mint(
     oidc: Arc<OidcRp>,
-    hydra: Arc<MockHydra>,
+    op: Arc<MockOP>,
     anchor_id: Uuid,
 ) -> anchors::RotationResult {
     if let Some(existing) = anchors::with_single_flight(|sf| sf.get(anchor_id)) {
         return existing.await;
     }
-    let fut = leader_mint_future(oidc, hydra, anchor_id);
+    let fut = leader_mint_future(oidc, op, anchor_id);
     let shared = anchors::with_single_flight(|sf| sf.insert(anchor_id, fut));
     // NO `remove` here — the guard inside the future body owns removal.
     shared.await
 }
 
 #[ntex::test]
-async fn n_parallel_mints_cause_one_hydra_refresh() {
+async fn n_parallel_mints_cause_one_op_refresh() {
     // FAITHFUL single-flight proof WITHOUT a DB: drive the real per-node
     // single-flight ([`anchors::with_single_flight`]) + the real
     // [`anchors::EntryGuard`] removal over a future that does a REAL OP
@@ -892,11 +891,11 @@ async fn n_parallel_mints_cause_one_hydra_refresh() {
     // The coalescing key + future-sharing + guard-based removal is the
     // round-6 BLOCKER core; the anchor DB read/write around it is orthogonal
     // to coalescing (covered by the PG-gated full-handler test below).
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
+    let op = Arc::new(MockOP::new(CLIENT_ID));
     // Hold each refresh open long enough that all N callers pile onto the
     // SAME in-flight future before the leader resolves.
-    hydra.refresh_delay_ms.store(150, Ordering::SeqCst);
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    op.refresh_delay_ms.store(150, Ordering::SeqCst);
+    let (base, _srv) = boot_mock_op(op.clone()).await;
 
     let oidc = Arc::new(
         OidcRp::new(
@@ -909,25 +908,25 @@ async fn n_parallel_mints_cause_one_hydra_refresh() {
     let anchor_id = Uuid::new_v4();
 
     // N concurrent minters coalesce into ONE shared future driving ONE
-    // Hydra refresh. Each caller resolves the SHARED future's result.
+    // OP refresh. Each caller resolves the SHARED future's result.
     let n = 8;
     let mut handles = Vec::new();
     for _ in 0..n {
-        handles.push(coalesced_mint(oidc.clone(), hydra.clone(), anchor_id));
+        handles.push(coalesced_mint(oidc.clone(), op.clone(), anchor_id));
     }
     let results = futures::future::join_all(handles).await;
 
-    // Exactly ONE Hydra refresh for all N concurrent minters.
+    // Exactly ONE OP refresh for all N concurrent minters.
     assert_eq!(
-        hydra.refresh_calls.load(Ordering::SeqCst),
+        op.refresh_calls.load(Ordering::SeqCst),
         1,
-        "single-flight must coalesce {n} concurrent minters into ONE Hydra refresh"
+        "single-flight must coalesce {n} concurrent minters into ONE OP refresh"
     );
     // All N callers got the SAME rotated identity facts (the shared result).
     assert_eq!(results.len(), n);
     for r in &results {
         let out = r.as_ref().expect("each caller resolves the shared result");
-        assert_eq!(out.global_user_id, hydra.user_id);
+        assert_eq!(out.global_user_id, op.user_id);
     }
 
     // The single-flight entry is cleared once resolved (the guard fired).
@@ -939,10 +938,10 @@ async fn n_parallel_mints_cause_one_hydra_refresh() {
 
     // A FOLLOW-UP mint after the in-flight one cleared triggers a SECOND
     // refresh (no stale coalescing).
-    let _ = coalesced_mint(oidc.clone(), hydra.clone(), anchor_id)
+    let _ = coalesced_mint(oidc.clone(), op.clone(), anchor_id)
         .await
         .expect("second mint");
-    assert_eq!(hydra.refresh_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(op.refresh_calls.load(Ordering::SeqCst), 2);
 }
 
 #[ntex::test]
@@ -951,11 +950,11 @@ async fn cancelled_leader_does_not_leak_single_flight_entry() {
     // LEADER's request future is dropped mid-flight AFTER `insert` but before
     // it resolves, a surviving follower still drives the shared future to
     // completion, the `EntryGuard` fires on the future's drop, and the entry
-    // is cleared — so the NEXT mint for the same anchor issues a FRESH Hydra
+    // is cleared — so the NEXT mint for the same anchor issues a FRESH OP
     // refresh instead of being handed a stale resolved wrapper forever.
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    hydra.refresh_delay_ms.store(120, Ordering::SeqCst);
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    op.refresh_delay_ms.store(120, Ordering::SeqCst);
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let oidc = Arc::new(
         OidcRp::new(
             &base,
@@ -967,7 +966,7 @@ async fn cancelled_leader_does_not_leak_single_flight_entry() {
     let anchor_id = Uuid::new_v4();
 
     // Leader registers the guarded future; a follower shares it.
-    let leader = leader_mint_future(oidc.clone(), hydra.clone(), anchor_id);
+    let leader = leader_mint_future(oidc.clone(), op.clone(), anchor_id);
     let shared_for_leader = anchors::with_single_flight(|sf| sf.insert(anchor_id, leader));
     let follower = anchors::with_single_flight(|sf| sf.get(anchor_id))
         .expect("follower shares the in-flight future");
@@ -979,9 +978,9 @@ async fn cancelled_leader_does_not_leak_single_flight_entry() {
 
     // The follower drives the same future to completion → exactly ONE refresh.
     let out = follower.await.expect("follower resolves the shared mint");
-    assert_eq!(out.global_user_id, hydra.user_id);
+    assert_eq!(out.global_user_id, op.user_id);
     assert_eq!(
-        hydra.refresh_calls.load(Ordering::SeqCst),
+        op.refresh_calls.load(Ordering::SeqCst),
         1,
         "the cancelled leader + surviving follower must yield exactly one refresh"
     );
@@ -996,11 +995,11 @@ async fn cancelled_leader_does_not_leak_single_flight_entry() {
 
     // And the NEXT mint for the same anchor re-rotates (fresh refresh), proving
     // no stale resolved wrapper is served from a leaked entry.
-    let _ = coalesced_mint(oidc.clone(), hydra.clone(), anchor_id)
+    let _ = coalesced_mint(oidc.clone(), op.clone(), anchor_id)
         .await
         .expect("post-cancel mint re-rotates");
     assert_eq!(
-        hydra.refresh_calls.load(Ordering::SeqCst),
+        op.refresh_calls.load(Ordering::SeqCst),
         2,
         "a mint after the cancelled-leader case must issue a FRESH refresh"
     );
@@ -1012,9 +1011,9 @@ async fn all_awaiters_dropped_clears_single_flight_entry() {
     // the future resolves, the future body (and its `EntryGuard`) is dropped,
     // so a half-started, never-resolved entry is ALSO cleared rather than
     // leaking.
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    hydra.refresh_delay_ms.store(200, Ordering::SeqCst);
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    op.refresh_delay_ms.store(200, Ordering::SeqCst);
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let oidc = Arc::new(
         OidcRp::new(
             &base,
@@ -1025,7 +1024,7 @@ async fn all_awaiters_dropped_clears_single_flight_entry() {
     );
     let anchor_id = Uuid::new_v4();
 
-    let leader = leader_mint_future(oidc.clone(), hydra.clone(), anchor_id);
+    let leader = leader_mint_future(oidc.clone(), op.clone(), anchor_id);
     let shared = anchors::with_single_flight(|sf| sf.insert(anchor_id, leader));
     assert_eq!(anchors::with_single_flight(|sf| sf.in_flight()), 1);
 
@@ -1047,13 +1046,13 @@ async fn all_awaiters_dropped_clears_single_flight_entry() {
 #[ntex::test]
 async fn malformed_2xx_refresh_body_is_not_logged() {
     // REGRESSION (§8.1/§8.5 — refresh token never logged): a malformed-but-2xx
-    // Hydra token body must NOT have its raw contents embedded in the surfaced
+    // OP token body must NOT have its raw contents embedded in the surfaced
     // `OidcRpError`. Before the fix, `post_token`'s parse-failure error was
     // `format!("parse: {e}\nbody: {resp_body}")`, which carried the full
     // success body (access_token + refresh_token) into `tracing::warn!`.
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    hydra.garbage_2xx.store(true, Ordering::SeqCst);
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    op.garbage_2xx.store(true, Ordering::SeqCst);
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let oidc = OidcRp::new(
         &base,
         BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("broker secret"),
@@ -1082,7 +1081,7 @@ async fn malformed_2xx_refresh_body_is_not_logged() {
 /// the same two steps `auth_token::do_refresh` runs (minus the DB write). The
 /// rotated raw access JWT stays server-side (BFF §2.2) — it is verified but no
 /// browser wrapper is produced from it.
-async fn hydra_refresh(oidc: &OidcRp, hydra: &MockHydra) -> Result<(), String> {
+async fn op_refresh(oidc: &OidcRp, op: &MockOP) -> Result<(), String> {
     let tokens = oidc
         .refresh_token_public(CLIENT_ID, "rt_seed")
         .await
@@ -1092,7 +1091,7 @@ async fn hydra_refresh(oidc: &OidcRp, hydra: &MockHydra) -> Result<(), String> {
         .verify_access_token(&tokens.access_token)
         .await
         .map_err(|e| e.to_string())?;
-    assert_eq!(raw.sub, hydra.user_id.to_string());
+    assert_eq!(raw.sub, op.user_id.to_string());
     Ok(())
 }
 
@@ -1167,8 +1166,8 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         .expect("seed user");
 }
 
-/// The real email the mock Hydra stamps into the id_token + access JWT (see
-/// `MockHydra::id_token`/`access_token`). The email-claim swap (§7) must ensure
+/// The real email the mock OP stamps into the id_token + access JWT (see
+/// `MockOP::id_token`/`access_token`). The email-claim swap (§7) must ensure
 /// THIS never reaches the browser wrapper or the user projection.
 const REAL_EMAIL: &str = "user@example.com";
 
@@ -1254,10 +1253,10 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         eprintln!("[anchors] skip token_exchange (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -1386,7 +1385,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
 
 /// §2.3 — the MANDATORY relay-email swap on the `/token` identity projection.
 /// With an active relay alias for `(CLIENT_ID, user)`, the `{ user }.email`
-/// carries the ALIAS, and the REAL email (`user@example.com`, what Hydra
+/// carries the ALIAS, and the REAL email (`user@example.com`, what OP
 /// stamps) is ABSENT from the entire SPA-facing body.
 #[ntex::test]
 async fn token_exchange_swaps_email_for_relay_alias() {
@@ -1394,12 +1393,12 @@ async fn token_exchange_swaps_email_for_relay_alias() {
         eprintln!("[anchors] skip token_email_swap (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias(&dsn, user_id, &relay_email).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -1442,12 +1441,12 @@ async fn token_exchange_fails_closed_when_no_alias() {
         eprintln!("[anchors] skip token_email_failclosed (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
     // Deliberately seed NO app_user_identities row → no alias.
     cleanup_identities(&dsn, user_id).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -1488,10 +1487,10 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
         eprintln!("[anchors] skip abs_expiry (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 4);
 
     // Create an anchor directly through the REAL store and assert
@@ -1533,7 +1532,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
 #[ntex::test]
 async fn session_mint_recovers_after_reload_one_refresh() {
     // BFF reload-recovery (§2.2): the gateway session lapses, but the anchor is
-    // valid. /session?mint=1 rotates the server-held family at Hydra exactly
+    // valid. /session?mint=1 rotates the server-held family at OP exactly
     // ONCE, RE-creates the gateway_sessions row, RE-sets __Host-zeroship_app_session,
     // and returns the identity projection — with NO JWT and NO real email in
     // the body, and the pws_ id (never the global UUID).
@@ -1541,12 +1540,12 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         eprintln!("[anchors] skip session_mint_recovers (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias(&dsn, user_id, &relay_email).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -1578,7 +1577,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
         .await
         .unwrap();
     }
-    let before = hydra.refresh_calls.load(Ordering::SeqCst);
+    let before = op.refresh_calls.load(Ordering::SeqCst);
 
     // 3. Reload-recovery: /session?mint=1 with the anchor cookie only.
     let req = test::TestRequest::get()
@@ -1627,11 +1626,11 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     assert!(!raw_body.contains(REAL_EMAIL), "real email absent from reload-recovery body");
     assert!(!raw_body.contains(&user_id.to_string()), "global UUID absent from reload-recovery body");
 
-    // Exactly ONE Hydra refresh happened on the family rotation.
+    // Exactly ONE OP refresh happened on the family rotation.
     assert_eq!(
-        hydra.refresh_calls.load(Ordering::SeqCst),
+        op.refresh_calls.load(Ordering::SeqCst),
         before + 1,
-        "reload-recovery triggers exactly one Hydra refresh"
+        "reload-recovery triggers exactly one OP refresh"
     );
 
     // BFF minor fix: identity facts (name/avatar) are sourced from the rotated
@@ -1691,9 +1690,9 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         eprintln!("[anchors] skip bcl_refreshed_session (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(BCL_REFRESH_CLIENT_ID));
-    hydra.omit_refresh_id_token_on_refresh();
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(BCL_REFRESH_CLIENT_ID));
+    op.omit_refresh_id_token_on_refresh();
+    let user_id = op.user_id;
     let _email = seed_app_and_client_for(
         &dsn,
         user_id,
@@ -1705,7 +1704,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     .await;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias_for(&dsn, BCL_REFRESH_CLIENT_ID, user_id, &relay_email).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state_with_route(
         &base,
@@ -1749,7 +1748,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         let sid: Option<String> = row.try_get("sid").ok();
         assert_eq!(
             sid.as_deref(),
-            Some(hydra.sid.as_str()),
+            Some(op.sid.as_str()),
             "initial login session must persist the OP sid"
         );
     }
@@ -1766,7 +1765,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200, "refresh rotation must succeed");
     assert_eq!(
-        hydra.refresh_calls.load(Ordering::SeqCst),
+        op.refresh_calls.load(Ordering::SeqCst),
         1,
         "test must exercise the real refresh-grant rotation path"
     );
@@ -1785,7 +1784,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
         let sid: Option<String> = row.try_get("sid").ok();
         assert_eq!(
             sid.as_deref(),
-            Some(hydra.sid.as_str()),
+            Some(op.sid.as_str()),
             "refreshed session row must preserve sid even though refresh returned no id_token"
         );
         row.get::<_, Uuid>("id")
@@ -1794,7 +1793,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     // 3. Global/session logout arrives as a real signed BCL logout_token carrying
     // that sid. The refreshed row must be revoked and the reload anchor removed.
     let jti = format!("jti-{}", Uuid::new_v4().simple());
-    let logout_token = hydra.logout_token(&jti);
+    let logout_token = op.logout_token(&jti);
     let req = test::TestRequest::post()
         .uri("/oidc/backchannel-logout")
         .header("content-type", "application/x-www-form-urlencoded")
@@ -1885,13 +1884,13 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
         eprintln!("[anchors] skip session_mint_persists_rotated_refresh_token (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    hydra.enforce_refresh_reuse_detection();
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    op.enforce_refresh_reuse_detection();
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias(&dsn, user_id, &relay_email).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -1925,7 +1924,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200, "first rotation must succeed");
     assert_eq!(
-        hydra.presented_refresh_tokens(),
+        op.presented_refresh_tokens(),
         vec![INITIAL_REFRESH_TOKEN.to_string()],
         "first rotation must present the authorization-code exchange's refresh token"
     );
@@ -1967,7 +1966,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status().as_u16(), 200, "second rotation must use the rotated refresh token");
     assert_eq!(
-        hydra.presented_refresh_tokens(),
+        op.presented_refresh_tokens(),
         vec![INITIAL_REFRESH_TOKEN.to_string(), "rt_rotated_1".to_string()],
         "second rotation must present the first rotation's NEW refresh token"
     );
@@ -1985,12 +1984,12 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
         eprintln!("[anchors] skip session_mint_invalid_grant_deletes_anchor (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias(&dsn, user_id, &relay_email).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -2011,7 +2010,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
     let anchor_id =
         anchors::parse_anchor_cookie(&anchor_pair, false).expect("anchor id parses from cookie");
 
-    hydra.invalid_grant.store(true, Ordering::SeqCst);
+    op.invalid_grant.store(true, Ordering::SeqCst);
     let req = test::TestRequest::get()
         .uri("/__zeroship/auth/session?mint=1")
         .header("host", APP_HOST)
@@ -2040,7 +2039,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
     let body = read_json(resp).await;
     assert_eq!(body["error"], "login_required");
     assert_eq!(
-        hydra.presented_refresh_tokens(),
+        op.presented_refresh_tokens(),
         vec![INITIAL_REFRESH_TOKEN.to_string()],
         "invalid_grant path must have attempted exactly one OP refresh"
     );
@@ -2066,21 +2065,21 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
 }
 
 #[ntex::test]
-async fn session_steady_state_reads_gateway_session_without_hydra() {
+async fn session_steady_state_reads_gateway_session_without_op() {
     // BFF steady state (§2.2): a non-mint GET /session with a LIVE
     // __Host-zeroship_app_session cookie reads the gateway_sessions row directly and
-    // returns the relay-swapped identity projection — NO anchor read, NO Hydra
+    // returns the relay-swapped identity projection — NO anchor read, NO OP
     // round-trip, NO JWT in the body.
     let Some(dsn) = db_url() else {
         eprintln!("[anchors] skip session_steady_state (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias(&dsn, user_id, &relay_email).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -2100,7 +2099,7 @@ async fn session_steady_state_reads_gateway_session_without_hydra() {
         set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=").expect("session cookie");
     let session_pair = session_cookie.split(';').next().unwrap().to_string();
 
-    let before = hydra.refresh_calls.load(Ordering::SeqCst);
+    let before = op.refresh_calls.load(Ordering::SeqCst);
     // Non-mint GET /session with ONLY the session cookie: reads the live row.
     let req = test::TestRequest::get()
         .uri("/__zeroship/auth/session")
@@ -2124,11 +2123,11 @@ async fn session_steady_state_reads_gateway_session_without_hydra() {
     let raw_body = serde_json::to_string(&body).unwrap();
     assert!(!raw_body.contains(REAL_EMAIL), "real email absent");
 
-    // The steady-state read does NOT hit Hydra.
+    // The steady-state read does NOT hit OP.
     assert_eq!(
-        hydra.refresh_calls.load(Ordering::SeqCst),
+        op.refresh_calls.load(Ordering::SeqCst),
         before,
-        "a live-session read must skip Hydra entirely (no family rotation)"
+        "a live-session read must skip OP entirely (no family rotation)"
     );
 
     cleanup_identities(&dsn, user_id).await;
@@ -2149,12 +2148,12 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
         eprintln!("[anchors] skip session_minted_cookie_verifies_locally (no GATEWAY_ANCHORS_DB_URL)");
         return;
     };
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    seed_user(&dsn, hydra.user_id).await;
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    seed_user(&dsn, op.user_id).await;
+    let user_id = op.user_id;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias(&dsn, user_id, &relay_email).await;
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -2335,7 +2334,7 @@ async fn cleanup_f1(dsn: &str, user_id: Uuid) {
 /// This drives the REAL production path end to end and pre-seeds NOTHING in
 /// `app_user_identities` (pre-seeding it is exactly what masked the bug in the
 /// auth-crate H1 test):
-///   1. REAL cookie mint via `POST /__zeroship/auth/session` (mock Hydra + live PG).
+///   1. REAL cookie mint via `POST /__zeroship/auth/session` (mock OP + live PG).
 ///   2. Assert the mint WROTE the `(CLIENT_ID, pws_)` identity row — the F1 gap.
 ///   3. REAL `password_reset::{issue,complete}` for that user.
 ///   4. Assert a `token_revocations` family marker now exists for the cookie's
@@ -2355,11 +2354,11 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
         _ => dsn.clone(),
     };
 
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let user_id = op.user_id;
     let email = seed_app_and_client(&dsn, user_id).await;
 
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -2488,11 +2487,11 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         _ => dsn.clone(),
     };
 
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let user_id = op.user_id;
     let email = seed_app_and_client(&dsn, user_id).await;
 
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg.clone()));
 
@@ -2592,13 +2591,13 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
 /// against a concurrent revocation — the H1/M1 TOCTOU).
 ///
 /// Kill-chain reproduced end to end against the REAL handler + live PG + a
-/// loopback Hydra that COUNTS and DELAYS the refresh grant:
+/// loopback OP that COUNTS and DELAYS the refresh grant:
 ///   1. REAL cookie mint establishes a live anchor (`POST /…/session`).
 ///   2. A `?mint=1` rotation starts: `read_live` returns the still-live anchor,
-///      then `do_refresh` enters the (delayed) Hydra refresh.
+///      then `do_refresh` enters the (delayed) OP refresh.
 ///   3. WHILE that refresh is in flight, the victim's REAL `password_reset::
 ///      complete` commits — revoking the anchor AND writing the `(CLIENT_ID,
-///      pws_)` family marker (H1's teardown). The Hydra grant stays alive (H1
+///      pws_)` family marker (H1's teardown). The OP grant stays alive (H1
 ///      leaves it), so the refresh SUCCEEDS.
 ///   4. The rotation then reaches the persist/sign step.
 ///
@@ -2627,13 +2626,13 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         _ => dsn.clone(),
     };
 
-    let hydra = Arc::new(MockHydra::new(CLIENT_ID));
-    let user_id = hydra.user_id;
+    let op = Arc::new(MockOP::new(CLIENT_ID));
+    let user_id = op.user_id;
     let email = seed_app_and_client(&dsn, user_id).await;
     let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
     seed_relay_alias(&dsn, user_id, &relay_email).await;
 
-    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let (base, _srv) = boot_mock_op(op.clone()).await;
     let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
     let state = build_state(&base, Some(db_cfg));
     let app = test::init_service(anchors_app!(state.clone())).await;
@@ -2663,10 +2662,10 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         .expect("issue reset token");
     let new_hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$Zm9vYmFyZm9vYmFyZm9vYmFy";
 
-    // Hold the Hydra refresh open long enough that the concurrent reset commits
+    // Hold the OP refresh open long enough that the concurrent reset commits
     // AFTER `read_live` returned the live anchor but BEFORE `do_refresh`
     // persists — the exact TOCTOU window.
-    hydra.refresh_delay_ms.store(400, Ordering::SeqCst);
+    op.refresh_delay_ms.store(400, Ordering::SeqCst);
 
     // 3. Race: the genuine `?mint=1` rotation vs the genuine reset commit.
     let mint_fut = async {
@@ -2680,7 +2679,7 @@ async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
         test::call_service(&app, req).await
     };
     let reset_fut = async {
-        // Land the reset commit mid-refresh (delay < the 400ms Hydra hold).
+        // Land the reset commit mid-refresh (delay < the 400ms OP hold).
         ntex::time::sleep(std::time::Duration::from_millis(120)).await;
         zeroship_auth::identity::password_reset::complete(&auth_client, &issued.raw, new_hash)
             .await

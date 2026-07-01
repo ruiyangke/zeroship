@@ -8,8 +8,8 @@
 //!   - **No idle window.** A reload-recovery anchor exists precisely to
 //!     survive long idle gaps, so there is no `idle_expires_at`/slide.
 //!   - **`abs_expires_at = created_at + 30d`, set once at create, never
-//!     slid.** The 720h Hydra refresh-family ceiling is NOT mirrored into
-//!     it; that ceiling is enforced solely by Hydra returning
+//!     slid.** The 720h OP refresh-family ceiling is NOT mirrored into
+//!     it; that ceiling is enforced solely by OP returning
 //!     `invalid_grant` on a `?mint=1` refresh, which the gateway treats as
 //!     anchor-dead (delete the row + clear the breadcrumb).
 //!   - **`refresh_token_enc`** holds the AES-256-GCM-encrypted server-held
@@ -26,7 +26,7 @@
 //! Every store fn takes a `&mut Client` (a `PooledClient` derefs mutably to
 //! it), so the caller checks a pooled connection out for exactly ONE operation
 //! and releases it on drop — NO connection is ever held across the outbound
-//! Hydra HTTP call (`crate::db`, the round-6 BLOCKER invariant).
+//! OP HTTP call (`crate::db`, the round-6 BLOCKER invariant).
 //!
 //! RLS (changeset 0025): `zeroship.app_session_anchors` is FORCE-RLS,
 //! tenant-isolated on `app_id` via the `zeroship.tenant_app` GUC. The gateway
@@ -52,7 +52,7 @@ use crate::rls;
 
 /// Anchor absolute lifetime in days. `abs_expires_at = created_at + 30d`,
 /// set once at create and NEVER slid (spec §8.1/§8.3 round-6). This is the
-/// SDK reload-recovery anchor's OWN clock — independent of the 720h Hydra
+/// SDK reload-recovery anchor's OWN clock — independent of the 720h OP
 /// family ceiling, which the gateway learns about only via `invalid_grant`.
 pub const ANCHOR_ABS_DAYS: i64 = 30;
 
@@ -269,7 +269,7 @@ pub async fn read_live(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<Opti
     Ok(anchor)
 }
 
-/// Persist a rotated refresh family after a `?mint=1` Hydra refresh.
+/// Persist a rotated refresh family after a `?mint=1` OP refresh.
 /// `abs_expires_at` and `created_at` are UNTOUCHED — the anchor's own 30-day
 /// clock never slides. The browser no longer holds a wrapper (BFF redesign
 /// §3.1), so there is no cached wrapper to persist here — only the rotated
@@ -314,7 +314,7 @@ pub async fn update_rotated_family(
     Ok(affected)
 }
 
-/// Hard-delete an anchor row (anchor-dead: Hydra `invalid_grant`, or
+/// Hard-delete an anchor row (anchor-dead: OP `invalid_grant`, or
 /// signout). Idempotent — deleting a missing id is a no-op.
 ///
 /// # Errors
@@ -342,8 +342,8 @@ pub async fn delete(conn: &mut Client, app_id: Uuid, id: Uuid) -> Result<()> {
 /// 1b-browser, `scope: 'global'` signout — "this app, every device", §1.2).
 ///
 /// Returns each row's `(refresh_token_enc, client_id)` so the caller can
-/// best-effort revoke each family at Hydra. The delete is the authoritative
-/// step; the returned ciphertexts are only for the (best-effort) Hydra
+/// best-effort revoke each family at OP. The delete is the authoritative
+/// step; the returned ciphertexts are only for the (best-effort) OP
 /// revoke and the `(client_id, sub)` family-marker upsert.
 ///
 /// # Errors
@@ -380,7 +380,7 @@ pub async fn delete_all_for_user(
 }
 
 /// One deleted anchor's family ciphertext + its client_id (for the
-/// best-effort Hydra revoke fan-out on `global` signout).
+/// best-effort OP revoke fan-out on `global` signout).
 #[derive(Debug, Clone)]
 pub struct DeletedFamily {
     pub refresh_token_enc: Vec<u8>,
@@ -404,16 +404,16 @@ fn row_to_anchor(row: &compio_postgres::Row) -> Anchor {
 // ─── Per-node family-rotation single-flight (round-6 BLOCKER) ────────────
 //
 // Concurrent `?mint=1` reloaders for the SAME anchor on ONE gateway worker
-// thread coalesce into ONE Hydra refresh (the "family rotation"). The compio
+// thread coalesce into ONE OP refresh (the "family rotation"). The compio
 // model is single-thread per worker (`!Send` futures), so the keyed map is a
 // thread-local `RefCell<HashMap<AnchorId, Shared<…>>>` — NOT a cross-thread
 // `Mutex`. A `Shared` future is `Clone`, so N callers clone-and-await the SAME
-// future; exactly one drives the body (the Hydra refresh), and all N receive
+// future; exactly one drives the body (the OP refresh), and all N receive
 // its cloned result.
 //
-// The single-flight holds NO db connection and NO lock across the Hydra
+// The single-flight holds NO db connection and NO lock across the OP
 // call: the future body itself checks a pooled connection out, reads, then
-// RELEASES it before awaiting Hydra, and checks another out afterwards to
+// RELEASES it before awaiting OP, and checks another out afterwards to
 // write — see `crate::auth_token::rotate_family` / `do_refresh`.
 //
 // NOTE on vocabulary: this is FAMILY-ROTATION machinery, not token "minting".
@@ -436,7 +436,7 @@ pub type RotationResult = std::result::Result<RotationOk, RotationError>;
 /// id-token `email_verified` / `name` / `auth_time` / `amr` claims. The
 /// relay-alias email swap and `pws_` projection happen in the handler (which
 /// holds the route and salts), exactly as on the `/token` path, so the rotated
-/// raw Hydra access JWT never leaves the gateway and no JWT reaches the browser.
+/// raw OP access JWT never leaves the gateway and no JWT reaches the browser.
 #[derive(Debug, Clone)]
 pub struct RotationOk {
     pub global_user_id: Uuid,
@@ -457,10 +457,10 @@ pub struct RotationOk {
 #[derive(Debug, Clone)]
 pub enum RotationError {
     /// The anchor is gone / its family was revoked or hit the 720h ceiling
-    /// (Hydra `invalid_grant`). The caller deletes the anchor + clears the
+    /// (OP `invalid_grant`). The caller deletes the anchor + clears the
     /// breadcrumb and surfaces `401 login_required`.
     LoginRequired,
-    /// A transient upstream/internal failure (Hydra unreachable, DB write
+    /// A transient upstream/internal failure (OP unreachable, DB write
     /// failed, issuer missing, …). The caller surfaces `503`/`500` and does
     /// NOT clear the breadcrumb.
     Upstream(String),
@@ -483,7 +483,7 @@ pub type SharedRotationFuture =
 /// `!Send` compio-postgres `Pool` has. So it lives in a thread-local
 /// ([`with_single_flight`]); coalescing is per worker thread, which is the
 /// intended scope (cross-thread/cross-node concurrency is absorbed by the
-/// short cached wrapper + Hydra's rotation grace, §1.2).
+/// short cached wrapper + OP's rotation grace, §1.2).
 #[derive(Default, Clone)]
 pub struct RotationSingleFlight {
     inner: Rc<RefCell<HashMap<Uuid, SharedRotationFuture>>>,

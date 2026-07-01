@@ -350,7 +350,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         return signout_cleared(&route.host, state.config.insecure_dev);
     };
 
-    // Load the anchor (released immediately — no conn held across the Hydra
+    // Load the anchor (released immediately — no conn held across the OP
     // revoke). A missing/expired anchor ⇒ just clear the cookies.
     let anchor = {
         let pool = match crate::db::checkout(db_cfg).await {
@@ -396,7 +396,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             )
         });
 
-    // The encrypted families to revoke at Hydra + the anchor rows to delete.
+    // The encrypted families to revoke at OP + the anchor rows to delete.
     // For `local`: just this anchor's family + this row. For `global`: every
     // anchor row for `(app_id, global_user_id)` (this app, every device).
     let mut families: Vec<(Vec<u8>, String)> = Vec::new();
@@ -439,7 +439,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         }
 
         // (c) Delete the anchor row(s) and collect the family ciphertexts
-        //     for the (best-effort) Hydra revoke fan-out.
+        //     for the (best-effort) OP revoke fan-out.
         if want_global {
             match anchors::delete_all_for_user(&mut conn, route.app_id, anchor.global_user_id)
                 .await
@@ -605,7 +605,7 @@ mod tests {
     fn signout_aad_matches_token_aad() {
         // signout decrypts a family that auth_token::anchor_aad encrypted —
         // the AAD strings MUST be byte-identical or decrypt fails and the
-        // Hydra revoke is silently skipped. Pin the exact format here.
+        // OP revoke is silently skipped. Pin the exact format here.
         let mine = anchor_aad("oac_app", "usr_123");
         assert_eq!(mine, b"zs-anchor-refresh:oac_app:usr_123".to_vec());
     }

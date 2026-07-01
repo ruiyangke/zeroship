@@ -1,8 +1,8 @@
-//! Shared, breaker-guarded outbound HTTP client for the gateway → Hydra
+//! Shared, breaker-guarded outbound HTTP client for the gateway → OP
 //! path (auth-sdk §8.7, round-6 MAJOR #3).
 //!
-//! Every gateway→Hydra call used to construct a fresh `cyper::Client::new()`
-//! with no bounded timeout and no shared failure state. A Hydra brownout
+//! Every gateway→OP call used to construct a fresh `cyper::Client::new()`
+//! with no bounded timeout and no shared failure state. A OP brownout
 //! could then exhaust the gateway's outbound connections — the mint path's
 //! exact risk (`/oauth2/token` slow or 5xx-ing while every request opens a
 //! new connection pool). This module fixes that with three pieces wired
@@ -14,13 +14,13 @@
 //!    thread other than the one that created it. It is therefore effectively
 //!    `!Send` in practice — exactly like the compio-postgres [`Pool`] in
 //!    [`crate::db`]. We mirror that crate's per-worker-thread `thread_local`:
-//!    the first Hydra touch on a worker thread builds the client; every
+//!    the first OP touch on a worker thread builds the client; every
 //!    subsequent call on that thread reuses it. NO `cyper::Client::new()`
 //!    per call anywhere on the auth path.
 //!
 //! 2. **Bounded per-call timeout.** Each outbound call runs under a
 //!    [`compio::time::timeout`] (the same primitive the worker-proxy path
-//!    uses), so a hung Hydra returns a fast [`HydraError::Timeout`] instead
+//!    uses), so a hung OP returns a fast [`OpError::Timeout`] instead
 //!    of an unbounded await pinning a connection.
 //!
 //! 3. **Circuit breaker with SHARED state.** The breaker's counters live in
@@ -29,7 +29,7 @@
 //!    threads consistently — not one breaker per thread. Closed →
 //!    (N consecutive transport failures/timeouts) → Open (fast-fail every
 //!    call for a cooldown window) → HalfOpen (one probe; success closes,
-//!    failure re-opens). A Hydra **4xx** (e.g. `invalid_grant`) is a VALID
+//!    failure re-opens). A OP **4xx** (e.g. `invalid_grant`) is a VALID
 //!    upstream response, NOT a breaker failure — only transport errors and
 //!    timeouts count.
 //!
@@ -41,10 +41,10 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-/// Default bounded timeout for a single outbound Hydra call. Picked to
+/// Default bounded timeout for a single outbound OP call. Picked to
 /// match the "few seconds" the spec (§8.7) calls for and the worker-proxy
 /// idiom of a hard wall on every outbound await.
-pub const DEFAULT_HYDRA_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_OP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Consecutive transport failures/timeouts that trip a closed breaker open.
 pub const DEFAULT_FAILURE_THRESHOLD: u32 = 5;
@@ -257,7 +257,7 @@ impl CircuitBreaker {
     /// it. Without this, `probe_in_flight` would stay `true` forever and every
     /// subsequent [`Self::claim_probe`] CAS would fail — wedging the breaker in
     /// HalfOpen-rejecting for the life of the process (a self-DoS of all
-    /// gateway→Hydra traffic).
+    /// gateway→OP traffic).
     ///
     /// We treat an abandoned probe like an inconclusive (not failed) attempt:
     /// re-arm the cooldown by stamping `opened_at_ms = now` and dropping back to
@@ -315,23 +315,23 @@ enum Admit {
 /// behavior: `Upstream`/`Timeout` count as breaker failures, `Open` is the
 /// fast-fail-while-open path that becomes a `503 upstream_unavailable`.
 #[derive(Debug, thiserror::Error)]
-pub enum HydraError {
-    /// The breaker is open — the call was rejected WITHOUT touching Hydra.
+pub enum OpError {
+    /// The breaker is open — the call was rejected WITHOUT touching OP.
     /// Maps to `503 upstream_unavailable` at the handler.
-    #[error("upstream_unavailable: hydra circuit breaker open")]
+    #[error("upstream_unavailable: op circuit breaker open")]
     Open,
     /// The bounded per-call timeout elapsed. Counts as a breaker failure.
     #[error("upstream timeout after {0:?}")]
     Timeout(Duration),
     /// A transport-level error from the reused client (connect refused,
-    /// reset, TLS, body read). Counts as a breaker failure. A Hydra HTTP
+    /// reset, TLS, body read). Counts as a breaker failure. A OP HTTP
     /// 4xx/5xx is NOT this — that surfaces inside the `Ok(Response)` and the
     /// caller decides; only sub-HTTP failures are `Upstream`.
     #[error("upstream transport error: {0}")]
     Upstream(String),
 }
 
-/// Run one outbound Hydra call through the shared reused client, the bounded
+/// Run one outbound OP call through the shared reused client, the bounded
 /// timeout, and the circuit breaker.
 ///
 /// `make` is given this worker thread's reused [`cyper::Client`] and returns
@@ -339,16 +339,16 @@ pub enum HydraError {
 /// future) so the client is only cloned on the admitted path and the caller
 /// reads the same reused client every other call site does.
 ///
-/// On `Ok(resp)` — ANY completed HTTP response, including a Hydra 4xx/5xx —
+/// On `Ok(resp)` — ANY completed HTTP response, including a OP 4xx/5xx —
 /// the failure counter resets (a 4xx is a valid upstream answer, not a breaker
 /// failure); the caller inspects `resp.status()`.
 ///
 /// # Errors
-/// - [`HydraError::Open`] immediately if the breaker is open (no Hydra contact
+/// - [`OpError::Open`] immediately if the breaker is open (no OP contact
 ///   at all — the brownout fast-fail).
-/// - [`HydraError::Timeout`] if the call exceeds `timeout` (counted as a
+/// - [`OpError::Timeout`] if the call exceeds `timeout` (counted as a
 ///   breaker failure).
-/// - [`HydraError::Upstream`] on a transport error (counted as a failure).
+/// - [`OpError::Upstream`] on a transport error (counted as a failure).
 ///
 /// # Cancellation / liveness
 /// If this future is dropped mid-flight while it holds the half-open probe
@@ -373,14 +373,14 @@ pub async fn call<F, Fut>(
     breaker: &CircuitBreaker,
     timeout: Duration,
     make: F,
-) -> Result<cyper::Response, HydraError>
+) -> Result<cyper::Response, OpError>
 where
     F: FnOnce(cyper::Client) -> Fut,
     Fut: Future<Output = cyper::Result<cyper::Response>>,
 {
     let is_probe = match breaker.admit() {
         Admit::Allowed { is_probe } => is_probe,
-        Admit::Rejected => return Err(HydraError::Open),
+        Admit::Rejected => return Err(OpError::Open),
     };
 
     // RAII backstop for the single half-open probe slot: if THIS future is
@@ -411,7 +411,7 @@ where
             }
             // Sub-HTTP transport failure: connect refused, reset, TLS, etc.
             breaker.on_failure(is_probe);
-            Err(HydraError::Upstream(e.to_string()))
+            Err(OpError::Upstream(e.to_string()))
         }
         Err(_elapsed) => {
             if let Some(g) = probe_guard.as_mut() {
@@ -419,7 +419,7 @@ where
             }
             // Bounded timeout fired — fast error, never an unbounded await.
             breaker.on_failure(is_probe);
-            Err(HydraError::Timeout(timeout))
+            Err(OpError::Timeout(timeout))
         }
     }
 }

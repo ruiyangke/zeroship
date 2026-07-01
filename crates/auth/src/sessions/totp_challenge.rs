@@ -189,7 +189,7 @@ mod tests {
         let c = TotpChallenge {
             user_id: uuid::Uuid::new_v4(),
             credential_version: 1,
-            return_to: "/authorize".into(),
+            return_to: "/oauth2/authorize".into(),
             iat: now - 1000,
             exp: now - 600,
         };
@@ -203,7 +203,7 @@ mod tests {
         let c = TotpChallenge {
             user_id: uuid::Uuid::new_v4(),
             credential_version: 1,
-            return_to: "/authorize".into(),
+            return_to: "/oauth2/authorize".into(),
             iat: now + 120,
             exp: now + 600,
         };

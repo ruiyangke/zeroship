@@ -2,7 +2,7 @@
 //! (auth-sdk §8.7, round-6 MAJOR #3).
 //!
 //! These drive the REAL `OidcRp` token path (`refresh_token_public` →
-//! `post_token` → `hydra_client::call`) against a loopback MOCK OP (an
+//! `post_token` → `op_client::call`) against a loopback MOCK OP (an
 //! in-process ntex test server), exactly like `auth_token_anchors_test.rs`.
 //! Nothing about the breaker, the reused client, or the bounded timeout is
 //! stubbed — the only fake is the OP itself, which:
@@ -26,7 +26,7 @@ use std::time::Duration;
 use ntex::web::{self, test};
 use uuid::Uuid;
 
-use zeroship_gateway::hydra_client::{BreakerState, CircuitBreaker};
+use zeroship_gateway::op_client::{BreakerState, CircuitBreaker};
 use zeroship_gateway::oidc_rp::{BrokerSecret, OidcRp, OidcRpError};
 
 const CLIENT_ID: &str = "oac_myapp";
@@ -35,7 +35,7 @@ const TEST_BROKER_MASTER: &[u8] = b"gateway-breaker-test-broker-master-32-bytes"
 /// Minimal mock OP `/token`. Counts every request, and can be
 /// flipped to answer `invalid_grant` or to add an artificial delay.
 #[derive(Default)]
-struct MockHydra {
+struct MockOP {
     /// Total `/token` requests received (the fast-fail proof).
     calls: AtomicU32,
     /// When true, answer `400 invalid_grant` (a valid upstream response).
@@ -46,7 +46,7 @@ struct MockHydra {
 
 async fn token_endpoint(
     _body: ntex::util::Bytes,
-    h: web::types::State<Arc<MockHydra>>,
+    h: web::types::State<Arc<MockOP>>,
 ) -> web::HttpResponse {
     h.calls.fetch_add(1, Ordering::SeqCst);
     let delay = h.delay_ms.load(Ordering::SeqCst);
@@ -74,13 +74,13 @@ async fn token_endpoint(
 }
 
 /// Boot the loopback mock OP. Returns `(base_url, server)`.
-async fn boot_mock(hydra: Arc<MockHydra>) -> (String, test::TestServer) {
+async fn boot_mock(op: Arc<MockOP>) -> (String, test::TestServer) {
     let srv = test::server(move || {
-        let h = hydra.clone();
+        let h = op.clone();
         async move {
             web::App::new()
                 .state(h)
-                .service(web::resource("/token").route(web::post().to(token_endpoint)))
+                .service(web::resource("/oauth2/token").route(web::post().to(token_endpoint)))
         }
     })
     .await;
@@ -97,7 +97,7 @@ fn rp_with(base: &str, breaker: Arc<CircuitBreaker>, timeout: Duration) -> OidcR
         b"k".repeat(32),
     )
         .with_breaker(breaker)
-        .with_hydra_timeout(timeout)
+        .with_op_timeout(timeout)
 }
 
 // ─── 1. The client is REUSED across calls (breaker state persists) ─────────
@@ -110,8 +110,8 @@ async fn client_is_reused_breaker_state_persists_across_calls() {
     // closed across all three — i.e. one persistent state object, not a fresh
     // one per call. We also assert the mock saw exactly three calls (no retry
     // storm, no dropped call) — the reused-client happy path is unchanged.
-    let hydra = Arc::new(MockHydra::default());
-    let (base, _srv) = boot_mock(hydra.clone()).await;
+    let op = Arc::new(MockOP::default());
+    let (base, _srv) = boot_mock(op.clone()).await;
     let breaker = Arc::new(CircuitBreaker::new(3, Duration::from_millis(50)));
     let rp = rp_with(&base, breaker.clone(), Duration::from_secs(5));
 
@@ -122,24 +122,24 @@ async fn client_is_reused_breaker_state_persists_across_calls() {
         assert_eq!(breaker.state(), BreakerState::Closed);
     }
     assert_eq!(
-        hydra.calls.load(Ordering::SeqCst),
+        op.calls.load(Ordering::SeqCst),
         3,
         "exactly one upstream call per refresh — success path unchanged"
     );
 }
 
-// ─── 2. Breaker OPENS after N failures, then fast-fails without hitting Hydra ─
+// ─── 2. Breaker OPENS after N failures, then fast-fails without hitting OP ─
 
 #[ntex::test]
-async fn breaker_opens_after_n_failures_then_fast_fails_without_calling_hydra() {
+async fn breaker_opens_after_n_failures_then_fast_fails_without_calling_op() {
     // Drive N connection-refused failures by pointing at a DEAD port, then
     // assert the breaker is open and the next call fast-fails WITHOUT any
-    // network attempt. To prove "no Hydra contact while open" exactly, the
+    // network attempt. To prove "no OP contact while open" exactly, the
     // breaker is shared with a SECOND OidcRp that points at a LIVE mock: once
     // the breaker is open, a call through the live-mock RP must NOT increment
     // the mock's counter (the breaker short-circuits before the request).
-    let hydra = Arc::new(MockHydra::default());
-    let (live_base, _srv) = boot_mock(hydra.clone()).await;
+    let op = Arc::new(MockOP::default());
+    let (live_base, _srv) = boot_mock(op.clone()).await;
 
     // One shared breaker, two RPs: one dials a dead port (to rack up
     // failures), one dials the live mock (to prove the open breaker blocks
@@ -168,7 +168,7 @@ async fn breaker_opens_after_n_failures_then_fast_fails_without_calling_hydra() 
 
     // Now a call through the LIVE-mock RP must fast-fail WITHOUT touching the
     // mock — the shared open breaker short-circuits it.
-    let before = hydra.calls.load(Ordering::SeqCst);
+    let before = op.calls.load(Ordering::SeqCst);
     let err = live
         .refresh_token_public(CLIENT_ID, "rt")
         .await
@@ -177,10 +177,10 @@ async fn breaker_opens_after_n_failures_then_fast_fails_without_calling_hydra() 
         err.is_upstream_unavailable(),
         "open breaker fast-fails with upstream_unavailable: {err:?}"
     );
-    let after = hydra.calls.load(Ordering::SeqCst);
+    let after = op.calls.load(Ordering::SeqCst);
     assert_eq!(
         before, after,
-        "while OPEN the breaker must NOT issue any Hydra request (no mock call)"
+        "while OPEN the breaker must NOT issue any OP request (no mock call)"
     );
 }
 
@@ -191,8 +191,8 @@ async fn half_open_probe_success_recovers_the_breaker() {
     // Open the breaker on a dead port, wait out a short cooldown, then a
     // probe through the LIVE mock succeeds and closes the breaker so normal
     // traffic flows again.
-    let hydra = Arc::new(MockHydra::default());
-    let (live_base, _srv) = boot_mock(hydra.clone()).await;
+    let op = Arc::new(MockOP::default());
+    let (live_base, _srv) = boot_mock(op.clone()).await;
     let breaker = Arc::new(CircuitBreaker::new(2, Duration::from_millis(80)));
     let dead = rp_with("http://127.0.0.1:1", breaker.clone(), Duration::from_secs(2));
     let live = rp_with(&live_base, breaker.clone(), Duration::from_secs(2));
@@ -205,7 +205,7 @@ async fn half_open_probe_success_recovers_the_breaker() {
     // Before cooldown elapses, a live call still fast-fails.
     let err = live.refresh_token_public(CLIENT_ID, "rt").await.expect_err("still open");
     assert!(err.is_upstream_unavailable(), "{err:?}");
-    let calls_while_open = hydra.calls.load(Ordering::SeqCst);
+    let calls_while_open = op.calls.load(Ordering::SeqCst);
     assert_eq!(calls_while_open, 0, "no mock traffic while open");
 
     // Wait out the cooldown; the next live call is admitted as the probe and
@@ -215,27 +215,27 @@ async fn half_open_probe_success_recovers_the_breaker() {
     let out = live.refresh_token_public(CLIENT_ID, "rt").await;
     assert!(out.is_ok(), "half-open probe should reach the mock and succeed: {out:?}");
     assert_eq!(breaker.state(), BreakerState::Closed, "probe success closes the breaker");
-    assert_eq!(hydra.calls.load(Ordering::SeqCst), 1, "exactly the one probe reached Hydra");
+    assert_eq!(op.calls.load(Ordering::SeqCst), 1, "exactly the one probe reached OP");
 
     // Breaker fully usable again — a follow-up call flows normally.
     let out2 = live.refresh_token_public(CLIENT_ID, "rt").await;
     assert!(out2.is_ok());
-    assert_eq!(hydra.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(op.calls.load(Ordering::SeqCst), 2);
 }
 
-// ─── 4. A Hydra 4xx does NOT trip the breaker ──────────────────────────────
+// ─── 4. A OP 4xx does NOT trip the breaker ──────────────────────────────
 
 #[ntex::test]
-async fn hydra_4xx_invalid_grant_does_not_trip_the_breaker() {
+async fn op_4xx_invalid_grant_does_not_trip_the_breaker() {
     // The mock answers 400 invalid_grant for EVERY call. invalid_grant is a
     // valid upstream response (the token is dead), NOT a transport failure —
     // so even many of them must leave the breaker CLOSED. The caller still
     // gets a TokenExchange error carrying the upstream body (so the
     // invalid_grant substring detection upstream keeps working), but the
     // breaker never opens and never fast-fails.
-    let hydra = Arc::new(MockHydra::default());
-    hydra.invalid_grant.store(true, Ordering::SeqCst);
-    let (base, _srv) = boot_mock(hydra.clone()).await;
+    let op = Arc::new(MockOP::default());
+    op.invalid_grant.store(true, Ordering::SeqCst);
+    let (base, _srv) = boot_mock(op.clone()).await;
     // Threshold 3 — but invalid_grant must never count toward it.
     let breaker = Arc::new(CircuitBreaker::new(3, Duration::from_secs(30)));
     let rp = rp_with(&base, breaker.clone(), Duration::from_secs(5));
@@ -261,9 +261,9 @@ async fn hydra_4xx_invalid_grant_does_not_trip_the_breaker() {
         "5 consecutive 4xx invalid_grant must NOT trip the breaker"
     );
     assert_eq!(
-        hydra.calls.load(Ordering::SeqCst),
+        op.calls.load(Ordering::SeqCst),
         5,
-        "every call reached Hydra — none was fast-failed by the breaker"
+        "every call reached OP — none was fast-failed by the breaker"
     );
 }
 
@@ -275,9 +275,9 @@ async fn slow_upstream_hits_bounded_timeout_and_counts_as_failure() {
     // call must return a fast upstream_unavailable (NOT hang for the full
     // delay), and the timeouts count as breaker failures — so after the
     // threshold the breaker opens and subsequent calls fast-fail.
-    let hydra = Arc::new(MockHydra::default());
-    hydra.delay_ms.store(1_000, Ordering::SeqCst); // 1s upstream delay
-    let (base, _srv) = boot_mock(hydra.clone()).await;
+    let op = Arc::new(MockOP::default());
+    op.delay_ms.store(1_000, Ordering::SeqCst); // 1s upstream delay
+    let (base, _srv) = boot_mock(op.clone()).await;
     let breaker = Arc::new(CircuitBreaker::new(2, Duration::from_secs(30)));
     // 100ms bounded timeout ≪ 1s upstream delay.
     let rp = rp_with(&base, breaker.clone(), Duration::from_millis(100));
@@ -302,11 +302,11 @@ async fn slow_upstream_hits_bounded_timeout_and_counts_as_failure() {
     assert_eq!(breaker.state(), BreakerState::Open, "two timeouts must trip the breaker");
 
     // The breaker is now open: the next call fast-fails WITHOUT a new request.
-    let calls_before = hydra.calls.load(Ordering::SeqCst);
+    let calls_before = op.calls.load(Ordering::SeqCst);
     let err = rp.refresh_token_public(CLIENT_ID, "rt").await.expect_err("open");
     assert!(err.is_upstream_unavailable(), "{err:?}");
     assert_eq!(
-        hydra.calls.load(Ordering::SeqCst),
+        op.calls.load(Ordering::SeqCst),
         calls_before,
         "open breaker issues no further upstream request"
     );
@@ -317,11 +317,11 @@ async fn slow_upstream_hits_bounded_timeout_and_counts_as_failure() {
 #[ntex::test]
 async fn dropped_half_open_probe_does_not_wedge_the_breaker() {
     // Regression for the probe-slot leak (round-7 BLOCKER). The mint hot path
-    // drives a Hydra refresh inside a CANCELLABLE single-flight future; when the
+    // drives a OP refresh inside a CANCELLABLE single-flight future; when the
     // breaker is HalfOpen and the sole leader is cancelled mid-probe (client
     // disconnect / ntex timeout, no follower), the probe slot must NOT leak —
     // otherwise every later admit() CAS fails and the breaker self-DoSes all
-    // gateway→Hydra traffic until restart.
+    // gateway→OP traffic until restart.
     //
     // We reproduce that exactly: open the breaker, wait out the cooldown so the
     // next call is admitted as the probe, then DROP that probe future while it
@@ -329,8 +329,8 @@ async fn dropped_half_open_probe_does_not_wedge_the_breaker() {
     // ProbeGuard's Drop must release the slot + re-arm the cooldown. A
     // subsequent call, after the cooldown, must then be ADMITTED (and succeed),
     // not rejected forever.
-    let hydra = Arc::new(MockHydra::default());
-    let (live_base, _srv) = boot_mock(hydra.clone()).await;
+    let op = Arc::new(MockOP::default());
+    let (live_base, _srv) = boot_mock(op.clone()).await;
     let breaker = Arc::new(CircuitBreaker::new(2, Duration::from_millis(80)));
     let dead = rp_with("http://127.0.0.1:1", breaker.clone(), Duration::from_secs(2));
     // Generous per-call timeout so the probe future does NOT self-resolve via
@@ -349,7 +349,7 @@ async fn dropped_half_open_probe_does_not_wedge_the_breaker() {
 
     // Make the mock hang so the probe future is genuinely in flight when we
     // drop it (parked on the upstream await, slot claimed).
-    hydra.delay_ms.store(5_000, Ordering::SeqCst);
+    op.delay_ms.store(5_000, Ordering::SeqCst);
     {
         let probe = live.refresh_token_public(CLIENT_ID, "rt");
         // Race the probe against an immediate timeout, then DROP it: this is
@@ -360,7 +360,7 @@ async fn dropped_half_open_probe_does_not_wedge_the_breaker() {
         // dropped here by `timeout` — ProbeGuard::drop fired.
     }
     // Stop the mock hanging so the recovery probe can complete promptly.
-    hydra.delay_ms.store(0, Ordering::SeqCst);
+    op.delay_ms.store(0, Ordering::SeqCst);
 
     // The slot must be released and the cooldown re-armed (Open, not a wedged
     // HalfOpen). Wait out the fresh cooldown and prove a probe is admittable.
@@ -378,7 +378,7 @@ async fn dropped_half_open_probe_does_not_wedge_the_breaker() {
     assert_eq!(breaker.state(), BreakerState::Closed, "recovery probe closes the breaker");
 }
 
-// ─── 7. Two concurrent minters ⇒ exactly ONE half-open probe reaches Hydra ──
+// ─── 7. Two concurrent minters ⇒ exactly ONE half-open probe reaches OP ──
 
 #[ntex::test]
 async fn concurrent_half_open_probes_admit_exactly_one() {
@@ -389,11 +389,11 @@ async fn concurrent_half_open_probes_admit_exactly_one() {
     // ONE as the probe (the other fast-fails with upstream_unavailable), so the
     // mock sees exactly one request — no thundering herd into a recovering
     // upstream.
-    let hydra = Arc::new(MockHydra::default());
+    let op = Arc::new(MockOP::default());
     // Small delay so both tasks are concurrently in flight when the probe is
     // claimed (the loser must observe the slot already taken).
-    hydra.delay_ms.store(150, Ordering::SeqCst);
-    let (live_base, _srv) = boot_mock(hydra.clone()).await;
+    op.delay_ms.store(150, Ordering::SeqCst);
+    let (live_base, _srv) = boot_mock(op.clone()).await;
     let breaker = Arc::new(CircuitBreaker::new(2, Duration::from_millis(80)));
     let dead = rp_with("http://127.0.0.1:1", breaker.clone(), Duration::from_secs(2));
     let live = Arc::new(rp_with(&live_base, breaker.clone(), Duration::from_secs(5)));
@@ -425,7 +425,7 @@ async fn concurrent_half_open_probes_admit_exactly_one() {
     assert_eq!(oks, 1, "exactly one concurrent probe is admitted: a={a:?} b={b:?}");
     assert_eq!(fast_fails, 1, "the other concurrent caller fast-fails: a={a:?} b={b:?}");
     assert_eq!(
-        hydra.calls.load(Ordering::SeqCst),
+        op.calls.load(Ordering::SeqCst),
         1,
         "the mock sees exactly ONE probe request — no herd into the recovering upstream",
     );

@@ -26,9 +26,9 @@ pub(crate) enum AuthOutcome {
     /// see the authenticated user when present.
     Allowed { user_header: Option<String> },
     /// Policy required `User`/`Admin` and no valid session was found.
-    /// Caller decides between a 401 (API) and a 302 → hydra (HTML).
+    /// Caller decides between a 401 (API) and a 302 → op (HTML).
     Unauthenticated,
-    /// A request resolved a real user (cookie / raw-Hydra Bearer)
+    /// A request resolved a real user (cookie / raw OP Bearer)
     /// but the route has no `sector_identifier` yet, so the gateway CANNOT
     /// derive the per-app pairwise `pws_…` (auth-sdk Slice 4, §6.2). We FAIL
     /// CLOSED — never project the global UUID into `ZeroShip-User.id` — and
@@ -65,7 +65,7 @@ enum RevocationDecision {
 }
 
 /// Family-marker revocation gate for the per-request auth arms (cookie /
-/// raw-Hydra Bearer), routed through the short-TTL
+/// raw OP Bearer), routed through the short-TTL
 /// read-through cache (R1d).
 ///
 /// On a FRESH cache hit the decision is computed LOCALLY (`revoked_after >
@@ -272,17 +272,17 @@ async fn resolve_auth_inner(
 
     // 1. Bearer arm (§1.3, slice 1c). Ordered BEFORE the cookie arm.
     //    Serves NON-BROWSER OAuth clients (CLI /
-    //    server-to-server) presenting a raw Hydra access JWT; the SPA uses
-    //    the signed session cookie, not Bearer. Discriminates the raw-Hydra
+    //    server-to-server) presenting a raw OP access JWT; the SPA uses
+    //    the signed session cookie, not Bearer. Discriminates the raw OP
     //    access JWT from the reserved API-key path:
     //
     //      - `Allowed(header)`     → short-circuit, fully authenticated.
-    //      - `Invalid`            → a recognized raw-Hydra user-session token
+    //      - `Invalid`            → a recognized raw OP user-session token
     //        that failed verify/binding/revocation. By policy: anonymous on
     //        an `Anon` route (a non-browser client may auto-attach Bearer,
     //        and an expired-but-present Bearer must not break public pages),
     //        401 on `User`/`Admin`.
-    //      - `NotUserSession`     → a Bearer that is not a raw-Hydra JWT
+    //      - `NotUserSession`     → a Bearer that is not a raw OP JWT
     //        (e.g. a future `zsk_…` API key). Reserved path → 401 on EVERY
     //        route, including `Anon` (it asserts a DIFFERENT scheme, not an
     //        expired user session).
@@ -297,7 +297,7 @@ async fn resolve_auth_inner(
             };
         }
         BearerOutcome::ClientNotProvisioned => {
-            // A valid raw-Hydra Bearer user, but no sector_identifier yet ⇒
+            // A valid raw OP Bearer user, but no sector_identifier yet ⇒
             // cannot derive the per-app pws_. Fail closed (§6.2).
             return AuthOutcome::ClientNotProvisioned;
         }
@@ -555,20 +555,20 @@ async fn project_pairwise(
 /// see the comment at the Bearer-arm call site for the policy table.
 #[derive(Debug)]
 enum BearerOutcome {
-    /// A valid raw-Hydra user-session Bearer that verified, bound to this
+    /// A valid raw OP user-session Bearer that verified, bound to this
     /// app, and passed revocation. Carries the signed `ZeroShip-User`
     /// header. Fully authenticated regardless of policy.
     Allowed(String),
-    /// A recognized raw-Hydra user-session token (`iss == oidc_rp.issuer`)
+    /// A recognized raw OP user-session token (`iss == oidc_rp.issuer`)
     /// that FAILED verification / per-app binding / revocation, OR was
     /// presented while the route is un-provisioned (`oauth_client_id ==
     /// None`). Treated as no-identity: anonymous on `Anon`, 401 on
     /// `User`/`Admin`.
     Invalid,
-    /// A Bearer token whose `iss` is not Hydra — the reserved API-key path
+    /// A Bearer token whose `iss` is not OP — the reserved API-key path
     /// (a future `zsk_…` shape). 401 on every route.
     NotUserSession,
-    /// A valid raw-Hydra Bearer user, but the route has no
+    /// A valid raw OP Bearer user, but the route has no
     /// `sector_identifier` yet ⇒ no per-app `pws_` derivation possible.
     /// Fail closed (`503`) rather than project the global UUID (§6.2).
     ClientNotProvisioned,
@@ -578,7 +578,7 @@ enum BearerOutcome {
 
 /// Peek the unverified `iss` claim out of a JWT payload. Mirrors
 /// [`jwt_subject_unverified`] but for `iss` — used ONLY to discriminate
-/// a raw-Hydra access JWT (`iss == oidc_rp.issuer`) from the reserved
+/// a raw OP access JWT (`iss == oidc_rp.issuer`) from the reserved
 /// API-key path; the actual trust decision is the subsequent signature
 /// check, so reading `iss` before verification is safe. Returns `None`
 /// for any structural parse failure (e.g. an opaque/non-JWT API key).
@@ -600,11 +600,11 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 
 /// Resolve the `ZeroShip-User` header from an `Authorization: Bearer`
 /// access token (§1.3, slice 1c). This serves **non-browser** OAuth clients
-/// (CLI / server-to-server) that present a RAW Hydra access JWT; the SPA
+/// (CLI / server-to-server) that present a RAW OP access JWT; the SPA
 /// uses the signed session cookie, not Bearer.
 ///
 /// Discriminates by the **unverified** `iss` peek:
-///   - `iss == state.oidc_rp.issuer` (Hydra) → RAW-HYDRA path: verify the
+///   - `iss == state.oidc_rp.issuer` (OP) → RAW-OP path: verify the
 ///     JWT signature locally via the gateway's JWKS cache
 ///     (`state.oidc_rp.verify_access_token`), then bind per-app on the
 ///     `client_id` claim (RFC 9068 §3) with an `aud`-contains fallback.
@@ -613,7 +613,7 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// **Per-app binding** is the critical safety property: a token minted
 /// for app A must be rejected at app B's host. `oauth_client_id` is the
 /// matched route's expected client. When it is `None` (the app is not
-/// yet provisioned — 1d fills it), a raw-Hydra token cannot be bound to a
+/// yet provisioned — 1d fills it), a raw OP token cannot be bound to a
 /// missing client and yields `Invalid`.
 ///
 /// **Revocation** is the spec §8.5 PER-APP family marker
@@ -624,8 +624,8 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 /// subject denylist could not). Per-app scoping means a revocation on app A
 /// leaves the same user's tokens on app B valid.
 ///
-/// Pairwise projection (Slice 4, §6.2): the RAW-HYDRA path's `sub` is the
-/// GLOBAL Hydra UUID, so it is projected to the per-app `pws_` via
+/// Pairwise projection (Slice 4, §6.2): the RAW-OP path's `sub` is the
+/// GLOBAL OP UUID, so it is projected to the per-app `pws_` via
 /// [`project_pairwise`] before encoding the header (and the mapping row is
 /// upserted). The arm fails closed ([`BearerOutcome::ClientNotProvisioned`]
 /// → `503`) when the route has no `sector_identifier` yet, so the global
@@ -656,22 +656,22 @@ async fn resolve_bearer_user_header(
     };
 
     if iss == state.oidc_rp.issuer {
-        // ── RAW-HYDRA path (RFC 9068, non-browser clients) ────────────
+        // ── RAW-OP path (RFC 9068, non-browser clients) ────────────
         let Some(expected_client_id) = oauth_client_id else {
             tracing::warn!(
-                "raw-Hydra Bearer presented but route has no oauth_client_id — rejecting"
+                "raw OP Bearer presented but route has no oauth_client_id — rejecting"
             );
             return BearerOutcome::Invalid;
         };
         let claims = match state.oidc_rp.verify_access_token(token).await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "raw-Hydra Bearer verification failed");
+                tracing::warn!(error = %e, "raw OP Bearer verification failed");
                 return BearerOutcome::Invalid;
             }
         };
         // Per-app binding: bind on the `client_id` claim (RFC 9068 §3 —
-        // Hydra emits it) when present; else fall back to `aud` containing
+        // the OP emits it) when present; else fall back to `aud` containing
         // the expected client_id. We bind to `client_id`, NOT `aud` as the
         // primary, because `aud` is the resource-server audience.
         let bound = match claims.client_id.as_deref() {
@@ -683,21 +683,21 @@ async fn resolve_bearer_user_header(
                 client_id = ?claims.client_id,
                 aud = ?claims.aud,
                 expected = %expected_client_id,
-                "raw-Hydra Bearer per-app binding failed — rejecting"
+                "raw OP Bearer per-app binding failed — rejecting"
             );
             return BearerOutcome::Invalid;
         }
         if claims.sub.is_empty() {
-            tracing::warn!("raw-Hydra Bearer token missing sub — rejecting");
+            tracing::warn!("raw OP Bearer token missing sub — rejecting");
             return BearerOutcome::Invalid;
         }
         // Project the per-app pairwise `pws_` FIRST (§6.2), then key the
         // revocation check on it — the marker WRITERS (/signout + control's
         // disconnect-app cascade) key `zeroship.token_revocations` on
-        // `(client_id, pws_)`, NOT the global Hydra UUID, so the reader MUST
+        // `(client_id, pws_)`, NOT the global OP UUID, so the reader MUST
         // agree (Batch A fix 3). Pre-fix this arm keyed the lookup on the
         // global `claims.sub` while the writer keyed on `pws_`, so a real
-        // revocation never matched a still-live raw-Hydra token.
+        // revocation never matched a still-live raw OP token.
         //
         // The pairwise derivation needs the route's `sector_identifier`; with
         // no sector we cannot derive the `pws_` (and would never reach the
@@ -708,15 +708,15 @@ async fn resolve_bearer_user_header(
         };
         // `derive_pairwise` canonicalizes a UUID `sub` to its hyphenated-
         // lowercase form before hashing (Batch A M1), so the `pws_` this reader
-        // computes from the RAW Hydra `claims.sub` is byte-identical to the
+        // computes from the RAW OP `claims.sub` is byte-identical to the
         // marker the canonical-form writers (`/signout`, control cascade) wrote
-        // — even if Hydra emitted a non-canonical sub spelling.
+        // — even if OP emitted a non-canonical sub spelling.
         let pws_sub =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &claims.sub, sector);
         // Cross-node PER-APP family-marker revocation (spec §8.5). Keyed on
         // `(expected_client_id, pws_sub)` — the SAME `(client_id, pws_)` shape
         // the writers use. Per-app: revoking this user on app A leaves their
-        // raw-Hydra access on app B valid (app B's `pws_` differs). We key on
+        // raw OP access on app B valid (app B's `pws_` differs). We key on
         // `expected_client_id` (the route's bound client) because the binding
         // above proved the token agrees and the marker is written against the
         // route's client.
@@ -738,7 +738,7 @@ async fn resolve_bearer_user_header(
                     tracing::warn!(
                         client_id = %expected_client_id,
                         sub = %pws_sub,
-                        "raw-Hydra Bearer family revoked after iat"
+                        "raw OP Bearer family revoked after iat"
                     );
                     return BearerOutcome::Invalid;
                 }
@@ -746,7 +746,7 @@ async fn resolve_bearer_user_header(
                 RevocationDecision::Unavailable => return BearerOutcome::Invalid,
             }
         }
-        // Slice 4 (§6.2): the raw-Hydra `sub` is the GLOBAL Hydra UUID —
+        // Slice 4 (§6.2): the raw OP `sub` is the GLOBAL OP UUID —
         // project it to the per-app `pws_` (and upsert the mapping + read the
         // live relay alias) before the header is built, so the worker never
         // sees the global id. `expected_client_id` is the route's bound oac_
@@ -781,14 +781,14 @@ async fn resolve_bearer_user_header(
         ));
     }
 
-    // Not a raw-Hydra JWT — reserved API-key path (e.g. a future `zsk_…`
+    // Not a raw OP JWT — reserved API-key path (e.g. a future `zsk_…`
     // shape). Stays 401.
     BearerOutcome::NotUserSession
 }
 
-/// Materialise a `WorkerUser` from a verified raw-Hydra access JWT.
+/// Materialise a `WorkerUser` from a verified raw OP access JWT.
 ///
-/// `id` is the raw `sub` (the GLOBAL Hydra UUID) here; the caller
+/// `id` is the raw `sub` (the GLOBAL OP UUID) here; the caller
 /// ([`resolve_bearer_user_header`]) projects it to the per-app `pws_`
 /// via [`project_pairwise`] (Slice 4, §6.2) BEFORE the header is built,
 /// so the global UUID never reaches the worker. The profile fields come
@@ -799,7 +799,7 @@ fn build_worker_user_from_access_claims(claims: &crate::oidc_rp::AccessClaims) -
         email: claims.email.clone().unwrap_or_default(),
         name: claims.name.clone().unwrap_or_default(),
         email_verified: claims.email_verified.unwrap_or(false),
-        // Raw-Hydra arm: scopes come from the access token's `scope` claim.
+        // Raw-OP arm: scopes come from the access token's `scope` claim.
         scopes: split_scope_claim(claims.scope.as_deref().unwrap_or_default()),
     }
 }
@@ -906,7 +906,7 @@ async fn resolve_app_session_user_header_inner(
 
     // A session cookie binds per-app on its `app` claim. Without an expected
     // client_id (un-provisioned app) we cannot bind, so refuse rather than
-    // accept an unbound cookie — mirrors the raw-Hydra Bearer arm.
+    // accept an unbound cookie — mirrors the raw OP Bearer arm.
     let Some(expected_client_id) = oauth_client_id else {
         tracing::warn!("signed session cookie presented but route has no oauth_client_id — rejecting");
         return CookieOutcome::None;
@@ -1069,14 +1069,14 @@ mod tests {
         assert_eq!(extract_session_cookie(Some(&prod_header), true), None);
     }
 
-    // ─── Worker-user builders (raw-Hydra Bearer) ─────────────────────
+    // ─── Worker-user builders (raw OP Bearer) ─────────────────────
     //
     // The surviving arms map their verified claims straight onto a
     // `WorkerUser`. A regression in the field mapping (e.g. losing
     // `email_verified`, dropping `name`, mangling `scopes`) would silently
     // degrade the worker's view of the authenticated user — covered here.
 
-    /// The raw-Hydra Bearer arm carries the app's granted scopes from the
+    /// The raw OP Bearer arm carries the app's granted scopes from the
     /// access-token `scope` claim onto `WorkerUser.scopes` (Slice 3, §1.4), and
     /// they survive the encode → verify → JSON-parse round-trip the worker
     /// performs.
@@ -1116,7 +1116,7 @@ mod tests {
         );
     }
 
-    /// The raw-Hydra Bearer arm carries `scope` from the access-token claims
+    /// The raw OP Bearer arm carries `scope` from the access-token claims
     /// onto `WorkerUser.scopes`.
     #[test]
     fn build_worker_user_from_access_claims_carries_scopes() {
@@ -1139,8 +1139,8 @@ mod tests {
 
     // ─── Bearer / cookie GateState fixtures ───────────────────────────
     //
-    // The integration tests below build a real raw-Hydra access token / signed
-    // session cookie, and a real `GateState` (sans live PG / hydra) and drive
+    // The integration tests below build a real raw OP access token / signed
+    // session cookie, and a real `GateState` (sans live PG / op) and drive
     // `resolve_bearer_user_header` / the cookie arm directly.
 
     fn test_broker_secret() -> crate::oidc_rp::BrokerSecret {
@@ -1248,7 +1248,7 @@ mod tests {
     }
 
     /// Most general state builder: inject a custom [`OidcRp`] so the
-    /// raw-Hydra Bearer tests can point its JWKS cache at a live test
+    /// raw OP Bearer tests can point its JWKS cache at a live test
     /// server and pin a known `issuer`. The signed-session-cookie
     /// issuer/verifier are built from `signing` (the gateway's own key);
     /// `public_url` stays `https://api.zeroship.ai` (the session `iss`).
@@ -1283,7 +1283,6 @@ mod tests {
                 worker_urls: vec![],
                 poll_interval_secs: 5,
                 worker_key: "wk".into(),
-                hydra_public_url: String::new(),
                 auth_ui_url: oidc_rp.auth_ui_url.clone(),
                 insecure_dev: true,
                 trust_proxy: false,
@@ -1321,24 +1320,24 @@ mod tests {
     // ─── Bearer arm (slice 1c) ────────────────────────────────────────
     //
     // The Bearer arm sits before the cookie arm. It
-    // recognizes a raw Hydra access JWT (`iss == oidc_rp.issuer`, verified
+    // recognizes a raw OP access JWT (`iss == oidc_rp.issuer`, verified
     // locally via the gateway JWKS) for non-browser clients — plus the
     // reserved API-key path (any other `iss`). These tests exercise
     // `resolve_bearer_user_header` directly with the REAL `JwksCache` (no
     // stubs), and the `Anon`/`User` policy gate through `resolve_auth`.
 
-    /// The logical Hydra issuer the raw-Hydra path pins. The test JWKS
+    /// The logical OP issuer the raw OP path pins. The test JWKS
     /// server dials loopback, but `OidcRp::with_issuer` decouples the
     /// dial URL from the `iss` the access JWT actually carries.
-    const HYDRA_ISS: &str = "https://auth.zeroship.ai/";
+    const OP_ISS: &str = "https://auth.zeroship.ai/oauth2";
 
-    /// Sign a raw Hydra-style access JWT (RFC 9068) with `signing`
+    /// Sign a raw OP-style access JWT (RFC 9068) with `signing`
     /// (EdDSA). `client_id`/`aud` are stamped so the Bearer arm's per-app
     /// binding (client_id primary, aud fallback) can be exercised; pass
     /// `client_id: None` to drop the claim and force the aud fallback.
     /// `exp_delta` controls expiry relative to now (negative ⇒ expired).
     #[allow(clippy::too_many_arguments)]
-    fn sign_hydra_access_jwt(
+    fn sign_op_access_jwt(
         signing: &ed25519_dalek::SigningKey,
         sub: &str,
         client_id: Option<&str>,
@@ -1359,7 +1358,7 @@ mod tests {
         .unwrap();
         let mut body = serde_json::json!({
             "sub": sub,
-            "iss": HYDRA_ISS,
+            "iss": OP_ISS,
             "aud": aud,
             "exp": now + exp_delta,
             "iat": now - 5,
@@ -1383,7 +1382,7 @@ mod tests {
     /// Build the JWKS document (one EdDSA/OKP key) that verifies tokens
     /// signed by `signing`. `kid` is the RFC 7638 thumbprint so it
     /// matches the JWT header the signer stamps.
-    fn hydra_jwks_doc(signing: &ed25519_dalek::SigningKey) -> serde_json::Value {
+    fn op_jwks_doc(signing: &ed25519_dalek::SigningKey) -> serde_json::Value {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine as _;
         let pk = signing.verifying_key();
@@ -1400,7 +1399,7 @@ mod tests {
     }
 
     /// Spin up a loopback JWKS server serving `doc` and return its base
-    /// URL. The gateway `OidcRp` dials `{base}/.well-known/jwks.json`.
+    /// URL. The gateway `OidcRp` dials `{base}/oauth2/.well-known/jwks.json`.
     async fn start_jwks_server(doc: serde_json::Value) -> ntex::web::test::TestServer {
         let doc = std::sync::Arc::new(doc);
         let doc_for_server = doc.clone();
@@ -1408,7 +1407,7 @@ mod tests {
             let doc = doc_for_server.clone();
             async move {
                 ntex::web::App::new().state(doc).service(
-                    ntex::web::resource("/.well-known/jwks.json").route(
+                    ntex::web::resource("/oauth2/.well-known/jwks.json").route(
                         ntex::web::get().to(
                             |doc: ntex::web::types::State<
                                 std::sync::Arc<serde_json::Value>,
@@ -1424,9 +1423,9 @@ mod tests {
     }
 
     /// Build a state whose `OidcRp` JWKS dials `jwks_base` and whose
-    /// `issuer` is the canonical Hydra `iss`. `gateway_signing` is the
-    /// gateway's own session-cookie signing key (distinct from Hydra's JWKS key).
-    fn build_state_for_hydra(
+    /// `issuer` is the canonical OP `iss`. `gateway_signing` is the
+    /// gateway's own session-cookie signing key (distinct from OP's JWKS key).
+    fn build_state_for_op(
         gateway_signing: ed25519_dalek::SigningKey,
         jwks_base: &str,
     ) -> std::sync::Arc<crate::GateState> {
@@ -1435,7 +1434,7 @@ mod tests {
             test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
-        .with_issuer(HYDRA_ISS);
+        .with_issuer(OP_ISS);
         build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, None)
     }
 
@@ -1618,7 +1617,7 @@ mod tests {
 
     #[compio::test]
     async fn bearer_unrecognized_iss_jwt_is_not_user_session() {
-        // A well-formed JWT whose `iss` is neither the gateway nor Hydra
+        // A well-formed JWT whose `iss` is neither the gateway nor OP
         // is still the reserved path → NotUserSession.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_session(gateway_signing);
@@ -1639,8 +1638,8 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn resolve_auth_invalid_raw_hydra_on_anon_route_serves_anonymously() {
-        // A present-but-INVALID raw-Hydra user-session Bearer on an `Anon`
+    async fn resolve_auth_invalid_raw_op_on_anon_route_serves_anonymously() {
+        // A present-but-INVALID raw OP user-session Bearer on an `Anon`
         // route must NOT 401 — it falls through to anonymous (a client may
         // auto-attach a Bearer to every request; a stale/invalid one must not
         // break public pages). round-3. The same invalid Bearer on a `User`
@@ -1648,26 +1647,26 @@ mod tests {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         // JWKS server serves a DIFFERENT key than the token is signed with, so
-        // the raw-Hydra Bearer fails signature verification → Invalid.
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        // the raw OP Bearer fails signature verification → Invalid.
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
             test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
-        .with_issuer(HYDRA_ISS);
+        .with_issuer(OP_ISS);
         let state = build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, None);
         let aud = "myapp.zeroship.ai";
 
         let bad_key = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &bad_key,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff00aa",
             Some("oac_myapp"),
             serde_json::json!(["oac_myapp"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
 
@@ -1945,7 +1944,7 @@ mod tests {
     async fn resolve_auth_non_user_session_bearer_401s_even_on_anon() {
         // The reserved API-key path asserts a DIFFERENT scheme, not an
         // expired user session — so it 401s even on an `Anon` route
-        // (unlike an invalid raw-Hydra Bearer, which falls through to anonymous).
+        // (unlike an invalid raw OP Bearer, which falls through to anonymous).
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_session(gateway_signing);
         let req = bearer_req("zsk_opaque_api_key", "myapp.zeroship.ai");
@@ -1966,28 +1965,28 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn bearer_valid_raw_hydra_jwt_emits_zeroship_user() {
-        // Happy path (raw Hydra): a real EdDSA-signed access JWT,
+    async fn bearer_valid_raw_op_jwt_emits_zeroship_user() {
+        // Happy path (raw OP): a real EdDSA-signed access JWT,
         // JWKS-verified against a live JWKS server, with a matching
         // client_id claim → Allowed + ZeroShip-User whose id is the per-app
         // pairwise pws_ (Slice 4 §6.2 — the global UUID sub is projected,
         // never emitted on the worker header).
-        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]); // Hydra's key
+        let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]); // OP's key
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]); // gateway wrapper key
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
         let sector = "https://myapp.zeroship.ai";
         let aud = "myapp.zeroship.ai";
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]), // resource-server aud, NOT the client
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
 
@@ -2010,7 +2009,7 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        // Slice 4: the raw-Hydra global UUID is projected to the per-app pws_.
+        // Slice 4: the raw OP global UUID is projected to the per-app pws_.
         let expected_pws =
             zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
         assert_eq!(user["id"], expected_pws);
@@ -2024,9 +2023,9 @@ mod tests {
             "global UUID leaked into ZeroShip-User: {json}"
         );
         // Slice 5c §7 — email-claim swap: the app NEVER sees the real email.
-        // With no DB/alias source here (`build_state_for_hydra` db=None) the
+        // With no DB/alias source here (`build_state_for_op` db=None) the
         // swap fails closed → empty email. The real `user@example.com` (what
-        // Hydra stamped) must be ABSENT from the projected header.
+        // OP stamped) must be ABSENT from the projected header.
         assert_eq!(user["email"], "", "no alias ⇒ empty email (fail closed)");
         assert!(
             !json.contains("user@example.com"),
@@ -2037,25 +2036,25 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn bearer_raw_hydra_aud_fallback_binds_when_client_id_absent() {
-        // RFC 9068 §3 mandates client_id, but if Hydra ever omits it the
+    async fn bearer_raw_op_aud_fallback_binds_when_client_id_absent() {
+        // RFC 9068 §3 mandates client_id, but if OP ever omits it the
         // Bearer arm falls back to binding on `aud` CONTAINING the
         // expected client_id (the pre-decided S1 fallback). Here the JWT
         // has NO client_id claim but lists the client_id in `aud`.
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let aud = "myapp.zeroship.ai";
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &jwks_signing,
             "usr_global_uuid",
             None, // no client_id claim → force aud fallback
             serde_json::json!(["http://api.zeroship.localhost", "oac_myapp"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
 
@@ -2081,23 +2080,23 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn bearer_raw_hydra_client_id_mismatch_rejected() {
-        // A raw-Hydra JWT whose client_id claim is app A must be rejected
+    async fn bearer_raw_op_client_id_mismatch_rejected() {
+        // A raw OP JWT whose client_id claim is app A must be rejected
         // at app B's host (cross-app replay defense on the raw path too).
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let aud = "myapp.zeroship.ai";
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &jwks_signing,
             "usr_global_uuid",
             Some("oac_app_a"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
 
@@ -2107,7 +2106,7 @@ mod tests {
             resolve_bearer_user_header(&req, &state, &request_id, Some("oac_app_b"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
-            "raw-Hydra client_id mismatch must be Invalid, got {outcome:?}"
+            "raw OP client_id mismatch must be Invalid, got {outcome:?}"
         );
 
         drop(srv);
@@ -2128,23 +2127,23 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn bearer_raw_hydra_expired_rejected() {
-        // An expired raw-Hydra JWT (beyond the 60s leeway) fails the JWKS
+    async fn bearer_raw_op_expired_rejected() {
+        // An expired raw OP JWT (beyond the 60s leeway) fails the JWKS
         // verify → Invalid (401 on User, anonymous on Anon).
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let aud = "myapp.zeroship.ai";
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &jwks_signing,
             "usr_global_uuid",
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             -100, // expired
         );
 
@@ -2154,33 +2153,33 @@ mod tests {
             resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
-            "expired raw-Hydra JWT must be Invalid, got {outcome:?}"
+            "expired raw OP JWT must be Invalid, got {outcome:?}"
         );
 
         drop(srv);
     }
 
     #[ntex::test]
-    async fn bearer_raw_hydra_bad_signature_rejected() {
-        // A raw-Hydra JWT signed by a key NOT in the JWKS must fail
+    async fn bearer_raw_op_bad_signature_rejected() {
+        // A raw OP JWT signed by a key NOT in the JWKS must fail
         // signature verification → Invalid.
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]); // published
         let forged_signing = ed25519_dalek::SigningKey::from_bytes(&[66u8; 32]); // NOT published
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let aud = "myapp.zeroship.ai";
         // Signed by forged key → its kid won't be in the JWKS (the kid is
         // the thumbprint of the forged public half).
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &forged_signing,
             "usr_global_uuid",
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
 
@@ -2190,7 +2189,7 @@ mod tests {
             resolve_bearer_user_header(&req, &state, &request_id, Some("oac_myapp"), None).await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
-            "bad-signature raw-Hydra JWT must be Invalid, got {outcome:?}"
+            "bad-signature raw OP JWT must be Invalid, got {outcome:?}"
         );
 
         drop(srv);
@@ -2246,46 +2245,46 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn bearer_raw_hydra_revocation_is_per_app_not_global() {
+    async fn bearer_raw_op_revocation_is_per_app_not_global() {
         let Some(db) = connect_auth_db().await else {
             eprintln!("skipping (no AUTH_DB_URL)");
             return;
         };
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
 
-        // build_state_for_hydra with a DB so the revocation check runs.
+        // build_state_for_op with a DB so the revocation check runs.
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
             test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
-        .with_issuer(HYDRA_ISS);
+        .with_issuer(OP_ISS);
         let state =
             build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, Some(db.clone()));
 
         let aud = "myapp.zeroship.ai";
         let sub = format!("usr_{}", Uuid::new_v4().simple());
-        // One Hydra token whose client_id claim is app A; the route binds
+        // One OP token whose client_id claim is app A; the route binds
         // on client_id, so present it at app A and (separately) app B.
-        let token_a = sign_hydra_access_jwt(
+        let token_a = sign_op_access_jwt(
             &jwks_signing,
             &sub,
             Some("oac_app_a"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
-        let token_b = sign_hydra_access_jwt(
+        let token_b = sign_op_access_jwt(
             &jwks_signing,
             &sub,
             Some("oac_app_b"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
         let req_a = bearer_req(&token_a, aud);
@@ -2364,23 +2363,23 @@ mod tests {
     // short-circuit (BearerOutcome::Allowed → AuthOutcome::Allowed{Some}).
 
     #[ntex::test]
-    async fn resolve_auth_valid_raw_hydra_on_user_route_allows_with_header() {
+    async fn resolve_auth_valid_raw_op_on_user_route_allows_with_header() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0001";
         let sector = "https://myapp.zeroship.ai";
         let aud = "myapp.zeroship.ai";
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
             Some("oac_myapp"),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
         let req = bearer_req(&token, aud);
@@ -2407,7 +2406,7 @@ mod tests {
         )
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
-        // Slice 4: the raw-Hydra global UUID is projected to the per-app pws_
+        // Slice 4: the raw OP global UUID is projected to the per-app pws_
         // end-to-end through resolve_auth (the global UUID never reaches the
         // worker header).
         let expected_pws =
@@ -2421,7 +2420,7 @@ mod tests {
     // ─── Invalid-Bearer does NOT fall back to a valid cookie (minor) ──────
     //
     // Documents the round-3 decision: on a User/Admin route an Invalid
-    // raw-Hydra Bearer 401s and is NOT silently
+    // raw OP Bearer 401s and is NOT silently
     // rescued by a valid cookie session. DB-free under R1b — the cookie is a
     // SIGNED `zeroship-sess+jwt` verified locally, so the test mints a real signed
     // cookie (genuinely valid) and proves the Bearer still wins the 401.
@@ -2430,17 +2429,17 @@ mod tests {
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         // Stand up a JWKS server that serves a DIFFERENT key than the token is
-        // signed with, so the raw-Hydra Bearer fails signature verification →
+        // signed with, so the raw OP Bearer fails signature verification →
         // BearerOutcome::Invalid (the "recognized user-session token that
-        // failed verify" case). The OidcRp issuer is pinned to HYDRA_ISS.
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        // failed verify" case). The OidcRp issuer is pinned to OP_ISS.
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
             test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
-        .with_issuer(HYDRA_ISS);
+        .with_issuer(OP_ISS);
         let state = build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, None);
         let aud = "myapp.zeroship.ai";
         let client_id = "oac_myapp";
@@ -2475,18 +2474,18 @@ mod tests {
             "the signed cookie alone must authenticate (test fixture sanity)"
         );
 
-        // Now attach a raw-Hydra Bearer signed with the WRONG key (so it fails
+        // Now attach a raw OP Bearer signed with the WRONG key (so it fails
         // verification) alongside the SAME valid cookie. The Bearer arm yields
         // Invalid; on a User route that 401s and MUST NOT fall through to the
         // (valid) cookie.
         let bad_key = ed25519_dalek::SigningKey::from_bytes(&[99u8; 32]);
-        let unverifiable_bearer = sign_hydra_access_jwt(
+        let unverifiable_bearer = sign_op_access_jwt(
             &bad_key,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0099",
             Some(client_id),
             serde_json::json!([client_id]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
 
@@ -2609,7 +2608,7 @@ mod tests {
     //
     // These cover the four properties of the consistent `pws_` projection:
     // (1) cross-app divergence (same user, two apps → different pws_);
-    // (2) cross-arm + re-login consistency (cookie vs raw-Hydra Bearer →
+    // (2) cross-arm + re-login consistency (cookie vs raw OP Bearer →
     //     the SAME pws_ for the same (user, app));
     // (3) the global UUID is ABSENT from every outward `ZeroShip-User`;
     // (4) fail-closed 503 when the route has no sector yet.
@@ -2619,20 +2618,20 @@ mod tests {
     /// A fixed global UUID + two distinct app sectors. A `pws_` derived for
     /// the SAME user under DIFFERENT sectors MUST differ — no cross-app
     /// correlation (G4). This is the cross-app divergence property at the
-    /// gateway projection boundary, asserted against the raw-Hydra arm's
+    /// gateway projection boundary, asserted against the raw OP arm's
     /// emitted header (the path that actually projects).
     #[ntex::test]
-    async fn raw_hydra_same_user_two_apps_get_different_pws() {
+    async fn raw_op_same_user_two_apps_get_different_pws() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0042";
 
         // App A.
-        let token_a = sign_hydra_access_jwt(
+        let token_a = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
             Some("oac_app_a"),
@@ -2657,7 +2656,7 @@ mod tests {
         let id_a = decode_header_id(&state, &header_a);
 
         // App B — SAME user, different sector/client.
-        let token_b = sign_hydra_access_jwt(
+        let token_b = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
             Some("oac_app_b"),
@@ -2693,25 +2692,25 @@ mod tests {
     }
 
     /// Cross-arm + re-login consistency: the SAME (user, app) yields the
-    /// SAME `pws_` whether the gateway resolves it via the raw-Hydra arm or
+    /// SAME `pws_` whether the gateway resolves it via the raw OP arm or
     /// derives it directly (the cookie arm uses the identical derivation on
     /// the SAME global UUID + sector). Re-login is modelled by deriving
     /// twice — `derive_pairwise` is deterministic, so a fresh token for the
     /// same user re-projects to the same id.
     #[ntex::test]
-    async fn raw_hydra_pws_is_consistent_across_arms_and_relogin() {
+    async fn raw_op_pws_is_consistent_across_arms_and_relogin() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
         let global_sub = "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0077";
         let sector = "https://myapp.zeroship.ai";
         let aud = "myapp.zeroship.ai";
 
-        // Raw-Hydra arm projection.
-        let token = sign_hydra_access_jwt(
+        // Raw-OP arm projection.
+        let token = sign_op_access_jwt(
             &jwks_signing,
             global_sub,
             Some("oac_myapp"),
@@ -2729,7 +2728,7 @@ mod tests {
         };
         let arm_id = decode_header_id(&state, &header);
 
-        // The cookie arm and the raw-Hydra arm use the SAME derivation on the
+        // The cookie arm and the raw OP arm use the SAME derivation on the
         // SAME (global UUID, sector). Re-login (a second fresh token)
         // re-derives the identical value.
         let direct = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_sub, sector);
@@ -2738,7 +2737,7 @@ mod tests {
 
         assert_eq!(
             arm_id, direct,
-            "raw-Hydra arm must project the same pws_ the cookie arm derives"
+            "raw OP arm must project the same pws_ the cookie arm derives"
         );
         assert_eq!(direct, relogin, "re-login must re-derive the SAME pws_");
         assert!(arm_id.starts_with("pws_"));
@@ -2746,19 +2745,19 @@ mod tests {
         drop(srv);
     }
 
-    /// Fail-closed: a VALID raw-Hydra user whose route has NO
+    /// Fail-closed: a VALID raw OP user whose route has NO
     /// `sector_identifier` yet must NOT be projected — the arm returns
     /// `ClientNotProvisioned` (which `resolve_auth` maps to 503), never the
     /// global UUID. Mirrors the browser-token path's posture.
     #[ntex::test]
-    async fn raw_hydra_unprovisioned_sector_fails_closed() {
+    async fn raw_op_unprovisioned_sector_fails_closed() {
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
-        let state = build_state_for_hydra(gateway_signing, &base);
+        let state = build_state_for_op(gateway_signing, &base);
 
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &jwks_signing,
             "0192f1aa-bbbb-7ccc-8ddd-eeeeffff0099",
             Some("oac_myapp"),
@@ -3058,7 +3057,7 @@ mod tests {
 
     /// Typ separation, both directions. A signed SESSION cookie (`zeroship-sess+jwt`)
     /// presented on the Bearer arm is REJECTED (the Bearer arm only recognizes a
-    /// raw-Hydra `iss`, never the gateway-signed session token) — and a gateway-
+    /// raw OP `iss`, never the gateway-signed session token) — and a gateway-
     /// signed `at+jwt` token presented to the session-cookie arm is rejected by
     /// the session verifier's `zeroship-sess+jwt` typ gate. DB-free.
     #[ntex::test]
@@ -3072,7 +3071,7 @@ mod tests {
         let rid = Uuid::new_v4();
 
         // (1) Session cookie presented on the Bearer arm → not a user session
-        //     (its `iss` is the gateway, not Hydra, so it is the reserved path).
+        //     (its `iss` is the gateway, not OP, so it is the reserved path).
         let session_token = issue_signed_session_cookie(&state, client_id, &pws, "", &[]);
         let bearer = bearer_req(&session_token, aud);
         let bearer_outcome =
@@ -3663,7 +3662,7 @@ mod tests {
 
     /// Write the family marker the EXACT way `/signout` does — keyed on
     /// `(client_id, pws_)` where `pws_ = derive_pairwise(salt, global_uuid,
-    /// sector)` — then assert that a still-live raw-Hydra Bearer token for the
+    /// sector)` — then assert that a still-live raw OP Bearer token for the
     /// same `(client_id, user)` is rejected. Pre-fix the lookup used the GLOBAL
     /// UUID while the writer keyed on `pws_`, so a real signout never matched a
     /// live token. PG-gated.
@@ -3671,7 +3670,7 @@ mod tests {
     /// `#[ntex::test]` (not `#[compio::test]`) because it stands up an
     /// `ntex::web::test::server` JWKS mock, which requires the ntex runtime.
     #[ntex::test]
-    async fn revocation_keyed_on_pws_rejects_raw_hydra_bearer() {
+    async fn revocation_keyed_on_pws_rejects_raw_op_bearer() {
         let Some(db) = connect_auth_db().await else {
             eprintln!("skipping (no AUTH_DB_URL)");
             return;
@@ -3685,17 +3684,17 @@ mod tests {
         let sector = "https://myapp.zeroship.ai";
         let global_sub = format!("0192f1aa-bbbb-7ccc-8ddd-{:012x}", rand_suffix());
 
-        // Build a state whose oidc_rp JWKS serves the Hydra key. Read the SAME
+        // Build a state whose oidc_rp JWKS serves the OP key. Read the SAME
         // salt the Bearer arm will use off the built state and derive the
         // WRITER's pws_ from it — no fragile Arc mutation.
-        let srv = start_jwks_server(hydra_jwks_doc(&jwks_signing)).await;
+        let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
         let base = srv.url("").trim_end_matches('/').to_string();
         let oidc_rp = crate::oidc_rp::OidcRp::new(
             &base,
             test_broker_secret(),
             b"test-stash-key-32-bytes-long----".to_vec(),
         )
-        .with_issuer(HYDRA_ISS);
+        .with_issuer(OP_ISS);
         let bearer_state =
             build_state_with_session_and_oidc_and_db(gateway_signing, oidc_rp, Some(db.clone()));
 
@@ -3714,13 +3713,13 @@ mod tests {
                 .expect("signout-style revoke_family on (client_id, pws_)");
         }
 
-        let token = sign_hydra_access_jwt(
+        let token = sign_op_access_jwt(
             &jwks_signing,
             &global_sub,
             Some(client_id),
             serde_json::json!(["http://api.zeroship.localhost"]),
             "user@example.com",
-            "Hydra User",
+            "OP User",
             3600,
         );
         let req = bearer_req(&token, host);
@@ -3735,7 +3734,7 @@ mod tests {
         .await;
         assert!(
             matches!(outcome, BearerOutcome::Invalid),
-            "a still-live raw-Hydra Bearer must be rejected by the pws_-keyed marker, got {outcome:?}"
+            "a still-live raw OP Bearer must be rejected by the pws_-keyed marker, got {outcome:?}"
         );
 
         // Cleanup.
