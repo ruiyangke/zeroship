@@ -388,6 +388,230 @@ async fn consent_covered_short_circuits_and_new_scope_bounces() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn prompt_none_without_session_redirects_login_required_to_rp() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let authorize_path = authorize_path_with_prompt(
+        &fx.client_id,
+        "openid email",
+        &verifier,
+        "state-none-login-required",
+        Some("nonce-none-login-required"),
+        Some("none"),
+    );
+
+    let resp = get(&fx, &authorize_path, None).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    assert!(
+        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        "prompt=none must not render the login form"
+    );
+    let loc = location(&resp);
+    assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
+    assert_eq!(
+        absolute_query_param(&loc, "error").as_deref(),
+        Some("login_required")
+    );
+    assert_eq!(
+        absolute_query_param(&loc, "state").as_deref(),
+        Some("state-none-login-required")
+    );
+    assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn prompt_none_with_session_but_no_consent_redirects_consent_required_to_rp() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let cookies = fx.create_session_cookie().await;
+    let verifier = pkce_verifier();
+    let authorize_path = authorize_path_with_prompt(
+        &fx.client_id,
+        "openid email",
+        &verifier,
+        "state-none-consent-required",
+        Some("nonce-none-consent-required"),
+        Some("none"),
+    );
+
+    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    assert!(
+        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        "prompt=none must not render the consent form"
+    );
+    let loc = location(&resp);
+    assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
+    assert_eq!(
+        absolute_query_param(&loc, "error").as_deref(),
+        Some("consent_required")
+    );
+    assert_eq!(
+        absolute_query_param(&loc, "state").as_deref(),
+        Some("state-none-consent-required")
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn prompt_none_with_session_and_prior_consent_issues_code_silently() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    fx.insert_grant(&["openid", "email"]).await;
+    let cookies = fx.create_session_cookie().await;
+    let verifier = pkce_verifier();
+    let authorize_path = authorize_path_with_prompt(
+        &fx.client_id,
+        "openid email",
+        &verifier,
+        "state-none-success",
+        Some("nonce-none-success"),
+        Some("none"),
+    );
+
+    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    assert!(
+        read_set_cookie(&resp, "zsidp_csrf").is_none(),
+        "silent success must not render UI"
+    );
+    let loc = location(&resp);
+    assert!(loc.starts_with(REDIRECT_URI), "callback: {loc}");
+    assert!(
+        absolute_query_param(&loc, "code").is_some(),
+        "silent authorize must issue a code"
+    );
+    assert!(absolute_query_param(&loc, "error").is_none());
+    assert_eq!(
+        absolute_query_param(&loc, "state").as_deref(),
+        Some("state-none-success")
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn prompt_none_combined_with_login_redirects_invalid_request_to_rp() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let authorize_path = authorize_path_with_prompt(
+        &fx.client_id,
+        "openid email",
+        &verifier,
+        "state-none-combo",
+        Some("nonce-none-combo"),
+        Some("none login"),
+    );
+
+    let resp = get(&fx, &authorize_path, None).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let loc = location(&resp);
+    assert!(loc.starts_with(REDIRECT_URI), "prompt combo redirect: {loc}");
+    assert_eq!(
+        absolute_query_param(&loc, "error").as_deref(),
+        Some("invalid_request")
+    );
+    assert_eq!(
+        absolute_query_param(&loc, "state").as_deref(),
+        Some("state-none-combo")
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn prompt_login_forces_login_screen_even_with_valid_session() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let cookies = fx.create_session_cookie().await;
+    let verifier = pkce_verifier();
+    let authorize_path = authorize_path_with_prompt(
+        &fx.client_id,
+        "openid email",
+        &verifier,
+        "state-prompt-login",
+        Some("nonce-prompt-login"),
+        Some("login"),
+    );
+
+    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let login_loc = location(&resp);
+    assert!(
+        login_loc.starts_with("/login?return_to="),
+        "prompt=login must force login, got {login_loc}"
+    );
+    assert_eq!(
+        relative_query_param(&login_loc, "return_to").as_deref(),
+        Some(authorize_path.as_str())
+    );
+
+    let login_get = get(&fx, &login_loc, Some(&cookies)).await;
+    assert_eq!(login_get.status().as_u16(), 200);
+    assert!(
+        read_set_cookie(&login_get, "zsidp_csrf").is_some(),
+        "login form should render with a csrf cookie"
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn prompt_consent_forces_consent_screen_even_with_prior_grant() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    fx.insert_grant(&["openid", "email"]).await;
+    let cookies = fx.create_session_cookie().await;
+    let verifier = pkce_verifier();
+    let authorize_path = authorize_path_with_prompt(
+        &fx.client_id,
+        "openid email",
+        &verifier,
+        "state-prompt-consent",
+        Some("nonce-prompt-consent"),
+        Some("consent"),
+    );
+
+    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let consent_loc = location(&resp);
+    assert!(
+        consent_loc.starts_with("/consent?return_to="),
+        "prompt=consent must force consent, got {consent_loc}"
+    );
+    assert_eq!(
+        relative_query_param(&consent_loc, "return_to").as_deref(),
+        Some(authorize_path.as_str())
+    );
+
+    let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
+    assert_eq!(consent_get.status().as_u16(), 200);
+    assert!(
+        read_set_cookie(&consent_get, "zsidp_csrf").is_some(),
+        "consent form should render with a csrf cookie"
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
     let Some(fx) = Fixture::boot().await else {
         return;
@@ -721,7 +945,24 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
         .await;
 }
 
-fn authorize_path(client_id: &str, scope: &str, verifier: &str, state: &str, nonce: Option<&str>) -> String {
+fn authorize_path(
+    client_id: &str,
+    scope: &str,
+    verifier: &str,
+    state: &str,
+    nonce: Option<&str>,
+) -> String {
+    authorize_path_with_prompt(client_id, scope, verifier, state, nonce, None)
+}
+
+fn authorize_path_with_prompt(
+    client_id: &str,
+    scope: &str,
+    verifier: &str,
+    state: &str,
+    nonce: Option<&str>,
+    prompt: Option<&str>,
+) -> String {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer
         .append_pair("client_id", client_id)
@@ -733,6 +974,9 @@ fn authorize_path(client_id: &str, scope: &str, verifier: &str, state: &str, non
         .append_pair("code_challenge_method", "S256");
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
+    }
+    if let Some(prompt) = prompt {
+        serializer.append_pair("prompt", prompt);
     }
     format!("/oauth2/authorize?{}", serializer.finish())
 }

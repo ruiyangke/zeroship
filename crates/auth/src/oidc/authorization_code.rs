@@ -190,6 +190,54 @@ impl OAuthError {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PromptValues {
+    none: bool,
+    login: bool,
+    consent: bool,
+    select_account: bool,
+    invalid_none_combo: bool,
+}
+
+impl PromptValues {
+    fn parse(raw: Option<&str>) -> Self {
+        let mut values = Self::default();
+        let mut none_values = 0usize;
+        let mut non_none_values = 0usize;
+
+        for value in raw
+            .unwrap_or("")
+            .split_ascii_whitespace()
+            .filter(|value| !value.is_empty())
+        {
+            match value {
+                "none" => {
+                    values.none = true;
+                    none_values += 1;
+                }
+                "login" => {
+                    values.login = true;
+                    non_none_values += 1;
+                }
+                "consent" => {
+                    values.consent = true;
+                    non_none_values += 1;
+                }
+                "select_account" => {
+                    values.select_account = true;
+                    non_none_values += 1;
+                }
+                _ => {
+                    non_none_values += 1;
+                }
+            }
+        }
+
+        values.invalid_none_combo = none_values > 0 && non_none_values > 0;
+        values
+    }
+}
+
 #[allow(clippy::future_not_send)]
 pub async fn authorize_get(
     req: HttpRequest,
@@ -266,6 +314,17 @@ async fn authorize_inner(
     .map_err(auth_request_oauth_error)?;
 
     let requested_scopes = auth_request.scopes.clone();
+    let prompt = PromptValues::parse(auth_request.prompt.as_deref());
+    if prompt.invalid_none_combo {
+        let redirect = authorization_error_redirect(
+            &auth_request.redirect_uri,
+            "invalid_request",
+            auth_request.state.as_deref(),
+            issuer.issuer(),
+        )?;
+        return Ok(error_see_other(&redirect));
+    }
+
     if !scope_subset(&requested_scopes, &client.scopes) {
         return Err(OAuthError::invalid_scope("scope is not allowed for client"));
     }
@@ -284,17 +343,82 @@ async fn authorize_inner(
         return Err(OAuthError::invalid_request("nonce is required for openid scope"));
     }
 
+    if prompt.none {
+        let session = match resolve_session(req, cfg, db).await {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                let redirect = authorization_error_redirect(
+                    &auth_request.redirect_uri,
+                    "login_required",
+                    auth_request.state.as_deref(),
+                    issuer.issuer(),
+                )?;
+                return Ok(error_see_other(&redirect));
+            }
+            Err(_) => {
+                let redirect = authorization_error_redirect(
+                    &auth_request.redirect_uri,
+                    "interaction_required",
+                    auth_request.state.as_deref(),
+                    issuer.issuer(),
+                )?;
+                return Ok(error_see_other(&redirect));
+            }
+        };
+        if !consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await? {
+            let redirect = authorization_error_redirect(
+                &auth_request.redirect_uri,
+                "consent_required",
+                auth_request.state.as_deref(),
+                issuer.issuer(),
+            )?;
+            return Ok(error_see_other(&redirect));
+        }
+        touch_consent_grant(db, session.user_id, &client.client_id).await?;
+        return issue_authorization_code(
+            db,
+            issuer,
+            &client,
+            &auth_request,
+            &session,
+            code_challenge,
+        )
+        .await;
+    }
+
+    if prompt.login || prompt.select_account {
+        return Ok(login_redirect(req, &auth_request, cfg));
+    }
+
     let Some(session) = resolve_session(req, cfg, db).await? else {
         return Ok(login_redirect(req, &auth_request, cfg));
     };
+
+    if prompt.consent {
+        return Ok(consent_redirect(req));
+    }
 
     if consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await? {
         touch_consent_grant(db, session.user_id, &client.client_id).await?;
     } else {
         return Ok(consent_redirect(req));
     }
-    let granted_scopes = requested_scopes.clone();
 
+    issue_authorization_code(db, issuer, &client, &auth_request, &session, code_challenge).await
+}
+
+#[allow(clippy::future_not_send)]
+async fn issue_authorization_code(
+    db: &Client,
+    issuer: &Issuer,
+    client: &OAuthClient,
+    auth_request: &AuthRequest,
+    session: &session_store::Session,
+    code_challenge: &str,
+) -> Result<HttpResponse, OAuthError> {
+    let requested_scopes = auth_request.scopes.clone();
+    let granted_scopes = requested_scopes.clone();
+    let nonce = auth_request.nonce.clone();
     let code = generate_code();
     let code_hash = code_hash(&code);
     db.execute(
@@ -306,7 +430,7 @@ async fn authorize_inner(
         &[
             &code_hash,
             &client.client_id,
-            &redirect_uri,
+            &auth_request.redirect_uri,
             &code_challenge,
             &requested_scopes,
             &granted_scopes,
@@ -325,7 +449,7 @@ async fn authorize_inner(
 
     // C13: use 303, never 307. C5/C12: include the exact issuer parameter.
     let redirect = authorization_success_redirect(
-        redirect_uri,
+        &auth_request.redirect_uri,
         &code,
         auth_request.state.as_deref(),
         issuer.issuer(),
@@ -883,6 +1007,76 @@ fn authorization_success_redirect(
         query.append_pair("iss", issuer);
     }
     Ok(url.to_string())
+}
+
+fn authorization_error_redirect(
+    redirect_uri: &str,
+    error: &str,
+    state: Option<&str>,
+    issuer: &str,
+) -> Result<String, OAuthError> {
+    let mut url = url::Url::parse(redirect_uri)
+        .map_err(|_| OAuthError::invalid_request("redirect_uri is not a valid URL"))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("error", error);
+        if let Some(state) = state.filter(|state| !state.is_empty()) {
+            query.append_pair("state", state);
+        }
+        query.append_pair("iss", issuer);
+    }
+    Ok(url.to_string())
+}
+
+fn error_see_other(location: &str) -> HttpResponse {
+    see_other(location)
+        .header("cache-control", "no-store")
+        .header("referrer-policy", "no-referrer")
+        .finish()
+}
+
+pub(crate) fn prompt_requests_login(prompt: Option<&str>) -> bool {
+    let prompt = PromptValues::parse(prompt);
+    prompt.login || prompt.select_account
+}
+
+pub(crate) fn return_to_after_prompt_interaction(return_to: &str, satisfied: &[&str]) -> String {
+    let Some(return_to) = return_to::valid_path(return_to) else {
+        return return_to.to_string();
+    };
+    let Ok(parsed) = url::Url::parse(&format!("http://zeroship.local{return_to}")) else {
+        return return_to.to_string();
+    };
+
+    let mut prompt_tokens = Vec::new();
+    let mut query_pairs = Vec::new();
+    for (key, value) in parsed.query_pairs() {
+        if key == "prompt" {
+            prompt_tokens.extend(value.split_ascii_whitespace().map(str::to_string));
+        } else {
+            query_pairs.push((key.into_owned(), value.into_owned()));
+        }
+    }
+
+    if prompt_tokens.is_empty() {
+        return return_to.to_string();
+    }
+
+    prompt_tokens.retain(|value| !satisfied.contains(&value.as_str()));
+    if !prompt_tokens.is_empty() {
+        query_pairs.push(("prompt".to_string(), prompt_tokens.join(" ")));
+    }
+
+    let mut out = parsed.path().to_string();
+    if !query_pairs.is_empty() {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        for (key, value) in query_pairs {
+            serializer.append_pair(&key, &value);
+        }
+        out.push('?');
+        out.push_str(&serializer.finish());
+    }
+    out
 }
 
 fn login_redirect(req: &HttpRequest, auth_request: &AuthRequest, cfg: &AuthConfig) -> HttpResponse {
