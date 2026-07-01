@@ -245,6 +245,47 @@ pub async fn revoke_app_sessions_for_user(
     Ok(affected)
 }
 
+/// Return the most recent non-null OP `sid` previously recorded for this
+/// `(app_id, user_id)` session family.
+///
+/// Reload-recovery refresh grants do not always return an ID token, and the
+/// access JWT does not carry `sid`. The original login session row is therefore
+/// the gateway-side durable source of the OP session id when re-writing the
+/// audit/revocation row during `?mint=1` rotation.
+pub async fn latest_sid_for_user(
+    conn: &mut Client,
+    app_id: Uuid,
+    user_id: &str,
+) -> Result<Option<String>> {
+    let user_id = Uuid::parse_str(user_id).map_err(|e| {
+        GatewayError::Db(format!(
+            "gateway_sessions latest_sid_for_user: invalid user_id: {e}"
+        ))
+    })?;
+    let tx = conn.transaction().await.map_err(|e| {
+        GatewayError::Db(format!("gateway_sessions latest_sid_for_user begin: {e}"))
+    })?;
+    rls::set_tenant_app(&tx, app_id).await?;
+    let rows = tx
+        .query(
+            "SELECT sid \
+             FROM zeroship.gateway_sessions \
+             WHERE user_id = $1 AND app_id = $2 AND sid IS NOT NULL \
+             ORDER BY issued_at DESC \
+             LIMIT 1",
+            &[&user_id, &app_id],
+        )
+        .await
+        .map_err(|e| GatewayError::Db(format!("gateway_sessions latest_sid_for_user: {e}")))?;
+    let sid = rows.first().and_then(|row| row.try_get("sid").ok());
+    tx.commit().await.map_err(|e| {
+        GatewayError::Db(format!(
+            "gateway_sessions latest_sid_for_user commit: {e}"
+        ))
+    })?;
+    Ok(sid)
+}
+
 /// Revoke every live session for one OP `sid` at one app. When `sub` is
 /// provided, it must match `gateway_sessions.user_id`; this prevents a malformed
 /// token containing a valid sid plus a contradictory subject from killing a

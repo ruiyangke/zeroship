@@ -22,7 +22,7 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_gateway::{
-    anchors,
+    anchors, backchannel_logout,
     blob_cache::{BlobCache, DiskBlobCache},
     enforce, idempotency,
     oidc_rp::{BrokerSecret, OidcRp},
@@ -75,6 +75,8 @@ struct MockHydra {
     /// asserts the second request uses the first response's NEW token.
     presented_refresh_tokens: Mutex<Vec<String>>,
     current_refresh_token: Mutex<String>,
+    sid: String,
+    refresh_id_token: AtomicBool,
 }
 
 impl MockHydra {
@@ -93,11 +95,17 @@ impl MockHydra {
             refresh_delay_ms: AtomicU32::new(0),
             presented_refresh_tokens: Mutex::new(Vec::new()),
             current_refresh_token: Mutex::new(INITIAL_REFRESH_TOKEN.to_string()),
+            sid: format!("sid-{}", Uuid::new_v4().simple()),
+            refresh_id_token: AtomicBool::new(true),
         }
     }
 
     fn enforce_refresh_reuse_detection(&self) {
         self.enforce_refresh_rotation.store(true, Ordering::SeqCst);
+    }
+
+    fn omit_refresh_id_token_on_refresh(&self) {
+        self.refresh_id_token.store(false, Ordering::SeqCst);
     }
 
     fn presented_refresh_tokens(&self) -> Vec<String> {
@@ -139,6 +147,7 @@ impl MockHydra {
             "email": "user@example.com",
             "email_verified": true,
             "name": "Test User",
+            "sid": self.sid.clone(),
         }))
     }
 
@@ -176,6 +185,33 @@ impl MockHydra {
             "name": ROTATED_NAME,
             "picture": ROTATED_AVATAR,
         }))
+    }
+
+    fn logout_token(&self, jti: &str) -> String {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+
+        let now = now_secs();
+        let der = self.signing.to_pkcs8_der().expect("pkcs8");
+        let key = EncodingKey::from_ed_der(der.as_bytes());
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        header.typ = Some(zeroship_core::logout_token::LOGOUT_TOKEN_TYP.into());
+        encode(
+            &header,
+            &serde_json::json!({
+                "iss": MOCK_ISSUER,
+                "aud": self.client_id,
+                "iat": now,
+                "exp": now + 120,
+                "jti": jti,
+                "sub": self.user_id.to_string(),
+                "sid": self.sid.clone(),
+                "events": { zeroship_core::logout_token::BCL_EVENT: {} },
+            }),
+            &key,
+        )
+        .expect("sign logout_token")
     }
 }
 
@@ -307,19 +343,19 @@ async fn token_endpoint(
                     .header("content-type", "application/json")
                     .body(GARBAGE_REFRESH_BODY);
             }
+            let mut body = serde_json::json!({
+                "access_token": h.access_token(),
+                "refresh_token": rotated_refresh_token,
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "scope": "openid email profile offline_access",
+            });
+            if h.refresh_id_token.load(Ordering::SeqCst) {
+                body["id_token"] = serde_json::json!(h.rotated_id_token());
+            }
             web::HttpResponse::Ok()
                 .header("content-type", "application/json")
-                .body(serde_json::json!({
-                    "access_token": h.access_token(),
-                    // Refresh grants return a rotated id_token carrying the
-                    // profile facts (name/picture). do_refresh sources identity
-                    // from THIS, not the access JWT (BFF minor fix).
-                    "id_token": h.rotated_id_token(),
-                    "refresh_token": rotated_refresh_token,
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                    "scope": "openid email profile offline_access",
-                }).to_string())
+                .body(body.to_string())
         }
         _ => web::HttpResponse::BadRequest()
             .body(r#"{"error":"unsupported_grant_type"}"#),
@@ -392,6 +428,10 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
 const APP_HOST: &str = "myapp.zeroship.ai";
 const APP_NAME: &str = "myapp";
 const CLIENT_ID: &str = "oac_myapp";
+const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
+const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
+const BCL_REFRESH_CLIENT_ID: &str = "oac_bcl_refresh";
+const BCL_REFRESH_APP_UUID: &str = "00000000-0000-7000-8000-0000000000bb";
 /// The app's STABLE UUID — the `RouteMap` key. Fixed (not random) so the
 /// live-dispatch regression test can assert that the `/token`-minted
 /// `gateway_sessions` row is keyed by THIS UUID (not the `myapp` slug), which
@@ -402,6 +442,24 @@ const APP_UUID: &str = "00000000-0000-7000-8000-0000000000aa";
 /// Build a `GateState` whose `OidcRp` dials the loopback mock OP and
 /// whose route cache has one provisioned app (`myapp` → `oac_myapp`).
 fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> Arc<GateState> {
+    build_state_with_route(
+        hydra_base,
+        db,
+        APP_UUID,
+        APP_NAME,
+        APP_HOST,
+        CLIENT_ID,
+    )
+}
+
+fn build_state_with_route(
+    hydra_base: &str,
+    db: Option<zeroship_gateway::db::DbConfig>,
+    app_uuid: &str,
+    app_name: &str,
+    app_host: &str,
+    client_id: &str,
+) -> Arc<GateState> {
     let mut tmp = std::env::temp_dir();
     tmp.push(format!("zsgate-anchors-{}", Uuid::new_v4().simple()));
     let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
@@ -426,7 +484,7 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
 
     let routes = RouteCache::new();
     routes.update(
-        build_route_map(),
+        build_route_map_for(app_uuid, app_name, app_host, client_id),
         &zeroship_gateway::enforce::RateLimitRegistry::new(1000, 2000),
         &zeroship_gateway::enforce::ConcurrencyRegistry::new(100),
     );
@@ -469,19 +527,24 @@ fn build_state(hydra_base: &str, db: Option<zeroship_gateway::db::DbConfig>) -> 
     })
 }
 
-fn build_route_map() -> zeroship_core::types::RouteMap {
+fn build_route_map_for(
+    app_uuid: &str,
+    app_name: &str,
+    app_host: &str,
+    client_id: &str,
+) -> zeroship_core::types::RouteMap {
     use zeroship_core::types::RouteEntry;
     let mut m = std::collections::HashMap::new();
     m.insert(
-        Uuid::parse_str(APP_UUID).expect("fixed app uuid"),
+        Uuid::parse_str(app_uuid).expect("fixed app uuid"),
         RouteEntry {
-            name: APP_NAME.into(),
+            name: app_name.into(),
             plan_id: "free".into(),
             api_key_hash: String::new(),
             deploy_hash: None,
             manifest: zeroship_bundle::Manifest::passthrough(),
-            oauth_client_id: Some(CLIENT_ID.into()),
-            sector_identifier: Some(format!("https://{APP_HOST}")),
+            oauth_client_id: Some(client_id.into()),
+            sector_identifier: Some(format!("https://{app_host}")),
             spend_state: zeroship_core::types::SpendState::Allow,
             account_state: zeroship_core::types::AccountState::Active,
         },
@@ -502,6 +565,23 @@ macro_rules! anchors_app {
                 web::resource("/__zeroship/auth/session")
                     .route(web::post().to(zeroship_gateway::auth_token::session_post))
                     .route(web::get().to(zeroship_gateway::auth_token::session)),
+            )
+    }};
+}
+
+macro_rules! anchors_bcl_app {
+    ($state:expr) => {{
+        let state = $state.clone();
+        web::App::new()
+            .state(state)
+            .service(
+                web::resource("/__zeroship/auth/session")
+                    .route(web::post().to(zeroship_gateway::auth_token::session_post))
+                    .route(web::get().to(zeroship_gateway::auth_token::session)),
+            )
+            .service(
+                web::resource("/oidc/backchannel-logout")
+                    .route(web::post().to(backchannel_logout::handle)),
             )
     }};
 }
@@ -1050,6 +1130,32 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         let _ = conn.run().await;
     })
     .detach();
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
+             VALUES ($1, $2, $3, $4, $1) ON CONFLICT (client_id) DO NOTHING",
+            &[
+                &CLIENT_ID,
+                &"Anchor Test App",
+                &vec![format!("https://{APP_HOST}/cb")],
+                &vec!["openid".to_string(), "email".to_string()],
+            ],
+        )
+        .await
+        .expect("seed oauth client");
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3) \
+             ON CONFLICT (id) DO NOTHING",
+            &[
+                &Uuid::parse_str(APP_UUID).expect("app uuid"),
+                &format!("anchor-test-{APP_NAME}"),
+                &"k",
+            ],
+        )
+        .await
+        .expect("seed app");
     let email = format!("anchor-{}@zeroship.test", user_id.simple());
     client
         .execute(
@@ -1070,6 +1176,10 @@ const REAL_EMAIL: &str = "user@example.com";
 /// (Slice 4) + consent (5b) write. The email-claim swap (§7) reads THIS and
 /// projects it instead of the real email.
 async fn seed_relay_alias(dsn: &str, user_id: Uuid, relay_email: &str) {
+    seed_relay_alias_for(dsn, CLIENT_ID, user_id, relay_email).await;
+}
+
+async fn seed_relay_alias_for(dsn: &str, client_id: &str, user_id: Uuid, relay_email: &str) {
     let (client, conn) = compio_postgres::connect(dsn, compio_postgres::NoTls)
         .await
         .expect("connect");
@@ -1085,7 +1195,7 @@ async fn seed_relay_alias(dsn: &str, user_id: Uuid, relay_email: &str) {
              VALUES ($1, $2, $3, $4) \
              ON CONFLICT (app_client_id, global_user_id) \
              DO UPDATE SET relay_email = EXCLUDED.relay_email, revoked_at = NULL",
-            &[&CLIENT_ID, &user_id, &pairwise_sub, &relay_email],
+            &[&client_id, &user_id, &pairwise_sub, &relay_email],
         )
         .await
         .expect("seed relay alias");
@@ -1118,6 +1228,12 @@ async fn cleanup(dsn: &str, user_id: Uuid) {
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
+            &[&user_id],
+        )
+        .await;
+    let _ = client
+        .execute(
+            "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
             &[&user_id],
         )
         .await;
@@ -1564,6 +1680,202 @@ async fn session_mint_recovers_after_reload_one_refresh() {
 }
 
 #[ntex::test]
+async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
+    // P5d C1 faithful regression: the session is first established by the real
+    // POST /session path, then refreshed by the real /session?mint=1 rotation
+    // path. The mock OP omits id_token on refresh, matching the self-contained OP
+    // refresh grant. Pre-fix, the rotated gateway_sessions row was written with
+    // sid=NULL, so a logout_token carrying sid matched zero rows and left the
+    // anchor alive; /session?mint=1 could re-mint the user after global logout.
+    let Some(dsn) = db_url() else {
+        eprintln!("[anchors] skip bcl_refreshed_session (no GATEWAY_ANCHORS_DB_URL)");
+        return;
+    };
+    let hydra = Arc::new(MockHydra::new(BCL_REFRESH_CLIENT_ID));
+    hydra.omit_refresh_id_token_on_refresh();
+    let user_id = hydra.user_id;
+    let _email = seed_app_and_client_for(
+        &dsn,
+        user_id,
+        BCL_REFRESH_APP_UUID,
+        BCL_REFRESH_APP_NAME,
+        BCL_REFRESH_APP_HOST,
+        BCL_REFRESH_CLIENT_ID,
+    )
+    .await;
+    let relay_email = format!("{}@relay.zeroship.localhost", user_id.simple());
+    seed_relay_alias_for(&dsn, BCL_REFRESH_CLIENT_ID, user_id, &relay_email).await;
+    let (base, _srv) = boot_mock_hydra(hydra.clone()).await;
+    let db_cfg = zeroship_gateway::db::DbConfig::new(dsn.clone(), 8);
+    let state = build_state_with_route(
+        &base,
+        Some(db_cfg.clone()),
+        BCL_REFRESH_APP_UUID,
+        BCL_REFRESH_APP_NAME,
+        BCL_REFRESH_APP_HOST,
+        BCL_REFRESH_CLIENT_ID,
+    );
+    let app = test::init_service(anchors_bcl_app!(state.clone())).await;
+    let app_id = Uuid::parse_str(BCL_REFRESH_APP_UUID).expect("fixed app uuid");
+
+    // 1. Login: real code exchange -> session row with sid + reload anchor.
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/session")
+        .header("host", BCL_REFRESH_APP_HOST)
+        .header("origin", format!("https://{BCL_REFRESH_APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload("grant_type=authorization_code&code=c&code_verifier=v")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "initial login must succeed");
+    let anchor_cookie =
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
+    let anchor_pair = anchor_cookie.split(';').next().unwrap().to_string();
+    let anchor_id =
+        anchors::parse_anchor_cookie(&anchor_pair, false).expect("anchor id parses from cookie");
+
+    {
+        let client = connect_pg(&dsn).await;
+        let row = client
+            .query_one(
+                "SELECT sid FROM zeroship.gateway_sessions \
+                 WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
+                 ORDER BY issued_at DESC LIMIT 1",
+                &[&user_id, &app_id],
+            )
+            .await
+            .expect("initial session row");
+        let sid: Option<String> = row.try_get("sid").ok();
+        assert_eq!(
+            sid.as_deref(),
+            Some(hydra.sid.as_str()),
+            "initial login session must persist the OP sid"
+        );
+    }
+
+    // 2. Refresh once via the real rotation path. The mock returns no id_token,
+    // so the only durable sid source is the pre-refresh gateway session row.
+    let req = test::TestRequest::get()
+        .uri("/__zeroship/auth/session?mint=1")
+        .header("host", BCL_REFRESH_APP_HOST)
+        .header("origin", format!("https://{BCL_REFRESH_APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("cookie", anchor_pair.clone())
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "refresh rotation must succeed");
+    assert_eq!(
+        hydra.refresh_calls.load(Ordering::SeqCst),
+        1,
+        "test must exercise the real refresh-grant rotation path"
+    );
+
+    let refreshed_session_id = {
+        let client = connect_pg(&dsn).await;
+        let row = client
+            .query_one(
+                "SELECT id, sid FROM zeroship.gateway_sessions \
+                 WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
+                 ORDER BY issued_at DESC LIMIT 1",
+                &[&user_id, &app_id],
+            )
+            .await
+            .expect("refreshed session row");
+        let sid: Option<String> = row.try_get("sid").ok();
+        assert_eq!(
+            sid.as_deref(),
+            Some(hydra.sid.as_str()),
+            "refreshed session row must preserve sid even though refresh returned no id_token"
+        );
+        row.get::<_, Uuid>("id")
+    };
+
+    // 3. Global/session logout arrives as a real signed BCL logout_token carrying
+    // that sid. The refreshed row must be revoked and the reload anchor removed.
+    let jti = format!("jti-{}", Uuid::new_v4().simple());
+    let logout_token = hydra.logout_token(&jti);
+    let req = test::TestRequest::post()
+        .uri("/oidc/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload(format!("logout_token={logout_token}"))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status().as_u16(), 200, "valid BCL must succeed");
+
+    {
+        let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
+        let mut conn = pool.get().await.expect("conn");
+        let row = conn
+            .query_one(
+                "SELECT revoked_at IS NOT NULL AS revoked \
+                 FROM zeroship.gateway_sessions WHERE id = $1",
+                &[&refreshed_session_id],
+            )
+            .await
+            .expect("refreshed session revoked_at");
+        let revoked: bool = row.get("revoked");
+        assert!(revoked, "BCL must revoke the refreshed gateway session row");
+        assert!(
+            anchors::read_live(&mut conn, app_id, anchor_id)
+                .await
+                .expect("post-BCL anchor read")
+                .is_none(),
+            "BCL must delete the reload-recovery anchor for the refreshed session"
+        );
+    }
+
+    // 4. A stale browser still sending the old anchor cookie must not re-mint.
+    let req = test::TestRequest::get()
+        .uri("/__zeroship/auth/session?mint=1")
+        .header("host", BCL_REFRESH_APP_HOST)
+        .header("origin", format!("https://{BCL_REFRESH_APP_HOST}"))
+        .header("x-zs-auth", "1")
+        .header("cookie", anchor_pair)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "deleted anchor must make /session?mint=1 require login, not re-mint"
+    );
+    assert!(
+        set_cookie_with_prefix(&resp, "__Host-zeroship_app_session=").is_none(),
+        "post-BCL /session?mint=1 must not set a fresh session cookie"
+    );
+
+    let cleanup_client = connect_pg(&dsn).await;
+    let pws = zeroship_core::auth::derive_pairwise(
+        &state.pairwise_salt,
+        &user_id.to_string(),
+        &format!("https://{BCL_REFRESH_APP_HOST}"),
+    );
+    let _ = cleanup_client
+        .execute(
+            "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
+            &[&jti],
+        )
+        .await;
+    let _ = cleanup_client
+        .execute(
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&BCL_REFRESH_CLIENT_ID, &pws],
+        )
+        .await;
+    cleanup_identities(&dsn, user_id).await;
+    cleanup(&dsn, user_id).await;
+    let _ = cleanup_client
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await;
+    let _ = cleanup_client
+        .execute(
+            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&BCL_REFRESH_CLIENT_ID],
+        )
+        .await;
+}
+
+#[ntex::test]
 async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     // P5c regression: the self-contained OP rotates refresh families. The
     // gateway must persist the NEW refresh token returned by the first
@@ -1918,6 +2230,25 @@ async fn connect_pg(dsn: &str) -> compio_postgres::Client {
 /// Deliberately seeds NO `app_user_identities` row — that is the row the REAL
 /// mint must write itself; pre-seeding it is exactly what masked H1 (F1).
 async fn seed_app_and_client(dsn: &str, user_id: Uuid) -> String {
+    seed_app_and_client_for(
+        dsn,
+        user_id,
+        APP_UUID,
+        APP_NAME,
+        APP_HOST,
+        CLIENT_ID,
+    )
+    .await
+}
+
+async fn seed_app_and_client_for(
+    dsn: &str,
+    user_id: Uuid,
+    app_uuid: &str,
+    app_name: &str,
+    app_host: &str,
+    client_id: &str,
+) -> String {
     let client = connect_pg(dsn).await;
     let email = format!("anchor-{}@zeroship.test", user_id.simple());
     client
@@ -1934,9 +2265,9 @@ async fn seed_app_and_client(dsn: &str, user_id: Uuid) -> String {
                 (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
              VALUES ($1, $2, $3, $4, $1) ON CONFLICT (client_id) DO NOTHING",
             &[
-                &CLIENT_ID,
-                &"F1 App",
-                &vec![format!("https://{APP_HOST}/cb")],
+                &client_id,
+                &format!("{app_name} App"),
+                &vec![format!("https://{app_host}/cb")],
                 &vec!["openid".to_string(), "email".to_string()],
             ],
         )
@@ -1947,8 +2278,8 @@ async fn seed_app_and_client(dsn: &str, user_id: Uuid) -> String {
             "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3) \
              ON CONFLICT (id) DO NOTHING",
             &[
-                &Uuid::parse_str(APP_UUID).expect("app uuid"),
-                &format!("f1-app-{}", user_id.simple()),
+                &Uuid::parse_str(app_uuid).expect("app uuid"),
+                &format!("{app_name}-{}", user_id.simple()),
                 &"k",
             ],
         )
@@ -1959,12 +2290,6 @@ async fn seed_app_and_client(dsn: &str, user_id: Uuid) -> String {
 
 async fn cleanup_f1(dsn: &str, user_id: Uuid) {
     let client = connect_pg(dsn).await;
-    let _ = client
-        .execute(
-            "DELETE FROM zeroship.token_revocations WHERE client_id = $1",
-            &[&CLIENT_ID],
-        )
-        .await;
     let _ = client
         .execute(
             "DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1",
@@ -1988,18 +2313,6 @@ async fn cleanup_f1(dsn: &str, user_id: Uuid) {
         .execute(
             "DELETE FROM zeroship.magic_links WHERE email = $1::citext",
             &[&email],
-        )
-        .await;
-    let _ = client
-        .execute(
-            "DELETE FROM zeroship.apps WHERE id = $1",
-            &[&Uuid::parse_str(APP_UUID).expect("app uuid")],
-        )
-        .await;
-    let _ = client
-        .execute(
-            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&CLIENT_ID],
         )
         .await;
     let _ = client

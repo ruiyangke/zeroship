@@ -667,6 +667,32 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         let _ = conn.run().await;
     })
     .detach();
+    client
+        .execute(
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
+             VALUES ($1, $2, $3, $4, $1) ON CONFLICT (client_id) DO NOTHING",
+            &[
+                &CLIENT_ID,
+                &"Browser Auth Test App",
+                &vec![format!("https://{APP_HOST}/cb")],
+                &vec!["openid".to_string(), "email".to_string()],
+            ],
+        )
+        .await
+        .expect("seed oauth client");
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3) \
+             ON CONFLICT (id) DO NOTHING",
+            &[
+                &Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
+                &format!("browser-auth-{APP_NAME}"),
+                &"k",
+            ],
+        )
+        .await
+        .expect("seed app");
     let email = format!("signout-{}@zeroship.test", user_id.simple());
     client
         .execute(

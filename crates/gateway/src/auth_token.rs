@@ -832,7 +832,9 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
 
             // Re-write the gateway_sessions ROW from the rotated facts — KEPT as
             // the revocation/audit record (+ auth_time/amr source), NOT read on
-            // the per-request path. Carry auth_time/amr forward.
+            // the per-request path. Carry auth_time/amr forward. Refresh grants
+            // may omit `sid`; preserve the original login session's sid so a
+            // later logout_token.sid can still find this refreshed session.
             {
                 let pool = match crate::db::checkout(db_cfg).await {
                     Ok(p) => p,
@@ -842,6 +844,31 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     Ok(c) => c,
                     Err(e) => return db_error(e),
                 };
+                let preserved_sid = if rotated.sid.is_none() {
+                    match crate::sessions::latest_sid_for_user(
+                        &mut conn,
+                        route.app_id,
+                        &rotated.global_user_id.to_string(),
+                    )
+                    .await
+                    {
+                        Ok(sid) => sid,
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "/session: gateway_sessions sid preservation lookup failed"
+                            );
+                            return error_response(
+                                HttpResponse::InternalServerError(),
+                                "internal",
+                                "session sid lookup failed",
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
+                let session_sid = rotated.sid.as_deref().or(preserved_sid.as_deref());
                 if let Err(e) = crate::sessions::create(
                     &mut conn,
                     &crate::sessions::NewSession {
@@ -855,7 +882,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                         avatar_url: rotated.avatar_url.as_deref(),
                         email_verified: rotated.email_verified.unwrap_or(false),
                         granted_scopes: &rotated.granted_scopes,
-                        sid: rotated.sid.as_deref(),
+                        sid: session_sid,
                         auth_time: rotated.auth_time,
                         amr: &rotated.amr,
                     },
@@ -1119,9 +1146,7 @@ async fn do_refresh(
         .as_ref()
         .and_then(|c| c.auth_time)
         .or(raw.auth_time);
-    let sid = id_claims
-        .as_ref()
-        .and_then(|c| c.sid.clone());
+    let sid = id_claims.as_ref().and_then(|c| c.sid.clone());
     let amr = id_claims
         .as_ref()
         .and_then(|c| c.amr.clone())
