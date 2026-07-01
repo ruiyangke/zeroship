@@ -77,7 +77,6 @@ fn expanded_destructive_set_is_classified_canonically() {
         ("DELETE FROM products", "DELETE"),
         ("DROP MATERIALIZED VIEW product_rollups", "DROP MATERIALIZED VIEW"),
         ("DROP VIEW product_view", "DROP VIEW"),
-        ("DROP INDEX product_idx", "DROP INDEX"),
         ("DROP SEQUENCE product_seq", "DROP SEQUENCE"),
         ("DROP TYPE product_type", "DROP TYPE"),
         ("DROP DOMAIN product_domain", "DROP DOMAIN"),
@@ -89,6 +88,23 @@ fn expanded_destructive_set_is_classified_canonically() {
         assert!(c.destructive, "{sql} must be classified destructive");
         assert_eq!(c.destructive_operation, Some(operation), "{sql}");
     }
+}
+
+#[test]
+fn drop_index_sql_is_reversible_structure_not_data_loss() {
+    let c = one("DROP INDEX product_idx");
+    assert!(!c.additive);
+    assert!(!c.destructive, "plain SQL DROP INDEX is not data loss");
+    assert_eq!(c.destructive_operation, None);
+    assert_eq!(c.data_security, DataSecurityClass::NonDestructive);
+
+    let concurrent = one("DROP INDEX CONCURRENTLY product_idx");
+    assert!(!concurrent.destructive);
+    assert!(
+        concurrent.non_transactional,
+        "DROP INDEX CONCURRENTLY still cannot run in a transaction"
+    );
+    assert_eq!(concurrent.data_security, DataSecurityClass::NonDestructive);
 }
 
 #[test]
