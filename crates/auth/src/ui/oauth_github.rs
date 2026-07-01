@@ -33,8 +33,10 @@ use crate::config::AuthConfig;
 use crate::hydra_client::types::AcceptLoginRequest;
 use crate::hydra_client::HydraAdmin;
 use crate::identity::eligibility;
-use crate::identity::linker::{self, LinkOutcome, ResolvedProfile};
+use crate::identity::linker::{self, LinkOutcome, LinkResume, ResolvedProfile};
 use crate::identity::oauth::github::{self, GitHubIdentity};
+use crate::oidc::auth_request::AuthRequest;
+use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::oauth_stash::{
@@ -47,7 +49,8 @@ const ACR_GITHUB: &str = "urn:zeroship:github";
 
 #[derive(Debug, Deserialize)]
 pub struct StartQuery {
-    pub login_challenge: String,
+    pub login_challenge: Option<String>,
+    pub return_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,14 +84,31 @@ pub async fn start(
         }
     };
 
-    let stash = OAuthStash::new(
-        auth_start.state.clone(),
-        auth_start.verifier,
-        // GitHub is OAuth 2.0 — no nonce. We carry an empty string
-        // through the stash so the shared payload shape is unchanged.
-        String::new(),
-        query.login_challenge.clone(),
-    );
+    let stash = if let Some(raw_return_to) = query.return_to.as_deref() {
+        let native_return_to = return_to::sanitize(Some(raw_return_to), return_to::SAFE_DEFAULT);
+        if AuthRequest::parse_return_to(&native_return_to).is_err() {
+            return render_error(PublicErrorMessage::InvalidRequest);
+        }
+        OAuthStash::with_return_to(
+            auth_start.state.clone(),
+            auth_start.verifier,
+            // GitHub is OAuth 2.0 — no nonce. We carry an empty string
+            // through the stash so the shared payload shape is unchanged.
+            String::new(),
+            native_return_to,
+        )
+    } else if let Some(login_challenge) = query.login_challenge.as_deref() {
+        OAuthStash::with_login_challenge(
+            auth_start.state.clone(),
+            auth_start.verifier,
+            // GitHub is OAuth 2.0 — no nonce. We carry an empty string
+            // through the stash so the shared payload shape is unchanged.
+            String::new(),
+            login_challenge.to_string(),
+        )
+    } else {
+        return render_error(PublicErrorMessage::InvalidRequest);
+    };
     let cookie_value = stash.encode(cfg.stash_signing_key.as_bytes());
 
     let mut resp = HttpResponse::Found();
@@ -193,20 +213,22 @@ pub async fn callback(
         return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     }
 
-    if let Err(e) = admin.get_login(&stash.login_challenge).await {
-        tracing::warn!(error = %e, challenge = %stash.login_challenge, "github callback hydra challenge validation failed");
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "oauth_callback_failure",
-                outcome: "failure",
-                auth_method: Some(PROVIDER),
-                detail: json!({ "reason": "login_challenge_invalid" }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-        return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
+    if let Some(login_challenge) = stash.login_challenge.as_deref() {
+        if let Err(e) = admin.get_login(login_challenge).await {
+            tracing::warn!(error = %e, challenge = %login_challenge, "github callback hydra challenge validation failed");
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "oauth_callback_failure",
+                    outcome: "failure",
+                    auth_method: Some(PROVIDER),
+                    detail: json!({ "reason": "login_challenge_invalid" }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
+        }
     }
 
     // Token exchange + /user + /user/emails.
@@ -243,10 +265,15 @@ pub async fn callback(
     let raw_profile = serde_json::to_value(&id).ok();
     let profile = build_resolved_profile(&id, raw_profile.as_ref());
 
+    let resume = match (stash.login_challenge.as_deref(), stash.return_to.as_deref()) {
+        (Some(login_challenge), None) => LinkResume::LoginChallenge(login_challenge),
+        (None, Some(native_return_to)) => LinkResume::ReturnTo(native_return_to),
+        _ => return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg),
+    };
     let outcome = match linker::resolve_or_link(
         db.as_ref(),
         &profile,
-        &stash.login_challenge,
+        resume,
         cfg.stash_signing_key.as_bytes(),
     )
     .await
@@ -269,6 +296,7 @@ pub async fn callback(
         }
     };
 
+    let created = matches!(&outcome, LinkOutcome::Created { .. });
     let user_id = match outcome {
         LinkOutcome::Existing { user_id } | LinkOutcome::Created { user_id } => user_id,
         LinkOutcome::NeedsConfirmation { pending_token, .. } => {
@@ -357,7 +385,42 @@ pub async fn callback(
         }
     };
 
+    if let Some(native_return_to) = stash.return_to.as_deref() {
+        audit::emit(
+            db.as_ref(),
+            &AuditEvent {
+                event_type: "oauth_callback_success",
+                outcome: "success",
+                user_id: Some(&user_id),
+                auth_method: Some(PROVIDER),
+                detail: json!({
+                    "subject": id.subject,
+                    "login": id.login,
+                    "created": created,
+                }),
+                ..AuditEvent::from_request(&req)
+            },
+        )
+        .await;
+
+        let mut resp = return_to::see_other(native_return_to);
+        resp.header(
+            SET_COOKIE,
+            session_cookie::set_cookie(&session.id, cfg.insecure_dev),
+        );
+        resp.header(
+            SET_COOKIE,
+            clear_stash_cookie(github_stash_cookie_name(cfg.insecure_dev), cfg.insecure_dev),
+        );
+        resp.header("cache-control", "no-store");
+        return resp.finish();
+    }
+
     // Accept the hydra login challenge.
+    let login_challenge = stash
+        .login_challenge
+        .as_deref()
+        .expect("missing login_challenge for legacy arm");
     let accept = AcceptLoginRequest {
         subject: user_id.to_string(),
         remember: Some(true),
@@ -366,7 +429,7 @@ pub async fn callback(
         amr: Some(vec!["oauth".into()]),
         ..Default::default()
     };
-    let redirect_to = match admin.accept_login(&stash.login_challenge, &accept).await {
+    let redirect_to = match admin.accept_login(login_challenge, &accept).await {
         Ok(r) => r.redirect_to,
         Err(e) => {
             tracing::error!(error = %e, "accept_login failed");
@@ -384,7 +447,7 @@ pub async fn callback(
             detail: json!({
                 "subject": id.subject,
                 "login": id.login,
-                "created": matches!(outcome, LinkOutcome::Created { .. }),
+                "created": created,
             }),
             ..AuditEvent::from_request(&req)
         },
