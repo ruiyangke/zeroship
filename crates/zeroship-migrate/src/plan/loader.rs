@@ -1492,10 +1492,10 @@ mod tests {
     }
 
     #[test]
-    fn flyway_db_migrations_still_load_as_58_ordered() {
+    fn flyway_db_migrations_still_load_as_current_ordered() {
         // Coexistence regression: the EXISTING platform port (`db/migrations/`,
         // the `V<NNNN>__…` Flyway set) must auto-detect as Flyway and load
-        // IDENTICALLY after the dbmate path was added — 58 versioned migrations,
+        // IDENTICALLY after the dbmate path was added — all current versioned migrations,
         // strictly ascending. This is the pure (no-PG) peer of the PG-gated
         // `tests/platform_port_pg.rs`, guaranteeing the dbmate work did not perturb
         // the platform loader.
@@ -1507,7 +1507,7 @@ mod tests {
             return;
         }
         let migs = load_dir_migrations(&dir).expect("the platform Flyway port still loads");
-        assert_eq!(migs.len(), 58, "all 58 ported V<NNNN>__ files load (0045 is a gap)");
+        assert_eq!(migs.len(), 64, "all current ported V<NNNN>__ files load");
         // Auto-detect chose Flyway, not dbmate: none is repeatable here and the
         // versions are strictly ascending (the Flyway numeric ordering).
         for w in migs.windows(2) {

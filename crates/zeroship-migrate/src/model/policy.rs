@@ -66,8 +66,8 @@ pub enum SchemaScope {
     /// Confined: exactly one permitted schema (the project schema). Any other
     /// explicitly-qualified schema is a cross-tenant violation.
     Single(String),
-    /// Platform: a set of permitted schemas (e.g. `zeroship` / `oauth_hydra` /
-    /// `public`). A reference is foreign iff its schema is NOT in this list.
+    /// Platform: a set of permitted schemas (e.g. `zeroship` / `public`). A
+    /// reference is foreign iff its schema is NOT in this list.
     Allowlist(Vec<String>),
     /// Explicit Trusted/operator posture: no validate-time cross-schema
     /// confinement. This is deliberately distinct from `None` at public load /

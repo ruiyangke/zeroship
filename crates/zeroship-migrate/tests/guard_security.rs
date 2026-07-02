@@ -2063,8 +2063,8 @@ fn t2b_privileged_constructs_still_denied_under_confined() {
     assert_denied("ALTER TABLE project_acme.t ENABLE ROW LEVEL SECURITY");
     assert_denied("ALTER TABLE project_acme.t FORCE ROW LEVEL SECURITY");
     assert_denied("DROP OWNED BY evil");
-    // cross-schema to the platform schemas stays denied.
-    assert_cross_schema("CREATE TABLE oauth_hydra.t(id int)");
+    // cross-schema to the platform schema stays denied.
+    assert_cross_schema("CREATE TABLE zeroship.t(id int)");
     // a 0025-style bootstrap DO block is denied under Confined.
     assert_denied(
         "DO $bootstrap$ BEGIN \
