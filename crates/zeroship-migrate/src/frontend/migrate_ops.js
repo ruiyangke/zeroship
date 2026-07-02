@@ -123,7 +123,7 @@ export function __drain() {
       throw structuredError(
         "SELECTOR_NOT_TERMINATED",
         `selector .${sel.selector}(${JSON.stringify(sel.name)}) was never terminated; ` +
-          "a selector records nothing until its terminal (.add/.drop/.rename/.alter) is called",
+          "a selector records nothing until one of its terminals is called",
         {
           selector: sel.selector,
           name: sel.name,
@@ -1282,33 +1282,42 @@ function recordRenameColumn(table, from, to, type, args) {
   );
 }
 
-function recordAlterColumn(table, name, change) {
-  if (change.type !== undefined) {
-    push(
-      compact({
-        op: "alterColumnType",
-        table,
-        column: name,
-        type: colTypeOf(change.type),
-        using: resolveExpr(change.using),
-        schema: change.schema,
-      }),
-    );
-    return;
-  }
-  if (change.nullable !== undefined) {
-    push(
-      compact({
-        op: "alterColumnNullability",
-        table,
-        column: name,
-        nullable: change.nullable,
-        schema: change.schema,
-      }),
-    );
-    return;
-  }
-  throw structuredError("OP_INVALID", ".column(name).alter({…}) must carry `type` or `nullable`");
+function recordSetColumnType(table, name, change) {
+  requireColumnDef(change.to, ".column(name).setType({ to })");
+  push(
+    compact({
+      op: "setColumnType",
+      table,
+      column: name,
+      toType: colTypeOf(change.to),
+      using: resolveExpr(change.using),
+      schema: change.schema,
+    }),
+  );
+}
+
+function recordSetColumnNotNull(table, name, args) {
+  push(compact({ op: "setColumnNotNull", table, column: name, schema: args.schema }));
+}
+
+function recordDropColumnNotNull(table, name, args) {
+  push(compact({ op: "dropColumnNotNull", table, column: name, schema: args.schema }));
+}
+
+function recordSetColumnDefault(table, name, value, args) {
+  push(
+    compact({
+      op: "setColumnDefault",
+      table,
+      column: name,
+      value: toIrDefault(value),
+      schema: args.schema,
+    }),
+  );
+}
+
+function recordDropColumnDefault(table, name, args) {
+  push(compact({ op: "dropColumnDefault", table, column: name, schema: args.schema }));
 }
 
 /** Build an `IrConstraint` of kind `fk`. **C1**: `onDelete`/`onUpdate` ARE
@@ -1986,9 +1995,29 @@ export function table(name, opts = {}) {
           recordRenameColumn(name, col, args.to, args.type, { schema: pickSchema(args, dflt) });
           return handle;
         },
-        alter(args) {
+        setType(args) {
           terminateSelector(id);
-          recordAlterColumn(name, col, { ...args, schema: pickSchema(args, dflt) });
+          recordSetColumnType(name, col, { ...args, schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        setNotNull(args = {}) {
+          terminateSelector(id);
+          recordSetColumnNotNull(name, col, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        dropNotNull(args = {}) {
+          terminateSelector(id);
+          recordDropColumnNotNull(name, col, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        setDefault(value, args = {}) {
+          terminateSelector(id);
+          recordSetColumnDefault(name, col, value, { schema: pickSchema(args, dflt) });
+          return handle;
+        },
+        dropDefault(args = {}) {
+          terminateSelector(id);
+          recordDropColumnDefault(name, col, { schema: pickSchema(args, dflt) });
           return handle;
         },
         comment(text, args = {}) {

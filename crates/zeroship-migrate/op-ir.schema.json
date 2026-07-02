@@ -597,7 +597,7 @@
               "description": "Target column.",
               "type": "string"
             },
-            "type": {
+            "toType": {
               "description": "New type.",
               "$ref": "#/$defs/ColType"
             },
@@ -632,7 +632,7 @@
             },
             "op": {
               "type": "string",
-              "const": "alterColumnType"
+              "const": "setColumnType"
             }
           },
           "additionalProperties": false,
@@ -640,11 +640,11 @@
             "op",
             "table",
             "column",
-            "type"
+            "toType"
           ]
         },
         {
-          "description": "`ALTER TABLE … ALTER COLUMN … SET/DROP NOT NULL`.",
+          "description": "`ALTER TABLE … ALTER COLUMN … SET NOT NULL`.",
           "type": "object",
           "properties": {
             "table": {
@@ -654,10 +654,6 @@
             "column": {
               "description": "Target column.",
               "type": "string"
-            },
-            "nullable": {
-              "description": "The desired nullability.",
-              "type": "boolean"
             },
             "schema": {
               "description": "**PR10** — the schema qualifier (§2.7).",
@@ -679,7 +675,95 @@
             },
             "op": {
               "type": "string",
-              "const": "alterColumnNullability"
+              "const": "setColumnNotNull"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "column"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … ALTER COLUMN … DROP NOT NULL`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "Target column.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropColumnNotNull"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "column"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … ALTER COLUMN … SET DEFAULT …`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "Target column.",
+              "type": "string"
+            },
+            "value": {
+              "description": "Structured default (typed literal only in P0; synth defaults are\nvalidate-refused until the expression/default renderer lands).",
+              "$ref": "#/$defs/IrDefault"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "setColumnDefault"
             }
           },
           "additionalProperties": false,
@@ -687,7 +771,49 @@
             "op",
             "table",
             "column",
-            "nullable"
+            "value"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE … ALTER COLUMN … DROP DEFAULT`.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "column": {
+              "description": "Target column.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropColumnDefault"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "column"
           ]
         },
         {
