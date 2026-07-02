@@ -20,7 +20,8 @@
 //!
 //! Phase 7 U1.2.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ntex::web::{self, types::Form, types::State, HttpResponse};
 use serde::Deserialize;
@@ -28,6 +29,13 @@ use serde_json::json;
 
 use crate::sessions;
 use crate::GateState;
+
+const MAX_INFLIGHT_LOGOUT_JTIS: usize = 50_000;
+
+// Process-local in-flight claims close the check-then-side-effect race before a
+// successful jti is promoted into `GateState.logout_jti_cache`. Cross-node replay
+// detection remains out of scope for this in-memory gateway cache.
+static INFLIGHT_LOGOUT_JTIS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
 
 /// Form body shape per OIDC BCL §2.5 — a single `logout_token` field,
 /// `x-www-form-urlencoded`. ntex's `Form<T>` parses that automatically.
@@ -152,6 +160,22 @@ pub async fn handle(
         },
         None => None,
     };
+    let Some(jti_claim) = LogoutJtiClaim::claim(
+        &token.jti,
+        now_secs,
+        zeroship_core::logout_token::LOGOUT_JTI_TTL_SECS,
+    ) else {
+        tracing::warn!(
+            jti = %token.jti,
+            sub = ?token.sub,
+            sid = ?token.sid,
+            "backchannel_logout: logout_token jti is already being processed"
+        );
+        return HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .finish();
+    };
+
     // M1 fix: the anchor refresh families deleted inside the DB block, to be
     // revoked at OP AFTER the connection is released (no conn held across the
     // outbound HTTP). Each family is paired with its global user id so we can
@@ -297,12 +321,10 @@ pub async fn handle(
             jti = %token.jti,
             sub = ?token.sub,
             sid = ?token.sid,
-            "backchannel_logout: logout_token jti was processed concurrently"
+            "backchannel_logout: logout_token jti was already in the replay cache after processing"
         );
-        return HttpResponse::Ok()
-            .header("cache-control", "no-store")
-            .finish();
     }
+    jti_claim.disarm();
 
     // Release the pooled connection BEFORE the outbound OP revoke (the
     // round-6 BLOCKER invariant: no DB conn is ever held across outbound HTTP).
@@ -373,6 +395,56 @@ fn retryable_processing_error() -> HttpResponse {
     HttpResponse::ServiceUnavailable()
         .header("cache-control", "no-store")
         .body("temporary logout processing failure")
+}
+
+struct LogoutJtiClaim {
+    jti: String,
+    active: bool,
+}
+
+impl LogoutJtiClaim {
+    fn claim(jti: &str, now_secs: i64, ttl_secs: i64) -> Option<Self> {
+        let claims = INFLIGHT_LOGOUT_JTIS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = claims.lock().expect("poisoned logout jti claim cache");
+        guard.retain(|_, expires_at| *expires_at > now_secs);
+        if guard.contains_key(jti) {
+            return None;
+        }
+        if guard.len() >= MAX_INFLIGHT_LOGOUT_JTIS {
+            if let Some(victim) = guard.keys().next().cloned() {
+                guard.remove(&victim);
+            }
+        }
+        guard.insert(jti.to_owned(), now_secs + ttl_secs);
+        Some(Self {
+            jti: jti.to_owned(),
+            active: true,
+        })
+    }
+
+    fn disarm(mut self) {
+        if let Some(claims) = INFLIGHT_LOGOUT_JTIS.get() {
+            claims
+                .lock()
+                .expect("poisoned logout jti claim cache")
+                .remove(&self.jti);
+        }
+        self.active = false;
+    }
+}
+
+impl Drop for LogoutJtiClaim {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Some(claims) = INFLIGHT_LOGOUT_JTIS.get() {
+            claims
+                .lock()
+                .expect("poisoned logout jti claim cache")
+                .remove(&self.jti);
+        }
+    }
 }
 
 async fn revoke_by_sub(

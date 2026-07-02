@@ -645,6 +645,161 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
 }
 
 #[ntex::test]
+async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
+    let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("skipping (no AUTH_DB_URL)");
+        return;
+    };
+
+    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+    let mut db = client;
+    let db_cfg = DbConfig::new(dsn.clone(), 4);
+
+    let (mut lock_db, lock_connection) = connect(&dsn, NoTls).await.expect("lock connect");
+    compio::runtime::spawn(async move {
+        if let Err(e) = lock_connection.run().await {
+            eprintln!("lock connection error: {e}");
+        }
+    })
+    .detach();
+
+    let key = make_key();
+    let jwks_key = Arc::new(key.clone());
+    let jwks_server = test::server(move || {
+        let jwks_key = jwks_key.clone();
+        async move {
+            web::App::new().state(jwks_key).service(
+                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
+            )
+        }
+    })
+    .await;
+    let auth_base = jwks_server.url("").trim_end_matches('/').to_string();
+    let issuer = format!("{auth_base}/oauth2");
+
+    let target_user = insert_user(&db, "gateway-bcl-concurrent-target").await;
+    let target_user_string = target_user.to_string();
+    let app_id = Uuid::new_v4();
+    let app_name = format!("bcl-concurrent-{}", Uuid::new_v4().simple());
+    let oauth_client_id = format!("oac_bclconcurrent_{}", Uuid::new_v4().simple());
+    let sector = format!("https://{app_name}.zeroship.localhost");
+    seed_app(&db, app_id, &app_name).await;
+    seed_oauth_client(&db, &oauth_client_id).await;
+    let session = create(
+        &mut db,
+        &NewSession {
+            user_id: &target_user_string,
+            sid: None,
+            app_id,
+            email: Some("alice@zeroship.test"),
+            name: Some("Alice"),
+            avatar_url: None,
+            email_verified: true,
+            granted_scopes: &[],
+            auth_time: None,
+            amr: &[],
+        },
+    )
+    .await
+    .expect("create session");
+
+    let lock_tx = lock_db.transaction().await.expect("begin lock tx");
+    lock_tx
+        .query(
+            "SELECT id FROM zeroship.gateway_sessions WHERE id = $1 FOR UPDATE",
+            &[&session.id],
+        )
+        .await
+        .expect("lock target session row");
+
+    let jti = format!("jti-{}", Uuid::new_v4().simple());
+    let token =
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
+    let state = build_handler_state_with_route(
+        db_cfg.clone(),
+        &auth_base,
+        app_id,
+        &app_name,
+        &oauth_client_id,
+        &sector,
+        zeroship_core::auth::derive_pairwise_salt(b"bcl-concurrent-stash"),
+    );
+    let app = test::init_service(
+        web::App::new()
+            .state(state.clone())
+            .service(
+                web::resource("/oidc/backchannel-logout")
+                    .route(web::post().to(backchannel_logout::handle)),
+            ),
+    )
+    .await;
+
+    let req_a = test::TestRequest::post()
+        .uri("/oidc/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload(format!("logout_token={token}"))
+        .to_request();
+    let req_b = test::TestRequest::post()
+        .uri("/oidc/backchannel-logout")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .set_payload(format!("logout_token={token}"))
+        .to_request();
+    let release_lock = async move {
+        compio::time::sleep(std::time::Duration::from_millis(75)).await;
+        lock_tx.rollback().await.expect("release target session lock");
+    };
+    let (resp_a, resp_b, _) = futures::join!(
+        test::call_service(&app, req_a),
+        test::call_service(&app, req_b),
+        release_lock
+    );
+
+    assert_eq!(resp_a.status(), StatusCode::OK);
+    assert_eq!(resp_b.status(), StatusCode::OK);
+    assert!(
+        validate(&mut db, session.id, app_id)
+            .await
+            .expect("validate after concurrent logout")
+            .is_none(),
+        "one accepted logout_token must revoke the session"
+    );
+    assert_eq!(
+        audit_count(&db, &jti).await,
+        1,
+        "concurrent replay of the same logout_token jti must emit one audit row"
+    );
+    assert_eq!(state.logout_jti_cache.len(), 1);
+
+    db.execute(
+        "DELETE FROM zeroship.audit_events WHERE detail->>'jti' = $1",
+        &[&jti],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.gateway_sessions WHERE id = $1", &[&session.id])
+        .await
+        .ok();
+    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
+        .await
+        .ok();
+    db.execute(
+        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&oauth_client_id],
+    )
+    .await
+    .ok();
+    db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .await
+        .ok();
+}
+
+#[ntex::test]
 async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     let Ok(dsn) = std::env::var("AUTH_DB_URL") else {
         eprintln!("skipping (no AUTH_DB_URL)");

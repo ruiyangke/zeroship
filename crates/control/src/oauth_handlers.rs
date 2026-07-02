@@ -57,6 +57,9 @@ struct DeleteOauthClientResponse {
     deleted: bool,
 }
 
+const MAX_REDIRECT_URIS: usize = 100;
+const MAX_REDIRECT_URI_LEN: usize = 2048;
+
 pub async fn create_oauth_client(
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
@@ -252,6 +255,13 @@ fn validate_create_body(body: &CreateOauthClientBody) -> Result<(), web::HttpRes
             "redirect_uris must contain at least one URI",
         ));
     }
+    if body.redirect_uris.len() > MAX_REDIRECT_URIS {
+        return Err(bad_request(
+            "invalid_redirect_uris",
+            "redirect_uris contains too many URIs",
+        ));
+    }
+    validate_redirect_uris(&body.redirect_uris)?;
     if !matches!(
         body.token_endpoint_auth_method.as_str(),
         "client_secret_basic" | "none"
@@ -262,6 +272,53 @@ fn validate_create_body(body: &CreateOauthClientBody) -> Result<(), web::HttpRes
         ));
     }
     Ok(())
+}
+
+fn validate_redirect_uris(redirect_uris: &[String]) -> Result<(), web::HttpResponse> {
+    for (index, redirect_uri) in redirect_uris.iter().enumerate() {
+        if redirect_uri.is_empty() || redirect_uri.trim() != redirect_uri {
+            return Err(invalid_redirect_uri(
+                index,
+                "redirect_uri must be a non-empty URI without leading or trailing whitespace",
+            ));
+        }
+        if redirect_uri.len() > MAX_REDIRECT_URI_LEN {
+            return Err(invalid_redirect_uri(
+                index,
+                "redirect_uri exceeds the maximum length",
+            ));
+        }
+        let parsed = url::Url::parse(redirect_uri).map_err(|_| {
+            invalid_redirect_uri(index, "redirect_uri must be an absolute URI")
+        })?;
+        if parsed.fragment().is_some() {
+            return Err(invalid_redirect_uri(
+                index,
+                "redirect_uri must not contain a fragment",
+            ));
+        }
+        match parsed.scheme() {
+            "https" if parsed.host_str().is_some() => {}
+            "http" if is_loopback_redirect_uri(&parsed) => {}
+            "http" => {
+                return Err(invalid_redirect_uri(
+                    index,
+                    "http redirect_uri is allowed only for localhost or 127.0.0.1",
+                ));
+            }
+            _ => {
+                return Err(invalid_redirect_uri(
+                    index,
+                    "redirect_uri must use https unless it is loopback http",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_loopback_redirect_uri(uri: &url::Url) -> bool {
+    matches!(uri.host_str(), Some("127.0.0.1" | "localhost"))
 }
 
 async fn ensure_client_absent(
@@ -391,6 +448,14 @@ fn generate_client_secret() -> String {
 fn bad_request(error: &str, message: &str) -> web::HttpResponse {
     web::HttpResponse::BadRequest().json(&json!({
         "error": error,
+        "message": message,
+    }))
+}
+
+fn invalid_redirect_uri(index: usize, message: &str) -> web::HttpResponse {
+    web::HttpResponse::BadRequest().json(&json!({
+        "error": "invalid_redirect_uri",
+        "index": index,
         "message": message,
     }))
 }
