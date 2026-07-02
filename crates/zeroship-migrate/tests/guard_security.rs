@@ -26,7 +26,11 @@ fn guard() -> SqlGuard {
 #[track_caller]
 fn assert_denied(sql: &str) {
     match guard().check(sql) {
-        Err(GuardError::Denied { .. } | GuardError::CrossSchema { .. }) => {}
+        Err(
+            GuardError::Denied { .. }
+            | GuardError::CrossSchema { .. }
+            | GuardError::DataSecurityPolicy { .. },
+        ) => {}
         Err(GuardError::Parse(e)) => panic!("expected Denied, got Parse({e:?}) for: {sql}"),
         // PHASE 4 — the PG `guard()` here is never SQLite, so this is unreachable.
         Err(GuardError::SqliteRawSqlRejected) => {
@@ -166,6 +170,17 @@ fn create_extension_not_in_allowlist_denied() {
 fn create_allowlisted_extension_is_allowed() {
     assert_ok("CREATE EXTENSION pgcrypto");
     assert_ok("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"");
+}
+
+#[test]
+fn create_extension_with_foreign_schema_is_cross_schema_denied() {
+    // SA-20: the `WITH SCHEMA <target>` schema is confined by gate 2 (the
+    // rendered-SQL walk), restoring gate-1/gate-2 parity with CREATE SCHEMA. An
+    // allowlisted extension planted into a FOREIGN schema is now cross-schema
+    // denied; the in-scope project schema still passes.
+    assert_cross_schema("CREATE EXTENSION pgcrypto WITH SCHEMA control");
+    assert_cross_schema("CREATE EXTENSION pgcrypto SCHEMA other_tenant");
+    assert_ok("CREATE EXTENSION pgcrypto WITH SCHEMA project_acme");
 }
 
 // ---------------------------------------------------------------------------

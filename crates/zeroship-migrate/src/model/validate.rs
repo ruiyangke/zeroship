@@ -1910,6 +1910,33 @@ pub fn validate_op_resolved(
                 validate_op(op, target_dialect, op_index, ts)?;
             }
         }
+        // SA-18: insert row cells and `on_conflict.do_update` values can carry a
+        // closed Expr (a DB-evaluated synth scalar or `DO UPDATE SET n = n + 1`).
+        // When the target table resolves, walk every `IrValue::Expr` through a real
+        // resolving `TargetScope` so a ColRef to a non-existent column is rejected
+        // here, not as an opaque mid-statement DB error — symmetric with the
+        // Update/Delete/Backfill/AlterColumnType arms above.
+        Op::Insert { table, rows, on_conflict, .. } => {
+            if let Some(cols) = resolved_scope(table) {
+                let scope = TargetScope::new(table, &cols);
+                for row in rows {
+                    for cell in row {
+                        if let crate::model::ir::IrValue::Expr(e) = cell {
+                            validate_expr(e, target_dialect, &scope, op_index, ts)?;
+                        }
+                    }
+                }
+                if let Some(do_update) = on_conflict.as_ref().and_then(|oc| oc.do_update.as_ref()) {
+                    for v in do_update.values() {
+                        if let crate::model::ir::IrValue::Expr(e) = v {
+                            validate_expr(e, target_dialect, &scope, op_index, ts)?;
+                        }
+                    }
+                }
+            } else {
+                validate_op(op, target_dialect, op_index, ts)?;
+            }
+        }
         // Every other op: revalidate structurally (its own scope is already
         // resolved or has no Expr slot).
         other => validate_op(other, target_dialect, op_index, ts)?,
@@ -3061,6 +3088,35 @@ mod tests {
         let err = validate_ir_resolved(&ir, Dialect::Postgres, &live, &[])
             .expect_err("an unresolved ColRef must be rejected at the resolved apply seam");
         assert_eq!(err.code, CODE_UNSUPPORTED, "rule (c) failure is structured, not a raw DB error");
+        assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_resolved_rejects_unresolved_colref_in_insert_on_conflict_do_update() {
+        use crate::model::ir::{IrOnConflict, IrValue};
+        use std::collections::BTreeMap;
+        // SA-18: an insert whose ON CONFLICT DO UPDATE assigns an Expr that
+        // references `ghost` — a column that does NOT exist on live `users`.
+        let mut do_update: BTreeMap<String, IrValue> = BTreeMap::new();
+        do_update.insert("name".to_string(), IrValue::Expr(Expr::col("ghost")));
+        let ir = ir_with(vec![Op::Insert {
+            table: "users".into(),
+            columns: vec!["name".into()],
+            rows: vec![vec![IrValue::Scalar(crate::model::ir::IrScalar::Str("x".into()))]],
+            on_conflict: Some(IrOnConflict { columns: vec!["id".into()], do_update: Some(do_update) }),
+            schema: None,
+        }]);
+
+        // At LOAD: structural-only ⇒ the unresolved ColRef is NOT caught (this is
+        // the asymmetry SA-18 closes — pre-fix the resolved seam also missed it).
+        assert!(validate_ir(&ir, Dialect::Postgres, &[]).is_ok());
+
+        // At APPLY: resolve against the live columns of `users` (no `ghost`).
+        let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        live.insert("users".to_string(), vec!["id".to_string(), "name".to_string()]);
+        let err = validate_ir_resolved(&ir, Dialect::Postgres, &live, &[])
+            .expect_err("an unresolved ColRef in DO UPDATE must be rejected at the resolved seam");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.op_index, 0);
     }
 

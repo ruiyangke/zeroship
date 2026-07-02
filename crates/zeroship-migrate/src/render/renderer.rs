@@ -235,6 +235,16 @@ impl DmlRenderer for PostgresDmlRenderer {
         materialized: bool,
         replace: bool,
     ) -> Result<String, IrLowerError> {
+        // Postgres has no `CREATE OR REPLACE MATERIALIZED VIEW`. Rather than
+        // silently dropping `replace` (which would leave a populated matview in
+        // place under a "replace" request) or destructively DROP+CREATE it, fail
+        // closed so the author resolves the contradiction explicitly. (SA-13)
+        if materialized && replace {
+            return Err(IrLowerError::UnsupportedOp(
+                "createView: Postgres has no CREATE OR REPLACE MATERIALIZED VIEW; \
+                 drop the view explicitly before recreating it (replace + materialized is contradictory)",
+            ));
+        }
         let mut create = String::from("CREATE ");
         if materialized {
             create.push_str("MATERIALIZED VIEW ");

@@ -83,6 +83,22 @@ pub enum VendorError {
         /// The rejected value.
         value: String,
     },
+    /// A reserved pseudo-role (e.g. `PUBLIC`) was used where a concrete role is
+    /// required. `DROP OWNED BY PUBLIC` errors at apply, so reject it at render.
+    #[error("vendor render: {what} cannot target the reserved pseudo-role {role:?}")]
+    ReservedRole {
+        /// What was being rendered.
+        what: &'static str,
+        /// The rejected pseudo-role.
+        role: String,
+    },
+    /// Two mutually-exclusive instructions were supplied in one op (e.g. an
+    /// `alterRole` carrying both `setSearchPath` and `resetSearchPath:true`).
+    #[error("vendor render: {what}")]
+    ContradictoryArgs {
+        /// A human description of the contradiction.
+        what: &'static str,
+    },
 }
 
 /// Quote an identifier through the crate's single seam, mapping the error.
@@ -103,6 +119,20 @@ fn role_ref(name: &str) -> Result<String, VendorError> {
     } else {
         qid(name)
     }
+}
+
+/// Pick a dollar-quote tag that does NOT occur in `body`, so a function body
+/// containing the literal `$zsfn$` cannot prematurely terminate the dollar-quoted
+/// literal (SA-14). Returns the canonical `$zsfn$` when the body is collision-free
+/// (so existing renders / goldens are byte-stable), else `$zsfn0$`, `$zsfn1$`, …
+fn function_body_dollar_tag(body: &str) -> String {
+    let mut tag = String::from("$zsfn$");
+    let mut i = 0u64;
+    while body.contains(&tag) {
+        tag = format!("$zsfn{i}$");
+        i += 1;
+    }
+    tag
 }
 
 /// Single-quote-escape a SQL string literal (`'` ⇒ `''`).
@@ -328,6 +358,19 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
         }
         Op::AlterRole { name, set_search_path, reset_search_path } => {
             let qname = qid(name)?;
+            // SA-16: `setSearchPath` + `resetSearchPath:true` is contradictory (the
+            // renderer would silently prefer RESET and drop the SET). Refuse it so
+            // the author resolves the intent. NOTE the createRole-vs-alterRole
+            // asymmetry below: createRole's search_path push carries a RESET `down`
+            // (its inverse is well-defined), whereas an alterRole is a one-way edit
+            // over a possibly-already-customized role, so it journals `down: None`.
+            if reset_search_path.unwrap_or(false)
+                && set_search_path.as_ref().is_some_and(|s| !s.is_empty())
+            {
+                return Err(VendorError::ContradictoryArgs {
+                    what: "alterRole cannot combine setSearchPath with resetSearchPath:true",
+                });
+            }
             // An `alterRole` carrying NEITHER a `setSearchPath` nor an explicit
             // `resetSearchPath` has no instruction. Fail CLOSED (vendor review
             // LOW-5): an instruction-less alter must NOT silently fabricate a
@@ -351,11 +394,17 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             vec![VendorStatement { name: format!("drop_role_{name}"), up, down: None }]
         }
         Op::DropOwnedBy { roles } => {
-            let parts: Result<Vec<_>, _> = roles.iter().map(|r| role_ref(r)).collect();
-            let roles_sql = parts?.join(", ");
+            // Validate BEFORE the map+join (SA-15): an empty list and the reserved
+            // `PUBLIC` pseudo-role (`DROP OWNED BY PUBLIC` errors at apply) are both
+            // refused fail-closed rather than rendered into an apply-time failure.
             if roles.is_empty() {
                 return Err(VendorError::EmptyList { what: "drop owned by roles" });
             }
+            if let Some(r) = roles.iter().find(|r| r.eq_ignore_ascii_case("public")) {
+                return Err(VendorError::ReservedRole { what: "drop owned by roles", role: r.clone() });
+            }
+            let parts: Result<Vec<_>, _> = roles.iter().map(|r| role_ref(r)).collect();
+            let roles_sql = parts?.join(", ");
             vec![VendorStatement {
                 name: "drop_owned_by".to_string(),
                 up: format!("DROP OWNED BY {roles_sql}"),
@@ -492,9 +541,12 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             let returns = type_ref_sql(returns, "createFunction.returns")?;
             // The raw `body` is embedded VERBATIM inside a `$zsfn$ … $zsfn$` dollar
             // tag; the WHOLE statement is `pg_query`-parsed + deny-scanned by the
-            // guard at the lower seam (vendor spec §3.3).
+            // guard at the lower seam (vendor spec §3.3). The tag is chosen to not
+            // collide with the body (SA-14) — a body literally containing `$zsfn$`
+            // would otherwise terminate the quote early.
+            let tag = function_body_dollar_tag(body);
             let up = format!(
-                "{or_replace} FUNCTION {qname}({args_sql}) RETURNS {returns} LANGUAGE {}{vol} AS $zsfn$\n{body}\n$zsfn$",
+                "{or_replace} FUNCTION {qname}({args_sql}) RETURNS {returns} LANGUAGE {}{vol} AS {tag}\n{body}\n{tag}",
                 language.as_sql(),
             );
             let down = format!("DROP FUNCTION IF EXISTS {qname}({args_sql})");

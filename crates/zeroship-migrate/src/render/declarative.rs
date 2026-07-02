@@ -6523,3 +6523,44 @@ mod fk_referenced_table_quoting_tests {
         assert_eq!(quote_ident_if_needed("2cool"), r#""2cool""#);
     }
 }
+
+#[cfg(test)]
+mod numeric_default_literal_tests {
+    //! SA-21 — lock the int / `>2^53` bigint / decimal-string column DEFAULT
+    //! literal rendering against regression. Pre-fix, the `int` arm was missing
+    //! and an integer DEFAULT (and any decimal/bigint carried as a numeric string)
+    //! silently dropped. The string arm is gated by `is_decimal_string` so raw text
+    //! cannot be injected into the DDL.
+    use super::numeric_default_literal;
+    use serde_json::json;
+
+    #[test]
+    fn integer_default_is_rendered_exactly() {
+        assert_eq!(numeric_default_literal(&json!(42)), Some("42".to_string()));
+        assert_eq!(numeric_default_literal(&json!(-7)), Some("-7".to_string()));
+        assert_eq!(numeric_default_literal(&json!(0)), Some("0".to_string()));
+    }
+
+    #[test]
+    fn bigint_above_2_pow_53_carried_as_string_survives_without_float_corruption() {
+        // 9007199254740993 = 2^53 + 1 — not exactly representable as f64, so the
+        // string arm (not as_f64) must carry it verbatim.
+        assert_eq!(
+            numeric_default_literal(&json!("9007199254740993")),
+            Some("9007199254740993".to_string())
+        );
+    }
+
+    #[test]
+    fn decimal_string_default_is_rendered_verbatim() {
+        assert_eq!(numeric_default_literal(&json!("1.5")), Some("1.5".to_string()));
+        assert_eq!(numeric_default_literal(&json!("-0.001")), Some("-0.001".to_string()));
+    }
+
+    #[test]
+    fn non_numeric_string_is_rejected_no_raw_text_injection() {
+        // A non-decimal string must NOT reach the DDL (is_decimal_string gate).
+        assert_eq!(numeric_default_literal(&json!("0); DROP TABLE users; --")), None);
+        assert_eq!(numeric_default_literal(&json!("now()")), None);
+    }
+}

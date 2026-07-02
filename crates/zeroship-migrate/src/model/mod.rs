@@ -7,5 +7,6 @@ pub mod migration;
 pub mod policy;
 pub mod precondition;
 pub mod probe;
+pub mod profile;
 pub mod snapshot;
 pub mod validate;

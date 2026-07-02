@@ -259,6 +259,7 @@ fn shadow_executor_cfg(cfg: &ExecutorConfig, shadow_db: &str) -> Result<Executor
             sc.pg.migrator_role = None;
             Ok(sc)
         }
+        #[cfg(any(test, feature = "standalone-cli"))]
         crate::model::policy::TrustProfile::Trusted => {
             // Trusted source (public dbmate-like posture): mirror the
             // connecting-role apply faithfully so the dry-run does NOT re-deny SQL

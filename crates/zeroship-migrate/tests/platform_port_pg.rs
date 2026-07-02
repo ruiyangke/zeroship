@@ -13,12 +13,12 @@
 //! be Platform: under Confined every one of those is DENIED.
 //!
 //! The ported tree uses the hardcoded `zeroship` schema and the global
-//! `zeroship_*` roles, so this test cannot use a
-//! token-suffixed throwaway schema like `cli_platform_pg.rs`. It instead resets
-//! the two real schemas in the dedicated `zeroship_migrate_test` DB and uses a
-//! token-suffixed META (journal) schema so concurrent runs do not collide on the
-//! journal. Roles are cluster-wide; the files' `IF NOT EXISTS` / DO-block guards
-//! make their creation idempotent across runs.
+//! `zeroship_*` roles, so this test cannot use a token-suffixed throwaway schema
+//! like `cli_platform_pg.rs`. It instead resets the real schema in the dedicated
+//! `zeroship_migrate_test` DB and uses a token-suffixed META (journal) schema so
+//! concurrent runs do not collide on the journal. Roles are cluster-wide; the
+//! files' `IF NOT EXISTS` / DO-block guards make their creation idempotent across
+//! runs.
 
 use std::path::PathBuf;
 
@@ -30,8 +30,6 @@ use zeroship_migrate::test_support::acquire_global_platform_resource_lock;
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
-const EXPECTED_PLATFORM_MIGRATIONS: usize = 64;
-const LATEST_PLATFORM_MIGRATION_VERSION: u64 = 66;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -70,9 +68,37 @@ fn migrations_dir() -> PathBuf {
         .expect("db/migrations exists at repo root")
 }
 
-/// A Platform [`RunConfig`] over the REAL `zeroship` schema with `public` in the
-/// allowlist, and a UNIQUE meta (journal) schema so the journal does not collide
-/// with a concurrent run.
+fn platform_up_migration_versions() -> Vec<u64> {
+    let mut versions: Vec<u64> = std::fs::read_dir(migrations_dir())
+        .expect("read db/migrations")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            if !name.starts_with('V') || !name.ends_with(".sql") || name.ends_with(".down.sql") {
+                return None;
+            }
+            name[1..]
+                .split_once("__")
+                .and_then(|(version, _)| version.parse::<u64>().ok())
+        })
+        .collect();
+    versions.sort_unstable();
+    versions
+}
+
+fn platform_migration_count() -> usize {
+    platform_up_migration_versions().len()
+}
+
+fn latest_platform_migration_version() -> u64 {
+    *platform_up_migration_versions()
+        .last()
+        .expect("db/migrations has at least one up migration")
+}
+
+/// A Platform [`RunConfig`] over the REAL `zeroship` schema with the
+/// `zeroship` + `public` namespaces in the allowlist, and a UNIQUE meta
+/// (journal) schema so the journal does not collide with a concurrent run.
 fn platform_cfg(meta: &str, yes: bool) -> RunConfig {
     platform_cfg_for_url(dsn(), meta, yes)
 }
@@ -86,8 +112,8 @@ fn platform_cfg_for_url(database_url: String, meta: &str, yes: bool) -> RunConfi
         project_id: "platform".to_string(),
         project_schema: "zeroship".to_string(),
         schemas: vec!["zeroship".to_string(), "public".to_string()],
-        // The changelog installs citext; the guard gates `CREATE EXTENSION`
-        // against this allowlist.
+        // The changelog installs citext (V0001) + uuid-ossp (V0027); the guard
+        // gates `CREATE EXTENSION` against this allowlist, so both must be named.
         extensions: vec!["citext".to_string(), "uuid-ossp".to_string()],
         meta_schema: meta.to_string(),
         yes,
@@ -160,6 +186,17 @@ async fn index_exists(conn: &Client, schema: &str, index: &str) -> bool {
         .is_empty()
 }
 
+async fn metric_weight(conn: &Client, metric: &str) -> Option<(i64, i64)> {
+    conn.query(
+        "SELECT units_per_op, per_units FROM zeroship.metric_weights WHERE metric = $1",
+        &[&metric],
+    )
+    .await
+    .expect("query metric weight")
+    .first()
+    .map(|row| (row.get("units_per_op"), row.get("per_units")))
+}
+
 async fn policy_exists(conn: &Client, schema: &str, table: &str, policy: &str) -> bool {
     !conn
         .query(
@@ -172,6 +209,68 @@ async fn policy_exists(conn: &Client, schema: &str, table: &str, policy: &str) -
         .await
         .expect("query pg_policy")
         .is_empty()
+}
+
+async fn assert_latest_platform_migration_effect(
+    conn: &Client,
+    latest_version: u64,
+    present: bool,
+) {
+    let state = if present { "materialized" } else { "rolled back" };
+    match latest_version {
+        66 => {
+            for column in ["client_id", "sid", "poll_interval_secs"] {
+                assert_eq!(
+                    column_exists(conn, "zeroship", "device_grants", column).await,
+                    present,
+                    "V0066 {state} zeroship.device_grants.{column}"
+                );
+            }
+            for index in [
+                "device_grants_client_id_idx",
+                "device_grants_provider_pending_user_code_idx",
+            ] {
+                assert_eq!(
+                    index_exists(conn, "zeroship", index).await,
+                    present,
+                    "V0066 {state} zeroship.{index}"
+                );
+            }
+        }
+        65 => {
+            assert_eq!(
+                table_exists(conn, "zeroship", "oidc_session_clients").await,
+                present,
+                "V0065 {state} zeroship.oidc_session_clients"
+            );
+            for (table, column) in [
+                ("oauth_clients", "backchannel_logout_uri"),
+                ("oauth_authorization_codes", "sid"),
+                ("gateway_sessions", "sid"),
+            ] {
+                assert_eq!(
+                    column_exists(conn, "zeroship", table, column).await,
+                    present,
+                    "V0065 {state} zeroship.{table}.{column}"
+                );
+            }
+        }
+        64 => {
+            assert_eq!(
+                table_exists(conn, "zeroship", "oauth_refresh_tokens").await,
+                present,
+                "V0064 {state} zeroship.oauth_refresh_tokens"
+            );
+        }
+        63 => {
+            assert_eq!(
+                table_exists(conn, "zeroship", "oauth_authorization_codes").await,
+                present,
+                "V0063 {state} zeroship.oauth_authorization_codes"
+            );
+        }
+        other => panic!("add a latest-migration effect assertion for V{other:04}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +286,7 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
     reset(&conn, &meta).await;
 
     let cfg = platform_cfg(&meta, /* yes */ true);
+    let expected_count = platform_migration_count();
 
     // 1. The WHOLE ported set applies with no error under Platform.
     let report = run_migrate(&cfg)
@@ -200,12 +300,11 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         other => panic!("expected Migrate report, got {other:?}"),
     };
     assert_eq!(
-        applied,
-        EXPECTED_PLATFORM_MIGRATIONS,
-        "all current ported files applied"
+        applied, expected_count,
+        "all ported db/migrations up files applied"
     );
 
-    // 2. Namespace the changelog provisions.
+    // 2. Namespace.
     assert!(namespace_exists(&conn, "zeroship").await, "zeroship schema");
 
     // 3. Roles — the five platform service roles.
@@ -235,7 +334,6 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         ("zeroship", "plans"),
         ("zeroship", "app_net_grants"),
         ("zeroship", "net_policy_catalog"),
-        ("zeroship", "device_grants"),
         ("zeroship", "invoices"),
     ] {
         assert!(
@@ -264,13 +362,13 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
         other => panic!("expected Migrate report, got {other:?}"),
     }
 
-    // 7. Status: all current migrations applied, none pending.
+    // 7. Status: all platform migrations applied, none pending.
     match run_status(&cfg).await.expect("status reads journal") {
         RunReport::Status(status) => {
             assert_eq!(
                 status.applied.len(),
-                EXPECTED_PLATFORM_MIGRATIONS,
-                "all current migrations applied"
+                expected_count,
+                "all platform migrations applied"
             );
             assert!(status.pending.is_empty(), "nothing pending");
         }
@@ -294,15 +392,14 @@ async fn ported_changelog_applies_under_platform_and_materializes_the_schema() {
 // untested against the REAL ported `.down.sql` files.
 //
 // This applies the whole ported set, then `run_rollback`'s the SINGLE most-recent
-// platform migration (V0066) via its real `.down.sql` under profile=Platform, and
-// asserts: the device-grant OP bindings are removed, the journal reflects the
-// rollback (RunReport::Rollback names V0066; status drops by one with V0066
-// pending), and the rolled-back migration RE-APPLIES forward cleanly (the down
-// was faithful).
+// platform migration via its real `.down.sql` under profile=Platform, and
+// asserts: the latest migration's known effect is removed, the journal reflects
+// the rollback, and the rolled-back migration RE-APPLIES forward cleanly (the
+// down was faithful).
 //
-// V0066 is a self-contained reversible step: its up adds OP device-grant binding
-// columns/indexes, and its down removes them without disturbing the base
-// device_grants table.
+// V0059 is a self-contained reversible step: its up makes net_ingress_bytes
+// attribution-only (0 CU weight), and its down restores the former V0058 billable
+// weight without disturbing the rest of the schema.
 //
 // Drives the REAL `command::runner::run_rollback` (not a shim, not a spawned
 // process) so the compose `migrate` service's rollback path is guarded by the same
@@ -319,125 +416,105 @@ async fn ported_set_rolls_back_the_last_platform_migration_via_its_down_sql() {
 
     // Apply the WHOLE ported set forward first (the precondition for a rollback).
     let cfg = platform_cfg(&meta, /* yes */ true);
+    let expected_count = platform_migration_count();
+    let latest_version = latest_platform_migration_version();
     match run_migrate(&cfg).await.expect("ported set applies under Platform") {
         RunReport::Migrate(outcome) => {
             assert_eq!(
                 outcome.applied.len(),
-                EXPECTED_PLATFORM_MIGRATIONS,
-                "all current ported files applied"
+                expected_count,
+                "all ported db/migrations up files applied"
             );
         }
         other => panic!("expected Migrate report, got {other:?}"),
     }
-    // V0066's objects exist on top of the base device_grants table.
+    // Earlier platform billing objects still exist, V0059 has zeroed only the net
+    // ingress attribution metric's billable weight, and the discovered latest
+    // migration's known effect exists before rollback.
     assert!(
-        table_exists(&conn, "zeroship", "device_grants").await,
-        "base zeroship.device_grants table exists"
+        table_exists(&conn, "zeroship", "app_net_grants").await,
+        "V0058 materialized zeroship.app_net_grants"
     );
     assert!(
-        column_exists(&conn, "zeroship", "device_grants", "client_id").await,
-        "V0066 added device_grants.client_id"
+        table_exists(&conn, "zeroship", "net_policy_catalog").await,
+        "V0058 materialized zeroship.net_policy_catalog"
     );
-    assert!(
-        column_exists(&conn, "zeroship", "device_grants", "sid").await,
-        "V0066 added device_grants.sid"
+    assert_eq!(
+        metric_weight(&conn, "net_ingress_bytes").await,
+        Some((0, 10000)),
+        "V0059 makes net_ingress_bytes attribution-only"
     );
-    assert!(
-        column_exists(&conn, "zeroship", "device_grants", "poll_interval_secs").await,
-        "V0066 added device_grants.poll_interval_secs"
-    );
-    assert!(
-        index_exists(&conn, "zeroship", "device_grants_client_id_idx").await,
-        "V0066 added device_grants_client_id_idx"
-    );
+    assert_latest_platform_migration_effect(&conn, latest_version, true).await;
 
-    // Roll back exactly the most-recently-applied migration (V0066) via its REAL
+    // Roll back exactly the most-recently-applied migration via its REAL
     // `.down.sql`. `run_rollback(.., None, Some(1))` is the `down` one-step target.
     let report = run_rollback(&cfg, None, Some(1))
         .await
         .expect("the last platform migration rolls back via its .down.sql");
     match report {
         RunReport::Rollback(outcome) => {
-            // V0066 → version 66 → the derived `mig_…` id. Exactly one step undone.
-            let expected = zeroship_migrate::migration_id_for_version(
-                LATEST_PLATFORM_MIGRATION_VERSION,
-            );
+            let expected = zeroship_migrate::migration_id_for_version(latest_version);
             assert_eq!(
                 outcome.rolled_back,
                 vec![expected.as_str().to_string()],
-                "exactly V0066 was rolled back, via its real .down.sql"
+                "exactly the latest platform migration was rolled back via its real .down.sql"
             );
             assert!(
                 outcome.skipped_irreversible.is_empty(),
-                "V0066 is reversible — nothing force-skipped"
+                "the latest platform migration is reversible — nothing force-skipped"
             );
         }
         other => panic!("expected Rollback report, got {other:?}"),
     }
 
-    // The base table remains, and V0066's down removed only its bindings.
+    // The V0058 tables and V0059 billing weight remain; the latest migration's
+    // known effect was removed.
     assert!(
-        table_exists(&conn, "zeroship", "device_grants").await,
-        "rolling back V0066 leaves zeroship.device_grants intact"
+        table_exists(&conn, "zeroship", "app_net_grants").await,
+        "rolling back the latest migration leaves zeroship.app_net_grants intact"
     );
     assert!(
-        !column_exists(&conn, "zeroship", "device_grants", "client_id").await,
-        "rolling back V0066 removes device_grants.client_id"
+        table_exists(&conn, "zeroship", "net_policy_catalog").await,
+        "rolling back the latest migration leaves zeroship.net_policy_catalog intact"
     );
-    assert!(
-        !column_exists(&conn, "zeroship", "device_grants", "sid").await,
-        "rolling back V0066 removes device_grants.sid"
+    assert_eq!(
+        metric_weight(&conn, "net_ingress_bytes").await,
+        Some((0, 10000)),
+        "rolling back the latest migration leaves V0059's attribution-only weight intact"
     );
-    assert!(
-        !column_exists(&conn, "zeroship", "device_grants", "poll_interval_secs").await,
-        "rolling back V0066 removes device_grants.poll_interval_secs"
-    );
-    assert!(
-        !index_exists(&conn, "zeroship", "device_grants_client_id_idx").await,
-        "rolling back V0066 removes device_grants_client_id_idx"
-    );
+    assert_latest_platform_migration_effect(&conn, latest_version, false).await;
 
-    // The journal reflects the rollback: one fewer applied, V0066 now pending.
+    // The journal reflects the rollback: one fewer applied, one pending.
     match run_status(&cfg).await.expect("status reads the journal post-rollback") {
         RunReport::Status(status) => {
             assert_eq!(
                 status.applied.len(),
-                EXPECTED_PLATFORM_MIGRATIONS - 1,
-                "the journal shows one fewer applied after rolling back V0066"
+                expected_count - 1,
+                "the journal shows one fewer applied after rolling back the latest migration"
             );
             assert_eq!(
                 status.pending.len(),
                 1,
-                "V0066 is the single pending migration after its rollback"
+                "the latest migration is the single pending migration after rollback"
             );
         }
         other => panic!("expected Status report, got {other:?}"),
     }
 
-    // Roll-forward heals: re-applying re-runs ONLY V0066. Proves the ported
-    // down/up pair round-trips.
+    // Roll-forward heals: re-applying re-runs ONLY the latest migration. Proves the
+    // ported down/up pair round-trips.
     match run_migrate(&cfg).await.expect("re-apply heals the rolled-back step") {
         RunReport::Migrate(outcome) => {
-            assert_eq!(outcome.applied.len(), 1, "only V0066 re-applied");
+            assert_eq!(outcome.applied.len(), 1, "only the latest migration re-applied");
         }
         other => panic!("expected Migrate report, got {other:?}"),
     }
-    assert!(
-        column_exists(&conn, "zeroship", "device_grants", "client_id").await,
-        "re-applying V0066 restores device_grants.client_id"
+    assert_eq!(
+        metric_weight(&conn, "net_ingress_bytes").await,
+        Some((0, 10000)),
+        "re-applying the latest migration leaves V0059's attribution-only weight intact"
     );
-    assert!(
-        column_exists(&conn, "zeroship", "device_grants", "sid").await,
-        "re-applying V0066 restores device_grants.sid"
-    );
-    assert!(
-        column_exists(&conn, "zeroship", "device_grants", "poll_interval_secs").await,
-        "re-applying V0066 restores device_grants.poll_interval_secs"
-    );
-    assert!(
-        index_exists(&conn, "zeroship", "device_grants_client_id_idx").await,
-        "re-applying V0066 restores device_grants_client_id_idx"
-    );
+    assert_latest_platform_migration_effect(&conn, latest_version, true).await;
 
     // Clean up the journal (leave the schemas; the next run resets them).
     conn.batch_execute(&format!("DROP SCHEMA IF EXISTS \"{meta}\" CASCADE;"))

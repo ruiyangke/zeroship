@@ -155,7 +155,7 @@ export interface PgNamespace {
   dropPolicy(args: DropPolicyArgs): Node;
   createFunction(args: CreateFunctionArgs): Node;
   dropFunction(args: DropFunctionArgs): Node;
-  pgRaw(args: PgRawArgs): Node;
+  raw(args: PgRawArgs): Node;
   sql(strings: TemplateStringsArray, ...binds: PgSqlBind[]): Node;
 }
 
@@ -232,6 +232,7 @@ export const pg: PgNamespace = {
     });
   },
   dropExtension(args) {
+    requireString(args.name, "pg.dropExtension({ name })");
     return record({ op: "dropExtension", name: args.name, ifExists: args.ifExists });
   },
   createRole(args) {
@@ -270,6 +271,15 @@ export const pg: PgNamespace = {
     return record({ op: "dropOwnedBy", roles: args.roles });
   },
   grant(args) {
+    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+      throw structuredError("OP_INVALID", "pg.grant({ privileges }): privileges must be a non-empty array");
+    }
+    if (args.on === null || typeof args.on !== "object") {
+      throw structuredError("OP_INVALID", "pg.grant({ on }): on must be a target object");
+    }
+    if (!Array.isArray(args.to) || args.to.length === 0) {
+      throw structuredError("OP_INVALID", "pg.grant({ to }): to must be a non-empty array");
+    }
     return record({
       op: "grant",
       privileges: args.privileges,
@@ -279,6 +289,15 @@ export const pg: PgNamespace = {
     });
   },
   revoke(args) {
+    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+      throw structuredError("OP_INVALID", "pg.revoke({ privileges }): privileges must be a non-empty array");
+    }
+    if (args.on === null || typeof args.on !== "object") {
+      throw structuredError("OP_INVALID", "pg.revoke({ on }): on must be a target object");
+    }
+    if (!Array.isArray(args.from) || args.from.length === 0) {
+      throw structuredError("OP_INVALID", "pg.revoke({ from }): from must be a non-empty array");
+    }
     return record({
       op: "revoke",
       privileges: args.privileges,
@@ -289,6 +308,12 @@ export const pg: PgNamespace = {
   createPolicy(args) {
     requireString(args.name, "pg.createPolicy({ name })");
     requireString(args.table, "pg.createPolicy({ table })");
+    if (Array.isArray(args.to) && args.to.length === 0) {
+      throw structuredError("OP_INVALID", "pg.createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+    }
+    if (args.using === undefined) {
+      throw structuredError("OP_INVALID", "pg.createPolicy({ using }): using is required (the renderer always emits USING)");
+    }
     return record({
       op: "createPolicy",
       name: args.name,
@@ -338,8 +363,8 @@ export const pg: PgNamespace = {
       ifExists: args.ifExists,
     });
   },
-  pgRaw(args) {
-    requireString(args.sql, "pg.pgRaw({ sql })");
+  raw(args) {
+    requireString(args.sql, "pg.raw({ sql })");
     return record({
       op: "pgRaw",
       sql: args.sql,

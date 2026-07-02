@@ -51,6 +51,16 @@ fn render_create_schema() {
 }
 
 #[test]
+fn render_drop_extension() {
+    // SA-25: the IF EXISTS form quotes the hyphenated name; the if_exists:None form
+    // emits a bare DROP EXTENSION. No CASCADE (matching the renderer).
+    let with_if = Op::DropExtension { name: "uuid-ossp".into(), if_exists: Some(true) };
+    assert_eq!(render_up(&with_if), r#"DROP EXTENSION IF EXISTS "uuid-ossp""#);
+    let bare = Op::DropExtension { name: "pgcrypto".into(), if_exists: None };
+    assert_eq!(render_up(&bare), r#"DROP EXTENSION "pgcrypto""#);
+}
+
+#[test]
 fn render_create_extension_with_schema() {
     let op = Op::CreateExtension {
         name: "uuid-ossp".into(),
@@ -321,6 +331,68 @@ fn render_create_function_embeds_body_verbatim() {
     assert!(up.starts_with(r#"CREATE OR REPLACE FUNCTION "zeroship"."audit_events_block_tamper"("user id" text) RETURNS trigger LANGUAGE plpgsql AS $zsfn$"#), "got: {up}");
     // The raw body is embedded verbatim (the one genuine escape, §2.6).
     assert!(up.contains("BEGIN RAISE EXCEPTION 'append-only'; END;"), "got: {up}");
+}
+
+#[test]
+fn create_function_body_containing_the_dollar_tag_picks_a_collision_free_tag() {
+    // SA-14: a body that literally contains `$zsfn$` would terminate the default
+    // dollar-quoted literal early. The renderer must choose a fresh tag.
+    let op = Op::CreateFunction {
+        name: "f".into(),
+        schema: Some("zeroship".into()),
+        args: None,
+        returns: "trigger".into(),
+        language: FuncLanguage::Plpgsql,
+        replace: Some(false),
+        volatility: None,
+        body: "BEGIN RETURN '$zsfn$ literal'; END;".into(),
+    };
+    let up = render_up(&op);
+    // The default tag is NOT used (it would collide); the next-free `$zsfn0$` is.
+    assert!(up.contains("AS $zsfn0$\n"), "got: {up}");
+    assert!(up.ends_with("\n$zsfn0$"), "got: {up}");
+    // The body is still embedded verbatim.
+    assert!(up.contains("BEGIN RETURN '$zsfn$ literal'; END;"), "got: {up}");
+}
+
+#[test]
+fn drop_owned_by_rejects_empty_and_the_public_pseudo_role() {
+    // SA-15: empty list and the reserved PUBLIC role (DROP OWNED BY PUBLIC errors
+    // at apply) are refused at render, not turned into an apply-time failure.
+    assert!(render_vendor_op(&Op::DropOwnedBy { roles: vec![] }, SCHEMA).is_err());
+    assert!(render_vendor_op(
+        &Op::DropOwnedBy { roles: vec!["zeroship_auth".into(), "public".into()] },
+        SCHEMA
+    )
+    .is_err());
+    // A concrete role still renders.
+    let ok = render_up(&Op::DropOwnedBy { roles: vec!["zeroship_auth".into()] });
+    assert_eq!(ok, r#"DROP OWNED BY "zeroship_auth""#);
+}
+
+#[test]
+fn alter_role_rejects_set_plus_reset_search_path() {
+    // SA-16: setSearchPath + resetSearchPath:true is contradictory (the renderer
+    // would silently prefer RESET and drop the SET). Refuse it.
+    let op = Op::AlterRole {
+        name: "zeroship_auth".into(),
+        set_search_path: Some(vec!["zeroship".into()]),
+        reset_search_path: Some(true),
+    };
+    assert!(render_vendor_op(&op, SCHEMA).is_err());
+    // Each instruction alone still renders.
+    let set_only = render_up(&Op::AlterRole {
+        name: "zeroship_auth".into(),
+        set_search_path: Some(vec!["zeroship".into()]),
+        reset_search_path: None,
+    });
+    assert!(set_only.contains("SET search_path = "), "got: {set_only}");
+    let reset_only = render_up(&Op::AlterRole {
+        name: "zeroship_auth".into(),
+        set_search_path: None,
+        reset_search_path: Some(true),
+    });
+    assert!(reset_only.contains("RESET search_path"), "got: {reset_only}");
 }
 
 #[test]

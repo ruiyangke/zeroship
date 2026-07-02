@@ -132,7 +132,29 @@ pub enum DmlError {
         /// The target table.
         table: String,
     },
+    /// A single `insert` assembled more bind parameters than the wire protocol
+    /// admits (PostgreSQL caps a statement at 65535 positional parameters; the
+    /// `Bind` message length is a `u16`). Reject at assemble time with a bounded
+    /// error rather than emitting a statement the driver fails mid-flight. Splitting
+    /// the insert into chunks touches the executor / atomicity boundary and is
+    /// deliberately out of scope here (SA-19).
+    #[error(
+        "insert into {table:?} assembles {count} bind parameters, over the {max} \
+         protocol limit; split the rows into smaller batches"
+    )]
+    TooManyBinds {
+        /// The target table.
+        table: String,
+        /// The assembled bind count.
+        count: usize,
+        /// The protocol ceiling.
+        max: usize,
+    },
 }
+
+/// The maximum number of positional bind parameters a single statement may carry
+/// (PostgreSQL `Bind` parameter count is a `u16`).
+pub(crate) const MAX_BIND_PARAMS: usize = 65535;
 
 /// Validate a bare SQL identifier and double-quote it (`"` → `""`). The ONLY
 /// identifier-emission path the assembler uses — a schema-qualified / malformed
@@ -805,6 +827,14 @@ pub fn assemble_insert(
         template.push_str(&render_on_conflict(oc, &mut ctx)?);
     }
 
+    if ctx.binds.len() > MAX_BIND_PARAMS {
+        return Err(DmlError::TooManyBinds {
+            table: table.to_string(),
+            count: ctx.binds.len(),
+            max: MAX_BIND_PARAMS,
+        });
+    }
+
     Ok(AssembledDml { template, binds: ctx.binds })
 }
 
@@ -1411,6 +1441,24 @@ mod tests {
         assert_eq!(a.template, "INSERT INTO \"app_proj\".\"t\" (\"a\") VALUES ($1)");
         assert!(!a.template.contains("DROP"), "metacharacters must not reach the template");
         assert_eq!(a.binds, vec![BindValue::Text(hostile.into())]);
+    }
+
+    #[test]
+    fn insert_over_the_bind_param_ceiling_is_rejected() {
+        // SA-19: one column × (MAX_BIND_PARAMS + 1) rows assembles one bind per row,
+        // overflowing the protocol parameter ceiling. Reject with a bounded error.
+        let rows: Vec<Vec<IrValue>> =
+            (0..=MAX_BIND_PARAMS as i64).map(|i| vec![val(IrScalar::Int(i))]).collect();
+        let err = assemble_insert(SCHEMA, SqlDialect::Postgres, "t", &["a".into()], &rows, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, DmlError::TooManyBinds { count, max, .. } if count == MAX_BIND_PARAMS + 1 && max == MAX_BIND_PARAMS),
+            "{err:?}"
+        );
+        // Exactly at the ceiling still assembles.
+        let rows_ok: Vec<Vec<IrValue>> =
+            (0..MAX_BIND_PARAMS as i64).map(|i| vec![val(IrScalar::Int(i))]).collect();
+        assert!(assemble_insert(SCHEMA, SqlDialect::Postgres, "t", &["a".into()], &rows_ok, None).is_ok());
     }
 
     #[test]

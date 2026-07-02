@@ -88,11 +88,47 @@ impl Advisory {
             suggestion: Some(suggestion.to_string()),
         }
     }
+
+    /// Build the structured warning emitted by `data_security.destructive_ops = "warn"`.
+    pub(crate) fn destructive_ops_warn(operation: &str, statement: &str) -> Self {
+        Self {
+            rule: rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN,
+            severity: Severity::Warning,
+            message: format!(
+                "data_security.destructive_ops=warn: {operation} is destructive and requires review: {statement}"
+            ),
+            suggestion: Some(
+                "review this destructive migration explicitly, or set destructive_ops=\"forbid\" to refuse it"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Build the structured warning emitted when
+    /// `data_security.destructive_ops = "warn"` sees an unclassified statement.
+    pub(crate) fn destructive_ops_unknown_warn(statement: &str) -> Self {
+        Self {
+            rule: rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN,
+            severity: Severity::Warning,
+            message: format!(
+                "data_security.destructive_ops=warn: statement is not positively classified as non-destructive and requires review: {statement}"
+            ),
+            suggestion: Some(
+                "review this migration explicitly; destructive_ops=\"forbid\" refuses unclassified statements fail-closed"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 /// The stable advisory rule ids — **data, not logic**, mirroring the guard's
 /// `denylist::rule` convention. These are NOT security rules; they never deny.
 pub mod rule {
+    /// `data_security.destructive_ops = "warn"` surfaced a destructive operation.
+    pub const DATA_SECURITY_DESTRUCTIVE_OPS_WARN: &str = "DATA_SECURITY_DESTRUCTIVE_OPS_WARN";
+    /// `data_security.destructive_ops = "warn"` surfaced an unclassified operation.
+    pub const DATA_SECURITY_UNCLASSIFIED_OPS_WARN: &str =
+        "DATA_SECURITY_UNCLASSIFIED_OPS_WARN";
     /// `DROP TABLE`/`DROP COLUMN`/`DROP CONSTRAINT` — irreversible data loss.
     pub const DESTRUCTIVE_DROP: &str = "DESTRUCTIVE_DROP";
     /// `RENAME COLUMN`/`RENAME TABLE` — breaks code reading the old name.

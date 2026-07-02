@@ -165,7 +165,8 @@ pub struct ExecutorConfig {
     /// PRIVATE (`pub(crate)`). The trust posture every executor-path guard build
     /// derives from (design §4.1 / §5). `Confined` for the creator path (set by
     /// [`ExecutorConfig::new`]); `Platform` ONLY via [`ExecutorConfig::platform`]
-    /// and `Trusted` ONLY via [`ExecutorConfig::trusted`] (both require an
+    /// and `Trusted` ONLY via [`ExecutorConfig::trusted`] when the standalone CLI
+    /// feature is enabled (both require an
     /// [`OperatorCapability`] token). Not `pub`, so the control plane — outside
     /// this crate — can neither name `Platform`/`Trusted` (the enum is
     /// `#[non_exhaustive]`) nor reach the constructors: it cannot flip the
@@ -180,7 +181,8 @@ pub struct ExecutorConfig {
     /// permits (e.g. `citext` / `uuid-ossp`). Empty for Confined and Trusted.
     pub(crate) platform_exts: Vec<String>,
     /// PRIVATE (`pub(crate)`). The OPERATOR capability token, present ONLY on a
-    /// config built via [`ExecutorConfig::platform`] or [`ExecutorConfig::trusted`].
+    /// config built via [`ExecutorConfig::platform`] or, in standalone CLI/test
+    /// builds, [`ExecutorConfig::trusted`].
     /// It rides here so the executor-path guard builds
     /// ([`ExecutorConfig::guard_config`]) can mint the privileged
     /// [`GuardConfig`](crate::guard::GuardConfig) without a fresh out-of-band mint
@@ -235,6 +237,7 @@ impl ExecutorConfig {
                 self.platform_schemas.clone(),
                 self.platform_exts.clone(),
             ),
+            #[cfg(any(test, feature = "standalone-cli"))]
             (crate::model::policy::TrustProfile::Trusted, Some(cap)) => {
                 crate::guard::GuardConfig::trusted(cap)
             }
@@ -289,6 +292,7 @@ impl ExecutorConfig {
     /// The real caller is the operator-side `command::runner` (the public
     /// CLI, Phase A2); the token is the in-crate enforcement primitive.
     #[must_use]
+    #[cfg(any(test, feature = "standalone-cli"))]
     pub(crate) fn trusted(
         cap: &crate::model::capability::OperatorCapability,
         project_id: impl Into<String>,

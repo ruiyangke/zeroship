@@ -28,7 +28,7 @@ use crate::apply::executor::{
 };
 use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
-use crate::plan::loader::{load_dir, LoaderError};
+use crate::plan::loader::{load_dir, LoaderError, PLATFORM_OWNER_APP};
 use crate::ops::status::{status, status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
 
@@ -47,10 +47,11 @@ pub enum RunProfile {
     /// Untrusted-equivalent: the full deny-list, single-schema.
     Confined,
     /// The public dbmate-like posture (Track A): the operator owns the DB, so the
-    /// deny-list is OFF and there is no schema confinement. The DEFAULT of the
-    /// public `zeroship-migrate` CLI. Reachable ONLY through the CLI's
-    /// `--profile trusted` flag (the single new Trusted surface) — the control
-    /// plane uses `submit_migration` (Confined) and never reaches this binary.
+    /// deny-list is OFF and there is no schema confinement. Present ONLY in the
+    /// standalone CLI/test build. Reachable ONLY through the CLI's `--profile
+    /// trusted` flag (the single new Trusted surface) — the control plane uses
+    /// `submit_migration` (Confined) and never reaches this binary.
+    #[cfg(any(test, feature = "standalone-cli"))]
     Trusted,
 }
 
@@ -256,6 +257,35 @@ pub enum RunError {
     /// single-step-shape precondition test) and exists for defense in depth.
     #[error("plan shape: {0}")]
     NotSingleStep(#[from] crate::render::plan::NotSingleStep),
+    /// A Platform-profile migration directory contains multiple corpus formats.
+    /// Pre-launch, a directory is exactly one format.
+    #[error(
+        "mixed platform migration corpus in '{dir}': found {found} \
+         (use exactly one format: .ts record/apply, or legacy .sql for db/migrations)"
+    )]
+    MixedPlatformMigrationCorpus {
+        /// The migration directory.
+        dir: String,
+        /// Human-readable examples of the formats seen.
+        found: String,
+    },
+    /// Committed Platform `.ir.json` was an intermediate apply-core test path.
+    /// Model C makes platform migrations `.ts`-only (transient IR), while creator
+    /// deployments keep committed `.ir.json` through control's deploy path.
+    #[error(
+        "unsupported platform migration corpus in '{dir}': found committed IR file '{ir}' \
+         (Platform migrations are .ts-only record/apply; creator committed .ir.json \
+         remains in the control-plane deploy path)"
+    )]
+    PlatformIrCorpusUnsupported {
+        /// The migration directory.
+        dir: String,
+        /// An example committed IR file.
+        ir: String,
+    },
+    /// Applying committed `.ir.json` migrations failed.
+    #[error("apply IR migrations: {0}")]
+    IrApply(#[from] crate::command::ir_apply::PostgresIrApplyError),
 }
 
 /// Load the migration directory and project each [`AppliedPlan`] down to its one
@@ -273,6 +303,81 @@ fn load_dir_flat(dir: &Path) -> Result<Vec<crate::model::migration::Migration>, 
         migrations.push(plan.single_step_migration()?.clone());
     }
     Ok(migrations)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationCorpusFormat {
+    Ts,
+    Sql,
+}
+
+/// Detect the top-level migration corpus shape for the Platform Postgres
+/// `migrate` command.
+///
+/// Model C selects `.ts` as the platform source format: the runner records each
+/// file to transient IR at migrate time and applies that IR. The `.sql` branch is
+/// retained only for the current repo-root `db/migrations/` port until the platform
+/// schema is rebaselined to `.ts`. Committed Platform `.ir.json` is intentionally
+/// rejected here; creator committed IR still flows through control/deploy.
+fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError> {
+    let read = std::fs::read_dir(dir).map_err(|e| {
+        RunError::Load(LoaderError::Io {
+            path: dir.display().to_string(),
+            message: e.to_string(),
+        })
+    })?;
+    let mut first_ts: Option<String> = None;
+    let mut first_ir: Option<String> = None;
+    let mut first_sql: Option<String> = None;
+    for entry in read {
+        let entry = entry.map_err(|e| {
+            RunError::Load(LoaderError::Io {
+                path: dir.display().to_string(),
+                message: e.to_string(),
+            })
+        })?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".ir.json") {
+            first_ir.get_or_insert_with(|| name.to_string());
+        } else if name.ends_with(".ts") {
+            first_ts.get_or_insert_with(|| name.to_string());
+        } else if name.ends_with(".sql") {
+            first_sql.get_or_insert_with(|| name.to_string());
+        }
+    }
+    let mut found = Vec::new();
+    if let Some(ts) = &first_ts {
+        found.push(format!(".ts '{ts}'"));
+    }
+    if let Some(ir) = &first_ir {
+        found.push(format!(".ir.json '{ir}'"));
+    }
+    if let Some(sql) = &first_sql {
+        found.push(format!(".sql '{sql}'"));
+    }
+    if found.len() > 1 {
+        return Err(RunError::MixedPlatformMigrationCorpus {
+            dir: dir.display().to_string(),
+            found: found.join(", "),
+        });
+    }
+    match (first_ts, first_ir, first_sql) {
+        (Some(_), None, None) => Ok(MigrationCorpusFormat::Ts),
+        (None, Some(ir), None) => Err(RunError::PlatformIrCorpusUnsupported {
+            dir: dir.display().to_string(),
+            ir,
+        }),
+        // Preserve the existing loader as the source of truth for empty dirs,
+        // malformed SQL names, dbmate files, and stray files.
+        (None, None, _) => Ok(MigrationCorpusFormat::Sql),
+        _ => unreachable!("mixed platform corpus returned above"),
+    }
 }
 
 /// The H1 destructive-gate decision (design §9, pure + unit-testable).
@@ -588,6 +693,7 @@ fn build_exec_cfg(cfg: &RunConfig) -> ExecutorConfig {
                 cfg.extensions.clone(),
             )
         }
+        #[cfg(any(test, feature = "standalone-cli"))]
         RunProfile::Trusted => {
             // Named CLI-runner mint seam (design §5), shared with Platform.
             let cap = OperatorCapability::new();
@@ -611,6 +717,7 @@ fn build_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
             let cap = OperatorCapability::new();
             crate::guard::GuardConfig::platform(&cap, cfg.schemas.clone(), cfg.extensions.clone())
         }
+        #[cfg(any(test, feature = "standalone-cli"))]
         RunProfile::Trusted => {
             let cap = OperatorCapability::new();
             crate::guard::GuardConfig::trusted(&cap)
@@ -638,9 +745,11 @@ fn sqlite_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
 }
 
 /// `migrate` — dispatch by the `--database-url` engine, then load the dir, plan,
-/// honour the H1 destructive gate, and apply PENDING (design §9). Postgres runs
-/// the existing byte-identical path; SQLite runs the same generic engine through
-/// a hardened [`SqliteBackend`]; an unsupported URL is an honest refusal.
+/// honour the H1 destructive gate, and apply PENDING (design §9). Postgres SQL
+/// corpora run the existing path, Platform `.ts` corpora record to transient IR
+/// and route through the IR apply
+/// path, SQLite runs the same generic engine through a hardened [`SqliteBackend`],
+/// and an unsupported URL is an honest refusal.
 ///
 /// # Errors
 /// [`RunError`] on an unsupported engine / load / connect / a
@@ -670,8 +779,14 @@ async fn run_migrate_sqlite(cfg: &RunConfig, app: &Path) -> Result<RunReport, Ru
     Ok(RunReport::Migrate(outcome))
 }
 
-/// The Postgres leg of `migrate` — the existing path, byte-identical.
+/// The Postgres leg of `migrate`.
 async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    if cfg.profile == RunProfile::Platform {
+        match platform_corpus_format(&cfg.dir)? {
+            MigrationCorpusFormat::Ts => return run_migrate_pg_platform_ts(cfg).await,
+            MigrationCorpusFormat::Sql => {}
+        }
+    }
     let migrations = load_dir_flat(&cfg.dir)?;
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
@@ -690,6 +805,36 @@ async fn run_migrate_pg(cfg: &RunConfig) -> Result<RunReport, RunError> {
         )
         .await?;
     Ok(RunReport::Migrate(outcome))
+}
+
+/// The Platform Postgres `.ts` leg of `migrate`.
+async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunError> {
+    let conn = connect(&cfg.database_url).await?;
+    let exec_cfg = build_exec_cfg(cfg);
+    let guard_cfg = build_guard_cfg(cfg);
+    let approval = if cfg.yes {
+        Approval::Approved
+    } else {
+        Approval::None
+    };
+    let via = crate::frontend::RecordVia::local();
+    let outcome = crate::command::ir_apply::apply_platform_ts_postgres(
+        &PostgresBackend::new(&conn),
+        &cfg.project_schema,
+        PLATFORM_OWNER_APP,
+        &cfg.dir,
+        &via,
+        &exec_cfg,
+        &guard_cfg,
+        approval,
+        "platform-migrate-ts",
+    )
+    .await?;
+    Ok(RunReport::Migrate(ApplyOutcome {
+        applied: outcome.applied,
+        skipped: outcome.skipped,
+        recovered: Vec::new(),
+    }))
 }
 
 /// `status` — read the journal, print applied vs pending (+ rolled-back). NO DDL
@@ -1591,6 +1736,18 @@ pub struct LoadOutcome {
     pub versions: Vec<String>,
 }
 
+fn profile_allows_load(profile: RunProfile) -> bool {
+    #[cfg(any(test, feature = "standalone-cli"))]
+    {
+        profile == RunProfile::Trusted
+    }
+    #[cfg(not(any(test, feature = "standalone-cli")))]
+    {
+        let _ = profile;
+        false
+    }
+}
+
 /// `load` (a.k.a. `db:setup`) — RESTORE a dumped `schema.sql` onto a FRESH database
 /// and reconstruct the journal from the dump's applied-versions trailer, WITHOUT
 /// replaying every migration (dbmate `db:load`).
@@ -1621,7 +1778,7 @@ pub async fn run_load(cfg: &RunConfig, content: &str) -> Result<RunReport, RunEr
     // ONLY under the Trusted profile (the operator owns the DB). Under
     // `confined`/`platform` it would execute raw DDL as admin and bypass the entire
     // confinement model, so refuse BEFORE any DB connection or DDL.
-    if cfg.profile != RunProfile::Trusted {
+    if !profile_allows_load(cfg.profile) {
         return Err(RunError::LoadCmd(
             "load restores a dump as admin without the guard/migrator role; \
              it is only available under --profile trusted"

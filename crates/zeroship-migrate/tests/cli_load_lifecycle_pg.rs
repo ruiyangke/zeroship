@@ -19,7 +19,42 @@ fn admin_dsn() -> String {
 }
 
 fn bin_database_url(db: &str) -> String {
-    format!("postgres://postgres:zeroship@localhost:5440/{db}")
+    throwaway_dsn(db)
+}
+
+fn dsn_for_db(dsn: &str, db: &str) -> String {
+    if let Some(url) = url_dsn_for_db(dsn, db) {
+        return url;
+    }
+
+    dsn.split_whitespace()
+        .filter(|kv| !kv.starts_with("dbname="))
+        .collect::<Vec<_>>()
+        .join(" ")
+        + &format!(" dbname={db}")
+}
+
+fn url_dsn_for_db(dsn: &str, db: &str) -> Option<String> {
+    if !(dsn.starts_with("postgres://") || dsn.starts_with("postgresql://")) {
+        return None;
+    }
+    let (base, query) = dsn.split_once('?').map_or((dsn, None), |(base, query)| {
+        (base, Some(query))
+    });
+    let slash = base.rfind('/')?;
+    let mut out = format!("{}{}", &base[..slash + 1], db);
+    if let Some(query) = query {
+        out.push('?');
+        out.push_str(query);
+    }
+    Some(out)
+}
+
+fn default_pg_dump() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/pg_dump_docker.sh")
+        .canonicalize()
+        .expect("tests/pg_dump_docker.sh exists at repo root")
 }
 
 async fn connect(dsn: &str) -> Client {
@@ -60,9 +95,12 @@ fn sink_dir() -> &'static std::path::Path {
 }
 
 fn run_bin(args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
-        .current_dir(sink_dir())
-        .args(args)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"));
+    cmd.current_dir(sink_dir()).args(args);
+    if std::env::var_os("PG_DUMP").is_none() {
+        cmd.env("PG_DUMP", default_pg_dump());
+    }
+    let out = cmd
         .output()
         .expect("spawn the built zeroship-migrate binary");
     (
@@ -102,12 +140,7 @@ async fn table_exists(db: &str, table: &str) -> bool {
 }
 
 fn throwaway_dsn(db: &str) -> String {
-    admin_dsn()
-        .split_whitespace()
-        .filter(|kv| !kv.starts_with("dbname="))
-        .collect::<Vec<_>>()
-        .join(" ")
-        + &format!(" dbname={db}")
+    dsn_for_db(&admin_dsn(), db)
 }
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {

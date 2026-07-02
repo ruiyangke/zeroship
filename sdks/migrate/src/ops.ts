@@ -367,6 +367,9 @@ function requireSequenceBounds(min: number | null | undefined, max: number | nul
  *  with a friendly client-side OP_INVALID; the engine's closed enum stays
  *  authoritative. */
 export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerProduct"];
+// The closed set of integer types a sequence may be declared `AS` (PG renders
+// only `integer` / `bigint`; everything else fails late at lower as UnsupportedOp).
+export const SEQUENCE_AS_TYPES: readonly ColType[] = ["int", "bigInt"];
 
 /** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the
  *  engine's `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
@@ -971,12 +974,19 @@ function stringArray(values: unknown, what: string): string[] {
 
 function recordCreateEnum(name: string, values: readonly string[], args: CreateEnumArgs = {}): void {
   requireString(name, "pgEnum(name, values)");
+  const enumValues = stringArray(values, "pgEnum(name, values)");
+  if (enumValues.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "pgEnum(name, values): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
+    );
+  }
   pushOrDeferUp(
     compact({
       op: "createEnum",
       name,
       schema: args.schema,
-      values: stringArray(values, "pgEnum(name, values)"),
+      values: enumValues,
     }),
   );
 }
@@ -1034,12 +1044,19 @@ function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void
   const minValue = requireNullableSafeI64(args.minValue, "sequence.create({ minValue })");
   const maxValue = requireNullableSafeI64(args.maxValue, "sequence.create({ maxValue })");
   requireSequenceBounds(minValue, maxValue, "sequence.create(args)");
+  const asType = args.as === undefined ? undefined : colTypeOf(args.as);
+  if (asType !== undefined && !SEQUENCE_AS_TYPES.includes(asType)) {
+    throw structuredError(
+      "OP_INVALID",
+      `sequence.create({ as }): as must be one of ${SEQUENCE_AS_TYPES.join(" | ")}; got ${JSON.stringify(asType)}`,
+    );
+  }
   pushOrDeferUp(
     compact({
       op: "createSequence",
       name,
       schema: args.schema,
-      as: args.as === undefined ? undefined : colTypeOf(args.as),
+      as: asType,
       increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
       start: requireSafeI64(args.start, "sequence.create({ start })"),
       minValue,
@@ -1095,7 +1112,7 @@ function recordComment(target: CommentTargetArg, text: string | null): void {
     compact({
       op: "comment",
       target: commentTargetToIr(target),
-      comment: text,
+      comment: text === null ? undefined : text,
     }),
   );
 }
@@ -1654,9 +1671,9 @@ function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): 
 }
 
 function normalizeOnConflict(
-  oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined,
+  oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined | null,
 ): Node | undefined {
-  if (oc === undefined) return undefined;
+  if (oc === undefined || oc === null) return undefined;
   if (oc.doUpdate === undefined) return { columns: oc.columns } as Node;
   const doUpdate: Record<string, unknown> = {};
   for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrValue(oc.doUpdate[col]);
@@ -1678,7 +1695,7 @@ function recordUpdate(table: string, args: UpdateArgs): void {
 
 function recordDel(table: string, args: DelArgs): void {
   if (args.where === undefined || args.where === null) {
-    throw structuredError("OP_INVALID", "del({ where }): where is mandatory");
+    throw structuredError("OP_INVALID", "del({ where }): where is mandatory (no unfiltered delete)");
   }
   push(
     compact({
@@ -2282,6 +2299,12 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     },
     createPolicy(args: CreateTablePolicyArgs) {
       requireString(args.name, ".createPolicy({ name })");
+      if (Array.isArray(args.to) && args.to.length === 0) {
+        throw structuredError("OP_INVALID", ".createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+      }
+      if (args.using === undefined) {
+        throw structuredError("OP_INVALID", ".createPolicy({ using }): using is required (the renderer always emits USING)");
+      }
       push(compact({
         op: "createPolicy",
         name: args.name,
