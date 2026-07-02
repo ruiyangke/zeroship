@@ -202,6 +202,16 @@ pub struct DevicePage<'a> {
     pub user_code: &'a str,
     pub error: Option<&'a str>,
     pub csrf: &'a str,
+    pub confirm: bool,
+    pub client_id: &'a str,
+    pub client_name: &'a str,
+    pub scopes: &'a [DeviceScopeView],
+}
+
+#[derive(Debug)]
+pub struct DeviceScopeView {
+    pub scope: String,
+    pub label: String,
 }
 
 /// `/device` page for the Supabase platform-mediated device flow. The browser

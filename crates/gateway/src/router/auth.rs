@@ -607,7 +607,8 @@ fn jwt_issuer_unverified(jwt: &str) -> Option<String> {
 ///   - `iss == state.oidc_rp.issuer` (OP) → RAW-OP path: verify the
 ///     JWT signature locally via the gateway's JWKS cache
 ///     (`state.oidc_rp.verify_access_token`), then bind per-app on the
-///     `client_id` claim (RFC 9068 §3) with an `aud`-contains fallback.
+///     `client_id` claim (RFC 9068 §3) and require the route's resource
+///     audience in `aud`.
 ///   - anything else → `NotUserSession` (reserved API-key path).
 ///
 /// **Per-app binding** is the critical safety property: a token minted
@@ -670,20 +671,41 @@ async fn resolve_bearer_user_header(
                 return BearerOutcome::Invalid;
             }
         };
-        // Per-app binding: bind on the `client_id` claim (RFC 9068 §3 —
-        // the OP emits it) when present; else fall back to `aud` containing
-        // the expected client_id. We bind to `client_id`, NOT `aud` as the
-        // primary, because `aud` is the resource-server audience.
-        let bound = match claims.client_id.as_deref() {
-            Some(cid) => cid == expected_client_id,
-            None => claims.aud.iter().any(|a| a == expected_client_id),
-        };
-        if !bound {
+        // Authorized-party binding: native OP access tokens always carry
+        // `client_id` (RFC 9068 §3). Do not fall back to `aud`: `aud` is the
+        // resource-server audience, and an ID token has `aud == client_id`.
+        if claims.client_id.as_deref() != Some(expected_client_id) {
             tracing::warn!(
                 client_id = ?claims.client_id,
-                aud = ?claims.aud,
                 expected = %expected_client_id,
-                "raw OP Bearer per-app binding failed — rejecting"
+                "raw OP Bearer client_id binding failed — rejecting"
+            );
+            return BearerOutcome::Invalid;
+        }
+
+        // Resource-server audience binding: the native OP stamps access tokens
+        // with `app:{app_id}` for per-app clients. `client_id` identifies the
+        // authorized party; `aud` identifies the resource server.
+        let Some(expected_app_id) =
+            zeroship_core::typed_id::app_id_from_oauth_client_id(expected_client_id)
+        else {
+            tracing::warn!(
+                expected = %expected_client_id,
+                "raw OP Bearer route client_id is not a per-app OAuth client — rejecting"
+            );
+            return BearerOutcome::Invalid;
+        };
+        let expected_resource_audience = format!("app:{expected_app_id}");
+        if !claims
+            .aud
+            .iter()
+            .any(|aud| aud == &expected_resource_audience)
+        {
+            tracing::warn!(
+                aud = ?claims.aud,
+                expected = %expected_resource_audience,
+                client_id = %expected_client_id,
+                "raw OP Bearer resource audience binding failed — rejecting"
             );
             return BearerOutcome::Invalid;
         }

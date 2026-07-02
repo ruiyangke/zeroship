@@ -26,6 +26,7 @@ use zeroship_core::pkce::{generate_verifier, s256_challenge};
 
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
+use crate::identity::oauth::UpstreamPrompt;
 
 /// `@users.noreply.github.com` addresses are GitHub's pseudonymous
 /// "keep my real email private" mailbox — they don't deliver mail. We
@@ -66,7 +67,10 @@ pub struct GitHubIdentity {
 /// # Errors
 ///
 /// [`AuthError::Config`] if `github_client_id` is not configured.
-pub fn start_authorize_url(cfg: &AuthConfig) -> Result<AuthorizeStart> {
+pub fn start_authorize_url(
+    cfg: &AuthConfig,
+    upstream_prompt: Option<UpstreamPrompt>,
+) -> Result<AuthorizeStart> {
     let client_id = cfg
         .github_client_id
         .as_deref()
@@ -76,15 +80,19 @@ pub fn start_authorize_url(cfg: &AuthConfig) -> Result<AuthorizeStart> {
     let challenge = s256_challenge(&verifier);
     let state = generate_verifier();
 
-    let query = url::form_urlencoded::Serializer::new(String::new())
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", &cfg.github_redirect_uri)
         .append_pair("scope", "read:user user:email")
         .append_pair("state", &state)
         .append_pair("code_challenge", &challenge)
-        .append_pair("code_challenge_method", "S256")
-        .finish();
+        .append_pair("code_challenge_method", "S256");
+    if let Some(prompt) = upstream_prompt {
+        query.append_pair("prompt", prompt.prompt_value());
+    }
+    let query = query.finish();
     let url = format!("{}?{query}", cfg.github_authorize_url);
 
     Ok(AuthorizeStart {
@@ -300,7 +308,7 @@ mod tests {
     #[test]
     fn start_authorize_url_well_formed() {
         let cfg = cfg_with_github();
-        let start = start_authorize_url(&cfg).expect("start");
+        let start = start_authorize_url(&cfg, None).expect("start");
         assert!(
             start.url.starts_with(cfg.github_authorize_url.as_str()),
             "url base: {}",
@@ -329,10 +337,37 @@ mod tests {
     }
 
     #[test]
+    fn start_authorize_url_propagates_forced_prompt() {
+        let cfg = cfg_with_github();
+        let start = start_authorize_url(
+            &cfg,
+            UpstreamPrompt::from_oidc_prompt(Some("login select_account"), None),
+        )
+        .expect("start");
+        let parsed = url::Url::parse(&start.url).expect("parse authorize url");
+
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(name, _)| name == "prompt")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("login select_account")
+        );
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(name, _)| name == "max_age")
+                .map(|(_, value)| value.into_owned()),
+            None
+        );
+    }
+
+    #[test]
     fn start_authorize_url_errors_when_client_id_missing() {
         let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
         cfg.github_client_id = None;
-        let err = start_authorize_url(&cfg).expect_err("must fail without client_id");
+        let err = start_authorize_url(&cfg, None).expect_err("must fail without client_id");
         assert!(matches!(err, AuthError::Config(_)), "got: {err:?}");
     }
 

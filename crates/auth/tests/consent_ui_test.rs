@@ -2,11 +2,15 @@ mod common;
 
 use std::sync::Arc;
 
+use ed25519_dalek::SigningKey;
 use ntex::web::{self, test};
 use serde_json::json;
 use uuid::Uuid;
 
 use common::test_auth_config;
+
+const ISSUER: &str = "https://auth.zeroship.test/oauth2";
+const REDIRECT_URI: &str = "https://builder.zeroship.test/callback";
 
 /// Mirror of control plane `client_id_for_app` (`oac_<base62-app-id>`). The
 /// consent classifier decodes this prefix to resolve `zeroship.app_scope_defs`.
@@ -236,6 +240,7 @@ impl ConsentTestApp {
             web::App::new()
                 .state(self.cfg.clone())
                 .state(self.pg.clone())
+                .state(Arc::new(test_issuer()))
                 .service(
                     web::resource("/consent/accept")
                         .route(web::post().to(zeroship_auth::ui::consent::post_consent_accept)),
@@ -266,6 +271,54 @@ impl ConsentTestApp {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn consent_deny_redirect_includes_issuer_parameter() {
+    let app = ConsentTestApp::boot(&["openid"], None, None, false).await;
+    let issuer = Arc::new(test_issuer());
+    let service = test::init_service(
+        web::App::new()
+            .state(app.cfg.clone())
+            .state(app.pg.clone())
+            .state(issuer.clone())
+            .service(
+                web::resource("/consent/deny")
+                    .route(web::post().to(zeroship_auth::ui::consent::post_consent_deny)),
+            ),
+    )
+    .await;
+
+    let csrf = "csrf-m3";
+    let return_to = authorize_return_to(&app.client_id, "openid", "state-m3");
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("csrf", csrf)
+        .append_pair("return_to", &return_to)
+        .finish();
+    let req = test::TestRequest::post()
+        .uri("/consent/deny")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("cookie", format!("zsidp_csrf={csrf}"))
+        .set_payload(body)
+        .to_request();
+    let resp = test::call_service(&service, req).await;
+    assert_eq!(resp.status().as_u16(), 303);
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("consent denial Location")
+        .to_string();
+    assert!(
+        location.starts_with(&format!("{REDIRECT_URI}?")),
+        "consent denial must redirect to RP callback: {location}"
+    );
+    assert_eq!(query_param(&location, "error").as_deref(), Some("access_denied"));
+    assert_eq!(query_param(&location, "state").as_deref(), Some("state-m3"));
+    assert_eq!(query_param(&location, "iss").as_deref(), Some(issuer.issuer()));
+
+    app.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn missing_csrf_returns_403() {
     let app = ConsentTestApp::boot(&["apps:deploy"], Some("admin"), None, false).await;
 
@@ -280,6 +333,39 @@ const BILLING_SCOPE: AppScope = AppScope {
     label: "View billing",
     description: Some("See invoices and plan."),
 };
+
+fn test_issuer() -> zeroship_auth::oidc::Issuer {
+    let signing = SigningKey::from_bytes(&[42u8; 32]);
+    zeroship_auth::oidc::Issuer::from_signing_key(
+        &signing,
+        [9u8; 32],
+        ISSUER.to_string(),
+    )
+    .expect("issuer")
+}
+
+fn authorize_return_to(client_id: &str, scope: &str, state: &str) -> String {
+    format!(
+        "/oauth2/authorize?{}",
+        url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("client_id", client_id)
+            .append_pair("response_type", "code")
+            .append_pair("scope", scope)
+            .append_pair("redirect_uri", REDIRECT_URI)
+            .append_pair("state", state)
+            .finish()
+    )
+}
+
+fn query_param(raw_url: &str, name: &str) -> Option<String> {
+    url::Url::parse(raw_url).ok()?.query_pairs().find_map(|(key, value)| {
+        if key == name {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    })
+}
 
 /// A per-app (`oac_`) end-user client is written with skip_consent = FALSE — it
 /// never auto-accepts; every challenge runs the classifier (spec §5.2 round-3).

@@ -9,12 +9,14 @@ use ntex::web;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use common::{assert_redirect, location, test_auth_config};
+use common::{assert_redirect, cleanup_rate_limits_like, location, test_auth_config};
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{Issuer, ACCESS_TOKEN_TYP};
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
 use zeroship_auth::store::{sessions as session_store, users};
+
+const DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS: usize = 60;
 
 #[derive(Debug, serde::Deserialize)]
 struct DeviceAuthorizationResponse {
@@ -104,6 +106,81 @@ fn sha256_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
+fn unique_test_client_ip() -> String {
+    let id = Uuid::new_v4();
+    let bytes = id.as_bytes();
+    let ip = format!("10.{}.{}.{}", bytes[0], bytes[1], bytes[2]);
+    ip.parse::<std::net::IpAddr>()
+        .expect("generated test client IP must parse");
+    ip
+}
+
+fn generated_user_code() -> String {
+    const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+    let id = Uuid::new_v4();
+    let bytes = id.as_bytes();
+    let mut user_code = String::with_capacity(14);
+    for idx in 0..12 {
+        if idx == 4 || idx == 8 {
+            user_code.push('-');
+        }
+        let ch =
+            USER_CODE_ALPHABET[(usize::from(bytes[idx]) + idx) % USER_CODE_ALPHABET.len()];
+        user_code.push(char::from(ch));
+    }
+    user_code
+}
+
+async fn unique_unknown_user_code(
+    pg: &compio_postgres::Client,
+    except: Option<&str>,
+) -> String {
+    for _ in 0..16 {
+        let user_code = generated_user_code();
+        if except.is_some_and(|except| except == user_code.as_str()) {
+            continue;
+        }
+        let row = pg
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS n FROM zeroship.device_grants WHERE user_code = $1",
+                &[&user_code],
+            )
+            .await
+            .expect("count candidate unknown user_code");
+        if row.get::<_, i64>("n") == 0 {
+            assert_user_code_format(&user_code);
+            return user_code;
+        }
+    }
+    panic!("failed to generate an unknown device user_code");
+}
+
+fn assert_user_code_format(user_code: &str) {
+    const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+    assert_eq!(
+        user_code.len(),
+        14,
+        "device user_code must use the new 4-4-4 format"
+    );
+    for (idx, ch) in user_code.bytes().enumerate() {
+        match idx {
+            4 | 9 => assert_eq!(ch, b'-', "dash separator at byte {idx}: {user_code}"),
+            _ => assert!(
+                USER_CODE_ALPHABET.contains(&ch),
+                "unexpected user_code character {:?} at byte {idx}: {user_code}",
+                char::from(ch)
+            ),
+        }
+    }
+    let entropy_bits = 12.0_f64 * 20.0_f64.log2();
+    assert!(
+        entropy_bits > 40.0,
+        "12 chars from the 20-symbol alphabet must exceed 40 bits"
+    );
+}
+
 async fn insert_native_device_client(
     pg: &compio_postgres::Client,
     client_id: &str,
@@ -129,10 +206,20 @@ async fn request_device_authorization(
     client_id: &str,
     scope: &str,
 ) -> DeviceAuthorizationResponse {
-    let device_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", client_id)
-        .append_pair("scope", scope)
-        .finish();
+    request_device_authorization_with_scope(http, auth_base, client_id, Some(scope)).await
+}
+
+async fn request_device_authorization_with_scope(
+    http: &cyper::Client,
+    auth_base: &str,
+    client_id: &str,
+    scope: Option<&str>,
+) -> DeviceAuthorizationResponse {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    form.append_pair("client_id", client_id);
+    if let Some(scope) = scope {
+        form.append_pair("scope", scope);
+    }
     let resp = http
         .request(
             http::Method::POST,
@@ -141,7 +228,7 @@ async fn request_device_authorization(
         .expect("build OP device authorization")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .body(device_body)
+        .body(form.finish())
         .send()
         .await
         .expect("send OP device authorization");
@@ -163,8 +250,13 @@ async fn request_device_authorization(
 /// form body.
 #[allow(clippy::future_not_send)]
 async fn fetch_csrf_token(http: &cyper::Client, auth_base: &str) -> String {
+    fetch_device_page(http, auth_base, "/device").await.0
+}
+
+#[allow(clippy::future_not_send)]
+async fn fetch_device_page(http: &cyper::Client, auth_base: &str, path: &str) -> (String, String) {
     let resp = http
-        .request(http::Method::GET, format!("{auth_base}/device"))
+        .request(http::Method::GET, format!("{auth_base}{path}"))
         .expect("build GET /device for csrf")
         .send()
         .await
@@ -176,11 +268,37 @@ async fn fetch_csrf_token(http: &cyper::Client, auth_base: &str) -> String {
         .unwrap_or("")
         .to_string();
     // `zsidp_csrf=<token>; Path=/; SameSite=Strict; Max-Age=3600`
-    raw.split(';')
+    let csrf = raw
+        .split(';')
         .next()
         .and_then(|kv| kv.trim().strip_prefix("zsidp_csrf="))
         .map(str::to_string)
-        .unwrap_or_else(|| panic!("GET /device must set a zsidp_csrf cookie; got: {raw:?}"))
+        .unwrap_or_else(|| panic!("GET /device must set a zsidp_csrf cookie; got: {raw:?}"));
+    let body = resp.text().await.expect("GET /device body");
+    (csrf, body)
+}
+
+#[allow(clippy::future_not_send)]
+async fn get_device_with_user_code_from_ip(
+    http: &cyper::Client,
+    auth_base: &str,
+    user_code: &str,
+    xff_ip: &str,
+) -> (u16, String) {
+    let resp = http
+        .request(
+            http::Method::GET,
+            format!("{auth_base}/device?user_code={user_code}"),
+        )
+        .expect("build GET /device with user_code")
+        .header("x-forwarded-for", format!("198.51.100.1, {xff_ip}"))
+        .expect("xff")
+        .send()
+        .await
+        .expect("send GET /device with user_code");
+    let status = resp.status().as_u16();
+    let body = resp.text().await.expect("GET /device body");
+    (status, body)
 }
 
 #[ntex::test]
@@ -243,10 +361,9 @@ async fn device_route_renders_and_rejects_bad_input() {
         .expect("send POST /device empty");
     assert_eq!(resp.status().as_u16(), 400);
 
-    // An over-length code is rejected by the handler's format check
-    // (`valid_user_code`, MAX_USER_CODE_BYTES) with 400 before lookup. A
-    // well-formed unknown code reaches the pending-code lookup instead; this
-    // assertion pins the format-level rejection.
+    // An over-length code is rejected by the handler's format check with 400
+    // before lookup. A well-formed unknown code reaches the pending-code lookup
+    // instead; this assertion pins the format-level rejection.
     let overlong = "A".repeat(64);
     let overlong_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &overlong)
@@ -269,6 +386,493 @@ async fn device_route_renders_and_rejects_bad_input() {
         "an over-length user_code must be rejected at the format check"
     );
 
+    drop(srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn device_authorization_user_code_uses_high_entropy_format() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_entropy] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-entropy-{}", Uuid::new_v4().simple());
+    insert_native_device_client(&pg, &client_id, "native device entropy test", &["openid"]).await;
+
+    let authz = request_device_authorization(&http, &auth_base, &client_id, "openid").await;
+    assert_user_code_format(&authz.user_code);
+
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.device_grants WHERE user_code = $1",
+            &[&authz.user_code],
+        )
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
+    drop(srv);
+}
+
+/// Regression for M1: failed `/device` user-code guesses must not be
+/// unbounded. Pre-fix, every wrong code below returned ordinary 400 form
+/// errors forever. Post-fix, the existing `zeroship.rate_limits` token bucket
+/// rejects the 6th failed signed-in guess for the same `(user, trusted IP)`,
+/// while the real code is still accepted because successful approvals do not
+/// consume the failed-attempt bucket.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_code() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_ratelimit] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-ratelimit-{}", Uuid::new_v4().simple());
+    insert_native_device_client(
+        &pg,
+        &client_id,
+        "native device rate-limit test",
+        &["openid", "apps:read"],
+    )
+    .await;
+    let authz = request_device_authorization(&http, &auth_base, &client_id, "openid").await;
+
+    let email = format!("device-ratelimit-{client_id}@zeroship.test");
+    let user = users::create(&pg, &email, "Device Rate Limit User", None)
+        .await
+        .expect("create device rate-limit user");
+    let session = session_store::create(
+        &pg,
+        &session_store::CreateSession {
+            user_id: user.id,
+            auth_method: "password",
+            amr: vec!["pwd".into()],
+            acr: None,
+            expected_credential_version: Some(user.credential_version),
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    .expect("create device rate-limit session");
+
+    let xff_ip = unique_test_client_ip();
+    let user_ip_key = format!("device:user_ip:{}:{xff_ip}", user.id);
+    let ip_key = format!("device:ip:{xff_ip}");
+    cleanup_rate_limits_like(&pg, &[&user_ip_key, &ip_key]).await;
+
+    let wrong_code = if authz.user_code == "BCDF-GHJK-LMNP" {
+        "BCDF-GHJK-LMNQ"
+    } else {
+        "BCDF-GHJK-LMNP"
+    };
+    assert_user_code_format(wrong_code);
+
+    let mut last_status = 0_u16;
+    for attempt in 1..=6 {
+        let csrf = fetch_csrf_token(&http, &auth_base).await;
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("user_code", wrong_code)
+            .append_pair("confirm", "authorize")
+            .append_pair("csrf", &csrf)
+            .finish();
+        let resp = http
+            .request(http::Method::POST, format!("{auth_base}/device"))
+            .expect("build wrong-code POST /device")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .expect("content-type")
+            .header(
+                "cookie",
+                format!(
+                    "{}; zsidp_csrf={csrf}",
+                    session_cookie::set_cookie(&session.id, true)
+                ),
+            )
+            .expect("cookie")
+            .header("x-forwarded-for", format!("198.51.100.1, {xff_ip}"))
+            .expect("xff")
+            .body(body)
+            .send()
+            .await
+            .expect("send wrong-code POST /device");
+        last_status = resp.status().as_u16();
+        if attempt <= 5 {
+            assert_eq!(
+                last_status, 400,
+                "wrong user_code attempt {attempt} should fail normally before the bucket is empty"
+            );
+        }
+    }
+    assert_eq!(
+        last_status, 429,
+        "6th wrong user_code attempt for the same signed-in user and trusted IP must be throttled"
+    );
+
+    let csrf = fetch_csrf_token(&http, &auth_base).await;
+    let correct_body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
+        .append_pair("csrf", &csrf)
+        .finish();
+    let approve = http
+        .request(http::Method::POST, format!("{auth_base}/device"))
+        .expect("build correct-code POST /device")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header(
+            "cookie",
+            format!(
+                "{}; zsidp_csrf={csrf}",
+                session_cookie::set_cookie(&session.id, true)
+            ),
+        )
+        .expect("cookie")
+        .header("x-forwarded-for", format!("198.51.100.1, {xff_ip}"))
+        .expect("xff")
+        .body(correct_body)
+        .send()
+        .await
+        .expect("send correct-code POST /device");
+    assert_eq!(
+        approve.status().as_u16(),
+        200,
+        "a correct user_code must still approve even after failed guesses are throttled"
+    );
+    let body = approve.text().await.expect("correct-code body");
+    assert!(body.contains("Device approved"), "{body}");
+
+    cleanup_rate_limits_like(&pg, &[&user_ip_key, &ip_key]).await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
+    drop(srv);
+}
+
+/// Regression for the `verification_uri_complete` gap: GET `/device?user_code=...`
+/// must not remain an unauthenticated code-enumeration oracle. Pre-fix, every
+/// well-formed unknown code returned 400 forever. Post-fix, the anonymous
+/// `device:ip:<ip>` LOGIN_IP bucket rejects the 61st failed lookup for one IP,
+/// while a valid pending code still renders the confirmation page without
+/// consuming that failed-attempt bucket.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_get_ratelimit] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-get-ratelimit-{}", Uuid::new_v4().simple());
+    let client_name = "native device GET rate-limit test";
+    insert_native_device_client(&pg, &client_id, client_name, &["openid"]).await;
+    let authz = request_device_authorization(&http, &auth_base, &client_id, "openid").await;
+
+    let xff_ip = unique_test_client_ip();
+    let ip_key = format!("device:ip:{xff_ip}");
+    let user_ip_like = format!("device:user_ip:%:{xff_ip}");
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
+
+    let wrong_code = unique_unknown_user_code(&pg, Some(&authz.user_code)).await;
+    let mut last_status = 0_u16;
+    for attempt in 1..=DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS + 1 {
+        let (status, body) =
+            get_device_with_user_code_from_ip(&http, &auth_base, &wrong_code, &xff_ip).await;
+        last_status = status;
+        if attempt <= DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS {
+            assert_eq!(
+                status, 400,
+                "unknown GET user_code attempt {attempt} should fail normally before the IP bucket is empty: {body}"
+            );
+        }
+    }
+    assert_eq!(
+        last_status, 429,
+        "GET verification_uri_complete guessing from one anonymous IP must be throttled"
+    );
+
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&ip_key],
+        )
+        .await
+        .expect("count anonymous device IP bucket");
+    assert_eq!(row.get::<_, i64>("n"), 1);
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key LIKE $1",
+            &[&user_ip_like],
+        )
+        .await
+        .expect("count unexpected device user/IP buckets");
+    assert_eq!(
+        row.get::<_, i64>("n"),
+        0,
+        "anonymous GET attempts must drain device:ip only, not device:user_ip"
+    );
+
+    let (status, body) =
+        get_device_with_user_code_from_ip(&http, &auth_base, &authz.user_code, &xff_ip).await;
+    assert_eq!(
+        status, 200,
+        "a valid verification_uri_complete deep-link must still render even after failed attempts are throttled"
+    );
+    assert!(body.contains(client_name), "{body}");
+    assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");
+
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
+    drop(srv);
+}
+
+/// Regression for the per-IP backstop path the original POST test did not cover:
+/// with no session cookie, wrong `/device` submissions must still drain
+/// `device:ip:<ip>` and throttle. Pre-fix for that coverage gap, only the
+/// signed-in `device:user_ip` bucket was asserted.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_ip_backstop] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+
+    let xff_ip = unique_test_client_ip();
+    let ip_key = format!("device:ip:{xff_ip}");
+    let user_ip_like = format!("device:user_ip:%:{xff_ip}");
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
+
+    let wrong_code = unique_unknown_user_code(&pg, None).await;
+    let csrf = fetch_csrf_token(&http, &auth_base).await;
+    let csrf_cookie = format!("zsidp_csrf={csrf}");
+    let mut last_status = 0_u16;
+    for attempt in 1..=DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS + 1 {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("user_code", &wrong_code)
+            .append_pair("confirm", "authorize")
+            .append_pair("csrf", &csrf)
+            .finish();
+        let resp = http
+            .request(http::Method::POST, format!("{auth_base}/device"))
+            .expect("build anonymous wrong-code POST /device")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .expect("content-type")
+            .header("cookie", csrf_cookie.clone())
+            .expect("csrf cookie")
+            .header("x-forwarded-for", format!("198.51.100.1, {xff_ip}"))
+            .expect("xff")
+            .body(body)
+            .send()
+            .await
+            .expect("send anonymous wrong-code POST /device");
+        last_status = resp.status().as_u16();
+        if attempt <= DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS {
+            assert_eq!(
+                last_status, 400,
+                "anonymous wrong-code POST attempt {attempt} should fail normally before the IP bucket is empty"
+            );
+        }
+    }
+    assert_eq!(
+        last_status, 429,
+        "anonymous POST guesses must be bounded by the device:ip LOGIN_IP bucket"
+    );
+
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&ip_key],
+        )
+        .await
+        .expect("count anonymous POST device IP bucket");
+    assert_eq!(row.get::<_, i64>("n"), 1);
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key LIKE $1",
+            &[&user_ip_like],
+        )
+        .await
+        .expect("count unexpected POST device user/IP buckets");
+    assert_eq!(
+        row.get::<_, i64>("n"),
+        0,
+        "anonymous POST attempts must not create a device:user_ip bucket"
+    );
+
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
+    drop(srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn device_authorization_omitted_scope_defaults_to_openid_only() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_scope] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-scope-{}", Uuid::new_v4().simple());
+    insert_native_device_client(
+        &pg,
+        &client_id,
+        "native device scope test",
+        &["openid", "email", "profile", "apps:read"],
+    )
+    .await;
+
+    let authz =
+        request_device_authorization_with_scope(&http, &auth_base, &client_id, None).await;
+    let device_code_hash = sha256_hex(&authz.device_code);
+    let row = pg
+        .query_one(
+            "SELECT scope FROM zeroship.device_grants WHERE device_code_hash = $1",
+            &[&device_code_hash],
+        )
+        .await
+        .expect("stored device grant scope");
+    assert_eq!(
+        row.get::<_, String>("scope"),
+        "openid",
+        "pre-fix omitted scope copied the client's full allowlist into the grant"
+    );
+
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.device_grants WHERE device_code_hash = $1",
+            &[&device_code_hash],
+        )
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
+    drop(srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_confirm] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-confirm-{}", Uuid::new_v4().simple());
+    let client_name = "zeroship CLI confirm test";
+    insert_native_device_client(&pg, &client_id, client_name, &["openid", "apps:read"]).await;
+    let authz =
+        request_device_authorization(&http, &auth_base, &client_id, "openid apps:read").await;
+
+    let (csrf_token, page) =
+        fetch_device_page(&http, &auth_base, &format!("/device?user_code={}", authz.user_code))
+            .await;
+    assert!(page.contains(client_name), "{page}");
+    assert!(page.contains(&client_id), "{page}");
+    assert!(page.contains("Verify your identity"), "{page}");
+    assert!(page.contains("apps:read"), "{page}");
+    assert!(page.contains(r#"name="confirm" value="authorize""#), "{page}");
+
+    let email = format!("device-confirm-{client_id}@zeroship.test");
+    let user = users::create(&pg, &email, "Device Confirm User", None)
+        .await
+        .expect("create device confirm user");
+    let session = session_store::create(
+        &pg,
+        &session_store::CreateSession {
+            user_id: user.id,
+            auth_method: "password",
+            amr: vec!["pwd".into()],
+            acr: None,
+            expected_credential_version: Some(user.credential_version),
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    .expect("create local auth session");
+
+    let no_confirm = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("user_code", &authz.user_code)
+        .append_pair("csrf", &csrf_token)
+        .finish();
+    let resp = http
+        .request(http::Method::POST, format!("{auth_base}/device"))
+        .expect("build no-confirm POST /device")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header(
+            "cookie",
+            format!(
+                "{}; zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id, true)
+            ),
+        )
+        .expect("cookie")
+        .body(no_confirm)
+        .send()
+        .await
+        .expect("send no-confirm POST /device");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.expect("no-confirm body");
+    assert!(body.contains(client_name), "{body}");
+
+    let rows = pg
+        .query_one(
+            "SELECT status FROM zeroship.device_grants WHERE user_code = $1",
+            &[&authz.user_code],
+        )
+        .await
+        .expect("device grant still pending");
+    assert_eq!(
+        rows.get::<_, String>("status"),
+        "pending",
+        "pre-fix a code-only POST approved immediately without an explicit confirmation"
+    );
+
+    let confirm = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
+        .append_pair("csrf", &csrf_token)
+        .finish();
+    let resp = http
+        .request(http::Method::POST, format!("{auth_base}/device"))
+        .expect("build confirm POST /device")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header(
+            "cookie",
+            format!(
+                "{}; zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id, true)
+            ),
+        )
+        .expect("cookie")
+        .body(confirm)
+        .send()
+        .await
+        .expect("send confirm POST /device");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(resp.text().await.expect("confirm body").contains("Device approved"));
+
+    let _ = pg
+        .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
     drop(srv);
 }
 
@@ -357,6 +961,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     let csrf_token = fetch_csrf_token(&http, &auth_base).await;
     let approve_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &csrf_token)
         .finish();
     let approve = http
@@ -493,6 +1098,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     let anon_csrf = fetch_csrf_token(&http, &auth_base).await;
     let post_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &anon_csrf)
         .finish();
     let resp = http
@@ -533,6 +1139,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     let csrf_token = fetch_csrf_token(&http, &auth_base).await;
     let post_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &csrf_token)
         .finish();
     let resp = http
@@ -684,6 +1291,7 @@ async fn device_post_requires_csrf_token() {
     let csrf_token = fetch_csrf_token(&http, &auth_base).await;
     let csrf_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &csrf_token)
         .finish();
     let resp = http

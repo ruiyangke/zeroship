@@ -494,6 +494,70 @@ async fn invalid_scope_returns_400() {
 }
 
 #[compio::test]
+async fn redirect_uri_validation_rejects_unsafe_targets_and_allows_loopback_http() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
+        return;
+    };
+    let fx = Fixture::new(&db_url, "redirect-uri-validation").await;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let app = init_control!(fx);
+
+    for (label, redirect_uri) in [
+        ("fragment", "https://ci.acme.example/oidc/callback#frag"),
+        ("relative", "/oidc/callback"),
+        ("plain-http", "http://ci.acme.example/oidc/callback"),
+    ] {
+        let client_id = format!("oauth-invalid-redirect-{label}-{}", Uuid::new_v4().simple());
+        let mut body = client_body(&client_id);
+        body["redirect_uris"] = json!([redirect_uri]);
+
+        let req = test::TestRequest::post()
+            .uri("/admin/oauth-clients")
+            .header("authorization", pat.bearer())
+            .set_json(&body)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "{label} redirect_uri must be rejected"
+        );
+        assert_eq!(count_client(&fx.state, &client_id).await, 0);
+    }
+
+    let client_id = format!("oauth-valid-redirect-{}", Uuid::new_v4().simple());
+    let mut body = client_body(&client_id);
+    body["redirect_uris"] = json!([
+        "https://ci.acme.example/oidc/callback",
+        "http://127.0.0.1:3000/oidc/callback",
+        "http://localhost/oidc/callback"
+    ]);
+
+    let req = test::TestRequest::post()
+        .uri("/admin/oauth-clients")
+        .header("authorization", pat.bearer())
+        .set_json(&body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let row = oauth_client_row(&fx.state, &client_id).await;
+    assert_eq!(
+        row.get::<_, Vec<String>>("redirect_uris"),
+        vec![
+            "https://ci.acme.example/oidc/callback".to_string(),
+            "http://127.0.0.1:3000/oidc/callback".to_string(),
+            "http://localhost/oidc/callback".to_string(),
+        ]
+    );
+
+    fx.cleanup_clients(&[client_id]).await;
+    pat.cleanup(&fx.state).await;
+}
+
+#[compio::test]
 async fn duplicate_client_id_returns_409() {
     let Some(db_url) = db_url() else {
         eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
