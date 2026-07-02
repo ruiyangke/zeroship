@@ -248,6 +248,7 @@ async fn apply_ir_documents_like_migrated(
             &state.registry,
             &state.live_schema,
             &guard_cfg,
+            Some(&policy),
         )?;
         let migrations = lowered.migrations();
         let plan = engine.plan(&migrations, &guard_cfg);

@@ -652,6 +652,7 @@ async fn preflight_ir_documents(
                 &state.registry,
                 &state.live_schema,
                 &guard_cfg,
+                Some(&policy.profile),
             )
             .map_err(|source| PostgresIrApplyError::Ir {
                 file: file.clone(),
