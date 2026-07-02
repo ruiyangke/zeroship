@@ -294,6 +294,12 @@ impl OidcRp {
 
         // 4. Verify ID token. The OP stamps `aud` with the per-app `oac_`
         //    client id stashed at authorize time.
+        // at_hash binds the id_token to the paired access token (the OP stamps
+        // at_hash on the token-endpoint id_token). c_hash is NOT applicable here:
+        // it is only defined for the AUTHORIZATION-endpoint id_token of the
+        // implicit/hybrid flows (OIDC Core 3.1.3.6 — the token-endpoint id_token
+        // of the code flow carries no c_hash), so we pass None. (Code injection
+        // is already blocked by mandatory S256 PKCE.)
         let claims = verify_id_token(
             &self.jwks,
             &tr.id_token,
@@ -301,9 +307,10 @@ impl OidcRp {
             &stash.client_id,
             Some(&stash.nonce),
             Some(&tr.access_token),
-            Some(code),
+            None,
         )
         .await?;
+        let _ = code;
 
         // Granted scopes — what the user actually consented to (Slice 3, §1.4).
         // Persisted onto the cookie session so the per-request path emits
