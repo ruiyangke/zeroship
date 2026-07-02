@@ -121,7 +121,7 @@ export function up() {
     // Apply the transient `.ir.json` through the REAL gate + lower on PG.
     let author = IrAuthor::new(&schema, APP, SqlDialect::Postgres);
     let migrations = author
-        .load_and_lower(&committed, APP, &BTreeMap::new(), &LiveSchema::default())
+        .load_and_lower(&committed, APP, &BTreeMap::new(), &LiveSchema::default(), None)
         .expect("transient .ir.json lowers on PG");
     let engine = MigrationEngine::new();
     let plan = engine.plan(&migrations, &GuardConfig::confined(schema.clone()));
@@ -182,7 +182,7 @@ async fn generate_redifs_to_zero_and_parity_and_todo_marker() {
     ir_bytes.push('\n');
     let author = IrAuthor::new(&schema, APP, SqlDialect::Postgres);
     let migrations = author
-        .load_and_lower(&ir_bytes, APP, &BTreeMap::new(), &LiveSchema::default())
+        .load_and_lower(&ir_bytes, APP, &BTreeMap::new(), &LiveSchema::default(), None)
         .expect("generated IR lowers on PG");
     let engine = MigrationEngine::new();
     let plan = engine.plan(&migrations, &GuardConfig::confined(schema.clone()));
@@ -289,7 +289,7 @@ async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
     ir_bytes.push('\n');
     let author = IrAuthor::new(&schema, APP, SqlDialect::Postgres);
     let migrations = author
-        .load_and_lower(&ir_bytes, APP, &BTreeMap::new(), &LiveSchema::default())
+        .load_and_lower(&ir_bytes, APP, &BTreeMap::new(), &LiveSchema::default(), None)
         .expect("generated IR lowers on PG");
     let engine = MigrationEngine::new();
     let plan = engine.plan(&migrations, &GuardConfig::confined(schema.clone()));

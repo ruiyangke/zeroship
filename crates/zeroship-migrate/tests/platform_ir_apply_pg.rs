@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use compio_postgres::Client;
 use zeroship_migrate::command::runner::{run_migrate, RunConfig, RunProfile};
 use zeroship_migrate::test_support::acquire_global_platform_resource_lock;
-use zeroship_migrate::{Approval, ExecutorConfig, GuardConfig, PostgresBackend};
+use zeroship_migrate::{Approval, ExecutorConfig, GuardConfig, PolicyProfile, PostgresBackend};
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_ir_test";
@@ -425,6 +425,7 @@ async fn confined_ir_still_denies_role_and_grant_vendor_ops() {
         role_dir.path(),
         &role_cfg,
         &guard,
+        &PolicyProfile::confined(),
         Approval::Approved,
         "confined-ir-test",
     )
@@ -456,6 +457,7 @@ async fn confined_ir_still_denies_role_and_grant_vendor_ops() {
         grant_dir.path(),
         &grant_cfg,
         &guard,
+        &PolicyProfile::confined(),
         Approval::Approved,
         "confined-ir-test",
     )

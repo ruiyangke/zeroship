@@ -73,6 +73,7 @@ async fn apply_doc(
         zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
         None,
+        None,
     )
     .expect("load gate (sqlite)");
     let ops = document.ops.clone();

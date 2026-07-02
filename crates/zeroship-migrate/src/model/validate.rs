@@ -43,6 +43,7 @@
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
 use crate::model::expr::{CaseBranch, Expr, SynthFn};
+use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
 // ── Canonical authoring-time error codes (§8.8) ─────────────────────────────
@@ -107,6 +108,11 @@ pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 pub const CODE_VENDOR_OP_DENIED: &str = "VENDOR_OP_DENIED";
 /// A `pgRaw` op must carry a non-empty audit reason for using the raw SQL escape.
 pub const CODE_PGRAW_REASON_REQUIRED: &str = "PGRAW_REASON_REQUIRED";
+/// A resolved `createTable.primaryKey` is structurally invalid: empty, duplicated,
+/// or naming a column absent from the resolved table.
+pub const CODE_PRIMARY_KEY_INVALID: &str = "PRIMARY_KEY_INVALID";
+/// A resolved `createTable` violates the active profile's table-shape policy.
+pub const CODE_TABLE_SHAPE_POLICY: &str = "TABLE_SHAPE_POLICY";
 
 /// The MAX byte length a `t.id({prefix})` prefix may carry (P2a §4). Mirrors the
 /// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
@@ -335,7 +341,13 @@ pub fn validate_ir(
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
 ) -> Result<(), AuthoringError> {
-    validate_ir_scoped(ir, target_dialect, ts_locations, None)
+    validate_ir_scoped(
+        ir,
+        target_dialect,
+        ts_locations,
+        None,
+        &PolicyProfile::confined(),
+    )
 }
 
 /// **PR10** — [`validate_ir`] threaded with the active schema confinement scope
@@ -358,10 +370,18 @@ pub fn validate_ir_scoped(
     target_dialect: Dialect,
     ts_locations: &[Option<String>],
     schema_scope: Option<&crate::model::policy::SchemaScope>,
+    policy_profile: &PolicyProfile,
 ) -> Result<(), AuthoringError> {
     for (op_index, op) in ir.ops.iter().enumerate() {
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
-        validate_op_scoped(op, target_dialect, op_index, ts, schema_scope)?;
+        validate_op_scoped(
+            op,
+            target_dialect,
+            op_index,
+            ts,
+            schema_scope,
+            policy_profile,
+        )?;
     }
     Ok(())
 }
@@ -380,7 +400,14 @@ pub fn validate_op(
 ) -> Result<(), AuthoringError> {
     // The bare entry keeps the Trusted posture (no cross-schema confinement); the
     // schema-ident + guard-direction checks still run (trust-independent).
-    validate_op_scoped(op, target_dialect, op_index, ts_location, None)
+    validate_op_scoped(
+        op,
+        target_dialect,
+        op_index,
+        ts_location,
+        None,
+        &PolicyProfile::confined(),
+    )
 }
 
 /// **PR10** — [`validate_op`] threaded with the active
@@ -395,6 +422,7 @@ pub fn validate_op_scoped(
     op_index: usize,
     ts_location: Option<&str>,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
+    policy_profile: &PolicyProfile,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
@@ -412,6 +440,13 @@ pub fn validate_op_scoped(
     // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
     // here; Platform/Trusted (`Allowlist`/`Unconfined`) grant the operator preset.
     validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
+    validate_create_table_primary_key_policy(
+        op,
+        target_dialect,
+        op_index,
+        ts_location,
+        policy_profile,
+    )?;
     validate_op_support(op, target_dialect, op_index, ts_location)?;
     validate_sequence_options(op, target_dialect, op_index, ts_location)?;
     validate_function_type_refs(op, target_dialect, op_index, ts_location)?;
@@ -822,6 +857,112 @@ pub fn validate_op_scoped(
     }
 }
 
+fn validate_create_table_primary_key_policy(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+    policy_profile: &PolicyProfile,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::Op;
+
+    let Op::CreateTable {
+        name,
+        columns,
+        primary_key,
+        indexes,
+        ..
+    } = op
+    else {
+        return Ok(());
+    };
+
+    let err = |code: &str, reason: String, suggested_fix: String| AuthoringError {
+        code: code.to_string(),
+        kind: None,
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason,
+        suggested_fix: Some(suggested_fix),
+    };
+
+    if let Some(pk_columns) = primary_key {
+        if pk_columns.is_empty() {
+            return Err(err(
+                CODE_PRIMARY_KEY_INVALID,
+                format!("createTable {name:?} declares an empty primaryKey"),
+                "omit primaryKey for no primary key, or name one or more table columns".to_string(),
+            ));
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        let table_columns = columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for column in pk_columns {
+            if !seen.insert(column.as_str()) {
+                return Err(err(
+                    CODE_PRIMARY_KEY_INVALID,
+                    format!(
+                        "createTable {name:?} primaryKey names column {column:?} more than once"
+                    ),
+                    "remove duplicate primaryKey columns".to_string(),
+                ));
+            }
+            if !table_columns.contains(column.as_str()) {
+                return Err(err(
+                    CODE_PRIMARY_KEY_INVALID,
+                    format!(
+                        "createTable {name:?} primaryKey names column {column:?}, but that column \
+                         is absent from the resolved table"
+                    ),
+                    "name only columns present in the resolved createTable columns".to_string(),
+                ));
+            }
+        }
+    }
+
+    if matches!(
+        policy_profile.system_shape.author_primary_key,
+        AuthorPrimaryKeyPolicy::Allow
+    ) {
+        return Ok(());
+    }
+
+    let matches_profile = crate::model::table_shape::resolved_create_table_matches_profile(
+        columns,
+        primary_key,
+        indexes,
+        policy_profile,
+    )
+    .map_err(|source| {
+        err(
+            CODE_TABLE_SHAPE_POLICY,
+            format!(
+                "createTable {name:?} could not validate against the active table-shape profile: \
+                 {source}"
+            ),
+            "fix the migration policy profile or regenerate the resolved IR".to_string(),
+        )
+    })?;
+
+    if !matches_profile {
+        return Err(err(
+            CODE_TABLE_SHAPE_POLICY,
+            format!(
+                "createTable {name:?} violates the active table-shape profile: \
+                 author_primary_key is forbid, so the resolved table must carry the profile \
+                 system columns, system indexes, and primaryKey [\"id\"]"
+            ),
+            "regenerate this migration under the confined profile, or apply it with a profile whose system_shape.author_primary_key is allow".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_op_support(
     op: &crate::model::ir::Op,
     target_dialect: Dialect,
@@ -829,8 +970,8 @@ fn validate_op_support(
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{
-        ColType, IndexElement, IndexMethod, IrConstraintKind, IrDefault, Op, TriggerAction,
-        TriggerEvent, TriggerStmt,
+        IndexElement, IndexMethod, IrConstraintKind, IrDefault, Op, TriggerAction, TriggerEvent,
+        TriggerStmt,
     };
     use crate::model::support::{Feature, Support, SupportDecision};
 
@@ -920,21 +1061,6 @@ fn validate_op_support(
         !matches!(using, None | Some(IndexMethod::Btree))
     }
 
-    fn is_system_owned_pk(columns: &[String], table_columns: &[crate::model::ir::IrColumn]) -> bool {
-        columns.len() == 1
-            && columns[0] == "id"
-            && table_columns
-                .iter()
-                .any(|col| {
-                    col.name == "id"
-                        && (col.identity.is_some()
-                            || (matches!(col.ty, ColType::Text)
-                                && col.nullable == Some(false)
-                                && col.default.is_none()
-                                && !col.unique.unwrap_or(false)))
-                })
-    }
-
     fn fk_features(
         columns: &[String],
         references_columns: &[String],
@@ -971,7 +1097,6 @@ fn validate_op_support(
     match op {
         Op::CreateTable {
             columns,
-            primary_key,
             constraints,
             indexes,
             ..
@@ -982,18 +1107,9 @@ fn validate_op_support(
             {
                 check(Feature::SynthDefault)?;
             }
-            if let Some(pk_columns) = primary_key {
-                if !is_system_owned_pk(pk_columns, columns) {
-                    check(Feature::UserPrimaryKey)?;
-                }
-            }
             for constraint in constraints {
                 match &constraint.kind {
-                    IrConstraintKind::Pk { columns: pk_columns } => {
-                        if !is_system_owned_pk(pk_columns, columns) {
-                            check(Feature::UserPrimaryKey)?;
-                        }
-                    }
+                    IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
                     IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
                     IrConstraintKind::Fk {
                         columns,
@@ -3167,7 +3283,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.op_index, 0);
     }
@@ -3251,6 +3367,13 @@ mod tests {
         serde_json::from_str(json).expect("test op JSON")
     }
 
+    fn validate_ir_platform(
+        ir: &MigrationIr,
+        dialect: Dialect,
+    ) -> Result<(), AuthoringError> {
+        validate_ir_scoped(ir, dialect, &[], None, &PolicyProfile::platform())
+    }
+
     // ── PR10: schema confinement + guard direction + schema-ident safety ────────
 
     /// CONFINED — an explicit `schema != project_schema` is REFUSED fail-closed at
@@ -3267,8 +3390,14 @@ mod tests {
             existence_guard: None,
         }]);
         let scope = SchemaScope::Single("app_a".into());
-        let err =
-            validate_ir_scoped(&cross, Dialect::Postgres, &[], Some(&scope)).unwrap_err();
+        let err = validate_ir_scoped(
+            &cross,
+            Dialect::Postgres,
+            &[],
+            Some(&scope),
+            &PolicyProfile::confined(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA, "got: {err}");
 
         // schema == project schema (case-insensitive) passes.
@@ -3278,7 +3407,14 @@ mod tests {
             schema: Some("APP_A".into()),
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(&same, Dialect::Postgres, &[], Some(&scope)).is_ok());
+        assert!(validate_ir_scoped(
+            &same,
+            Dialect::Postgres,
+            &[],
+            Some(&scope),
+            &PolicyProfile::confined(),
+        )
+        .is_ok());
 
         // Absent schema passes.
         let none = ir_with(vec![Op::DropTable {
@@ -3287,7 +3423,14 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(&none, Dialect::Postgres, &[], Some(&scope)).is_ok());
+        assert!(validate_ir_scoped(
+            &none,
+            Dialect::Postgres,
+            &[],
+            Some(&scope),
+            &PolicyProfile::confined(),
+        )
+        .is_ok());
     }
 
     /// Defaulted public validation (`None` scope) has no project schema available,
@@ -3303,11 +3446,24 @@ mod tests {
             existence_guard: None,
         }]);
         // Defaulted public validation: permitted for non-vendor schema qualifiers.
-        assert!(validate_ir_scoped(&foreign, Dialect::Postgres, &[], None).is_ok());
+        assert!(validate_ir_scoped(
+            &foreign,
+            Dialect::Postgres,
+            &[],
+            None,
+            &PolicyProfile::confined(),
+        )
+        .is_ok());
         // Platform allow-list excluding "anything": refused.
         let scope = SchemaScope::Allowlist(vec!["zeroship".into(), "public".into()]);
-        let err =
-            validate_ir_scoped(&foreign, Dialect::Postgres, &[], Some(&scope)).unwrap_err();
+        let err = validate_ir_scoped(
+            &foreign,
+            Dialect::Postgres,
+            &[],
+            Some(&scope),
+            &PolicyProfile::platform(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA);
         // A schema IN the allow-list passes.
         let ok = ir_with(vec![Op::DropTable {
@@ -3316,7 +3472,14 @@ mod tests {
             schema: Some("zeroship".into()),
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(&ok, Dialect::Postgres, &[], Some(&scope)).is_ok());
+        assert!(validate_ir_scoped(
+            &ok,
+            Dialect::Postgres,
+            &[],
+            Some(&scope),
+            &PolicyProfile::platform(),
+        )
+        .is_ok());
     }
 
     /// A `schema` qualifier that is not a safe bare identifier (injection-shaped) is
@@ -3332,7 +3495,14 @@ mod tests {
                 existence_guard: None,
             }]);
             // Even defaulted public validation (None scope) rejects an injection-shaped ident.
-            let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], None).unwrap_err();
+            let err = validate_ir_scoped(
+                &ir,
+                Dialect::Postgres,
+                &[],
+                None,
+                &PolicyProfile::confined(),
+            )
+            .unwrap_err();
             assert_eq!(err.code, CODE_INVALID_SCHEMA_IDENT, "schema {bad:?} got: {err}");
         }
     }
@@ -3353,7 +3523,14 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfExists),
         }]);
-        let err = validate_ir_scoped(&bad_create, Dialect::Postgres, &[], None).unwrap_err();
+        let err = validate_ir_scoped(
+            &bad_create,
+            Dialect::Postgres,
+            &[],
+            None,
+            &PolicyProfile::platform(),
+        )
+        .unwrap_err();
         assert_eq!(err.code, CODE_GUARD_DIRECTION, "got: {err}");
 
         // ifNotExists on dropTable — illegal.
@@ -3363,7 +3540,14 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
-        let err2 = validate_ir_scoped(&bad_drop, Dialect::Postgres, &[], None).unwrap_err();
+        let err2 = validate_ir_scoped(
+            &bad_drop,
+            Dialect::Postgres,
+            &[],
+            None,
+            &PolicyProfile::confined(),
+        )
+        .unwrap_err();
         assert_eq!(err2.code, CODE_GUARD_DIRECTION);
 
         // The LEGAL directions pass.
@@ -3377,11 +3561,18 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
-        assert!(validate_ir_scoped(&ok_create, Dialect::Postgres, &[], None).is_ok());
+        assert!(validate_ir_scoped(
+            &ok_create,
+            Dialect::Postgres,
+            &[],
+            None,
+            &PolicyProfile::platform(),
+        )
+        .is_ok());
     }
 
     #[test]
-    fn create_table_top_level_primary_key_is_still_validate_refused() {
+    fn platform_profile_accepts_create_table_composite_primary_key() {
         let ir = ir_with(vec![op_json(
             r#"{
               "op": "createTable",
@@ -3396,14 +3587,98 @@ mod tests {
             }"#,
         )]);
 
-        let err = validate_ir(&ir, Dialect::Postgres, &[])
-            .expect_err("top-level createTable user PK must remain validate-refused");
-        assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
-        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        validate_ir_scoped(
+            &ir,
+            Dialect::Postgres,
+            &[],
+            None,
+            &PolicyProfile::platform(),
+        )
+        .expect("platform profile accepts author-owned composite createTable primaryKey");
+    }
+
+    #[test]
+    fn platform_profile_accepts_create_table_null_primary_key() {
+        let ir = ir_with(vec![op_json(
+            r#"{
+              "op": "createTable",
+              "name": "events",
+              "columns": [
+                { "name": "stream", "type": "text", "nullable": false },
+                { "name": "payload", "type": "json", "nullable": false }
+              ],
+              "primaryKey": null,
+              "constraints": [],
+              "indexes": []
+            }"#,
+        )]);
+
+        validate_ir_scoped(
+            &ir,
+            Dialect::Postgres,
+            &[],
+            None,
+            &PolicyProfile::platform(),
+        )
+        .expect("platform profile accepts no primary key");
+    }
+
+    #[test]
+    fn confined_profile_refuses_create_table_author_primary_key() {
+        let ir = ir_with(vec![op_json(
+            r#"{
+              "op": "createTable",
+              "name": "memberships",
+              "columns": [
+                { "name": "account_id", "type": "uuid", "nullable": false },
+                { "name": "team", "type": "text", "nullable": false }
+              ],
+              "primaryKey": ["account_id", "team"],
+              "constraints": [],
+              "indexes": []
+            }"#,
+        )]);
+
+        let err = validate_ir_scoped(
+            &ir,
+            Dialect::Postgres,
+            &[],
+            None,
+            &PolicyProfile::confined(),
+        )
+        .expect_err("confined profile must refuse author-owned createTable primaryKey");
+        assert_eq!(err.code, CODE_TABLE_SHAPE_POLICY, "got: {err}");
         assert!(
-            err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"),
-            "PK refusal should explain platform-owned PK, got: {err}"
+            err.reason.contains("author_primary_key") && err.reason.contains("primaryKey"),
+            "policy refusal should name the profile gate, got: {err}"
         );
+    }
+
+    #[test]
+    fn confined_profile_accepts_resolved_system_shape_create_table() {
+        let raw = ir_with(vec![op_json(
+            r#"{
+              "op": "createTable",
+              "name": "users",
+              "columns": [
+                { "name": "email", "type": "text", "nullable": false }
+              ],
+              "constraints": [],
+              "indexes": []
+            }"#,
+        )]);
+        let confined = PolicyProfile::confined();
+        let resolved = crate::model::table_shape::resolve_create_table_policy(&raw, &confined)
+            .expect("confined table-shape resolution succeeds");
+
+        validate_ir_scoped(
+            &resolved,
+            Dialect::Postgres,
+            &[],
+            None,
+            &confined,
+        )
+        .expect("resolved confined system shape remains valid");
     }
 
     // (E) MED — ColRef resolution at the apply/render seam. At LOAD the DML scope
@@ -3519,14 +3794,14 @@ mod tests {
                 schema: None,
             },
         ]);
-        assert!(validate_ir(&ir, Dialect::Postgres, &[]).is_ok());
-        assert!(validate_ir(&ir, Dialect::Sqlite, &[]).is_ok());
+        assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&ir, Dialect::Sqlite).is_ok());
     }
 
     #[test]
     fn validate_ir_rejects_sequence_increment_zero() {
         let ir = ir_with(vec![op_json(r#"{"op":"createSequence","name":"s","increment":0}"#)]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("increment"));
     }
@@ -3534,7 +3809,7 @@ mod tests {
     #[test]
     fn validate_ir_rejects_sequence_cache_zero() {
         let ir = ir_with(vec![op_json(r#"{"op":"alterSequence","name":"s","cache":0}"#)]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("cache"));
     }
@@ -3544,7 +3819,7 @@ mod tests {
         let ir = ir_with(vec![op_json(
             r#"{"op":"createSequence","name":"s","minValue":10,"maxValue":9}"#,
         )]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("minValue"));
     }
@@ -3622,7 +3897,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
@@ -3654,7 +3929,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        let err = validate_ir_platform(&ir, Dialect::Postgres).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert_eq!(err.op_index, 0);
@@ -3832,7 +4107,7 @@ mod tests {
     fn p2a_create_table_accepts_a_valid_id_prefix() {
         let ir = ir_with(vec![create_with_id_prefix("post")]);
         assert!(
-            validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
+            validate_ir_platform(&ir, Dialect::Postgres).is_ok(),
             "a well-formed, unreserved, in-length id prefix must validate"
         );
     }
@@ -3842,7 +4117,7 @@ mod tests {
         // `usr` is the platform user-id prefix (RESERVED_ID_PREFIXES); a creator
         // prefix that collides with it would mint ids colliding with platform users.
         let ir = ir_with(vec![create_with_id_prefix("usr")]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[])
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("a reserved id prefix must be refused at validate, fail-closed");
         assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
         assert_eq!(err.op_index, 0);
@@ -3852,7 +4127,7 @@ mod tests {
     fn p2a_create_table_rejects_a_malformed_id_prefix() {
         // An upper-case / non-`[a-z0-9_]` prefix is not a valid typed-id segment.
         let ir = ir_with(vec![create_with_id_prefix("Po-st")]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[])
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("a malformed id prefix must be refused at validate");
         assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
     }
@@ -3862,7 +4137,7 @@ mod tests {
         // Charset-valid but longer than MAX_ID_PREFIX_LEN — refused so the minted
         // `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
         let ir = ir_with(vec![create_with_id_prefix("toolong")]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[])
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("an over-long id prefix must be refused at validate");
         assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
         assert!(err.reason.contains("maximum"), "the error names the length bound: {err}");
@@ -3894,7 +4169,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, Dialect::Postgres, &[])
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("a vector_metric on a non-vector column must be refused");
         assert_eq!(err.code, CODE_VECTOR_METRIC_MISPLACED, "got: {err}");
     }
@@ -3923,7 +4198,7 @@ mod tests {
             existence_guard: None,
         }]);
         assert!(
-            validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
+            validate_ir_platform(&ir, Dialect::Postgres).is_ok(),
             "a metric on a t.vector(n) column is the legitimate co-occurrence"
         );
     }

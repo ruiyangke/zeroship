@@ -137,7 +137,7 @@ async fn new_edit_build_apply_on_sqlite() {
     let be = SqliteBackend::open(&p.app, &p.journal).expect("open sqlite backend");
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(&committed, APP, &BTreeMap::new(), &LiveSchema::default())
+        .load_and_lower(&committed, APP, &BTreeMap::new(), &LiveSchema::default(), None)
         .expect("the transient .ir.json must lower on SQLite");
     assert!(!migrations.is_empty());
 

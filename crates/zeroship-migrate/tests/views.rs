@@ -10,7 +10,7 @@ use zeroship_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerErro
 use zeroship_migrate::model::validate::{
     validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
-use zeroship_migrate::{fold_ops, SchemaScope, SchemaSnapshot, ViewSnapshot};
+use zeroship_migrate::{fold_ops, PolicyProfile, SchemaScope, SchemaSnapshot, ViewSnapshot};
 use zeroship_schema::query::SqlDialect;
 
 const SCHEMA: &str = "app";
@@ -141,6 +141,7 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
         Dialect::Sqlite,
         &[],
         Some(&trusted),
+        &PolicyProfile::platform(),
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -159,6 +160,7 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
         Dialect::Postgres,
         &[],
         Some(&trusted),
+        &PolicyProfile::platform(),
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -173,7 +175,14 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
 fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let structured = ir(create_structured_view(None, None));
     let confined = SchemaScope::Single(SCHEMA.to_string());
-    validate_ir_scoped(&structured, Dialect::Postgres, &[], Some(&confined)).unwrap();
+    validate_ir_scoped(
+        &structured,
+        Dialect::Postgres,
+        &[],
+        Some(&confined),
+        &PolicyProfile::confined(),
+    )
+    .unwrap();
 
     let guard_cfg = GuardConfig::confined(SCHEMA);
     IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
@@ -181,7 +190,14 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
         .expect("plain structured view is core under confined lower_guarded");
 
     let raw = ir(raw_view("SELECT id FROM app.users", None));
-    let err = validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&confined)).unwrap_err();
+    let err = validate_ir_scoped(
+        &raw,
+        Dialect::Postgres,
+        &[],
+        Some(&confined),
+        &PolicyProfile::confined(),
+    )
+    .unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
 
     let err = IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
@@ -196,7 +212,14 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     ));
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
-    validate_ir_scoped(&raw, Dialect::Postgres, &[], Some(&operator)).unwrap();
+    validate_ir_scoped(
+        &raw,
+        Dialect::Postgres,
+        &[],
+        Some(&operator),
+        &PolicyProfile::platform(),
+    )
+    .unwrap();
     IrAuthor::new(SCHEMA, "app_a", SqlDialect::Postgres)
         .with_schema_scope(operator)
         .lower(&raw, &LiveSchema::default())
@@ -207,7 +230,13 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
 fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     for sql in ["DROP TABLE x", "SELECT 1; DROP TABLE x"] {
-        let err = validate_ir_scoped(&ir(raw_view(sql, None)), Dialect::Postgres, &[], Some(&operator))
+        let err = validate_ir_scoped(
+            &ir(raw_view(sql, None)),
+            Dialect::Postgres,
+            &[],
+            Some(&operator),
+            &PolicyProfile::platform(),
+        )
             .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(
@@ -226,6 +255,7 @@ fn raw_view_body_runs_function_body_deny_list_scan() {
         Dialect::Postgres,
         &[],
         Some(&operator),
+        &PolicyProfile::platform(),
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);

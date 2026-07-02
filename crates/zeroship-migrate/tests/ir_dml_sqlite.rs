@@ -112,7 +112,7 @@ async fn lower_and_apply(
     let ir = resolved_ir_json(ir);
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(&ir, APP, reg, &LiveSchema::default())
+        .load_and_lower(&ir, APP, reg, &LiveSchema::default(), None)
         .expect("lower the .ir.json on SQLite");
     let engine = MigrationEngine::new();
     let plan = zeroship_migrate::AppliedPlan {
@@ -158,6 +158,7 @@ async fn lower_plan_and_apply(
         zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
         None,
+        None,
     )
     .expect("load gate");
     let plan = author
@@ -182,6 +183,7 @@ async fn load_recorded_ir_and_apply(
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
+        None,
         None,
     )
     .expect("load recorded IR through the SQLite gate");
@@ -526,6 +528,7 @@ async fn on_conflict_rejected_on_sqlite() {
         zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
         None,
+        None,
     )
     .expect_err("onConflict must be validate-refused on SQLite");
     let zeroship_migrate::model::load::IrLoadError::Validate(err) = err else {
@@ -557,6 +560,7 @@ async fn batched_backfill_portable_on_sqlite() {
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
+        None,
         None,
     )
     .expect("load gate");
@@ -702,6 +706,7 @@ async fn unresolved_colref_rejected_at_apply_seam_on_sqlite() {
         zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
         None,
+        None,
     )
     .expect("load gate (DML ColRef resolution is an apply-seam reject, not a load reject)");
     let err = author
@@ -739,6 +744,7 @@ async fn malformed_set_identifier_rejected_on_sqlite() {
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
+        None,
         None,
     )
     .expect("load gate");

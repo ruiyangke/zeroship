@@ -115,6 +115,7 @@ async fn pg_apply(
         zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
+        None,
     )
     .expect("PG load gate");
     let plan = author.lower_plan(&document, &LiveSchema::default()).expect("PG lower");
@@ -159,6 +160,7 @@ async fn sqlite_apply(
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
+        None,
         None,
     )
     .expect("SQLite load gate");

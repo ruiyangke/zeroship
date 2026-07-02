@@ -295,6 +295,7 @@ pub async fn apply_bundle_ir_postgres(
     migrations_dir: &Path,
     exec_cfg: &ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
     applied_by: &str,
 ) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
@@ -322,6 +323,7 @@ pub async fn apply_bundle_ir_postgres(
                 &mut state,
                 exec_cfg,
                 guard_cfg,
+                policy_profile,
                 approval,
                 &ApprovalScope::All,
                 applied_by,
@@ -379,6 +381,7 @@ pub async fn apply_sealed(
     sealed.verify(verifier)?;
     sealed.reconcile_with_executor_config(exec_cfg)?;
     let guard_cfg = sealed.to_guard_config();
+    let policy_profile = sealed.policy_profile();
     let mut exec_cfg = exec_cfg.clone();
     sealed.apply_operational_to_executor_config(&mut exec_cfg);
     apply_bundle_ir_postgres(
@@ -388,6 +391,7 @@ pub async fn apply_sealed(
         migrations_dir,
         &exec_cfg,
         &guard_cfg,
+        &policy_profile,
         approval,
         applied_by,
     )
@@ -409,6 +413,7 @@ pub async fn apply_standalone(
     migrations_dir: &Path,
     exec_cfg: &ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
     applied_by: &str,
 ) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
@@ -419,6 +424,7 @@ pub async fn apply_standalone(
         migrations_dir,
         exec_cfg,
         guard_cfg,
+        policy_profile,
         approval,
         applied_by,
     )
@@ -442,6 +448,7 @@ pub async fn apply_platform_ts_postgres(
     record_via: &RecordVia<'_>,
     exec_cfg: &ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
     applied_by: &str,
 ) -> Result<PostgresIrApplyOutcome, PostgresIrApplyError> {
@@ -492,6 +499,7 @@ pub async fn apply_platform_ts_postgres(
                 &mut state,
                 exec_cfg,
                 guard_cfg,
+                policy_profile,
                 approval,
                 &ApprovalScope::All,
                 applied_by,
@@ -542,6 +550,7 @@ pub async fn apply_one_ir_file_postgres(
     state: &mut PostgresIrApplyState,
     exec_cfg: &ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
     scope: &ApprovalScope,
     applied_by: &str,
@@ -567,6 +576,7 @@ pub async fn apply_one_ir_file_postgres(
         state,
         exec_cfg,
         guard_cfg,
+        policy_profile,
         approval,
         scope,
         applied_by,
@@ -592,6 +602,7 @@ async fn apply_one_ir_document_postgres(
     state: &mut PostgresIrApplyState,
     exec_cfg: &ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
     scope: &ApprovalScope,
     applied_by: &str,
@@ -610,6 +621,7 @@ async fn apply_one_ir_document_postgres(
             &state.registry,
             &state.live_schema,
             guard_cfg,
+            Some(policy_profile),
         )
         .map_err(|source| PostgresIrApplyError::Ir {
             file: file.to_string(),
@@ -826,6 +838,7 @@ pub async fn apply_bundle_ir_sqlite(
     migrations_dir: &Path,
     exec_cfg: &crate::ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
 ) -> Result<SqliteIrApplyOutcome, SqliteIrApplyError> {
     // Discover `*.ir.json`, version-ordered by filename (deterministic).
@@ -918,6 +931,7 @@ pub async fn apply_bundle_ir_sqlite(
         &ir_files,
         exec_cfg,
         guard_cfg,
+        policy_profile,
         approval,
     )
     .await
@@ -957,6 +971,7 @@ pub async fn apply_bundle_ir_sqlite_catalog(
     migrations_dir: &Path,
     exec_cfg: &crate::ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
 ) -> Result<SqliteIrApplyOutcome, SqliteIrApplyError> {
     // Discover `*.ir.json`, version-ordered by filename (deterministic).
@@ -1007,6 +1022,7 @@ pub async fn apply_bundle_ir_sqlite_catalog(
         &ir_files,
         exec_cfg,
         guard_cfg,
+        policy_profile,
         approval,
     )
     .await
@@ -1026,6 +1042,7 @@ async fn run_ir_files_sqlite(
     ir_files: &[std::path::PathBuf],
     exec_cfg: &crate::ExecutorConfig,
     guard_cfg: &GuardConfig,
+    policy_profile: &PolicyProfile,
     approval: Approval,
 ) -> Result<SqliteIrApplyOutcome, SqliteIrApplyError> {
     let engine = MigrationEngine::new();
@@ -1045,7 +1062,14 @@ async fn run_ir_files_sqlite(
 
         let author = IrAuthor::new(project_schema, owner_app, SqlDialect::Sqlite);
         let lowered = author
-            .load_and_lower_guarded(&bytes, owner_app, registry, live_schema, guard_cfg)
+            .load_and_lower_guarded(
+                &bytes,
+                owner_app,
+                registry,
+                live_schema,
+                guard_cfg,
+                Some(policy_profile),
+            )
             .map_err(|source| SqliteIrApplyError::Ir { file: file.clone(), source })?;
 
         let outcome = engine
