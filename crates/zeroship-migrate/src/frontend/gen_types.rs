@@ -7,8 +7,8 @@
 //! declared schema from the app entry contract. So the typed `env.db.ts` MUST be
 //! emitted from the migrations, not from a declared schema object. This module:
 //!
-//! 1. loads the committed `.ir.json` set in version order ([`load_dir_ops`]),
-//!    concatenating their `Op` lists;
+//! 1. records each committed `.ts` migration in version order ([`load_dir_ops`]),
+//!    using the sandboxed recorder and concatenating the transient IR `Op` lists;
 //! 2. folds-and-recovers per-collection wire-`FieldDef` maps
 //!    ([`crate::fold_to_field_defs`]);
 //! 3. emits TWO artifacts ([`render_artifacts`]):
@@ -22,17 +22,17 @@
 //!      `declare module "zeroship" { interface Env { db: Db<typeof schema> } }`.
 //!
 //! `--check` ([`check_artifacts`]) regenerates in memory and diffs against the
-//! committed artifacts — the CI drift gate, no DB write.
+//! generated artifacts — the CI drift gate, no DB write.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
-use crate::model::ir::{MigrationIr, Op};
+use crate::model::ir::Op;
 use crate::SqlDialect;
 
-use super::discover_migrations;
+use super::build::{discover_migrations, record_migration_transient, BuildError, RecordVia};
 
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
 /// against them).
@@ -60,28 +60,21 @@ pub enum GenTypesError {
         /// The underlying build error.
         source: super::BuildError,
     },
-    /// A committed `.ir.json` was missing (the `.ts` has no recorded sibling — run
-    /// `build` first).
-    #[error("gen-types: {path} missing — run `build` to record the migration first")]
-    MissingIr {
-        /// The expected `.ir.json` path.
-        path: PathBuf,
+    /// Recording a `.ts` migration to transient IR failed.
+    #[error("gen-types: record {stem}.ts: {source}")]
+    Record {
+        /// The migration stem.
+        stem: String,
+        /// The underlying build/record error.
+        source: BuildError,
     },
-    /// Reading a committed `.ir.json` failed.
+    /// Reading a generated artifact during `--check` failed.
     #[error("gen-types: read {path}: {source}")]
-    ReadIr {
+    ReadArtifact {
         /// The path.
         path: PathBuf,
         /// The IO error.
         source: std::io::Error,
-    },
-    /// A committed `.ir.json` did not parse as a [`MigrationIr`].
-    #[error("gen-types: {path} is not a valid IR document: {message}")]
-    CorruptIr {
-        /// The path.
-        path: PathBuf,
-        /// The parse error.
-        message: String,
     },
     /// The fold-and-recover seam refused the op stream (incoherent migrations).
     #[error("gen-types: fold the migration set failed: {0}")]
@@ -94,8 +87,8 @@ pub enum GenTypesError {
         /// The IO error.
         source: std::io::Error,
     },
-    /// `--check`: the committed artifact diverges from the freshly-generated one
-    /// (the CI drift signal). Names the file + a unified-ish diff preview.
+    /// `--check`: the generated artifact on disk diverges from the freshly-generated
+    /// one. Names the file + a unified-ish diff preview.
     #[error("gen-types --check: {file} is STALE — regenerate with `zeroship-migrate-js gen-types`\n{detail}")]
     Drift {
         /// The drifted file.
@@ -103,7 +96,7 @@ pub enum GenTypesError {
         /// A human-readable first-divergence preview.
         detail: String,
     },
-    /// `--check`: a committed artifact is missing entirely (never generated).
+    /// `--check`: a generated artifact is missing entirely.
     #[error("gen-types --check: {path} is missing — run `gen-types` to generate it")]
     CheckMissing {
         /// The expected path.
@@ -111,32 +104,46 @@ pub enum GenTypesError {
     },
 }
 
-/// Load every committed `.ir.json` in `dir` (version-ordered) and concatenate its
-/// `Op` lists — the migration-first "current schema" input to the fold.
+/// The owner stamp used by gen-types' transient local recording path.
+///
+/// The fold only consumes ops, but the recorder requires an owner to stamp the IR
+/// before it passes through the same canonical Rust validation path as build/apply.
+pub const GEN_TYPES_OWNER_APP: &str = "app_local";
+
+/// Record every `.ts` migration in `dir` (version-ordered) through the sandboxed
+/// local recorder and concatenate its transient `Op` lists — the migration-first
+/// "current schema" input to the fold.
 ///
 /// # Errors
-/// [`GenTypesError`] on a discovery failure, a missing/corrupt committed `.ir.json`.
+/// [`GenTypesError`] on a discovery or recording failure.
 pub fn load_dir_ops(dir: &Path) -> Result<Vec<Op>, GenTypesError> {
+    let via = RecordVia::local();
+    load_dir_ops_with_recorder(dir, GEN_TYPES_OWNER_APP, &via)
+}
+
+/// Like [`load_dir_ops`], but lets tests or callers supply the owner and recorder
+/// path explicitly.
+///
+/// # Errors
+/// [`GenTypesError`] on a discovery or recording failure.
+pub fn load_dir_ops_with_recorder(
+    dir: &Path,
+    owner_app: &str,
+    via: &RecordVia<'_>,
+) -> Result<Vec<Op>, GenTypesError> {
     let discovered = discover_migrations(dir).map_err(|source| GenTypesError::Discover {
         dir: dir.to_path_buf(),
         source,
     })?;
     let mut ops = Vec::new();
     for m in &discovered {
-        let ir_path = m.ir_json_path();
-        if !ir_path.exists() {
-            return Err(GenTypesError::MissingIr { path: ir_path });
-        }
-        let bytes = std::fs::read(&ir_path).map_err(|source| GenTypesError::ReadIr {
-            path: ir_path.clone(),
-            source,
+        let recorded = record_migration_transient(m, owner_app, via).map_err(|source| {
+            GenTypesError::Record {
+                stem: m.stem.clone(),
+                source,
+            }
         })?;
-        let ir: MigrationIr =
-            serde_json::from_slice(&bytes).map_err(|e| GenTypesError::CorruptIr {
-                path: ir_path.clone(),
-                message: e.to_string(),
-            })?;
-        ops.extend(ir.ops);
+        ops.extend(recorded.ir.ops);
     }
     Ok(ops)
 }
@@ -493,7 +500,7 @@ fn render_env_dts(
          //\n\
          // The typed `env.db` surface, reconstructed from the op.* migration set\n\
          // (migration-first: the migrations are the source of truth, types are\n\
-         // generated from the fold). Re-run `gen-types` after every `build`; the\n\
+         // generated from the fold). Re-run `gen-types` after migration changes; the\n\
          // `gen-types --check` CI gate fails if this file drifts from the migrations.\n\
          //\n\
          // The schema below is a reconstruction of `@zeroship/db` `t.*()` builder\n\
@@ -823,7 +830,7 @@ pub fn write_artifacts(out_dir: &Path, artifacts: &GeneratedArtifacts) -> Result
 /// [`GenTypesError::CheckMissing`].
 ///
 /// # Errors
-/// [`GenTypesError`] on a read failure, a missing committed artifact, or drift.
+/// [`GenTypesError`] on a read failure, a missing generated artifact, or drift.
 pub fn check_artifacts(out_dir: &Path, artifacts: &GeneratedArtifacts) -> Result<(), GenTypesError> {
     check_one(
         &out_dir.join(RUNTIME_DESCRIPTOR_FILE),
@@ -841,7 +848,7 @@ fn check_one(path: &Path, generated: &str, file: &str) -> Result<(), GenTypesErr
             path: path.to_path_buf(),
         });
     }
-    let committed = std::fs::read_to_string(path).map_err(|source| GenTypesError::ReadIr {
+    let committed = std::fs::read_to_string(path).map_err(|source| GenTypesError::ReadArtifact {
         path: path.to_path_buf(),
         source,
     })?;

@@ -270,12 +270,11 @@ pub enum RunError {
         found: String,
     },
     /// Committed Platform `.ir.json` was an intermediate apply-core test path.
-    /// Model C makes platform migrations `.ts`-only (transient IR), while creator
-    /// deployments keep committed `.ir.json` through control's deploy path.
+    /// Model C makes platform migrations `.ts`-only (transient IR); creator
+    /// migrations now follow the same committed-`.ts`, transient-IR model.
     #[error(
         "unsupported platform migration corpus in '{dir}': found committed IR file '{ir}' \
-         (Platform migrations are .ts-only record/apply; creator committed .ir.json \
-         remains in the control-plane deploy path)"
+         (Platform and creator migrations are .ts-only record/apply)"
     )]
     PlatformIrCorpusUnsupported {
         /// The migration directory.
@@ -283,7 +282,7 @@ pub enum RunError {
         /// An example committed IR file.
         ir: String,
     },
-    /// Applying committed `.ir.json` migrations failed.
+    /// Applying IR migrations failed.
     #[error("apply IR migrations: {0}")]
     IrApply(#[from] crate::command::ir_apply::PostgresIrApplyError),
 }
@@ -318,7 +317,7 @@ enum MigrationCorpusFormat {
 /// file to transient IR at migrate time and applies that IR. The `.sql` branch is
 /// retained only for the current repo-root `db/migrations/` port until the platform
 /// schema is rebaselined to `.ts`. Committed Platform `.ir.json` is intentionally
-/// rejected here; creator committed IR still flows through control/deploy.
+/// rejected here; creator migrations are also `.ts` source with transient IR.
 fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError> {
     let read = std::fs::read_dir(dir).map_err(|e| {
         RunError::Load(LoaderError::Io {
