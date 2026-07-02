@@ -48,6 +48,9 @@ pub struct PolicyProfile {
     /// DDL-observable and server-enforced obligations.
     #[serde(default)]
     pub data_security: DataSecurityConfig,
+    /// Platform-managed table shape injected around author-declared columns.
+    #[serde(default)]
+    pub system_shape: TableSystemShapePolicy,
 }
 
 impl Default for PolicyProfile {
@@ -146,8 +149,185 @@ impl PolicyProfile {
                 &ceiling.data_security,
                 &draft.data_security,
             )?,
+            system_shape: TableSystemShapePolicy::meet_ceiling_draft(
+                &ceiling.system_shape,
+                &draft.system_shape,
+            )?,
         })
     }
+}
+
+/// Policy for platform-managed table shape injected around author-declared columns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TableSystemShapePolicy {
+    /// System columns prepended to every table.
+    #[serde(default)]
+    pub columns: Vec<InjectedSystemColumnPolicy>,
+    /// System indexes created for every table, excluding the implicit primary-key
+    /// index represented by [`primary_key`](Self::primary_key).
+    #[serde(default)]
+    pub indexes: Vec<InjectedSystemIndexPolicy>,
+    /// Primary-key policy for the table.
+    #[serde(default)]
+    pub primary_key: TablePrimaryKeyPolicy,
+    /// Whether author-supplied primary keys are accepted.
+    #[serde(default)]
+    pub author_primary_key: AuthorPrimaryKeyPolicy,
+}
+
+impl Default for TableSystemShapePolicy {
+    fn default() -> Self {
+        Self::confined()
+    }
+}
+
+impl TableSystemShapePolicy {
+    /// The current confined table shape injected by `build_table_snapshot`.
+    #[must_use]
+    pub fn confined() -> Self {
+        Self {
+            columns: vec![
+                InjectedSystemColumnPolicy {
+                    name: "id".into(),
+                    data_type: "text".into(),
+                    nullable: false,
+                },
+                InjectedSystemColumnPolicy {
+                    name: "created_at".into(),
+                    data_type: "timestamp with time zone".into(),
+                    nullable: false,
+                },
+                InjectedSystemColumnPolicy {
+                    name: "updated_at".into(),
+                    data_type: "timestamp with time zone".into(),
+                    nullable: false,
+                },
+                InjectedSystemColumnPolicy {
+                    name: "created_by".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                },
+                InjectedSystemColumnPolicy {
+                    name: "updated_by".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                },
+                InjectedSystemColumnPolicy {
+                    name: "version".into(),
+                    data_type: "integer".into(),
+                    nullable: false,
+                },
+                InjectedSystemColumnPolicy {
+                    name: "deleted_at".into(),
+                    data_type: "timestamp with time zone".into(),
+                    nullable: true,
+                },
+            ],
+            indexes: vec![
+                InjectedSystemIndexPolicy {
+                    columns: vec!["deleted_at".into()],
+                },
+                InjectedSystemIndexPolicy {
+                    columns: vec!["updated_at".into()],
+                },
+                InjectedSystemIndexPolicy {
+                    columns: vec!["created_by".into()],
+                },
+            ],
+            primary_key: TablePrimaryKeyPolicy::ExplicitColumns(vec!["id".into()]),
+            author_primary_key: AuthorPrimaryKeyPolicy::Forbid,
+        }
+    }
+
+    /// The platform/operator table-shape policy: no automatic injection.
+    #[must_use]
+    pub fn platform() -> Self {
+        Self {
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            primary_key: TablePrimaryKeyPolicy::Author(PrimaryKeyAuthorPolicy::Author),
+            author_primary_key: AuthorPrimaryKeyPolicy::Allow,
+        }
+    }
+
+    fn meet_ceiling_draft(ceiling: &Self, draft: &Self) -> Result<Self, SealError> {
+        if ceiling == &Self::platform() {
+            return Ok(draft.clone());
+        }
+        if draft == ceiling {
+            return Ok(draft.clone());
+        }
+        Err(SealError::PolicyExceedsCeiling {
+            knob: "system_shape",
+        })
+    }
+
+    fn validate_for_seal(&self) -> Result<(), SealError> {
+        if self == &Self::confined() || self == &Self::platform() {
+            return Ok(());
+        }
+        Err(SealError::UnsupportedProfileKnob {
+            knob: "system_shape",
+        })
+    }
+}
+
+/// One injected system column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InjectedSystemColumnPolicy {
+    /// Column name.
+    pub name: String,
+    /// `information_schema` data-type spelling.
+    #[serde(rename = "type")]
+    pub data_type: String,
+    /// Whether the injected column is nullable.
+    #[serde(default)]
+    pub nullable: bool,
+}
+
+/// One injected system index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InjectedSystemIndexPolicy {
+    /// Indexed columns, in order.
+    pub columns: Vec<String>,
+}
+
+/// Primary-key source for a table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TablePrimaryKeyPolicy {
+    /// The platform injects an explicit primary key over these columns.
+    ExplicitColumns(Vec<String>),
+    /// The author owns primary-key declaration.
+    Author(PrimaryKeyAuthorPolicy),
+}
+
+impl Default for TablePrimaryKeyPolicy {
+    fn default() -> Self {
+        Self::ExplicitColumns(vec!["id".into()])
+    }
+}
+
+/// TOML/JSON sentinel used by [`TablePrimaryKeyPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryKeyAuthorPolicy {
+    /// Author-owned primary-key policy.
+    Author,
+}
+
+/// Whether author-supplied primary keys are accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorPrimaryKeyPolicy {
+    /// Reject author-supplied primary keys.
+    #[default]
+    Forbid,
+    /// Accept author-supplied primary keys.
+    Allow,
 }
 
 /// Permission knobs in the policy profile.
@@ -810,6 +990,7 @@ struct SealedEffectiveProfile {
     capabilities: PolicyCapabilities,
     operational: OperationalConfig,
     data_security: DataSecurityConfig,
+    system_shape: TableSystemShapePolicy,
 }
 
 impl SealedEffectiveProfile {
@@ -829,6 +1010,7 @@ impl SealedEffectiveProfile {
             capabilities: profile.capabilities,
             operational: profile.operational,
             data_security: profile.data_security,
+            system_shape: profile.system_shape,
         })
     }
 
@@ -863,6 +1045,7 @@ impl PolicyProfile {
         self.capabilities.validate_for_seal()?;
         self.operational.validate_for_seal()?;
         self.data_security.validate_for_seal()?;
+        self.system_shape.validate_for_seal()?;
         Ok(())
     }
 }
@@ -926,6 +1109,7 @@ struct SealPayloadEffective<'a> {
     capabilities: &'a PolicyCapabilities,
     operational: &'a OperationalConfig,
     data_security: &'a DataSecurityConfig,
+    system_shape: &'a TableSystemShapePolicy,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -1134,6 +1318,7 @@ impl SealedProfile {
                 capabilities: &self.effective.capabilities,
                 operational: &self.effective.operational,
                 data_security: &self.effective.data_security,
+                system_shape: &self.effective.system_shape,
             },
             nonce: &self.nonce,
             issued_at: self.issued_at,
@@ -1401,6 +1586,8 @@ mod tests {
     use super::*;
     use crate::model::capability::VendorCapabilities;
     use crate::model::policy::TrustProfile;
+    use crate::render::declarative::{build_table_snapshot, CollectionDescriptor};
+    use zeroship_schema::query::SqlDialect;
 
     const KEY: &[u8] = b"stage-1 test key for sealed migrate policy";
     const ISSUED_AT: u64 = 1_719_792_000;
@@ -1414,7 +1601,12 @@ mod tests {
     fn policy_profile_toml_round_trips_and_matches_platform_caps() {
         let parsed = PolicyProfile::from_toml(PLATFORM_PROFILE_TOML).unwrap();
         assert_eq!(parsed.vendor_capabilities(), VendorCapabilities::operator());
+        assert_eq!(parsed.system_shape, TableSystemShapePolicy::platform());
         let encoded = toml::to_string(&parsed).unwrap();
+        assert!(
+            encoded.contains("[system_shape]"),
+            "system_shape must be part of the serialized profile: {encoded}"
+        );
         let reparsed = PolicyProfile::from_toml(&encoded).unwrap();
         assert_eq!(parsed, reparsed);
     }
@@ -1476,6 +1668,109 @@ mod tests {
             VendorCapabilities::operator()
         );
         assert!(PolicyProfile::preset("permissive").is_none());
+    }
+
+    #[test]
+    fn confined_system_shape_matches_current_snapshot_injection() {
+        let confined = PolicyProfile::confined();
+        assert_eq!(
+            confined.system_shape.author_primary_key,
+            AuthorPrimaryKeyPolicy::Forbid
+        );
+        assert_eq!(
+            confined.system_shape.primary_key,
+            TablePrimaryKeyPolicy::ExplicitColumns(vec!["id".to_string()])
+        );
+
+        let expected_columns = vec![
+            ("id", "text", false),
+            ("created_at", "timestamp with time zone", false),
+            ("updated_at", "timestamp with time zone", false),
+            ("created_by", "text", true),
+            ("updated_by", "text", true),
+            ("version", "integer", false),
+            ("deleted_at", "timestamp with time zone", true),
+        ];
+        let policy_columns = confined
+            .system_shape
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.data_type.as_str(), c.nullable))
+            .collect::<Vec<_>>();
+        assert_eq!(policy_columns, expected_columns);
+
+        let expected_indexes = vec![vec!["deleted_at"], vec!["updated_at"], vec!["created_by"]];
+        let policy_indexes = confined
+            .system_shape
+            .indexes
+            .iter()
+            .map(|idx| idx.columns.iter().map(String::as_str).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        assert_eq!(policy_indexes, expected_indexes);
+
+        let descriptor = CollectionDescriptor {
+            name: "widgets".into(),
+            owner_app: "app_test".into(),
+            fields: Vec::new(),
+            indexes: Vec::new(),
+            runtime_options: Default::default(),
+        };
+        let snapshot = build_table_snapshot("app", &descriptor, SqlDialect::Postgres)
+            .expect("empty table snapshot should build");
+
+        let mut snapshot_columns = snapshot
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.data_type.as_str(), c.nullable))
+            .collect::<Vec<_>>();
+        let mut sorted_policy_columns = policy_columns.clone();
+        snapshot_columns.sort_unstable();
+        sorted_policy_columns.sort_unstable();
+        assert_eq!(sorted_policy_columns, snapshot_columns);
+
+        let mut snapshot_system_indexes = snapshot
+            .indexes
+            .iter()
+            .filter(|idx| !idx.unique)
+            .map(|idx| {
+                assert_eq!(idx.access_method, "btree");
+                assert_eq!(idx.predicate, None);
+                idx.columns.iter().map(String::as_str).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut sorted_policy_indexes = policy_indexes.clone();
+        snapshot_system_indexes.sort_unstable();
+        sorted_policy_indexes.sort_unstable();
+        assert_eq!(sorted_policy_indexes, snapshot_system_indexes);
+
+        assert!(snapshot.constraints.iter().any(|c| {
+            c.name == "widgets_pkey"
+                && c.kind == "PRIMARY KEY"
+                && c.definition == "PRIMARY KEY (id)"
+        }));
+        assert!(snapshot.indexes.iter().any(|idx| {
+            idx.name == "widgets_pkey" && idx.unique && idx.columns == ["id"]
+        }));
+    }
+
+    #[test]
+    fn platform_and_default_system_shapes_are_explicit() {
+        assert_eq!(
+            PolicyProfile::default().system_shape,
+            PolicyProfile::confined().system_shape
+        );
+
+        let platform = PolicyProfile::platform();
+        assert!(platform.system_shape.columns.is_empty());
+        assert!(platform.system_shape.indexes.is_empty());
+        assert_eq!(
+            platform.system_shape.primary_key,
+            TablePrimaryKeyPolicy::Author(PrimaryKeyAuthorPolicy::Author)
+        );
+        assert_eq!(
+            platform.system_shape.author_primary_key,
+            AuthorPrimaryKeyPolicy::Allow
+        );
     }
 
     #[test]
@@ -1674,6 +1969,20 @@ mod tests {
     }
 
     #[test]
+    fn policy_profile_meet_rejects_confined_ceiling_empty_system_shape_escape() {
+        let ceiling = PolicyProfile::confined();
+        let mut draft = PolicyProfile::confined();
+        draft.system_shape = TableSystemShapePolicy::platform();
+
+        assert!(matches!(
+            PolicyProfile::meet_ceiling_draft(&ceiling, &draft),
+            Err(SealError::PolicyExceedsCeiling {
+                knob: "system_shape"
+            })
+        ));
+    }
+
+    #[test]
     fn operational_lowering_only_tightens_executor_timeouts() {
         let op = OperationalConfig::default();
         let mut exec_cfg = ExecutorConfig::new("prj_test", "app");
@@ -1704,6 +2013,28 @@ mod tests {
         .unwrap();
         sealed.verify(&verifier_at(VERIFY_NOW, 7)).unwrap();
         assert_eq!(sealed.posture(), SealedPosture::Platform);
+        assert_eq!(sealed.effective.system_shape, TableSystemShapePolicy::platform());
+    }
+
+    #[test]
+    fn sealed_profile_mac_covers_system_shape() {
+        let cap = SealApplier::new();
+        let mut sealed = SealedProfile::mint(
+            &cap,
+            PolicyProfile::confined(),
+            "app",
+            KEY,
+            b"nonce-system-shape".to_vec(),
+            ISSUED_AT,
+            7,
+        )
+        .unwrap();
+        sealed.effective.system_shape = TableSystemShapePolicy::platform();
+
+        assert!(matches!(
+            sealed.verify(&verifier_at(VERIFY_NOW, 7)),
+            Err(SealError::InvalidSeal)
+        ));
     }
 
     #[test]
