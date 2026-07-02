@@ -1919,6 +1919,10 @@ pub enum Op {
         name: String,
         /// Columns.
         columns: Vec<IrColumn>,
+        /// Resolved primary key columns. `None` means the resolved table has no
+        /// primary key and serializes as `primaryKey: null`.
+        #[serde(default)]
+        primary_key: Option<Vec<String>>,
         /// Table-level constraints.
         #[serde(default)]
         constraints: Vec<IrConstraint>,
@@ -4380,6 +4384,7 @@ mod tests {
                 generated: None,
                 identity: None,
             }],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
@@ -4523,6 +4528,7 @@ mod tests {
         let create = Op::CreateTable {
             name: "t".into(),
             columns: vec![],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,

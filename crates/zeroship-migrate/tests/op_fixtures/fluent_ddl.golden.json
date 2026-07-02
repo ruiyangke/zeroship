@@ -123,6 +123,7 @@
           }
         }
       ],
+      "primaryKey": null,
       "constraints": [
         {
           "kind": {
@@ -150,6 +151,7 @@
           "nullable": false
         }
       ],
+      "primaryKey": null,
       "constraints": [
         {
           "kind": {

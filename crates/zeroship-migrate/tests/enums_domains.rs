@@ -42,6 +42,7 @@ fn create_table(name: &str, columns: Vec<IrColumn>) -> Op {
     Op::CreateTable {
         name: name.to_string(),
         columns,
+        primary_key: None,
         constraints: Vec::new(),
         indexes: Vec::new(),
         runtime_options: None,

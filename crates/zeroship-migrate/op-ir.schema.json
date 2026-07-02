@@ -88,6 +88,17 @@
                 "$ref": "#/$defs/IrColumn"
               }
             },
+            "primaryKey": {
+              "description": "Resolved primary key columns. `None` means the resolved table has no\nprimary key and serializes as `primaryKey: null`.",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              },
+              "default": null
+            },
             "constraints": {
               "description": "Table-level constraints.",
               "type": "array",

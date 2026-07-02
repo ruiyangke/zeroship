@@ -122,7 +122,7 @@ const TS = {
 // schema gains/loses a field on any op, THIS fails — forcing `ir.ts` to be
 // regenerated in lockstep. Sorted; the `op` discriminant is excluded.
 const TS_OP_FIELDS: Record<string, string[]> = {
-  createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "runtimeOptions", "schema"].sort(),
+  createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "primaryKey", "runtimeOptions", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // #173/#174 + generated/identity — addColumn carries the column facets that are
@@ -306,6 +306,13 @@ test("every Op variant's field set matches the schema (no removed/missing fields
       `Op "${tag}" field set drifted from the schema — regenerate src/generated/ir.ts`,
     );
   }
+});
+
+test("createTable primaryKey is present in the schema and hand-authored ir.ts", () => {
+  const schemaFields = opFieldsByTag(schema.$defs.Op, "op");
+  assert.ok(schemaFields.createTable.includes("primaryKey"));
+  const irTs = readFileSync(resolve(here, "../src/generated/ir.ts"), "utf8");
+  assert.match(irTs, /primaryKey:\s*string\[\]\s*\|\s*null/);
 });
 
 // **PR10** — explicit assertion that the removed native `ifExists` is GONE from

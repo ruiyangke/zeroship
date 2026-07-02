@@ -268,6 +268,7 @@ async fn add_column_ifnotexists_absent_runs() {
     apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -373,6 +374,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
     apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -387,6 +389,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
     let steps = lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -408,6 +411,7 @@ async fn create_table_ifnotexists_present_matching_is_noop() {
     apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -418,6 +422,7 @@ async fn create_table_ifnotexists_present_matching_is_noop() {
     let steps = lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -458,6 +463,7 @@ async fn create_table_ifnotexists_fresh_creates_all_secondary_indexes_and_reruns
             nullable: Some(true),
             default: None,
             unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -570,6 +576,7 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
     apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("email", ColType::String)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -733,6 +740,7 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
     apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
         name: "people".into(),
         columns: vec![col("label", ColType::String)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -752,6 +760,7 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
             nullable: Some(true),
             default: None,
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -795,6 +804,7 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
     apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("legacy", ColType::String)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -855,6 +865,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
     apply(&conn, &cfg, &lower(&cfg, Op::CreateTable {
         name: "t".into(),
         columns: vec![col("name", ColType::String)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,

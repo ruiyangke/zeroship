@@ -2288,6 +2288,7 @@ mod tests {
             ops: vec![crate::model::ir::Op::CreateTable {
                 name: "users".to_string(),
                 columns: Vec::new(),
+                primary_key: None,
                 constraints: Vec::new(),
                 indexes: Vec::new(),
                 runtime_options: None,
@@ -2352,6 +2353,7 @@ mod tests {
             ops: vec![crate::model::ir::Op::CreateTable {
                 name: "users".to_string(),
                 columns: Vec::new(),
+                primary_key: None,
                 constraints: Vec::new(),
                 indexes: Vec::new(),
                 runtime_options: None,

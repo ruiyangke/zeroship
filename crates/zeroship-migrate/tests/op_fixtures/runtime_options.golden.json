@@ -28,6 +28,7 @@
           }
         }
       ],
+      "primaryKey": null,
       "constraints": [],
       "indexes": [],
       "runtimeOptions": {

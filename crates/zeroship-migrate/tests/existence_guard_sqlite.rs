@@ -157,6 +157,7 @@ async fn add_column_ifnotexists_absent_runs() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -202,6 +203,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -259,6 +261,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -321,6 +324,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -381,6 +385,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -438,6 +443,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -454,6 +460,7 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
     let migs = lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -483,6 +490,7 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("legacy", ColType::String)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -542,6 +550,7 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
     let make_op = || Op::CreateTable {
         name: "t".into(),
         columns: vec![col("title", ColType::String), col("happened", ColType::Timestamp)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -616,6 +625,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
             nullable: Some(true),
             default: None,
             unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -682,6 +692,7 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("n", ColType::Int)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,
@@ -758,6 +769,7 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
     for m in lower(Op::CreateTable {
         name: "t".into(),
         columns: vec![col("name", ColType::String)],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,

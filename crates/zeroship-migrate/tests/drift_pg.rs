@@ -1161,6 +1161,7 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
                 ir_col("email", ColType::Text, true),
                 ir_col("active", ColType::Bool, true),
             ],
+            primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
             runtime_options: None,
@@ -1351,6 +1352,7 @@ async fn top_level_comment_metadata_reintrospects_and_drifts() {
                 ir_col("email", ColType::Text, true),
                 ir_col("active", ColType::Bool, true),
             ],
+            primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
             runtime_options: None,
@@ -1476,6 +1478,7 @@ async fn sequence_options_round_trip_and_out_of_band_option_drift_is_reported() 
         Op::CreateTable {
             name: "invoices".into(),
             columns: vec![ir_col("amount", ColType::Int, false)],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,

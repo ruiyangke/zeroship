@@ -4879,6 +4879,7 @@ mod tests {
             ops: vec![Op::CreateTable {
                 name: table.into(),
                 columns: cols,
+                primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
                 runtime_options: None,
@@ -5902,6 +5903,7 @@ mod tests {
                     nullable: None,
                     default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
                     unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
                 runtime_options: None,

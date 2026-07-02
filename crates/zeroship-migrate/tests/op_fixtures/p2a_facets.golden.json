@@ -41,6 +41,7 @@
           }
         }
       ],
+      "primaryKey": null,
       "constraints": [
         {
           "kind": {

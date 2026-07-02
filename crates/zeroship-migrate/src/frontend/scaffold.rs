@@ -385,6 +385,7 @@ fn synth_delta_ops(
                     op: Op::CreateTable {
                         name: table.clone(),
                         columns,
+                        primary_key: None,
                         constraints: Vec::new(),
                         indexes: Vec::new(),
                         runtime_options: Some(want.runtime_options.clone()),

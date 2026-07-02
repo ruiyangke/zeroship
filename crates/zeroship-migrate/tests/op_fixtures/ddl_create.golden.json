@@ -32,6 +32,7 @@
           "type": "text"
         }
       ],
+      "primaryKey": null,
       "constraints": [],
       "indexes": []
     },
