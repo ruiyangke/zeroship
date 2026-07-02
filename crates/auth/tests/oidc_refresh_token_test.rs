@@ -20,9 +20,7 @@ use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_core::auth::hash_api_key;
 
-use common::{
-    location, pkce_challenge_s256, pkce_verifier, provider_mirror_column, test_auth_config,
-};
+use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9998/cb";
@@ -929,15 +927,11 @@ async fn seed_user_client(
     .expect("seed app");
     let scope_vec = scopes.iter().map(|scope| (*scope).to_string()).collect::<Vec<_>>();
     let secret_hash = hash_api_key(REFRESH_CLIENT_SECRET);
-    let sql = format!(
-        "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, {}, \
-             client_secret_hash, refresh_allowed, token_endpoint_auth_method) \
-         VALUES ($1, 'P5b OP refresh test', $2, $3, FALSE, $1, $4, TRUE, 'client_secret_basic')",
-        provider_mirror_column()
-    );
     db.execute(
-        &sql,
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, \
+             client_secret_hash, refresh_allowed, token_endpoint_auth_method) \
+         VALUES ($1, 'P5b OP refresh test', $2, $3, FALSE, $4, TRUE, 'client_secret_basic')",
         &[&client_id, &vec![REDIRECT_URI.to_string()], &scope_vec, &secret_hash],
     )
     .await

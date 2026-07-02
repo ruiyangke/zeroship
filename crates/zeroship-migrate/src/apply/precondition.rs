@@ -485,10 +485,9 @@ async fn evaluate_sql_boolean(
     //    gets. A precondition reaching `control.*` / a file/network func / a
     //    dangerous construct is denied here, before anything runs.
     // §4.1/HIGH-2: trust-aware. Confined ⇒ `confined(project_schema)`;
-    // Platform ⇒ the operator allowlist (so a future platform precondition
-    // referencing `oauth_hydra.*` is not wrongly Denied). Latent for the 56-file
-    // port (the loader sets `preconditions = []`), but threaded so it is correct
-    // the day a platform precondition is written.
+    // Platform ⇒ the operator allowlist. Latent for the port (the loader sets
+    // `preconditions = []`), but threaded so it is correct the day a platform
+    // precondition is written.
     let guard = SqlGuard::new(cfg.guard_config());
     guard.check(sql)?;
 

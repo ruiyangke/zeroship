@@ -137,13 +137,12 @@ async fn insert_oauth_client(
         .collect::<Vec<_>>();
     let created_by: Option<Uuid> = None;
     let client_secret_hash = hash_api_key(client_secret);
-    // TODO(P6): drop oauth_clients.hydra_client_id column; placeholder write until then.
     pg.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-             skip_consent, created_by, hydra_client_id, client_secret_hash, \
+             skip_consent, created_by, client_secret_hash, \
              refresh_allowed, token_endpoint_auth_method) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1, $7, TRUE, 'client_secret_basic')",
+         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7, TRUE, 'client_secret_basic')",
         &[
             &BUILDER_CLIENT_ID,
             &BUILDER_CLIENT_NAME,

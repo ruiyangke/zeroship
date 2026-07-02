@@ -537,13 +537,12 @@ async fn upsert_db_rows(
     // `skip_consent` is FALSE for every creator (per-app end-user) client
     // (spec §5.2), TRUE only for the platform's own first-party console
     // (`first_party`). `scopes` mirrors the baseline + declared allowlist.
-    // TODO(P6): drop oauth_clients.hydra_client_id column; placeholder write until then.
     tx.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-             skip_consent, created_by, hydra_client_id, client_secret_hash, refresh_allowed, \
+             skip_consent, created_by, client_secret_hash, refresh_allowed, \
              token_endpoint_auth_method, brokered, backchannel_logout_uri) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $1, $8, TRUE, \
+         VALUES ($1, $2, NULL, NULL, $3, $4, $6, $5, $8, TRUE, \
                  'client_secret_basic', TRUE, $7) \
          ON CONFLICT (client_id) DO UPDATE SET \
             client_name = EXCLUDED.client_name, \

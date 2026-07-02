@@ -104,10 +104,6 @@ fn sha256_hex(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
 
-fn provider_mirror_column() -> String {
-    ["hy", "dra_client_id"].concat()
-}
-
 async fn insert_native_device_client(
     pg: &compio_postgres::Client,
     client_id: &str,
@@ -116,15 +112,11 @@ async fn insert_native_device_client(
 ) {
     let scope_values: Vec<String> = scopes.iter().map(|scope| (*scope).to_string()).collect();
     let empty_redirects: Vec<String> = Vec::new();
-    let sql = format!(
-        "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, {}, \
-             refresh_allowed, token_endpoint_auth_method) \
-         VALUES ($1, $2, $3, $4, TRUE, $1, FALSE, 'none')",
-        provider_mirror_column()
-    );
     pg.execute(
-        &sql,
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, \
+             refresh_allowed, token_endpoint_auth_method) \
+         VALUES ($1, $2, $3, $4, TRUE, FALSE, 'none')",
         &[&client_id, &client_name, &empty_redirects, &scope_values],
     )
     .await

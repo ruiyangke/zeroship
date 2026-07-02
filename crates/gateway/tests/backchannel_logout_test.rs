@@ -238,9 +238,9 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
     client
         .execute(
             "INSERT INTO zeroship.oauth_clients \
-                (client_id, client_name, redirect_uris, scopes, hydra_client_id, \
+                (client_id, client_name, redirect_uris, scopes, \
                  refresh_allowed, token_endpoint_auth_method, brokered) \
-             VALUES ($1, $2, $3, $4, $1, TRUE, 'client_secret_basic', TRUE) \
+             VALUES ($1, $2, $3, $4, TRUE, 'client_secret_basic', TRUE) \
              ON CONFLICT (client_id) DO UPDATE SET \
                 redirect_uris = EXCLUDED.redirect_uris, \
                 scopes = EXCLUDED.scopes, \

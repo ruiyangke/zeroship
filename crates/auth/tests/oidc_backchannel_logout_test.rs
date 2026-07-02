@@ -16,10 +16,6 @@ use zeroship_auth::store::sessions as session_store;
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
-fn provider_mirror_column() -> String {
-    ["hy", "dra_client_id"].concat()
-}
-
 fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("CONTROL_TEST_DB"))
@@ -189,16 +185,12 @@ async fn seed_user(db: &Client) -> Uuid {
 async fn seed_oauth_client(db: &Client, client_id: &str, backchannel_logout_uri: &str) {
     let redirect_uris: Vec<String> = vec!["https://app.zeroship.test/callback".into()];
     let scopes: Vec<String> = vec!["openid".into()];
-    let sql = format!(
-        "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, {}, \
-             refresh_allowed, token_endpoint_auth_method, brokered, backchannel_logout_uri) \
-         VALUES ($1, 'BCL emission test', $2, $3, TRUE, $1, TRUE, \
-                 'client_secret_basic', TRUE, $4)",
-        provider_mirror_column()
-    );
     db.execute(
-        &sql,
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, \
+             refresh_allowed, token_endpoint_auth_method, brokered, backchannel_logout_uri) \
+         VALUES ($1, 'BCL emission test', $2, $3, TRUE, TRUE, \
+                 'client_secret_basic', TRUE, $4)",
         &[&client_id, &redirect_uris, &scopes, &backchannel_logout_uri],
     )
     .await

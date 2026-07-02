@@ -3,8 +3,7 @@
 -- V0061 created the shared pending device grant table for the control-owned
 -- platform device flow. The auth OP's native RFC 8628 arm also needs to bind a
 -- pending user code to its OAuth client and, after approval, to the approving
--- IdP session (`sid`) so the token poll can mint one-use OP tokens without
--- consulting Hydra.
+-- IdP session (`sid`) so the token poll can mint one-use OP tokens directly.
 
 ALTER TABLE zeroship.device_grants
     ADD COLUMN client_id TEXT REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE,

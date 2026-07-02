@@ -3,7 +3,7 @@
 -- 12h/30-min interactive zeroship.gateway_sessions:
 --   - NO idle column: a reload-recovery anchor MUST survive long idle gaps.
 --   - abs_expires_at = created_at + 30d, SET ONCE at create, NEVER slid. The
---     720h Hydra family ceiling is enforced ONLY by Hydra invalid_grant on a
+--     refresh-family ceiling is enforced ONLY by invalid_grant on a
 --     ?mint=1 refresh (gateway deletes the anchor + clears the breadcrumb),
 --     NOT mirrored into abs_expires_at.
 --   - refresh_token_enc holds the encrypted (AES-256-GCM, core::crypto) server-
@@ -32,7 +32,7 @@ CREATE TABLE zeroship.app_session_anchors (
     client_id           TEXT        NOT NULL REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE,  -- the per-app OAuth client_id (oac_<base62>) bound at mint time
     global_user_id      UUID        NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,  -- the GLOBAL user (pws_ is a projection, never stored)
     refresh_token_enc   BYTEA       NOT NULL,            -- AES-256-GCM encrypted server-held rotating refresh family
-    refresh_family_id   TEXT        NOT NULL,            -- gateway-generated lineage id (rfam_<base62>), set ONCE at create and carried verbatim across every rotation; Hydra exposes no usable family-lineage field (§1.2)
+    refresh_family_id   TEXT        NOT NULL,            -- gateway-generated lineage id (rfam_<base62>), set ONCE at create and carried verbatim across every rotation; the OP exposes no usable family-lineage field (§1.2)
     granted_scopes      TEXT[]      NOT NULL DEFAULT '{}',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- NO idle column: a reload-recovery anchor MUST survive long idle gaps.

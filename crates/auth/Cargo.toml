@@ -2,7 +2,7 @@
 name = "zeroship-auth"
 version = "0.1.0"
 edition = "2021"
-description = "zeroship auth service — login/consent UI, identity flows, hydra admin client"
+description = "zeroship auth service — login/consent UI, identity flows, native OP"
 
 [[bin]]
 name = "zeroship-auth"

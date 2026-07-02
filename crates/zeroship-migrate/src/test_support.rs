@@ -14,8 +14,8 @@ use crate::model::migration::Migration;
 use crate::Approval;
 
 /// One fixed advisory-lock key for tests that intentionally exercise the real
-/// platform schemas (`zeroship` / `oauth_hydra`) and fixed cluster roles
-/// (`zeroship_*` / `oauth_hydra`).
+/// platform schemas (`zeroship` / `public`) and fixed cluster roles
+/// (`zeroship_*`).
 ///
 /// PostgreSQL advisory lock tags include the database OID, so every caller must
 /// acquire this on the same maintenance DB connection, even when the test's

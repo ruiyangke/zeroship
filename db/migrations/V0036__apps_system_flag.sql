@@ -4,7 +4,7 @@
 -- cascade-deletes, leaving that user's apps OWNER-LESS. zeroship.apps has no FK
 -- to users, so the orphaned apps row (plus its bundle/blobs in object storage)
 -- is never torn down. The control-side orphaned_app_reaper sweeps owner-less
--- apps and purges them (VFS + DB cascade + Hydra client).
+-- apps and purges them (VFS + DB cascade + OAuth client).
 --
 -- The landmine: bootstrap_console seeds the platform console into zeroship.apps
 -- with NO app_members owner row (the console is owner-less BY CONSTRUCTION).

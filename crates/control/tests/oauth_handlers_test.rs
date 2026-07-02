@@ -543,8 +543,8 @@ async fn list_returns_registered_clients() {
         .execute(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                 skip_consent, created_by, hydra_client_id) \
-             VALUES ($1, 'List Client', NULL, NULL, $2, $3, true, $4, $1)",
+                 skip_consent, created_by) \
+             VALUES ($1, 'List Client', NULL, NULL, $2, $3, true, $4)",
             &[&client_id, &redirect_uris, &scopes, &pat.user_id],
         )
         .await
