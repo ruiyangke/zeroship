@@ -159,6 +159,7 @@ async fn apply_doc(
         zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
+        None,
     )
     .expect("load gate");
     let ops = document.ops.clone();

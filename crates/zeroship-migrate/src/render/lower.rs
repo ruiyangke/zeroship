@@ -1115,6 +1115,7 @@ impl IrAuthor {
         deploying_app: &str,
         registry: &std::collections::BTreeMap<String, String>,
         live: &LiveSchema,
+        policy_profile: Option<&crate::model::profile::PolicyProfile>,
     ) -> Result<Vec<Migration>, LoadAndLowerError> {
         let target = match self.dialect {
             SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
@@ -1126,9 +1127,15 @@ impl IrAuthor {
         // cross-schema op is refused at validate-time here too (defense in depth for
         // any caller that does not go through `load_and_lower_guarded`).
         let scope = crate::model::policy::SchemaScope::Single(self.project_schema.clone());
-        let ir =
-            crate::model::load::load_ir_document(bytes, deploying_app, target, registry, Some(&scope))
-                .map_err(LoadAndLowerError::Load)?;
+        let ir = crate::model::load::load_ir_document(
+            bytes,
+            deploying_app,
+            target,
+            registry,
+            Some(&scope),
+            policy_profile,
+        )
+        .map_err(LoadAndLowerError::Load)?;
         self.lower(&ir, live).map_err(LoadAndLowerError::Lower)
     }
 
@@ -1158,6 +1165,7 @@ impl IrAuthor {
         registry: &std::collections::BTreeMap<String, String>,
         live: &LiveSchema,
         guard_cfg: &GuardConfig,
+        policy_profile: Option<&crate::model::profile::PolicyProfile>,
     ) -> Result<LoweredArtifact, LoadAndLowerGuardedError> {
         let target = match self.dialect {
             SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
@@ -1176,6 +1184,7 @@ impl IrAuthor {
             target,
             registry,
             scope.as_ref(),
+            policy_profile,
         )
         .map_err(LoadAndLowerGuardedError::Load)?;
         // The tables this artifact creates — folded by the caller into the
@@ -4887,6 +4896,23 @@ mod tests {
 
     use crate::model::ir::{IrColumn as TIrColumn, IrFlagsOverride};
 
+    fn platform_profile() -> crate::model::profile::PolicyProfile {
+        crate::model::profile::PolicyProfile::platform()
+    }
+
+    fn validate_ir_platform(
+        ir: &MigrationIr,
+        dialect: crate::model::validate::Dialect,
+    ) -> Result<(), crate::model::validate::AuthoringError> {
+        crate::model::validate::validate_ir_scoped(
+            ir,
+            dialect,
+            &[],
+            Some(&crate::model::policy::SchemaScope::Unconfined),
+            &platform_profile(),
+        )
+    }
+
     /// Build a one-op `createTable` IR for the guard-per-fragment tests.
     fn create_table_ir(table: &str, cols: Vec<TIrColumn>) -> MigrationIr {
         MigrationIr {
@@ -5933,7 +5959,7 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let err = validate_ir(&ir_create, Dialect::Postgres, &[])
+        let err = validate_ir_platform(&ir_create, Dialect::Postgres)
             .expect_err("a synth default on a user column must validate-refuse");
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
@@ -6300,8 +6326,15 @@ mod tests {
             {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let profile = platform_profile();
         let migs = author
-            .load_and_lower(bytes, "app_a", &registry(&[]), &LiveSchema::default())
+            .load_and_lower(
+                bytes,
+                "app_a",
+                &registry(&[]),
+                &LiveSchema::default(),
+                Some(&profile),
+            )
             .expect("a fresh createTable by its declarer loads + lowers");
         assert!(
             migs.iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")),
@@ -6324,6 +6357,7 @@ mod tests {
                 "app_intruder",
                 &registry(&[("victim", "app_victim")]),
                 &LiveSchema::default(),
+                None,
             )
             .unwrap_err();
         match err {
@@ -6347,11 +6381,19 @@ mod tests {
             {"op":"createTable","name":"widgets","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let profile = platform_profile();
         // Guard confined to "other" — the rendered `"app".…` DDL is a cross-schema
         // reference the Confined guard denies, attributed to op #0.
         let guard_cfg = GuardConfig::confined("other".to_string());
         let err = author
-            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &LiveSchema::default(), &guard_cfg)
+            .load_and_lower_guarded(
+                bytes,
+                "app_a",
+                &registry(&[]),
+                &LiveSchema::default(),
+                &guard_cfg,
+                Some(&profile),
+            )
             .expect_err("a fragment outside the confined schema must be denied via the wired entry");
         match err {
             LoadAndLowerGuardedError::Lower(IrGuardedLowerError::Denied(d)) => {
@@ -6371,8 +6413,16 @@ mod tests {
         ]}"#;
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
+        let profile = platform_profile();
         let out = author
-            .load_and_lower_guarded(bytes, "app_a", &registry(&[]), &LiveSchema::default(), &guard_cfg)
+            .load_and_lower_guarded(
+                bytes,
+                "app_a",
+                &registry(&[]),
+                &LiveSchema::default(),
+                &guard_cfg,
+                Some(&profile),
+            )
             .expect("a clean createTable loads + guarded-lowers");
         assert_eq!(out.created_tables, vec!["fresh".to_string()], "the createTable is reported");
         assert!(out.migrations().iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
@@ -6510,6 +6560,7 @@ mod tests {
                 "app_intruder",
                 &registry(&[("users", "app_owner")]),
                 &LiveSchema::default(),
+                None,
             )
             .unwrap_err();
         assert!(

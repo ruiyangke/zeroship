@@ -49,7 +49,7 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
             ]}}"#
         );
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            let err = load_ir_document(&ir, APP, dialect, &registry(), None)
+            let err = load_ir_document(&ir, APP, dialect, &registry(), None, None)
                 .expect_err(&format!("raw `{raw_fn}` must be rejected at load on {dialect:?}"));
             // The closed ScalarFn enum has no such variant → a deserialize/contract
             // rejection. (Never a silent acceptance that would later mis-apply.)
@@ -74,7 +74,7 @@ fn in_envelope_split_part_helper_accepted() {
              {"node":"colRef","name":"v"},{"node":"literal","value":","},{"node":"literal","value":1}]}}}
     ]}"#;
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        load_ir_document(ir, APP, dialect, &registry(), None)
+        load_ir_document(ir, APP, dialect, &registry(), None, None)
             .unwrap_or_else(|e| panic!("in-envelope c.fn.splitPart must load on {dialect:?}: {e}"));
     }
 }
@@ -89,9 +89,9 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
          "set":{"x":{"node":"fnSynth","fn":"splitPart","args":[
              {"node":"colRef","name":"v"},{"node":"literal","value":", "},{"node":"literal","value":1}]}}}
     ]}"#;
-    load_ir_document(ir, APP, Dialect::Postgres, &registry(), None)
+    load_ir_document(ir, APP, Dialect::Postgres, &registry(), None, None)
         .expect("out-of-envelope splitPart is PG-renderable → loads on PG");
-    let err = load_ir_document(ir, APP, Dialect::Sqlite, &registry(), None)
+    let err = load_ir_document(ir, APP, Dialect::Sqlite, &registry(), None, None)
         .expect_err("out-of-envelope splitPart must reject on SQLite");
     assert!(
         err.to_string().contains("EXPR_NOT_PORTABLE") || err.to_string().to_lowercase().contains("portable"),

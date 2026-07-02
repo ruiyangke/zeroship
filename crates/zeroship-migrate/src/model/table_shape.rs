@@ -88,7 +88,7 @@ fn resolve_create_table(
         return Ok(());
     }
 
-    if already_resolved(columns, primary_key, indexes, profile)? {
+    if resolved_create_table_matches_profile(columns, primary_key, indexes, profile)? {
         return Ok(());
     }
 
@@ -246,7 +246,7 @@ fn validate_folded_id_identity(table: &str, column: &IrColumn) -> Result<(), Tab
     Ok(())
 }
 
-fn already_resolved(
+pub(crate) fn resolved_create_table_matches_profile(
     columns: &[IrColumn],
     primary_key: &Option<Vec<String>>,
     indexes: &[IrIndex],

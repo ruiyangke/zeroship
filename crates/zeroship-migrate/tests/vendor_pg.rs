@@ -18,7 +18,9 @@ use zeroship_migrate::model::validate::{
 };
 use zeroship_migrate::SchemaScope;
 use zeroship_migrate::render::vendor::render_vendor_op;
-use zeroship_migrate::{Checksum, GuardConfig, IrAuthor, LiveSchema, MigrationFlags, SqlDialect};
+use zeroship_migrate::{
+    Checksum, GuardConfig, IrAuthor, LiveSchema, MigrationFlags, PolicyProfile, SqlDialect,
+};
 
 const SCHEMA: &str = "zeroship";
 
@@ -226,14 +228,14 @@ fn trigger_action_and_facet_refusals_are_dialect_specific() {
     let scope = SchemaScope::Single("app".into());
 
     let pg_body = ir_with(vec![body_trigger_op("append-only")]);
-    let err = validate_ir_scoped(&pg_body, Dialect::Postgres, &[], Some(&scope))
+    let err = validate_ir_scoped(&pg_body, Dialect::Postgres, &[], Some(&scope), &PolicyProfile::confined())
         .expect_err("PG must reject closed trigger bodies instead of synthesizing functions");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Postgres);
     assert!(err.reason.contains("named trigger function"), "got {err:?}");
 
     let sqlite_exec = ir_with(vec![execute_trigger_op()]);
-    let err = validate_ir_scoped(&sqlite_exec, Dialect::Sqlite, &[], Some(&scope))
+    let err = validate_ir_scoped(&sqlite_exec, Dialect::Sqlite, &[], Some(&scope), &PolicyProfile::confined())
         .expect_err("SQLite must reject ExecuteFunction trigger actions");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Sqlite);
@@ -243,7 +245,7 @@ fn trigger_action_and_facet_refusals_are_dialect_specific() {
     if let Op::CreateTrigger { events, .. } = &mut truncate {
         *events = vec![TriggerEvent::Truncate];
     }
-    let err = validate_ir_scoped(&ir_with(vec![truncate]), Dialect::Sqlite, &[], Some(&scope))
+    let err = validate_ir_scoped(&ir_with(vec![truncate]), Dialect::Sqlite, &[], Some(&scope), &PolicyProfile::confined())
         .expect_err("SQLite must reject only the TRUNCATE facet");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Sqlite);
@@ -253,7 +255,7 @@ fn trigger_action_and_facet_refusals_are_dialect_specific() {
     if let Op::CreateTrigger { for_each, .. } = &mut statement {
         *for_each = ForEach::Statement;
     }
-    let err = validate_ir_scoped(&ir_with(vec![statement]), Dialect::Sqlite, &[], Some(&scope))
+    let err = validate_ir_scoped(&ir_with(vec![statement]), Dialect::Sqlite, &[], Some(&scope), &PolicyProfile::confined())
         .expect_err("SQLite must reject only the FOR EACH STATEMENT facet");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Sqlite);
@@ -264,7 +266,7 @@ fn trigger_action_and_facet_refusals_are_dialect_specific() {
 fn body_trigger_is_not_vendor_gated_under_confined_validate_or_lower_guarded() {
     let ir = ir_with(vec![body_trigger_op("append-only")]);
     let scope = SchemaScope::Single("app".into());
-    validate_ir_scoped(&ir, Dialect::Sqlite, &[], Some(&scope))
+    validate_ir_scoped(&ir, Dialect::Sqlite, &[], Some(&scope), &PolicyProfile::confined())
         .expect("Body trigger is cross-dialect core and should validate under Confined");
 
     let author = IrAuthor::new("app", "app_corpus", SqlDialect::Sqlite);
@@ -418,7 +420,7 @@ fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
         if let Op::CreateFunction { returns: r, .. } = &mut op {
             *r = returns.into();
         }
-        let err = validate_ir_scoped(&ir_with(vec![op.clone()]), Dialect::Postgres, &[], Some(&platform))
+        let err = validate_ir_scoped(&ir_with(vec![op.clone()]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
             .expect_err("unsafe return type fragment must be rejected");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got {err:?}");
     }
@@ -427,7 +429,7 @@ fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
         *returns = "numeric(10,2)[]".into();
         args.as_mut().unwrap()[0].ty = "int[] SECURITY DEFINER".into();
     }
-    let err = validate_ir_scoped(&ir_with(vec![op.clone()]), Dialect::Postgres, &[], Some(&platform))
+    let err = validate_ir_scoped(&ir_with(vec![op.clone()]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
         .expect_err("unsafe arg type fragment must be rejected");
     assert_eq!(err.code, CODE_UNSUPPORTED, "got {err:?}");
 
@@ -437,7 +439,7 @@ fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
         arg_types: Some(vec!["text SET search_path=public".into()]),
         if_exists: Some(true),
     };
-    let err = validate_ir_scoped(&ir_with(vec![bad_drop]), Dialect::Postgres, &[], Some(&platform))
+    let err = validate_ir_scoped(&ir_with(vec![bad_drop]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
         .expect_err("unsafe dropFunction arg type fragment must be rejected");
     assert_eq!(err.code, CODE_UNSUPPORTED, "got {err:?}");
 
@@ -445,7 +447,7 @@ fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
         *returns = "myschema.mytype".into();
         args.as_mut().unwrap()[0].ty = "numeric(10,2)".into();
     }
-    validate_ir_scoped(&ir_with(vec![op]), Dialect::Postgres, &[], Some(&platform))
+    validate_ir_scoped(&ir_with(vec![op]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
         .expect("legal type refs pass");
 
     let ok_drop = Op::DropFunction {
@@ -454,7 +456,7 @@ fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
         arg_types: Some(vec!["text".into(), "int[]".into(), "myschema.mytype".into()]),
         if_exists: Some(true),
     };
-    validate_ir_scoped(&ir_with(vec![ok_drop]), Dialect::Postgres, &[], Some(&platform))
+    validate_ir_scoped(&ir_with(vec![ok_drop]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
         .expect("legal dropFunction type refs pass");
 }
 
@@ -465,7 +467,7 @@ fn pg_raw_empty_reason_is_rejected_at_validate() {
         reason: "  ".into(),
     };
     let platform = SchemaScope::Allowlist(vec!["zeroship".into(), "public".into()]);
-    let err = validate_ir_scoped(&ir_with(vec![op]), Dialect::Postgres, &[], Some(&platform))
+    let err = validate_ir_scoped(&ir_with(vec![op]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
         .expect_err("empty pgRaw reason must be rejected");
     assert_eq!(err.code, CODE_PGRAW_REASON_REQUIRED, "got {err:?}");
     assert_eq!(err.reason, "pgRaw requires a non-empty reason for auditability");
@@ -516,7 +518,7 @@ fn confined_refuses_every_vendor_op_with_vendor_op_denied() {
     let confined = SchemaScope::Single("app1".into());
     for op in vendor_samples() {
         let ir = ir_with(vec![op.clone()]);
-        let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&confined))
+        let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&confined), &PolicyProfile::confined())
             .expect_err("confined must refuse the vendor op");
         // The error code must be the VALIDATE-layer VENDOR_OP_DENIED (gate 1) — NOT
         // a generic guard denial; this pins that the validate gate fired, not just
@@ -533,7 +535,7 @@ fn platform_allowlist_permits_vendor_ops() {
     let platform = SchemaScope::Allowlist(vec!["zeroship".into(), "public".into()]);
     for op in vendor_samples() {
         let ir = ir_with(vec![op.clone()]);
-        validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&platform))
+        validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
             .unwrap_or_else(|e| panic!("platform must permit vendor op {op:?}; got {e:?}"));
     }
 }
@@ -550,7 +552,7 @@ fn grant_revoke_table_target_schema_is_checked_at_validate_time() {
         to: vec!["app_reader".into()],
         with_grant_option: None,
     };
-    let err = validate_ir_scoped(&ir_with(vec![grant]), Dialect::Postgres, &[], Some(&platform))
+    let err = validate_ir_scoped(&ir_with(vec![grant]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
         .expect_err("out-of-allowlist grant table target must be rejected at validate");
     assert_eq!(err.code, zeroship_migrate::model::validate::CODE_CROSS_SCHEMA, "got {err:?}");
 
@@ -562,7 +564,7 @@ fn grant_revoke_table_target_schema_is_checked_at_validate_time() {
         },
         from: vec!["app_reader".into()],
     };
-    let err = validate_ir_scoped(&ir_with(vec![revoke]), Dialect::Postgres, &[], Some(&platform))
+    let err = validate_ir_scoped(&ir_with(vec![revoke]), Dialect::Postgres, &[], Some(&platform), &PolicyProfile::platform())
         .expect_err("out-of-allowlist revoke table target must be rejected at validate");
     assert_eq!(err.code, zeroship_migrate::model::validate::CODE_CROSS_SCHEMA, "got {err:?}");
 }
@@ -572,12 +574,12 @@ fn none_scope_rejects_vendor_ops_explicit_unconfined_permits_them() {
     // RED pre-fix: None mapped onto the operator preset, so this public/defaulted
     // path accepted raw vendor IR.
     let ir = ir_with(vendor_samples());
-    let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], None)
+    let err = validate_ir_scoped(&ir, Dialect::Postgres, &[], None, &PolicyProfile::confined())
         .expect_err("omitted/default capability must reject vendor ops");
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED, "got: {err:?}");
 
     let trusted = SchemaScope::Unconfined;
-    validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&trusted))
+    validate_ir_scoped(&ir, Dialect::Postgres, &[], Some(&trusted), &PolicyProfile::platform())
         .expect("explicit Trusted/Unconfined capability permits vendor ops");
 }
 
@@ -603,7 +605,7 @@ fn sqlite_target_hard_rejects_vendor_ops_at_validate() {
         name: "r".into(), login: None, password: None, bypass_rls: None, create_role: None,
         create_db: None, superuser: None, in_role: None, set_search_path: None, if_not_exists: None,
     }]);
-    let err = validate_ir_scoped(&ir, Dialect::Sqlite, &[], Some(&platform))
+    let err = validate_ir_scoped(&ir, Dialect::Sqlite, &[], Some(&platform), &PolicyProfile::platform())
         .expect_err("SQLite must refuse the vendor op");
     assert_eq!(err.code, CODE_UNSUPPORTED, "SQLite vendor op ⇒ UNSUPPORTED; got {err:?}");
 }

@@ -2674,7 +2674,10 @@ mod tests {
     };
     use crate::model::profile::PolicyProfile;
     use crate::model::table_shape::resolve_create_table_policy;
-    use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+    use crate::model::policy::SchemaScope;
+    use crate::model::validate::{
+        validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED,
+    };
 
     const SCHEMA: &str = "proj_test";
 
@@ -2694,7 +2697,14 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        validate_ir(&ir, dialect, &[]).unwrap_err()
+        validate_ir_scoped(
+            &ir,
+            dialect,
+            &[],
+            Some(&SchemaScope::Unconfined),
+            &PolicyProfile::platform(),
+        )
+        .unwrap_err()
     }
 
     fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
