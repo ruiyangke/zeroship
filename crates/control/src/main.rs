@@ -24,7 +24,7 @@ use zeroship_control::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const DEV_AUTH_PLATFORM_ISSUER: &str = "http://localhost:4444/oauth2";
+const DEV_AUTH_PLATFORM_ISSUER: &str = "http://localhost:9092/oauth2";
 
 /// zeroship control-plane startup configuration.
 #[derive(Parser)]

@@ -60,13 +60,14 @@ HOST="auth-notes-ax.localhost"
 OAC="oac_e2e_authrpc"
 SECTOR="https://$HOST"
 
-# --- Provision the app's per-app OAuth client (what Hydra provisioning would do).
-# resolve_auth needs route.oauth_client_id + sector_identifier (else 503/401);
-# the gateway picks these up from control's LEFT JOIN on app_oauth_clients.
+# --- Provision the app's per-app OAuth client (what control's OAuth-client
+# provisioning does). resolve_auth needs route.oauth_client_id + sector_identifier
+# (else 503/401); the gateway picks these up from control's LEFT JOIN on
+# app_oauth_clients.
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.oauth_clients (client_id, client_name, redirect_uris, scopes, hydra_client_id)
+INSERT INTO zeroship.oauth_clients (client_id, client_name, redirect_uris, scopes)
 VALUES ('$OAC', 'e2e auth-rpc', ARRAY['https://$HOST/__zeroship/auth/callback'],
-        ARRAY['openid','email','profile'], 'hydra_$OAC')
+        ARRAY['openid','email','profile'])
 ON CONFLICT (client_id) DO NOTHING;
 INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier)
 VALUES ('$APP_ID', '$OAC', '$SECTOR')
