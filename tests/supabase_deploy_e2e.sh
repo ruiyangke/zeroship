@@ -58,7 +58,7 @@ dump_debug() {
   [ -n "${WORK:-}" ] || return 0
   echo "" >&2
   echo "Debug logs under $WORK" >&2
-  for log in gotrue-proxy.log hydra-admin-stub.log auth.log control.log worker.log gate.log; do
+  for log in gotrue-proxy.log auth.log control.log worker.log gate.log; do
     if [ -f "$WORK/$log" ]; then
       echo "--- tail $log ---" >&2
       tail -40 "$WORK/$log" >&2 || true
@@ -112,7 +112,6 @@ CONTROL_PG_PORT="${CONTROL_PG_PORT:-$(pick_port)}"
 GOTRUE_PORT="${GOTRUE_PORT:-$(pick_port)}"
 GOTRUE_PROXY_PORT="${GOTRUE_PROXY_PORT:-$(pick_port)}"
 AUTH_PORT="${AUTH_PORT:-$(pick_port)}"
-HYDRA_STUB_PORT="${HYDRA_STUB_PORT:-$(pick_port)}"
 
 CONTROL_URL="http://localhost:$CONTROL_PORT"
 GATE_URL="http://localhost:$GATE_PORT"
@@ -331,106 +330,37 @@ ensure_starter_zship() {
   pass "starter .zship built ($(du -k "$ZSHIP" | cut -f1)KB)"
 }
 
-start_hydra_admin_stub() {
-  cat >"$WORK/hydra_admin_stub.mjs" <<'NODE'
-import http from "node:http";
-
-const port = Number(process.argv[2]);
-const clients = new Map();
-const keys = {
-  "hydra.openid.id-token": [
-    { kid: "stub-id-eddsa", alg: "EdDSA", use: "sig" },
-    { kid: "stub-id-rs256", alg: "RS256", use: "sig" },
-  ],
-  "hydra.jwt.access-token": [
-    { kid: "stub-at-eddsa", alg: "EdDSA", use: "sig" },
-  ],
-};
-
-function send(res, status, body) {
-  const text = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json" });
-  res.end(text);
-}
-
-function readJson(req) {
-  return new Promise((resolve) => {
-    let raw = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => raw += chunk);
-    req.on("end", () => {
-      try {
-        resolve(raw ? JSON.parse(raw) : {});
-      } catch {
-        resolve({});
-      }
-    });
-  });
-}
-
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url || "/", "http://127.0.0.1");
-  const keyMatch = url.pathname.match(/^\/admin\/keys\/([^/]+)(?:\/([^/]+))?$/);
-  if (keyMatch) {
-    const set = decodeURIComponent(keyMatch[1]);
-    const kid = keyMatch[2] ? decodeURIComponent(keyMatch[2]) : "";
-    keys[set] ||= [];
-    if (req.method === "GET" && !kid) return send(res, 200, { keys: keys[set] });
-    if (req.method === "POST" && !kid) {
-      const body = await readJson(req);
-      const key = { kid: body.kid || `stub-${Date.now()}`, alg: body.alg || "EdDSA", use: body.use || "sig" };
-      keys[set].unshift(key);
-      return send(res, 201, { keys: keys[set] });
-    }
-    if (req.method === "DELETE" && kid) {
-      keys[set] = keys[set].filter((key) => key.kid !== kid);
-      res.writeHead(204);
-      return res.end();
-    }
-  }
-
-  const clientMatch = url.pathname.match(/^\/admin\/clients\/([^/]+)$/);
-  if (clientMatch && req.method === "GET") {
-    const id = decodeURIComponent(clientMatch[1]);
-    if (clients.has(id)) return send(res, 200, clients.get(id));
-    return send(res, 404, { error: "not_found" });
-  }
-  if (clientMatch && req.method === "PUT") {
-    const id = decodeURIComponent(clientMatch[1]);
-    const body = await readJson(req);
-    clients.set(id, body);
-    return send(res, 200, body);
-  }
-  if (url.pathname === "/admin/clients" && req.method === "POST") {
-    const body = await readJson(req);
-    clients.set(body.client_id || `client-${Date.now()}`, body);
-    return send(res, 201, body);
-  }
-
-  send(res, 404, { error: "not_found" });
-});
-
-server.listen(port, "127.0.0.1", () => {
-  console.error(`hydra admin stub listening on 127.0.0.1:${port}`);
-});
-NODE
-
-  node "$WORK/hydra_admin_stub.mjs" "$HYDRA_STUB_PORT" >"$WORK/hydra-admin-stub.log" 2>&1 &
-  PIDS+=("$!")
-  wait_http "http://localhost:$HYDRA_STUB_PORT/admin/keys/hydra.openid.id-token" \
-    "Hydra admin stub healthy"
+prepare_auth_native_op_secrets() {
+  openssl genpkey -algorithm ed25519 -out "$WORK/auth-signing.pem" \
+    >"$WORK/auth-signing-keygen.log" 2>&1 || fail "auth native OP signing key generation failed"
+  openssl rand -base64 48 >"$WORK/auth-pairwise-salt" \
+    || fail "auth pairwise salt generation failed"
+  openssl rand -base64 48 >"$WORK/auth-broker-secret" \
+    || fail "auth broker secret generation failed"
+  printf '1:%s\n' "$(openssl rand -hex 48)" >"$WORK/refresh-hash-key"
+  openssl rand -base64 48 >"$WORK/refresh-idem-key" \
+    || fail "auth refresh idempotency key generation failed"
+  chmod 0600 \
+    "$WORK/auth-signing.pem" \
+    "$WORK/auth-pairwise-salt" \
+    "$WORK/auth-broker-secret" \
+    "$WORK/refresh-hash-key" \
+    "$WORK/refresh-idem-key"
 }
 
 start_auth_service() {
-  start_hydra_admin_stub
+  prepare_auth_native_op_secrets
   "$BIN/zeroship-auth" \
     --addr "0.0.0.0:$AUTH_PORT" \
     --db-url "$CONTROL_DB_URL" \
-    --hydra-admin-url "http://127.0.0.1:$HYDRA_STUB_PORT" \
-    --hydra-public-url "http://127.0.0.1:$HYDRA_STUB_PORT" \
-    --clients-config "$ROOT/ops/auth-clients.example.toml" \
+    --public-url "http://localhost:$AUTH_PORT" \
     --dev-insecure \
     --stash-signing-key "$AUTH_STASH_KEY" \
+    --auth-signing-key-file "$WORK/auth-signing.pem" \
+    --auth-pairwise-salt-file "$WORK/auth-pairwise-salt" \
+    --auth-broker-secret-file "$WORK/auth-broker-secret" \
+    --refresh-hash-key-file "$WORK/refresh-hash-key" \
+    --refresh-idem-key-file "$WORK/refresh-idem-key" \
     --auth-provider supabase \
     --supabase-url "$SUPABASE_URL" \
     --supabase-anon-key "$SUPABASE_ANON_KEY" \
@@ -442,6 +372,8 @@ start_auth_service() {
   PIDS+=("$!")
   wait_http "http://localhost:$AUTH_PORT/healthz" \
     "zeroship-auth healthy with GoTrue Send Email hook"
+  wait_http "http://localhost:$AUTH_PORT/oauth2/.well-known/jwks.json" \
+    "zeroship-auth native OP JWKS healthy"
 }
 
 start_prefix_proxy() {
@@ -699,7 +631,7 @@ ensure_release_bins
 ensure_starter_zship
 [ "$SUPABASE_E2E_MODE" = "jwks" ] && echo "  mode: $SUPABASE_E2E_MODE"
 echo "  GoTrue image: $GOTRUE_IMAGE"
-echo "  ports: gotrue=$GOTRUE_PORT proxy=$GOTRUE_PROXY_PORT auth=$AUTH_PORT hydra_stub=$HYDRA_STUB_PORT control=$CONTROL_PORT worker=$WORKER_PORT gate=$GATE_PORT pg=$CONTROL_PG_PORT"
+echo "  ports: gotrue=$GOTRUE_PORT proxy=$GOTRUE_PROXY_PORT auth=$AUTH_PORT control=$CONTROL_PORT worker=$WORKER_PORT gate=$GATE_PORT pg=$CONTROL_PG_PORT"
 
 step "Mint Supabase API keys"
 if [ "$SUPABASE_E2E_MODE" = "jwks" ]; then
