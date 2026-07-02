@@ -169,6 +169,14 @@ pub async fn complete_callback(
     // 2. Verify the ID token using core::oidc_verify against Google's JWKS.
     //    The `audience` we expect is our client_id; the issuer is Google's
     //    canonical value; the nonce is whatever the start step stashed.
+    // `c_hash` is NOT applicable here: it is only defined for the
+    // authorization-endpoint id_token of the implicit/hybrid flows (OIDC Core
+    // 3.1.3.6). We use `response_type=code`, so Google's token-endpoint id_token
+    // carries no `c_hash` and we pass `None` (passing `Some(code)` would make
+    // verify_id_token fail CHashClaimMissing on every real login). `at_hash`
+    // binding to the paired access token still applies. (Mirrors the gateway
+    // RP fix in crates/gateway/src/oidc_rp.rs.)
+    let _ = code;
     let claims: TokenClaims = verify_id_token(
         jwks,
         &tr.id_token,
@@ -176,7 +184,7 @@ pub async fn complete_callback(
         client_id,
         Some(expected_nonce),
         tr.access_token.as_deref(),
-        Some(code),
+        None,
     )
     .await
     .map_err(|e| AuthError::Internal(format!("google id_token verify: {e}")))?;
