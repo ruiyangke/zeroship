@@ -3,6 +3,7 @@ use zeroship_migrate::{
     IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrLowerError, IrScalar, IrAuthor,
     LiveSchema, MigrationIr, Op, PolicyProfile, UnsupportedKind, ValidatorDialect,
     CODE_COLUMN_FACET_CONFLICT, CODE_UNSUPPORTED, CURRENT_IR_VERSION, resolve_create_table_policy,
+    SchemaScope,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -31,6 +32,16 @@ fn raw_ir(op: Op) -> MigrationIr {
 fn ir(op: Op) -> MigrationIr {
     let ir = raw_ir(op);
     resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves")
+}
+
+fn validate_platform(ir: &MigrationIr, dialect: ValidatorDialect) -> Result<(), zeroship_migrate::AuthoringError> {
+    zeroship_migrate::model::validate::validate_ir_scoped(
+        ir,
+        dialect,
+        &[],
+        Some(&SchemaScope::Unconfined),
+        &PolicyProfile::platform(),
+    )
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
@@ -232,10 +243,9 @@ fn identity_cannot_also_have_default_or_generated() {
     id_with_default.default = Some(IrDefault::Literal {
         value: IrScalar::Int(1),
     });
-    let err = validate_ir(
+    let err = validate_platform(
         &raw_ir(create_table(vec![id_with_default], vec![pk_id()])),
         ValidatorDialect::Postgres,
-        &[],
     )
     .expect_err("identity + default is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -246,10 +256,9 @@ fn identity_cannot_also_have_default_or_generated() {
         expr: Expr::lit(IrScalar::Int(1)),
         stored: true,
     });
-    let err = validate_ir(
+    let err = validate_platform(
         &raw_ir(create_table(vec![id_with_generated], vec![pk_id()])),
         ValidatorDialect::Postgres,
-        &[],
     )
     .expect_err("identity + generated is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");

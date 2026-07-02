@@ -288,7 +288,7 @@ const UNSUPPORTED: &str = crate::model::validate::CODE_UNSUPPORTED;
 
 const UNSUPPORTED_ALL_PRIMARY_KEY: DialectSupport = DialectSupport::unsupported_all(
     UNSUPPORTED,
-    "the platform owns the id primary key; user primary keys are not supported",
+    "standalone/table-level primary key constraints are deferred; createTable.primaryKey is validated by the active table-shape policy",
 );
 
 const UNSUPPORTED_ALL_CHECK_EXPR: DialectSupport = DialectSupport::unsupported_all(

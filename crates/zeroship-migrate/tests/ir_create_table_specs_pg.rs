@@ -104,6 +104,7 @@ async fn author_and_apply(
         zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
+        None,
     )
     .expect("load gate");
     let plan = author
@@ -258,8 +259,8 @@ async fn create_table_level_unique_fk_and_index_apply_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// HIGH-fix fail-closed: a composite user PRIMARY KEY is a HARD error (the
-/// platform owns the `id` PK), never a silent no-op.
+/// HIGH-fix fail-closed: a table-level PRIMARY KEY constraint is a HARD error,
+/// never a silent no-op. Top-level `primaryKey` is policy-gated separately.
 #[compio::test]
 async fn create_table_user_primary_key_is_hard_error_on_pg() {
     let conn = pg().await;
@@ -275,14 +276,16 @@ async fn create_table_user_primary_key_is_hard_error_on_pg() {
             {"kind":{"kind":"pk","columns":["a","b"]}}
         ]}
     ]}"#;
+    let policy = PolicyProfile::platform();
     let err = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Postgres,
         &registry(&[]),
         None,
+        Some(&policy),
     )
-    .expect_err("a user composite PRIMARY KEY must validate-refuse, not silently no-op");
+    .expect_err("a table-level PRIMARY KEY must validate-refuse, not silently no-op");
     let IrLoadError::Validate(err) = err else {
         panic!("expected validate error for user PRIMARY KEY, got {err:?}");
     };
@@ -314,12 +317,14 @@ async fn create_table_check_is_hard_error_on_pg() {
                 "rhs":{"node":"literal","value":0}}}}
         ]}
     ]}"#;
+    let policy = PolicyProfile::platform();
     let err = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Postgres,
         &registry(&[]),
         None,
+        Some(&policy),
     )
     .expect_err("a table-level CHECK must validate-refuse, not be dropped");
     let IrLoadError::Validate(err) = err else {

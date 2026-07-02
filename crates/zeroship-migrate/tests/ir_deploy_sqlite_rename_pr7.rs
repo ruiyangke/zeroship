@@ -106,7 +106,7 @@ async fn deploy_renamecolumn_completes_as_rebuild_on_real_sqlite() {
         &p.migrations,
         &exec_cfg(),
         &GuardConfig::confined(PROJECT),
-        Approval::None,
+        &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable deploy must succeed");
@@ -140,7 +140,7 @@ async fn deploy_renamecolumn_completes_as_rebuild_on_real_sqlite() {
         &p.migrations,
         &exec_cfg(),
         &GuardConfig::confined(PROJECT),
-        Approval::Approved,
+        &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect("renameColumn deploy must complete as a rebuild");
@@ -214,7 +214,7 @@ async fn deploy_post_rename_descriptor_set_fails_closed_on_real_sqlite() {
     write_ir(&p, "0001_create_people.ir.json", create);
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable deploy must succeed");
@@ -241,7 +241,7 @@ async fn deploy_post_rename_descriptor_set_fails_closed_on_real_sqlite() {
     let post_rename_desired = [descriptor("people", "handle")];
     let err = apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &post_rename_desired, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::Approved,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect_err(
@@ -299,7 +299,7 @@ async fn deploy_renamecolumn_refused_under_no_approval_on_real_sqlite() {
         &p.migrations,
         &exec_cfg(),
         &GuardConfig::confined(PROJECT),
-        Approval::None,
+        &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable deploy must succeed");
@@ -317,7 +317,7 @@ async fn deploy_renamecolumn_refused_under_no_approval_on_real_sqlite() {
         &p.migrations,
         &exec_cfg(),
         &GuardConfig::confined(PROJECT),
-        Approval::None,
+        &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect_err("a rename rebuild must be refused under Approval::None");
@@ -379,7 +379,7 @@ async fn deploy_understated_unique_drop_refused_on_real_sqlite() {
     write_ir(&p, "0001_create_users.ir.json", create);
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable + unique createIndex deploy must succeed");
@@ -394,7 +394,7 @@ async fn deploy_understated_unique_drop_refused_on_real_sqlite() {
     write_ir(&p, "0002_drop_uniq.ir.json", drop);
     let err = apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect_err("an understated-unique drop of a descriptor-unique index must be refused");
@@ -446,7 +446,7 @@ async fn deploy_multi_file_intermediate_rename_fails_closed_on_real_sqlite() {
 
     let err = apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &end_state, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::Approved,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect_err(
@@ -505,7 +505,7 @@ async fn deploy_no_raw_sql_hero_ddl_backfill_applies_sqlite() {
     write_ir(&p, "0001_create_people.ir.json", create);
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable deploy must succeed");
@@ -548,7 +548,7 @@ async fn deploy_no_raw_sql_hero_ddl_backfill_applies_sqlite() {
     let live = [descriptor3("people", "name", "first_name", "last_name")];
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &live, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::Approved,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect("the op.*-authored DDL+backfill hero must apply on SQLite with no raw SQL");

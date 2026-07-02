@@ -28,6 +28,7 @@ use crate::apply::executor::{
 };
 use crate::model::capability::OperatorCapability;
 use crate::model::migration::{migration_id_for_version, MigrationId};
+use crate::model::profile::PolicyProfile;
 use crate::plan::loader::{load_dir, LoaderError, PLATFORM_OWNER_APP};
 use crate::ops::status::{status, status_via_backend, MigrationStatus, StatusError};
 use crate::Approval;
@@ -725,6 +726,16 @@ fn build_guard_cfg(cfg: &RunConfig) -> crate::guard::GuardConfig {
     }
 }
 
+/// The resolved migration policy profile paired with the executor/guard config.
+fn build_policy_profile(cfg: &RunConfig) -> PolicyProfile {
+    match cfg.profile {
+        RunProfile::Platform => PolicyProfile::platform(),
+        #[cfg(any(test, feature = "standalone-cli"))]
+        RunProfile::Trusted => PolicyProfile::platform(),
+        RunProfile::Confined => PolicyProfile::confined(),
+    }
+}
+
 /// The SQLite [`ExecutorConfig`] for the CLI's SQLite leg. SQLite ignores the PG
 /// schema/role machinery (the single migration actor serializes structurally, the
 /// `_mig` journal lives in the attached file), so a plain
@@ -811,6 +822,7 @@ async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunErr
     let conn = connect(&cfg.database_url).await?;
     let exec_cfg = build_exec_cfg(cfg);
     let guard_cfg = build_guard_cfg(cfg);
+    let policy_profile = build_policy_profile(cfg);
     let approval = if cfg.yes {
         Approval::Approved
     } else {
@@ -825,6 +837,7 @@ async fn run_migrate_pg_platform_ts(cfg: &RunConfig) -> Result<RunReport, RunErr
         &via,
         &exec_cfg,
         &guard_cfg,
+        &policy_profile,
         approval,
         "platform-migrate-ts",
     )

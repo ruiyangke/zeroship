@@ -6,7 +6,8 @@ use zeroship_migrate::model::ir::{IrConstraintKind, Op, TriggerAction, ViewQuery
 use zeroship_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
 use zeroship_migrate::model::validate::validate_ir_scoped;
 use zeroship_migrate::{
-    IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, SchemaScope, SqlDialect, CURRENT_IR_VERSION,
+    IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, PolicyProfile, SchemaScope, SqlDialect,
+    CURRENT_IR_VERSION,
 };
 
 const DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql];
@@ -155,6 +156,7 @@ fn validate_current(op: &Op, dialect: Dialect) -> bool {
         dialect,
         &[],
         Some(&SchemaScope::Unconfined),
+        &PolicyProfile::platform(),
     )
     .is_ok()
 }

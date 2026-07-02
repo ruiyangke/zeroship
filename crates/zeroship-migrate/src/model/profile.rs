@@ -1270,6 +1270,16 @@ impl SealedProfile {
         self.effective.to_guard_config()
     }
 
+    pub(crate) fn policy_profile(&self) -> PolicyProfile {
+        PolicyProfile {
+            extends: None,
+            capabilities: self.effective.capabilities.clone(),
+            operational: self.effective.operational.clone(),
+            data_security: self.effective.data_security.clone(),
+            system_shape: self.effective.system_shape.clone(),
+        }
+    }
+
     /// Ensure the sealed line-1 capability profile is backed by the executor's
     /// line-2 database role. A least-privilege `migrator_<app>` role is the
     /// DB-enforced floor; a sealed profile that grants platform-only capabilities

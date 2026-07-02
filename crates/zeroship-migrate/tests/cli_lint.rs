@@ -1,6 +1,7 @@
 //! DB-free CLI coverage for `zeroship-migrate lint`.
 
 use serde_json::Value;
+use zeroship_migrate::{resolve_create_table_policy, MigrationIr, PolicyProfile};
 
 const INDEX_IR: &str = r#"{
   "ir_version": 1,
@@ -32,8 +33,16 @@ fn run_lint(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     out
 }
 
+fn resolve_ir_json(ir: &str) -> String {
+    let raw: MigrationIr = serde_json::from_str(ir).expect("lint fixture IR parses");
+    let resolved =
+        resolve_create_table_policy(&raw, &PolicyProfile::confined()).expect("lint fixture IR resolves");
+    serde_json::to_string(&resolved).expect("resolved lint fixture serializes")
+}
+
 #[test]
 fn lint_human_output_groups_rules_and_summarizes() {
+    let index_ir = resolve_ir_json(INDEX_IR);
     let dir = tempdir_with(&[
         (
             "V0001__risky.sql",
@@ -43,7 +52,7 @@ fn lint_human_output_groups_rules_and_summarizes() {
                FOREIGN KEY (parent_id) REFERENCES parent(id) NOT VALID;
              DROP TABLE legacy;",
         ),
-        ("0002_creator_index.ir.json", INDEX_IR),
+        ("0002_creator_index.ir.json", &index_ir),
     ]);
 
     let out = run_lint(&dir, &["--dialect", "pg"]);
@@ -64,9 +73,10 @@ fn lint_human_output_groups_rules_and_summarizes() {
 
 #[test]
 fn lint_json_shape_is_stable() {
+    let index_ir = resolve_ir_json(INDEX_IR);
     let dir = tempdir_with(&[
         ("V0001__drop.sql", "DROP TABLE legacy;"),
-        ("0002_creator_index.ir.json", INDEX_IR),
+        ("0002_creator_index.ir.json", &index_ir),
     ]);
 
     let out = run_lint(&dir, &["--dialect", "pg", "--json"]);

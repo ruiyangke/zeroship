@@ -123,7 +123,7 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     write_ir(&p, "0001_create_users.ir.json", create);
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable users(name, secret encrypted) must succeed");
@@ -195,7 +195,7 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
         &p.migrations,
         &exec_cfg(),
         &GuardConfig::confined(PROJECT),
-        Approval::Approved,
+        &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect(
@@ -312,7 +312,7 @@ async fn catalog_entry_fails_closed_when_descriptor_to_affinity_diverges_from_li
     write_ir(&p, "0001_create_users.ir.json", create);
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable users(name TEXT) must succeed");
@@ -339,7 +339,7 @@ async fn catalog_entry_fails_closed_when_descriptor_to_affinity_diverges_from_li
 
     let err = apply_bundle_ir_sqlite_catalog(
         &be, PROJECT, APP, &divergent_desired, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::Approved,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect_err(
@@ -405,7 +405,7 @@ async fn catalog_entry_fails_closed_on_same_affinity_facet_change_on_renamed_col
     write_ir(&p, "0001_create_users.ir.json", create);
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable users(name TEXT) must succeed");
@@ -430,7 +430,7 @@ async fn catalog_entry_fails_closed_on_same_affinity_facet_change_on_renamed_col
 
     let err = apply_bundle_ir_sqlite_catalog(
         &be, PROJECT, APP, &facet_changed_desired, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::Approved,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect_err(
@@ -482,7 +482,7 @@ async fn catalog_entry_still_fails_closed_when_from_column_absent_from_live() {
     write_ir(&p, "0001_create_users.ir.json", create);
     apply_bundle_ir_sqlite(
         &be, PROJECT, APP, &v1, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::None,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::None,
     )
     .await
     .expect("createTable users(full_name) must succeed");
@@ -506,7 +506,7 @@ async fn catalog_entry_still_fails_closed_when_from_column_absent_from_live() {
     let desired = [descriptor("users", vec![text_field("full_name")])];
     let err = apply_bundle_ir_sqlite_catalog(
         &be, PROJECT, APP, &desired, &p.migrations, &exec_cfg(),
-        &GuardConfig::confined(PROJECT), Approval::Approved,
+        &GuardConfig::confined(PROJECT), &PolicyProfile::confined(), Approval::Approved,
     )
     .await
     .expect_err(

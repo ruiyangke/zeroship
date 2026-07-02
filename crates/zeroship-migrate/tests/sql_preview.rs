@@ -229,7 +229,8 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
 
 #[test]
 fn mysql_feature_preview_renders_mysql8_sql() {
-    let out = render_ir_json_sql(MYSQL_FEATURE_IR, SqlDialect::Mysql, &opts())
+    let ir = resolve_ir_json(MYSQL_FEATURE_IR);
+    let out = render_ir_json_sql(&ir, SqlDialect::Mysql, &opts())
         .expect("MySQL feature fixture renders offline");
     assert!(out.contains("CREATE TABLE `public`.`teams`"), "{out}");
     assert!(out.contains("`id` INT AUTO_INCREMENT PRIMARY KEY"), "{out}");
@@ -297,7 +298,8 @@ fn backfill_is_labeled_never_fabricated() {
           "lhs":{"node":"colRef","name":"code"},
           "rhs":{"node":"literal","value":1000}}}
     ]}"#;
-    let out = render_ir_json_sql(ir, SqlDialect::Postgres, &opts()).expect("renders offline");
+    let ir = resolve_ir_json(ir);
+    let out = render_ir_json_sql(&ir, SqlDialect::Postgres, &opts()).expect("renders offline");
     assert!(
         out.contains(RUNTIME_RESOLVED) && out.contains("backfill"),
         "backfill must be labeled runtime-resolved:\n{out}"
@@ -387,9 +389,11 @@ fn raw_sql_caption_does_not_claim_a_transformed_dialect() {
 fn render_succeeds_without_a_dsn() {
     // Scrub any inherited DSN so the render cannot lean on an env-provided DSN.
     std::env::remove_var("DATABASE_URL");
-    let pg = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Postgres, &opts());
-    let sqlite = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Sqlite, &opts());
-    let mysql = render_ir_json_sql(REPRESENTATIVE_IR_MYSQL, SqlDialect::Mysql, &opts());
+    let representative = resolve_ir_json(REPRESENTATIVE_IR);
+    let representative_mysql = resolve_ir_json(REPRESENTATIVE_IR_MYSQL);
+    let pg = render_ir_json_sql(&representative, SqlDialect::Postgres, &opts());
+    let sqlite = render_ir_json_sql(&representative, SqlDialect::Sqlite, &opts());
+    let mysql = render_ir_json_sql(&representative_mysql, SqlDialect::Mysql, &opts());
     assert!(
         pg.is_ok() && sqlite.is_ok() && mysql.is_ok(),
         "offline render must not need a DSN"
@@ -510,7 +514,8 @@ fn malformed_ir_is_error() {
 /// BEFORE the DSN-bearing RunConfig is built).
 #[test]
 fn cli_plan_prints_and_exits_zero_offline() {
-    let dir = tempdir_with(&[("001_create.ir.json", REPRESENTATIVE_IR)]);
+    let representative = resolve_ir_json(REPRESENTATIVE_IR);
+    let dir = tempdir_with(&[("001_create.ir.json", &representative)]);
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
         .args(["plan", "--dir"])
         .arg(&dir)
@@ -529,7 +534,8 @@ fn cli_plan_prints_and_exits_zero_offline() {
 
 #[test]
 fn cli_plan_mysql_engine_prints_and_exits_zero_offline() {
-    let dir = tempdir_with(&[("001_create.ir.json", MYSQL_FEATURE_IR)]);
+    let mysql_feature = resolve_ir_json(MYSQL_FEATURE_IR);
+    let dir = tempdir_with(&[("001_create.ir.json", &mysql_feature)]);
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_zeroship-migrate"))
         .args(["--engine", "mysql", "plan", "--dir"])
         .arg(&dir)

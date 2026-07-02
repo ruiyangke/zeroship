@@ -685,9 +685,7 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         schema: None,
         columns: vec![identity_id(), col("account_id", ColType::BigInt, false)],
         primary_key: None,
-        constraints: vec![
-            pk_id(),
-            IrConstraint {
+        constraints: vec![IrConstraint {
                 name: Some("orders_account_fk".to_string()),
                 kind: IrConstraintKind::Fk {
                     columns: vec!["account_id".to_string()],
@@ -696,8 +694,7 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
                     on_delete: Some(RefAction::Cascade),
                     on_update: Some(RefAction::Restrict),
                 },
-            },
-        ],
+            }],
         indexes: Vec::new(),
         runtime_options: None,
             existence_guard: None,
@@ -713,15 +710,12 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         schema: None,
         columns: vec![identity_id(), col("name", ColType::Text, false)],
         primary_key: None,
-        constraints: vec![
-            pk_id(),
-            IrConstraint {
+        constraints: vec![IrConstraint {
                 name: Some("accounts_name_unique".to_string()),
                 kind: IrConstraintKind::Unique {
                     columns: vec!["name".to_string()],
                 },
-            },
-        ],
+            }],
         indexes: Vec::new(),
         runtime_options: None,
             existence_guard: None,
