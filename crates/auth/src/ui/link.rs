@@ -14,11 +14,10 @@
 //!      and `provider`.
 //!   2. POST `/link` — verify CSRF, re-decode the token, run the
 //!      Argon2id verify in `spawn_blocking`. On match: insert the
-//!      `zeroship.federated_identities` row, create an `zeroship.idp_sessions` row, and call
-//!      hydra's `accept_login(login_challenge)` (the SAME challenge the
-//!      original `/oauth/<provider>/start` stashed — hydra has been waiting
-//!      all along). On mismatch: re-render the form with an error banner
-//!      and a fresh CSRF cookie.
+//!      `zeroship.federated_identities` row, create an
+//!      `zeroship.idp_sessions` row, and resume the native authorize
+//!      request. On mismatch: re-render the form with an error banner and a
+//!      fresh CSRF cookie.
 //!
 //! The handler never tries to look up the user by something else — the
 //! HMAC on the pending token IS the binding to `user_id`. A forged or
@@ -28,7 +27,7 @@
 use std::sync::Arc;
 
 use askama::Template;
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
+use ntex::http::header::{COOKIE, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
@@ -36,13 +35,13 @@ use serde_json::json;
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::hydra_client::types::AcceptLoginRequest;
-use crate::hydra_client::HydraAdmin;
 use crate::identity::email as email_validation;
 use crate::identity::eligibility;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
+use crate::oidc::auth_request::AuthRequest;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::{identities, sessions, users};
 use crate::ui::{ErrorPage, LinkPage, PublicErrorMessage};
@@ -130,10 +129,9 @@ pub struct LinkForm {
 ///      Argon2 against the dummy hash so the wall-clock matches a real
 ///      verify (account-enumeration defense, mirroring `/login`).
 ///   4. Argon2id verify in `spawn_blocking` (~100ms).
-///   5. On success: insert `zeroship.federated_identities`, create an `zeroship.idp_sessions`
-///      row, accept the (still-pending) hydra `login_challenge`, audit
-///      `oauth_link_success`, 302 to hydra's `redirect_to` with the
-///      session cookie.
+///   5. On success: insert `zeroship.federated_identities`, create an
+///      `zeroship.idp_sessions` row, audit `oauth_link_success`, and redirect
+///      back to the native authorize request with the session cookie.
 ///   6. On failure: audit `oauth_link_failed`, re-render the page with
 ///      an error banner.
 #[allow(clippy::too_many_lines, clippy::future_not_send)]
@@ -141,7 +139,6 @@ pub async fn post(
     req: HttpRequest,
     form: ntex::web::types::Form<LinkForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
-    admin: ntex::web::types::State<HydraAdmin>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     // 1. CSRF — cheapest check first.
@@ -164,23 +161,6 @@ pub async fn post(
     };
     if email_validation::validate_email(&pending.email).is_err() {
         return render_error_page(PublicErrorMessage::SessionExpired);
-    }
-
-    if let Err(e) = admin.get_login(&pending.login_challenge).await {
-        tracing::warn!(error = %e, challenge = %pending.login_challenge, "link hydra challenge validation failed");
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "oauth_link_failed",
-                outcome: "failure",
-                user_id: Some(&pending.user_id),
-                auth_method: Some(&pending.provider),
-                detail: json!({ "reason": "login_challenge_invalid" }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-        return render_error_page(PublicErrorMessage::InvalidRequest);
     }
 
     // Trusted, gateway-authored client IP (SEC-3) — not the spoofable
@@ -386,26 +366,14 @@ pub async fn post(
         tracing::warn!(error = %e, user_id = %u.id, "touch_last_login failed");
     }
 
-    // 5d. Accept the hydra login challenge — the SAME challenge the
-    // original `/oauth/<provider>/start` stashed. Hydra has been pending
-    // all this time.
-    let accept = AcceptLoginRequest {
-        subject: u.id.to_string(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        acr: Some(acr_static.into()),
-        amr: Some(vec!["oauth".into(), "pwd".into()]),
-        ..Default::default()
+    let Some(native_return_to) = pending.return_to.as_deref() else {
+        return render_error_page(PublicErrorMessage::InvalidRequest);
     };
-    let redirect_to = match admin.accept_login(&pending.login_challenge, &accept).await {
-        Ok(r) => r.redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, "accept_login failed");
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
+    let Some(native_return_to) = validated_native_return_to(native_return_to) else {
+        tracing::warn!("link native return_to failed use-time validation");
+        return render_error_page(PublicErrorMessage::InvalidRequest);
     };
 
-    // 5e. Audit + redirect.
     audit::emit(
         db.as_ref(),
         &AuditEvent {
@@ -422,16 +390,12 @@ pub async fn post(
     )
     .await;
 
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(&redirect_to)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
+    let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
+    resp.header("cache-control", "no-store");
     resp.finish()
 }
 
@@ -475,6 +439,35 @@ fn render_link_error_with_status(
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
     resp.body(body)
+}
+
+fn validated_native_return_to(return_to: &str) -> Option<&str> {
+    AuthRequest::parse_return_to(return_to).ok()?;
+    return_to::valid_path(return_to)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_native_return_to;
+
+    #[test]
+    fn native_return_to_guard_rejects_open_redirects_at_use_time() {
+        for bad in ["//evil.com", "https://evil.com"] {
+            assert_eq!(validated_native_return_to(bad), None);
+        }
+    }
+
+    #[test]
+    fn native_return_to_guard_requires_authorize_path() {
+        assert_eq!(validated_native_return_to("/me"), None);
+    }
+
+    #[test]
+    fn native_return_to_guard_accepts_same_origin_authorize_path() {
+        let return_to =
+            "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        assert_eq!(validated_native_return_to(return_to), Some(return_to));
+    }
 }
 
 fn render_error_page(message: PublicErrorMessage) -> HttpResponse {

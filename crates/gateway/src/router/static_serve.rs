@@ -1007,7 +1007,6 @@ mod tests {
                 worker_urls: vec![],
                 poll_interval_secs: 5,
                 worker_key: String::new(),
-                hydra_public_url: String::new(),
                 auth_ui_url: String::new(),
                 insecure_dev: true,
                 trust_proxy: false,
@@ -1024,12 +1023,13 @@ mod tests {
             idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
             oidc_rp: Arc::new(crate::oidc_rp::OidcRp::new(
                 "http://auth.test",
-                "gateway",
-                "test-secret",
+                crate::oidc_rp::BrokerSecret::from_bytes(
+                    b"gateway-static-test-broker-master-32-bytes".to_vec(),
+                )
+                .expect("broker secret"),
                 b"test-stash-key-32-bytes-long----".to_vec(),
             )),
             db: None,
-            dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
             signing_key: None,

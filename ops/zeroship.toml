@@ -2,24 +2,18 @@
 # One file PER ENVIRONMENT. Secrets never live here.
 
 [auth]
-hydra_admin_url       = "http://hydra:4445"
-# COMPOSE-INTERNAL value: the public issuer is the Caddy-fronted dev host
-# http://auth.zeroship.localhost. Caddy proxies /oauth2/* + /.well-known/* on
-# that host to hydra:4444, and a docker network ALIAS makes the same hostname
-# resolve to Caddy from inside the network — so server-side RPs (control,
-# gateway) verify tokens against the SAME issuer the browser sees. This
-# intentionally differs from the prod template (https://auth.zeroship.ai) and
-# from the old compose value (http://hydra:4444). One file per environment —
-# do not copy this value into a prod overlay.
-hydra_public_url      = "http://auth.zeroship.localhost"
-# First-party trusted OAuth client(s) that skip Hydra consent. This is the
-# FIRST-PARTY CONSOLE only — a deliberate, narrow exception to the spec rule that
-# per-app (THIRD-PARTY creator) clients NEVER skip consent. A consent prompt for
-# the platform's OWN console is meaningless, and the immersive iframe login frames
-# the /login dance — a console consent screen would also have to be a framed
-# document. (The old gateway POST /__zeroship/auth/password first-party gate this
-# value also fed is GONE — the anti-clickjacking gate is now the browser-enforced
-# `frame-ancestors` allowlist; see [auth].frame_ancestor_origins below.)
+# The native OP issuer is supplied to the auth service through AUTH_PUBLIC_URL
+# in docker-compose.yml. This shared overlay does not define that key.
+#
+# First-party trusted OAuth client(s) that skip native OP consent. This is the
+# FIRST-PARTY CONSOLE only — a deliberate, narrow exception to the spec rule
+# that per-app (THIRD-PARTY creator) clients NEVER skip consent. A consent prompt
+# for the platform's OWN console is meaningless, and the immersive iframe login
+# frames the /login dance — a console consent screen would also have to be a
+# framed document. (The old gateway POST /__zeroship/auth/password first-party
+# gate this value also fed is GONE — the anti-clickjacking gate is now the
+# browser-enforced `frame-ancestors` allowlist; see
+# [auth].frame_ancestor_origins below.)
 #
 # Value = client_id_for_app(console_app_id("console.zeroship.localhost")), the
 # deterministic per-app PKCE client id for THIS compose's --console-host

@@ -26,14 +26,14 @@
 {% if can_grant %}
   <form id="consent-accept" method="POST" action="/consent/accept">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
     <label class="checkbox">
       <input type="checkbox" name="remember"> Remember this choice for 30 days
     </label>
   </form>
   <form id="consent-deny" method="POST" action="/consent/deny">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="consent_challenge" value="{{ challenge }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
   </form>
   <div class="buttons">
     <button type="submit" form="consent-accept" class="primary">Allow</button>

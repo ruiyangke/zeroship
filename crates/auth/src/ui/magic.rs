@@ -2,8 +2,9 @@
 //!
 //! Routes (registered in `server::configure`):
 //!
-//! - **POST `/magic/start`** — accept an email + `login_challenge`, issue a
-//!   magic-link token, send the email, set `__Host-zsidp_magic_csrf` at
+//! - **POST `/magic/start`** — accept an email + native `return_to`
+//!   continuation target, issue a magic-link token, send the email, set
+//!   `__Host-zsidp_magic_csrf` at
 //!   the requesting device, render the "check your email" page (with a
 //!   hidden code-entry form for cross-device completion). Always returns
 //!   200, regardless of whether the address exists or is rate-limited
@@ -13,12 +14,13 @@
 //!   code-entry form. The check-email page already embeds the same form
 //!   inside a `<details>` toggle; this route exists for direct entry.
 //!
-//! - **GET `/magic/verify?token=<token>&login_challenge=<…>`** — render a
-//!   POST interstitial so the token leaves the URL before it is redeemed.
+//! - **GET `/magic/verify?token=<token>&return_to=<…>`** — render a POST
+//!   interstitial so the token leaves the URL before it is redeemed.
 //!
 //! - **POST `/magic/verify/redeem`** — redeem the magic-link token. If the
 //!   redeeming browser presents the matching `__Host-zsidp_magic_csrf`
-//!   cookie (same-device path) → mint session, `accept_login`, 302 to hydra.
+//!   cookie (same-device path) → mint session, then resume the continuation
+//!   target.
 //!   If the cookie is missing or different (cross-device) → generate a
 //!   6-digit code, persist it under the magic-link's CSRF nonce, render the
 //!   code on the redeeming device.
@@ -26,7 +28,7 @@
 //! - **POST `/magic/complete`** — the cross-device completion form. The
 //!   requesting device posts the 6-digit code it saw on the redeeming
 //!   device; we atomically consume `zeroship.magic_completions`, look up the
-//!   user, mint a session, `accept_login`, redirect.
+//!   user, mint a session, then resume the continuation target.
 //!
 //! User creation: a successful redeem on an unknown email creates a new
 //! `zeroship.users` row with `email_verified_at = NOW()` — clicking the link
@@ -34,7 +36,7 @@
 //! for both same-device and cross-device.
 
 use askama::Template;
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE, USER_AGENT};
+use ntex::http::header::{HeaderValue, COOKIE, SET_COOKIE, USER_AGENT};
 use ntex::http::StatusCode;
 use ntex::web::{HttpRequest, HttpResponse};
 use rand::Rng;
@@ -48,12 +50,12 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::{AuthError, Result};
-use crate::hydra_client::types::AcceptLoginRequest;
-use crate::hydra_client::HydraAdmin;
 use crate::identity::email as email_validation;
 use crate::identity::eligibility;
 use crate::identity::magic_link;
+use crate::oidc::auth_request::AuthRequest;
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
 use crate::ui::{
@@ -126,13 +128,71 @@ fn safe_csrf_value(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+const MAGIC_TARGET_RETURN_TO_PREFIX: &str = "return_to:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MagicTarget {
+    ReturnTo(String),
+}
+
+impl MagicTarget {
+    fn from_return_to(raw_return_to: Option<&str>) -> Option<Self> {
+        let raw_return_to = non_empty(raw_return_to);
+        let native_return_to =
+            return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
+        AuthRequest::parse_return_to(&native_return_to).ok()?;
+        Some(Self::ReturnTo(native_return_to))
+    }
+
+    fn decode_store(value: &str) -> Option<Self> {
+        if let Some(return_to) = value.strip_prefix(MAGIC_TARGET_RETURN_TO_PREFIX) {
+            return Self::from_return_to(Some(return_to));
+        }
+        None
+    }
+
+    fn encode_store(&self) -> String {
+        match self {
+            Self::ReturnTo(return_to) => format!("{MAGIC_TARGET_RETURN_TO_PREFIX}{return_to}"),
+        }
+    }
+
+    fn query_key(&self) -> &'static str {
+        match self {
+            Self::ReturnTo(_) => "return_to",
+        }
+    }
+
+    fn value(&self) -> &str {
+        match self {
+            Self::ReturnTo(value) => value,
+        }
+    }
+
+    fn return_to(&self) -> Option<&str> {
+        match self {
+            Self::ReturnTo(value) => Some(value.as_str()),
+        }
+    }
+
+    fn login_href(&self) -> String {
+        match self {
+            Self::ReturnTo(return_to) => return_to::login_location(return_to),
+        }
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 // ─── POST /magic/start ───────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct MagicStartForm {
     pub csrf: String,
     pub email: String,
-    pub login_challenge: String,
+    pub return_to: Option<String>,
 }
 
 /// Issue a magic-link token + send the email + render "check your email".
@@ -172,7 +232,10 @@ pub async fn start(
             StatusCode::BAD_REQUEST,
         );
     }
-    let login_challenge = form.login_challenge.clone();
+    let target = match MagicTarget::from_return_to(form.return_to.as_deref()) {
+        Some(target) => target,
+        None => return render_error_page(PublicErrorMessage::InvalidRequest),
+    };
 
     // 2. Rate-limit per-email + per-IP. On throttle, render the
     //    check-email page anyway so the attacker can't distinguish.
@@ -227,13 +290,14 @@ pub async fn start(
     //    defense — a suppressed/bouncing address must look identical to a
     //    deliverable one).
     if let Some(ref issued) = issued {
-        let lc_escaped: String =
-            form_urlencoded::byte_serialize(login_challenge.as_bytes()).collect();
+        let target_value_escaped: String =
+            form_urlencoded::byte_serialize(target.value().as_bytes()).collect();
         let link = format!(
-            "{}/magic/verify?token={}&login_challenge={}",
+            "{}/magic/verify?token={}&{}={}",
             cfg.public_url(),
             issued.raw,
-            lc_escaped,
+            target.query_key(),
+            target_value_escaped,
         );
         let name_hint = email_norm.split('@').next().unwrap_or("there").to_string();
         let device_str = user_agent_str(req.headers().get(USER_AGENT));
@@ -308,9 +372,10 @@ pub async fn start(
 
     let page = MagicCheckEmailPage {
         csrf: &new_csrf,
-        login_challenge: &login_challenge,
+        return_to: target.return_to(),
         csrf_nonce: &nonce,
         email: &email_norm,
+        login_href: target.login_href(),
     };
     let body = page
         .render()
@@ -333,7 +398,7 @@ pub async fn start(
 
 #[derive(Debug, Deserialize)]
 pub struct MagicAwaitQuery {
-    pub login_challenge: String,
+    pub return_to: Option<String>,
     pub csrf_nonce: String,
     pub email: String,
 }
@@ -349,12 +414,17 @@ pub async fn await_code(
     query: ntex::web::types::Query<MagicAwaitQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
+    let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
+        Some(target) => target,
+        None => return render_error_page(PublicErrorMessage::InvalidRequest),
+    };
     let new_csrf = csrf::generate_token();
     let page = MagicAwaitCodePage {
         csrf: &new_csrf,
-        login_challenge: &query.login_challenge,
+        return_to: target.return_to(),
         csrf_nonce: &query.csrf_nonce,
         email: &query.email,
+        login_href: target.login_href(),
     };
     let body = page
         .render()
@@ -370,14 +440,14 @@ pub async fn await_code(
 #[derive(Debug, Deserialize)]
 pub struct MagicVerifyQuery {
     pub token: String,
-    pub login_challenge: String,
+    pub return_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MagicRedeemForm {
     pub csrf: Option<String>,
     pub token: String,
-    pub login_challenge: String,
+    pub return_to: Option<String>,
 }
 
 /// `/magic/verify` — the link the user clicks in the email. Renders a
@@ -388,6 +458,10 @@ pub async fn verify(
     query: ntex::web::types::Query<MagicVerifyQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
+    let target = match MagicTarget::from_return_to(query.return_to.as_deref()) {
+        Some(target) => target,
+        None => return render_error_page(PublicErrorMessage::InvalidRequest),
+    };
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -404,7 +478,7 @@ pub async fn verify(
         // Overwritten with an independent per-response nonce inside
         // `render_token_interstitial`; callers must not set it.
         script_nonce: "",
-        extra_fields: vec![("login_challenge", query.login_challenge.as_str())],
+        extra_fields: vec![(target.query_key(), target.value())],
     };
     let csrf_set_cookie = magic_csrf_set_cookie(&csrf_token, cfg.insecure_dev);
     render_token_interstitial(&page, &csrf_set_cookie)
@@ -414,7 +488,7 @@ pub async fn verify(
 /// whether the redeeming browser
 /// presents the matching `__Host-zsidp_magic_csrf` cookie:
 ///
-/// - **Same-device**: mint a session, `accept_login`, 302 to hydra.
+/// - **Same-device**: mint a session and redirect to the native authorize request.
 /// - **Cross-device**: generate a 6-digit code, persist it in
 ///   `zeroship.magic_completions`, render the code on this device for the
 ///   user to type back on the requesting device.
@@ -424,7 +498,6 @@ pub async fn verify_redeem(
     form: ntex::web::types::Form<MagicRedeemForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
-    admin: ntex::web::types::State<HydraAdmin>,
 ) -> HttpResponse {
     if !valid_magic_csrf(&req, form.csrf.as_deref(), &cfg) {
         return render_error_page_with_status(
@@ -432,6 +505,10 @@ pub async fn verify_redeem(
             StatusCode::FORBIDDEN,
         );
     }
+    let target = match MagicTarget::from_return_to(form.return_to.as_deref()) {
+        Some(target) => target,
+        None => return render_error_page(PublicErrorMessage::InvalidRequest),
+    };
 
     // 1. Redeem.
     let redeemed = match magic_link::redeem_pending(db.as_ref(), &form.token).await {
@@ -561,12 +638,11 @@ pub async fn verify_redeem(
     if same_device {
         same_device_finish(
             db.as_ref(),
-            &admin,
             &cfg,
             &redeemed.token_hash,
             &redeemed.reserved_at,
             user_id,
-            &form.login_challenge,
+            &target,
             &req,
         )
         .await
@@ -578,7 +654,7 @@ pub async fn verify_redeem(
             user_id,
             &redeemed.email,
             &redeemed.csrf_nonce,
-            &form.login_challenge,
+            &target,
             &req,
         )
         .await
@@ -598,16 +674,15 @@ fn valid_magic_csrf(req: &HttpRequest, form_csrf: Option<&str>, cfg: &AuthConfig
         .is_some_and(|(cookie, form)| csrf::matches(form, cookie))
 }
 
-/// Same-device path: mint session, `accept_login`, 302 to hydra.
+/// Same-device path: mint session, then resume native authorize.
 #[allow(clippy::future_not_send)]
 async fn same_device_finish(
     db: &compio_postgres::Client,
-    admin: &HydraAdmin,
     cfg: &AuthConfig,
     token_hash: &[u8],
     reserved_at: &chrono::DateTime<chrono::Utc>,
     user_id: Uuid,
-    login_challenge: &str,
+    target: &MagicTarget,
     req: &HttpRequest,
 ) -> HttpResponse {
     let session = match sessions::create(
@@ -640,27 +715,6 @@ async fn same_device_finish(
         tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
     }
 
-    let accept = AcceptLoginRequest {
-        subject: user_id.to_string(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        acr: Some("urn:zeroship:magic".into()),
-        amr: Some(vec!["magic".into()]),
-        ..Default::default()
-    };
-    let redirect_to = match admin.accept_login(login_challenge, &accept).await {
-        Ok(r) => r.redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, "magic accept_login failed");
-            if let Err(e) =
-                magic_link::clear_consume_pending(db, token_hash, Some(reserved_at)).await
-            {
-                tracing::warn!(error = %e, "magic_link clear pending after accept_login failure failed");
-            }
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
-    };
-
     match magic_link::finalize_consume(db, token_hash, reserved_at).await {
         Ok(true) => {}
         Ok(false) => {
@@ -685,15 +739,13 @@ async fn same_device_finish(
     )
     .await;
 
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
+    let MagicTarget::ReturnTo(native_return_to) = target;
+    let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
+    resp.header("cache-control", "no-store");
     // Clear the requesting-device cookie so a future stray click can't
     // be replayed in a same-device check.
     resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
@@ -710,13 +762,14 @@ async fn cross_device_show_code(
     user_id: Uuid,
     email: &str,
     csrf_nonce: &str,
-    login_challenge: &str,
+    target: &MagicTarget,
     req: &HttpRequest,
 ) -> HttpResponse {
     let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
+    let store_target = target.encode_store();
     // 5-minute window — short, since the user is actively typing.
     if let Err(e) =
-        completions_store::create(db, csrf_nonce, &code, email, login_challenge, 300).await
+        completions_store::create(db, csrf_nonce, &code, email, &store_target, 300).await
     {
         tracing::error!(error = %e, "magic_completions insert failed");
         if let Err(e) = magic_link::clear_consume_pending(db, token_hash, Some(reserved_at)).await {
@@ -764,21 +817,20 @@ async fn cross_device_show_code(
 pub struct MagicCompleteForm {
     pub csrf: String,
     pub csrf_nonce: String,
-    pub login_challenge: String,
+    pub return_to: Option<String>,
     pub code: String,
 }
 
 /// `/magic/complete` POST — cross-device completion. The requesting
 /// device posts the 6-digit code shown on the redeeming device; we
-/// atomically reserve the row, mint a session, `accept_login`, then
-/// finalize the row consume.
+/// atomically reserve the row, mint a session, resume the selected
+/// continuation target, then finalize the row consume.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn complete(
     req: HttpRequest,
     form: ntex::web::types::Form<MagicCompleteForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
-    admin: ntex::web::types::State<HydraAdmin>,
 ) -> HttpResponse {
     // 1. CSRF.
     let cookie_header = req
@@ -793,6 +845,10 @@ pub async fn complete(
     {
         return render_error_page(PublicErrorMessage::InvalidRequest);
     }
+    let form_target = match MagicTarget::from_return_to(form.return_to.as_deref()) {
+        Some(target) => target,
+        None => return render_error_page(PublicErrorMessage::InvalidRequest),
+    };
 
     // 2. Per-IP throttle before touching the completion row. This limits
     //    online guessing even across many CSRF nonces from one source.
@@ -825,7 +881,7 @@ pub async fn complete(
     }
 
     // 3. Reserve the completion row atomically. It is finalized only
-    //    after hydra accepts the login.
+    //    after the selected continuation succeeds.
     let completion =
         match completions_store::consume_pending(db.as_ref(), &form.csrf_nonce, &form.code).await {
             Ok(c) => c,
@@ -863,17 +919,44 @@ pub async fn complete(
             }
         };
 
-    // 4. Defence: form `login_challenge` must match the one stashed at
+    let completion_target = match MagicTarget::decode_store(&completion.target) {
+        Some(target) => target,
+        None => {
+            audit::emit(
+                db.as_ref(),
+                &AuditEvent {
+                    event_type: "magic_complete",
+                    outcome: "failure",
+                    auth_method: Some("magic"),
+                    detail: json!({ "reason": "target_invalid" }),
+                    ..AuditEvent::from_request(&req)
+                },
+            )
+            .await;
+            if let Err(e) = completions_store::clear_consume_pending(
+                db.as_ref(),
+                &form.csrf_nonce,
+                Some(&completion.reserved_at),
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "magic_completions clear pending after invalid target failed");
+            }
+            return render_error_page(PublicErrorMessage::SessionExpired);
+        }
+    };
+
+    // 4. Defence: form target must match the one stashed at
     //    issue time. Defeats a forged challenge swap on the requesting
     //    device.
-    if form.login_challenge != completion.login_challenge {
+    if form_target != completion_target {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
                 event_type: "magic_complete",
                 outcome: "failure",
                 auth_method: Some("magic"),
-                detail: json!({ "reason": "login_challenge_mismatch" }),
+                detail: json!({ "reason": "target_mismatch" }),
                 ..AuditEvent::from_request(&req)
             },
         )
@@ -941,7 +1024,7 @@ pub async fn complete(
         return render_error_page(PublicErrorMessage::AccountTemporarilyLocked);
     }
 
-    // 6. Mint session + accept_login + 302 — mirrors same-device path.
+    // 6. Mint session + resume the selected continuation target.
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
@@ -976,31 +1059,6 @@ pub async fn complete(
         tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
     }
 
-    let accept = AcceptLoginRequest {
-        subject: user_id.to_string(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        acr: Some("urn:zeroship:magic".into()),
-        amr: Some(vec!["magic".into()]),
-        ..Default::default()
-    };
-    let redirect_to = match admin.accept_login(&form.login_challenge, &accept).await {
-        Ok(r) => r.redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, "magic complete accept_login failed");
-            if let Err(e) = completions_store::clear_consume_pending(
-                db.as_ref(),
-                &form.csrf_nonce,
-                Some(&completion.reserved_at),
-            )
-            .await
-            {
-                tracing::warn!(error = %e, "magic_completions clear pending after accept_login failure failed");
-            }
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
-    };
-
     match completions_store::finalize_consume(
         db.as_ref(),
         &form.csrf_nonce,
@@ -1031,15 +1089,13 @@ pub async fn complete(
     )
     .await;
 
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
+    let MagicTarget::ReturnTo(native_return_to) = &form_target;
+    let mut resp = return_to::see_other(native_return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
+    resp.header("cache-control", "no-store");
     resp.header(SET_COOKIE, magic_csrf_clear_cookie(cfg.insecure_dev));
     resp.finish()
 }
@@ -1108,7 +1164,7 @@ pub mod completions_store {
     #[derive(Debug, Clone)]
     pub struct Completion {
         pub email: String,
-        pub login_challenge: String,
+        pub target: String,
         pub reserved_at: chrono::DateTime<chrono::Utc>,
     }
 
@@ -1133,7 +1189,7 @@ pub mod completions_store {
         csrf_nonce: &str,
         code: &str,
         email: &str,
-        login_challenge: &str,
+        target: &str,
         expires_secs: i64,
     ) -> crate::error::Result<()> {
         super::email_validation::validate_email(email)
@@ -1155,7 +1211,7 @@ pub mod completions_store {
                 &csrf_nonce,
                 &code,
                 &email,
-                &login_challenge,
+                &target,
                 &expires_secs.to_string(),
             ],
         )
@@ -1196,7 +1252,7 @@ pub mod completions_store {
         if let Some(row) = rows.first() {
             return Ok(Completion {
                 email: row.get("email"),
-                login_challenge: row.get("login_challenge"),
+                target: row.get("login_challenge"),
                 reserved_at: row.get("consumed_pending_at"),
             });
         }
@@ -1332,6 +1388,28 @@ fn email_domain(email: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NATIVE_RETURN_TO: &str = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=openid";
+
+    #[test]
+    fn magic_target_decode_store_uses_front_anchored_discriminator() {
+        let return_to_with_challenge_text =
+            format!("{NATIVE_RETURN_TO}&state=login_challenge%3Ainner");
+        let target = MagicTarget::ReturnTo(return_to_with_challenge_text);
+        assert_eq!(
+            MagicTarget::decode_store(&target.encode_store()),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn magic_target_decode_store_rejects_bare_values() {
+        assert_eq!(MagicTarget::decode_store(NATIVE_RETURN_TO), None);
+        assert_eq!(
+            MagicTarget::decode_store("lc-return_to:/oauth2/authorize?client_id=oac_123"),
+            None
+        );
+    }
 
     #[test]
     fn user_agent_str_caps_long_values() {

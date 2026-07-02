@@ -1,5 +1,4 @@
-//! Security headers applied to every `crates/auth` response. Hydra
-//! sets its own on `/oauth2/*` responses.
+//! Security headers applied to every `crates/auth` response.
 //!
 //! [`apply`] writes the headers into a `HeaderMap`; [`SecurityHeaders`] is
 //! the ntex middleware that wires it onto every outgoing response in
@@ -479,10 +478,10 @@ mod tests {
     use ntex::web::test;
 
     /// Pure-helper exercise of the route-aware framing builder (design §9): the
-    /// framing logic is testable WITHOUT booting Hydra (the live `GET /login`
-    /// needs Hydra; `apply` against a bare `HeaderMap` does not). Given a path +
-    /// the configured console origin(s), assert the exact framed-vs-strict
-    /// header set. This is the offline regression guard for the iframe pivot.
+    /// framing logic is testable without booting the full server: `apply`
+    /// works against a bare `HeaderMap`. Given a path + the configured console
+    /// origin(s), assert the exact framed-vs-strict header set. This is the
+    /// offline regression guard for the iframe pivot.
     const CONSOLE: &str = "https://console.zeroship.ai";
 
     fn header(headers: &HeaderMap, name: &str) -> Option<String> {

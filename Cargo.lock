@@ -6680,6 +6680,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-authn"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "compio-postgres",
+ "ed25519-dalek",
+ "jsonwebtoken",
+ "ntex",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "zeroship-authz",
+ "zeroship-core",
+]
+
+[[package]]
 name = "zeroship-authz"
 version = "0.1.0"
 dependencies = [
@@ -6738,6 +6758,7 @@ dependencies = [
  "mimalloc",
  "ntex",
  "rand 0.8.5",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6749,6 +6770,7 @@ dependencies = [
  "uuid",
  "zeroize",
  "zeroship-auth",
+ "zeroship-authn",
  "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",
@@ -6770,6 +6792,7 @@ dependencies = [
  "cyper",
  "ed25519-dalek",
  "hex",
+ "hkdf",
  "hmac 0.12.1",
  "http",
  "indexmap 2.14.0",

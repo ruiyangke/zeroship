@@ -215,7 +215,7 @@ async fn load_memberships(pg: &Client, principal_id: Uuid) -> Result<Memberships
 async fn load_app_flags(pg: &Client, app_id: &str) -> Result<AppFlags, AuthzError> {
     let rows = pg
         .query(
-            "SELECT suspended, audit_locked FROM apps WHERE id::text = $1",
+            "SELECT suspended, audit_locked FROM zeroship.apps WHERE id::text = $1",
             &[&app_id],
         )
         .await

@@ -51,8 +51,8 @@ async fn seed_active_alias(db: &Client) -> (Uuid, String, String) {
     let client_id = format!("oac_autorevoke_{}", Uuid::new_v4().simple());
     db.execute(
         "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
-         VALUES ($1, $2, $3, $4, $1)",
+            (client_id, client_name, redirect_uris, scopes) \
+         VALUES ($1, $2, $3, $4)",
         &[
             &client_id,
             &format!("Client {client_id}"),

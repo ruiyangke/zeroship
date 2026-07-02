@@ -1,8 +1,8 @@
 //! Trusted first-party OAuth client resolution.
 //!
-//! First-party OAuth clients (the platform's own **console**) skip Hydra
-//! consent — a consent prompt for the platform's own first-party surface is
-//! meaningless. The trusted set is resolved from the shared
+//! First-party OAuth clients (the platform's own **console**) skip the
+//! first-party consent prompt: a consent prompt for the platform's own
+//! first-party surface is meaningless. The trusted set is resolved from the shared
 //! `[auth].trusted_oauth_clients` file overlay; when the key is absent the
 //! compiled default is **empty** (fail-closed). This lives in `zeroship-core`
 //! so both the control plane and any other service that needs to consult the
@@ -28,14 +28,14 @@
 //!
 //! The browser-enforced `frame-ancestors` allowlist on the auth login routes is
 //! the separate anti-clickjacking gate (it replaced the deleted gateway
-//! credential-oracle first-party gate); this set is purely about skipping Hydra
-//! consent for the console.
+//! credential-oracle first-party gate); this set is purely about skipping
+//! first-party consent for the console.
 
 use std::collections::HashSet;
 
 use crate::config::AuthSection;
 
-/// Compiled default for first-party OAuth clients that skip Hydra consent.
+/// Compiled default for first-party OAuth clients that skip first-party consent.
 ///
 /// **Empty by design (fail-closed).** No client is trusted unless the shared
 /// `[auth].trusted_oauth_clients` file overlay names it. The console's

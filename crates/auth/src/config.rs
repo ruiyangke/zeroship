@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use zeroship_core::config::{
     parse_bool_flag, resolve_overlay_string, AuthSection, DEV_STASH_SIGNING_KEY, DEV_TOTP_ENC_KEY,
 };
@@ -10,8 +10,23 @@ use zeroship_core::config::{
 use zeroship_core::observability::ObservabilityFlags;
 use zeroship_mailer::SmtpTls;
 
-const DEFAULT_HYDRA_ADMIN_URL: &str = "http://127.0.0.1:4445";
-const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
+const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum AuthProviderKind {
+    Native,
+    Supabase,
+}
+
+impl AuthProviderKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Supabase => "supabase",
+        }
+    }
+}
 
 #[derive(Clone, Parser)]
 #[command(name = "zeroship-auth")]
@@ -44,35 +59,47 @@ pub struct AuthConfig {
     #[arg(long, env = "AUTH_DB_URL", hide_env_values = true)]
     pub db_url: String,
 
-    /// Hydra admin base URL (loopback).
-    #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
-    pub hydra_admin_url: Option<String>,
+    /// Platform auth provider backend.
+    #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", value_enum)]
+    pub auth_provider: Option<AuthProviderKind>,
 
-    /// Permit a non-loopback Hydra admin URL. Production deployments that
-    /// enable this must protect Hydra admin externally with mTLS, firewall
-    /// rules, or equivalent network policy.
+    /// Supabase Auth / GoTrue base URL used when `--auth-provider=supabase`.
+    #[arg(long = "supabase-url", env = "SUPABASE_URL")]
+    pub supabase_url: Option<String>,
+
+    /// Supabase anon API key used by the browser-side GoTrue login.
     #[arg(
-        long,
-        env = "AUTH_ALLOW_REMOTE_HYDRA_ADMIN",
-        action = clap::ArgAction::Set,
-        default_value_t = false,
-        default_missing_value = "true",
-        num_args = 0..=1
+        long = "supabase-anon-key",
+        env = "SUPABASE_ANON_KEY",
+        hide_env_values = true
     )]
-    pub allow_remote_hydra_admin: bool,
+    pub supabase_anon_key: Option<String>,
 
-    /// Hydra public base URL (issuer).
-    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
-    pub hydra_public_url: Option<String>,
+    /// Standard-Webhooks symmetric secret for GoTrue's Send Email hook.
+    /// Set this to the same `v1,whsec_<base64>` value supplied to GoTrue via
+    /// `GOTRUE_HOOK_SEND_EMAIL_SECRETS`. When unset, the hook endpoint
+    /// fail-closes with 401.
+    #[arg(
+        long = "gotrue-email-hook-secret",
+        env = "AUTH_GOTRUE_EMAIL_HOOK_SECRET",
+        hide_env_values = true
+    )]
+    pub gotrue_email_hook_secret: Option<String>,
 
-    /// Path to clients config TOML.
-    #[arg(long, env = "AUTH_CLIENTS_CONFIG", default_value = "/etc/zeroship/auth-clients.toml")]
-    pub clients_config: String,
+    /// Control-plane base URL used by browser-mediated auth flows.
+    #[arg(long = "control-url", env = "CONTROL_URL")]
+    pub control_url: Option<String>,
 
-    /// Allow first-boot JWK + client creation. Without this, an empty
-    /// `hydra_jwk` set is a fatal startup error.
-    #[arg(long, env = "AUTH_BOOTSTRAP")]
-    pub bootstrap: bool,
+    /// Shared internal control-plane bearer key. Auth uses this only to gate
+    /// control -> auth internal OP mint calls; it is never exposed to browser
+    /// flows.
+    #[arg(
+        long = "control-key",
+        env = "CONTROL_KEY",
+        default_value = "",
+        hide_env_values = true
+    )]
+    pub control_key: String,
 
     /// Dev mode: drop the Secure flag on cookies + relax secret guards.
     /// ONLY for localhost. `--dev-insecure` (no value) enables it;
@@ -332,6 +359,69 @@ pub struct AuthConfig {
     )]
     pub public_url: String,
 
+    /// Platform OP Ed25519 private signing key file (PEM/PKCS#8 or DER).
+    ///
+    /// Required on real boot. The key is loaded into auth-service memory and
+    /// never stored in Postgres; `zeroship.signing_keys` receives only the
+    /// matching public JWK metadata.
+    #[arg(long = "auth-signing-key-file", env = "AUTH_SIGNING_KEY_FILE")]
+    pub auth_signing_key_file: Option<PathBuf>,
+
+    /// Platform OP pairwise subject salt source file.
+    ///
+    /// Required on real boot. The file contents are fed through
+    /// `derive_pairwise_salt`, then used with `(user_id, sector_identifier)` to
+    /// mint cross-app-unlinkable `pws_...` subjects.
+    #[arg(long = "auth-pairwise-salt-file", env = "AUTH_PAIRWISE_SALT_FILE")]
+    pub auth_pairwise_salt_file: Option<PathBuf>,
+
+    /// Platform broker master-secret source file.
+    ///
+    /// Required on real boot. Brokered OAuth clients do not store per-client
+    /// secret hashes; the OP derives a per-client broker secret from this
+    /// ≥256-bit master secret and the client_id, then verifies the gateway's
+    /// presented secret on the authorization-code grant.
+    #[arg(long = "auth-broker-secret-file", env = "AUTH_BROKER_SECRET_FILE")]
+    pub auth_broker_secret_file: Option<PathBuf>,
+
+    /// Previous platform broker master-secret source file for rotation.
+    ///
+    /// Optional. During a rolling rotation, code exchanges may authenticate
+    /// against either the current or previous broker master secret. Remove this
+    /// after every gateway has rolled to the current secret.
+    #[arg(
+        long = "auth-broker-secret-previous-file",
+        env = "AUTH_BROKER_SECRET_PREVIOUS_FILE"
+    )]
+    pub auth_broker_secret_previous_file: Option<PathBuf>,
+
+    /// Refresh-token HMAC keyring file.
+    ///
+    /// The OP stores only HMAC-SHA256 refresh-token verifiers in Postgres.
+    /// This file is the out-of-DB keyring used to mint/verify those hashes.
+    #[arg(long = "refresh-hash-key-file", env = "REFRESH_HASH_KEY_FILE")]
+    pub refresh_hash_key_file: Option<PathBuf>,
+
+    /// Refresh-token idempotency-cache AEAD key source file.
+    ///
+    /// Used only to seal the bounded lost-response retry cache stored on a
+    /// rotated predecessor row.
+    #[arg(long = "refresh-idem-key-file", env = "REFRESH_IDEM_KEY_FILE")]
+    pub refresh_idem_key_file: Option<PathBuf>,
+
+    /// Maximum dedicated refresh-family database sessions per auth worker.
+    ///
+    /// These sessions are used only for OP refresh-token root issuance,
+    /// rotation, revoke, and refresh-family sweeps. The pool is deliberately
+    /// small: excess concurrent refresh-family transactions wait instead of
+    /// opening unbounded PostgreSQL backends.
+    #[arg(
+        long = "refresh-pool-size",
+        env = "AUTH_REFRESH_POOL_SIZE",
+        default_value = "4"
+    )]
+    pub refresh_pool_size: usize,
+
     // ─── Relay email (Slice 5 — app → user one-way forwarding) ───────────
     /// Relay alias domain. Aliases are minted as `{token}@{relay_domain}`
     /// (lowercase). Dev: `relay.zeroship.localhost`; prod: `relay.zeroship.ai`
@@ -422,22 +512,6 @@ pub struct AuthConfig {
         hide_env_values = true
     )]
     pub postmark_webhook_password: Option<String>,
-
-    // ─── Cron (P6-U1: jwk_rotation; future units add audit retention) ───
-    /// Days between JWK rotations. Once a set's `zeroship.cron_state` row is
-    /// older than this, the next cron tick prepends fresh keys and they
-    /// become the active signers (hydra signs with the head of the
-    /// list). 90 days mirrors the OIDC operator handbook default.
-    #[arg(long, env = "AUTH_JWK_ROTATION_DAYS", default_value = "90")]
-    pub jwk_rotation_days: i64,
-
-    /// Days to retain outgoing keys past their rotation. Old keys are
-    /// retired once `(rotation_days + retain_days)` has elapsed since
-    /// the most recent rotation — long enough for any access token
-    /// signed by the outgoing key to expire (default 31 ≫ 1 h access
-    /// token TTL, ≫ typical refresh window).
-    #[arg(long, env = "AUTH_JWK_RETAIN_DAYS", default_value = "31")]
-    pub jwk_retain_days: i64,
 
     /// Cron tick interval in seconds. Default 86400 (24 h). Operators
     /// drop this to seconds in staging/integration tests so a cron
@@ -554,20 +628,44 @@ fn is_same_site_with_issuer(origin: &str, issuer_host: &str) -> bool {
     registrable_domain(host) == registrable_domain(issuer_host)
 }
 
+fn parse_auth_provider_overlay(raw: Option<String>) -> Result<Option<AuthProviderKind>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let value = raw.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "" => Ok(None),
+        "native" => Ok(Some(AuthProviderKind::Native)),
+        "supabase" => Ok(Some(AuthProviderKind::Supabase)),
+        other => Err(format!(
+            "unknown auth_provider value {other:?}; expected native|supabase"
+        )),
+    }
+}
+
+fn resolved_optional_string(cli: Option<String>, file: Option<String>) -> Option<String> {
+    let resolved = resolve_overlay_string(cli, file, None);
+    let trimmed = resolved.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 impl AuthConfig {
     /// Resolve runtime state from the parsed CLI/env + the shared `[auth]`
     /// file overlay.
     ///
-    /// Hydra URLs follow CLI/env > file > default precedence via the shared
-    /// [`resolve_overlay_string`] primitive (same idiom as control). The
-    /// dev-insecure flag resolves CLI presence > env > default-false: a CLI
-    /// `--dev-insecure=false` overrides a stray `ZEROSHIP_DEV_INSECURE=1`.
+    /// The dev-insecure flag resolves CLI presence > env > default-false:
+    /// a CLI `--dev-insecure=false` overrides a stray
+    /// `ZEROSHIP_DEV_INSECURE=1`.
     ///
     /// Under `--dev-insecure` an empty stash key falls back to the shared
     /// [`DEV_STASH_SIGNING_KEY`] in code (the clap default is empty so no
     /// secret leaks into `--help`); outside dev the empty key is rejected by
     /// `validate_stash_key` before this fallback would matter.
-    pub fn resolve(&mut self, auth: AuthSection) {
+    pub fn try_resolve(&mut self, auth: AuthSection) -> Result<(), String> {
         self.insecure_dev = self.dev_insecure.unwrap_or(false);
         if self.insecure_dev && self.stash_signing_key.is_empty() {
             self.stash_signing_key = DEV_STASH_SIGNING_KEY.to_string();
@@ -579,6 +677,7 @@ impl AuthConfig {
         if self.insecure_dev && self.totp_enc_key.is_empty() {
             self.totp_enc_key = DEV_TOTP_ENC_KEY.to_string();
         }
+        self.refresh_pool_size = self.refresh_pool_size.max(1);
         // Console framing allowlist (immersive iframe login, §4.3/§10.1).
         // Precedence mirrors the deployment-injection pattern: a non-empty
         // CLI/env (`--frame-ancestor-origin` / `FRAME_ANCESTOR_ORIGINS`) wins;
@@ -610,32 +709,69 @@ impl AuthConfig {
                     origins.into_iter().filter(|o| keep(o)).collect();
             }
         }
-        self.hydra_admin_url = Some(resolve_overlay_string(
-            self.hydra_admin_url.take(),
-            auth.hydra_admin_url,
-            Some(DEFAULT_HYDRA_ADMIN_URL),
+        let overlay_provider = parse_auth_provider_overlay(auth.auth_provider)?;
+        self.auth_provider = Some(
+            self.auth_provider
+                .or(overlay_provider)
+                .unwrap_or(AuthProviderKind::Native),
+        );
+        self.supabase_url = resolved_optional_string(self.supabase_url.take(), auth.supabase_url);
+        self.supabase_anon_key =
+            resolved_optional_string(self.supabase_anon_key.take(), auth.supabase_anon_key);
+        self.control_url = Some(resolve_overlay_string(
+            self.control_url.take(),
+            auth.control_url,
+            Some(DEFAULT_CONTROL_URL),
         ));
-        self.hydra_public_url = Some(resolve_overlay_string(
-            self.hydra_public_url.take(),
-            auth.hydra_public_url,
-            Some(DEFAULT_HYDRA_PUBLIC_URL),
-        ));
+
+        if self.auth_provider() == AuthProviderKind::Supabase {
+            let mut missing = Vec::new();
+            if self.supabase_url().is_none() {
+                missing.push("SUPABASE_URL / --supabase-url");
+            }
+            if self.supabase_anon_key().is_none() {
+                missing.push("SUPABASE_ANON_KEY / --supabase-anon-key");
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "ZEROSHIP_AUTH_PROVIDER=supabase requires {}",
+                    missing.join(" and ")
+                ));
+            }
+        }
+
+        Ok(())
     }
 
-    /// Resolved Hydra admin API base URL.
-    #[must_use]
-    pub fn hydra_admin_url(&self) -> &str {
-        self.hydra_admin_url
-            .as_deref()
-            .unwrap_or(DEFAULT_HYDRA_ADMIN_URL)
+    /// Resolve runtime state, panicking on invalid config. Existing tests and
+    /// fixtures use this convenience wrapper; real boot uses [`Self::try_resolve`]
+    /// so invalid Supabase config exits cleanly.
+    pub fn resolve(&mut self, auth: AuthSection) {
+        self.try_resolve(auth).expect("resolve auth config");
     }
 
-    /// Resolved Hydra public issuer/base URL.
+    /// Resolved auth-provider backend.
     #[must_use]
-    pub fn hydra_public_url(&self) -> &str {
-        self.hydra_public_url
-            .as_deref()
-            .unwrap_or(DEFAULT_HYDRA_PUBLIC_URL)
+    pub fn auth_provider(&self) -> AuthProviderKind {
+        self.auth_provider.unwrap_or(AuthProviderKind::Native)
+    }
+
+    /// Resolved Supabase Auth / GoTrue base URL.
+    #[must_use]
+    pub fn supabase_url(&self) -> Option<&str> {
+        self.supabase_url.as_deref()
+    }
+
+    /// Resolved Supabase anon API key.
+    #[must_use]
+    pub fn supabase_anon_key(&self) -> Option<&str> {
+        self.supabase_anon_key.as_deref()
+    }
+
+    /// Resolved control-plane base URL.
+    #[must_use]
+    pub fn control_url(&self) -> &str {
+        self.control_url.as_deref().unwrap_or(DEFAULT_CONTROL_URL)
     }
 
     /// External origin of this auth server (no trailing slash). Returns
@@ -644,6 +780,16 @@ impl AuthConfig {
     #[must_use]
     pub fn public_url(&self) -> String {
         self.public_url.trim_end_matches('/').to_string()
+    }
+
+    /// Public issuer URL for the self-contained OAuth/OIDC provider.
+    ///
+    /// Protocol endpoints are mounted under the fixed `/oauth2` prefix so the
+    /// OP is reverse-proxyable without owning the host root. This is the single
+    /// source for the `iss` stamped into tokens and discovery metadata.
+    #[must_use]
+    pub fn op_issuer_url(&self) -> String {
+        format!("{}/oauth2", self.public_url())
     }
 }
 
@@ -655,11 +801,12 @@ impl std::fmt::Debug for AuthConfig {
         f.debug_struct("AuthConfig")
             .field("addr", &self.addr)
             .field("db_url", &"<redacted>")
-            .field("hydra_admin_url", &self.hydra_admin_url)
-            .field("hydra_public_url", &self.hydra_public_url)
-            .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
-            .field("clients_config", &self.clients_config)
-            .field("bootstrap", &self.bootstrap)
+            .field("auth_provider", &self.auth_provider)
+            .field("supabase_url", &self.supabase_url)
+            .field("supabase_anon_key", &"<redacted>")
+            .field("gotrue_email_hook_secret", &"<redacted>")
+            .field("control_url", &self.control_url)
+            .field("control_key", &"<redacted>")
             .field("dev_insecure", &self.dev_insecure)
             .field("insecure_dev", &self.insecure_dev)
             .field("stash_signing_key", &"<redacted>")
@@ -673,6 +820,16 @@ impl std::fmt::Debug for AuthConfig {
             .field("smtp_password", &"<redacted>")
             .field("resend_api_key", &"<redacted>")
             .field("public_url", &self.public_url)
+            .field("auth_signing_key_file", &self.auth_signing_key_file)
+            .field("auth_pairwise_salt_file", &self.auth_pairwise_salt_file)
+            .field("auth_broker_secret_file", &self.auth_broker_secret_file)
+            .field(
+                "auth_broker_secret_previous_file",
+                &self.auth_broker_secret_previous_file,
+            )
+            .field("refresh_hash_key_file", &self.refresh_hash_key_file)
+            .field("refresh_idem_key_file", &self.refresh_idem_key_file)
+            .field("refresh_pool_size", &self.refresh_pool_size)
             .field("postmark_webhook_password", &"<redacted>")
             .field("relay_domain", &self.relay_domain)
             .field("relay_forward_mailer", &self.relay_forward_mailer)
@@ -691,8 +848,6 @@ mod tests {
 
     use super::*;
     use zeroship_core::config::FileConfig;
-
-    static HYDRA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct TempFile {
         path: PathBuf,
@@ -718,42 +873,11 @@ mod tests {
         }
     }
 
-    fn set_env_opt(key: &str, value: Option<&str>) {
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
-    }
-
     fn restore_env(key: &str, value: Option<OsString>) {
         if let Some(value) = value {
             std::env::set_var(key, value);
         } else {
             std::env::remove_var(key);
-        }
-    }
-
-    fn with_hydra_env<T>(
-        hydra_admin_url: Option<&str>,
-        hydra_public_url: Option<&str>,
-        f: impl FnOnce() -> T,
-    ) -> T {
-        let _guard = HYDRA_ENV_LOCK.lock().expect("hydra env lock poisoned");
-        let old_admin = std::env::var_os("HYDRA_ADMIN_URL");
-        let old_public = std::env::var_os("HYDRA_PUBLIC_URL");
-
-        set_env_opt("HYDRA_ADMIN_URL", hydra_admin_url);
-        set_env_opt("HYDRA_PUBLIC_URL", hydra_public_url);
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-
-        restore_env("HYDRA_ADMIN_URL", old_admin);
-        restore_env("HYDRA_PUBLIC_URL", old_public);
-
-        match result {
-            Ok(value) => value,
-            Err(payload) => std::panic::resume_unwind(payload),
         }
     }
 
@@ -765,6 +889,88 @@ mod tests {
 
     fn test_config() -> AuthConfig {
         AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"])
+    }
+
+    #[test]
+    fn auth_provider_defaults_to_native() {
+        let mut cfg = test_config();
+        cfg.try_resolve(AuthSection::default())
+            .expect("resolve default auth config");
+
+        assert_eq!(cfg.auth_provider(), AuthProviderKind::Native);
+        assert!(cfg.supabase_url().is_none());
+        assert!(cfg.supabase_anon_key().is_none());
+        assert_eq!(cfg.control_url(), DEFAULT_CONTROL_URL);
+    }
+
+    #[test]
+    fn supabase_provider_requires_url_and_anon_key() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--auth-provider",
+            "supabase",
+        ]);
+
+        let err = cfg
+            .try_resolve(AuthSection::default())
+            .expect_err("supabase provider must fail closed without GoTrue config");
+
+        assert!(err.contains("SUPABASE_URL"), "{err}");
+        assert!(err.contains("SUPABASE_ANON_KEY"), "{err}");
+    }
+
+    #[test]
+    fn supabase_provider_resolves_with_required_fields() {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--auth-provider",
+            "supabase",
+            "--supabase-url",
+            "https://project.supabase.test",
+            "--supabase-anon-key",
+            "anon-test-key",
+            "--control-url",
+            "https://control.zeroship.test",
+        ]);
+
+        cfg.try_resolve(AuthSection::default())
+            .expect("supabase provider resolves with GoTrue config");
+
+        assert_eq!(cfg.auth_provider(), AuthProviderKind::Supabase);
+        assert_eq!(cfg.supabase_url(), Some("https://project.supabase.test"));
+        assert_eq!(cfg.supabase_anon_key(), Some("anon-test-key"));
+        assert_eq!(cfg.control_url(), "https://control.zeroship.test");
+    }
+
+    #[test]
+    fn auth_file_overlay_supplies_supabase_device_config_when_unset() {
+        let file = TempFile::write(
+            "auth-supabase-overlay.toml",
+            r#"
+[auth]
+auth_provider = "supabase"
+supabase_url = "https://project.supabase.test"
+supabase_anon_key = "anon-file-key"
+control_url = "https://control-file.zeroship.test"
+"#,
+        );
+
+        let cfg = resolve_from_file(AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--config",
+            file.path.to_str().expect("utf-8 temp path"),
+        ]));
+
+        assert_eq!(cfg.auth_provider(), AuthProviderKind::Supabase);
+        assert_eq!(cfg.supabase_url(), Some("https://project.supabase.test"));
+        assert_eq!(cfg.supabase_anon_key(), Some("anon-file-key"));
+        assert_eq!(cfg.control_url(), "https://control-file.zeroship.test");
     }
 
     // The stash validator now lives in `zeroship_core::config`; these tests
@@ -946,30 +1152,6 @@ mod tests {
         ])
         .expect_err("--smtp-starttls no longer accepted");
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn allow_remote_hydra_admin_flag_accepts_bare_switch() {
-        let cfg = AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--allow-remote-hydra-admin",
-        ]);
-
-        assert!(cfg.allow_remote_hydra_admin);
-    }
-
-    #[test]
-    fn allow_remote_hydra_admin_flag_accepts_true_value() {
-        let cfg = AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--allow-remote-hydra-admin=true",
-        ]);
-
-        assert!(cfg.allow_remote_hydra_admin);
     }
 
     // Immersive iframe login (design §4.3/§10.1): the `--frame-ancestor-origin`
@@ -1244,86 +1426,4 @@ mod tests {
         assert!(!is_same_site_with_issuer("not-a-url", "auth.zeroship.ai"));
     }
 
-    #[test]
-    fn auth_file_overlay_supplies_hydra_urls_when_unset() {
-        with_hydra_env(None, None, || {
-            let file = TempFile::write(
-                "auth-overlay.toml",
-                r#"
-[auth]
-hydra_admin_url = "http://hydra-file:4445"
-hydra_public_url = "https://hydra-file.example"
-"#,
-            );
-
-            let cfg = resolve_from_file(AuthConfig::parse_from([
-                "zeroship-auth",
-                "--db-url",
-                "postgres://test",
-                "--config",
-                file.path.to_str().expect("utf-8 temp path"),
-            ]));
-
-            assert_eq!(cfg.hydra_admin_url(), "http://hydra-file:4445");
-            assert_eq!(cfg.hydra_public_url(), "https://hydra-file.example");
-        });
-    }
-
-    #[test]
-    fn cli_hydra_urls_override_file_overlay() {
-        with_hydra_env(None, None, || {
-            let file = TempFile::write(
-                "auth-cli-override.toml",
-                r#"
-[auth]
-hydra_admin_url = "http://hydra-file:4445"
-hydra_public_url = "https://hydra-file.example"
-"#,
-            );
-
-            let cfg = resolve_from_file(AuthConfig::parse_from([
-                "zeroship-auth",
-                "--db-url",
-                "postgres://test",
-                "--config",
-                file.path.to_str().expect("utf-8 temp path"),
-                "--hydra-admin-url",
-                "http://hydra-cli:4445",
-                "--hydra-public-url",
-                "https://hydra-cli.example",
-            ]));
-
-            assert_eq!(cfg.hydra_admin_url(), "http://hydra-cli:4445");
-            assert_eq!(cfg.hydra_public_url(), "https://hydra-cli.example");
-        });
-    }
-
-    #[test]
-    fn env_hydra_urls_override_file_overlay() {
-        with_hydra_env(
-            Some("http://hydra-env:4445"),
-            Some("https://hydra-env.example"),
-            || {
-                let file = TempFile::write(
-                    "auth-env-override.toml",
-                    r#"
-[auth]
-hydra_admin_url = "http://hydra-file:4445"
-hydra_public_url = "https://hydra-file.example"
-"#,
-                );
-
-                let cfg = resolve_from_file(AuthConfig::parse_from([
-                    "zeroship-auth",
-                    "--db-url",
-                    "postgres://test",
-                    "--config",
-                    file.path.to_str().expect("utf-8 temp path"),
-                ]));
-
-                assert_eq!(cfg.hydra_admin_url(), "http://hydra-env:4445");
-                assert_eq!(cfg.hydra_public_url(), "https://hydra-env.example");
-            },
-        );
-    }
 }

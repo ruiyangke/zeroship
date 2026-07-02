@@ -22,6 +22,9 @@ use crate::rls;
 pub struct AppSession {
     pub id: Uuid,
     pub user_id: String,
+    /// OIDC OP session id (`sid`) from the ID token, used to correlate
+    /// Back-Channel Logout tokens to the local RP session.
+    pub sid: Option<String>,
     /// The app's stable UUID (`apps.id`). The `zeroship.gateway_sessions.app_id`
     /// column is UUID and bound natively — the canonical session key is the
     /// immutable app id, never the renameable subdomain slug.
@@ -51,6 +54,8 @@ pub struct AppSession {
 #[derive(Debug)]
 pub struct NewSession<'a> {
     pub user_id: &'a str,
+    /// OIDC OP session id (`sid`) from the validated ID token, if present.
+    pub sid: Option<&'a str>,
     /// The app's stable UUID (`apps.id`), bound natively into the UUID
     /// `app_id` column. Keyed on the immutable app id (the subdomain slug can
     /// be renamed), matching the live per-request dispatch arm.
@@ -97,15 +102,15 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
         .query(
             "INSERT INTO zeroship.gateway_sessions \
                 (user_id, app_id, email, name, avatar_url, email_verified, \
-                 granted_scopes, auth_time, amr, idle_expires_at, abs_expires_at) \
+                 granted_scopes, auth_time, amr, sid, idle_expires_at, abs_expires_at) \
              VALUES ($1, $2, $3::citext, $4, $5, $6, $9, \
                      CASE WHEN $10::bigint IS NULL THEN NULL \
                           ELSE to_timestamp($10::bigint) END, \
-                     $11, \
+                     $11, $12, \
                      NOW() + ($7::text || ' minutes')::interval, \
                      NOW() + ($8::text || ' hours')::interval) \
              RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
-                       email_verified, granted_scopes, auth_time, amr, \
+                       email_verified, granted_scopes, auth_time, amr, sid, \
                        idle_expires_at, abs_expires_at",
             &[
                 &user_id,
@@ -119,6 +124,7 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
                 &params.granted_scopes,
                 &params.auth_time,
                 &amr,
+                &params.sid,
             ],
         )
         .await
@@ -164,7 +170,7 @@ pub async fn validate(conn: &mut Client, id: Uuid, app_id: Uuid) -> Result<Optio
                AND idle_expires_at > NOW() \
                AND abs_expires_at > NOW() \
              RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
-                       email_verified, granted_scopes, auth_time, amr, \
+                       email_verified, granted_scopes, auth_time, amr, sid, \
                        idle_expires_at, abs_expires_at",
             &[&id, &app_id, &IDLE_MINUTES.to_string()],
         )
@@ -239,11 +245,133 @@ pub async fn revoke_app_sessions_for_user(
     Ok(affected)
 }
 
+/// Return the most recent non-null OP `sid` previously recorded for this
+/// `(app_id, user_id)` session family.
+///
+/// Reload-recovery refresh grants do not always return an ID token, and the
+/// access JWT does not carry `sid`. The original login session row is therefore
+/// the gateway-side durable source of the OP session id when re-writing the
+/// audit/revocation row during `?mint=1` rotation.
+pub async fn latest_sid_for_user(
+    conn: &mut Client,
+    app_id: Uuid,
+    user_id: &str,
+) -> Result<Option<String>> {
+    let user_id = Uuid::parse_str(user_id).map_err(|e| {
+        GatewayError::Db(format!(
+            "gateway_sessions latest_sid_for_user: invalid user_id: {e}"
+        ))
+    })?;
+    let tx = conn.transaction().await.map_err(|e| {
+        GatewayError::Db(format!("gateway_sessions latest_sid_for_user begin: {e}"))
+    })?;
+    rls::set_tenant_app(&tx, app_id).await?;
+    let rows = tx
+        .query(
+            "SELECT sid \
+             FROM zeroship.gateway_sessions \
+             WHERE user_id = $1 AND app_id = $2 AND sid IS NOT NULL \
+             ORDER BY issued_at DESC \
+             LIMIT 1",
+            &[&user_id, &app_id],
+        )
+        .await
+        .map_err(|e| GatewayError::Db(format!("gateway_sessions latest_sid_for_user: {e}")))?;
+    let sid = rows.first().and_then(|row| row.try_get("sid").ok());
+    tx.commit().await.map_err(|e| {
+        GatewayError::Db(format!(
+            "gateway_sessions latest_sid_for_user commit: {e}"
+        ))
+    })?;
+    Ok(sid)
+}
+
+/// Revoke every live session for one OP `sid` at one app. When `sub` is
+/// provided, it must match `gateway_sessions.user_id`; this prevents a malformed
+/// token containing a valid sid plus a contradictory subject from killing a
+/// different user's rows.
+pub async fn revoke_app_sessions_for_sid(
+    conn: &mut Client,
+    app_id: Uuid,
+    sid: &str,
+    sub: Option<&str>,
+) -> Result<Vec<Uuid>> {
+    let parsed_sub = match sub {
+        Some(sub) => Some(Uuid::parse_str(sub).map_err(|e| {
+            GatewayError::Db(format!(
+                "gateway_sessions revoke_app_sessions_for_sid: invalid user_id: {e}"
+            ))
+        })?),
+        None => None,
+    };
+    let tx = conn.transaction().await.map_err(|e| {
+        GatewayError::Db(format!(
+            "gateway_sessions revoke_app_sessions_for_sid begin: {e}"
+        ))
+    })?;
+    rls::set_tenant_app(&tx, app_id).await?;
+    let rows = if let Some(user_id) = parsed_sub {
+        tx.query(
+            "WITH targets AS ( \
+                 SELECT DISTINCT user_id \
+                 FROM zeroship.gateway_sessions \
+                 WHERE app_id = $1 AND sid = $2 AND user_id = $3 \
+             ), revoked AS ( \
+                 UPDATE zeroship.gateway_sessions \
+                 SET revoked_at = NOW() \
+                 WHERE app_id = $1 AND sid = $2 AND user_id = $3 AND revoked_at IS NULL \
+                 RETURNING user_id \
+             ) \
+             SELECT user_id FROM targets \
+             UNION \
+             SELECT user_id FROM revoked",
+            &[&app_id, &sid, &user_id],
+        )
+        .await
+    } else {
+        tx.query(
+            "WITH targets AS ( \
+                 SELECT DISTINCT user_id \
+                 FROM zeroship.gateway_sessions \
+                 WHERE app_id = $1 AND sid = $2 \
+             ), revoked AS ( \
+                 UPDATE zeroship.gateway_sessions \
+                 SET revoked_at = NOW() \
+                 WHERE app_id = $1 AND sid = $2 AND revoked_at IS NULL \
+                 RETURNING user_id \
+             ) \
+             SELECT user_id FROM targets \
+             UNION \
+             SELECT user_id FROM revoked",
+            &[&app_id, &sid],
+        )
+        .await
+    }
+    .map_err(|e| {
+        GatewayError::Db(format!("gateway_sessions revoke_app_sessions_for_sid: {e}"))
+    })?;
+    tx.commit().await.map_err(|e| {
+        GatewayError::Db(format!(
+            "gateway_sessions revoke_app_sessions_for_sid commit: {e}"
+        ))
+    })?;
+
+    let mut users = Vec::new();
+    for row in rows {
+        let user_id: Uuid = row.get("user_id");
+        if !users.contains(&user_id) {
+            users.push(user_id);
+        }
+    }
+    Ok(users)
+}
+
 fn row_to_session(row: &compio_postgres::Row) -> AppSession {
     let user_id: Uuid = row.get("user_id");
     AppSession {
         id: row.get("id"),
         user_id: user_id.to_string(),
+        sid: row.try_get("sid").ok().flatten(),
         app_id: row.get("app_id"),
         email: row.try_get("email").ok(),
         name: row.try_get("name").ok(),

@@ -1,7 +1,7 @@
 /**
  * Faithful dev-tier auth test — the REAL `@zeroship/auth` browser client driving
  * the REAL `@zeroship/bootstrap` dev-auth provider end-to-end, with NO gateway /
- * Hydra. This is the contract-parity proof: the same client code that talks to
+ * external auth service. This is the contract-parity proof: the same client code that talks to
  * the gateway in prod resolves a session against the dev provider's
  * `/__zeroship/auth/*` endpoints, byte-identical wire, only the backend differs.
  *

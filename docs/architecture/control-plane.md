@@ -30,7 +30,7 @@ lib.rs             `AppState`, shared services, secret wrappers
 api.rs             app CRUD, deploy, plan, usage reads
 internal.rs        route/version/env feeds, usage ingest
 token_handlers.rs  PAT issuance (`/me/tokens`)
-oauth_handlers.rs  admin OAuth-client CRUD against hydra
+oauth_handlers.rs  admin OAuth-client CRUD for the native OP registry
 oauth_grants_handlers.rs  per-app OAuth grant management
 authz_guard.rs     Cedar-backed request authorization (crates/authz)
 admin_handlers.rs  platform-admin surface
@@ -156,14 +156,14 @@ The blob-store ingest path is current. The older raw bundle upload path is gone.
 ## Auth flow
 
 End-user auth does **not** terminate in control. The gateway is the OIDC
-RP of the auth service (`crates/auth` + hydra); control is a pure API
+RP of the native auth service (`crates/auth`); control is a pure API
 resource server with no RP of its own — the bespoke `ConsoleOidcRp` +
 `console_sessions` surface was removed in the R5 cutover
 (`crates/control/src/lib.rs`).
 
 ```text
-Gateway -> 302 to hydra /oauth2/auth (no session cookie)
-crates/auth -> login / OAuth / consent, accept_login against hydra
+Gateway -> 302 to auth /oauth2/authorize (no session cookie)
+crates/auth -> login / OAuth / consent, then native OP code issuance
 Gateway -> /__zeroship/auth/callback: code exchange, sets `__Host-zeroship_app_session`
 Gateway -> validates the session and forwards `ZeroShip-User` (HMAC-signed)
 Worker/runtime -> reads the forwarded user context

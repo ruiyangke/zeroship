@@ -41,7 +41,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
-    /// Auth-domain configuration shared by binaries that integrate with Hydra.
+    /// Auth-domain configuration shared by platform binaries.
     #[serde(default)]
     pub auth: AuthSection,
     /// Observability configuration shared by platform binaries.
@@ -58,10 +58,18 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
-    /// Hydra admin API base URL.
-    pub hydra_admin_url: Option<String>,
-    /// Hydra public issuer/base URL.
-    pub hydra_public_url: Option<String>,
+    /// Platform auth provider backend (`platform` or `supabase`).
+    pub auth_provider: Option<String>,
+    /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
+    pub supabase_url: Option<String>,
+    /// Supabase anon API key used by browser-side GoTrue session calls.
+    pub supabase_anon_key: Option<String>,
+    /// Platform OP issuer accepted for platform-issued access tokens.
+    pub platform_issuer: Option<String>,
+    /// Platform OP JWKS URL. Defaults to `{platform_issuer}/.well-known/jwks.json`.
+    pub platform_jwks_url: Option<String>,
+    /// Control-plane base URL used by auth-service browser flows.
+    pub control_url: Option<String>,
     /// First-party OAuth client IDs trusted by the platform.
     ///
     /// `None` (key absent) means "use the compiled-in default set"; `Some(vec)`
@@ -216,8 +224,12 @@ mod tests {
     fn load_none_returns_defaults() {
         let config = FileConfig::load(None).expect("load default config");
 
-        assert!(config.auth.hydra_admin_url.is_none());
-        assert!(config.auth.hydra_public_url.is_none());
+        assert!(config.auth.auth_provider.is_none());
+        assert!(config.auth.supabase_url.is_none());
+        assert!(config.auth.supabase_anon_key.is_none());
+        assert!(config.auth.platform_issuer.is_none());
+        assert!(config.auth.platform_jwks_url.is_none());
+        assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert!(config.auth.frame_ancestor_origins.is_none());
         assert!(config.observability.log_filter.is_none());
@@ -256,8 +268,12 @@ frame_ancestor_origins = ["https://console.zeroship.ai", "https://staging-consol
             "full.toml",
             r#"
 [auth]
-hydra_admin_url = "http://hydra:4445"
-hydra_public_url = "https://auth.zeroship.ai"
+auth_provider = "supabase"
+supabase_url = "https://project.supabase.test"
+supabase_anon_key = "anon-test-key"
+platform_issuer = "https://auth.zeroship.ai"
+platform_jwks_url = "https://auth.zeroship.ai/.well-known/jwks.json"
+control_url = "https://control.zeroship.ai"
 trusted_oauth_clients = ["zeroship-builder", "zeroship-console"]
 
 [observability]
@@ -268,13 +284,26 @@ log_format = "json"
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
+        assert_eq!(config.auth.auth_provider.as_deref(), Some("supabase"));
         assert_eq!(
-            config.auth.hydra_admin_url.as_deref(),
-            Some("http://hydra:4445")
+            config.auth.supabase_url.as_deref(),
+            Some("https://project.supabase.test")
         );
         assert_eq!(
-            config.auth.hydra_public_url.as_deref(),
+            config.auth.supabase_anon_key.as_deref(),
+            Some("anon-test-key")
+        );
+        assert_eq!(
+            config.auth.platform_issuer.as_deref(),
             Some("https://auth.zeroship.ai")
+        );
+        assert_eq!(
+            config.auth.platform_jwks_url.as_deref(),
+            Some("https://auth.zeroship.ai/.well-known/jwks.json")
+        );
+        assert_eq!(
+            config.auth.control_url.as_deref(),
+            Some("https://control.zeroship.ai")
         );
         assert_eq!(
             config.auth.trusted_oauth_clients.as_deref(),
@@ -305,16 +334,13 @@ log_format = "json"
             "auth-only.toml",
             r#"
 [auth]
-hydra_admin_url = "http://hydra:4445"
+auth_provider = "platform"
 "#,
         );
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
-        assert_eq!(
-            config.auth.hydra_admin_url.as_deref(),
-            Some("http://hydra:4445")
-        );
+        assert_eq!(config.auth.auth_provider.as_deref(), Some("platform"));
         assert!(config.observability.log_filter.is_none());
         assert!(config.observability.log_format.is_none());
     }
@@ -331,8 +357,12 @@ rust_log = "debug"
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
-        assert!(config.auth.hydra_admin_url.is_none());
-        assert!(config.auth.hydra_public_url.is_none());
+        assert!(config.auth.auth_provider.is_none());
+        assert!(config.auth.supabase_url.is_none());
+        assert!(config.auth.supabase_anon_key.is_none());
+        assert!(config.auth.platform_issuer.is_none());
+        assert!(config.auth.platform_jwks_url.is_none());
+        assert!(config.auth.control_url.is_none());
         assert!(config.auth.trusted_oauth_clients.is_none());
         assert_eq!(config.observability.log_filter.as_deref(), Some("debug"));
     }
@@ -367,7 +397,7 @@ rust_log = "debug"
             "unknown-auth-key.toml",
             r#"
 [auth]
-hydra_pubic_url = "https://typo.example"
+platform_issur = "https://typo.example"
 "#,
         );
 
@@ -383,7 +413,7 @@ hydra_pubic_url = "https://typo.example"
             "tcl-absent.toml",
             r#"
 [auth]
-hydra_admin_url = "http://hydra:4445"
+auth_provider = "platform"
 "#,
         );
 

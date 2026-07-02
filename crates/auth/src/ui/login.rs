@@ -1,18 +1,7 @@
-//! `/login` GET handler.
-//!
-//! Algorithm (P2 §8.1 GET path):
-//!
-//! 1. Read `login_challenge` from the query.
-//! 2. Fetch challenge metadata from hydra via `admin.get_login(challenge)`.
-//! 3. If `info.skip == true`, hydra already has a session for this subject —
-//!    immediately call `accept_login` and redirect back to hydra.
-//! 4. Otherwise render the form with a fresh CSRF token cookie.
-//!
-//! Route wiring happens in P2-U6 (`server::configure`); the handler here is
-//! a plain `pub async fn` with no `#[ntex::web::*]` attribute.
+//! `/login` GET/POST handlers.
 
 use askama::Template;
-use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
+use ntex::http::header::{COOKIE, SET_COOKIE};
 use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
@@ -21,12 +10,14 @@ use std::sync::Arc;
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::hydra_client::types::{AcceptLoginRequest, RejectRequest};
-use crate::hydra_client::HydraAdmin;
 use crate::identity::credentials::{verify_password_credentials, CredentialError};
-use crate::identity::eligibility::{self, LoginIneligible};
 use crate::identity::totp;
+use crate::oidc::auth_request::AuthRequest;
+use crate::oidc::authorization_code::{
+    prompt_requests_login, return_to_after_prompt_interaction,
+};
 use crate::ratelimit::{self, Bucket, RateLimitDecision};
+use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, TotpChallenge};
 use crate::store::{sessions, totp as totp_store, users};
@@ -34,7 +25,7 @@ use crate::ui::{LoginPage, PublicErrorMessage, TotpChallengePage};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
-    pub login_challenge: String,
+    pub return_to: Option<String>,
 }
 
 // ntex's per-thread service futures are intentionally `!Send` (Rc-based
@@ -44,106 +35,54 @@ pub struct LoginQuery {
 pub async fn get(
     req: HttpRequest,
     query: ntex::web::types::Query<LoginQuery>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let _ = req; // header extraction (UA, request-id) lands in later phases.
-    let challenge = &query.login_challenge;
-
-    // Fetch challenge details from hydra.
-    let info = match admin.get_login(challenge).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(error = %e, challenge = %challenge, "login challenge fetch failed");
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-    };
-
-    // Skip path: hydra already knows the subject.
-    if info.skip {
-        let subject_uuid = uuid::Uuid::parse_str(&info.subject).ok();
-        let eligible = match subject_uuid {
-            Some(subject_id) => eligibility::check_user_eligible(db.as_ref(), subject_id).await,
-            None => Err(LoginIneligible::NotFound),
-        };
-        if let Err(e) = eligible {
-            if !e.is_account_state() {
-                tracing::error!(error = %e, subject = %info.subject, "skip-login eligibility check failed");
-                return render_error(PublicErrorMessage::ContactSupport);
-            }
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "login_failure",
-                    outcome: "failure",
-                    user_id: subject_uuid.as_ref(),
-                    client_id: Some(&info.client.client_id),
-                    auth_method: Some("hydra_skip"),
-                    detail: json!({ "reason": "account_ineligible" }),
-                    ..AuditEvent::from_request(&req)
-                },
-            )
-            .await;
-            let reject = RejectRequest {
-                error: "access_denied".into(),
-                error_description: Some("account temporarily locked".into()),
-                status_code: Some(403),
-            };
-            match admin.reject_login(challenge, &reject).await {
-                Ok(resp) => return redirect(&resp.redirect_to),
-                Err(e) => {
-                    tracing::error!(error = %e, subject = %info.subject, "reject_login (skip path) failed");
-                    return render_error(PublicErrorMessage::ContactSupport);
-                }
-            }
-        }
-        let accept = AcceptLoginRequest {
-            subject: info.subject.clone(),
-            remember: Some(true),
-            remember_for: Some(3600),
-            ..Default::default()
-        };
-        match admin.accept_login(challenge, &accept).await {
-            Ok(resp) => return redirect(&resp.redirect_to),
-            Err(e) => {
-                tracing::error!(error = %e, "accept_login (skip path) failed");
-                return render_error(PublicErrorMessage::ContactSupport);
-            }
-        }
-    }
-
-    // Render the form with a fresh CSRF token cookie.
-    let csrf_token = csrf::generate_token();
-    let page = LoginPage {
-        challenge,
-        csrf: &csrf_token,
-        error: None,
-        client_name: info.client.client_name.as_deref().unwrap_or(&info.client.client_id),
-        google_enabled: cfg.google_client_id.is_some(),
-        github_enabled: cfg.github_client_id.is_some(),
-    };
-    let body = match page.render() {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(error = %e, "render login.html failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
-
-    let mut resp = HttpResponse::Ok();
-    resp.content_type("text/html; charset=utf-8");
-    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
-    resp.body(body)
+    let query = query.into_inner();
+    get_native(req, query.return_to.as_deref(), cfg.as_ref(), db.as_ref()).await
 }
 
-fn redirect(to: &str) -> HttpResponse {
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(to).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
-    resp.finish()
+#[allow(clippy::future_not_send)]
+async fn get_native(
+    req: HttpRequest,
+    raw_return_to: Option<&str>,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+) -> HttpResponse {
+    let return_to = return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
+    let auth_request = AuthRequest::parse_return_to(&return_to).ok();
+    let force_login = auth_request
+        .as_ref()
+        .is_some_and(|request| prompt_requests_login(request.prompt.as_deref()));
+    match resolve_native_session(&req, cfg, db).await {
+        Ok(Some(_)) if !force_login => {
+            return return_to::see_other(&return_to)
+                .header("cache-control", "no-store")
+                .finish();
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {}
+        Err(resp) => return resp,
+    }
+
+    if let Some(location) = auth_request.as_ref().and_then(|request| {
+        request.provider_start_location(
+            cfg.google_client_id.is_some(),
+            cfg.github_client_id.is_some(),
+        )
+    }) {
+        return return_to::see_other(&location)
+            .header("cache-control", "no-store")
+            .finish();
+    }
+
+    render_login_form_native(
+        &return_to,
+        &native_client_name(auth_request.as_ref()),
+        cfg,
+        None,
+        200,
+    )
 }
 
 fn render_error(message: PublicErrorMessage) -> HttpResponse {
@@ -167,6 +106,7 @@ pub struct LoginForm {
     pub csrf: String,
     pub email: String,
     pub password: String,
+    pub return_to: Option<String>,
 }
 
 /// `/login` POST — credential flow per proposal §8.1.
@@ -177,8 +117,8 @@ pub struct LoginForm {
 ///    has no `password_hash` (account-enumeration defense).
 /// 4. Argon2 verify wrapped in `compio::runtime::spawn_blocking` (~100 ms,
 ///    must not block the ntex event loop).
-/// 5. On success: insert `zeroship.idp_sessions`, set `__Host-zsidp_session` cookie,
-///    `accept_login` to hydra, 302 to hydra's `redirect_to`.
+/// 5. On success: insert `zeroship.idp_sessions`, set `__Host-zsidp_session`
+///    cookie, and redirect back to the native authorize request.
 /// 6. On failure: re-render the form with a status code matching the
 ///    failure mode (400 / 401 / 429 / 500). Cookies refreshed so the form
 ///    stays usable for a retry.
@@ -190,31 +130,35 @@ pub async fn post(
     req: HttpRequest,
     query: ntex::web::types::Query<LoginQuery>,
     form: ntex::web::types::Form<LoginForm>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let challenge = query.login_challenge.clone();
+    let query = query.into_inner();
+    let form = form.into_inner();
+    post_native(req, query.return_to.as_deref(), &form, cfg.as_ref(), db.as_ref()).await
+}
 
-    // Best-effort fetch of client_name so the re-rendered LoginPage on
-    // failure still shows the relying-party label. If hydra is unreachable
-    // we render an opaque error page; the login flow cannot proceed without
-    // a challenge anyway.
-    let info = match admin.get_login(&challenge).await {
-        Ok(i) => i,
-        Err(e) => {
-            tracing::warn!(error = %e, challenge = %challenge, "POST /login: get_login failed");
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-    };
-    let client_id = info.client.client_id.clone();
-    let client_name = info
-        .client
-        .client_name
-        .clone()
-        .unwrap_or_else(|| client_id.clone());
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+async fn post_native(
+    req: HttpRequest,
+    query_return_to: Option<&str>,
+    form: &LoginForm,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+) -> HttpResponse {
+    let return_to = return_to::sanitize(
+        form.return_to.as_deref().or(query_return_to),
+        return_to::SAFE_DEFAULT,
+    );
+    // MED-3: do NOT derive the audit `client_id` from `return_to`. Only /authorize
+    // pre-validates that param; a direct /login hit lets an attacker forge it, and
+    // login is client-agnostic anyway (the real client binding + its audit happen at
+    // /authorize → /consent → /token). Stamp a fixed sentinel so a forged return_to
+    // cannot poison the login_failure/login_success audit label.
+    let client_id = "native".to_string();
+    let auth_request = AuthRequest::parse_return_to(&return_to).ok();
+    let client_name = native_client_name(auth_request.as_ref());
 
-    // 1. CSRF — cheapest check first.
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -225,27 +169,12 @@ pub async fn post(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_login_error(
-            &challenge,
-            &client_name,
-            &cfg,
-            "invalid request",
-            400,
-        );
+        return render_login_error(&return_to, &client_name, cfg, "invalid request", 400);
     }
 
-    // 2. Resolve the remote IP (rate-limit bucket + audit). Use the trusted,
-    //    gateway-authored client IP (SEC-3) — never the spoofable leftmost
-    //    X-Forwarded-For token `connection_info().remote()` returns.
     let ip = crate::headers::client_ip(&req);
-
-    // 3–4 + failure arms: the constant-time, fail-closed credential check
-    // (rate-limit → lookup → dummy-hash defense → Argon2 verify → eligibility
-    // → audit) lives in `identity::credentials` as the single shared
-    // verification body. Map its failure classes back to the form-re-render /
-    // opaque-error responses this HTML handler uses.
     let verified = match verify_password_credentials(
-        db.as_ref(),
+        db,
         &req,
         &client_id,
         &ip,
@@ -257,27 +186,27 @@ pub async fn post(
         Ok(v) => v,
         Err(CredentialError::RateLimited) => {
             return render_login_error(
-                &challenge,
+                &return_to,
                 &client_name,
-                &cfg,
+                cfg,
                 "too many attempts, try again later",
                 429,
             );
         }
         Err(CredentialError::InvalidCredentials) => {
             return render_login_error(
-                &challenge,
+                &return_to,
                 &client_name,
-                &cfg,
+                cfg,
                 "invalid email or password",
                 401,
             );
         }
         Err(CredentialError::Ineligible) => {
             return render_login_error(
-                &challenge,
+                &return_to,
                 &client_name,
-                &cfg,
+                cfg,
                 PublicErrorMessage::AccountTemporarilyLocked.as_str(),
                 403,
             );
@@ -287,23 +216,17 @@ pub async fn post(
         }
     };
 
-    // 5. Password verified. If the user has a CONFIRMED TOTP credential, do NOT
-    // mint a session / accept_login yet — require a second factor. We attest
-    // "factor 1 passed" in a short-lived, HMAC-signed `__Host-zsidp_2fa` cookie
-    // (bound to user_id + credential_version + this hydra challenge) and render
-    // the code-entry form. `/login/2fa` finishes the flow. A pending (un-
-    // confirmed) enrollment does NOT gate login (`is_enabled` is confirmed-only).
-    match totp_store::is_enabled(db.as_ref(), verified.id).await {
+    match totp_store::is_enabled(db, verified.id).await {
         Ok(true) => {
             let stash = TotpChallenge::new(
                 verified.id,
                 verified.credential_version,
-                challenge.clone(),
+                return_to.clone(),
             );
             let cookie = stash.encode(cfg.stash_signing_key.as_bytes());
             let csrf_token = csrf::generate_token();
             let page = TotpChallengePage {
-                challenge: &challenge,
+                return_to: &return_to,
                 csrf: &csrf_token,
                 error: None,
             };
@@ -325,36 +248,36 @@ pub async fn post(
         }
         Ok(false) => {}
         Err(e) => {
-            // Fail CLOSED: if we cannot determine 2FA status we must not skip
-            // the second factor for a user who may have it enabled.
             tracing::error!(error = %e, user_id = %verified.id, "totp is_enabled check failed");
             return render_error(PublicErrorMessage::ContactSupport);
         }
     }
 
-    // 5'. No 2FA — finish the login (session + accept_login + 302).
-    finish_login(&req, &admin, &cfg, db.as_ref(), verified.id, verified.credential_version, &challenge, &["pwd"], None).await
+    finish_login_native(
+        cfg,
+        db,
+        verified.id,
+        verified.credential_version,
+        &return_to,
+        &["pwd"],
+        None,
+    )
+    .await
 }
 
 /// Complete a verified login: create the IdP session row, bump `last_login_at`,
-/// `accept_login` to hydra, and 302 with the session cookie. `amr` records the
-/// methods used (`["pwd"]` or `["pwd", "otp"]`). `clear_challenge_cookie`, when
-/// set, additionally clears the `__Host-zsidp_2fa` cookie (the 2FA path).
+/// and let the caller redirect with the session cookie. `amr` records the
+/// methods used (`["pwd"]` or `["pwd", "otp"]`).
 ///
 /// Shared by the no-2FA login tail and the `/login/2fa` second-factor handler so
-/// there is ONE session-mint + accept_login body.
+/// there is ONE session-mint body.
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn finish_login(
-    _req: &HttpRequest,
-    admin: &HydraAdmin,
-    cfg: &AuthConfig,
     db: &compio_postgres::Client,
     user_id: uuid::Uuid,
     credential_version: i64,
-    challenge: &str,
     amr: &[&str],
-    clear_challenge_cookie: Option<()>,
-) -> HttpResponse {
+) -> Option<sessions::Session> {
     let session = match sessions::create(
         db,
         &sessions::CreateSession {
@@ -372,7 +295,7 @@ async fn finish_login(
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "sessions::create failed");
-            return render_error(PublicErrorMessage::ContactSupport);
+            return None;
         }
     };
 
@@ -380,31 +303,30 @@ async fn finish_login(
         tracing::warn!(error = %e, user_id = %user_id, "touch_last_login failed");
     }
 
-    let accept = AcceptLoginRequest {
-        subject: user_id.to_string(),
-        remember: Some(true),
-        remember_for: Some(3600),
-        acr: Some("urn:zeroship:pwd".into()),
-        amr: Some(amr.iter().map(|s| (*s).to_string()).collect()),
-        ..Default::default()
-    };
-    let redirect_to = match admin.accept_login(challenge, &accept).await {
-        Ok(resp) => resp.redirect_to,
-        Err(e) => {
-            tracing::error!(error = %e, "accept_login failed");
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
+    Some(session)
+}
+
+#[allow(clippy::future_not_send, clippy::too_many_arguments)]
+async fn finish_login_native(
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+    user_id: uuid::Uuid,
+    credential_version: i64,
+    return_to: &str,
+    amr: &[&str],
+    clear_challenge_cookie: Option<()>,
+) -> HttpResponse {
+    let Some(session) = finish_login(db, user_id, credential_version, amr).await else {
+        return render_error(PublicErrorMessage::ContactSupport);
     };
 
-    let mut resp = HttpResponse::Found();
-    resp.header(
-        LOCATION,
-        HeaderValue::from_str(&redirect_to).unwrap_or_else(|_| HeaderValue::from_static("/")),
-    );
+    let return_to = return_to_after_prompt_interaction(return_to, &["login", "select_account"]);
+    let mut resp = return_to::see_other(&return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),
     );
+    resp.header("cache-control", "no-store");
     if clear_challenge_cookie.is_some() {
         resp.header(SET_COOKIE, totp_challenge::clear_cookie(cfg.insecure_dev));
     }
@@ -417,6 +339,7 @@ async fn finish_login(
 pub struct TotpForm {
     pub csrf: String,
     pub code: String,
+    pub return_to: Option<String>,
 }
 
 /// `/login/2fa` POST — the second factor (ISS-11).
@@ -432,17 +355,21 @@ pub struct TotpForm {
 /// 4. Rate-limit the verify (per-user) so the 6-digit code + backup codes can't
 ///    be brute-forced.
 /// 5. Accept a valid TOTP code (±1 step skew) OR an unused backup code (marked
-///    used on redeem). Only then `finish_login` (session + accept_login).
+///    used on redeem). Only then `finish_login` creates the native session.
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
 pub async fn post_2fa(
     req: HttpRequest,
     query: ntex::web::types::Query<LoginQuery>,
     form: ntex::web::types::Form<TotpForm>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    let challenge = query.login_challenge.clone();
+    let query = query.into_inner();
+    let form = form.into_inner();
+    let return_to = return_to::sanitize(
+        form.return_to.as_deref().or(query.return_to.as_deref()),
+        return_to::SAFE_DEFAULT,
+    );
 
     // 1. CSRF.
     let cookie_header = req
@@ -455,33 +382,35 @@ pub async fn post_2fa(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return redirect_to_login();
+        return redirect_to_login(&return_to);
     }
 
     // 2. Decode + verify the factor-1 challenge cookie.
     let Some(stash) = totp_challenge::parse_cookie(cookie_header, cfg.insecure_dev)
         .and_then(|raw| TotpChallenge::decode(&raw, cfg.stash_signing_key.as_bytes()))
     else {
-        return redirect_to_login();
+        return redirect_to_login(&return_to);
     };
-    // The cookie's challenge must match the form's challenge (no cross-flow
-    // replay onto a different hydra login challenge).
-    if stash.login_challenge != challenge {
-        return redirect_to_login();
+    if stash.return_to != return_to {
+        return redirect_to_login(&return_to);
     }
 
     // 3. Re-fetch the user; credential_version must still match (a password
     // change / forced logout since factor 1 invalidates this challenge).
     let user = match users::find_by_id(db.as_ref(), &stash.user_id.to_string()).await {
         Ok(Some(u)) => u,
-        Ok(None) => return redirect_to_login(),
+        Ok(None) => return redirect_to_login(&return_to),
         Err(e) => {
             tracing::error!(error = %e, "post_2fa find_by_id failed");
             return render_error(PublicErrorMessage::ContactSupport);
         }
     };
     if user.credential_version != stash.credential_version {
-        return render_2fa_error(&challenge, &cfg, "session expired, sign in again");
+        return render_2fa_error(
+            &return_to,
+            cfg.as_ref(),
+            "session expired, sign in again",
+        );
     }
 
     // 4. Rate-limit the verify (per-user).
@@ -489,7 +418,11 @@ pub async fn post_2fa(
     match ratelimit::consume(db.as_ref(), &rl_key, Bucket::TOTP_VERIFY).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
-            return render_2fa_error(&challenge, &cfg, "too many attempts, try again later");
+            return render_2fa_error(
+                &return_to,
+                cfg.as_ref(),
+                "too many attempts, try again later",
+            );
         }
         Err(e) => {
             tracing::error!(error = %e, "post_2fa rate-limit consume failed");
@@ -500,7 +433,7 @@ pub async fn post_2fa(
     // 5. The credential must still be confirmed/enabled.
     let cred = match totp_store::find_confirmed(db.as_ref(), user.id).await {
         Ok(Some(c)) => c,
-        Ok(None) => return redirect_to_login(),
+        Ok(None) => return redirect_to_login(&return_to),
         Err(e) => {
             tracing::error!(error = %e, "post_2fa find_confirmed failed");
             return render_error(PublicErrorMessage::ContactSupport);
@@ -561,7 +494,11 @@ pub async fn post_2fa(
             },
         )
         .await;
-        return render_2fa_error(&challenge, &cfg, "invalid code");
+        return render_2fa_error(
+            &return_to,
+            cfg.as_ref(),
+            "invalid code",
+        );
     }
 
     audit::emit(
@@ -577,14 +514,12 @@ pub async fn post_2fa(
     )
     .await;
 
-    finish_login(
-        &req,
-        &admin,
-        &cfg,
+    finish_login_native(
+        cfg.as_ref(),
         db.as_ref(),
         user.id,
         user.credential_version,
-        &challenge,
+        &return_to,
         &["pwd", "otp"],
         Some(()),
     )
@@ -592,10 +527,14 @@ pub async fn post_2fa(
 }
 
 /// Re-render the 2FA challenge page with an error banner + fresh CSRF cookie.
-fn render_2fa_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpResponse {
+fn render_2fa_error(
+    return_to: &str,
+    cfg: &AuthConfig,
+    err: &str,
+) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = TotpChallengePage {
-        challenge,
+        return_to,
         csrf: &csrf_token,
         error: Some(err),
     };
@@ -606,10 +545,17 @@ fn render_2fa_error(challenge: &str, cfg: &AuthConfig, err: &str) -> HttpRespons
     resp.body(body)
 }
 
-fn redirect_to_login() -> HttpResponse {
-    let mut r = HttpResponse::Found();
-    r.header(LOCATION, HeaderValue::from_static("/login"));
-    r.finish()
+fn redirect_to_login(return_to: &str) -> HttpResponse {
+    let location = return_to::login_location(return_to);
+    return_to::see_other(&location)
+        .header("cache-control", "no-store")
+        .finish()
+}
+
+fn oauth_start_href(path: &str, return_to: &str) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("return_to", return_to);
+    format!("{path}?{}", query.finish())
 }
 
 /// Re-render the login page with an error banner + fresh CSRF cookie, at the
@@ -617,7 +563,7 @@ fn redirect_to_login() -> HttpResponse {
 /// thing that varies is the visible message + status) so timing and content
 /// don't leak which arm rejected the request.
 fn render_login_error(
-    challenge: &str,
+    return_to: &str,
     client_name: &str,
     cfg: &AuthConfig,
     err: &str,
@@ -625,12 +571,14 @@ fn render_login_error(
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = LoginPage {
-        challenge,
+        return_to,
         csrf: &csrf_token,
         error: Some(err),
         client_name,
         google_enabled: cfg.google_client_id.is_some(),
         github_enabled: cfg.github_client_id.is_some(),
+        google_start_href: oauth_start_href("/oauth/google/start", return_to),
+        github_start_href: oauth_start_href("/oauth/github/start", return_to),
     };
     let body = page
         .render()
@@ -643,6 +591,61 @@ fn render_login_error(
     resp.body(body)
 }
 
+fn render_login_form_native(
+    return_to: &str,
+    client_name: &str,
+    cfg: &AuthConfig,
+    err: Option<&str>,
+    status: u16,
+) -> HttpResponse {
+    let csrf_token = csrf::generate_token();
+    let page = LoginPage {
+        return_to,
+        csrf: &csrf_token,
+        error: err,
+        client_name,
+        google_enabled: cfg.google_client_id.is_some(),
+        github_enabled: cfg.github_client_id.is_some(),
+        google_start_href: oauth_start_href("/oauth/google/start", return_to),
+        github_start_href: oauth_start_href("/oauth/github/start", return_to),
+    };
+    let body = page
+        .render()
+        .unwrap_or_else(|_| format!("<h1>{}</h1>", err.unwrap_or("sign in")));
+    let code = ntex::http::StatusCode::from_u16(status)
+        .unwrap_or(ntex::http::StatusCode::BAD_REQUEST);
+    let mut resp = HttpResponse::build(code);
+    resp.content_type("text/html; charset=utf-8");
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    resp.body(body)
+}
+
+#[allow(clippy::future_not_send)]
+async fn resolve_native_session(
+    req: &HttpRequest,
+    cfg: &AuthConfig,
+    db: &compio_postgres::Client,
+) -> Result<Option<sessions::Session>, HttpResponse> {
+    let cookie_header = req
+        .headers()
+        .get(COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let Some(session_id) = session_cookie::parse_cookie(cookie_header, cfg.insecure_dev) else {
+        return Ok(None);
+    };
+    sessions::validate(db, session_id).await.map_err(|err| {
+        tracing::error!(error = %err, "native login session validation failed");
+        render_error(PublicErrorMessage::ContactSupport)
+    })
+}
+
+fn native_client_name(auth_request: Option<&AuthRequest>) -> String {
+    auth_request
+        .map(|request| request.client_id.clone())
+        .unwrap_or_else(|| "zeroship".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,13 +653,16 @@ mod tests {
 
     #[test]
     fn login_page_oauth_buttons_gated_by_config() {
+        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
         let page = LoginPage {
-            challenge: "abc",
+            return_to,
             csrf: "xyz",
             error: None,
             client_name: "Test",
             google_enabled: true,
             github_enabled: false,
+            google_start_href: oauth_start_href("/oauth/google/start", return_to),
+            github_start_href: oauth_start_href("/oauth/github/start", return_to),
         };
         let html = page.render().expect("render");
         assert!(
@@ -672,13 +678,16 @@ mod tests {
 
     #[test]
     fn login_page_hides_section_if_no_oauth() {
+        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
         let page = LoginPage {
-            challenge: "abc",
+            return_to,
             csrf: "xyz",
             error: None,
             client_name: "Test",
             google_enabled: false,
             github_enabled: false,
+            google_start_href: oauth_start_href("/oauth/google/start", return_to),
+            github_start_href: oauth_start_href("/oauth/github/start", return_to),
         };
         let html = page.render().expect("render");
         assert!(
@@ -686,5 +695,30 @@ mod tests {
             "OAuth section should be hidden"
         );
         assert!(!html.contains("or sign in with"));
+    }
+
+    #[test]
+    fn native_login_page_oauth_buttons_use_return_to() {
+        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        let page = LoginPage {
+            return_to,
+            csrf: "xyz",
+            error: None,
+            client_name: "Test",
+            google_enabled: true,
+            github_enabled: true,
+            google_start_href: oauth_start_href("/oauth/google/start", return_to),
+            github_start_href: oauth_start_href("/oauth/github/start", return_to),
+        };
+        let html = page.render().expect("render");
+        assert!(html.contains("/oauth/google/start?return_to=%2Foauth2%2Fauthorize"));
+        assert!(html.contains("/oauth/github/start?return_to=%2Foauth2%2Fauthorize"));
+        assert!(
+            html.contains(
+                "/signup?return_to=%2Foauth2%2Fauthorize%3Fclient_id%3Doac_123%26redirect_uri%3Dhttps%253A%252F%252Fapp.test%252Fcb"
+            ),
+            "native signup link should preserve return_to"
+        );
+        assert!(!html.contains("login_challenge="));
     }
 }

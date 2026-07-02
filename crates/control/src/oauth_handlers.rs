@@ -6,10 +6,12 @@ use chrono::{DateTime, Utc};
 use compio_postgres::error::SqlState;
 use ntex::web;
 use ntex::web::types::{Json, Path, State};
+use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{Action, Resource, Scope};
+use zeroship_core::auth::hash_api_key;
 
 use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
@@ -40,7 +42,6 @@ struct OauthClientRow {
     skip_consent: bool,
     created_at: DateTime<Utc>,
     created_by: Option<Uuid>,
-    hydra_client_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,30 +55,6 @@ struct CreateOauthClientResponse {
 #[derive(Debug, Serialize)]
 struct DeleteOauthClientResponse {
     deleted: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct HydraCreateClientRequest<'a> {
-    client_id: &'a str,
-    client_name: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_uri: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    logo_uri: Option<&'a str>,
-    redirect_uris: &'a [String],
-    grant_types: &'a [String],
-    response_types: &'a [String],
-    scope: &'a str,
-    token_endpoint_auth_method: &'a str,
-    subject_type: &'static str,
-    skip_consent: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct HydraCreateClientResponse {
-    #[allow(dead_code)]
-    client_id: String,
-    client_secret: Option<String>,
 }
 
 pub async fn create_oauth_client(
@@ -103,24 +80,10 @@ pub async fn create_oauth_client(
         return resp;
     }
     let skip_consent = state.is_trusted(&body.client_id);
-
-    let hydra_body = HydraCreateClientRequest {
-        client_id: &body.client_id,
-        client_name: &body.client_name,
-        client_uri: body.client_uri.as_deref(),
-        logo_uri: body.logo_uri.as_deref(),
-        redirect_uris: &body.redirect_uris,
-        grant_types: &body.grant_types,
-        response_types: &body.response_types,
-        scope: &body.scope,
-        token_endpoint_auth_method: &body.token_endpoint_auth_method,
-        subject_type: "public",
-        skip_consent,
-    };
-
-    let hydra = match hydra_create_client(&state.hydra_admin_url, &hydra_body).await {
-        Ok(client) => client,
-        Err(err) => return hydra_error_response("create", &body.client_id, err),
+    let client_secret = if body.token_endpoint_auth_method == "none" {
+        None
+    } else {
+        Some(generate_client_secret())
     };
 
     let persisted = insert_oauth_client(
@@ -129,16 +92,12 @@ pub async fn create_oauth_client(
         &scopes,
         authz.principal_id,
         skip_consent,
+        client_secret.as_deref(),
     )
     .await;
     let persisted = match persisted {
         Ok(row) => row,
-        Err(resp) => {
-            match hydra_delete_client(&state.hydra_admin_url, &body.client_id).await {
-                Ok(()) => return resp,
-                Err(err) => return oauth_rollback_failed_response(&body.client_id, err),
-            }
-        }
+        Err(resp) => return resp,
     };
     if let Err(resp) = auth_audit::emit_guard_event(
         &state,
@@ -151,7 +110,6 @@ pub async fn create_oauth_client(
             "redirect_uris": &persisted.redirect_uris,
             "scopes": &persisted.scopes,
             "skip_consent": persisted.skip_consent,
-            "hydra_client_id": &persisted.hydra_client_id,
         }),
     )
     .await
@@ -161,8 +119,8 @@ pub async fn create_oauth_client(
 
     web::HttpResponse::Created().json(&CreateOauthClientResponse {
         client: persisted,
-        client_secret_show_once: hydra.client_secret.is_some(),
-        client_secret: hydra.client_secret,
+        client_secret_show_once: client_secret.is_some(),
+        client_secret,
     })
 }
 
@@ -181,7 +139,7 @@ pub async fn list_oauth_clients(
         .control_pg
         .query(
             "SELECT client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                    skip_consent, created_at, created_by, hydra_client_id \
+                    skip_consent, created_at, created_by \
              FROM zeroship.oauth_clients \
              ORDER BY created_at DESC, client_id ASC",
             &[],
@@ -215,10 +173,6 @@ pub async fn delete_oauth_client(
     if let Err(resp) = ensure_client_present(&state, &client_id).await {
         return resp;
     }
-    if let Err(err) = hydra_delete_client(&state.hydra_admin_url, &client_id).await {
-        return hydra_error_response("delete", &client_id, err);
-    }
-
     match state
         .control_pg
         .execute(
@@ -366,18 +320,22 @@ async fn insert_oauth_client(
     scopes: &[String],
     created_by: Uuid,
     skip_consent: bool,
+    client_secret: Option<&str>,
 ) -> Result<OauthClientRow, web::HttpResponse> {
     let redirect_uris: Vec<&str> = body.redirect_uris.iter().map(String::as_str).collect();
     let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let client_secret_hash = client_secret.map(hash_api_key);
+    let refresh_allowed = body.grant_types.iter().any(|grant| grant == "refresh_token");
     let rows = state
         .control_pg
         .query(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                 skip_consent, created_by, hydra_client_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $1) \
+                 skip_consent, created_by, client_secret_hash, \
+                 refresh_allowed, token_endpoint_auth_method) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
              RETURNING client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                       skip_consent, created_at, created_by, hydra_client_id",
+                       skip_consent, created_at, created_by",
             &[
                 &body.client_id,
                 &body.client_name,
@@ -387,6 +345,9 @@ async fn insert_oauth_client(
                 &scopes,
                 &skip_consent,
                 &created_by,
+                &client_secret_hash,
+                &refresh_allowed,
+                &body.token_endpoint_auth_method,
             ],
         )
         .await
@@ -418,122 +379,13 @@ fn row_to_oauth_client(row: &compio_postgres::Row) -> OauthClientRow {
         skip_consent: row.get("skip_consent"),
         created_at: row.get("created_at"),
         created_by: row.get("created_by"),
-        hydra_client_id: row.get("hydra_client_id"),
     }
 }
 
-#[allow(clippy::future_not_send)]
-async fn hydra_create_client(
-    base_url: &str,
-    body: &HydraCreateClientRequest<'_>,
-) -> Result<HydraCreateClientResponse, HydraAdminError> {
-    let body_bytes = serde_json::to_vec(body)
-        .map_err(|err| HydraAdminError::Encode(err.to_string()))?;
-    let res = cyper::Client::new()
-        .request(http::Method::POST, hydra_url(base_url, "/admin/clients"))
-        .map_err(|err| HydraAdminError::Build(err.to_string()))?
-        .header("content-type", "application/json")
-        .map_err(|err| HydraAdminError::Build(err.to_string()))?
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|err| HydraAdminError::Transport(err.to_string()))?;
-    finish_hydra_json(res).await
-}
-
-#[allow(clippy::future_not_send)]
-async fn hydra_delete_client(base_url: &str, client_id: &str) -> Result<(), HydraAdminError> {
-    let path = format!("/admin/clients/{}", path_segment(client_id));
-    let res = cyper::Client::new()
-        .request(http::Method::DELETE, hydra_url(base_url, &path))
-        .map_err(|err| HydraAdminError::Build(err.to_string()))?
-        .send()
-        .await
-        .map_err(|err| HydraAdminError::Transport(err.to_string()))?;
-    let status = res.status().as_u16();
-    let body = res
-        .text()
-        .await
-        .map_err(|err| HydraAdminError::Transport(err.to_string()))?;
-    if (200..300).contains(&status) {
-        Ok(())
-    } else {
-        Err(HydraAdminError::Response { status, body })
-    }
-}
-
-async fn finish_hydra_json<T: for<'de> Deserialize<'de>>(
-    res: cyper::Response,
-) -> Result<T, HydraAdminError> {
-    let status = res.status().as_u16();
-    let body = res
-        .text()
-        .await
-        .map_err(|err| HydraAdminError::Transport(err.to_string()))?;
-    if !(200..300).contains(&status) {
-        return Err(HydraAdminError::Response { status, body });
-    }
-    serde_json::from_str(&body).map_err(|err| HydraAdminError::Decode(format!("{err}: {body}")))
-}
-
-fn hydra_url(base_url: &str, path: &str) -> String {
-    format!("{}{}", base_url.trim_end_matches('/'), path)
-}
-
-fn path_segment(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
-}
-
-#[derive(Debug)]
-enum HydraAdminError {
-    Build(String),
-    Encode(String),
-    Transport(String),
-    Decode(String),
-    Response { status: u16, body: String },
-}
-
-impl std::fmt::Display for HydraAdminError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Build(err) => write!(f, "build request: {err}"),
-            Self::Encode(err) => write!(f, "encode request: {err}"),
-            Self::Transport(err) => write!(f, "transport: {err}"),
-            Self::Decode(err) => write!(f, "decode response: {err}"),
-            Self::Response { status, body } => write!(f, "hydra returned {status}: {body}"),
-        }
-    }
-}
-
-fn hydra_error_response(
-    operation: &str,
-    client_id: &str,
-    err: HydraAdminError,
-) -> web::HttpResponse {
-    if matches!(err, HydraAdminError::Response { status: 409, .. }) {
-        return web::HttpResponse::Conflict().json(&json!({
-            "error": "oauth_client_exists",
-            "client_id": client_id,
-        }));
-    }
-
-    tracing::error!(error = %err, operation, client_id, "control: hydra oauth client operation failed");
-    web::HttpResponse::BadGateway().json(&json!({
-        "error": "hydra_admin_error",
-        "operation": operation,
-    }))
-}
-
-fn oauth_rollback_failed_response(client_id: &str, err: HydraAdminError) -> web::HttpResponse {
-    tracing::error!(
-        error = %err,
-        client_id,
-        "control: oauth client create rollback failed; manual cleanup required"
-    );
-    web::HttpResponse::BadGateway().json(&json!({
-        "error": "oauth_client_cleanup_required",
-        "message": "oauth client create failed and cleanup is required",
-    }))
+fn generate_client_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }
 
 fn bad_request(error: &str, message: &str) -> web::HttpResponse {
@@ -550,39 +402,11 @@ fn db_error() -> web::HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ntex::http::StatusCode;
-    use ntex::util::{stream_recv, BytesMut};
 
-    async fn body_json(mut resp: web::HttpResponse) -> serde_json::Value {
-        let mut body = resp.take_body();
-        let mut buf = BytesMut::new();
-        while let Some(item) = stream_recv(&mut body).await {
-            buf.extend_from_slice(&item.expect("body chunk"));
-        }
-        serde_json::from_slice(&buf).expect("body is JSON")
-    }
-
-    #[compio::test]
-    async fn oauth_rollback_failure_response_is_sanitized_and_actionable() {
-        let resp = oauth_rollback_failed_response(
-            "oauth-r9",
-            HydraAdminError::Response {
-                status: 503,
-                body: "driver failed: dsn=postgres://internal/path".to_string(),
-            },
-        );
-
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
-        let body = body_json(resp).await;
-        assert_eq!(
-            body,
-            json!({
-                "error": "oauth_client_cleanup_required",
-                "message": "oauth client create failed and cleanup is required",
-            })
-        );
-        let rendered = body.to_string();
-        assert!(!rendered.contains("driver failed"));
-        assert!(!rendered.contains("postgres://internal"));
+    #[test]
+    fn generated_client_secret_shape_is_hex_32_bytes() {
+        let secret = generate_client_secret();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 }

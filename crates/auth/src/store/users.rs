@@ -69,9 +69,8 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
 
 /// Look up a user by their primary key (`zeroship.users.id`).
 ///
-/// The argument is the UUID rendered as a hyphenated string — that's the
-/// shape `accept_login` stamps into the hydra session as `subject`, and
-/// what the consent challenge then surfaces back via `info.subject`.
+/// The argument is the UUID rendered as a hyphenated string — the native
+/// subject shape surfaced through consent context.
 ///
 /// Returns `Ok(None)` if the string doesn't parse as a UUID OR if no row
 /// matches. Callers handling consent flows treat both as "subject unknown
@@ -81,7 +80,10 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
 ///
 /// Returns `AuthError::Db` on PG failure (parse failure is NOT an error —
 /// it's a `None`, since the subject string is attacker-influenced).
-pub async fn find_by_id(conn: &Client, id: &str) -> Result<Option<UserRow>> {
+pub async fn find_by_id(
+    conn: &(impl GenericClient + ?Sized),
+    id: &str,
+) -> Result<Option<UserRow>> {
     let Ok(uuid) = uuid::Uuid::parse_str(id) else {
         return Ok(None);
     };
@@ -323,9 +325,8 @@ pub struct DeletionRequest {
 /// `deletion_requested_at` untouched (the schedule does not slide) but still
 /// re-asserts the disable + revocation. Returns `Ok(None)` if no such user.
 ///
-/// Hydra login-session teardown (a network call to the admin API) is NOT done
-/// here — it is the caller's responsibility, mirroring the password-reset flow
-/// (`ui/reset.rs`), so this function stays a pure DB transaction.
+/// External logout fanout is NOT done here, so this function stays a pure DB
+/// transaction.
 ///
 /// # Errors
 ///

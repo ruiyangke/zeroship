@@ -10,7 +10,7 @@
 -- the two values must live on the row the gateway path actually loads.
 --
 -- Populated by gateway::sessions::create from the validated id_token claims
--- (auth_time/amr are standard OIDC claims Hydra issues); validate() returns
+-- (auth_time/amr are standard OIDC claims the OP issues); validate() returns
 -- them so the per-request projection reads them off the same row it loads.
 --
 -- amr defaults '{}' and auth_time is NULLABLE so existing-shape inserts and

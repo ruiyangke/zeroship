@@ -3,17 +3,16 @@
 //!
 //! **`token_revocations`** is the SOLE wrapper-token revocation primitive
 //! keyed on `(client_id, sub)` with `sub` stored as TEXT, so it holds the
-//! wrapper's `pws_…` pairwise subject (and, on the raw-Hydra arm, the per-app
-//! `pws_` derived from the global UUID). The wrapper / Bearer / DPoP arms
-//! (§1.3 c-wrap / c-hydra) reject a token when a row exists for its
+//! wrapper's `pws_…` pairwise subject. The wrapper / Bearer arms
+//! (§1.3 c-wrap / bearer) reject a token when a row exists for its
 //! `(client_id, pws_)` with `revoked_after > token.iat`. Per-app scoping means
 //! revoking a user on app A leaves their tokens on app B valid.
 //!
 //! There is no longer a global UUID-keyed subject denylist: every wrapper /
-//! raw-Hydra access token is minted under a per-app `oac_…` client and carries
+//! bearer access token is minted under a per-app `oac_…` client and carries
 //! (or projects to) a per-app `pws_`, so the per-app family marker is the only
 //! key any reader uses. The previous `wrapper_revoked_subjects` denylist was
-//! write-only dead code after the per-app cutover (Batch A M2) and is removed —
+//! write-only dead code after the per-app cutover (Batch A M2) and is removed:
 //! pre-launch, no back-compat (AGENTS.md), so the table and its helpers are
 //! deleted rather than left orphaned.
 
@@ -31,7 +30,7 @@ pub const WRAPPER_REVOCATION_RETENTION_HOURS: i32 = 24;
 // — one row per token family per app — so signout (which cannot enumerate
 // the live `jti`s) can reject every already-minted token for that family
 // on every node. `sub` is TEXT and holds the per-app `pws_…` pairwise
-// subject every wrapper / raw-Hydra access token carries (or projects to);
+// subject every wrapper / bearer access token carries (or projects to);
 // the per-app scoping is exactly what a global UUID-keyed denylist could
 // never express for the browser wrapper path.
 
@@ -112,8 +111,7 @@ pub fn family_revoked_at(revoked_after: Option<i64>, iat: i64) -> bool {
 
 /// Sweep family markers older than the retention window. Markers only need
 /// to outlive the longest-lived token whose `iat` could predate them; the
-/// 24 h retention is comfortably beyond the 10-min wrapper / 1 h raw-Hydra
-/// TTLs.
+/// 24 h retention is comfortably beyond the wrapper and bearer TTLs.
 pub async fn sweep_expired_families(db: &Client) -> Result<u64, Error> {
     db.execute(
         "DELETE FROM zeroship.token_revocations \
@@ -125,7 +123,7 @@ pub async fn sweep_expired_families(db: &Client) -> Result<u64, Error> {
 
 // ─── R1d: short-TTL read-through cache for the per-request marker read ────
 //
-// The cookie hot path (and the Bearer / DPoP-introspect arms) verifies the
+// The cookie hot path (and the Bearer arm) verifies the
 // token LOCALLY, then runs ONE per-request DB read — the family-marker
 // revocation gate. R1d caches that read so the steady-state (no-revocation)
 // request is fully DB-free on a cache hit.
@@ -146,10 +144,9 @@ pub async fn sweep_expired_families(db: &Client) -> Result<u64, Error> {
 // gateway-side family revoke) busts the entry immediately, so same-node
 // signout needs no TTL wait; cross-node writers rely on the TTL backstop.
 //
-// No tokio: a `std::Mutex<HashMap>` with sweep-on-insert and a capacity cap,
-// the same shape as [`crate::dpop::JtiCache`]. The instance lives on
-// `GateState` as an `Arc` and is threaded into the resolve arms like the
-// other shared caches.
+// No tokio: a `std::Mutex<HashMap>` with sweep-on-insert and a capacity cap.
+// The instance lives on `GateState` as an `Arc` and is threaded into the
+// resolve arms like the other shared caches.
 
 /// Default cache TTL. Short on purpose: it is the upper bound on how long a
 /// cross-node revocation can be unseen by a cache-warm node. 5 s is small

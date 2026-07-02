@@ -1,6 +1,4 @@
-//! zeroship-auth — the `OIDC` `IdP` login UI + identity flows + hydra admin client.
-//!
-//! Companion process: `oryd/hydra` (OIDC kernel). See docs/archive/auth-server.md.
+//! zeroship-auth — the `OIDC` `IdP` login UI + identity flows.
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -15,16 +13,13 @@ use zeroship_core::config::{
 };
 use zeroship_core::oidc_verify::JwksCache;
 
-use zeroship_auth::bootstrap;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::cron;
 use zeroship_auth::error::AuthError;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 use zeroship_mailer::{
     Mailer, RelayForwardMailer, ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, StdoutMailer,
 };
-use zeroship_auth::startup_validation::validate_hydra_admin_url;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = AuthConfig::parse();
@@ -41,7 +36,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // this `.clone()` of `.secrets` is a small defensive snapshot for clarity.
     let file_secrets = boot.overlay.config.secrets.clone();
     let file = &boot.overlay.config;
-    cfg.resolve(file.auth.clone());
+    if let Err(message) = cfg.try_resolve(file.auth.clone()) {
+        tracing::error!("{message}");
+        std::process::exit(1);
+    }
 
     // Resolve secret-reference inputs (urn:zeroship:env|file|vault, arn:…) before
     // any guard or use. On real boot we resolve to the literal value (env/file
@@ -89,11 +87,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     }
-    if let Err(message) = validate_hydra_admin_url(&cfg) {
-        tracing::error!("{message}");
-        std::process::exit(1);
-    }
-
     // --check-config is a read-only DRY-RUN: resolve + report the config and
     // exit BEFORE any runtime-only validation (mailer/SMTP construction), exactly
     // like control / gateway / worker. Building the mailers enforces the
@@ -109,12 +102,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             CheckValue::Plain(boot.overlay.source.to_string()),
         );
         report.field(
-            "hydra_admin_url",
-            CheckValue::Plain(cfg.hydra_admin_url().to_string()),
+            "auth_provider",
+            CheckValue::Plain(cfg.auth_provider().as_str().to_string()),
         );
         report.field(
-            "hydra_public_url",
-            CheckValue::Plain(cfg.hydra_public_url().to_string()),
+            "supabase_url",
+            CheckValue::Plain(cfg.supabase_url().unwrap_or("").to_string()),
+        );
+        report.field(
+            "supabase_anon_key_configured",
+            CheckValue::Secret(cfg.supabase_anon_key().is_some()),
+        );
+        report.field(
+            "gotrue_email_hook_secret_configured",
+            CheckValue::Secret(cfg.gotrue_email_hook_secret.is_some()),
+        );
+        report.field(
+            "control_url",
+            CheckValue::Plain(cfg.control_url().to_string()),
+        );
+        report.field(
+            "control_key_configured",
+            CheckValue::Secret(!cfg.control_key.is_empty()),
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field(
@@ -125,17 +134,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         );
         report.field("insecure_dev", CheckValue::Flag(cfg.insecure_dev));
-        report.field(
-            "allow_remote_hydra_admin",
-            CheckValue::Flag(cfg.allow_remote_hydra_admin),
-        );
-        report.field("bootstrap", CheckValue::Flag(cfg.bootstrap));
         report.field("public_url", CheckValue::Plain(cfg.public_url()));
+        report.field("op_issuer_url", CheckValue::Plain(cfg.op_issuer_url()));
+        report.field(
+            "auth_signing_key_file_configured",
+            CheckValue::Secret(cfg.auth_signing_key_file.is_some()),
+        );
+        report.field(
+            "auth_pairwise_salt_file_configured",
+            CheckValue::Secret(cfg.auth_pairwise_salt_file.is_some()),
+        );
+        report.field(
+            "auth_broker_secret_file_configured",
+            CheckValue::Secret(cfg.auth_broker_secret_file.is_some()),
+        );
+        report.field(
+            "auth_broker_secret_previous_file_configured",
+            CheckValue::Secret(cfg.auth_broker_secret_previous_file.is_some()),
+        );
+        report.field(
+            "refresh_hash_key_file_configured",
+            CheckValue::Secret(cfg.refresh_hash_key_file.is_some()),
+        );
+        report.field(
+            "refresh_idem_key_file_configured",
+            CheckValue::Secret(cfg.refresh_idem_key_file.is_some()),
+        );
+        report.field(
+            "refresh_pool_size",
+            CheckValue::Plain(cfg.refresh_pool_size.to_string()),
+        );
         report.field(
             "frame_ancestor_origins",
             CheckValue::Plain(cfg.frame_ancestor_origins.join(",")),
         );
-        report.field("clients_config", CheckValue::Plain(cfg.clients_config.clone()));
         report.field("db_configured", CheckValue::Secret(!cfg.db_url.is_empty()));
         report.field("mailer", CheckValue::Plain(cfg.mailer.clone()));
         report.field(
@@ -156,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Real boot only (past the --check-config dry-run early-return above). Mailer
-    // config validation is cheap and should fail before any DB/Hydra work, with a
+    // config validation is cheap and should fail before any DB work, with a
     // named env var, so a misconfigured SMTP block (transactional or relay-forward)
     // fails fast. The constructed drivers are threaded into `server::run` below.
     let mailer: Arc<dyn Mailer> = build_mailer(&cfg)?;
@@ -198,12 +230,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // compose `migrate` service / `ops/db-migrate.sh`) out of band before this
     // service boots — not here.
 
-    // 2. Bootstrap: keys + client reconciliation.
-    let admin = HydraAdmin::new(cfg.hydra_admin_url());
-    bootstrap::run(&admin, &client, cfg.bootstrap, &cfg.clients_config).await?;
-    tracing::info!("bootstrap complete");
+    let auth_signing_key_file = cfg.auth_signing_key_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "AUTH_SIGNING_KEY_FILE / --auth-signing-key-file is required".into(),
+        )
+    })?;
+    let auth_pairwise_salt_file = cfg.auth_pairwise_salt_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "AUTH_PAIRWISE_SALT_FILE / --auth-pairwise-salt-file is required".into(),
+        )
+    })?;
+    let auth_broker_secret_file = cfg.auth_broker_secret_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "AUTH_BROKER_SECRET_FILE / --auth-broker-secret-file is required".into(),
+        )
+    })?;
+    cfg.refresh_hash_key_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "REFRESH_HASH_KEY_FILE / --refresh-hash-key-file is required".into(),
+        )
+    })?;
+    cfg.refresh_idem_key_file.as_deref().ok_or_else(|| {
+        AuthError::Config(
+            "REFRESH_IDEM_KEY_FILE / --refresh-idem-key-file is required".into(),
+        )
+    })?;
+    let op_issuer = zeroship_auth::oidc::Issuer::from_files(
+        auth_signing_key_file,
+        auth_pairwise_salt_file,
+        cfg.op_issuer_url(),
+    )?
+    .with_broker_secrets(zeroship_auth::oidc::BrokerSecrets::from_files(
+        auth_broker_secret_file,
+        cfg.auth_broker_secret_previous_file.as_deref(),
+    )?);
+    op_issuer.publish_active_key(&client).await?;
+    tracing::info!(
+        kid = %op_issuer.kid(),
+        issuer = %op_issuer.issuer(),
+        "platform OP signing key published"
+    );
+    let op_issuer = Arc::new(op_issuer);
 
-    // 3. Build the Google JWKS cache. Only constructed when Google OAuth
+    // 2. Build the Google JWKS cache. Only constructed when Google OAuth
     //    is wired up — the cache eagerly does nothing (lazy refresh on
     //    first verify), so we don't burn a startup roundtrip on Google.
     let google_jwks = if cfg.google_client_id.is_some() {
@@ -212,20 +281,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // 4. Spawn in-process cron tasks. Detached on
+    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(
+        cfg.db_url.clone(),
+        cfg.refresh_pool_size,
+    );
+    tracing::info!(
+        pool_size = refresh_pool.pool_size(),
+        "refresh dedicated session pool configured"
+    );
+
+    // 3. Spawn in-process cron tasks. Detached on
     //    the compio runtime — survives across server worker restarts.
     //    Spawned BEFORE `server::run` so the loop is live as soon as
-    //    the listener is bound. `Arc<Client>` is shared with the server
-    //    so both drive I/O through the single compio-postgres connection.
+    //    the listener is bound. `Arc<Client>` is shared for autocommit
+    //    cron work; refresh-family sweeps check out bounded dedicated
+    //    sessions for their advisory-locked transactions.
     let cfg = Arc::new(cfg);
     let db = Arc::new(client);
-    cron::spawn_all(admin.clone(), db.clone(), cfg.clone());
+    cron::spawn_all(db.clone(), cfg.clone(), refresh_pool.clone());
     tracing::info!("cron tasks spawned");
 
-    // 5. Serve. `Arc`s keep the PG client + config alive across the
+    // 4. Serve. `Arc`s keep the PG client + config alive across the
     //    server worker tasks AND the detached cron tasks; on shutdown
     //    the last `Arc` drop unblocks the background connection driver.
-    server::run(cfg, admin, db, google_jwks, mailer, relay_forward_mailer).await?;
+    //    OP refresh-token rotations/revokes/root issuance do not run
+    //    multi-statement transactions on this shared handle; they check
+    //    out bounded dedicated compio-postgres sessions from refresh_pool.
+    server::run(
+        cfg,
+        db,
+        google_jwks,
+        mailer,
+        relay_forward_mailer,
+        op_issuer,
+        refresh_pool,
+    )
+    .await?;
     Ok::<(), Box<dyn std::error::Error>>(())
         })
 }
@@ -260,6 +351,12 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
         file_secrets.stash_signing_key.as_deref(),
         check,
     );
+    cfg.control_key = obtain_secret(
+        "CONTROL_KEY / --control-key",
+        &cfg.control_key,
+        file_secrets.control_key.as_deref(),
+        check,
+    );
     cfg.totp_enc_key = obtain_secret(
         "AUTH_TOTP_ENC_KEY / --totp-enc-key",
         &cfg.totp_enc_key,
@@ -292,6 +389,12 @@ fn resolve_auth_secrets(cfg: &mut AuthConfig, file_secrets: &SecretSection) {
         "AUTH_RESEND_API_KEY / --resend-api-key",
         cfg.resend_api_key.as_deref(),
         file_secrets.resend_api_key.as_deref(),
+    );
+    cfg.gotrue_email_hook_secret = resolve_optional(
+        check,
+        "AUTH_GOTRUE_EMAIL_HOOK_SECRET / --gotrue-email-hook-secret",
+        cfg.gotrue_email_hook_secret.as_deref(),
+        None,
     );
     cfg.postmark_webhook_password = resolve_optional(
         check,

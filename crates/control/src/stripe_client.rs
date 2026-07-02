@@ -6,7 +6,7 @@
 //! invoice on that Customer. NO Connect, NO `application_fee` (that is Stream-2).
 //!
 //! Zero tokio: HTTP is `cyper::Client` + `compio::time::timeout`, the SAME idiom
-//! the control plane already uses for the Hydra admin POSTs
+//! the control plane already uses for outbound provider calls
 //! (`bootstrap_builder.rs`, `oauth_handlers.rs`) and the worker-log GET
 //! (`api.rs::fetch_worker_logs`). Bodies are `application/x-www-form-urlencoded`
 //! (Stripe's wire); we hand-encode so nested params (`period[start]`,

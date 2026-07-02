@@ -233,8 +233,7 @@ CREATE TABLE zeroship.oauth_clients (
     scopes               TEXT[] NOT NULL,
     skip_consent         BOOLEAN NOT NULL DEFAULT FALSE,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_by           UUID REFERENCES zeroship.users(id),
-    hydra_client_id      TEXT NOT NULL
+    created_by           UUID REFERENCES zeroship.users(id)
 );
 
 CREATE TABLE zeroship.oauth_grants (

@@ -138,23 +138,6 @@ pub async fn revoke_grant(
     }
     EntityCache::invalidate(authz.principal_id);
 
-    if let Err(err) = hydra_revoke_consent_sessions(
-        &state.hydra_admin_url,
-        &authz.principal_id.to_string(),
-        &client_id,
-    )
-    .await
-    {
-        tracing::error!(
-            error = %err,
-            client_id = %client_id,
-            subject = %authz.principal_id,
-            "control: hydra oauth grant token revoke failed"
-        );
-        return web::HttpResponse::InternalServerError()
-            .json(&json!({"error": "hydra_oauth_grant_revoke_failed"}));
-    }
-
     if let Err(resp) = auth_audit::emit_guard_event(
         &state,
         &authz,
@@ -255,62 +238,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         );
 }
 
-#[allow(clippy::future_not_send)]
-async fn hydra_revoke_consent_sessions(
-    base_url: &str,
-    subject: &str,
-    client_id: &str,
-) -> Result<(), HydraRevokeError> {
-    let url = hydra_revoke_consent_url(base_url, subject, client_id);
-    let res = cyper::Client::new()
-        .request(http::Method::DELETE, url)
-        .map_err(|err| HydraRevokeError::Build(err.to_string()))?
-        .send()
-        .await
-        .map_err(|err| HydraRevokeError::Transport(err.to_string()))?;
-    let status = res.status().as_u16();
-    let body = res
-        .text()
-        .await
-        .map_err(|err| HydraRevokeError::Transport(err.to_string()))?;
-    if (200..300).contains(&status) {
-        Ok(())
-    } else {
-        Err(HydraRevokeError::Response { status, body })
-    }
-}
-
-fn hydra_revoke_consent_url(base_url: &str, subject: &str, client_id: &str) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("subject", subject)
-        .append_pair("client", client_id)
-        .finish();
-    format!(
-        "{}/admin/oauth2/auth/sessions/consent?{}",
-        base_url.trim_end_matches('/'),
-        query
-    )
-}
-
 fn valid_client_id_path_segment(client_id: &str) -> bool {
     !client_id.is_empty() && client_id.len() <= MAX_CLIENT_ID_PATH_BYTES
-}
-
-#[derive(Debug)]
-enum HydraRevokeError {
-    Build(String),
-    Transport(String),
-    Response { status: u16, body: String },
-}
-
-impl std::fmt::Display for HydraRevokeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Build(err) => write!(f, "build request: {err}"),
-            Self::Transport(err) => write!(f, "transport: {err}"),
-            Self::Response { status, body } => write!(f, "hydra returned {status}: {body}"),
-        }
-    }
 }
 
 #[cfg(test)]

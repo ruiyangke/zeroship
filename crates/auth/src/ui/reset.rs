@@ -30,7 +30,6 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::headers;
-use crate::hydra_client::HydraAdmin;
 use crate::identity::{password, password_reset};
 use crate::ui::ResetPage;
 
@@ -64,7 +63,6 @@ pub async fn post(
     form: Form<ResetForm>,
     cfg: State<Arc<AuthConfig>>,
     db: State<Arc<compio_postgres::Client>>,
-    admin: State<HydraAdmin>,
 ) -> HttpResponse {
     // 1. CSRF.
     let cookie_header = req
@@ -141,27 +139,6 @@ pub async fn post(
         magic_completions = revoked.magic_completions,
         "password_reset revoked sessions and stale tokens"
     );
-
-    let subject = completed.user_id.to_string();
-    if let Err(e) = admin.delete_login_sessions(&subject).await {
-        tracing::warn!(
-            error = %e,
-            user_id = %completed.user_id,
-            "password_reset hydra login-session revocation failed"
-        );
-        audit::emit(
-            db.as_ref(),
-            &AuditEvent {
-                event_type: "hydra_login_sessions_revoked_after_password_reset",
-                outcome: "failure",
-                user_id: Some(&completed.user_id),
-                auth_method: Some("password_reset"),
-                detail: serde_json::json!({ "error": e.to_string() }),
-                ..AuditEvent::from_request(&req)
-            },
-        )
-        .await;
-    }
 
     // 7. Redirect to /login. The user signs in fresh with the new
     //    credential — we intentionally don't auto-mint a session here

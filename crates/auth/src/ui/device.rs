@@ -2,7 +2,6 @@
 //! user-code entry (RFC 8628).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use askama::Template;
 use ntex::http::header::{HeaderValue, COOKIE, LOCATION, SET_COOKIE};
@@ -12,14 +11,14 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::audit::{self, AuditEvent};
-use crate::config::AuthConfig;
+use crate::config::{AuthConfig, AuthProviderKind};
 use crate::csrf;
-use crate::hydra_client::types::AcceptDeviceUserCodeRequest;
-use crate::hydra_client::HydraAdmin;
+use crate::headers;
 use crate::identity::eligibility;
+use crate::oidc::device_token::{self, DeviceApproval};
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
-use crate::ui::DevicePage;
+use crate::ui::{DevicePage, SupabaseDevicePage};
 
 const MAX_USER_CODE_BYTES: usize = 32;
 
@@ -34,27 +33,55 @@ pub struct DeviceForm {
     pub csrf: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeviceQuery {
+    #[serde(default)]
+    pub user_code: Option<String>,
+}
+
 #[allow(clippy::future_not_send)]
-pub async fn get(cfg: ntex::web::types::State<Arc<AuthConfig>>) -> HttpResponse {
+pub async fn get(
+    query: ntex::web::types::Query<DeviceQuery>,
+    cfg: ntex::web::types::State<Arc<AuthConfig>>,
+) -> HttpResponse {
+    if cfg.auth_provider() == AuthProviderKind::Supabase {
+        let user_code = query.user_code.as_deref().unwrap_or("").trim();
+        return render_supabase_form(cfg.as_ref(), user_code, None, StatusCode::OK);
+    }
     render_form("", None, StatusCode::OK, cfg.insecure_dev)
 }
 
-/// `/device` POST — validate the typed user code through Hydra's public
-/// device-verification endpoint. Anonymous browsers are sent into the normal
-/// sign-in route; already-signed-in browsers complete the device flow by
-/// accepting the device challenge with Hydra's admin API.
+/// `/device` POST — approve a native OP device grant. Anonymous browsers are
+/// sent into the normal sign-in route; already-signed-in browsers complete the
+/// matching grant.
 #[allow(clippy::future_not_send)]
 pub async fn post(
     req: HttpRequest,
     form: ntex::web::types::Form<DeviceForm>,
-    admin: ntex::web::types::State<HydraAdmin>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     let insecure_dev = cfg.insecure_dev;
 
-    // CSRF double-submit — enforced FIRST, before any Hydra round-trip or
-    // state change, exactly like the login/signup/consent/reset siblings.
+    if cfg.auth_provider() == AuthProviderKind::Supabase {
+        if !csrf_valid(&req, &form, insecure_dev) {
+            return render_supabase_form(
+                cfg.as_ref(),
+                form.user_code.trim(),
+                Some("invalid request"),
+                StatusCode::FORBIDDEN,
+            );
+        }
+        return render_supabase_form(
+            cfg.as_ref(),
+            form.user_code.trim(),
+            Some("device approval is completed in the browser"),
+            StatusCode::METHOD_NOT_ALLOWED,
+        );
+    }
+
+    // CSRF double-submit — enforced FIRST, before any state change, exactly
+    // like the login/signup/consent/reset siblings.
     if !csrf_valid(&req, &form, insecure_dev) {
         return render_form(
             "",
@@ -82,9 +109,10 @@ pub async fn post(
         );
     }
 
-    let verified = match verify_user_code(cfg.hydra_public_url(), user_code).await {
-        Ok(v) => v,
-        Err(DeviceVerifyError::Rejected) => {
+    let native_pending = match device_token::native_user_code_pending(db.as_ref(), user_code).await {
+        Ok(pending) => pending,
+        Err(e) => {
+            tracing::error!(error = %e, "native device user-code lookup failed");
             return render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -92,28 +120,6 @@ pub async fn post(
                 insecure_dev,
             );
         }
-        Err(DeviceVerifyError::Hydra(e)) => {
-            tracing::warn!(error = %e, "device user-code verification failed");
-            return render_form(
-                user_code,
-                Some("invalid or expired code"),
-                StatusCode::BAD_REQUEST,
-                insecure_dev,
-            );
-        }
-    };
-
-    let Some(device_challenge) = verified.device_challenge else {
-        tracing::warn!(
-            location = ?verified.location,
-            "device verification response had no device_challenge"
-        );
-        return render_form(
-            user_code,
-            Some("invalid or expired code"),
-            StatusCode::BAD_REQUEST,
-            insecure_dev,
-        );
     };
 
     let Some(session) = current_session(&req, cfg.as_ref(), db.as_ref()).await else {
@@ -138,29 +144,36 @@ pub async fn post(
         );
     }
 
-    let accept = AcceptDeviceUserCodeRequest {
-        user_code: Some(user_code.to_string()),
-    };
-    match admin.accept_device_user_code(&device_challenge, &accept).await {
-        Ok(resp) => {
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "device_grant",
-                    outcome: "success",
-                    user_id: Some(&session.user_id),
-                    auth_method: Some("device"),
-                    detail: json!({
-                        "session_id": session.id.to_string(),
-                    }),
-                    ..AuditEvent::from_request(&req)
-                },
-            )
-            .await;
-            redirect_with_cookies(&resp.redirect_to, &verified.set_cookies)
+    if !native_pending {
+        return render_form(
+            user_code,
+            Some("invalid or expired code"),
+            StatusCode::BAD_REQUEST,
+            insecure_dev,
+        );
+    }
+
+    match device_token::approve_user_code(
+        db.as_ref(),
+        user_code,
+        session.user_id,
+        session.id,
+        session.credential_version,
+    )
+    .await
+    {
+        Ok(DeviceApproval::Approved) => {
+            emit_device_grant_audit(db.as_ref(), &req, &session).await;
+            render_device_approved()
         }
+        Ok(DeviceApproval::NotFound) => render_form(
+            user_code,
+            Some("invalid or expired code"),
+            StatusCode::BAD_REQUEST,
+            insecure_dev,
+        ),
         Err(e) => {
-            tracing::warn!(error = %e, "accept device user code failed");
+            tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
             render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -169,6 +182,27 @@ pub async fn post(
             )
         }
     }
+}
+
+async fn emit_device_grant_audit(
+    db: &compio_postgres::Client,
+    req: &HttpRequest,
+    session: &sessions::Session,
+) {
+    audit::emit(
+        db,
+        &AuditEvent {
+            event_type: "device_grant",
+            outcome: "success",
+            user_id: Some(&session.user_id),
+            auth_method: Some("device"),
+            detail: json!({
+                "session_id": session.id.to_string(),
+            }),
+            ..AuditEvent::from_request(req)
+        },
+    )
+    .await;
 }
 
 /// Double-submit CSRF check for the device-confirmation POST. Mirrors the
@@ -189,88 +223,6 @@ fn csrf_valid(req: &HttpRequest, form: &DeviceForm, insecure_dev: bool) -> bool 
         .is_some_and(|cookie| csrf::matches(form_token, cookie))
 }
 
-#[derive(Debug)]
-struct VerifiedDeviceCode {
-    location: String,
-    device_challenge: Option<String>,
-    set_cookies: Vec<String>,
-}
-
-#[derive(Debug)]
-enum DeviceVerifyError {
-    Rejected,
-    Hydra(String),
-}
-
-#[allow(clippy::future_not_send)]
-async fn verify_user_code(
-    hydra_public: &str,
-    user_code: &str,
-) -> Result<VerifiedDeviceCode, DeviceVerifyError> {
-    let q = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("user_code", user_code)
-        .finish();
-    let url = format!(
-        "{}/oauth2/device/verify?{}",
-        hydra_public.trim_end_matches('/'),
-        q,
-    );
-    let res = cyper::Client::new()
-        .request(http::Method::GET, url)
-        .map_err(|e| DeviceVerifyError::Hydra(format!("build GET /oauth2/device/verify: {e}")))?
-        .send_with_timeout(Duration::from_secs(10))
-        .await
-        .map_err(|_| DeviceVerifyError::Hydra("GET /oauth2/device/verify: timeout".into()))?
-        .map_err(|e| DeviceVerifyError::Hydra(format!("GET /oauth2/device/verify: {e}")))?;
-
-    let status = res.status().as_u16();
-    if status == 400 || status == 404 {
-        return Err(DeviceVerifyError::Rejected);
-    }
-    if !(300..400).contains(&status) {
-        let body = res.text().await.unwrap_or_else(|_| "<no body>".into());
-        return Err(DeviceVerifyError::Hydra(format!(
-            "GET /oauth2/device/verify -> {status}: {body}"
-        )));
-    }
-
-    let location = res
-        .headers()
-        .get(LOCATION)
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let set_cookies = res
-        .headers()
-        .get_all(SET_COOKIE)
-        .iter()
-        .filter_map(|h| h.to_str().ok())
-        .map(str::to_string)
-        .collect();
-    let device_challenge = query_param(&location, "device_challenge");
-    Ok(VerifiedDeviceCode {
-        location,
-        device_challenge,
-        set_cookies,
-    })
-}
-
-trait SendWithTimeout {
-    async fn send_with_timeout(
-        self,
-        timeout: Duration,
-    ) -> std::result::Result<cyper::Result<cyper::Response>, compio::time::Elapsed>;
-}
-
-impl SendWithTimeout for cyper::RequestBuilder {
-    async fn send_with_timeout(
-        self,
-        timeout: Duration,
-    ) -> std::result::Result<cyper::Result<cyper::Response>, compio::time::Elapsed> {
-        compio::time::timeout(timeout, self.send()).await
-    }
-}
-
 async fn current_session(
     req: &HttpRequest,
     cfg: &AuthConfig,
@@ -285,34 +237,12 @@ async fn current_session(
     sessions::validate(db, session_id).await.ok().flatten()
 }
 
-fn query_param(raw_url: &str, key: &str) -> Option<String> {
-    let parsed = url::Url::parse(raw_url).ok()?;
-    parsed
-        .query_pairs()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.into_owned())
-}
-
 fn redirect(to: &str) -> HttpResponse {
-    redirect_with_cookies(to, &[])
-}
-
-fn redirect_with_cookies(to: &str, set_cookies: &[String]) -> HttpResponse {
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,
         HeaderValue::from_str(to).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
-    for cookie in set_cookies {
-        match HeaderValue::from_str(cookie) {
-            Ok(value) => {
-                resp.header(SET_COOKIE, value);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "hydra device verification set-cookie was invalid");
-            }
-        }
-    }
     resp.finish()
 }
 
@@ -337,6 +267,120 @@ fn render_form(
     resp.body(body)
 }
 
+fn render_device_approved() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>Device approved · zeroship</title></head><body>\
+             <main><h1>zeroship</h1><h2>Device approved</h2>\
+             <p>You can return to the device that requested access.</p></main>\
+             </body></html>",
+        )
+}
+
+fn render_supabase_form(
+    cfg: &AuthConfig,
+    user_code: &str,
+    error: Option<&str>,
+    status: StatusCode,
+) -> HttpResponse {
+    let csrf_token = csrf::generate_token();
+    let script_nonce = csrf::generate_token();
+    let supabase_auth_url = format!(
+        "{}/auth/v1",
+        cfg.supabase_url().unwrap_or("").trim_end_matches('/')
+    );
+    let control_approve_url = format!(
+        "{}/api/device/approve",
+        cfg.control_url().trim_end_matches('/')
+    );
+    let supabase_auth_url_json = json_for_script(&supabase_auth_url);
+    let supabase_anon_key_json = json_for_script(cfg.supabase_anon_key().unwrap_or(""));
+    let control_approve_url_json = json_for_script(&control_approve_url);
+    let page = SupabaseDevicePage {
+        user_code,
+        error,
+        csrf: &csrf_token,
+        script_nonce: &script_nonce,
+        supabase_auth_url_json: &supabase_auth_url_json,
+        supabase_anon_key_json: &supabase_anon_key_json,
+        control_approve_url_json: &control_approve_url_json,
+    };
+    let body = page
+        .render()
+        .unwrap_or_else(|_| "<h1>device authorization</h1>".to_string());
+    let mut resp = HttpResponse::build(status);
+    resp.content_type("text/html; charset=utf-8");
+    resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, cfg.insecure_dev));
+    let csp = supabase_device_csp(&script_nonce, &supabase_auth_url, &control_approve_url);
+    if let Ok(value) = HeaderValue::from_str(&csp) {
+        resp.header("Content-Security-Policy", value);
+    } else {
+        resp.header(
+            "Content-Security-Policy",
+            headers::content_security_policy_with_script_nonce(&script_nonce),
+        );
+    }
+    resp.body(body)
+}
+
+fn json_for_script(value: &str) -> String {
+    serde_json::to_string(value)
+        .expect("serialize script string")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+fn supabase_device_csp(nonce: &str, supabase_auth_url: &str, control_approve_url: &str) -> String {
+    let mut connect = vec!["'self'".to_string()];
+    for source in [
+        csp_source_origin(supabase_auth_url),
+        csp_source_origin(control_approve_url),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !connect.iter().any(|existing| existing == &source) {
+            connect.push(source);
+        }
+    }
+    format!(
+        "default-src 'self'; \
+         script-src 'self' 'nonce-{nonce}'; \
+         style-src 'self'; \
+         img-src 'self' data: https://*.zeroship.ai \
+                       https://lh3.googleusercontent.com \
+                       https://avatars.githubusercontent.com; \
+         connect-src {}; \
+         form-action 'self'; \
+         frame-ancestors 'none'; \
+         base-uri 'none'; \
+         object-src 'none'; \
+         upgrade-insecure-requests",
+        connect.join(" ")
+    )
+}
+
+fn csp_source_origin(raw_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw_url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = parsed.port().map_or_else(String::new, |port| format!(":{port}"));
+    Some(format!("{}://{}{}", parsed.scheme(), host, port))
+}
+
 fn valid_user_code(user_code: &str) -> bool {
     !user_code.is_empty() && user_code.len() <= MAX_USER_CODE_BYTES
 }
@@ -344,6 +388,52 @@ fn valid_user_code(user_code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use ntex::http::HeaderMap;
+    use ntex::web;
+    use ntex::web::test;
+    use zeroship_core::config::AuthSection;
+
+    fn native_cfg() -> Arc<AuthConfig> {
+        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"]);
+        cfg.try_resolve(AuthSection::default())
+            .expect("resolve native test config");
+        Arc::new(cfg)
+    }
+
+    fn supabase_cfg() -> Arc<AuthConfig> {
+        let mut cfg = AuthConfig::parse_from([
+            "zeroship-auth",
+            "--db-url",
+            "postgres://test",
+            "--auth-provider",
+            "supabase",
+            "--supabase-url",
+            "https://project.supabase.test",
+            "--supabase-anon-key",
+            "anon-test-key",
+            "--control-url",
+            "https://control.zeroship.test",
+        ]);
+        cfg.try_resolve(AuthSection::default())
+            .expect("resolve supabase test config");
+        Arc::new(cfg)
+    }
+
+    async fn get_device_body(cfg: Arc<AuthConfig>, uri: &str) -> (StatusCode, HeaderMap, String) {
+        let app = test::init_service(
+            web::App::new()
+                .state(cfg)
+                .service(web::resource("/device").route(web::get().to(get))),
+        )
+        .await;
+        let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = String::from_utf8(test::read_body(resp).await.to_vec())
+            .expect("device response body is utf8");
+        (status, headers, body)
+    }
 
     #[test]
     fn device_user_code_is_bounded() {
@@ -351,5 +441,76 @@ mod tests {
         assert!(valid_user_code(&"A".repeat(32)));
         assert!(!valid_user_code(""));
         assert!(!valid_user_code(&"A".repeat(33)));
+    }
+
+    #[ntex::test]
+    async fn supabase_device_get_renders_gotrue_approval_page_with_csrf() {
+        let (status, headers, body) =
+            get_device_body(supabase_cfg(), "/device?user_code=BCDF-GHJK").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let set_cookie = headers
+            .get(SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("supabase /device sets csrf cookie");
+        assert!(
+            set_cookie.starts_with("__Host-zsidp_csrf="),
+            "prod csrf cookie must use __Host- prefix: {set_cookie}"
+        );
+        let csrf_token = set_cookie
+            .split(';')
+            .next()
+            .and_then(|kv| kv.strip_prefix("__Host-zsidp_csrf="))
+            .expect("csrf cookie token");
+
+        assert!(body.contains("Authorize device"), "{body}");
+        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK""#), "{body}");
+        assert!(body.contains(r#"name="csrf""#), "{body}");
+        assert!(
+            body.contains(&format!(r#"value="{csrf_token}""#)),
+            "hidden csrf field must echo the csrf cookie token: {body}"
+        );
+        assert!(body.contains("https://project.supabase.test/auth/v1"), "{body}");
+        assert!(
+            body.contains("https://control.zeroship.test/api/device/approve"),
+            "{body}"
+        );
+        assert!(body.contains("x-zeroship-csrf"), "{body}");
+        assert!(
+            !body.contains("/oauth2/device/verify"),
+            "Supabase render must not reference native device verification: {body}"
+        );
+
+        let csp = headers
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .expect("supabase /device sets nonce CSP");
+        assert!(csp.contains("script-src 'self' 'nonce-"), "{csp}");
+        assert!(
+            csp.contains(
+                "connect-src 'self' https://project.supabase.test https://control.zeroship.test"
+            ),
+            "{csp}"
+        );
+    }
+
+    #[ntex::test]
+    async fn native_device_get_keeps_existing_page_shape() {
+        let (status, _headers, body) =
+            get_device_body(native_cfg(), "/device?user_code=BCDF-GHJK").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Enter the code shown on your device"),
+            "{body}"
+        );
+        assert!(body.contains(r#"<form method="POST" action="/device">"#), "{body}");
+        assert!(
+            body.contains(r#"name="user_code" value="""#),
+            "native GET should continue ignoring verification_uri_complete user_code: {body}"
+        );
+        assert!(!body.contains("supabaseAuthUrl"), "{body}");
+        assert!(!body.contains("/api/device/approve"), "{body}");
+        assert!(!body.contains(r#"name="email""#), "{body}");
     }
 }

@@ -6,13 +6,13 @@
 //! `zeroship.apps` has NO FK to `zeroship.users`, so the user's apps are left
 //! OWNER-LESS. Auth has no call path to control and no access to the blob store,
 //! so the orphaned apps row (plus its bundle/blobs in object storage and its
-//! per-app Hydra client) is never torn down. This control-side cron is the
-//! cleanup: it owns apps + the blob VFS + the per-app Hydra client.
+//! native per-app OAuth rows) is never torn down. This control-side cron is the
+//! cleanup: it owns apps + the blob VFS + native per-app OAuth rows.
 //!
 //! Each tick finds apps that are **owner-less AND NOT system AND past a short
 //! grace** and purges each via the shared [`crate::api::purge_app`] — the SAME
 //! teardown path the `DELETE /apps/{id}` handler uses (VFS delete → atomic DB
-//! cascade → best-effort Hydra client delete).
+//! cascade).
 //!
 //! ## The platform-console-safety guarantee
 //!
@@ -54,7 +54,7 @@ const GRACE_INTERVAL: &str = "5 minutes";
 pub struct ReaperReport {
     /// Owner-less, non-system, past-grace apps detected this tick.
     pub found: usize,
-    /// Of those, successfully purged (DB row + blobs + Hydra client).
+    /// Of those, successfully purged (DB row + blobs).
     pub purged: usize,
 }
 

@@ -770,7 +770,7 @@ describe("SignedIn / SignedOut conditional rendering", () => {
 describe("redirect-callback mount path (?code=&state=)", () => {
   test("calls exchangeCodeForSession then strips the query via replaceState", async () => {
     const client = makeFakeClient();
-    setURL("https://myapp.zeroship.test/dashboard?code=AUTH_CODE&state=ST8&iss=hydra");
+    setURL("https://myapp.zeroship.test/dashboard?code=AUTH_CODE&state=ST8&iss=auth");
 
     await act(async () => {
       render(

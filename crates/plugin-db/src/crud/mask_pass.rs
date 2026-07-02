@@ -491,7 +491,7 @@ pub(crate) fn wrap_row_on_read(
         let repr = serde_json::json!({
             "sentinel": "__zsmask__",
             // DB-7: an unforgeable per-process signature. Only sentinels the
-            // read pipeline itself produced carry it; the rehydrator refuses to
+            // read pipeline itself produced carry it; the decoder refuses to
             // mint a MaskedValue from any sentinel lacking it, so app JS cannot
             // fabricate a `__zsmask__` object (e.g. stashed in a JSONB column it
             // controls) and have it minted into a MaskedValue pointing at an

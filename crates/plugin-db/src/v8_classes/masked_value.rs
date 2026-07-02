@@ -817,7 +817,7 @@ mod tests {
     fn rehydrate_refuses_forged_sentinel_db7() {
         // DB-7: a `__zsmask__` object app JS fabricated (e.g. read back from a
         // JSONB column it wrote) lacks the per-process `_sig` the read pipeline
-        // stamps, so the rehydrator must NOT mint it into a MaskedValue (which
+        // stamps, so the decoder must NOT mint it into a MaskedValue (which
         // could then `.unmask()` an attacker-chosen cell). A correctly-signed
         // sentinel — what the pipeline actually produces — IS minted.
         init_v8();

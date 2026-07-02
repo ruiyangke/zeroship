@@ -8,7 +8,7 @@ contract, so `pnpm dev` runs an app with zero platform infra:
 | `env.db`    | PostgreSQL                        | SQLite (embedded)                    |
 | `env.kv`    | Redis                             | redb (embedded)                      |
 | `env.storage` | S3 / R2                         | LocalFs                              |
-| **auth**    | **gateway BFF + Hydra**           | **in-process dev-auth provider**     |
+| **auth**    | **gateway BFF + native OP**       | **in-process dev-auth provider**     |
 
 Auth was the missing one. This note describes the dev tier: the contract it
 mirrors, the dev implementation, and the dev-only-by-construction guarantee.
@@ -62,7 +62,7 @@ session cookie + an identity projection, never a token. Two surfaces:
    `env.auth` per-request state (`crate::auth::set_request_user`) and the RPC
    ctx (`mint_rpc_ctx(user_json)` → `currentUser()`).
 
-The prod tier (gateway + Hydra) is the faithful validation surface and is NOT
+The prod tier (gateway + native OP) is the faithful validation surface and is NOT
 touched by the dev tier. Its integration tests + live E2E stay authoritative.
 
 ## The dev tier
@@ -72,7 +72,7 @@ Two pieces, mirroring the two contract surfaces:
 ### 1. Browser endpoints — `@zeroship/bootstrap` `dev-auth.ts`
 
 `createDevAuthProvider(getEnv)` serves the same-origin `/__zeroship/auth/*` routes
-from inside the dev runtime — no gateway, no Hydra:
+from inside the dev runtime — no gateway, no external auth service:
 
 - `authorize` (GET) → render a **real dev login form** in-frame (the same
   same-origin iframe the SDK drives in prod). It is **prefilled** with the
@@ -203,7 +203,8 @@ This is **grep-provable** and guarded by a test
 - `crates/runtime/tests/dev_auth.rs` — drives the real serve-path seam
   (`resolve_dev_user_json` → `call_fetch_handler_with_user`) and asserts BOTH
   `env.auth.getUser()` and `currentUser()` resolve the dev user from the cookie,
-  plus forgery rejection (wrong-secret cookie → anonymous). No gateway/Hydra.
+  plus forgery rejection (wrong-secret cookie → anonymous). No gateway or
+  external auth service.
 - `sdks/bootstrap/tests/dev-auth.test.ts` — exercises the real provider through
   the full `/__zeroship/auth/*` flow + the WebCrypto HMAC cookie roundtrip, and the
   production-build absence guard.

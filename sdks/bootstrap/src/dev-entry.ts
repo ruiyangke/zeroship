@@ -381,7 +381,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   );
 
   // Dev-tier auth provider — owns the same-origin `/__zeroship/auth/*` endpoints in
-  // self-contained dev (no gateway/Hydra). Reads its config from the spawn env
+  // self-contained dev (no gateway or external auth service). Reads its config from the spawn env
   // (`ZEROSHIP_DEV_AUTH` + `ZEROSHIP_DEV_AUTH_SECRET`, set by the Vite plugin);
   // `null` when no secret is present (e.g. a hand-run `zeroship serve`), in
   // which case `/__zeroship/auth/*` falls through to the user module unchanged.

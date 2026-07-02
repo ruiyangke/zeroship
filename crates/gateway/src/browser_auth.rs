@@ -3,8 +3,8 @@
 //! Three same-origin gateway endpoints the `@zeroship/auth` SDK drives:
 //!
 //! - **`GET /__zeroship/auth/authorize`** — the ONE cross-site hop. Resolves the
-//!   app's per-app PUBLIC PKCE client from `Host`, then 302s to Hydra's
-//!   `/oauth2/auth` carrying the BROWSER-supplied PKCE `code_challenge`
+//!   app's per-app brokered PKCE client from `Host`, then 302s to the OP's
+//!   `/authorize` carrying the BROWSER-supplied PKCE `code_challenge`
 //!   (S256), `state`, `nonce`, requested `scope`, and an optional `prompt`
 //!   passthrough, with `redirect_uri = {scheme}://{host}/__zeroship/auth/popup-callback`
 //!   (a registered URI from 1d). The gateway holds NO PKCE verifier — the
@@ -29,7 +29,7 @@
 //!   origin guard (X-ZS-Auth + exact Origin). Reads the `__Host-zeroship_app_anchor`
 //!   anchor cookie → loads the anchor → (a) sets the per-app family marker
 //!   via `revoke_family(client_id, pws_sub)`, (b) best-effort revokes the
-//!   server-held refresh family at Hydra `/oauth2/revoke`, (c) deletes the
+//!   server-held refresh family at the OP `/revoke`, (c) deletes the
 //!   anchor row(s), (d) clears the anchor cookie + breadcrumb. `scope:
 //!   'local'` (default, this device) or `'global'` (this app, every device).
 //!   Returns `204` + no-store cookie clears.
@@ -56,8 +56,8 @@ fn popup_csp(nonce: &str) -> String {
 
 // ─── GET /__zeroship/auth/authorize ────────────────────────────────────────────
 
-/// `GET /__zeroship/auth/authorize` — build the Hydra `/oauth2/auth` URL for the
-/// per-app PUBLIC PKCE client and 302. See module docs.
+/// `GET /__zeroship/auth/authorize` — build the OP `/authorize` URL for the
+/// per-app brokered PKCE client and 302. See module docs.
 #[allow(clippy::future_not_send)]
 pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResponse {
     // Resolve the app + per-app oauth_client_id. 503 client_not_provisioned
@@ -91,18 +91,19 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
     let Some(nonce) = q.nonce.as_deref().filter(|s| !s.is_empty()) else {
         return error_response(HttpResponse::BadRequest(), "invalid_request", "nonce required");
     };
-    let scope = q.scope.as_deref().filter(|s| !s.is_empty()).unwrap_or("openid");
+    let requested_scope = q.scope.as_deref().filter(|s| !s.is_empty()).unwrap_or("openid");
+    let scope = scope_with_offline_access(requested_scope);
 
     // `prompt` is a PASSTHROUGH (spec §1.2): omitted in the common case so
-    // Hydra's SSO skip fires; `login`/`consent` for explicit step-up. The
+    // the OP's SSO skip fires; `login`/`consent` for explicit step-up. The
     // silent-iframe `prompt=none` path was removed, but the gateway does NOT
-    // reject `none` here — it is simply forwarded (Hydra decides). We only
+    // reject `none` here — it is simply forwarded (the OP decides). We only
     // forward a non-empty prompt.
     let prompt = q.prompt.as_deref().filter(|s| !s.is_empty());
 
     // `idp_hint` is the SDK's `SignInOptions.provider` (google/github/password)
-    // threaded through verbatim to Hydra so the login UI can route to / pre-
-    // select the named upstream IdP. PASSTHROUGH only (Hydra/login-UI decides
+    // threaded through verbatim to the OP so the login UI can route to / pre-
+    // select the named upstream IdP. PASSTHROUGH only (OP/login-UI decides
     // what a value means); omitted ⇒ default provider picker.
     let idp_hint = q.idp_hint.as_deref().filter(|s| !s.is_empty());
 
@@ -110,10 +111,10 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
     // URI from 1d). When the SDK supplies one, it MUST EXACTLY match one of
     // this app's registered callback URIs — a foreign OR same-origin-but-
     // unregistered redirect_uri is rejected (open-redirect guard, RFC 6749
-    // §3.1.2.3 / RFC 9700 §4.1.3). The ultimate allowlist is Hydra's
+    // §3.1.2.3 / RFC 9700 §4.1.3). The ultimate allowlist is the OP's
     // registered redirect_uris; we mirror that exact-match set up front so a
     // misconfigured SDK fails fast AND so a gateway-layer deviation can never
-    // widen Hydra's allowlist if Hydra registration ever drifts.
+    // widen the OP's allowlist if registration ever drifts.
     let scheme = if state.config.insecure_dev { "http" } else { "https" };
     let redirect_uri = match q.redirect_uri.as_deref().filter(|s| !s.is_empty()) {
         None => default_redirect_uri(scheme, &route.host),
@@ -136,7 +137,7 @@ pub async fn authorize(req: HttpRequest, state: State<Arc<GateState>>) -> HttpRe
             code_challenge,
             state: stt,
             nonce,
-            scope,
+            scope: scope.as_str(),
             redirect_uri: &redirect_uri,
             prompt,
             idp_hint,
@@ -164,12 +165,21 @@ fn default_redirect_uri(scheme: &str, host: &str) -> String {
 
 /// Exact-match a supplied `redirect_uri` against this app's registered callback
 /// set. NOT a prefix/origin check: a same-origin-but-unregistered path (or any
-/// extra query/fragment) is rejected, mirroring Hydra's registered allowlist so
+/// extra query/fragment) is rejected, mirroring the OP's registered allowlist so
 /// the gateway can never widen it.
 fn is_registered_redirect_uri(scheme: &str, host: &str, supplied: &str) -> bool {
     REGISTERED_CALLBACK_PATHS
         .iter()
         .any(|path| supplied == format!("{scheme}://{host}{path}"))
+}
+
+fn scope_with_offline_access(scope: &str) -> String {
+    let trimmed = scope.trim();
+    let mut out = if trimmed.is_empty() { "openid".to_string() } else { trimmed.to_string() };
+    if !out.split_whitespace().any(|s| s == "offline_access") {
+        out.push_str(" offline_access");
+    }
+    out
 }
 
 /// `GET /__zeroship/auth/authorize` query params (all browser-supplied).
@@ -210,10 +220,21 @@ impl AuthorizeQuery {
 /// `GET /__zeroship/auth/popup-callback` — the same-origin HTML relay page. See
 /// module docs. The query params are NEVER reflected into the response body
 /// by the gateway: the inline JS reads them from `location.search` at
-/// runtime and `postMessage`s the PARSED values. The gateway only emits a
-/// static, query-independent document plus a per-response CSP nonce.
+/// runtime and `postMessage`s the PARSED values. A present RFC 9207 `iss`
+/// mismatch is rejected before the relay page is emitted; absence is tolerated
+/// for mixed-version OP/dev flows.
 #[allow(clippy::future_not_send)]
-pub async fn popup_callback() -> HttpResponse {
+pub async fn popup_callback(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResponse {
+    for (k, v) in url::form_urlencoded::parse(req.query_string().as_bytes()) {
+        if k == "iss" && !v.is_empty() && v.as_ref() != state.oidc_rp.issuer {
+            return error_response(
+                HttpResponse::BadRequest(),
+                "invalid_request",
+                "issuer mismatch",
+            );
+        }
+    }
+
     // Per-response CSP nonce (fresh random base64url). Stamped on BOTH the
     // CSP header and the <script nonce>, so only THIS inline script runs and
     // any injected/reflected <script> is blocked.
@@ -254,10 +275,11 @@ fn popup_callback_html(nonce: &str) -> String {
 (function(){{\n\
   var p = new URLSearchParams(location.search);\n\
   var state = p.get('state');\n\
+  var iss = p.get('iss');\n\
   var msg = {{ type: 'zs:authorization_response', response:\n\
     p.get('error')\n\
-      ? {{ error: p.get('error'), error_description: p.get('error_description'), state: state }}\n\
-      : {{ code: p.get('code'), state: state }} }};\n\
+      ? {{ error: p.get('error'), error_description: p.get('error_description'), state: state, iss: iss }}\n\
+      : {{ code: p.get('code'), state: state, iss: iss }} }};\n\
   // Primary: postMessage to the launcher — opener (popup) || parent (iframe).\n\
   // Same-origin target pinned to location.origin; NEVER '*'.\n\
   var tgt = (window.opener && window.opener !== window) ? window.opener\n\
@@ -328,7 +350,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         return signout_cleared(&route.host, state.config.insecure_dev);
     };
 
-    // Load the anchor (released immediately — no conn held across the Hydra
+    // Load the anchor (released immediately — no conn held across the OP
     // revoke). A missing/expired anchor ⇒ just clear the cookies.
     let anchor = {
         let pool = match crate::db::checkout(db_cfg).await {
@@ -359,7 +381,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
 
     // The per-app pairwise `pws_` subject the session cookie / access token
     // carries — the family marker is keyed on `(client_id, pws_sub)` to match
-    // their `sub` (the cookie / Bearer / DPoP arms check the SAME
+    // their `sub` (the cookie / Bearer arms check the SAME
     // (client_id, sub), §8.5). When the sector is missing we cannot derive the
     // pws_; the family marker is then best-effort skipped (the anchor delete +
     // cookie clear still happen).
@@ -374,7 +396,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             )
         });
 
-    // The encrypted families to revoke at Hydra + the anchor rows to delete.
+    // The encrypted families to revoke at OP + the anchor rows to delete.
     // For `local`: just this anchor's family + this row. For `global`: every
     // anchor row for `(app_id, global_user_id)` (this app, every device).
     let mut families: Vec<(Vec<u8>, String)> = Vec::new();
@@ -417,7 +439,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         }
 
         // (c) Delete the anchor row(s) and collect the family ciphertexts
-        //     for the (best-effort) Hydra revoke fan-out.
+        //     for the (best-effort) OP revoke fan-out.
         if want_global {
             match anchors::delete_all_for_user(&mut conn, route.app_id, anchor.global_user_id)
                 .await
@@ -447,12 +469,12 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
                 );
             }
         }
-        // conn drops here — released before the outbound Hydra revoke.
+        // conn drops here — released before the outbound OP revoke.
     }
 
-    // (b) Best-effort revoke each server-held refresh family at Hydra. NO db
+    // (b) Best-effort revoke each server-held refresh family at the OP. NO db
     //     connection is held across these calls. The anchor delete + family
-    //     marker above are the authoritative revocation; a Hydra hiccup must
+    //     marker above are the authoritative revocation; an OP hiccup must
     //     not block signout, so failures are logged, not surfaced.
     for (refresh_enc, client_id) in &families {
         let aad = anchor_aad(client_id, &anchor.global_user_id.to_string());
@@ -460,14 +482,14 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
         {
             Ok(pt) => String::from_utf8_lossy(&pt).into_owned(),
             Err(e) => {
-                tracing::warn!(error = %e, "/signout: refresh decrypt failed (skipping Hydra revoke)");
+                tracing::warn!(error = %e, "/signout: refresh decrypt failed (skipping OP revoke)");
                 continue;
             }
         };
         if let Err(e) = state.oidc_rp.revoke_token_public(client_id, &refresh).await {
             // RFC 7009 §2.2: a non-2xx here is not fatal — the family is
             // already removed locally and the marker rejects live tokens.
-            tracing::warn!(error = %e, "/signout: Hydra /oauth2/revoke best-effort failure");
+            tracing::warn!(error = %e, "/signout: OP /revoke best-effort failure");
         }
     }
 
@@ -583,7 +605,7 @@ mod tests {
     fn signout_aad_matches_token_aad() {
         // signout decrypts a family that auth_token::anchor_aad encrypted —
         // the AAD strings MUST be byte-identical or decrypt fails and the
-        // Hydra revoke is silently skipped. Pin the exact format here.
+        // OP revoke is silently skipped. Pin the exact format here.
         let mine = anchor_aad("oac_app", "usr_123");
         assert_eq!(mine, b"zs-anchor-refresh:oac_app:usr_123".to_vec());
     }
@@ -680,13 +702,23 @@ mod tests {
     fn registered_callback_paths_match_control_plane_registration() {
         // The gateway's accept-set MUST stay byte-identical to the control
         // plane's CALLBACK_PATHS (control::app_oauth_client) that registers the
-        // URIs with Hydra. If these drift, the gateway would either reject a
-        // legitimately-registered callback or (worse) accept one Hydra never
+        // URIs with the OP. If these drift, the gateway would either reject a
+        // legitimately-registered callback or (worse) accept one the OP never
         // registered. Pin the exact strings.
         assert_eq!(
             REGISTERED_CALLBACK_PATHS,
             ["/__zeroship/auth/popup-callback", "/__zeroship/auth/callback"],
         );
+    }
+
+    #[test]
+    fn authorize_scope_includes_offline_access_once() {
+        assert_eq!(scope_with_offline_access("openid"), "openid offline_access");
+        assert_eq!(
+            scope_with_offline_access("openid profile offline_access"),
+            "openid profile offline_access"
+        );
+        assert_eq!(scope_with_offline_access("   "), "openid offline_access");
     }
 
     #[test]
@@ -701,7 +733,7 @@ mod tests {
         assert_eq!(q.scope.as_deref(), Some("openid profile"));
         assert_eq!(q.prompt.as_deref(), Some("consent"));
         assert_eq!(q.redirect_uri.as_deref(), Some("https://app/cb"));
-        // Fix 5: the provider hint parses into idp_hint and is forwarded to Hydra.
+        // Fix 5: the provider hint parses into idp_hint and is forwarded to the OP.
         assert_eq!(q.idp_hint.as_deref(), Some("google"));
     }
 }

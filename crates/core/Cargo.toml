@@ -13,6 +13,7 @@ indexmap = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
+hkdf = { workspace = true }
 hex = { workspace = true }
 # PKCE verifier generation (shared with gateway OIDC RP + auth tests).
 rand = "0.8"
@@ -26,7 +27,7 @@ zeroship-bundle = { workspace = true }
 jsonwebtoken = { workspace = true }
 parking_lot = "0.12"
 cyper = { workspace = true }
-# JWKS refresh bounds its outbound Hydra fetch with `compio::time::timeout`
+# JWKS refresh bounds its outbound OP fetch with `compio::time::timeout`
 # (zero-tokio). The workspace `compio` carries the `time` feature; the
 # dev-dependency below additionally enables `polling` for sandboxed tests
 # (Cargo unions the feature sets — same split as the `auth` crate).

@@ -1,18 +1,13 @@
 # Database migrations (zeroship-migrate)
 
 The platform's Postgres schema — the single `zeroship` schema that holds every
-platform/system table, plus the dedicated `oauth_hydra` schema — is managed by
+platform/system table — is managed by
 **`zeroship-migrate`**, zeroship's own versioned migration engine, run under its
 **Platform** trust profile. Migrations are hand-authored Flyway-style SQL files
 in `db/migrations/`, version-controlled, reviewable, and rollback-able. The
 engine tracks what's applied in an append-only journal (in a meta schema,
 default `zeroship_migrations`), so `migrate` only ever runs pending files and is
 safe to re-run (idempotent no-op when everything is applied).
-
-> **Hydra owns its own schema** via `hydra migrate` (the `hydra-migrate` compose
-> service). Do not put hydra tables in `db/migrations/`. The `oauth_hydra`
-> *schema + role + grants + uuid-ossp pre-create* live in `V0027`; Hydra's own
-> `hydra_*` tables are migrated by Hydra.
 
 Services **do not migrate themselves.** `zeroship-control`/`zeroship-auth`
 connect to an already-migrated database — exactly as in production, where the
@@ -39,9 +34,11 @@ See `docs/proposals/2026-06-17-platform-migrations-flyway-mode-design.md`.
 db/migrations/
   V0001__extensions_schemas.sql        # citext + CREATE SCHEMA zeroship (the one platform schema)
   V0001__extensions_schemas.down.sql   # OPTIONAL reverse for the same version
-  …                                    # 58 versioned files today (V0001–V0059, 0045 is a gap)
+  ...                                  # versioned files in numeric order
   V0004__control.sql                   # the control-plane app/usage/env tables
-  V0027__oauth_hydra_schema.sql        # the separate oauth_hydra schema + least-priv role for Hydra
+  V0062__op_signing_keys.sql           # native OP signing-key metadata
+  V0063__oauth_authorization_codes.sql # native OP authorization-code store
+  V0064__oauth_refresh_tokens.sql      # native OP refresh-token family store
 ```
 
 The filename encodes everything — there is **no** `--changeset`/`--rollback`
@@ -52,7 +49,7 @@ in numeric `V<NNNN>` order. **One file = one migration**, multi-statement,
 whole-file transaction-atomic. Any `--rollback` / `--liquibase formatted sql`
 comment surviving from the port is just a comment — the reverse lives in the
 sibling `.down.sql`. Every object reference is fully schema-qualified; the
-Platform guard permits the `zeroship`/`oauth_hydra`/`public` schema allowlist.
+Platform guard permits the `zeroship`/`public` schema allowlist.
 
 ## Running migrations
 

@@ -13,17 +13,17 @@
 	admin off
 }
 
-# auth.zeroship.localhost — split between the Hydra OIDC kernel (protocol
-# endpoints) and the zeroship-auth UI/RP (login, consent, logout, etc.).
+# auth.zeroship.localhost — native auth service owns the OIDC protocol
+# endpoints and the login/consent/logout UI.
 http://auth.zeroship.localhost {
-	# OAuth2 protocol + discovery/JWKS endpoints → Hydra public listener.
+	# OAuth2 protocol + discovery/JWKS endpoints.
 	handle /oauth2/* {
-		reverse_proxy hydra:4444
+		reverse_proxy auth:9092
 	}
 	handle /.well-known/* {
-		reverse_proxy hydra:4444
+		reverse_proxy auth:9092
 	}
-	# Everything else (login / consent / logout UI + RP routes) → auth service.
+	# Everything else (login / consent / logout UI + RP routes).
 	handle {
 		reverse_proxy auth:9092
 	}

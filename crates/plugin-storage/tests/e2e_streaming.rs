@@ -173,14 +173,18 @@ fn run_app(app: &'static str) -> (u16, String) {
         let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
 
         let result = match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
                     .await
                     .expect("storage e2e: fetch pending timed out")
                     .expect("storage e2e: pending delivered DispatchError");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     other => {
                         let name = match other {
                             SettledFetch::Stream { .. } => "Stream",
@@ -256,14 +260,18 @@ fn run_app_metered(app: &'static str, app_id: &str) -> (u16, String, Arc<zeroshi
         let outcome = runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
 
         let result = match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
                     .await
                     .expect("storage metering: fetch pending timed out")
                     .expect("storage metering: pending delivered DispatchError");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     _ => panic!("storage metering: expected SettledFetch::Response"),
                 }
             }

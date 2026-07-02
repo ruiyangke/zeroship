@@ -6,14 +6,14 @@
 //! leave `/link` un-gated. If `/link` skipped the lockout check, a locked
 //! account holder (or an attacker who has triggered lockout but knows the
 //! password) could still link a federated identity and mint a fresh session
-//! (302 → hydra redirect_to). The eligibility gate must reject the locked
+//! (302 → native return_to). The eligibility gate must reject the locked
 //! account BEFORE any session/identity is created.
 //!
 //! Rule-A faithfulness: we seed a user with the CORRECT password and then
 //! lock it. We drive the REAL `/link` POST end to end (CSRF → token decode →
-//! hydra get_login → password verify → eligibility). With the lockout gate
-//! present the request is rejected; without it the correct password would
-//! produce a 302 success. We do NOT pre-seed any "rejected" state — the
+//! password verify → eligibility). With the lockout gate present the request
+//! is rejected; without it the correct password would produce a 302 success.
+//! We do NOT pre-seed any "rejected" state — the
 //! production code path itself must do the rejecting.
 
 use std::sync::Arc;
@@ -23,12 +23,9 @@ use clap::Parser;
 use compio_postgres::{connect, NoTls};
 use ntex::http::header::SET_COOKIE;
 use ntex::web::{self, test};
-use serde::Deserialize;
-use serde_json::json;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::identity::linker::{PendingLink, PENDING_LINK_TTL_SECS};
 use zeroship_auth::identity::password;
 use zeroship_auth::store::users;
@@ -59,50 +56,6 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
         }
     }
     None
-}
-
-#[derive(Debug, Deserialize)]
-struct LoginChallengeQuery {
-    login_challenge: String,
-}
-
-#[allow(clippy::future_not_send)]
-async fn mock_get_login(query: web::types::Query<LoginChallengeQuery>) -> web::HttpResponse {
-    web::HttpResponse::Ok().json(&json!({
-        "challenge": query.login_challenge,
-        "skip": false,
-        "subject": "",
-        "client": {
-            "client_id": "link-lockout-client",
-            "client_name": "Link Lockout Client",
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
-            "redirect_uris": ["https://client.example/callback"],
-            "post_logout_redirect_uris": [],
-            "scope": "openid",
-            "token_endpoint_auth_method": "client_secret_basic",
-            "subject_type": "public",
-            "audience": [],
-            "skip_consent": true,
-            "require_consent": false,
-            "require_logout_consent": false
-        },
-        "request_url": "https://auth.zeroship.ai/oauth2/auth?client_id=link-lockout-client",
-        "requested_scope": ["openid"],
-        "requested_access_token_audience": [],
-        "session_id": null,
-        "oidc_context": null
-    }))
-}
-
-// If the link POST ever reached `accept_login` for a locked account, it would
-// hit this and produce a 302 success — exactly what the lockout gate must
-// prevent. Its presence makes a regression unambiguous.
-#[allow(clippy::future_not_send)]
-async fn mock_accept_login() -> web::HttpResponse {
-    web::HttpResponse::Ok().json(&json!({
-        "redirect_to": "https://auth.zeroship.ai/oauth2/auth?login_verifier=accepted"
-    }))
 }
 
 #[ntex::test]
@@ -147,7 +100,7 @@ async fn locked_account_cannot_link_with_correct_password() {
         provider: "github".into(),
         subject: format!("github-{}", Uuid::new_v4().simple()),
         email: email.clone(),
-        login_challenge: format!("challenge-{}", Uuid::new_v4().simple()),
+        return_to: Some("/oauth2/authorize?client_id=oac_link_lockout".into()),
         exp_unix: i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -159,25 +112,10 @@ async fn locked_account_cannot_link_with_correct_password() {
     };
     let token = pending.encode(cfg.stash_signing_key.as_bytes());
 
-    let hydra_srv = web::test::server(|| async {
-        web::App::new()
-            .service(
-                web::resource("/admin/oauth2/auth/requests/login")
-                    .route(web::get().to(mock_get_login)),
-            )
-            .service(
-                web::resource("/admin/oauth2/auth/requests/login/accept")
-                    .route(web::put().to(mock_accept_login)),
-            )
-    })
-    .await;
-    let admin = HydraAdmin::new(hydra_srv.url("").trim_end_matches('/').to_string());
-
     let app = test::init_service(
         web::App::new()
             .state(cfg.clone())
             .state(pg.clone())
-            .state(admin)
             .service(
                 web::resource("/link")
                     .route(web::get().to(zeroship_auth::ui::link::get))
