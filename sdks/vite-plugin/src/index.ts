@@ -67,7 +67,7 @@ export interface ZeroshipOptions {
    * peer of `env.db`→SQLite / `env.kv`→redb). When enabled the dev runtime
    * serves the same-origin `/__zeroship/auth/*` endpoints the `@zeroship/auth` client
    * drives and supplies a logged-in identity to `env.auth.getUser()` /
-   * `currentUser()` server-side — with NO gateway / Hydra / control plane.
+   * `currentUser()` server-side — with NO gateway / external auth service / control plane.
    *
    * - `true` (the default in dev) — a single built-in dev user
    *   (`pws_dev…` / `dev@localhost` / scopes `openid profile email`).

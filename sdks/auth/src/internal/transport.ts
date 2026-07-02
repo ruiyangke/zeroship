@@ -127,7 +127,7 @@ export class Transport {
     scope: string[];
     redirectUri: string;
     prompt?: string;
-    /** Provider hint (`google`/`github`/`password`) → Hydra `idp_hint`. */
+    /** Provider hint (`google`/`github`/`password`) → native auth `idp_hint`. */
     idpHint?: string;
   }): string {
     const q = new URLSearchParams({
@@ -140,7 +140,7 @@ export class Transport {
     });
     if (params.prompt) q.set("prompt", params.prompt);
     // `SignInOptions.provider` → `idp_hint` (Fix 5). The gateway parses it and
-    // forwards it to Hydra so the login UI routes to the named upstream IdP.
+    // forwards it to the native auth service so the login UI routes to the named upstream IdP.
     if (params.idpHint) q.set("idp_hint", params.idpHint);
     return `${this.appOrigin}/__zeroship/auth/authorize?${q.toString()}`;
   }

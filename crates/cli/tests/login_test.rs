@@ -80,20 +80,19 @@ fn device_grant_flow_polls_until_approved() {
     let server = MockServer::start(vec![
         (
             200,
-            r#"{"device_code":"dev-123","user_code":"ABCD-EFGH","verification_uri":"http://auth.test/device","interval":1,"expires_in":60}"#,
+            r#"{"device_code":"dev-123","user_code":"ABCD-EFGH","verification_uri":"http://auth.test/device","verification_uri_complete":"http://auth.test/device?user_code=ABCD-EFGH","interval":1,"expires_in":60}"#,
         ),
         (400, r#"{"error":"authorization_pending"}"#),
         (
             200,
-            r#"{"access_token":"access-123","refresh_token":"refresh-123","expires_in":3600,"token_type":"bearer"}"#,
+            r#"{"access_token":"platform-access","token_type":"Bearer","provider":"platform","expires_in":120,"scope":"apps:deploy apps:read apps:write","principal_id":"11111111-1111-4111-8111-111111111111"}"#,
         ),
-        (200, r#"{"email":"dev@example.com","sub":"usr_123"}"#),
     ]);
     let config = tempfile::tempdir().expect("tempdir");
 
     let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
         .arg("login")
-        .arg("--auth-url")
+        .arg("--control")
         .arg(&server.url)
         .env("ZEROSHIP_CONFIG_HOME", config.path())
         .output()
@@ -106,7 +105,8 @@ fn device_grant_flow_polls_until_approved() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Signed in as dev@example.com"),
+        String::from_utf8_lossy(&output.stdout)
+            .contains("Signed in as 11111111-1111-4111-8111-111111111111"),
         "stdout={}",
         String::from_utf8_lossy(&output.stdout)
     );
@@ -117,31 +117,26 @@ fn device_grant_flow_polls_until_approved() {
     );
 
     let requests = server.requests();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 3);
     assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/oauth2/device/auth");
-    assert_eq!(
-        requests[0].body,
-        "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread+apps%3Awrite"
-    );
-    assert_eq!(requests[1].path, "/oauth2/token");
-    assert!(requests[1]
-        .body
-        .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"));
-    assert!(requests[1].body.contains("device_code=dev-123"));
-    assert_eq!(requests[2].path, "/oauth2/token");
+    assert_eq!(requests[0].path, "/api/device/auth");
+    assert_header(&requests[0], "content-type", "application/json");
+    assert!(requests[0].body.contains(r#""client_id":"zeroship-cli""#));
+    assert!(requests[0].body.contains("apps:write"));
+    assert_eq!(requests[1].path, "/api/device/token");
+    assert!(requests[1].body.contains(r#""device_code":"dev-123""#));
+    assert_eq!(requests[2].path, "/api/device/token");
     assert!(
         requests[2].at.duration_since(requests[1].at) >= Duration::from_millis(900),
         "token polling did not wait for the server interval"
     );
-    assert_eq!(requests[3].method, "GET");
-    assert_eq!(requests[3].path, "/userinfo");
-    assert_header(&requests[3], "authorization", "Bearer access-123");
 
     let token = read_token(config.path());
-    assert_eq!(token["access_token"], "access-123");
-    assert_eq!(token["refresh_token"], "refresh-123");
+    assert_eq!(token["access_token"], "platform-access");
+    assert_eq!(token["refresh_token"], "");
+    assert_eq!(token["provider"], "platform");
     assert_eq!(token["auth_url"], server.url);
+    assert_eq!(token["control_url"], server.url);
     assert_eq!(token["client_id"], "zeroship-cli");
     assert!(token["expires_at"].as_u64().expect("expires_at") > now_secs());
 
@@ -221,17 +216,17 @@ fn supabase_device_flow_uses_control_and_stores_platform_token() {
 }
 
 #[test]
-fn whoami_loads_credentials_and_calls_userinfo() {
-    let server = MockServer::start(vec![(200, r#"{"email":"dev@example.com"}"#)]);
+fn whoami_loads_platform_credentials_from_token() {
     let config = tempfile::tempdir().expect("tempdir");
     write_token(
         config.path(),
         &serde_json::json!({
-            "access_token": "access-whoami",
-            "refresh_token": "refresh-whoami",
+            "access_token": "e30.eyJzdWIiOiJ1c3JfMTIzIn0.sig",
+            "refresh_token": "",
             "expires_at": now_secs() + 3600,
-            "auth_url": server.url.clone(),
-            "client_id": "zeroship-cli"
+            "auth_url": "http://control.test",
+            "client_id": "zeroship-cli",
+            "provider": "platform"
         }),
     );
 
@@ -248,28 +243,22 @@ fn whoami_loads_credentials_and_calls_userinfo() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("dev@example.com"), "stdout={stdout}");
+    assert!(stdout.contains("usr_123"), "stdout={stdout}");
     assert!(stdout.contains("Token expires at"), "stdout={stdout}");
-
-    let requests = server.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "GET");
-    assert_eq!(requests[0].path, "/userinfo");
-    assert_header(&requests[0], "authorization", "Bearer access-whoami");
 }
 
 #[test]
-fn logout_revokes_token_and_clears_file() {
-    let server = MockServer::start(vec![(200, "{}")]);
+fn logout_clears_file() {
     let config = tempfile::tempdir().expect("tempdir");
     write_token(
         config.path(),
         &serde_json::json!({
             "access_token": "access-logout",
-            "refresh_token": "refresh-logout",
+            "refresh_token": "",
             "expires_at": now_secs() + 3600,
-            "auth_url": server.url.clone(),
-            "client_id": "zeroship-cli"
+            "auth_url": "http://control.test",
+            "client_id": "zeroship-cli",
+            "provider": "platform"
         }),
     );
 
@@ -286,14 +275,6 @@ fn logout_revokes_token_and_clears_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!token_path(config.path()).exists());
-
-    let requests = server.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/oauth2/revoke");
-    assert!(requests[0].body.contains("token=refresh-logout"));
-    assert!(requests[0].body.contains("token_type_hint=refresh_token"));
-    assert!(requests[0].body.contains("client_id=zeroship-cli"));
 }
 
 fn read_request(stream: &mut TcpStream) -> RecordedRequest {

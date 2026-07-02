@@ -210,7 +210,7 @@ describe("signInWithOAuth → popup → relay → exchange (faithful end-to-end)
     await signIn.catch(() => {});
   });
 
-  test("no prompt param when none requested (Hydra SSO skip fires)", async () => {
+  test("no prompt param when none requested (SSO skip can fire)", async () => {
     const h = makeHarness();
     const client = createAuthClient({ appOrigin: APP_ORIGIN }, h.env);
     const signIn = client.signInWithOAuth();

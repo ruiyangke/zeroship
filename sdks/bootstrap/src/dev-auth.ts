@@ -1,7 +1,7 @@
 /**
  * Dev-tier auth provider — the self-contained `pnpm dev` implementation of the
  * platform auth contract (BFF model), the auth peer of `env.db` → SQLite and
- * `env.kv` → redb. NO gateway, NO Hydra, NO control plane.
+ * `env.kv` → redb. NO gateway, NO external auth service, NO control plane.
  *
  * ## Contract parity (dev mirrors prod exactly)
  *
@@ -15,7 +15,7 @@
  * This module is the DEV-TIER implementation of that exact contract:
  *
  *   - `GET  /__zeroship/auth/authorize`     → frictionless dev login. Instead of a
- *       cross-site hop to Hydra, it 302-redirects straight back to the app's
+ *       cross-site hop to the native auth service, it 302-redirects straight back to the app's
  *       own `/__zeroship/auth/popup-callback?code=…&state=…` with a dev auth code.
  *       An optional dev user-picker (multi-user config) renders an HTML form.
  *   - `GET  /__zeroship/auth/popup-callback`→ the SAME same-origin relay page the
@@ -544,7 +544,7 @@ function loginFormHtml(args: {
     `<label>Password<input type="password" name="password" id="zs-password" autocomplete="current-password" value="${escapeHtml(defPassword)}" required></label>` +
     `<button type="submit">Sign in</button>` +
     `</form>` +
-    `<p class="dev-note">Dev sign-in — credentials are prefilled and validated locally (no gateway, no Hydra). Edit them to exercise the failure path.</p>` +
+    `<p class="dev-note">Dev sign-in — credentials are prefilled and validated locally (no gateway, no external auth service). Edit them to exercise the failure path.</p>` +
     pickerScript
   );
 }

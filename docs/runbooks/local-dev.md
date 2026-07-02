@@ -115,7 +115,7 @@ Notes:
   rather than installing into `/etc`.
 - To seed the console (the AI app-builder, now a gateway-fronted zeroship app)
   in local dev, start control with `--bootstrap-console` (env
-  `BOOTSTRAP_CONSOLE=1`) while Hydra admin is reachable. Control ingests the
+  `BOOTSTRAP_CONSOLE=1`) after the native auth service is reachable. Control ingests the
   prebuilt console `.zship` and registers it as a public-PKCE gateway-fronted
   app. Override the served host with `--console-host` and the artifact path with
   `--console-zship`. (The retired `builder` Vite service and its confidential

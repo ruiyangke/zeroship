@@ -1,10 +1,10 @@
 # zeroship-auth
 
-The zeroship Identity Provider login surface + identity flows + native OP.
+The zeroship Identity Provider login surface, identity flows, and native OIDC OP.
 
 Public host: `auth.zeroship.ai`.
 
-See `docs/archive/auth-server.md` for the design.
+See `docs/reference/auth.md` for the current architecture.
 
 ## Build & run (local dev)
 
@@ -18,7 +18,7 @@ cargo run -p zeroship-auth
 
 ## Important files
 - `src/main.rs` — binary entrypoint.
-- `src/bootstrap/` — first-boot JWK + client reconciliation.
-- `src/store/` — `auth.*` schema migrations and CRUD.
+- `src/oidc/` — native OAuth/OIDC protocol endpoints, tokens, metadata, signing, and client flows.
+- `src/store/` — `auth.*` schema CRUD.
 - `src/identity/` — password / federation / magic-link (Phase 2 onward).
 - `src/ui/` — server-rendered HTML (Phase 2 onward).
