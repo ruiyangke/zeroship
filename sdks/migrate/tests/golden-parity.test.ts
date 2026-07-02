@@ -46,10 +46,9 @@ async function golden(stem: string): Promise<any> {
 
 /** Normalize a `createTable` op for parity comparison: the committed golden is the
  *  RUST RE-SERIALIZATION of the typed IR, which fills `constraints`/`indexes` with
- *  serde defaults (`[]`) and Slice-2 `primaryKey:null` on serialize; the fluent
- *  recorder omits defaulted fields until later slices populate `primaryKey`. Both
- *  deserialize to the same typed op, so we drop defaulted fields on both sides
- *  before comparing. */
+ *  serde defaults (`[]`) and serializes unresolved `primaryKey` as null; the fluent
+ *  recorder omits defaulted/unresolved fields. Both deserialize to the same typed
+ *  op, so we drop defaulted fields on both sides before comparing. */
 function normalizeOps(ops: any[]): any[] {
   return ops.map((op) => {
     if (op.op !== "createTable") return op;

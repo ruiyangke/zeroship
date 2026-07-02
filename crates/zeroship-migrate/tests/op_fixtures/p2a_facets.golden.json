@@ -41,17 +41,10 @@
           }
         }
       ],
-      "primaryKey": null,
-      "constraints": [
-        {
-          "kind": {
-            "kind": "pk",
-            "columns": [
-              "id"
-            ]
-          }
-        }
+      "primaryKey": [
+        "id"
       ],
+      "constraints": [],
       "indexes": []
     }
   ],

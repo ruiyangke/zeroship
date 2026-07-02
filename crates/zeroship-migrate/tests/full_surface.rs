@@ -1417,14 +1417,20 @@ fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() 
         "generated(expr, {{ virtual: true }}) records stored:false",
     );
 
-    let pk = create
-        .get("constraints")
-        .and_then(|c| c.as_array())
-        .unwrap()
-        .iter()
-        .find(|c| c.get("kind").and_then(|k| k.get("kind")).and_then(|k| k.as_str()) == Some("pk"))
-        .expect("primaryKey() hoists a pk constraint");
-    assert_eq!(pk.get("kind").unwrap().get("columns").unwrap(), &serde_json::json!(["id"]));
+    assert_eq!(
+        create.get("primaryKey").unwrap(),
+        &serde_json::json!(["id"]),
+        "primaryKey() records the top-level createTable primaryKey"
+    );
+    assert!(
+        !create
+            .get("constraints")
+            .and_then(|c| c.as_array())
+            .unwrap()
+            .iter()
+            .any(|c| c.get("kind").and_then(|k| k.get("kind")).and_then(|k| k.as_str()) == Some("pk")),
+        "primaryKey() must not hoist a pk constraint"
+    );
 
     let add_generated = &ops(&ir)[1];
     assert_eq!(add_generated.get("op").unwrap(), "addColumn");
