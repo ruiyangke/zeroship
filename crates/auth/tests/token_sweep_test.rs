@@ -4,12 +4,15 @@
 //! a single test run (the real cron sleeps 1 h between ticks).
 
 use compio_postgres::{connect, NoTls};
+use std::sync::Mutex;
 use uuid::Uuid;
 use zeroship_auth::cron::token_sweep;
 use zeroship_auth::store::{users};
 
+static TOKEN_SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<compio_postgres::Client> {
+async fn pg() -> Option<(compio_postgres::Client, String)> {
     let dsn = std::env::var("AUTH_DB_URL").ok()?;
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -18,15 +21,16 @@ async fn pg() -> Option<compio_postgres::Client> {
         }
     })
     .detach();
-    Some(client)
+    Some((client, dsn))
 }
 
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
-    let Some(client) = pg().await else {
+    let Some((client, db_url)) = pg().await else {
         eprintln!("skipping token_sweep_test (no AUTH_DB_URL)");
         return;
     };
+    let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
 
     let tag = Uuid::new_v4().simple().to_string();
     let login_email = format!("token-sweep-login-{tag}@zeroship.test");
@@ -105,7 +109,8 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
         .await
         .expect("seed email verifications");
 
-    let report = token_sweep::tick(&client).await.expect("tick");
+    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
+    let report = token_sweep::tick(&client, &refresh_pool).await.expect("tick");
 
     assert_eq!(report.magic_links_deleted, 1);
     assert_eq!(report.password_resets_deleted, 1);
@@ -218,10 +223,11 @@ async fn cleanup(
 /// freshly-touched one survives. Live PG — skip when `AUTH_DB_URL` unset.
 #[compio::test]
 async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
-    let Some(client) = pg().await else {
+    let Some((client, db_url)) = pg().await else {
         eprintln!("skipping token_sweep rate_limits test (no AUTH_DB_URL)");
         return;
     };
+    let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
 
     let tag = Uuid::new_v4().simple().to_string();
     let stale_key = format!("login:ip:sec3-stale-{tag}");
@@ -238,7 +244,8 @@ async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
         .await
         .expect("seed rate_limits rows");
 
-    token_sweep::tick(&client).await.expect("tick");
+    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url, 4);
+    token_sweep::tick(&client, &refresh_pool).await.expect("tick");
 
     let stale_remaining: i64 = client
         .query_one(

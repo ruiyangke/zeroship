@@ -1,332 +1,268 @@
-# Auth deployment runbook
+# Auth Deployment Runbook
 
-Operator guide for deploying `crates/auth` + `oryd/hydra` in production
-(or any environment beyond the docker-compose dev stack).
+Operator guide for deploying `zeroship-auth`, the native zeroship OIDC OP, in
+production or any environment beyond the docker-compose dev stack.
 
-For the architectural picture (sequence diagrams, cookies, SDK surface)
-see [`docs/reference/auth.md`](../reference/auth.md). For the design
-rationale see [`docs/archive/auth-server.md`](../archive/auth-server.md).
+For the architectural picture, see [Auth](../reference/auth.md).
 
-## 1 · Topology
+## Topology
 
-```
-End user → gateway → ┬── hydra        (OIDC kernel,        public :4444 / admin :4445)
-                     └── crates/auth  (login UI + flows,            public :9092)
-                          │
-                          ▼
-                       Postgres (shared: oauth_hydra schema + auth.* schema)
+```text
+End user -> gateway -> zeroship-auth (native OIDC OP + login UI, :9092)
+                              |
+                              v
+                         Postgres (zeroship schema)
 ```
 
-Each "auth pod" runs two processes:
+`zeroship-auth` is stateless apart from PostgreSQL and its configured secret
+files. Run any number of replicas behind the auth host after the platform
+migrations have completed. All replicas for one environment must use the same
+issuer URL and the same signing, broker, pairwise, refresh, stash, and TOTP
+secret material.
 
-- `oryd/hydra` v25.4.x — OIDC/OAuth 2.1 protocol kernel. Issues ID
-  tokens, access tokens, and refresh tokens. Owns its own `oauth_hydra`
-  schema in Postgres.
-- `crates/auth` — login UI (`/login`, `/signup`, `/consent`), identity
-  flows (password, Google, GitHub, magic-link), email verification +
-  password reset, mailer driver, audit log, hydra-admin client. Owns
-  the `auth.*` schema in the same Postgres database.
+## Required Configuration
 
-`crates/auth` reaches hydra over loopback (`http://127.0.0.1:4445`)
-inside the pod. The hydra admin port MUST NOT be exposed externally —
-it is a privileged management API.
+Flag names match `crates/auth/src/config.rs`; every flag has an equivalent env
+var.
 
-## 2 · Required environment variables
+### Core Native OP
 
-Flag names match `crates/auth/src/config.rs` (Clap `#[arg(long, env = …)]`).
-Every flag has an equivalent env var.
+| Env var | Default | Required? | Notes |
+|---|---|---|---|
+| `AUTH_ADDR` | `127.0.0.1:9092` | no | Bind address. Keep loopback unless a reverse proxy or orchestrator needs a pod/network bind. |
+| `AUTH_DB_URL` | unset | yes | DSN for the `zeroship_auth` role against the migrated platform database. |
+| `AUTH_PUBLIC_URL` | `http://localhost:9092` | yes in prod | Public auth origin. The issuer is `${AUTH_PUBLIC_URL}/oauth2`. |
+| `AUTH_SIGNING_KEY_FILE` | unset | yes in prod | Ed25519 private key, PEM/PKCS#8 or DER. Public JWK metadata is published to Postgres at boot. |
+| `AUTH_PAIRWISE_SALT_FILE` | unset | yes in prod | Permanent pairwise-subject salt. Do not rotate without a migration. |
+| `AUTH_BROKER_SECRET_FILE` | unset | yes in prod | Master secret used to derive per-client broker secrets. |
+| `AUTH_BROKER_SECRET_PREVIOUS_FILE` | unset | rotation only | Previous broker secret during rolling rotation. |
+| `REFRESH_HASH_KEY_FILE` | unset | yes in prod | HMAC keyring for refresh-token verifiers. |
+| `REFRESH_IDEM_KEY_FILE` | unset | yes in prod | AEAD key for refresh idempotency cache rows. |
+| `AUTH_STASH_SIGNING_KEY` | dev default | yes in prod | HMAC key for auth-origin stash cookies. Use at least 32 bytes. |
+| `AUTH_TOTP_ENC_KEY` | dev default | yes in prod | TOTP secret encryption key. |
+| `AUTH_REFRESH_POOL_SIZE` | `4` | no | Dedicated refresh-family DB session pool size per process. |
+| `ZEROSHIP_CONFIG` | unset | optional | Shared TOML overlay path for non-secret auth config and secret references. |
+| `ZEROSHIP_DEV_INSECURE` / `--dev-insecure` | unset | never in prod | Relaxes cookie/secret guards for local development only. |
 
-### hydra (sidecar)
+### Mailer
+
+| Env var | Default | Required? | Notes |
+|---|---|---|---|
+| `AUTH_MAILER` | `stdout` | yes in prod | Use `smtp` or `resend` for real users. |
+| `AUTH_MAIL_FROM_EMAIL` | `auth@zeroship.ai` | yes | Sender address. |
+| `AUTH_MAIL_FROM_NAME` | `zeroship` | yes | Sender display name. |
+| `AUTH_SMTP_HOST` | unset | when SMTP | SMTP relay host. |
+| `AUTH_SMTP_PORT` | `587` | no | 587 STARTTLS or 465 implicit TLS. |
+| `AUTH_SMTP_USERNAME` | unset | optional | SMTP username. |
+| `AUTH_SMTP_PASSWORD` | unset | paired | SMTP password. |
+| `AUTH_SMTP_TLS` | `starttls` | no | `starttls`, `implicit`, or dev/test `plaintext`. |
+| `AUTH_RESEND_API_KEY` | unset | when Resend | Resend API key. |
+| `AUTH_POSTMARK_WEBHOOK_USER` | unset | when Postmark | Basic-auth user for `/webhooks/postmark`. |
+| `AUTH_POSTMARK_WEBHOOK_PASSWORD` | unset | paired | Basic-auth password. |
+
+The SES-SNS webhook verifies AWS-published SNS signatures and has no shared
+secret variable.
+
+### Federated Providers
+
+Routes are registered only when provider client IDs are present.
 
 | Env var | Required? | Notes |
 |---|---|---|
-| `DSN` | yes | Postgres URL, e.g. `postgres://user:pw@host:5432/zeroship?sslmode=verify-full`. |
-| `SECRETS_SYSTEM` | yes | ≥16 chars. Encrypts JWK material at rest. **Identical across all hydra replicas in a deployment.** Rotate by prepending; never replace. |
-| `SECRETS_COOKIE` | yes | ≥16 chars. Signs hydra session cookies. Same rotation rule as `SECRETS_SYSTEM`. |
-| `TRACING_PROVIDERS_OTLP_SERVER_URL` | optional | OTLP collector URL if you ingest hydra spans. |
+| `AUTH_GOOGLE_CLIENT_ID` | optional | Enables `/oauth/google/*`. |
+| `AUTH_GOOGLE_CLIENT_SECRET` | with Google ID | Google client secret. |
+| `AUTH_GOOGLE_REDIRECT_URI` | with Google ID | Defaults to `https://auth.zeroship.ai/oauth/google/callback`. |
+| `AUTH_GITHUB_CLIENT_ID` | optional | Enables `/oauth/github/*`. |
+| `AUTH_GITHUB_CLIENT_SECRET` | with GitHub ID | GitHub client secret. |
+| `AUTH_GITHUB_REDIRECT_URI` | with GitHub ID | Defaults to `https://auth.zeroship.ai/oauth/github/callback`. |
 
-Config file: `ops/hydra.yaml` (mounted at `/etc/config/hydra/hydra.yaml`).
-Issuer URL, TTLs, cookie domain, and the EdDSA/JWT strategy live there.
+Provider URL override variables exist for e2e tests with mock providers.
+Production should normally use the defaults.
 
-### crates/auth — core + DB + bootstrap
+## Secret Generation
 
-| Env var | Default | Required? | What it controls |
-|---|---|---|---|
-| `AUTH_ADDR` | `127.0.0.1:9092` | no | Bind address. Loopback by default; compose passes `--addr 0.0.0.0:9092` to be reachable across the container network. |
-| `AUTH_PUBLIC_URL` | `http://localhost:9092` | **yes in prod** | Externally-reachable origin (scheme + host + optional port). Used to construct absolute URLs in outbound email (magic-link, verify, reset). Distinct from `AUTH_ADDR`. |
-| `AUTH_DB_URL` | — | yes | Postgres DSN. Same database as hydra. |
-| `ZEROSHIP_CONFIG` | unset | optional | Shared TOML overlay path. `[auth].hydra_admin_url` and `[auth].hydra_public_url` are read from this file when the env vars below are unset. |
-| `HYDRA_ADMIN_URL` | `http://127.0.0.1:4445` | yes | Hydra admin API base URL. Loopback in prod. |
-| `HYDRA_PUBLIC_URL` | `https://auth.zeroship.ai` | yes | Hydra public base URL (issuer). |
-| `AUTH_CLIENTS_CONFIG` | `/etc/zeroship/auth-clients.toml` | yes | Path to the declarative OIDC client registry. |
-| `AUTH_BOOTSTRAP` | unset | first boot only | Boolean — set to `true` on first boot to allow JWK + client creation. Drop on subsequent restarts. Without it, an empty `hydra_jwk` set is a fatal startup error. |
-| `ZEROSHIP_DEV_INSECURE` (`--dev-insecure`) | unset | dev only | Drops the `Secure` flag on cookies and relaxes secret-strength/stash-key guards. **Never set in production.** |
-| `AUTH_STASH_SIGNING_KEY` | dev default | **yes in prod** | HMAC key (≥32 bytes) signing the federation stash cookies. The dev default is loud-warned at boot; a weak value lets an attacker forge stash cookies and bypass OAuth state/PKCE checks. |
+Generate the OP signing key once per environment:
 
-### crates/gateway + crates/control — pairwise identity salt
+```bash
+openssl genpkey -algorithm ed25519 -out auth-signing.pem
+chmod 0600 auth-signing.pem
+```
 
-This secret is configured on **both** the gateway and the control plane, and it
-**must be byte-identical** on the two services — both derive the per-app
-pairwise subject (`pws_…`) from it.
+Generate the other file-backed secrets from at least 32 random bytes each and
+store them in your secret manager:
 
-| Env var | Default | Required? | What it controls |
-|---|---|---|---|
-| `PAIRWISE_SALT` | dev default | **yes in prod** | The dedicated, **permanent** seed for every app's `pws_…` identity anchor (auth-sdk §6.2). ≥32 bytes; the dev default aborts boot outside `--dev-insecure`. **Identical on gateway + control.** |
-| `PAIRWISE_SALT_FILE` | unset | optional | Path to a file holding the salt. Takes precedence over `PAIRWISE_SALT`; prefer it in prod so the value never appears in the process table. |
+```bash
+openssl rand -base64 48 > auth-pairwise-salt
+openssl rand -base64 48 > auth-broker-secret
+openssl rand -base64 48 > refresh-hash-key
+openssl rand -base64 48 > refresh-idem-key
+chmod 0600 auth-pairwise-salt auth-broker-secret refresh-hash-key refresh-idem-key
+```
 
-> **⚠️ NEVER rotate `PAIRWISE_SALT` without a migration.** `pws_…` is the
-> stable per-app foreign key apps store to identify a user. Rotating this secret
-> silently re-keys *every* app's `pws_` for *every* user — breaking every
-> app-stored reference. It is deliberately **separate from**
-> `AUTH_STASH_SIGNING_KEY` (a rotatable, short-lived OIDC-stash HMAC) precisely
-> so that rotating operational keys does not disturb the permanent identity
-> anchor. Treat it like an encryption root key: set once, back it up, leave it.
+`AUTH_STASH_SIGNING_KEY` and `AUTH_TOTP_ENC_KEY` may also come from files through
+your process manager's secret injection, but the binary accepts them as env/CLI
+values today.
 
-### crates/auth — mailer
+## First Boot
 
-| Env var | Default | Required? | What it controls |
-|---|---|---|---|
-| `AUTH_MAILER` | `stdout` | **yes in prod** | Driver: `stdout` (dev) \| `smtp` \| `resend`. `stdout` swallows transactional mail; setting `smtp` or `resend` is mandatory for any deployment with real users. |
-| `AUTH_MAIL_FROM_EMAIL` | `auth@zeroship.ai` | yes | `From` address. |
-| `AUTH_MAIL_FROM_NAME` | `zeroship` | yes | `From` display name. |
-| `AUTH_SMTP_HOST` | — | when `AUTH_MAILER=smtp` | SMTP relay hostname. |
-| `AUTH_SMTP_PORT` | `587` | no | 587 (STARTTLS) or 465 (implicit TLS). |
-| `AUTH_SMTP_USERNAME` | — | optional | SMTP username (if relay requires auth). |
-| `AUTH_SMTP_PASSWORD` | — | optional | Paired with `AUTH_SMTP_USERNAME`. |
-| `AUTH_SMTP_TLS` | `starttls` | no | Transport encryption: `starttls` (587) \| `implicit` (SMTPS, 465) \| `plaintext` (no TLS — dev/test sinks like mailpit on :1025 ONLY). |
-| `AUTH_RESEND_API_KEY` | — | when `AUTH_MAILER=resend` | Resend HTTP API key. |
-| `AUTH_POSTMARK_WEBHOOK_USER` | unset | when using Postmark | HTTP Basic-auth user Postmark presents on `/webhooks/postmark`. Unset = handler returns 401. |
-| `AUTH_POSTMARK_WEBHOOK_PASSWORD` | unset | paired | Paired with the above. |
-
-The SES-SNS webhook (`/webhooks/ses-sns`) verifies SNS RSA-SHA1 signatures
-against AWS-published certs — no env vars to configure.
-
-### crates/auth — OAuth providers (optional; routes registered only when set)
-
-| Env var | Required? | Notes |
-|---|---|---|
-| `AUTH_GOOGLE_CLIENT_ID` | optional | Set to enable `/oauth/google/*`. |
-| `AUTH_GOOGLE_CLIENT_SECRET` | with id | — |
-| `AUTH_GOOGLE_REDIRECT_URI` | with id | Default `https://auth.zeroship.ai/oauth/google/callback`. Must match what's configured in Google Cloud Console. |
-| `AUTH_GITHUB_CLIENT_ID` | optional | Set to enable `/oauth/github/*`. |
-| `AUTH_GITHUB_CLIENT_SECRET` | with id | — |
-| `AUTH_GITHUB_REDIRECT_URI` | with id | Default `https://auth.zeroship.ai/oauth/github/callback`. |
-
-The `AUTH_GOOGLE_AUTH_URL` / `AUTH_GOOGLE_TOKEN_URL` / `AUTH_GOOGLE_JWKS_URL` /
-`AUTH_GOOGLE_ISSUER` and equivalent `AUTH_GITHUB_*_URL` variables exist for
-e2e tests pointing at a mock provider. Production deployments leave them
-at their defaults.
-
-### crates/auth — cron timing
-
-| Env var | Default | Notes |
-|---|---|---|
-| `AUTH_JWK_ROTATION_DAYS` | `90` | Days between JWK rotations. |
-| `AUTH_JWK_RETAIN_DAYS` | `31` | Days to keep the outgoing key after rotation. `90 + 31` > refresh-token max lifetime (720 h). |
-| `AUTH_CRON_TICK_SECS` | `86400` | JWK-rotation cron tick (24 h). |
-| `AUTH_AUDIT_RETENTION_CHECK_SECS` | `3600` | Audit-retention sweeper tick (1 h). |
-
-## 3 · First-boot sequence
-
-1. **Postgres up + reachable.** Both processes share one database; verify
-   `psql "$AUTH_DB_URL" -c 'select 1'` succeeds from inside the pod.
-   Hydra connects as the **least-privileged `oauth_hydra` role** (provisioned
-   by zeroship-migrate `V0027` — its own `oauth_hydra` schema + search_path, NO
-   superuser / BYPASSRLS), NOT the shared `$AUTH_DB_URL` superuser. Inject its
-   DSN as a secret reference (password from your secret manager, never
-   committed):
+1. **Run platform migrations** before any service starts:
 
    ```bash
-   HYDRA_DSN="postgres://oauth_hydra:${OAUTH_HYDRA_PASSWORD}@<db-host>:5432/zeroship?sslmode=require"
+   zeroship-migrate migrate \
+     --dir ./db/migrations \
+     --database-url "$PLATFORM_ADMIN_DATABASE_URL" \
+     --profile platform \
+     --yes
    ```
 
-2. **Migrate hydra schema** — one-shot job, `oryd/hydra:v25.4.x`:
+2. **Verify the auth role can connect**:
 
    ```bash
-   docker run --rm \
-     -e DSN="$HYDRA_DSN" \
-     oryd/hydra:v25.4.0 migrate sql up -e --yes
+   psql "$AUTH_DB_URL" -c 'select 1'
    ```
 
-3. **Start hydra** with `ops/hydra.yaml` mounted at
-   `/etc/config/hydra/hydra.yaml` and `DSN` / `SECRETS_SYSTEM` /
-   `SECRETS_COOKIE` injected (the template omits `dsn:` so Hydra fails closed
-   onto this env var):
+3. **Start `zeroship-auth`** behind your reverse proxy:
 
    ```bash
-   docker run -d --name hydra \
-     -e DSN="$HYDRA_DSN" \
-     -e SECRETS_SYSTEM="$SECRETS_SYSTEM" \
-     -e SECRETS_COOKIE="$SECRETS_COOKIE" \
-     -v ./ops/hydra.yaml:/etc/config/hydra/hydra.yaml:ro \
-     -p 127.0.0.1:4444:4444 -p 127.0.0.1:4445:4445 \
-     oryd/hydra:v25.4.0 serve all --config /etc/config/hydra/hydra.yaml
-   ```
-
-   Generate `SECRETS_SYSTEM` + `SECRETS_COOKIE` (each ≥16 chars) once
-   and store in your secret manager. See §7 for rotation.
-
-4. **Bootstrap `crates/auth`** with `AUTH_BOOTSTRAP=true`:
-
-   ```bash
-   AUTH_BOOTSTRAP=true \
-   AUTH_DB_URL=… HYDRA_ADMIN_URL=http://127.0.0.1:4445 \
-   HYDRA_PUBLIC_URL=https://auth.zeroship.ai \
+   AUTH_DB_URL=postgres://zeroship_auth:...@db:5432/zeroship \
    AUTH_PUBLIC_URL=https://auth.zeroship.ai \
-   AUTH_STASH_SIGNING_KEY=… AUTH_CLIENTS_CONFIG=/etc/zeroship/auth-clients.toml \
-   AUTH_MAILER=smtp AUTH_SMTP_HOST=… \
-   ./zeroship-auth
+   AUTH_SIGNING_KEY_FILE=/run/secrets/auth-signing.pem \
+   AUTH_PAIRWISE_SALT_FILE=/run/secrets/auth-pairwise-salt \
+   AUTH_BROKER_SECRET_FILE=/run/secrets/auth-broker-secret \
+   REFRESH_HASH_KEY_FILE=/run/secrets/refresh-hash-key \
+   REFRESH_IDEM_KEY_FILE=/run/secrets/refresh-idem-key \
+   AUTH_STASH_SIGNING_KEY="$AUTH_STASH_SIGNING_KEY" \
+   AUTH_TOTP_ENC_KEY="$AUTH_TOTP_ENC_KEY" \
+   AUTH_MAILER=smtp AUTH_SMTP_HOST=smtp.example.com \
+   zeroship-auth --addr 0.0.0.0:9092
    ```
 
-   `--bootstrap` (or `AUTH_BOOTSTRAP=true`) authorises three first-time
-   side effects:
-   - generate EdDSA + RS256 keys in `hydra.openid.id-token` if the key set is empty;
-   - generate EdDSA in `hydra.jwt.access-token` if empty;
-   - reconcile OIDC clients from `auth-clients.toml` against hydra's admin API (upsert; never deletes).
+On boot, the service loads the signing key, publishes the matching public JWK
+metadata, initializes the refresh-token key material, and serves discovery at
+`${AUTH_PUBLIC_URL}/oauth2/.well-known/openid-configuration`.
 
-5. **Verify**:
+## Healthchecks
 
-   ```bash
-   curl -sf http://<auth-host>:9092/healthz
-   curl -sf http://<auth-host>:9092/readyz
-   curl -sf http://<hydra-public>:4444/.well-known/openid-configuration | jq .issuer
-   curl -sf http://<hydra-admin>:4445/admin/keys/hydra.openid.id-token | jq '.keys | length'
-   ```
+- `GET /healthz` checks process liveness.
+- `GET /readyz` checks service readiness.
+- `GET /oauth2/.well-known/openid-configuration` should return the issuer.
+- `GET /oauth2/.well-known/jwks.json` should return at least one key.
 
-6. **Drop `AUTH_BOOTSTRAP` for subsequent restarts.** The bootstrap pass
-   is idempotent but the flag gates accidental key regeneration on a
-   clean DB clone.
+Example:
 
-## 4 · Healthchecks
+```bash
+curl -sf https://auth.zeroship.ai/healthz
+curl -sf https://auth.zeroship.ai/readyz
+curl -sf https://auth.zeroship.ai/oauth2/.well-known/openid-configuration | jq .issuer
+curl -sf https://auth.zeroship.ai/oauth2/.well-known/jwks.json | jq '.keys | length'
+```
 
-`crates/auth`:
+## Logs
 
-- `GET /healthz` — process up. k8s liveness probe (10s interval, 3 failures = restart).
-- `GET /readyz` — process ready. k8s readiness probe (5s interval, 2 failures = mark unready).
+`zeroship-auth` emits structured logs to stdout when configured with the JSON log
+format. Notable streams:
 
-hydra:
+- `auth.audit` tracing target for security/audit events.
+- Mailer bounce and complaint events from Postmark or SES-SNS webhooks.
+- OP token, refresh, revoke, device, consent, and logout events from the auth
+  service itself.
 
-- `GET :4445/health/alive` — process up (admin port).
-- `GET :4445/health/ready` — DB reachable.
+Persisted audit events live in `zeroship.audit_events`.
 
-The hydra admin port is not exposed externally, so probe it from a
-sidecar or shared-network neighbor (k8s readiness probes do this on the
-pod-local interface).
-
-## 5 · Logs
-
-Both processes emit structured JSON to stdout — pipe to your log
-aggregator. Notable targets:
-
-- `crates/auth` audit events use the `auth.audit` tracing target. Payloads
-  are structured JSON objects (event kind + actor + subject + outcome).
-  Ingest into your SIEM by filtering on `target == "auth.audit"`. The
-  same events are persisted in `auth.audit_events` for retention.
-- hydra emits OIDC-protocol-level events (auth, token, revoke) with
-  `log.format: json` per `ops/hydra.yaml`.
-- Bounce/complaint events from `POST /webhooks/postmark` and
-  `POST /webhooks/ses-sns` land as `mailer_bounce` / `mailer_complaint`
-  audit events AND as stdout JSON. The suppression list is `auth.email_suppressions`.
-
-## 6 · Failure modes + responses
+## Failure Modes
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `/login` returns 500 | DB unreachable | Restart auth; check PG load + `auth.audit_events` row count for truncation. |
-| hydra 500 on `/oauth2/token` | hydra DB unreachable OR JWK set empty | Inspect hydra logs; `GET /admin/keys/hydra.openid.id-token` — non-empty? |
-| New users can't sign up | `AUTH_MAILER=stdout` in production | Set `AUTH_MAILER=smtp` or `resend` + provider creds. |
-| `/login` p99 jumps | Argon2 contention OR PG slow | Check CPU pressure; inspect `auth.rate_limits` row count; investigate PG indices. |
-| Magic-link / verify emails not arriving | Recipient on `auth.email_suppressions` (prior bounce) | `DELETE` the row if the recipient resolved the issue; audit the action. |
-| `/webhooks/postmark` 401s | Postmark Basic-auth creds wrong | Verify `AUTH_POSTMARK_WEBHOOK_USER` + `_PASSWORD` match the dashboard. |
-| `AUTH_STASH_SIGNING_KEY is using the dev default` in logs | dev value in production | Set a strong (≥32 bytes) value and restart. |
-| JWK rotation cron noisy in logs | Daily tick on schedule | Expected — `cron tasks spawned` plus occasional `key rotation: prepending`. |
-| hydra unreachable for >5 s | hydra down OR hydra DB down | All logins go dark. Auth returns 503; gateway-cached app sessions keep working until access tokens expire (1 h). Mitigate with hydra HA + hot-standby PG. |
+| `/login` returns 500 | DB unavailable or auth role missing grants | Check `AUTH_DB_URL`, migrations, and database health. |
+| `/oauth2/token` returns `invalid_client` | Client row missing or broker secret mismatch | Check `zeroship.oauth_clients`, app client provisioning, and broker secret rollout. |
+| `/oauth2/token` returns `invalid_grant` | Code expired/consumed, PKCE mismatch, consent revoked, or refresh family revoked | Retry the auth flow; inspect audit logs for revocation or reuse detection. |
+| JWKS is empty | Signing key failed to load or publish | Check `AUTH_SIGNING_KEY_FILE` permissions and boot logs. |
+| New users cannot sign up | Mailer still set to `stdout` or provider credentials invalid | Set `AUTH_MAILER=smtp` or `resend`; verify provider logs. |
+| `/webhooks/postmark` returns 401 | Basic-auth mismatch | Verify `AUTH_POSTMARK_WEBHOOK_USER` and `AUTH_POSTMARK_WEBHOOK_PASSWORD`. |
+| Login p99 jumps | Argon2id CPU pressure or slow DB | Check CPU saturation, DB latency, and rate-limit table health. |
+| Magic-link or verification email missing | Recipient suppressed after prior bounce/complaint | Review `zeroship.email_suppressions` and audit before deleting. |
 
-## 7 · Backups + restore
+Gateway-cached app sessions remain valid until their own expiry even if the auth
+service is temporarily unavailable, but new login, refresh, revoke, and
+introspection flows fail until auth recovers.
 
-- `pg_dump` covers BOTH the `oauth_hydra` and `auth.*` schemas — one dump.
-- **Critical:** back up `SECRETS_SYSTEM` and `SECRETS_COOKIE` separately
-  (NOT in the same blob as the DB dump). Hydra encrypts JWK material at
-  rest with `SECRETS_SYSTEM`; without it the `hydra_jwk` rows are
-  unrecoverable and you must regenerate keys (which invalidates every
-  outstanding access token, refresh token, and ID token).
-- Restore order: PG first; start hydra with the same `SECRETS_SYSTEM`
-  and `SECRETS_COOKIE`; start `crates/auth` (no `AUTH_BOOTSTRAP` needed
-  unless the keys were lost in the restore).
-- Test the restore quarterly. A backup you have never restored is not a
-  backup.
+## Backups and Restore
 
-## 8 · Capacity
+Back up the platform database and all auth secret material together:
 
-Measured baseline (`AUTH_LOAD_TEST=1 cargo test -p zeroship-auth --test load_test --release`,
-32-core dev workstation, OWASP-2026 Argon2id params):
+- PostgreSQL dump or snapshot of the `zeroship` schema.
+- `AUTH_SIGNING_KEY_FILE`
+- `AUTH_PAIRWISE_SALT_FILE`
+- `AUTH_BROKER_SECRET_FILE` and any previous broker secret during rollout
+- `REFRESH_HASH_KEY_FILE`
+- `REFRESH_IDEM_KEY_FILE`
+- `AUTH_STASH_SIGNING_KEY`
+- `AUTH_TOTP_ENC_KEY`
 
-- **~28 RPS** sustained `/login` POST (Argon2id verify dominates; CPU-pegged).
-- **p99 ~1.75 s** at N=50 parallel logins.
-- Throughput scales linearly with available cores — Argon2id is CPU-bound.
+Restore order:
 
-Per-pod rough sizing:
+1. Restore PostgreSQL.
+2. Restore the same secret files and env secrets.
+3. Start `zeroship-auth`.
+4. Verify discovery, JWKS, `/readyz`, login, refresh, and logout.
 
-- **4 vCPU + 8 GB RAM** — handles ~100 logins/min sustained, bursts of ~500/min.
-- Beyond ~1000 logins/min sustained: scale `crates/auth` horizontally
-  (stateless — sessions live in PG, rate-limit buckets in PG). Hydra
-  scales the same way against the same Postgres.
+Losing the signing key invalidates outstanding ID/access tokens. Losing refresh
+key material invalidates refresh families. Losing the pairwise salt rekeys every
+app-facing user subject and requires an explicit migration plan.
 
-`crates/auth` replicas: any number. Bootstrap is idempotent.
-Hydra replicas: any number, but launch with `replicas=1` until the JWK
-set is populated, then scale.
+## Capacity
 
-If CPU is the binding cost and Argon2id verification dominates, the
-OWASP-2026 "second-recommended" Argon2id parameter set (m = 12 MiB,
-t = 3, p = 1) is the floor — see `docs/archive/auth-server.md` §8.
+Password login throughput is CPU-bound by Argon2id verification. Scale auth
+replicas horizontally for login bursts; sessions, rate limits, refresh families,
+and consent state live in PostgreSQL.
 
-## 9 · Operational tasks
+Rough sizing guidance:
 
-### Rotating client secrets
+- Start with 4 vCPU / 8 GB RAM per auth replica.
+- Keep `AUTH_REFRESH_POOL_SIZE` small unless refresh traffic is demonstrably
+  waiting on the dedicated pool.
+- Scale replicas before weakening Argon2id parameters.
 
-OIDC clients live in `ops/auth-clients.toml`; the reconciliation pass at
-each boot upserts the file into hydra. To rotate: update `client_secret`,
-distribute to the RP, restart `crates/auth`. For zero-downtime, add a
-parallel client via the admin API first, migrate the RP, then retire the
-old client.
+## Operational Tasks
 
-### Removing an OAuth provider
+### Rotate Broker Secret
 
-Unset the provider's client-id env var (e.g. `AUTH_GOOGLE_CLIENT_ID=`),
-restart `crates/auth`. Federation routes deregister at boot. Existing
-`auth.identities` rows stay — users can re-link via `/me` once re-enabled,
-or fall back to password recovery.
+1. Write the new secret to `AUTH_BROKER_SECRET_FILE`.
+2. Move the old secret to `AUTH_BROKER_SECRET_PREVIOUS_FILE`.
+3. Roll auth replicas.
+4. Roll gateway/control components that need to present derived broker secrets.
+5. Remove `AUTH_BROKER_SECRET_PREVIOUS_FILE` after every dependent has rolled.
 
-### Suppression list maintenance
+### Rotate OP Signing Key
 
-The `auth.email_suppressions` table holds bounced/complained addresses;
-the mailer silently no-ops sends to suppressed recipients (audit event
-emitted). To re-enable:
+The current implementation loads one active Ed25519 private key from
+`AUTH_SIGNING_KEY_FILE` and publishes its public JWK at boot.
+
+1. Generate the new key.
+2. Roll auth with the new key.
+3. Keep old app sessions and tokens within their configured TTL expectations.
+4. Verify discovery and JWKS after rollout.
+
+### Remove a Federated Provider
+
+Unset the provider client ID and secret, then restart auth. The route is not
+registered when the client ID is absent. Existing linked identities remain in
+Postgres and can be used again if the provider is re-enabled.
+
+### Suppression List Maintenance
+
+Only remove a suppression after confirming the recipient can accept mail again:
 
 ```sql
-DELETE FROM auth.email_suppressions WHERE email = 'user@example.com';
+DELETE FROM zeroship.email_suppressions WHERE email = 'user@example.com';
 ```
 
-Audit the deletion — undoing a suppression is a trust decision.
+Record the operator action in the incident/audit trail.
 
-### Adding a new OIDC client
+## Reference
 
-Edit `ops/auth-clients.toml`, restart `crates/auth`. The reconciler
-creates the client at boot. Ad-hoc `POST /admin/clients` on hydra's
-admin port also works but is lost on the next reconcile unless mirrored
-in the TOML.
-
-### JWK rotation cadence
-
-- Default: 90-day prepend, 31-day retention (`AUTH_JWK_ROTATION_DAYS` / `AUTH_JWK_RETAIN_DAYS`).
-- Manual: `POST /admin/keys/hydra.openid.id-token { "alg": "EdDSA" }` (or `RS256`) on the hydra admin port — hydra prepends and signs with the head.
-- Verify: `curl -sf http://<hydra-admin>:4445/admin/keys/hydra.openid.id-token | jq '.keys | length'` — after retention sweeps, expect 2 for id-token (EdDSA + RS256), 1 for access-token (EdDSA).
-
-## 10 · Reference
-
-- Design proposal — `docs/archive/auth-server.md` (§16 covers operational concerns end-to-end).
-- Architecture summary — `docs/reference/auth.md`.
-- Phase plans — `docs/superpowers/plans/2026-05-{26,27}-auth-server-phase-{1..6}.md`.
-- Hydra config — `ops/hydra.yaml`.
-- Example client registry — `ops/auth-clients.example.toml`.
-- Local dev stack — `docs/runbooks/docker-compose.md` (mounts the same `ops/hydra.yaml`).
+- [Auth](../reference/auth.md)
+- [Auth dev tier](../reference/auth-dev-tier.md)
+- [Docker Compose runbook](docker-compose.md)
+- [Database migrations](db-migrations.md)
+- [Historical auth-server design](../archive/auth-server.md)

@@ -1,27 +1,23 @@
 //! Live-PG regression tests for admin OAuth client handlers.
 //!
-//! Hydra is mocked in-process; the control handler still exercises the real
-//! authz extractor, PAT verifier, auth migrations, and `control.oauth_clients`
-//! table.
+//! The control handler exercises the real authz extractor, PAT verifier, auth
+//! migrations, and native `zeroship.oauth_clients` table.
 
 #![allow(clippy::future_not_send)]
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use compio_postgres::{connect, NoTls};
 use ntex::http::StatusCode;
-use ntex::web::{self, test, HttpResponse};
+use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
-    oauth_handlers, token_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
+    oauth_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
     SecretString, StripeStore,
 };
 
@@ -46,14 +42,12 @@ fn tmpdir(label: &str) -> PathBuf {
 
 struct Fixture {
     state: Arc<AppState>,
-    hydra: MockHydra,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
 }
 
 impl Fixture {
     async fn new(db_url: &str, label: &str) -> Self {
-        let hydra = MockHydra::start();
         let (control_pg_client, control_pg_conn) = connect(db_url, NoTls).await.expect("control-pg connect");
         compio::runtime::spawn(async move {
             let _ = control_pg_conn.run().await;
@@ -87,7 +81,6 @@ impl Fixture {
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
-            hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
             // The compiled default is now EMPTY (fail-closed), so seed an
             // explicit trusted client id for the "skip_consent derived from
@@ -97,10 +90,8 @@ impl Fixture {
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
-            pat_issuer: Arc::new(token_handlers::PatIssuer::dev_insecure()),
-            hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-                "http://127.0.0.1:9",
-            )),
+            pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             metering_provider: zeroship_control::metering::provider::build_provider(
                 &zeroship_control::metering::provider::MeteringProviderConfig::native(),
@@ -119,7 +110,6 @@ impl Fixture {
 
         Self {
             state,
-            hydra,
             blob_root,
             deploy_tmp_dir,
         }
@@ -143,131 +133,6 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.blob_root);
         let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
     }
-}
-
-#[derive(Clone, Debug)]
-struct RecordedHydraRequest {
-    method: String,
-    path: String,
-    body: Option<Value>,
-}
-
-#[derive(Default)]
-struct MockHydraState {
-    requests: Vec<RecordedHydraRequest>,
-    clients: HashMap<String, Value>,
-}
-
-struct MockHydra {
-    base: String,
-    state: Arc<Mutex<MockHydraState>>,
-    shutdown: Option<mpsc::Sender<()>>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl MockHydra {
-    fn start() -> Self {
-        // ntex's test server requires an ntex System runtime; #[compio::test]
-        // doesn't provide one. Spawn a dedicated thread that owns an ntex
-        // System for the mock — same pattern as crates/core/tests/hydra_introspect.rs.
-        let state = Arc::new(Mutex::new(MockHydraState::default()));
-        let factory_state = state.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            ntex::rt::System::build()
-                .name("mock-hydra-oauth-admin")
-                .testing()
-                .build(ntex::rt::DefaultRuntime)
-                .block_on(async move {
-                    let server = web::test::server(move || {
-                        let state = factory_state.clone();
-                        async move {
-                            web::App::new()
-                                .state(state)
-                                .service(
-                                    web::resource("/admin/clients")
-                                        .route(web::post().to(mock_create_client)),
-                                )
-                                .service(
-                                    web::resource("/admin/clients/{id}")
-                                        .route(web::delete().to(mock_delete_client)),
-                                )
-                        }
-                    })
-                    .await;
-                    let addr = server.addr();
-                    started_tx.send(addr).expect("send mock hydra addr");
-                    let _ = shutdown_rx.recv();
-                    drop(server);
-                });
-        });
-        let addr = started_rx.recv().expect("mock hydra starts");
-        let base = format!("http://{addr}");
-        Self {
-            base,
-            state,
-            shutdown: Some(shutdown_tx),
-            thread: Some(thread),
-        }
-    }
-
-    fn requests(&self) -> Vec<RecordedHydraRequest> {
-        self.state.lock().expect("mock hydra state").requests.clone()
-    }
-}
-
-impl Drop for MockHydra {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-async fn mock_create_client(
-    body: web::types::Json<Value>,
-    state: web::types::State<Arc<Mutex<MockHydraState>>>,
-) -> HttpResponse {
-    let request_body = body.into_inner();
-    let mut state = state.lock().expect("mock hydra state");
-    state.requests.push(RecordedHydraRequest {
-        method: "POST".to_string(),
-        path: "/admin/clients".to_string(),
-        body: Some(request_body.clone()),
-    });
-    let Some(client_id) = request_body
-        .get("client_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return HttpResponse::BadRequest().json(&json!({"error": "missing client_id"}));
-    };
-    if state.clients.contains_key(&client_id) {
-        return HttpResponse::Conflict().json(&json!({"error": "already exists"}));
-    }
-    let mut response = request_body;
-    response["client_secret"] = Value::String(format!("secret-{client_id}"));
-    state.clients.insert(client_id, response.clone());
-    HttpResponse::Created().json(&response)
-}
-
-async fn mock_delete_client(
-    id: web::types::Path<String>,
-    state: web::types::State<Arc<Mutex<MockHydraState>>>,
-) -> HttpResponse {
-    let client_id = id.into_inner();
-    let mut state = state.lock().expect("mock hydra state");
-    state.requests.push(RecordedHydraRequest {
-        method: "DELETE".to_string(),
-        path: format!("/admin/clients/{client_id}"),
-        body: None,
-    });
-    state.clients.remove(&client_id);
-    HttpResponse::NoContent().finish()
 }
 
 struct NonAdminPat {
@@ -411,6 +276,22 @@ async fn persisted_skip_consent(state: &AppState, client_id: &str) -> bool {
     rows[0].get("skip_consent")
 }
 
+async fn oauth_client_row(state: &AppState, client_id: &str) -> compio_postgres::Row {
+    let rows = state
+        .control_pg
+        .query(
+            "SELECT client_name, client_uri, logo_uri, redirect_uris, scopes, \
+                    skip_consent, client_secret_hash, refresh_allowed, \
+                    token_endpoint_auth_method \
+             FROM zeroship.oauth_clients WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await
+        .expect("select oauth client");
+    assert_eq!(rows.len(), 1, "oauth_clients row exists for {client_id}");
+    rows.into_iter().next().expect("one row")
+}
+
 macro_rules! init_control {
     ($fx:expr) => {{
         test::init_service(
@@ -439,7 +320,6 @@ async fn unauthenticated_request_returns_401() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    assert!(fx.hydra.requests().is_empty());
 }
 
 #[compio::test]
@@ -461,12 +341,11 @@ async fn non_admin_request_returns_403() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert!(fx.hydra.requests().is_empty());
     pat.cleanup(&fx.state).await;
 }
 
 #[compio::test]
-async fn admin_can_register_oauth_client_proxies_to_hydra() {
+async fn admin_can_register_oauth_client_in_native_store() {
     let Some(db_url) = db_url() else {
         eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
         return;
@@ -486,8 +365,9 @@ async fn admin_can_register_oauth_client_proxies_to_hydra() {
     assert_eq!(resp.status(), StatusCode::CREATED);
     let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("response json");
     assert_eq!(body["client_id"].as_str(), Some(client_id.as_str()));
-    let expected_secret = format!("secret-{client_id}");
-    assert_eq!(body["client_secret"].as_str(), Some(expected_secret.as_str()));
+    let secret = body["client_secret"].as_str().expect("client_secret");
+    assert_eq!(secret.len(), 64);
+    assert!(secret.bytes().all(|b| b.is_ascii_hexdigit()));
     assert_eq!(body["client_secret_show_once"], true);
     assert_eq!(body["scopes"], json!(["apps:read", "apps:deploy", "env:read"]));
     assert_eq!(count_client(&fx.state, &client_id).await, 1);
@@ -496,28 +376,41 @@ async fn admin_can_register_oauth_client_proxies_to_hydra() {
         1
     );
 
-    let requests = fx.hydra.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "POST");
-    assert_eq!(requests[0].path, "/admin/clients");
-    let hydra_body = requests[0].body.as_ref().expect("hydra body");
-    assert_eq!(hydra_body["client_id"].as_str(), Some(client_id.as_str()));
-    assert_eq!(hydra_body["client_name"], "ACME CI");
-    assert_eq!(hydra_body["client_uri"], "https://acme.example");
-    assert_eq!(hydra_body["logo_uri"], "https://acme.example/logo.png");
+    let row = oauth_client_row(&fx.state, &client_id).await;
+    assert_eq!(row.get::<_, String>("client_name"), "ACME CI");
     assert_eq!(
-        hydra_body["redirect_uris"],
-        json!(["https://ci.acme.example/oidc/callback"])
+        row.get::<_, Option<String>>("client_uri").as_deref(),
+        Some("https://acme.example")
     );
     assert_eq!(
-        hydra_body["grant_types"],
-        json!(["authorization_code", "refresh_token"])
+        row.get::<_, Option<String>>("logo_uri").as_deref(),
+        Some("https://acme.example/logo.png")
     );
-    assert_eq!(hydra_body["response_types"], json!(["code"]));
-    assert_eq!(hydra_body["scope"], "apps:read apps:deploy env:read");
-    assert_eq!(hydra_body["token_endpoint_auth_method"], "client_secret_basic");
-    assert_eq!(hydra_body["skip_consent"], false);
-    assert!(hydra_body.get("require_consent").is_none());
+    assert_eq!(
+        row.get::<_, Vec<String>>("redirect_uris"),
+        vec!["https://ci.acme.example/oidc/callback".to_string()]
+    );
+    assert_eq!(
+        row.get::<_, Vec<String>>("scopes"),
+        vec![
+            "apps:read".to_string(),
+            "apps:deploy".to_string(),
+            "env:read".to_string()
+        ]
+    );
+    assert!(!row.get::<_, bool>("skip_consent"));
+    assert!(row.get::<_, bool>("refresh_allowed"));
+    assert_eq!(
+        row.get::<_, String>("token_endpoint_auth_method"),
+        "client_secret_basic"
+    );
+    let hash = row
+        .get::<_, Option<String>>("client_secret_hash")
+        .expect("client_secret_hash");
+    assert!(
+        zeroship_core::auth::validate_api_key(secret, &hash),
+        "client_secret_hash validates the generated one-time secret"
+    );
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
@@ -544,11 +437,6 @@ async fn skip_consent_is_derived_from_whitelist_not_body() {
 
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert!(persisted_skip_consent(&fx.state, &client_id).await);
-    let requests = fx.hydra.requests();
-    assert_eq!(requests.len(), 1);
-    let hydra_body = requests[0].body.as_ref().expect("hydra body");
-    assert_eq!(hydra_body["client_id"].as_str(), Some(client_id.as_str()));
-    assert_eq!(hydra_body["skip_consent"], true);
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
@@ -575,11 +463,6 @@ async fn arbitrary_client_gets_skip_consent_false() {
 
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert!(!persisted_skip_consent(&fx.state, &client_id).await);
-    let requests = fx.hydra.requests();
-    assert_eq!(requests.len(), 1);
-    let hydra_body = requests[0].body.as_ref().expect("hydra body");
-    assert_eq!(hydra_body["client_id"].as_str(), Some(client_id.as_str()));
-    assert_eq!(hydra_body["skip_consent"], false);
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
@@ -607,7 +490,6 @@ async fn invalid_scope_returns_400() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(count_client(&fx.state, &client_id).await, 0);
-    assert!(fx.hydra.requests().is_empty());
     pat.cleanup(&fx.state).await;
 }
 
@@ -639,7 +521,6 @@ async fn duplicate_client_id_returns_409() {
 
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     assert_eq!(count_client(&fx.state, &client_id).await, 1);
-    assert_eq!(fx.hydra.requests().len(), 1);
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
@@ -662,8 +543,8 @@ async fn list_returns_registered_clients() {
         .execute(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                 skip_consent, created_by, hydra_client_id) \
-             VALUES ($1, 'List Client', NULL, NULL, $2, $3, true, $4, $1)",
+                 skip_consent, created_by) \
+             VALUES ($1, 'List Client', NULL, NULL, $2, $3, true, $4)",
             &[&client_id, &redirect_uris, &scopes, &pat.user_id],
         )
         .await
@@ -693,7 +574,7 @@ async fn list_returns_registered_clients() {
 }
 
 #[compio::test]
-async fn delete_removes_from_hydra_and_local() {
+async fn delete_removes_from_native_store() {
     let Some(db_url) = db_url() else {
         eprintln!("[oauth_handlers_test] AUTH_DB_URL not set - skipping");
         return;
@@ -723,10 +604,6 @@ async fn delete_removes_from_hydra_and_local() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(count_client(&fx.state, &client_id).await, 0);
-    let requests = fx.hydra.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].method, "DELETE");
-    assert_eq!(requests[1].path, format!("/admin/clients/{client_id}"));
     assert_eq!(
         audit_event_count(&fx.state, pat.user_id, "oauth_client_delete", &client_id).await,
         1

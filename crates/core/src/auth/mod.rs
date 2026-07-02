@@ -10,6 +10,7 @@ pub use trusted_clients::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
+use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -18,6 +19,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub const ZEROSHIP_USER_MAX_AGE_SECS: u64 = 60;
 pub const ZEROSHIP_USER_FUTURE_SKEW_SECS: u64 = 5;
+pub const DEV_BROKER_MASTER_SECRET: &[u8] = b"dev-broker-master-secret-never-use-prod";
+
+const BROKER_SECRET_HKDF_SALT: &[u8] = b"zeroship:broker-secret:v1";
 
 /// Constant-time comparison to prevent timing attacks.
 /// Returns true if `provided` and `expected` are equal.
@@ -76,6 +80,48 @@ pub fn validate_api_key(provided: &str, stored_hash: &str) -> bool {
     validate_control_key(&computed, stored_hash)
 }
 
+/// Derive the gateway-presented per-client broker secret from the platform
+/// broker master secret.
+///
+/// The OP never stores per-client broker secret hashes. Brokered clients are
+/// authenticated by deriving this value from the configured current/previous
+/// platform master and comparing the presented secret in constant time.
+#[must_use]
+pub fn derive_broker_secret(master: &[u8], client_id: &str) -> String {
+    let hk = Hkdf::<Sha256>::new(Some(BROKER_SECRET_HKDF_SALT), master);
+    let mut out = [0u8; 32];
+    hk.expand(client_id.as_bytes(), &mut out)
+        .expect("HKDF-SHA256 expands 32 bytes");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(out)
+}
+
+/// Validate broker master-secret material before auth-service boot proceeds.
+///
+/// The input is raw file bytes, not a display string. It must carry at least
+/// 256 bits of material and must not be the all-zero value or the development
+/// sentinel.
+///
+/// # Errors
+///
+/// Returns a startup-facing error message when the candidate is weak.
+pub fn validate_broker_master(master: &[u8]) -> Result<(), String> {
+    if master.len() < 32 {
+        return Err(format!(
+            "AUTH_BROKER_SECRET_FILE decodes to {} bytes; minimum is 32 bytes",
+            master.len()
+        ));
+    }
+    if master.iter().all(|byte| *byte == 0) {
+        return Err("AUTH_BROKER_SECRET_FILE is all zero; refusing weak broker secret".into());
+    }
+    if master == DEV_BROKER_MASTER_SECRET {
+        return Err(
+            "AUTH_BROKER_SECRET_FILE is the dev sentinel; refusing broker secret".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Strip the `Bearer ` prefix from an Authorization header value.
 /// Returns `None` if the header does not start with `"Bearer "`.
 pub fn extract_bearer(header: &str) -> Option<&str> {
@@ -124,13 +170,13 @@ pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 /// gateway-issued wrapper token's `sub` is ALWAYS one of these (auth-sdk
 /// §6.2/G4) — the self-describing-subject invariant (Batch A fix 2) lets the
 /// wrapper fast-paths reject, defense-in-depth, any wrapper whose `sub` is the
-/// global Hydra UUID rather than a projected pairwise pseudonym.
+/// global user UUID rather than a projected pairwise pseudonym.
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
 /// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
 /// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base62 (`[0-9A-Za-z]`)
 /// chars. The gateway wrapper / session cookie is JS-readable by app code, so
-/// it MUST NOT carry the global Hydra UUID in any claim; a `sub` that survives
+/// it MUST NOT carry the global user UUID in any claim; a `sub` that survives
 /// this predicate can never be the un-projected global identity (a bare UUID
 /// has no `pws_` prefix).
 ///
@@ -146,8 +192,8 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 ///   gateway itself signed — so the `sub` is already trusted; this predicate is
 ///   a defense-in-depth minter-bug containment check (reject a wrapper a mint
 ///   bug failed to project), never the thing that decides trust.
-/// - The Bearer/DPoP arms NEVER consume an inbound `pws_` as identity at all —
-///   they re-derive it with [`derive_pairwise`] from the verified global Hydra
+/// - The Bearer arm NEVER consumes an inbound `pws_` as identity at all:
+///   it re-derives it with [`derive_pairwise`] from the verified global
 ///   subject. There is no path where an attacker-supplied `pws_` is trusted for
 ///   an authz/lookup decision on the strength of its shape.
 ///
@@ -215,21 +261,21 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 /// break-glass).
 ///
 /// `salt` is the platform-wide pairwise secret (config); `global_user_id` is
-/// the global Hydra subject (the `usr_…` UUID string); `sector` is the app's
+/// the global user subject (the `usr_…` UUID string); `sector` is the app's
 /// stable apex origin (`RouteEntry.sector_identifier`).
 ///
 /// ## Input canonicalization (Batch A M1)
 ///
-/// The `global_user_id` argument reaches this function from two shapes across
-/// the writers/readers: the RAW Hydra `sub` string (the raw-Hydra Bearer +
-/// DPoP-introspection readers) and `Uuid::to_string()` (`/session` exchange +
-/// `?mint=1`, `/signout`, the control disconnect-app cascade). Those are
-/// byte-identical only WHILE Hydra emits a canonical hyphenated-lowercase
-/// UUID. If Hydra ever emits a non-canonical form (uppercase / braces /
-/// no-dash), a session cookie's `pws_` would diverge from the
-/// `/signout`-written family marker's `pws_`, silently breaking cross-arm
-/// revocation. To make the `pws_` independent of the inbound spelling, we
-/// canonicalize HERE in the ONE place every writer and reader funnels through:
+/// The `global_user_id` argument reaches this function from multiple shapes
+/// across the writers/readers: a verified `sub` string and `Uuid::to_string()`
+/// (`/session` exchange + `?mint=1`, `/signout`, the control disconnect-app
+/// cascade). Those are byte-identical only while the issuer emits a canonical
+/// hyphenated-lowercase UUID. If the issuer ever emits a non-canonical form
+/// (uppercase / braces / no-dash), a session cookie's `pws_` would diverge
+/// from the `/signout`-written family marker's `pws_`, silently breaking
+/// cross-arm revocation. To make the `pws_` independent of the inbound
+/// spelling, we canonicalize HERE in the ONE place every writer and reader
+/// funnels through:
 /// if `global_user_id` parses as a UUID we hash its canonical
 /// `Uuid::to_string()` (hyphenated lowercase); otherwise (a non-UUID subject —
 /// which the user-session arms already reject before deriving) we hash it
@@ -239,7 +285,7 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 pub fn derive_pairwise(salt: &[u8], global_user_id: &str, sector: &str) -> String {
     // Normalize the subject to its canonical UUID spelling when it is one, so
     // the derived `pws_` is byte-identical no matter whether the caller passed
-    // the raw Hydra sub or `Uuid::to_string()`. Non-UUID subjects (never a
+    // the raw provider sub or `Uuid::to_string()`. Non-UUID subjects (never a
     // real end-user identity on the pairwise paths) hash verbatim.
     let canonical = Uuid::parse_str(global_user_id)
         .map(|u| u.to_string())
@@ -390,6 +436,29 @@ mod tests {
     #[test]
     fn control_key_equal() {
         assert!(validate_control_key("secret", "secret"));
+    }
+
+    #[test]
+    fn broker_secret_derivation_is_deterministic_and_domain_separated() {
+        let master = b"broker-master-secret-32-bytes-minimum-aa";
+        let other_master = b"broker-master-secret-32-bytes-minimum-bb";
+        let client_a = "oac_app_a";
+        let client_b = "oac_app_b";
+
+        let a = derive_broker_secret(master, client_a);
+        assert_eq!(a, derive_broker_secret(master, client_a));
+        assert_ne!(a, derive_broker_secret(master, client_b));
+        assert_ne!(a, derive_broker_secret(other_master, client_a));
+        assert!(!a.contains(client_a), "derived secret must not embed client_id");
+    }
+
+    #[test]
+    fn broker_master_validation_rejects_weak_material() {
+        assert!(validate_broker_master(b"short").is_err());
+        assert!(validate_broker_master(&[0u8; 32]).is_err());
+        assert!(validate_broker_master(DEV_BROKER_MASTER_SECRET).is_err());
+        validate_broker_master(b"broker-master-secret-32-bytes-minimum-ok")
+            .expect("strong broker master");
     }
 
     #[test]
@@ -564,10 +633,10 @@ mod tests {
     #[test]
     fn pairwise_is_invariant_to_inbound_uuid_spelling() {
         // Batch A M1 regression: the writers feed `derive_pairwise` either the
-        // RAW Hydra sub string (e.g. `/token` passing `claims.sub`) or the
+        // raw provider sub string (e.g. `/token` passing `claims.sub`) or the
         // canonical `Uuid::to_string()` (e.g. `/signout`, control cascade). If
-        // Hydra ever emits a NON-canonical sub spelling (uppercase / braces /
-        // no-dash), a `/token`-minted wrapper's `pws_` MUST still equal the
+        // the issuer ever emits a non-canonical sub spelling (uppercase /
+        // braces / no-dash), a `/token`-minted wrapper's `pws_` MUST still equal the
         // `pws_` a `/signout`-style `revoke_family(derive_pairwise(uuid.to_string()))`
         // writes — otherwise a signout silently fails to revoke the live wrapper.
         let salt = b"platform-pairwise-salt";

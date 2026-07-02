@@ -5,10 +5,9 @@
 //! against a live, migrated Postgres + a real ingested `.zship` (the prebuilt
 //! `apps/zeroship-builder/dist/app.zship` when present, else a minimal
 //! synthesized archive through the SAME `zeroship_bundle::ingest` the deploy
-//! handler uses), with a real-HTTP mock Hydra admin standing in only for the
-//! Hydra transport. It then asserts every seeded artifact and that a second run
-//! is idempotent (no error, no duplicate). It also asserts the **pure creator
-//! app** invariant: the seed mints NO control PAT and injects NO
+//! handler uses). It then asserts every seeded artifact and that a second run is
+//! idempotent (no error, no duplicate). It also asserts the **pure creator app**
+//! invariant: the seed mints NO control PAT and injects NO
 //! `ZEROSHIP_CONTROL_SERVICE_TOKEN` / `ZEROSHIP_CONTROL_URL` into the console env.
 //!
 //! REQUIRES a Postgres migrated by `zeroship-migrate`
@@ -21,13 +20,9 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 
 use compio_postgres::{connect, Client, NoTls};
-use ntex::web::{self, HttpResponse};
-use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::app_oauth_client::client_id_for_app;
@@ -174,115 +169,6 @@ fn synthesize_minimal_zship() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Mock Hydra admin (real HTTP) — stands in ONLY for the Hydra transport. The
-// per-app client lifecycle logic (`ensure_app_client`) runs for real.
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct MockHydraState {
-    clients: std::collections::HashMap<String, Value>,
-}
-
-struct MockHydra {
-    base: String,
-    shutdown: Option<mpsc::Sender<()>>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl MockHydra {
-    fn start() -> Self {
-        let state = Arc::new(Mutex::new(MockHydraState::default()));
-        let factory_state = state.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            ntex::rt::System::build()
-                .name("mock-hydra-console-seed")
-                .testing()
-                .build(ntex::rt::DefaultRuntime)
-                .block_on(async move {
-                    let server = web::test::server(move || {
-                        let state = factory_state.clone();
-                        async move {
-                            web::App::new().state(state).service(
-                                web::resource("/admin/clients")
-                                    .route(web::post().to(mock_create_client)),
-                            )
-                            .service(
-                                web::resource("/admin/clients/{client_id}")
-                                    .route(web::get().to(mock_get_client))
-                                    .route(web::put().to(mock_update_client)),
-                            )
-                        }
-                    })
-                    .await;
-                    let addr = server.addr();
-                    started_tx.send(addr).expect("send mock hydra addr");
-                    let _ = shutdown_rx.recv();
-                    drop(server);
-                });
-        });
-        let addr = started_rx.recv().expect("mock hydra starts");
-        Self {
-            base: format!("http://{addr}"),
-            shutdown: Some(shutdown_tx),
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for MockHydra {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-async fn mock_create_client(
-    body: web::types::Json<Value>,
-    state: web::types::State<Arc<Mutex<MockHydraState>>>,
-) -> HttpResponse {
-    let body = body.into_inner();
-    let id = body["client_id"].as_str().unwrap_or_default().to_string();
-    state
-        .lock()
-        .expect("hydra state")
-        .clients
-        .insert(id, body.clone());
-    HttpResponse::Created().json(&body)
-}
-
-async fn mock_get_client(
-    client_id: web::types::Path<String>,
-    state: web::types::State<Arc<Mutex<MockHydraState>>>,
-) -> HttpResponse {
-    let id = client_id.into_inner();
-    match state.lock().expect("hydra state").clients.get(&id).cloned() {
-        Some(c) => HttpResponse::Ok().json(&c),
-        None => HttpResponse::NotFound().json(&json!({"error": "not_found"})),
-    }
-}
-
-async fn mock_update_client(
-    client_id: web::types::Path<String>,
-    body: web::types::Json<Value>,
-    state: web::types::State<Arc<Mutex<MockHydraState>>>,
-) -> HttpResponse {
-    let id = client_id.into_inner();
-    let body = body.into_inner();
-    state
-        .lock()
-        .expect("hydra state")
-        .clients
-        .insert(id, body.clone());
-    HttpResponse::Ok().json(&body)
-}
-
-// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 
@@ -338,7 +224,6 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     // `zeroship` schema; there is no separate auth DB any more.
     let mut control_pg = pg(&url).await;
 
-    let hydra = MockHydra::start();
     cleanup(&control_pg, &host).await;
 
     // Throwaway BlobStore for the prebuilt-artifact trial ingest (see
@@ -373,7 +258,6 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         console_host: host.clone(),
         console_zship: zship.clone(),
         scheme: "http".to_string(),
-        hydra_admin_url: hydra.base.clone(),
     };
 
     // Seed the built-in plan tiers FIRST — exactly as `main.rs` does
@@ -460,11 +344,8 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
         uris.iter().any(|u| u == &format!("http://{host}/__zeroship/auth/callback")),
         "callback redirect_uri anchors on the console host: {uris:?}"
     );
-    // The Hydra-side client is a public PKCE client (token_endpoint_auth_method
-    // none) — asserted via the mock's recorded body.
-    // (The DB skip_consent=true (first-party console) + the oac_ client_id
-    // already pin the shape; the public-PKCE body is produced by the SAME
-    // build_client_body the per-app unit tests pin.)
+    // The DB skip_consent=true (first-party console) + the deterministic oac_
+    // client_id pin the native OP client identity used by the console.
 
     // (3) RouteEntry surfaces the OAuth fields (gateway route-sync invariant).
     let routes = registry.get_routes().await.expect("get_routes");
@@ -781,5 +662,4 @@ async fn seed_creates_all_artifacts_and_is_idempotent() {
     if zship.starts_with(std::env::temp_dir()) {
         let _ = std::fs::remove_file(&zship);
     }
-    drop(hydra);
 }

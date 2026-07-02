@@ -1,11 +1,10 @@
 //! Shared JWKS cache + OIDC ID-token verifier.
 //!
 //! Used by the gateway (per-app OIDC RP) and the control plane (dashboard
-//! OIDC RP) to verify ID tokens issued by hydra. Hydra's JWKS endpoint
-//! lives at `https://auth.zeroship.ai/.well-known/jwks.json` in prod
-//! (or wherever the deployment configures); this module fetches it on
-//! demand, caches for 5 minutes, and force-refreshes on signature
-//! verification failure.
+//! OIDC RP) to verify ID tokens issued by the configured OP. The JWKS endpoint
+//! lives at `https://auth.zeroship.ai/.well-known/jwks.json` in prod, or
+//! wherever the deployment configures it. This module fetches keys on demand,
+//! caches for 5 minutes, and force-refreshes on signature verification failure.
 //!
 //! Token verification covers: signature (against any cached public key
 //! matching `kid` and `alg`), `iss`, `aud`, `exp` (+ `nbf` if present),
@@ -26,14 +25,12 @@ const ID_TOKEN_IAT_SKEW_SECS: i64 = 300;
 const ID_TOKEN_NBF_SKEW_SECS: i64 = 30;
 
 /// Bounded wall-clock budget for a single JWKS HTTP fetch. A hung or slow
-/// Hydra JWKS endpoint must not block ID-token verification indefinitely:
+/// JWKS endpoint must not block ID-token verification indefinitely:
 /// `refresh()` wraps its GET in a [`compio::time::timeout`] of this duration
 /// and, on expiry, returns [`OidcError::FetchJwks`] while leaving the cache's
 /// last-good keys intact (stale-on-error — a transient JWKS blip must not
-/// break verification while cached keys are still valid). Mirrors the gateway
-/// `hydra_client::DEFAULT_HYDRA_TIMEOUT` idiom for the token/introspect mint
-/// path; JWKS is the remaining unbounded outbound Hydra call (though 5-min
-/// cached, so lower-frequency).
+/// break verification while cached keys are still valid). Mirrors the bounded
+/// timeout pattern used by other outbound auth calls.
 const DEFAULT_JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 thread_local! {
@@ -43,9 +40,9 @@ thread_local! {
     /// the client is used on a thread other than the one that created it —
     /// so it is effectively `!Send` and cannot be stored on the `Send + Sync`
     /// `JwksCache` (every consumer shares it as `Arc<JwksCache>` across ntex
-    /// worker arbiter threads). We mirror the gateway `hydra_client` /
-    /// compio-postgres `Pool` idiom: build the client lazily on first use per
-    /// thread and reuse it thereafter. `cyper::Client` is internally
+    /// worker arbiter threads). We mirror the compio-postgres `Pool` idiom:
+    /// build the client lazily on first use per thread and reuse it thereafter.
+    /// `cyper::Client` is internally
     /// `Arc<ClientInner>`, so the clone is a cheap refcount bump — not a new
     /// connection pool per fetch (the previous `cyper::Client::new()`-per-call
     /// behavior).
@@ -233,7 +230,7 @@ impl JwksCache {
     /// The HTTP GET runs under a bounded [`compio::time::timeout`]
     /// ([`DEFAULT_JWKS_FETCH_TIMEOUT`], 5s by default) and over this thread's
     /// *reused* `cyper::Client` (built once per thread, not per call). A hung
-    /// or slow Hydra JWKS endpoint therefore returns a fast
+    /// or slow JWKS endpoint therefore returns a fast
     /// [`OidcError::FetchJwks`] instead of blocking ID-token verification
     /// indefinitely. On ANY error — timeout, transport, non-2xx, or malformed
     /// JWKS — the cache's last-good keys are left untouched: the failing
@@ -393,6 +390,8 @@ pub struct TokenClaims {
     #[serde(default)]
     pub nonce: Option<String>,
     #[serde(default)]
+    pub sid: Option<String>,
+    #[serde(default)]
     pub at_hash: Option<String>,
     #[serde(default)]
     pub c_hash: Option<String>,
@@ -411,7 +410,7 @@ pub struct TokenClaims {
     /// OIDC `auth_time` — seconds since epoch of the end-user authentication
     /// event. Carried onto the gateway cookie session (BFF redesign §2.2 step
     /// 5b) so the SPA identity projection + the step-up freshness gate (§5.3)
-    /// can read it. Standard OIDC claim Hydra issues; `None` when absent.
+    /// can read it. Standard OIDC claim; `None` when absent.
     #[serde(default)]
     pub auth_time: Option<i64>,
     #[serde(flatten)]
@@ -791,12 +790,11 @@ mod tests {
 }
 
 /// Resilience tests for the bounded, client-reused JWKS [`JwksCache::refresh`]:
-/// a slow/hung Hydra JWKS endpoint must NOT block ID-token verification
-/// indefinitely, and a failed refresh must NOT wipe the last-good keys.
+/// a slow/hung JWKS endpoint must NOT block ID-token verification indefinitely,
+/// and a failed refresh must NOT wipe the last-good keys.
 ///
 /// These run the REAL path end to end — a real [`JwksCache`], a real
-/// loopback HTTP server (ntex on its own thread, the same idiom as
-/// `tests/hydra_introspect.rs`), a real `cyper` GET, and the real
+/// loopback HTTP server (ntex on its own thread), a real `cyper` GET, and the real
 /// `compio::time::timeout` — no shim. The mock can switch between a fast
 /// JWKS response and a multi-second hang via shared atomic state, so the
 /// same `JwksCache` URL covers both phases.
@@ -825,7 +823,7 @@ mod resilience_tests {
         /// JWKS document body served in fast mode.
         jwks_body: String,
         /// When set, the handler sleeps `HANG_SECS` before responding —
-        /// simulating a hung/slow Hydra JWKS endpoint.
+        /// simulating a hung/slow JWKS endpoint.
         hang: AtomicBool,
         /// Number of times the handler was entered (proves the hung path
         /// actually reached the server and was cut off by the timeout, vs.

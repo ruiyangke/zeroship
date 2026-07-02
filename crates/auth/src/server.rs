@@ -8,7 +8,7 @@ use zeroship_core::oidc_verify::JwksCache;
 
 use crate::config::AuthConfig;
 use crate::headers::{RequestContextMiddleware, SecurityHeaders};
-use crate::hydra_client::HydraAdmin;
+use crate::oidc;
 use crate::ui;
 use zeroship_mailer::{Mailer, RelayForwardMailer};
 
@@ -18,9 +18,9 @@ const STATIC_CSS: &str = include_str!("../static/style.css");
 
 /// Register every route the auth server exposes.
 ///
-/// State (`Arc<HydraAdmin>`-equivalent, `Arc<AuthConfig>`, `Arc<Client>`,
-/// and optionally `Arc<JwksCache>` for Google) is registered on the `App`
-/// in [`run`]; this function only wires URL paths to handlers.
+/// State (`Arc<AuthConfig>`, `Arc<Client>`, and optionally `Arc<JwksCache>`
+/// for Google) is registered on the `App` in [`run`]; this function only wires
+/// URL paths to handlers.
 ///
 /// `google_enabled` gates the `/oauth/google/*` routes — when Google
 /// `OAuth` credentials are not configured we don't register dead routes
@@ -34,6 +34,20 @@ pub fn configure(
     github_enabled: bool,
 ) -> impl Fn(&mut web::ServiceConfig) {
     move |cfg: &mut web::ServiceConfig| {
+        cfg.service(
+            web::scope("/oauth2")
+                .configure(oidc::authorization_code::configure)
+                .configure(oidc::userinfo::configure)
+                .service(
+                    web::resource("/logout")
+                        .route(web::get().to(ui::logout::get))
+                        .route(web::post().to(ui::logout::post)),
+                )
+                .service(oidc::metadata::jwks)
+                .service(oidc::metadata::openid_configuration)
+                .service(oidc::metadata::oauth_authorization_server),
+        );
+        oidc::device_token::configure(cfg);
         cfg.service(healthz)
             .service(readyz)
             .service(style)
@@ -72,10 +86,8 @@ pub fn configure(
                     .route(web::get().to(ui::device::get))
                     .route(web::post().to(ui::device::post)),
             )
-            // RP-initiated logout (OIDC Session Management §5). hydra's
-            // `urls.logout` config points here; the RP redirects to
-            // hydra's `end_session_endpoint`, hydra issues a
-            // `logout_challenge` and 302s to this route.
+            // Browser logout surface for the auth service session and
+            // RP-initiated OP logout flows.
             .service(
                 web::resource("/logout")
                     .route(web::get().to(ui::logout::get))
@@ -200,6 +212,14 @@ pub fn configure(
                 web::resource("/webhooks/ses-sns")
                     .route(web::post().to(ui::webhooks::ses_sns)),
             )
+            // GoTrue Send Email hook. Server-to-server Standard-Webhooks HMAC
+            // auth, so this route is deliberately outside the browser CSRF
+            // form flow. When GoTrue enables this hook it fully bypasses its
+            // own SMTP path; the handler sends through zeroship_mailer.
+            .service(
+                web::resource("/hooks/gotrue/send-email")
+                    .route(web::post().to(ui::gotrue_email_hook::send_email)),
+            )
             // Relay inbound webhook (Slice 5b). The Postmark Inbound server
             // POSTs parsed-JSON mail sent to `{alias}@{relay_domain}`; the
             // handler resolves the alias → real inbox and re-originates the
@@ -250,7 +270,7 @@ async fn healthz() -> web::HttpResponse {
 
 #[web::get("/readyz")]
 async fn readyz() -> web::HttpResponse {
-    // Phase 1 readiness is process-up. Phase 1 Task 17 wires PG + hydra reachability.
+    // Phase 1 readiness is process-up. A later probe can include PG reachability.
     web::HttpResponse::Ok().json(&serde_json::json!({ "ready": true }))
 }
 
@@ -265,10 +285,8 @@ async fn style() -> web::HttpResponse {
 ///
 /// Threads shared-state slots through ntex's `App::state`:
 ///
-/// - `HydraAdmin` — hydra admin API client (cheap to clone; holds an
-///   internal `cyper::Client`).
 /// - `Arc<AuthConfig>` — the parsed config; used by handlers for the
-///   `insecure_dev` cookie flag and hydra URLs.
+///   `insecure_dev` cookie flag and runtime URLs.
 /// - `Arc<compio_postgres::Client>` — the PG client; `Client` is not
 ///   itself `Clone`, so it must be wrapped before being shared across
 ///   worker tasks.
@@ -283,6 +301,9 @@ async fn style() -> web::HttpResponse {
 ///   (sub-spec §5.2a). Built from `--relay-forward-mailer` (SMTP/stdout,
 ///   never Resend) with its own `AUTH_RELAY_SMTP_*` identity. A newtype so
 ///   `State<RelayForwardMailer>` is distinct from the transactional state.
+/// - `RefreshSessionPool` — bounded dedicated-session pool config for OP
+///   refresh-family transactions. The concrete compio-postgres pool is cached
+///   per ntex worker thread because it is `!Send`.
 ///
 /// # Errors
 ///
@@ -295,11 +316,12 @@ async fn style() -> web::HttpResponse {
 #[allow(clippy::future_not_send)]
 pub async fn run(
     cfg: Arc<AuthConfig>,
-    admin: HydraAdmin,
     db: Arc<compio_postgres::Client>,
     google_jwks: Option<Arc<JwksCache>>,
     mailer: Arc<dyn Mailer>,
     relay_forward_mailer: RelayForwardMailer,
+    op_issuer: Arc<oidc::Issuer>,
+    refresh_pool: oidc::refresh::RefreshSessionPool,
 ) -> std::io::Result<()> {
     let addr = cfg.addr.clone();
     let google_enabled = google_jwks.is_some();
@@ -311,10 +333,11 @@ pub async fn run(
 
     web::server(async move || {
         let mut app = web::App::new()
-            .state(admin.clone())
             .state(cfg.clone())
             .state(db.clone())
             .state(mailer.clone())
+            .state(op_issuer.clone())
+            .state(refresh_pool.clone())
             // The dedicated relay-forward mailer (§5.2a). A distinct newtype
             // so `State<RelayForwardMailer>` doesn't collide with the
             // transactional `State<Arc<dyn Mailer>>`.

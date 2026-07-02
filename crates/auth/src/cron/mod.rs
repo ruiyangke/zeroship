@@ -6,18 +6,16 @@
 //! `--cron-tick-secs` for staging environments) and coordinate via
 //! `zeroship.cron_state` rows when they need durable "last-ran" tracking.
 //!
-//! P6-U1 ships `jwk_rotation`; P6-U2 adds `audit_retention`;
-//! `token_sweep` drops expired one-shot token rows after their grace window.
+//! The active tasks retain audit logs, drop expired one-shot token rows after
+//! their grace window, and erase accounts whose deletion grace window elapsed.
 
 pub mod account_reaper;
 pub mod audit_retention;
-pub mod jwk_rotation;
 pub mod token_sweep;
 
 use std::sync::Arc;
 
 use crate::config::AuthConfig;
-use crate::hydra_client::HydraAdmin;
 
 /// Spawn every cron task onto the compio runtime.
 ///
@@ -25,30 +23,24 @@ use crate::hydra_client::HydraAdmin;
 /// responsible for keeping the `Arc<Client>` they pass in alive (in
 /// practice, `server::run` holds the matching `Arc` until shutdown).
 pub fn spawn_all(
-    admin: HydraAdmin,
     db: Arc<compio_postgres::Client>,
     cfg: Arc<AuthConfig>,
+    refresh_pool: crate::oidc::refresh::RefreshSessionPool,
 ) {
-    let db_jwk = db.clone();
-    let cfg_jwk = cfg.clone();
-    compio::runtime::spawn(async move {
-        jwk_rotation::run(admin, db_jwk, cfg_jwk).await;
-    })
-    .detach();
-
     // `audit_retention` opens its OWN dedicated connection per tick (the
     // sweep flips the append-only tamper trigger off via a transaction-local
     // GUC, which must never share a socket with other traffic), so it takes
     // only the config — not the shared `Arc<Client>`.
-    let cfg_audit = cfg;
+    let cfg_audit = cfg.clone();
     compio::runtime::spawn(async move {
         audit_retention::run(cfg_audit).await;
     })
     .detach();
 
     let db_token_sweep = db.clone();
+    let refresh_pool_token_sweep = refresh_pool;
     compio::runtime::spawn(async move {
-        token_sweep::run(db_token_sweep).await;
+        token_sweep::run(db_token_sweep, refresh_pool_token_sweep).await;
     })
     .detach();
 

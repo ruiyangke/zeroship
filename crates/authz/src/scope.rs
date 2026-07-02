@@ -171,7 +171,7 @@ pub fn scopes_to_policy(scopes: &[Scope]) -> Policy {
     }
 }
 
-/// Parse a Hydra scope string (space-separated).
+/// Parse an OAuth scope string (space-separated).
 ///
 /// Unknown scopes return [`ParseScopeError::Unknown`]; they are not silently
 /// dropped.

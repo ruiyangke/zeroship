@@ -1,12 +1,9 @@
 //! TOTP login-challenge gate — the second-factor decision + stash binding
 //! exercised against the REAL store/crypto (ISS-11).
 //!
-//! The FULL HTTP flow (`POST /login` → 2FA page → `POST /login/2fa` →
-//! `accept_login`) needs a live Hydra (the `/login` POST fetches the challenge
-//! from Hydra before anything else), so it lives in the hydra-gated e2e suite.
-//! This test pins the parts that DON'T need Hydra and are the security core of
-//! the challenge: (1) a confirmed-2FA user is gated (`is_enabled`), a pending
-//! one is NOT; (2) the signed factor-1 stash round-trips bound to the user +
+//! This test pins the store/crypto parts that are the security core of the
+//! challenge: (1) a confirmed-2FA user is gated (`is_enabled`), a pending one is
+//! NOT; (2) the signed factor-1 stash round-trips bound to the user +
 //! credential_version, and a version bump (password change / forced logout)
 //! invalidates it — the exact check `post_2fa` runs before accepting factor 2;
 //! (3) the second-factor evaluation the handler performs (valid TOTP code OR a
@@ -109,7 +106,7 @@ async fn challenge_stash_binds_user_and_credential_version() {
     let decoded = TotpChallenge::decode(&cookie, signing_key).expect("decode");
     assert_eq!(decoded.user_id, user.id);
     assert_eq!(decoded.credential_version, cv);
-    assert_eq!(decoded.login_challenge, "lc-xyz");
+    assert_eq!(decoded.return_to, "lc-xyz");
 
     // Bump credential_version (a password reset does this). The cookie's
     // captured version no longer matches the live row → `post_2fa` rejects it.

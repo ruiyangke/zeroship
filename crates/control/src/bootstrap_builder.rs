@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use compio_postgres::Client;
 use rand::RngCore as _;
-use serde::Serialize;
 use uuid::Uuid;
+use zeroship_core::auth::hash_api_key;
 use zeroship_authz::Scope;
 
 /// Client ID of the first-party `zeroship-builder` OAuth client.
@@ -37,7 +37,6 @@ const BUILDER_SCOPES: &[Scope] = &[
 #[derive(Clone, Debug)]
 pub struct BuilderClientBootstrapConfig {
     pub enabled: bool,
-    pub hydra_admin_url: String,
     pub redirect_uri: String,
     pub client_secret_path: PathBuf,
     pub skip_consent: bool,
@@ -61,8 +60,6 @@ pub enum BuilderClientBootstrapError {
     Db(String),
     Io(String),
     InvalidSecretFile { path: PathBuf },
-    Hydra(String),
-    Encode(String),
 }
 
 impl std::fmt::Display for BuilderClientBootstrapError {
@@ -73,27 +70,11 @@ impl std::fmt::Display for BuilderClientBootstrapError {
             Self::InvalidSecretFile { path } => {
                 write!(f, "invalid builder client secret file: {}", path.display())
             }
-            Self::Hydra(err) => write!(f, "hydra admin: {err}"),
-            Self::Encode(err) => write!(f, "encode hydra request: {err}"),
         }
     }
 }
 
 impl std::error::Error for BuilderClientBootstrapError {}
-
-#[derive(Debug, Serialize)]
-struct HydraCreateClientRequest<'a> {
-    client_id: &'a str,
-    client_name: &'a str,
-    client_secret: &'a str,
-    redirect_uris: &'a [String],
-    grant_types: &'a [&'static str],
-    response_types: &'a [&'static str],
-    scope: &'a str,
-    token_endpoint_auth_method: &'static str,
-    subject_type: &'static str,
-    skip_consent: bool,
-}
 
 pub async fn bootstrap_builder_oauth_client(
     pg: &Client,
@@ -120,8 +101,7 @@ pub async fn bootstrap_builder_oauth_client(
     }
 
     let client_secret = ensure_client_secret(&cfg.client_secret_path)?;
-    create_hydra_client(cfg, &client_secret).await?;
-    insert_oauth_client(pg, cfg).await?;
+    insert_oauth_client(pg, cfg, &client_secret).await?;
 
     tracing::info!(
         client_id = BUILDER_CLIENT_ID,
@@ -148,6 +128,7 @@ async fn oauth_client_exists(pg: &Client) -> Result<bool, BuilderClientBootstrap
 async fn insert_oauth_client(
     pg: &Client,
     cfg: &BuilderClientBootstrapConfig,
+    client_secret: &str,
 ) -> Result<(), BuilderClientBootstrapError> {
     let redirect_uris = vec![cfg.redirect_uri.as_str()];
     let scopes = BUILDER_SCOPES
@@ -155,11 +136,13 @@ async fn insert_oauth_client(
         .map(|scope| scope.as_str())
         .collect::<Vec<_>>();
     let created_by: Option<Uuid> = None;
+    let client_secret_hash = hash_api_key(client_secret);
     pg.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-             skip_consent, created_by, hydra_client_id) \
-         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $1)",
+             skip_consent, created_by, client_secret_hash, \
+             refresh_allowed, token_endpoint_auth_method) \
+         VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7, TRUE, 'client_secret_basic')",
         &[
             &BUILDER_CLIENT_ID,
             &BUILDER_CLIENT_NAME,
@@ -167,6 +150,7 @@ async fn insert_oauth_client(
             &scopes,
             &cfg.skip_consent,
             &created_by,
+            &client_secret_hash,
         ],
     )
     .await
@@ -232,59 +216,6 @@ fn read_existing_client_secret(path: &Path) -> Result<String, BuilderClientBoots
 
 fn is_valid_client_secret(secret: &str) -> bool {
     secret.len() == 64 && secret.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-async fn create_hydra_client(
-    cfg: &BuilderClientBootstrapConfig,
-    client_secret: &str,
-) -> Result<(), BuilderClientBootstrapError> {
-    let redirect_uris = vec![cfg.redirect_uri.clone()];
-    let grant_types = ["authorization_code", "refresh_token"];
-    let response_types = ["code"];
-    let scope = BUILDER_SCOPES
-        .iter()
-        .map(|scope| scope.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let body = HydraCreateClientRequest {
-        client_id: BUILDER_CLIENT_ID,
-        client_name: BUILDER_CLIENT_NAME,
-        client_secret,
-        redirect_uris: &redirect_uris,
-        grant_types: &grant_types,
-        response_types: &response_types,
-        scope: &scope,
-        token_endpoint_auth_method: "client_secret_basic",
-        subject_type: "public",
-        skip_consent: cfg.skip_consent,
-    };
-    let body_bytes = serde_json::to_vec(&body)
-        .map_err(|err| BuilderClientBootstrapError::Encode(err.to_string()))?;
-    let res = cyper::Client::new()
-        .request(http::Method::POST, hydra_url(&cfg.hydra_admin_url, "/admin/clients"))
-        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
-        .header("content-type", "application/json")
-        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("build request: {err}")))?
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("transport: {err}")))?;
-    let status = res.status().as_u16();
-    let response_body = res
-        .text()
-        .await
-        .map_err(|err| BuilderClientBootstrapError::Hydra(format!("read response: {err}")))?;
-    if (200..300).contains(&status) || status == 409 {
-        Ok(())
-    } else {
-        Err(BuilderClientBootstrapError::Hydra(format!(
-            "POST /admin/clients returned {status}: {response_body}"
-        )))
-    }
-}
-
-fn hydra_url(base_url: &str, path: &str) -> String {
-    format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
 #[cfg(test)]

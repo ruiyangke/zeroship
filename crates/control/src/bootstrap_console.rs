@@ -174,8 +174,6 @@ pub struct ConsoleBootstrapConfig {
     /// URL scheme the console serves under (`http` in dev-insecure, else
     /// `https`). Drives the OAuth redirect_uris + sector origin.
     pub scheme: String,
-    /// Hydra admin API base URL (for the per-app public PKCE client).
-    pub hydra_admin_url: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -432,7 +430,7 @@ pub async fn seed_plans(registry: &Registry) -> Result<(), ConsoleBootstrapError
 /// schema.
 ///
 /// # Errors
-/// [`ConsoleBootstrapError`] on any DB / IO / ingest / Hydra / env failure.
+/// [`ConsoleBootstrapError`] on any DB / IO / ingest / OAuth client / env failure.
 pub async fn bootstrap_console(
     cfg: &ConsoleBootstrapConfig,
     registry: &Registry,
@@ -483,11 +481,9 @@ pub async fn bootstrap_console(
     //    dance auto-accepts identity consent for the console (the `oac_<base62>`
     //    id is printed by `--bootstrap-console`; see
     //    `zeroship_core::auth::trusted_clients`).
-    let hydra = zeroship_auth::hydra_client::HydraAdmin::new(cfg.hydra_admin_url.clone());
     let hosts = vec![cfg.console_host.clone()];
     app_oauth_client::ensure_app_client(
         control_pg,
-        &hydra,
         &app_id,
         &app_name,
         &cfg.scheme,

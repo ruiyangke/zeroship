@@ -13,6 +13,7 @@ pub mod account_deletion;
 pub mod consent;
 pub mod device;
 pub mod forgot;
+pub mod gotrue_email_hook;
 pub mod link;
 pub mod login;
 pub mod logout;
@@ -40,33 +41,32 @@ use crate::{csrf, headers};
 #[derive(Debug, Template)]
 #[template(path = "login.html")]
 pub struct LoginPage<'a> {
-    pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
     pub client_name: &'a str,
     pub google_enabled: bool,
     pub github_enabled: bool,
+    pub google_start_href: String,
+    pub github_start_href: String,
 }
 
 /// `/login/2fa` challenge page (ISS-11). Rendered after a successful password
-/// verify for a user with a CONFIRMED TOTP credential, BEFORE `accept_login`.
-/// The `challenge` is hydra's pending `login_challenge`; the signed
+/// verify for a user with a CONFIRMED TOTP credential. The signed
 /// `__Host-zsidp_2fa` cookie (set alongside) attests factor 1 passed.
 #[derive(Debug, Template)]
 #[template(path = "totp_challenge.html")]
 pub struct TotpChallengePage<'a> {
-    pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
 }
 
-/// `/signup` GET page. Same `login_challenge` carries through so that
-/// after account creation we can flow straight back into hydra's
-/// `accept_login`.
+/// `/signup` GET page. Carries the native continuation target.
 #[derive(Debug, Template)]
 #[template(path = "signup.html")]
 pub struct SignupPage<'a> {
-    pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub error: Option<&'a str>,
 }
@@ -131,7 +131,7 @@ pub struct LinkPage<'a> {
 #[derive(Debug, Template)]
 #[template(path = "consent.html")]
 pub struct ConsentPage<'a> {
-    pub challenge: &'a str,
+    pub return_to: &'a str,
     pub csrf: &'a str,
     pub client_id: &'a str,
     pub client_name: &'a str,
@@ -167,9 +167,10 @@ pub struct LinkedIdentity<'a> {
 #[template(path = "magic_check_email.html")]
 pub struct MagicCheckEmailPage<'a> {
     pub csrf: &'a str,
-    pub login_challenge: &'a str,
+    pub return_to: Option<&'a str>,
     pub csrf_nonce: &'a str,
     pub email: &'a str,
+    pub login_href: String,
 }
 
 /// `/magic/await` GET — alternate landing for the cross-device code-entry
@@ -178,9 +179,10 @@ pub struct MagicCheckEmailPage<'a> {
 #[template(path = "magic_await_code.html")]
 pub struct MagicAwaitCodePage<'a> {
     pub csrf: &'a str,
-    pub login_challenge: &'a str,
+    pub return_to: Option<&'a str>,
     pub csrf_nonce: &'a str,
     pub email: &'a str,
+    pub login_href: String,
 }
 
 /// `/magic/verify` cross-device branch — displays a 6-digit code on the
@@ -200,6 +202,20 @@ pub struct DevicePage<'a> {
     pub user_code: &'a str,
     pub error: Option<&'a str>,
     pub csrf: &'a str,
+}
+
+/// `/device` page for the Supabase platform-mediated device flow. The browser
+/// signs into GoTrue, then approves the pending device grant through control.
+#[derive(Debug, Template)]
+#[template(path = "device_supabase.html")]
+pub struct SupabaseDevicePage<'a> {
+    pub user_code: &'a str,
+    pub error: Option<&'a str>,
+    pub csrf: &'a str,
+    pub script_nonce: &'a str,
+    pub supabase_auth_url_json: &'a str,
+    pub supabase_anon_key_json: &'a str,
+    pub control_approve_url_json: &'a str,
 }
 
 /// `/verify` GET page (P5-U5) — shown after a successful email-verification
@@ -288,19 +304,12 @@ pub struct ResetPage<'a> {
     pub error: Option<&'a str>,
 }
 
-/// `/logout` GET page (RP-initiated logout, RFC OIDC §5 — RP redirects
-/// to hydra's `end_session_endpoint`, hydra issues a `logout_challenge`
-/// and 302s here). Renders a CSRF-protected confirm form; the POST
-/// handler calls hydra's `accept_logout` and redirects to the
-/// post-logout `redirect_to`.
+/// `/logout` GET page. Renders a CSRF-protected confirm form; the POST
+/// handler revokes the native IdP session cookie.
 #[derive(Debug, Template)]
 #[template(path = "logout.html")]
 pub struct LogoutPage<'a> {
-    pub challenge: &'a str,
     pub csrf: &'a str,
-    /// `Some(name)` when the RP that initiated logout published a
-    /// human-readable `client_name`. `None` for hydra-internal flows
-    /// (e.g. session-cleanup without a specific RP context).
     pub client_name: Option<&'a str>,
     pub error: Option<&'a str>,
 }

@@ -213,7 +213,7 @@ mod tests {
             "resolve-explicit.toml",
             r#"
 [auth]
-hydra_admin_url = "http://hydra:4445"
+auth_provider = "platform"
 "#,
         );
 
@@ -225,10 +225,7 @@ hydra_admin_url = "http://hydra:4445"
             overlay.source,
             ConfigSource::Explicit(file.path.clone())
         );
-        assert_eq!(
-            overlay.config.auth.hydra_admin_url.as_deref(),
-            Some("http://hydra:4445")
-        );
+        assert_eq!(overlay.config.auth.auth_provider.as_deref(), Some("platform"));
     }
 
     #[test]
@@ -269,7 +266,7 @@ rust_log = "info,zeroship_=debug"
             FileConfig::resolve_with_well_known(None, true, &path).expect("missing well-known is ok");
 
         assert_eq!(overlay.source, ConfigSource::None);
-        assert!(overlay.config.auth.hydra_admin_url.is_none());
+        assert!(overlay.config.auth.auth_provider.is_none());
         assert!(overlay.config.observability.log_filter.is_none());
     }
 

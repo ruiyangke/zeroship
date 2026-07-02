@@ -625,8 +625,8 @@ fn print_usage() {
     eprintln!("  zeroship deploy   <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   Token source: --token, ZEROSHIP_TOKEN, or zeroship login.");
-    eprintln!("  zeroship login    [--auth-url=https://auth.zeroship.ai]");
-    eprintln!("                   Sign in with OAuth Device Authorization Grant.");
+    eprintln!("  zeroship login    [--control=URL] [--provider=platform|supabase]");
+    eprintln!("                   Sign in with the platform device flow.");
     eprintln!("  zeroship whoami");
     eprintln!("                   Show the signed-in account.");
     eprintln!("  zeroship logout");
@@ -1073,6 +1073,11 @@ mod tests {
                     expires_at: u64::MAX,
                     auth_url: "http://auth.test".to_string(),
                     client_id: "zeroship-cli".to_string(),
+                    provider: "platform".to_string(),
+                    control_url: None,
+                    token_endpoint: None,
+                    anon_key: None,
+                    userinfo_url: None,
                 })
             },
         )

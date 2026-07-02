@@ -34,12 +34,26 @@ async fn pg() -> Option<Client> {
 /// return its id.
 async fn seed_app(client: &Client) -> Uuid {
     let app_id = Uuid::new_v4();
+    let plan_id = "session-visibility-test-plan";
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.plans \
+                 (id, name, base_fee_cents, included_units, spend_limit_default_cents, \
+                  runtime_limits_json) \
+             VALUES ($1, 'Session Visibility Test Plan', 0, 0, 0, \
+                     '{\"cpu_ms\":1000,\"wall_ms\":5000,\"memory_mb\":128,\"concurrency\":10}'::jsonb) \
+             ON CONFLICT (id) DO NOTHING",
+            &[&plan_id],
+        )
+        .await
+        .expect("seed session visibility test plan");
+    client
+        .execute(
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
             &[
                 &app_id,
                 &format!("iss10-app-{}", app_id.simple()),
+                &plan_id,
                 &format!("k-{}", app_id.simple()),
             ],
         )

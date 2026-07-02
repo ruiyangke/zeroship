@@ -636,7 +636,7 @@ mod tests {
         assert!(is_loopback_url("http://[::1]:4445"));
 
         // non-loopback hostnames rejected
-        assert!(!is_loopback_url("http://hydra:4445"));
+        assert!(!is_loopback_url("http://auth-internal:4445"));
 
         // a hostname that resolves to loopback must NOT be accepted (no DNS).
         assert!(!is_loopback_url("http://localhost.localdomain:4445"));

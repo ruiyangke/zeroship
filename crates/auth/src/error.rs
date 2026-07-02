@@ -10,9 +10,6 @@ pub enum AuthError {
     #[error("database[{code}]: {message}")]
     DbCode { code: String, message: String },
 
-    #[error("hydra admin: {0}")]
-    Hydra(String),
-
     #[error("bootstrap: {0}")]
     Bootstrap(String),
 

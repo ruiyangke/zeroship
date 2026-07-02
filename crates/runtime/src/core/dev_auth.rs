@@ -12,7 +12,7 @@
 //! the `currentUser()` RPC ctx (`mint_rpc_ctx(user_json)`).
 //!
 //! In **self-contained dev** (`pnpm dev` → the Vite plugin spawns
-//! `zeroship serve`) there is no gateway and no Hydra. The dev-tier auth
+//! `zeroship serve`) there is no gateway and no hosted OP. The dev-tier auth
 //! provider lives in JS (`@zeroship/bootstrap/dev` — `dev-auth.ts`): it serves
 //! `/__zeroship/auth/{authorize,popup-callback,session,signout}` and mints a LOCAL
 //! signed session cookie `__zeroship_dev_session`. That cookie is the dev equivalent

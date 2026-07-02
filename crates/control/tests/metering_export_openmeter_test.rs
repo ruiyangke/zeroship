@@ -463,16 +463,13 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg,
-        hydra_admin_url: "http://127.0.0.1:9".to_string(),
         app_base_domain: "zeroship.localhost".to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
-        hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-            "http://127.0.0.1:9",
-        )),
+        pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: provider,
         tax_provider: zeroship_control::tax::build_tax_provider(

@@ -10,7 +10,9 @@
   <form method="POST" action="/magic/complete">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="csrf_nonce" value="{{ csrf_nonce }}">
-    <input type="hidden" name="login_challenge" value="{{ login_challenge }}">
+    {% if let Some(return_to) = return_to %}
+      <input type="hidden" name="return_to" value="{{ return_to }}">
+    {% endif %}
     <label>6-digit code
       <input name="code" pattern="[0-9]{6}" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required>
     </label>
@@ -18,5 +20,5 @@
   </form>
 </details>
 
-<p><a href="/login?login_challenge={{ login_challenge }}">Back to sign in</a></p>
+<p><a href="{{ login_href }}">Back to sign in</a></p>
 {% endblock %}

@@ -97,7 +97,7 @@ struct Cli {
     profile: Option<ProfileArg>,
 
     /// Schema allowlist for the `platform` profile (repeatable). Default:
-    /// `zeroship`, `oauth_hydra`, `public`. The FIRST value is the primary schema
+    /// `zeroship`, `public`. The FIRST value is the primary schema
     /// pinned into `search_path`. Ignored under `trusted` (no confinement).
     #[arg(long = "schema", global = true)]
     schema: Vec<String>,
@@ -1580,7 +1580,7 @@ mod tests {
         assert_eq!(cfg.profile, RunProfile::Platform);
         assert_eq!(cfg.project_schema, "zeroship");
         assert_eq!(cfg.meta_schema, "zeroship_migrations");
-        assert!(cfg.schemas.contains(&"oauth_hydra".to_string()));
+        assert_eq!(cfg.schemas, vec!["zeroship".to_string(), "public".to_string()]);
     }
 
     #[test]

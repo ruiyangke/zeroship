@@ -12,9 +12,7 @@
 //! If these diverge in status, body length, or wall time, the dummy-hash
 //! arm has regressed and an attacker can probe for valid emails.
 //!
-//! Skips when `AUTH_DB_URL` and `HYDRA_ADMIN_URL` are unset (same gate as
-//! `e2e_password.rs`). Live path requires a registered test OIDC client in
-//! hydra so `/login` POST can resolve a real `login_challenge`.
+//! Skips when `AUTH_DB_URL` is unset.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,12 +21,10 @@ use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::hydra_client::types::OAuth2Client;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_auth::server;
 
 mod common;
-use common::{fresh_login_challenge, read_set_cookie, test_auth_config, CookieJar};
+use common::{native_authorize_return_to, read_set_cookie, test_auth_config, CookieJar};
 
 fn median(durations: &mut [Duration]) -> Duration {
     durations.sort();
@@ -44,11 +40,14 @@ fn median(durations: &mut [Duration]) -> Duration {
 async fn one_failure(
     http: &cyper::Client,
     auth_base: &str,
-    challenge: &str,
+    return_to: &str,
     email: &str,
     password: &str,
 ) -> (u16, usize, Duration) {
-    let login_url = format!("{auth_base}/login?login_challenge={challenge}");
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("return_to", return_to)
+        .finish();
+    let login_url = format!("{auth_base}/login?{query}");
     let resp = http
         .request(http::Method::GET, &login_url)
         .expect("build GET /login")
@@ -95,15 +94,10 @@ const N_PAIRS: usize = 4;
 #[ntex::test]
 async fn login_failure_responses_are_indistinguishable() {
     // 0. Env-skip check.
-    let (Ok(db_url), Ok(hydra_admin_url)) = (
-        std::env::var("AUTH_DB_URL"),
-        std::env::var("HYDRA_ADMIN_URL"),
-    ) else {
-        eprintln!("[enum_defense] skip (need AUTH_DB_URL + HYDRA_ADMIN_URL)");
+    let Ok(db_url) = std::env::var("AUTH_DB_URL") else {
+        eprintln!("[enum_defense] skip (need AUTH_DB_URL)");
         return;
     };
-    let hydra_public = std::env::var("HYDRA_PUBLIC_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:4444".to_string());
 
     // 1. Connect PG.
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
@@ -118,20 +112,20 @@ async fn login_failure_responses_are_indistinguishable() {
     let pg_client = Arc::new(pg_client);
 
     // 2. Boot the auth server in-process.
-    let admin = HydraAdmin::new(&hydra_admin_url);
-    let cfg = Arc::new(test_auth_config(&db_url, &hydra_admin_url, &hydra_public));
-    let admin_state = admin.clone();
+    let cfg = Arc::new(test_auth_config(&db_url));
     let cfg_state = cfg.clone();
     let db_state = pg_client.clone();
+    let refresh_pool_state =
+        zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = web::test::server(move || {
-        let admin_state = admin_state.clone();
         let cfg_state = cfg_state.clone();
         let db_state = db_state.clone();
+        let refresh_pool_state = refresh_pool_state.clone();
         async move {
             web::App::new()
-                .state(admin_state)
                 .state(cfg_state)
                 .state(db_state)
+                .state(refresh_pool_state)
                 .middleware(SecurityHeaders::default())
                 .configure(server::configure(false, false))
         }
@@ -139,33 +133,9 @@ async fn login_failure_responses_are_indistinguishable() {
     .await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-    // 3. Register a test OIDC client.
+    // 3. Build a stable native authorization request target.
     let test_client_id = format!("enum-{}", Uuid::new_v4().simple());
     let test_redirect = "http://127.0.0.1:9999/cb";
-    let test_secret = "enum-test-secret".to_string();
-    admin
-        .create_client(&OAuth2Client {
-            client_id: test_client_id.clone(),
-            client_name: Some("enum test".into()),
-            client_secret: Some(test_secret),
-            grant_types: vec!["authorization_code".into()],
-            response_types: vec!["code".into()],
-            redirect_uris: vec![test_redirect.into()],
-            post_logout_redirect_uris: vec![],
-            scope: "openid".into(),
-            token_endpoint_auth_method: "client_secret_post".into(),
-            subject_type: "public".into(),
-            access_token_strategy: None,
-            id_token_signed_response_alg: Some("RS256".into()),
-            audience: vec![],
-            skip_consent: true,
-            require_consent: false,
-            require_logout_consent: false,
-            frontchannel_logout_uri: None,
-            backchannel_logout_uri: None,
-        })
-        .await
-        .expect("create test client");
 
     // 4. Seed a real user we can fail against.
     let real_email = format!("real-{}@zeroship.test", Uuid::new_v4().simple());
@@ -210,18 +180,14 @@ async fn login_failure_responses_are_indistinguishable() {
     let mut missing_resps: Vec<(u16, usize)> = Vec::with_capacity(N_PAIRS);
 
     for i in 0..N_PAIRS {
-        // Same login_challenge for BOTH arms so the rendered form's
-        // hidden inputs / form-action URL (which embed the challenge) are
-        // byte-identical between paths. The challenge isn't single-use
-        // until accept_login runs, so reusing it across two failures is
-        // safe. Use a fresh challenge per iteration so we can amortize
-        // the rate-limit budget per arm (5/EIP).
-        let challenge =
-            fresh_login_challenge(&http, &hydra_public, &test_client_id, test_redirect).await;
+        // Same return target for BOTH arms so the rendered form's hidden inputs
+        // / form-action URL are byte-identical between paths. Use a fresh
+        // target per iteration so visible nonce/state values never collide.
+        let return_to = native_authorize_return_to(&test_client_id, test_redirect);
 
         // ── wrong password on existing user ──────────────────────────────
         let (status_w, len_w, elapsed_w) =
-            one_failure(&http, &auth_base, &challenge, &real_email, "totally-wrong-password-xyz").await;
+            one_failure(&http, &auth_base, &return_to, &real_email, "totally-wrong-password-xyz").await;
         wrong_pw_times.push(elapsed_w);
         wrong_pw_resps.push((status_w, len_w));
         eprintln!("[enum_defense] iter {i}: wrong-pw status={status_w} body_len={len_w} t={elapsed_w:?}");
@@ -229,7 +195,7 @@ async fn login_failure_responses_are_indistinguishable() {
         // ── any password on a missing user ───────────────────────────────
         let ghost_email = format!("ghost-{}@zeroship.test", Uuid::new_v4().simple());
         let (status_m, len_m, elapsed_m) =
-            one_failure(&http, &auth_base, &challenge, &ghost_email, "totally-wrong-password-xyz").await;
+            one_failure(&http, &auth_base, &return_to, &ghost_email, "totally-wrong-password-xyz").await;
         missing_times.push(elapsed_m);
         missing_resps.push((status_m, len_m));
         eprintln!("[enum_defense] iter {i}: missing-user status={status_m} body_len={len_m} t={elapsed_m:?}");
@@ -279,10 +245,6 @@ async fn login_failure_responses_are_indistinguishable() {
     );
 
     // 7. Cleanup.
-    admin
-        .delete_client(&test_client_id)
-        .await
-        .expect("delete test client");
     pg_client
         .execute(
             "DELETE FROM zeroship.users WHERE email = $1::citext",

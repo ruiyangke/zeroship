@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! `zeroship-gate` binary entry point. Thin shell over the
 //! [`zeroship_gateway`] library: parse flags, build [`GateState`],
 //! register routes, run.
@@ -8,9 +10,8 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::config::{
-    bootstrap_or_exit, parse_bool_flag, require_unless_dev, resolve_overlay_string,
-    validate_stash_key, CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT,
-    DEV_STASH_SIGNING_KEY,
+    bootstrap_or_exit, parse_bool_flag, require_unless_dev, validate_stash_key,
+    CheckConfigReport, CheckFormat, CheckValue, DEV_PAIRWISE_SALT, DEV_STASH_SIGNING_KEY,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::{
@@ -20,9 +21,6 @@ use zeroship_gateway::{
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-const DEFAULT_HYDRA_PUBLIC_URL: &str = "https://auth.zeroship.ai";
-const DEV_GATEWAY_OIDC_SECRET: &str = "dev-secret-rotate-me-too";
 
 /// zeroship gateway startup configuration.
 #[derive(Parser)]
@@ -82,7 +80,7 @@ struct GateCli {
 
     /// Maximum number of pooled PostgreSQL connections the gateway
     /// keeps open for session/anchor/revocation work. Bounds concurrent
-    /// DB fan-out so a Hydra brownout (or any stalled query) cannot pile
+    /// DB fan-out so a OP brownout (or any stalled query) cannot pile
     /// up unbounded checkouts. Ignored when `--db` is empty.
     #[arg(long = "db-pool-size", env = "DB_POOL_SIZE", default_value_t = 16)]
     db_pool_size: usize,
@@ -115,22 +113,22 @@ struct GateCli {
     )]
     gateway_public_url: String,
 
-    /// Hydra public issuer/base URL.
-    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
-    hydra_public_url: Option<String>,
-
     /// Upstream URL for the auth service UI and OAuth surfaces.
     #[arg(long = "auth-ui-url", env = "AUTH_UI_URL", default_value = "http://auth:9092")]
     auth_ui_url: String,
 
-    /// Gateway OIDC client secret.
+    /// File containing the shared platform broker master secret.
+    ///
+    /// Must contain the same raw bytes as auth's `AUTH_BROKER_SECRET_FILE`.
+    /// The gateway derives per-app `oac_` client secrets from this material
+    /// when brokering authorization-code, refresh, and revoke requests to the
+    /// platform OP.
     #[arg(
-        long = "gateway-oidc-secret",
-        env = "GATEWAY_OIDC_SECRET",
-        default_value = "",
-        hide_env_values = true
+        long = "gateway-broker-secret-file",
+        env = "GATEWAY_BROKER_SECRET_FILE",
+        default_value = ""
     )]
-    gateway_oidc_secret: String,
+    gateway_broker_secret_file: String,
 
     /// HMAC key for short-lived OIDC stash cookies.
     #[arg(
@@ -248,6 +246,34 @@ fn resolve_pairwise_salt(
     )
 }
 
+fn load_gateway_broker_secret_file(path: &str) -> oidc_rp::BrokerSecret {
+    if path.is_empty() {
+        tracing::error!(
+            "gateway: refusing to start without GATEWAY_BROKER_SECRET_FILE / --gateway-broker-secret-file"
+        );
+        std::process::exit(1);
+    }
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        tracing::error!(
+            error = %e,
+            path = %path,
+            "gateway: cannot read GATEWAY_BROKER_SECRET_FILE"
+        );
+        std::process::exit(1);
+    });
+    oidc_rp::BrokerSecret::from_bytes(bytes).unwrap_or_else(|message| {
+        let message = message.replace(
+            "AUTH_BROKER_SECRET_FILE",
+            "GATEWAY_BROKER_SECRET_FILE / --gateway-broker-secret-file",
+        );
+        tracing::error!(
+            error = %message,
+            "gateway: refusing to start with unsafe broker master secret"
+        );
+        std::process::exit(1);
+    })
+}
+
 fn main() -> std::io::Result<()> {
     let cli = GateCli::parse();
     let boot = bootstrap_or_exit(
@@ -266,12 +292,6 @@ fn main() -> std::io::Result<()> {
 
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
-    let hydra_public_url = resolve_overlay_string(
-        cli.hydra_public_url,
-        file.auth.hydra_public_url.clone(),
-        Some(DEFAULT_HYDRA_PUBLIC_URL),
-    );
-
     let port = cli.port;
     let bind_host = cli.bind;
     let control_url = cli.control;
@@ -323,12 +343,6 @@ fn main() -> std::io::Result<()> {
         file_secrets.database_url.as_deref(),
         cli.check_config,
     );
-    let oidc_client_secret = zeroship_core::config::obtain_secret(
-        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-        &cli.gateway_oidc_secret,
-        file_secrets.gateway_oidc_secret.as_deref(),
-        cli.check_config,
-    );
     let stash_signing_key = zeroship_core::config::obtain_secret(
         "STASH_SIGNING_KEY / --stash-signing-key",
         &cli.stash_signing_key,
@@ -348,6 +362,7 @@ fn main() -> std::io::Result<()> {
     // unresolved; the signing key is loaded from this path below.
     let signing_key_path = cli.gateway_signing_key_file;
     let prev_signing_key_path = cli.gateway_prev_signing_key_file;
+    let broker_secret_path = cli.gateway_broker_secret_file;
     let public_url = cli.gateway_public_url;
 
     if let Err(message) =
@@ -357,19 +372,7 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    if let Err(message) = require_unless_dev(
-        "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-        &oidc_client_secret,
-        insecure_dev,
-    ) {
-        tracing::error!(error = %message, "gateway: refusing to start without gateway OIDC secret");
-        std::process::exit(1);
-    }
-    let oidc_client_secret = if oidc_client_secret.is_empty() {
-        DEV_GATEWAY_OIDC_SECRET.to_string()
-    } else {
-        oidc_client_secret
-    };
+    let broker_secret = load_gateway_broker_secret_file(&broker_secret_path);
 
     // STRENGTH guard. At real boot `stash_signing_key` is the resolved value,
     // so the length/sentinel checks apply to the real material. During
@@ -506,10 +509,6 @@ fn main() -> std::io::Result<()> {
             CheckValue::Plain(boot.overlay.source.to_string()),
         );
         report.field("control_url", CheckValue::Plain(control_url));
-        report.field(
-            "hydra_public_url",
-            CheckValue::Plain(hydra_public_url),
-        );
         report.field("auth_ui_url", CheckValue::Plain(auth_ui_url));
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
@@ -538,6 +537,10 @@ fn main() -> std::io::Result<()> {
         report.field(
             "signing_key_configured",
             CheckValue::Secret(!signing_key_path.is_empty()),
+        );
+        report.field(
+            "gateway_broker_secret_file_configured",
+            CheckValue::Secret(!broker_secret_path.is_empty()),
         );
         // Report whether the OPERATOR explicitly supplied a salt (pre-dev-
         // default), matching control — so a dev run with no salt reads "(unset)"
@@ -603,41 +606,18 @@ fn main() -> std::io::Result<()> {
     // Every per-request DB touch checks out a pooled connection for ONE
     // operation and releases it on drop, so no single shared connection
     // serializes gateway DB work.
-    //
-    // `dpop_jti_cache` keeps its own dedicated single connection: the
-    // `PgJtiCache` type (in zeroship-core) owns an `Arc<Client>` (which
-    // *is* `Send + Sync`), and its DPoP replay-insert path is unchanged
-    // by this slice — so it stays exactly as it was before the pool
-    // migration.
-    let (db, dpop_jti_cache): (
-        Option<zeroship_gateway::db::DbConfig>,
-        zeroship_core::dpop::TieredJtiCache,
-    ) = if pg_dsn.is_empty() {
+    let db: Option<zeroship_gateway::db::DbConfig> = if pg_dsn.is_empty() {
         tracing::warn!(
             "DATABASE_URL not set — gateway session validation disabled (all auth-gated requests will 401)"
         );
-        (None, zeroship_core::dpop::TieredJtiCache::default())
+        None
     } else {
         let db_cfg = zeroship_gateway::db::DbConfig::new(pg_dsn.clone(), db_pool_size);
         tracing::info!(
             db_pool_size = db_cfg.pool_size(),
             "gateway pg connection pool configured (per-worker)"
         );
-
-        // Dedicated single connection for the DPoP jti replay cache.
-        let (jti_client, jti_conn) = compio_postgres::connect(&pg_dsn, compio_postgres::NoTls)
-            .await
-            .expect("gateway: pg connect (dpop jti cache)");
-        compio::runtime::spawn(async move {
-            if let Err(e) = jti_conn.run().await {
-                tracing::error!(error = %e, "gateway/pg dpop-jti connection ended");
-            }
-        })
-        .detach();
-        let pg = zeroship_core::dpop::PgJtiCache::new(Arc::new(jti_client));
-        let dpop_jti_cache = zeroship_core::dpop::TieredJtiCache::with_pg(pg);
-
-        (Some(db_cfg), dpop_jti_cache)
+        Some(db_cfg)
     };
 
     // OIDC RP — services every `{app}.zeroship.ai` host. The
@@ -653,7 +633,7 @@ fn main() -> std::io::Result<()> {
     // refresh family never sits in PG in plaintext. Domain-separated by the
     // derive prefix; rotating the stash key rotates this key too (acceptable
     // pre-launch — a roll just forces re-login, which the anchor design
-    // already tolerates via Hydra invalid_grant → login_required).
+    // already tolerates via OP invalid_grant → login_required).
     let anchor_enc_key = {
         let seed = format!(
             "anchor-refresh-enc:{}",
@@ -675,8 +655,7 @@ fn main() -> std::io::Result<()> {
 
     let oidc_rp = Arc::new(oidc_rp::OidcRp::new(
         &auth_ui_url,
-        "gateway",
-        oidc_client_secret,
+        broker_secret,
         stash_signing_key_bytes,
     ));
 
@@ -702,7 +681,6 @@ fn main() -> std::io::Result<()> {
             worker_urls,
             poll_interval_secs: poll_interval,
             worker_key,
-            hydra_public_url,
             auth_ui_url,
             insecure_dev,
             trust_proxy,
@@ -719,7 +697,6 @@ fn main() -> std::io::Result<()> {
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp,
         db,
-        dpop_jti_cache: Arc::new(dpop_jti_cache),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
         signing_key,
@@ -794,7 +771,7 @@ fn main() -> std::io::Result<()> {
             )
             // auth-sdk Slice 1b-browser — the browser-facing auth HTTP
             // surface. Same mounting discipline (BEFORE the subdomain
-            // catch-all). `/authorize` 302s to Hydra (the one cross-site
+            // catch-all). `/authorize` 302s to OP (the one cross-site
             // hop); `/popup-callback` serves the same-origin relay page;
             // `/signout` revokes + clears (fixes the live bug).
             .service(
@@ -833,17 +810,26 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    static DEV_INSECURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn restore_env_var(key: &str, old: Option<std::ffi::OsString>) {
+        match old {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
     // S1: a stray `ZEROSHIP_DEV_INSECURE=1` in the environment MUST be
     // overridable from the CLI. `--dev-insecure=false` resolves to false.
     // NB: `GateCli` deliberately has no `Debug` (S2 — it holds raw secret
     // strings), so we can't `.expect()` the Ok arm; match instead.
     #[test]
     fn dev_insecure_cli_false_overrides_env_one() {
-        // Single-threaded test: env set + cleared within this fn.
-        // (Edition 2021 — `set_var`/`remove_var` are safe here.)
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
+        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
         let parsed = GateCli::try_parse_from(["zeroship-gate", "--dev-insecure=false"]);
-        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
 
         let Ok(cli) = parsed else {
             panic!("parse with explicit false should succeed");
@@ -854,9 +840,11 @@ mod tests {
 
     #[test]
     fn dev_insecure_env_one_enables_when_cli_absent() {
+        let _guard = DEV_INSECURE_ENV_LOCK.lock().expect("env lock");
+        let old = std::env::var_os("ZEROSHIP_DEV_INSECURE");
         std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
         let parsed = GateCli::try_parse_from(["zeroship-gate"]);
-        std::env::remove_var("ZEROSHIP_DEV_INSECURE");
+        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
 
         let Ok(cli) = parsed else {
             panic!("parse with env only should succeed");
@@ -923,33 +911,26 @@ mod tests {
     }
 
     #[test]
-    fn gateway_oidc_secret_rejects_missing_in_non_dev() {
-        let err = require_unless_dev(
-            "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-            "",
-            false,
+    fn gateway_broker_secret_rejects_short_material() {
+        let err = oidc_rp::BrokerSecret::from_bytes(b"short".to_vec()).unwrap_err();
+        assert!(err.contains("minimum is 32 bytes"), "{err}");
+    }
+
+    #[test]
+    fn gateway_broker_secret_rejects_dev_sentinel() {
+        let err = oidc_rp::BrokerSecret::from_bytes(
+            zeroship_core::auth::DEV_BROKER_MASTER_SECRET.to_vec(),
         )
         .unwrap_err();
-        assert!(err.contains("GATEWAY_OIDC_SECRET"), "{err}");
+        assert!(err.contains("dev sentinel"), "{err}");
     }
 
     #[test]
-    fn gateway_oidc_secret_allows_missing_in_insecure_dev() {
-        assert!(
-            require_unless_dev("GATEWAY_OIDC_SECRET / --gateway-oidc-secret", "", true).is_ok()
-        );
-    }
-
-    #[test]
-    fn gateway_oidc_secret_accepts_nonempty_in_non_dev() {
-        assert!(
-            require_unless_dev(
-                "GATEWAY_OIDC_SECRET / --gateway-oidc-secret",
-                "secret",
-                false
-            )
-            .is_ok()
-        );
+    fn gateway_broker_secret_accepts_strong_material() {
+        oidc_rp::BrokerSecret::from_bytes(
+            b"gateway-broker-secret-test-master-32-bytes".to_vec(),
+        )
+        .expect("strong broker master");
     }
 
     #[test]
@@ -1045,7 +1026,7 @@ mod tests {
     }
 
     // (d) `[secrets]` file tier — the gateway maps control_key/worker_key/
-    // database_url/gateway_oidc_secret/stash_signing_key through
+    // database_url/stash_signing_key through
     // `obtain_secret`. When the CLI/env value is empty, a `[secrets]` file
     // reference is used; when both are present, the CLI/env value WINS.
     // Asserted directly against the public `obtain_secret` (the exact helper

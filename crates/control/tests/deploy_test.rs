@@ -86,12 +86,14 @@ fn manifest_for(
         asset_version: 0,
         sourcemaps: HashMap::new(),
         auth: Default::default(),
+        net: Default::default(),
         metadata: ManifestMetadata {
             compiler: Some("test".into()),
             built_at: "2026-04-29T00:00:00Z".into(),
         },
         exports: None,
         migrations: Vec::new(),
+        runtime_descriptor: None,
     }
 }
 

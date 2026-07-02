@@ -5,7 +5,7 @@
 //! deletes the owner link, but `zeroship.apps` has no FK to users — so the app
 //! row (and its bundle/blobs in object storage) is never torn down. Auth has no
 //! call path to control and no access to the blob store, so cleanup lives here,
-//! where apps + the blob VFS + the per-app Hydra client are owned.
+//! where apps + the blob VFS + the native per-app OAuth client are owned.
 //!
 //! These run the REAL path: a real `Registry` (PG-backed), a real `LocalFs`
 //! VFS with a bundle written to disk, and the actual `cron::orphaned_app_reaper`
@@ -14,7 +14,7 @@
 //! All cases gate on `CONTROL_TEST_DB` / `PG_TEST_URL`; silent skip in dev.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use uuid::Uuid;
 
@@ -31,6 +31,11 @@ fn db_url() -> Option<String> {
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
+
+// These tests all exercise the production sweep against the same live test
+// database. Serialize them so one test's sweep cannot purge another test's
+// freshly inserted ownerless app before that test asserts its own report.
+static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn tmpdir(label: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
@@ -91,18 +96,15 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg,
-        // Unroutable: the per-app Hydra delete is best-effort, so a refused
+        // Unroutable: there are no worker calls on the DB-only delete path, so a refused
         // connection must NOT fail the purge. (Port 9 = discard.)
-        hydra_admin_url: "http://127.0.0.1:9".to_string(),
         app_base_domain: "zeroship.localhost".to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
-        hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-            "http://127.0.0.1:9",
-        )),
+        pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),
@@ -188,6 +190,7 @@ async fn reaper_deletes_ownerless_app_and_its_bundle() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "ownerless").await;
     let state = &fx.state;
 
@@ -235,6 +238,7 @@ async fn reaper_leaves_owned_app_untouched() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "owned").await;
     let state = &fx.state;
 
@@ -272,6 +276,7 @@ async fn reaper_never_touches_system_app() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "system").await;
     let state = &fx.state;
 
@@ -302,6 +307,7 @@ async fn reaper_respects_grace_window() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "grace").await;
     let state = &fx.state;
 
@@ -330,6 +336,7 @@ async fn purge_app_removes_db_row_and_vfs_blob() {
         eprintln!("skip: CONTROL_TEST_DB not set");
         return;
     };
+    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
     let fx = build_state(&url, "purge").await;
     let state = &fx.state;
 

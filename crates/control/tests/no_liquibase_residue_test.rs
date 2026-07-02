@@ -1,6 +1,6 @@
 //! Regression guard for T1: the control crate is migrated by `zeroship-migrate`
 //! (`db/migrations`, platform profile), NOT Liquibase. The schema-authority
-//! convergence moved the platform DB (control/auth/billing/oauth_hydra) off
+//! convergence moved the platform DB (control/auth/billing/auth-provider state) off
 //! Liquibase onto zeroship-migrate, but doc-comments and test/bench setup prose
 //! still pointed operators at the dead `docker run liquibase ... -v db/changelog`
 //! path. This test fails if that operational residue creeps back into the

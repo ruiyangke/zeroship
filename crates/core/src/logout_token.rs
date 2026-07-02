@@ -1,23 +1,21 @@
 //! OIDC Back-Channel Logout 1.0 `logout_token` JWT verifier.
 //!
-//! When a user signs out via hydra's `/oauth2/sessions/logout` endpoint,
-//! hydra POSTs a signed `logout_token` JWT to every RP's registered
-//! `backchannel_logout_uri`. The RP must verify the JWT and revoke the
-//! affected sessions.
+//! When a user signs out at the OP, it POSTs a signed `logout_token` JWT to
+//! every RP's registered `backchannel_logout_uri`. The RP must verify the JWT
+//! and revoke the affected sessions.
 //!
 //! This module owns the verification side of that contract. The
 //! signature-verification path reuses the existing [`JwksCache`] (with
 //! its 5-min TTL + on-failure refresh) from [`crate::oidc_verify`]; the
 //! BCL-specific claim checks (events marker, nonce-must-be-absent,
-//! sub/sid presence, iat freshness) live here.
+//! sub/sid presence, exp/iat freshness) live here.
 //!
 //! Why not call [`crate::oidc_verify::verify_id_token`] and re-parse?
 //! That function returns
 //! [`crate::oidc_verify::TokenClaims`], which requires `sub: String`
-//! and `exp: i64`. BCL `logout_token` JWTs do not require either claim
-//! (`sub` is optional — `sid` may stand alone — and `exp` SHOULD NOT
-//! be present per spec §2.4). So we do the JWT decode locally with a
-//! shape tailored to BCL.
+//! and `sub: String`. BCL `logout_token` JWTs do not require `sub`
+//! (`sid` may stand alone), so we do the JWT decode locally with a shape
+//! tailored to BCL.
 //!
 //! Spec: <https://openid.net/specs/openid-connect-backchannel-1_0.html>
 
@@ -32,6 +30,8 @@ use crate::oidc_verify::{JwksCache, OidcError};
 /// The OIDC BCL 1.0 `events` claim marker. Per §2.4 the `events` claim
 /// MUST contain exactly this key (with an empty object value).
 pub const BCL_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
+/// Recommended JWT `typ` for OIDC Back-Channel Logout tokens.
+pub const LOGOUT_TOKEN_TYP: &str = "logout+jwt";
 
 /// Maximum allowed skew between the JWT `iat` and the verifier's clock.
 /// Tokens older than this (or that claim to be issued from the future
@@ -44,7 +44,7 @@ const IAT_SKEW_SECS: i64 = 300;
 /// from an untrusted token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogoutToken {
-    /// Issuer — matches the configured hydra issuer URL.
+    /// Issuer — matches the configured OP issuer URL.
     pub iss: String,
     /// Audience. Per RFC 7519 this is either a string or an array of
     /// strings; we keep it as `Value` and let the signature-verification
@@ -52,6 +52,8 @@ pub struct LogoutToken {
     pub aud: serde_json::Value,
     /// Issue time (seconds since UNIX epoch).
     pub iat: i64,
+    /// Expiration time (seconds since UNIX epoch).
+    pub exp: i64,
     /// Unique token id — for replay defense at the RP. The verifier
     /// surfaces this so receivers can enforce one-shot use with
     /// [`LogoutJtiCache`].
@@ -63,8 +65,7 @@ pub struct LogoutToken {
     /// present.
     #[serde(default)]
     pub sub: Option<String>,
-    /// Session id (hydra-issued). Either `sub` or `sid` (or both) MUST
-    /// be present.
+    /// Session id. Either `sub` or `sid` (or both) MUST be present.
     #[serde(default)]
     pub sid: Option<String>,
     /// MUST NOT be present per BCL §2.4. If found, [`verify`] rejects
@@ -75,13 +76,12 @@ pub struct LogoutToken {
 
 /// Replay-cache retention for OIDC Back-Channel Logout `jti` values.
 ///
-/// BCL logout tokens commonly omit `exp` (the spec says they SHOULD NOT
-/// include it), so receivers need a bounded local memory window instead
-/// of deriving retention from token expiry. We retain a seen `jti` for
-/// 10 minutes: max(5 minutes of `iat` skew plus a reasonable 5 minute
-/// delivery window, 5 minutes minimum). This bounds memory while covering
-/// normal retry latency and prevents replayed captured tokens from
-/// repeatedly triggering revocation work.
+/// BCL logout tokens are short-lived, but receivers still need a local memory
+/// window for one-shot `jti` replay defense. We retain a seen `jti` for 10
+/// minutes: max(5 minutes of `iat` skew plus a reasonable 5 minute delivery
+/// window, 5 minutes minimum). This bounds memory while covering normal retry
+/// latency and prevents replayed captured tokens from repeatedly triggering
+/// revocation work.
 pub const LOGOUT_JTI_TTL_SECS: i64 = 600;
 
 /// Bounded in-process cache of OIDC BCL `logout_token` `jti` values.
@@ -134,6 +134,22 @@ impl LogoutJtiCache {
         }
         guard.insert(jti.to_string(), now_secs + ttl_secs);
         true
+    }
+
+    /// Return whether `jti` is already in the live replay window without marking
+    /// a new token consumed.
+    ///
+    /// This is used by receivers that can only burn a `jti` after downstream
+    /// processing succeeds: a transient processing failure must remain retryable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `Mutex` has been poisoned.
+    #[must_use]
+    pub fn contains(&self, jti: &str, now_secs: i64) -> bool {
+        let mut guard = self.inner.lock().expect("poisoned");
+        guard.retain(|_, expires_at| *expires_at > now_secs);
+        guard.contains_key(jti)
     }
 
     /// Current live entry count.
@@ -194,9 +210,8 @@ pub enum LogoutError {
 ///    in the shared [`JwksCache`]. On a cache miss (or first-attempt
 ///    verify failure), the cache is force-refreshed once and the
 ///    lookup retried.
-/// 2. Verify the signature, `iss`, and `aud` via `jsonwebtoken::decode`.
-///    `exp` is NOT required (BCL forbids it); the standard library's
-///    default `validate_exp` is disabled accordingly.
+/// 2. Verify the EdDSA signature, `iss`, `aud`, and `exp` via
+///    `jsonwebtoken::decode`.
 /// 3. Run the BCL-specific claim checks:
 ///    - `nonce` MUST NOT be present
 ///    - `events` MUST be exactly `{ BCL_EVENT: {} }`
@@ -221,22 +236,30 @@ pub async fn verify(
         .clone()
         .ok_or_else(|| OidcError::DecodeHeader("no kid".into()))?;
     let alg = header.alg;
+    if alg != jsonwebtoken::Algorithm::EdDSA {
+        return Err(LogoutError::Verify(OidcError::Verify(
+            "logout_token alg must be EdDSA".into(),
+        )));
+    }
 
-    // 2. Build the jsonwebtoken Validation. BCL §2.4: tokens have `iat`
-    //    but SHOULD NOT have `exp`, so we drop `exp` from the required
-    //    set and turn off expiry validation. We keep iss/aud validation
-    //    enabled — that's what the signed-token contract requires.
+    // 2. Build the jsonwebtoken Validation. We keep iss/aud/exp validation
+    //    enabled and require the registered BCL claims below.
     let mut validation = Validation::new(alg);
+    validation.algorithms = vec![jsonwebtoken::Algorithm::EdDSA];
     validation.set_issuer(&[expected_iss]);
     validation.set_audience(&[expected_aud]);
-    validation.validate_exp = false;
-    // The default required set includes "exp"; drop it (BCL forbids `exp`).
-    // Keep "iss" and "aud" — those are still mandatory.
     validation.required_spec_claims = {
-        let mut s = HashSet::new();
-        s.insert("iss".to_string());
-        s.insert("aud".to_string());
-        s
+        [
+            "iss",
+            "aud",
+            "exp",
+            "iat",
+            "jti",
+            "events",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>()
     };
 
     // Closure that runs the actual decode against a key set — used twice
@@ -420,6 +443,7 @@ mod tests {
             "iss": "https://auth.zeroship.ai/",
             "aud": "gateway",
             "iat": now,
+            "exp": now + 120,
             "jti": "jti-abc-123",
             "events": { BCL_EVENT: {} },
             "sub": "usr_alice",
@@ -599,7 +623,7 @@ mod tests {
         // candidates (caller rejects).
         let (key, _cache) = make_key();
 
-        // String aud (Hydra's per-app client_id case).
+        // String aud (per-app client_id case).
         let mut c = happy_claims();
         c["aud"] = json!("oac_myapp");
         let token = sign(&key, &c);

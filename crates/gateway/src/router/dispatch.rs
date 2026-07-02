@@ -270,9 +270,8 @@ pub async fn handle_subdomain(
     body: Bytes,
 ) -> HttpResponse {
     // `auth.zeroship.ai` is a platform-internal host, not a creator app.
-    // The gateway proxies OIDC protocol endpoints (`/oauth2/*`,
-    // `/.well-known/*`, `/userinfo`) to Ory Hydra; everything else
-    // (login UI, OAuth2 consent handlers, webhooks) goes to crates/auth.
+    // The gateway proxies the self-contained OP protocol surface under
+    // `/oauth2/*`, plus the login UI and webhook surfaces, to `crates/auth`.
     if is_auth_host(&req) {
         return route_auth_host(req, state, body).await;
     }
@@ -304,35 +303,28 @@ pub async fn handle_subdomain(
 /// forwarded to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthUpstream {
-    /// OIDC protocol endpoints implemented by Ory Hydra.
-    Hydra,
-    /// Login UI, OAuth2 consent handlers, and webhooks — implemented
-    /// by `crates/auth`.
+    /// Self-contained OP endpoints, login UI, OAuth2 consent handlers,
+    /// and webhooks — implemented by `crates/auth`.
     Auth,
 }
 
 /// Classify an inbound `auth.zeroship.ai` path. The protocol endpoints
-/// listed here are the public hydra contract:
+/// listed here are the self-contained OP contract implemented by `crates/auth`:
 ///
-///   * `/oauth2/auth`, `/oauth2/token`, `/oauth2/revoke`, …
-///   * `/.well-known/openid-configuration`, `/.well-known/jwks.json`
-///   * `/userinfo`
+///   * `/oauth2/.well-known/openid-configuration`, `/oauth2/.well-known/jwks.json`
+///   * `/oauth2/userinfo`
+///   * `/oauth2/authorize`, `/oauth2/token`, `/oauth2/revoke`
+///   * `/oauth2/device/authorization`, `/oauth2/logout`
 ///
-/// Everything else is handled by `crates/auth` (login HTML, consent
-/// callbacks, signup, password reset, …).
+/// Everything else is handled by `crates/auth` (login HTML, consent callbacks,
+/// signup, password reset, …).
 pub(crate) fn classify_auth_path(path: &str) -> AuthUpstream {
-    if path.starts_with("/oauth2/")
-        || path.starts_with("/.well-known/")
-        || path == "/userinfo"
-    {
-        AuthUpstream::Hydra
-    } else {
-        AuthUpstream::Auth
-    }
+    let _ = path;
+    AuthUpstream::Auth
 }
 
 /// Platform-internal auth hosts. A request whose Host matches one of
-/// these EXACTLY is routed to the internal auth/Hydra upstream rather
+/// these EXACTLY is routed to the internal auth upstream rather
 /// than treated as a creator app. Production is `auth.zeroship.ai`;
 /// `auth.zeroship.localhost` is the dev/compose hostname.
 const AUTH_HOSTS: &[&str] = &["auth.zeroship.ai", "auth.zeroship.localhost"];
@@ -343,7 +335,7 @@ const AUTH_HOSTS: &[&str] = &["auth.zeroship.ai", "auth.zeroship.localhost"];
 /// loose prefix/substring comparison would let a crafted Host —
 /// `auth.zeroship.ai.evil.com` (suffix), `authx.zeroship.ai` (label
 /// prefix-extension), `evil-auth.zeroship.ai` (substring) — reach the
-/// internal auth/Hydra routing it must never see (finding P2-A2).
+/// internal auth routing it must never see (finding P2-A2).
 fn is_auth_host(req: &HttpRequest) -> bool {
     let Some(host_hdr) = req.headers().get("host").and_then(|v| v.to_str().ok()) else {
         return false;
@@ -359,10 +351,8 @@ async fn route_auth_host(
     body: Bytes,
 ) -> HttpResponse {
     let path = req.uri().path();
-    let upstream_base = match classify_auth_path(path) {
-        AuthUpstream::Hydra => state.config.hydra_public_url.as_str(),
-        AuthUpstream::Auth => state.config.auth_ui_url.as_str(),
-    };
+    let _upstream = classify_auth_path(path);
+    let upstream_base = state.config.auth_ui_url.as_str();
 
     let path_and_query = req
         .uri()
@@ -370,7 +360,7 @@ async fn route_auth_host(
         .map(|p| p.as_str())
         .unwrap_or("/");
 
-    // SEC-3: the auth/Hydra upstream keys per-IP rate limits on the forwarded
+    // SEC-3: the auth upstream keys per-IP rate limits on the forwarded
     // client address. Scrub any client-supplied `X-Forwarded-For` /
     // `Forwarded` / `X-Real-IP` and inject a SINGLE authoritative
     // `X-Forwarded-For` derived from the gateway's own trust_proxy-aware
@@ -396,7 +386,7 @@ async fn route_auth_host(
 }
 
 /// Inbound client-IP spoofing vectors the gateway MUST strip before forwarding
-/// to the trusted auth/Hydra upstream (SEC-3). The auth service derives its
+/// to the trusted auth upstream (SEC-3). The auth service derives its
 /// per-IP rate-limit bucket key from a forwarded client address; if a creator
 /// app's request could carry these verbatim, an attacker would rotate the
 /// value to evade credential-stuffing / email-amplification limits and mint an
@@ -404,7 +394,7 @@ async fn route_auth_host(
 /// case-insensitive (HTTP header names are case-insensitive).
 const CLIENT_IP_SPOOF_HEADERS: &[&str] = &["x-forwarded-for", "forwarded", "x-real-ip"];
 
-/// Build the header set forwarded to the auth/Hydra upstream: drop any
+/// Build the header set forwarded to the auth upstream: drop any
 /// client-supplied forwarding headers ([`CLIENT_IP_SPOOF_HEADERS`]) and inject
 /// a SINGLE authoritative `X-Forwarded-For` carrying the real socket peer.
 ///
@@ -434,7 +424,7 @@ fn build_auth_upstream_headers(
     out
 }
 
-/// The authoritative client IP the gateway forwards to the auth/Hydra upstream
+/// The authoritative client IP the gateway forwards to the auth upstream
 /// (SEC-3). Reuses the gateway's own [`client_ip`] policy so the auth service
 /// keys its per-IP rate-limit buckets on the SAME address the gateway keys its
 /// own limits on: the immediate socket peer when the gateway is the edge, or
@@ -677,7 +667,7 @@ async fn execute_resource_tree(
     //    checks will arrive with the auth tier.
     //
     //    On miss for an HTML navigation we kick off the OIDC dance via
-    //    a 302 → hydra; API clients see a 401 with a `WWW-Authenticate`
+    //    a 302 → the platform OP; API clients see a 401 with a `WWW-Authenticate`
     //    challenge so they can prompt the user out-of-band.
     let request_id = Uuid::new_v4();
     let user_header_from_gate =
@@ -693,7 +683,11 @@ async fn execute_resource_tree(
         {
             AuthOutcome::Allowed { user_header } => user_header,
             AuthOutcome::Unauthenticated => {
-                return unauthenticated_response(&req, &state);
+                return unauthenticated_response(
+                    &req,
+                    &state,
+                    compiled_route.entry.oauth_client_id.as_deref(),
+                );
             }
             AuthOutcome::ClientNotProvisioned => {
                 return client_not_provisioned_response();
@@ -1498,7 +1492,10 @@ async fn handle_dispatch(
     // already short-circuited by `auth_satisfied` upstream, so they
     // never reach the worker.) API clients still see the 401 verbatim.
     if response.status() == ntex::http::StatusCode::UNAUTHORIZED && wants_html(&req) {
-        return start_oidc_redirect(&req, state);
+        return match route.oauth_client_id.as_deref() {
+            Some(client_id) => start_oidc_redirect(&req, state, client_id),
+            None => client_not_provisioned_response(),
+        };
     }
 
     // Add response headers.
@@ -1540,14 +1537,21 @@ fn wants_html(req: &HttpRequest) -> bool {
         .is_some_and(|v| v.contains("text/html"))
 }
 
-/// Build the unauthenticated response: 302 → `auth.zeroship.ai/oauth2/auth`
+/// Build the unauthenticated response: 302 → `auth.zeroship.ai/authorize`
 /// for HTML navigations, 401 with a `WWW-Authenticate` challenge for
 /// API clients. Sets the `__Host-zs_oidc_stash` cookie carrying PKCE,
 /// state, and the original path so `/__zeroship/auth/callback` can finish
 /// the dance.
-fn unauthenticated_response(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+fn unauthenticated_response(
+    req: &HttpRequest,
+    state: &Arc<GateState>,
+    oauth_client_id: Option<&str>,
+) -> HttpResponse {
     if wants_html(req) {
-        start_oidc_redirect(req, state)
+        match oauth_client_id {
+            Some(client_id) => start_oidc_redirect(req, state, client_id),
+            None => client_not_provisioned_response(),
+        }
     } else {
         HttpResponse::Unauthorized()
             .header("www-authenticate", "Bearer realm=\"zeroship\"")
@@ -1611,7 +1615,7 @@ fn insufficient_scope_response(required: &[String]) -> HttpResponse {
 
 /// Handle `/__zeroship/auth/callback` on any `{app}.zeroship.ai` host. Reads
 /// the signed stash cookie + `code`/`state` query, exchanges with
-/// hydra via `OidcRp::finish_callback`, persists a row in
+/// op via `OidcRp::finish_callback`, persists a row in
 /// `zeroship.gateway_sessions`, sets the per-origin
 /// `__Host-zeroship_app_session` cookie, clears the stash cookie, and 302s
 /// back to the original path the user was trying to reach when the
@@ -1652,17 +1656,19 @@ async fn handle_auth_callback(
     };
     let sector_identifier = route.entry.sector_identifier.clone();
 
-    // 1. Parse query (code + state). Hydra may also send `error=...`
+    // 1. Parse query (code + state). The OP may also send `error=...`
     //    for user-denied consent; surface it directly.
     let query_str = req.uri().query().unwrap_or("");
     let mut code: Option<String> = None;
     let mut state_param: Option<String> = None;
     let mut oauth_error: Option<String> = None;
+    let mut issuer_param: Option<String> = None;
     for (k, v) in url::form_urlencoded::parse(query_str.as_bytes()) {
         match k.as_ref() {
             "code" => code = Some(v.into_owned()),
             "state" => state_param = Some(v.into_owned()),
             "error" => oauth_error = Some(v.into_owned()),
+            "iss" => issuer_param = Some(v.into_owned()),
             _ => {}
         }
     }
@@ -1675,6 +1681,14 @@ async fn handle_auth_callback(
             "missing code or state query parameter",
         );
     };
+    // RFC 9207 issuer identification. The OP emits `iss` on authorize
+    // responses; tolerate absence for mixed-version local/dev flows, but reject
+    // any present mismatch before consuming the code.
+    if let Some(issuer_param) = issuer_param.as_deref() {
+        if issuer_param != state.oidc_rp.issuer {
+            return render_callback_error(state.config.insecure_dev, "issuer mismatch");
+        }
+    }
 
     // 2. Read the signed stash cookie.
     let cookie_header = req
@@ -1686,10 +1700,10 @@ async fn handle_auth_callback(
         return render_callback_error(state.config.insecure_dev, "missing stash cookie");
     };
 
-    // 3. Exchange the code with hydra + verify the ID token.
+    // 3. Exchange the code with the OP + verify the ID token.
     let (claims, original_path, granted_scopes) = match state
         .oidc_rp
-        .finish_callback(&code, &state_param, &stash)
+        .finish_callback(&code, &state_param, &stash, &client_id)
         .await
     {
         Ok(p) => p,
@@ -1734,6 +1748,7 @@ async fn handle_auth_callback(
             avatar_url: claims.picture.as_deref(),
             email_verified: claims.email_verified.unwrap_or(false),
             granted_scopes: &granted_scopes,
+            sid: claims.sid.as_deref(),
             // Carry the OIDC auth_time/amr onto the cookie session so the SPA
             // projection + step-up gate read them off this row (BFF §2.2/§5.3).
             auth_time: claims.auth_time,
@@ -1783,7 +1798,7 @@ async fn handle_auth_callback(
 
     // 6. 302 back to the original path, set the signed session cookie, clear
     //    the stash cookie. Two `Set-Cookie` headers on one response is
-    //    valid per RFC 6265 §3 (and is how hydra emits its own cookies).
+    //    valid per RFC 6265 §3 (and is how op emits its own cookies).
     let mut builder = HttpResponse::Found();
     builder.header("location", sanitize_oidc_original_path(&original_path));
     builder.header("set-cookie", session_cookie);
@@ -1795,7 +1810,7 @@ async fn handle_auth_callback(
 }
 
 /// Render the failed-callback page. Generic on purpose — leaking
-/// hydra's error string to the user would be a noisy debugging tool
+/// op's error string to the user would be a noisy debugging tool
 /// for an attacker. The structured error is already in the gateway log
 /// at warn / error.
 fn render_callback_error(_insecure_dev: bool, msg: &str) -> HttpResponse {
@@ -1813,13 +1828,14 @@ fn render_callback_error(_insecure_dev: bool, msg: &str) -> HttpResponse {
 fn oidc_callback_public_error(e: &oidc_rp::OidcRpError) -> &'static str {
     match e {
         oidc_rp::OidcRpError::UpstreamUnavailable(_) => {
-            // Hydra is browning out (breaker open / bounded timeout). Tell the
+            // The OP is browning out (breaker open / bounded timeout). Tell the
             // user it's transient rather than implying their credentials are
             // bad — the §8.7 fast-fail surfaces here on the cookie flow.
             "sign-in is temporarily unavailable, please try again shortly"
         }
         oidc_rp::OidcRpError::StashInvalid
         | oidc_rp::OidcRpError::StateMismatch
+        | oidc_rp::OidcRpError::ClientMismatch
         | oidc_rp::OidcRpError::TokenExchange(_)
         | oidc_rp::OidcRpError::VerifyIdToken(_) => "sign-in could not be completed",
     }
@@ -1836,10 +1852,10 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Build the 302 → hydra redirect that kicks off the OIDC dance.
+/// Build the 302 → op redirect that kicks off the OIDC dance.
 /// Stash cookie carries the PKCE verifier + state + original_path so
 /// the callback can resume.
-fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpResponse {
+fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>, client_id: &str) -> HttpResponse {
     let original_path = req
         .uri()
         .path_and_query()
@@ -1861,7 +1877,11 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>) -> HttpRespons
 
     let (auth_url, stash) = state
         .oidc_rp
-        .build_authorize_redirect(&original_path, &redirect_uri);
+        .build_authorize_redirect(
+            client_id,
+            &original_path,
+            &redirect_uri,
+        );
 
     let mut builder = HttpResponse::Found();
     builder.header("location", auth_url);
@@ -1918,6 +1938,13 @@ mod tests {
     use zeroship_bundle::{
         AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, ResourceEntry,
     };
+
+    fn test_broker_secret() -> crate::oidc_rp::BrokerSecret {
+        crate::oidc_rp::BrokerSecret::from_bytes(
+            b"gateway-dispatch-test-broker-master-32-bytes".to_vec(),
+        )
+        .expect("broker secret")
+    }
 
     fn manifest_with_resources(resources: HashMap<String, ResourceEntry>) -> Manifest {
         Manifest {
@@ -2020,7 +2047,6 @@ mod tests {
                 worker_urls: vec![],
                 poll_interval_secs: 5,
                 worker_key: String::new(),
-                hydra_public_url: String::new(),
                 auth_ui_url: String::new(),
                 insecure_dev: true,
                 trust_proxy: false,
@@ -2037,12 +2063,10 @@ mod tests {
             idempotency_store: Arc::new(crate::idempotency::InMemoryIdempotencyStore::new()),
             oidc_rp: Arc::new(crate::oidc_rp::OidcRp::new(
                 "http://auth.test",
-                "gateway",
-                "test-secret",
+                test_broker_secret(),
                 b"test-stash-key-32-bytes-long----".to_vec(),
             )),
             db: None,
-            dpop_jti_cache: Arc::new(zeroship_core::dpop::TieredJtiCache::default()),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             revocation_cache: Arc::new(zeroship_core::wrapper_revocation::RevocationCache::new()),
             signing_key: None,
@@ -2389,7 +2413,7 @@ mod tests {
 
     #[test]
     fn auth_upstream_headers_drop_spoofed_client_ip_and_inject_peer() {
-        // SEC-3: forwarding to the auth/Hydra upstream must strip ANY
+        // SEC-3: forwarding to the auth upstream must strip ANY
         // client-supplied X-Forwarded-For / Forwarded / X-Real-IP and inject a
         // single authoritative X-Forwarded-For from the real socket peer.
         // Pre-fix the helper copies headers verbatim and injects nothing → the
@@ -3065,35 +3089,43 @@ mod tests {
     // ----------------------------------------------------------------------
 
     #[test]
-    fn classify_auth_path_oauth2_routes_to_hydra() {
-        assert_eq!(classify_auth_path("/oauth2/auth"), AuthUpstream::Hydra);
-        assert_eq!(classify_auth_path("/oauth2/token"), AuthUpstream::Hydra);
-        assert_eq!(classify_auth_path("/oauth2/revoke"), AuthUpstream::Hydra);
+    fn classify_auth_path_oauth2_routes_to_self_contained_op() {
+        assert_eq!(classify_auth_path("/oauth2/authorize"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/oauth2/token"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/oauth2/revoke"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/oauth2/logout"), AuthUpstream::Auth);
         assert_eq!(
-            classify_auth_path("/oauth2/sessions/logout"),
-            AuthUpstream::Hydra
+            classify_auth_path("/oauth2/.well-known/openid-configuration"),
+            AuthUpstream::Auth
+        );
+        assert_eq!(
+            classify_auth_path("/oauth2/.well-known/jwks.json"),
+            AuthUpstream::Auth
         );
     }
 
     #[test]
-    fn classify_auth_path_well_known_routes_to_hydra() {
+    fn classify_auth_path_well_known_routes_to_self_contained_op() {
         assert_eq!(
             classify_auth_path("/.well-known/openid-configuration"),
-            AuthUpstream::Hydra
+            AuthUpstream::Auth
         );
         assert_eq!(
             classify_auth_path("/.well-known/jwks.json"),
-            AuthUpstream::Hydra
+            AuthUpstream::Auth
         );
     }
 
     #[test]
-    fn classify_auth_path_userinfo_routes_to_hydra() {
-        assert_eq!(classify_auth_path("/userinfo"), AuthUpstream::Hydra);
+    fn classify_auth_path_userinfo_routes_to_self_contained_op() {
+        assert_eq!(classify_auth_path("/userinfo"), AuthUpstream::Auth);
     }
 
     #[test]
     fn classify_auth_path_ui_and_callbacks_route_to_auth() {
+        assert_eq!(classify_auth_path("/authorize"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/token"), AuthUpstream::Auth);
+        assert_eq!(classify_auth_path("/revoke"), AuthUpstream::Auth);
         assert_eq!(classify_auth_path("/login"), AuthUpstream::Auth);
         assert_eq!(classify_auth_path("/signup"), AuthUpstream::Auth);
         assert_eq!(classify_auth_path("/consent"), AuthUpstream::Auth);
@@ -3109,7 +3141,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    // is_auth_host — the Host header that routes to internal auth/Hydra
+    // is_auth_host — the Host header that routes to internal auth
     // MUST be an anchored, exact match. A loose prefix/substring match
     // lets a crafted Host (`auth.zeroship.ai.evil.com`, `authx.zeroship.ai`,
     // `evil-auth.zeroship.ai`) reach the platform-internal auth upstream.
@@ -3191,14 +3223,14 @@ mod tests {
     /// `unauthenticated_response` returns 401+WWW-Authenticate for API
     /// callers (no `Accept: text/html`). This is the contract that
     /// lets `fetch()` callers surface their own login UI instead of
-    /// following a 302 into hydra they can't render.
+    /// following a 302 into op they can't render.
     #[test]
     fn unauthenticated_response_returns_401_for_api_clients() {
         let req = ntex::web::test::TestRequest::default()
             .header("accept", "application/json")
             .to_http_request();
         let state = build_idempotency_state();
-        let resp = unauthenticated_response(&req, &state);
+        let resp = unauthenticated_response(&req, &state, Some("oac_myapp"));
         assert_eq!(resp.status(), ntex::http::StatusCode::UNAUTHORIZED);
         let wa = resp
             .headers()
@@ -3256,19 +3288,19 @@ mod tests {
         );
     }
 
-    /// HTML navigations get a 302 → hydra with the stash cookie set.
+    /// HTML navigations get a 302 → op with the stash cookie set.
     /// The redirect target carries the gateway's client_id, the PKCE
     /// challenge, and the per-app `redirect_uri` derived from the Host
     /// header.
     #[test]
-    fn unauthenticated_response_redirects_html_clients_to_hydra() {
+    fn unauthenticated_response_redirects_html_clients_to_op() {
         let req = ntex::web::test::TestRequest::default()
             .header("accept", "text/html")
             .header("host", "myapp.zeroship.localhost")
             .uri("/dashboard?welcome=true")
             .to_http_request();
         let state = build_idempotency_state();
-        let resp = unauthenticated_response(&req, &state);
+        let resp = unauthenticated_response(&req, &state, Some("oac_myapp"));
         assert_eq!(resp.status(), ntex::http::StatusCode::FOUND);
         let location = resp
             .headers()
@@ -3276,10 +3308,10 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         assert!(
-            location.contains("/oauth2/auth?"),
-            "location must point at hydra's /oauth2/auth; got {location:?}"
+            location.contains("/authorize?"),
+            "location must point at the OP's /authorize; got {location:?}"
         );
-        assert!(location.contains("client_id=gateway"));
+        assert!(location.contains("client_id=oac_myapp"));
         assert!(location.contains("code_challenge="));
         // `redirect_uri` is the per-host callback path; insecure_dev=true
         // in the test fixture, so scheme is http.
@@ -3341,7 +3373,7 @@ mod tests {
     #[test]
     fn oidc_callback_token_exchange_error_is_generic() {
         let err = oidc_rp::OidcRpError::TokenExchange(
-            "HTTP 500: hydra says postgres://internal".into(),
+            "HTTP 500: op says postgres://internal".into(),
         );
         assert_eq!(
             oidc_callback_public_error(&err),

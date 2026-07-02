@@ -1,12 +1,12 @@
 //! OIDC Relying Party module for the gateway.
 //!
-//! Each hosted creator app on `{app}.zeroship.ai` is served by the same
-//! `gateway` OIDC client registered with hydra; the gateway runs the
-//! authorize-redirect dance and code exchange on the creator app's behalf
-//! (per proposal §2.2 and §10.2). After a successful exchange the
-//! gateway mints its own per-origin app session cookie
-//! (`__Host-zeroship_app_session`) — the ID token from hydra never reaches the
-//! creator app or the browser.
+//! Each hosted creator app on `{app}.zeroship.ai` has a per-app `oac_` OAuth
+//! client. The gateway brokers the authorize-redirect dance and code exchange
+//! on the creator app's behalf, deriving the per-app broker secret from the
+//! platform broker master for token endpoint authentication. After a successful
+//! exchange the gateway mints its own per-origin app session cookie
+//! (`__Host-zeroship_app_session`) — the OP ID token never reaches the creator
+//! app or the browser.
 //!
 //! Wiring into the dispatch pipeline lives in U5 — the gateway's
 //! dispatch handler calls `OidcRp::build_authorize_redirect` on
@@ -16,84 +16,101 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use zeroship_core::auth::hmac_sha256;
+use zeroship_core::auth::{derive_broker_secret, hmac_sha256, validate_broker_master};
 use zeroship_core::oidc_verify::{verify_id_token, JwksCache, OidcError, TokenClaims};
 // `CachedKey` is referenced in `verify_access_jwt`'s closure type below.
 use zeroship_core::pkce::{generate_verifier, s256_challenge};
 
+/// Validated platform broker master secret. `Debug` deliberately redacts the
+/// raw bytes because `OidcRp` is frequently held inside wider gateway state.
+#[derive(Clone)]
+pub struct BrokerSecret(Vec<u8>);
+
+impl std::fmt::Debug for BrokerSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BrokerSecret").field(&"<redacted>").finish()
+    }
+}
+
+impl BrokerSecret {
+    /// Validate and store raw broker master-secret bytes.
+    ///
+    /// The bytes must be read exactly the same way by auth and gateway; do not
+    /// trim or normalize the file contents here.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
+        validate_broker_master(&bytes)?;
+        Ok(Self(bytes))
+    }
+
+    fn derive_client_secret(&self, client_id: &str) -> String {
+        derive_broker_secret(&self.0, client_id)
+    }
+}
+
 /// A configured OIDC relying party for the gateway, parameterised by the
-/// auth UI/OIDC upstream URL, the shared gateway client credentials, and
-/// the signing key used to MAC the per-request `__Host-zs_oidc_stash`
-/// cookie.
+/// auth UI/OIDC upstream URL, the broker master secret used to derive per-app
+/// client secrets, and the signing key used to MAC the per-request
+/// `__Host-zs_oidc_stash` cookie.
 #[derive(Debug, Clone)]
 pub struct OidcRp {
     /// Auth service UI base URL (e.g. `https://auth.zeroship.ai`).
-    /// This is the URL the gateway actually dials for `/oauth2/auth`,
-    /// `/oauth2/token`, and JWKS — it must be reachable from the gateway
-    /// process. In tests it points at a loopback auth/Hydra surface; in
-    /// prod it is the public DNS name.
+    /// The OP protocol surface is derived by appending `/oauth2`; this base
+    /// must be reachable from the gateway process.
     pub auth_ui_url: String,
-    /// Expected `iss` claim in ID tokens issued by hydra. Per
-    /// `ops/hydra.yaml::urls.self.issuer` hydra always emits its
-    /// configured public URL with a trailing slash, regardless of which
-    /// host the RP dialled to obtain the token. In tests this can be
-    /// overridden separately from `auth_ui_url` (which may point at
-    /// loopback) — see [`OidcRp::with_issuer`].
+    /// Expected `iss` claim in ID tokens issued by the platform OP. Defaults
+    /// to `{auth_ui_url}/oauth2`, byte-identical to the self-contained OP's
+    /// issuer stamp. In tests this can be overridden separately from
+    /// `auth_ui_url` — see [`OidcRp::with_issuer`].
     pub issuer: String,
-    /// `OAuth2` `client_id` registered with hydra (currently `"gateway"`).
-    pub client_id: String,
-    /// `OAuth2` `client_secret` for confidential client auth at `/oauth2/token`.
-    pub client_secret: String,
+    /// Platform broker master secret used to derive per-app client secrets for
+    /// brokered `oac_` clients.
+    broker_secret: BrokerSecret,
     /// JWKS cache — shared with other RPs in the same gateway process.
     pub jwks: Arc<JwksCache>,
     /// HMAC-SHA256 key used to sign the `__Host-zs_oidc_stash` cookie body.
     /// Must be at least 32 random bytes in prod.
     pub stash_signing_key: Vec<u8>,
-    /// Shared circuit breaker for ALL outbound Hydra token/introspect/revoke
-    /// calls (auth-sdk §8.7, round-6 MAJOR #3). `Arc`-shared so a Hydra
-    /// brownout observed on one ntex worker thread trips the breaker for
-    /// every thread — the reused `cyper::Client` itself is per-worker-thread
-    /// (`!Send` in practice; see [`crate::hydra_client`]), but the breaker
-    /// state is one-per-process. When open, every Hydra call fast-fails with
-    /// `HydraError::Open` (→ `503 upstream_unavailable`) instead of opening a
+    /// Shared circuit breaker for ALL outbound OP token/revoke calls
+    /// (auth-sdk §8.7, round-6 MAJOR #3). `Arc`-shared so an OP brownout
+    /// observed on one ntex worker thread trips the breaker for every thread —
+    /// the reused `cyper::Client` itself is per-worker-thread (`!Send` in
+    /// practice; see [`crate::op_client`]), but the breaker state is
+    /// one-per-process. When open, every OP call fast-fails with
+    /// `OpError::Open` (→ `503 upstream_unavailable`) instead of opening a
     /// fresh connection into the brownout.
-    pub breaker: Arc<crate::hydra_client::CircuitBreaker>,
-    /// Bounded per-call timeout for every outbound Hydra request. A hung
-    /// Hydra returns a fast `HydraError::Timeout` (counted as a breaker
+    pub breaker: Arc<crate::op_client::CircuitBreaker>,
+    /// Bounded per-call timeout for every outbound OP request. A hung OP
+    /// returns a fast `OpError::Timeout` (counted as a breaker
     /// failure) rather than an unbounded await pinning a connection.
-    pub hydra_timeout: std::time::Duration,
+    pub op_timeout: std::time::Duration,
 }
 
 impl OidcRp {
-    /// Construct a new RP. Caller supplies the auth UI/OIDC upstream URL,
-    /// the `OAuth2` client credentials registered for the gateway, and
-    /// the stash signing key. The JWKS cache is derived from
-    /// `auth_ui_url` by appending `/.well-known/jwks.json`. The expected
-    /// ID-token `iss` defaults to `auth_ui_url` with a trailing slash;
-    /// override via
-    /// [`OidcRp::with_issuer`] when the dial-URL and issuer string
-    /// differ (e.g. loopback hydra during tests).
+    /// Construct a new RP. Caller supplies the auth UI/OIDC upstream URL, the
+    /// validated platform broker secret, and the stash signing key. The JWKS
+    /// cache is derived from `{auth_ui_url}/oauth2/.well-known/jwks.json`.
+    /// The expected ID-token `iss` defaults to `{auth_ui_url}/oauth2`; override via
+    /// [`OidcRp::with_issuer`] when the dial-URL and issuer string differ
+    /// (e.g. loopback tests).
     pub fn new(
         auth_ui_url: impl Into<String>,
-        client_id: impl Into<String>,
-        client_secret: impl Into<String>,
+        broker_secret: BrokerSecret,
         stash_signing_key: impl Into<Vec<u8>>,
     ) -> Self {
         let auth_ui_url = auth_ui_url.into();
+        let issuer = op_base_url(&auth_ui_url);
         let jwks_url = format!(
             "{}/.well-known/jwks.json",
-            auth_ui_url.trim_end_matches('/')
+            issuer
         );
-        let issuer = format!("{}/", auth_ui_url.trim_end_matches('/'));
         Self {
             auth_ui_url,
             issuer,
-            client_id: client_id.into(),
-            client_secret: client_secret.into(),
+            broker_secret,
             jwks: Arc::new(JwksCache::new(jwks_url)),
             stash_signing_key: stash_signing_key.into(),
-            breaker: Arc::new(crate::hydra_client::CircuitBreaker::default()),
-            hydra_timeout: crate::hydra_client::DEFAULT_HYDRA_TIMEOUT,
+            breaker: Arc::new(crate::op_client::CircuitBreaker::default()),
+            op_timeout: crate::op_client::DEFAULT_OP_TIMEOUT,
         }
     }
 
@@ -101,36 +118,38 @@ impl OidcRp {
     /// breaker; production uses the [`CircuitBreaker::default`] from
     /// [`OidcRp::new`]).
     ///
-    /// [`CircuitBreaker::default`]: crate::hydra_client::CircuitBreaker::default
+    /// [`CircuitBreaker::default`]: crate::op_client::CircuitBreaker::default
     #[must_use]
-    pub fn with_breaker(mut self, breaker: Arc<crate::hydra_client::CircuitBreaker>) -> Self {
+    pub fn with_breaker(mut self, breaker: Arc<crate::op_client::CircuitBreaker>) -> Self {
         self.breaker = breaker;
         self
     }
 
-    /// Override the bounded per-call Hydra timeout (tests use a short value
+    /// Override the bounded per-call OP timeout (tests use a short value
     /// to exercise the timeout→breaker-failure path quickly).
     #[must_use]
-    pub fn with_hydra_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.hydra_timeout = timeout;
+    pub fn with_op_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.op_timeout = timeout;
         self
     }
 
     /// Override the expected ID-token `iss` claim. Used when the
-    /// network-reachable auth/Hydra URL (`auth_ui_url`) and the logical
-    /// issuer hydra emits in ID tokens are not the same string — e.g.
-    /// in integration tests against a loopback hydra that's configured
-    /// with `urls.self.issuer: https://auth.zeroship.ai/`.
+    /// network-reachable auth/OP URL (`auth_ui_url`) and the logical issuer the
+    /// OP emits in ID tokens are not the same string.
     #[must_use]
     pub fn with_issuer(mut self, issuer: impl Into<String>) -> Self {
         self.issuer = issuer.into();
         self
     }
 
-    /// Build the `/oauth2/auth` redirect URL + the signed stash cookie
+    fn op_base_url(&self) -> String {
+        op_base_url(&self.auth_ui_url)
+    }
+
+    /// Build the `/authorize` redirect URL + the signed stash cookie
     /// body. `original_path` is the request path the user was trying to
     /// reach; `redirect_uri` is the per-app callback URL the worker
-    /// registered with hydra (e.g.
+    /// registered with op (e.g.
     /// `https://myapp.zeroship.ai/__zeroship/auth/callback`).
     ///
     /// Returns `(authorize_url, stash_cookie_value)`. Caller wraps the
@@ -139,6 +158,7 @@ impl OidcRp {
     #[must_use]
     pub fn build_authorize_redirect(
         &self,
+        client_id: &str,
         original_path: &str,
         redirect_uri: &str,
     ) -> (String, String) {
@@ -152,6 +172,7 @@ impl OidcRp {
 
         let stash = Stash {
             state: state.clone(),
+            client_id: client_id.to_string(),
             verifier,
             nonce: nonce.clone(),
             original_path: original_path.to_string(),
@@ -164,7 +185,7 @@ impl OidcRp {
         // values). The result is `application/x-www-form-urlencoded`
         // which is the historical query-string convention.
         let mut q = url::form_urlencoded::Serializer::new(String::new());
-        q.append_pair("client_id", &self.client_id);
+        q.append_pair("client_id", client_id);
         q.append_pair("response_type", "code");
         q.append_pair("scope", "openid offline_access email profile");
         q.append_pair("redirect_uri", redirect_uri);
@@ -174,11 +195,7 @@ impl OidcRp {
         q.append_pair("code_challenge_method", "S256");
         let query = q.finish();
 
-        let url = format!(
-            "{}/oauth2/auth?{}",
-            self.auth_ui_url.trim_end_matches('/'),
-            query
-        );
+        let url = format!("{}/authorize?{}", self.op_base_url(), query);
 
         (url, stash_value)
     }
@@ -196,8 +213,8 @@ impl OidcRp {
     ///   or tampered.
     /// - [`OidcRpError::StateMismatch`] — `state` query param does not
     ///   equal the value stashed when the dance started (CSRF guard).
-    /// - [`OidcRpError::TokenExchange`] — hydra rejected the code or
-    ///   network failure on `/oauth2/token`.
+    /// - [`OidcRpError::TokenExchange`] — the OP rejected the code or
+    ///   network failure on `/token`.
     /// - [`OidcRpError::VerifyIdToken`] — ID token signature, issuer,
     ///   audience, `exp`, or `nonce` check failed.
     pub async fn finish_callback(
@@ -205,6 +222,7 @@ impl OidcRp {
         code: &str,
         state_param: &str,
         stash_cookie: &str,
+        expected_client_id: &str,
     ) -> Result<(TokenClaims, String, Vec<String>), OidcRpError> {
         // 1. Decode + verify stash cookie.
         let stash = Stash::decode(stash_cookie, &self.stash_signing_key)
@@ -217,25 +235,34 @@ impl OidcRp {
             return Err(OidcRpError::StateMismatch);
         }
 
-        // 3. POST /oauth2/token with the code + PKCE verifier + client creds.
+        // 2b. Bind the exchange to THIS route's per-app client. The stash was
+        //     minted with the route's `oauth_client_id`; the session is later
+        //     projected under the caller's route client_id + sector. Enforce
+        //     the two agree as an INVARIANT (not merely an emergent property of
+        //     __Host- cookie origin-isolation): a stash whose client_id does not
+        //     match the route it is being redeemed on is a per-app-isolation
+        //     violation — fail closed (cross-tenant identity/PII bind otherwise).
+        if stash.client_id != expected_client_id {
+            return Err(OidcRpError::ClientMismatch);
+        }
+
+        // 3. POST /token with the code + PKCE verifier + brokered client auth.
+        let client_secret = self.broker_secret.derive_client_secret(&stash.client_id);
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "authorization_code")
             .append_pair("code", code)
             .append_pair("redirect_uri", &stash.redirect_uri)
-            .append_pair("client_id", &self.client_id)
-            .append_pair("client_secret", &self.client_secret)
+            .append_pair("client_id", &stash.client_id)
+            .append_pair("client_secret", &client_secret)
             .append_pair("code_verifier", &stash.verifier)
             .finish();
 
-        let token_url = format!(
-            "{}/oauth2/token",
-            self.auth_ui_url.trim_end_matches('/')
-        );
+        let token_url = format!("{}/token", self.op_base_url());
         // Reused, breaker-guarded, bounded-timeout client (§8.7). A failed
         // build is a programming error (bad URL), not a transport failure, so
         // it never reaches the breaker; the `send()` await is what the breaker
         // and timeout wrap.
-        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
+        let resp = crate::op_client::call(&self.breaker, self.op_timeout, |client| async move {
             client
                 .request(http::Method::POST, &token_url)?
                 .header("content-type", "application/x-www-form-urlencoded")?
@@ -244,7 +271,7 @@ impl OidcRp {
                 .await
         })
         .await
-        .map_err(|e| OidcRpError::from_hydra(e, "token"))?;
+        .map_err(|e| OidcRpError::from_op(e, "token"))?;
 
         let status = resp.status().as_u16();
         let resp_body = resp
@@ -258,23 +285,20 @@ impl OidcRp {
         }
 
         let tr: TokenResponse = serde_json::from_str(&resp_body).map_err(|e| {
-            // SECURITY: a 2xx body from `/oauth2/token` contains the
+            // SECURITY: a 2xx body from `/token` contains the
             // access_token AND refresh_token in plaintext. NEVER embed it in
             // an error that surfaces at `tracing::warn!` — the refresh family
             // must never be logged (§8.1/§8.5). Redact to the parse error only.
             OidcRpError::TokenExchange(format!("parse: {e} (success body redacted)"))
         })?;
 
-        // 4. Verify ID token. Hydra's issuer is whatever
-        //    `urls.self.issuer` is set to in ops/hydra.yaml; by default
-        //    we derive it from `auth_ui_url + "/"`, but the test suite
-        //    (and any deployment where the dial URL differs from the
-        //    logical issuer) overrides it via [`with_issuer`].
+        // 4. Verify ID token. The OP stamps `aud` with the per-app `oac_`
+        //    client id stashed at authorize time.
         let claims = verify_id_token(
             &self.jwks,
             &tr.id_token,
             &self.issuer,
-            &self.client_id,
+            &stash.client_id,
             Some(&stash.nonce),
             Some(&tr.access_token),
             Some(code),
@@ -287,10 +311,10 @@ impl OidcRp {
         //
         // Primary source: the token endpoint's `scope` response. But RFC 6749
         // §5.1 makes that parameter OPTIONAL when the granted scope equals the
-        // requested scope, so Hydra may omit it on a no-narrowing consent. When
+        // requested scope, so OP may omit it on a no-narrowing consent. When
         // it is absent/empty we MUST fall back to the always-present `scope`
         // claim of the access token — decoded through the SAME JWKS-verified
-        // path the Bearer/raw-Hydra arms use, so the cookie arm records the same
+        // path the Bearer/raw-OP arms use, so the cookie arm records the same
         // authoritative, non-spoofable scope set as every other arm (instead of
         // silently persisting `[]`).
         let access_scope = match tr.scope.as_deref() {
@@ -300,7 +324,7 @@ impl OidcRp {
             _ => match verify_access_jwt(&self.jwks, &tr.access_token, &self.issuer).await {
                 Ok(ac) => ac.scope,
                 Err(e) => {
-                    // The access token is a Hydra-issued RFC 9068 JWT here, so a
+                    // The access token is a OP-issued RFC 9068 JWT here, so a
                     // verify failure is unexpected; log and fall through to an
                     // empty scope set rather than failing the whole login.
                     tracing::warn!(
@@ -317,77 +341,12 @@ impl OidcRp {
         Ok((claims, stash.original_path, granted_scopes))
     }
 
-    /// Introspect an access token at hydra's `/oauth2/introspect`
-    /// endpoint (RFC 7662). Returns the parsed response; callers MUST
-    /// check `.active` before trusting any other field — hydra emits a
-    /// 200 with `{"active": false}` for revoked/expired/unknown tokens.
-    ///
-    /// Used by the gateway's DPoP-bound resource-server path: a worker
-    /// request carrying `Authorization: DPoP <access_token>` triggers
-    /// proof verification (`core::dpop::verify`) followed by this
-    /// introspection call so the gateway can resolve `sub`/`email`
-    /// from a hydra-issued opaque access token without a local JWT.
-    ///
-    /// # Errors
-    ///
-    /// [`OidcRpError::TokenExchange`] on transport error, non-2xx
-    /// status, or JSON parse failure. (`active: false` is NOT an error
-    /// — that's a valid response indicating the token isn't usable.)
-    pub async fn introspect_token(
-        &self,
-        access_token: &str,
-    ) -> Result<IntrospectionResponse, OidcRpError> {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine as _;
-
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("token", access_token)
-            .finish();
-        let url = format!(
-            "{}/oauth2/introspect",
-            self.auth_ui_url.trim_end_matches('/')
-        );
-
-        // Basic auth header — hydra requires confidential-client auth on
-        // /oauth2/introspect regardless of the token's own client_id.
-        let creds = format!("{}:{}", self.client_id, self.client_secret);
-        let auth = format!("Basic {}", B64.encode(&creds));
-
-        // Reused, breaker-guarded, bounded-timeout client (§8.7).
-        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
-            client
-                .request(http::Method::POST, &url)?
-                .header("content-type", "application/x-www-form-urlencoded")?
-                .header("authorization", &auth)?
-                .body(body)
-                .send()
-                .await
-        })
-        .await
-        .map_err(|e| OidcRpError::from_hydra(e, "introspect"))?;
-
-        let status = resp.status().as_u16();
-        let resp_body = resp
-            .text()
-            .await
-            .map_err(|e| OidcRpError::TokenExchange(format!("introspect read: {e}")))?;
-        if !(200..300).contains(&status) {
-            return Err(OidcRpError::TokenExchange(format!(
-                "introspect HTTP {status}: {resp_body}"
-            )));
-        }
-        serde_json::from_str(&resp_body).map_err(|e| {
-            OidcRpError::TokenExchange(format!("introspect parse: {e}\nbody: {resp_body}"))
-        })
-    }
-
-    /// Exchange an authorization code for tokens as a PUBLIC PKCE client
+    /// Exchange an authorization code for tokens as a brokered PKCE client
     /// (auth-sdk Slice 1b, `POST /__zeroship/auth/token`). Unlike
-    /// [`OidcRp::finish_callback`] (the interactive cookie flow, which uses
-    /// the gateway's confidential `client_secret`), the browser SDK is a
-    /// public client: it sends `code` + `code_verifier`, and the gateway
-    /// injects the per-app `client_id` (the browser never sends it). No
-    /// `client_secret` — public clients authenticate by PKCE alone.
+    /// [`OidcRp::finish_callback`] (the interactive cookie flow), the browser
+    /// SDK holds the PKCE verifier, but the gateway still authenticates the
+    /// per-app `oac_` client by deriving its broker secret. The browser never
+    /// sees or sends the `client_secret`.
     ///
     /// Returns the full token set INCLUDING the `refresh_token` (the
     /// gateway keeps it server-side under the anchor in `server_anchor`
@@ -403,25 +362,28 @@ impl OidcRp {
         code_verifier: &str,
         redirect_uri: &str,
     ) -> Result<TokenSet, OidcRpError> {
+        let client_secret = self.broker_secret.derive_client_secret(client_id);
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "authorization_code")
             .append_pair("code", code)
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("client_id", client_id)
+            .append_pair("client_secret", &client_secret)
             .append_pair("code_verifier", code_verifier)
             .finish();
         self.post_token(body).await
     }
 
-    /// Rotate a refresh family as a PUBLIC PKCE client (the server-held
+    /// Rotate a refresh family as a brokered PKCE client (the server-held
     /// `?mint=1` refresh, auth-sdk Slice 1b-anchors). Posts
-    /// `grant_type=refresh_token` with the per-app `client_id` injected.
+    /// `grant_type=refresh_token` with the per-app `client_id` and derived
+    /// broker secret injected.
     /// Returns the rotated token set (new `access_token` + new
     /// `refresh_token`).
     ///
     /// # Errors
     /// [`OidcRpError::TokenExchange`] — its message contains the upstream
-    /// status + body, so callers can detect Hydra `invalid_grant` (family
+    /// status + body, so callers can detect OP `invalid_grant` (family
     /// revoked / expired / 720h ceiling) by substring and treat the anchor
     /// as dead.
     pub async fn refresh_token_public(
@@ -429,15 +391,17 @@ impl OidcRp {
         client_id: &str,
         refresh_token: &str,
     ) -> Result<TokenSet, OidcRpError> {
+        let client_secret = self.broker_secret.derive_client_secret(client_id);
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "refresh_token")
             .append_pair("refresh_token", refresh_token)
             .append_pair("client_id", client_id)
+            .append_pair("client_secret", &client_secret)
             .finish();
         self.post_token(body).await
     }
 
-    /// Build the Hydra `/oauth2/auth` URL for the browser PKCE flow
+    /// Build the OP `/authorize` URL for the browser PKCE flow
     /// (auth-sdk Slice 1b-browser, `GET /__zeroship/auth/authorize`, spec §1.2).
     ///
     /// Unlike [`OidcRp::build_authorize_redirect`] (the interactive cookie
@@ -448,7 +412,7 @@ impl OidcRp {
     /// browser-chosen `state` + `nonce`, the requested `scope`, and the
     /// per-app `redirect_uri`. The gateway holds NO server-side state — it
     /// just assembles the redirect. `prompt` is a PASSTHROUGH (omitted in
-    /// the common interactive-popup case so Hydra's SSO skip fires; `login`
+    /// the common interactive-popup case so OP's SSO skip fires; `login`
     /// / `consent` only on explicit step-up — `none` is not supported here,
     /// the silent-iframe path having been removed, but the gateway does not
     /// reject it: the caller validates `prompt` before calling).
@@ -466,7 +430,7 @@ impl OidcRp {
         q.append_pair("nonce", p.nonce);
         q.append_pair("code_challenge", p.code_challenge);
         q.append_pair("code_challenge_method", "S256");
-        // `prompt` is optional — omitted in the common case so Hydra's
+        // `prompt` is optional — omitted in the common case so OP's
         // SSO/`remember` skip path fires (spec §1.2 round-2). Passthrough
         // when the browser explicitly asks for `login`/`consent` step-up.
         if let Some(prompt) = p.prompt {
@@ -474,7 +438,7 @@ impl OidcRp {
                 q.append_pair("prompt", prompt);
             }
         }
-        // `idp_hint` is optional — passed through to Hydra so the login UI can
+        // `idp_hint` is optional — passed through to OP so the login UI can
         // route to / pre-select the named upstream IdP. Omitted ⇒ default picker.
         if let Some(idp_hint) = p.idp_hint {
             if !idp_hint.is_empty() {
@@ -483,17 +447,17 @@ impl OidcRp {
         }
         let query = q.finish();
         format!(
-            "{}/oauth2/auth?{}",
-            self.auth_ui_url.trim_end_matches('/'),
+            "{}/authorize?{}",
+            self.op_base_url(),
             query
         )
     }
 
-    /// Best-effort revoke a token (refresh family) at Hydra's RFC 7009
-    /// `/oauth2/revoke` endpoint as a PUBLIC PKCE client (auth-sdk Slice
-    /// 1b-browser, `POST /__zeroship/auth/signout`, spec §1.2). The per-app
-    /// `client_id` is sent (public client; no secret) so Hydra scopes the
-    /// revoke to this client's family. `token_type_hint=refresh_token`
+    /// Best-effort revoke a token (refresh family) at the OP's RFC 7009
+    /// `/revoke` endpoint as a brokered client (auth-sdk Slice 1b-browser,
+    /// `POST /__zeroship/auth/signout`, spec §1.2). The per-app `client_id`
+    /// and derived broker secret are sent so the OP scopes the revoke to this
+    /// client's family. `token_type_hint=refresh_token`
     /// because signout revokes the server-held refresh family.
     ///
     /// RFC 7009 §2.2: the AS returns `200` even for an unknown/already-dead
@@ -508,14 +472,16 @@ impl OidcRp {
         client_id: &str,
         token: &str,
     ) -> Result<(), OidcRpError> {
+        let client_secret = self.broker_secret.derive_client_secret(client_id);
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("token", token)
             .append_pair("token_type_hint", "refresh_token")
             .append_pair("client_id", client_id)
+            .append_pair("client_secret", &client_secret)
             .finish();
-        let url = format!("{}/oauth2/revoke", self.auth_ui_url.trim_end_matches('/'));
+        let url = format!("{}/revoke", self.op_base_url());
         // Reused, breaker-guarded, bounded-timeout client (§8.7).
-        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
+        let resp = crate::op_client::call(&self.breaker, self.op_timeout, |client| async move {
             client
                 .request(http::Method::POST, &url)?
                 .header("content-type", "application/x-www-form-urlencoded")?
@@ -524,7 +490,7 @@ impl OidcRp {
                 .await
         })
         .await
-        .map_err(|e| OidcRpError::from_hydra(e, "revoke"))?;
+        .map_err(|e| OidcRpError::from_op(e, "revoke"))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             // Body MAY echo an error code, but NEVER the token (we sent it,
@@ -534,14 +500,14 @@ impl OidcRp {
         Ok(())
     }
 
-    /// Shared `POST /oauth2/token` for the public-client grants above.
+    /// Shared `POST /token` for the brokered-client grants above.
     async fn post_token(&self, body: String) -> Result<TokenSet, OidcRpError> {
-        let token_url = format!("{}/oauth2/token", self.auth_ui_url.trim_end_matches('/'));
+        let token_url = format!("{}/token", self.op_base_url());
         // Reused, breaker-guarded, bounded-timeout client (§8.7). This is the
         // mint hot path — `exchange_code_public` / `refresh_token_public` both
         // funnel through here, so the breaker here is what protects the
-        // gateway from a Hydra `/oauth2/token` brownout.
-        let resp = crate::hydra_client::call(&self.breaker, self.hydra_timeout, |client| async move {
+        // gateway from an OP `/token` brownout.
+        let resp = crate::op_client::call(&self.breaker, self.op_timeout, |client| async move {
             client
                 .request(http::Method::POST, &token_url)?
                 .header("content-type", "application/x-www-form-urlencoded")?
@@ -550,7 +516,7 @@ impl OidcRp {
                 .await
         })
         .await
-        .map_err(|e| OidcRpError::from_hydra(e, "token"))?;
+        .map_err(|e| OidcRpError::from_op(e, "token"))?;
         let status = resp.status().as_u16();
         let resp_body = resp
             .text()
@@ -562,18 +528,18 @@ impl OidcRp {
             )));
         }
         serde_json::from_str(&resp_body).map_err(|e| {
-            // SECURITY: redact — a 2xx `/oauth2/token` body carries the
+            // SECURITY: redact — a 2xx `/token` body carries the
             // access_token + refresh_token in plaintext and this error is
-            // logged on the refresh path (§8.1/§8.5). Non-2xx bodies (Hydra
+            // logged on the refresh path (§8.1/§8.5). Non-2xx bodies (OP
             // error JSON, no tokens) are surfaced above this branch.
             OidcRpError::TokenExchange(format!("parse: {e} (success body redacted)"))
         })
     }
 
-    /// Verify a **raw Hydra access JWT** (RFC 9068) locally against the
-    /// gateway's JWKS cache — no introspection round-trip. Used by the
-    /// Bearer arm's raw-Hydra path (§1.3, slice 1c) for non-browser
-    /// clients that hold a Hydra access token directly (CLI,
+    /// Verify a **raw OP access JWT** (RFC 9068) locally against the
+    /// gateway's JWKS cache — no remote validation round-trip. Used by the
+    /// Bearer arm's raw-OP path (§1.3, slice 1c) for non-browser
+    /// clients that hold a OP access token directly (CLI,
     /// server-to-server). The browser never takes this path — it holds a
     /// gateway-signed session cookie, verified by `session_token::Verifier`.
     ///
@@ -608,7 +574,11 @@ impl OidcRp {
     }
 }
 
-/// Decoded claims of a raw Hydra access JWT (RFC 9068). The Bearer arm
+fn op_base_url(auth_ui_url: &str) -> String {
+    format!("{}/oauth2", auth_ui_url.trim_end_matches('/'))
+}
+
+/// Decoded claims of a raw OP access JWT (RFC 9068). The Bearer arm
 /// reads `client_id`/`aud` for per-app binding, `sub` for identity, and
 /// the profile fields for the `ZeroShip-User` header.
 ///
@@ -617,12 +587,12 @@ impl OidcRp {
 /// binding (`aud` contains the expected `client_id`) is uniform.
 #[derive(Debug, Clone)]
 pub struct AccessClaims {
-    /// Subject — the **global** Hydra UUID (`usr_…`). On the raw-Hydra
+    /// Subject — the **global** OP UUID (`usr_…`). On the raw-OP
     /// Bearer path Slice 4 projects this to a per-app `pws_`; Slice 1c
     /// uses it directly (no pairwise derivation yet).
     pub sub: String,
     /// The OAuth `client_id` claim, when present (RFC 9068 §3 mandates
-    /// it; Hydra emits it). The Bearer arm's primary per-app binding.
+    /// it; OP emits it). The Bearer arm's primary per-app binding.
     pub client_id: Option<String>,
     /// The token audience(s), normalized to a list. The Bearer arm's
     /// fallback binding (when `client_id` is absent) checks whether this
@@ -636,14 +606,14 @@ pub struct AccessClaims {
     pub scope: Option<String>,
     /// OIDC `auth_time` (UNIX seconds), when the token carries it. Forwarded
     /// onto the re-created gateway session on reload-recovery (BFF §2.2 step
-    /// 5b). `None` when absent — Hydra access JWTs do not always include it.
+    /// 5b). `None` when absent — OP access JWTs do not always include it.
     pub auth_time: Option<i64>,
     /// OIDC `amr` (authentication methods), when present. Forwarded onto the
     /// re-created gateway session on reload-recovery.
     pub amr: Option<Vec<String>>,
 }
 
-/// Wire shape of a Hydra access JWT we deserialize. `aud` is a raw
+/// Wire shape of a OP access JWT we deserialize. `aud` is a raw
 /// `serde_json::Value` so we accept both the string and array forms.
 #[derive(Deserialize)]
 struct RawAccessClaims {
@@ -676,10 +646,10 @@ struct RawAccessClaims {
 ///
 /// 1. `token_response_scope` — the OAuth token-endpoint `scope` field. Per
 ///    RFC 6749 §5.1 it is REQUIRED only when the granted scope differs from
-///    the requested scope, so a server (Hydra) MAY omit it on a no-narrowing
+///    the requested scope, so a server (OP) MAY omit it on a no-narrowing
 ///    consent. When present and non-blank it wins.
 /// 2. `access_token_scope` — the `scope` claim of the (already JWKS-verified)
-///    access-token JWT (RFC 9068 §2.2.3 makes it mandatory for Hydra-issued
+///    access-token JWT (RFC 9068 §2.2.3 makes it mandatory for OP-issued
 ///    access tokens). Used as the fallback when (1) is absent/blank, so the
 ///    cookie arm never silently records `[]` for a consented session.
 ///
@@ -698,7 +668,7 @@ fn resolve_granted_scopes(
         .unwrap_or_default()
 }
 
-/// Verify a raw Hydra access JWT against `cache`, pinning `iss` and
+/// Verify a raw OP access JWT against `cache`, pinning `iss` and
 /// `exp` but NOT `aud` (see [`OidcRp::verify_access_token`] rationale).
 /// On a first verify failure (likely a rotated JWKS) the cache is
 /// force-refreshed and verification retried once — mirroring
@@ -778,59 +748,20 @@ async fn verify_access_jwt(
     })
 }
 
-/// Subset of an RFC 7662 introspection response (hydra's
-/// `/oauth2/introspect`). Only `active` is mandatory; everything else
-/// is `Option` because hydra omits fields when the token is inactive
-/// or when no value is bound. Callers MUST gate on `.active` before
-/// reading any other field.
-#[derive(Debug, Clone, Deserialize)]
-pub struct IntrospectionResponse {
-    /// `true` iff the access token is currently valid (not revoked, not
-    /// expired, recognised by the AS).
-    pub active: bool,
-    /// Subject (user id) the access token represents.
-    #[serde(default)]
-    pub sub: Option<String>,
-    /// `OAuth2` `client_id` the token was issued to.
-    #[serde(default)]
-    pub client_id: Option<String>,
-    /// User's email address (when the `email` scope was granted).
-    #[serde(default)]
-    pub email: Option<String>,
-    /// Whether the user's email is verified at the `IdP`.
-    #[serde(default)]
-    pub email_verified: Option<bool>,
-    /// User's display name (when the `profile` scope was granted).
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Space-separated list of granted scopes.
-    #[serde(default)]
-    pub scope: Option<String>,
-    /// Absolute expiry (UNIX seconds).
-    #[serde(default)]
-    pub exp: Option<i64>,
-    /// Token issued-at (UNIX seconds). RFC 7662 §2.2 optional field; Hydra
-    /// emits it. The DPoP introspection-fallback arm needs it for the
-    /// per-app family-marker revocation check (`is_family_revoked_since`):
-    /// a token whose `iat` predates the marker is rejected. When Hydra omits
-    /// it, the arm fails CLOSED (treats it as epoch `0`), so any live family
-    /// marker rejects the token rather than silently skipping the check.
-    #[serde(default)]
-    pub iat: Option<i64>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum OidcRpError {
     #[error("stash cookie invalid or tampered")]
     StashInvalid,
     #[error("state parameter mismatch")]
     StateMismatch,
+    #[error("stash client_id does not match the route it is redeemed on")]
+    ClientMismatch,
     #[error("token exchange: {0}")]
     TokenExchange(String),
     #[error("verify id_token: {0}")]
     VerifyIdToken(#[from] OidcError),
-    /// The shared Hydra circuit breaker is open (or the bounded per-call
-    /// timeout fired) — Hydra is browning out. Handlers surface this as
+    /// The shared OP circuit breaker is open (or the bounded per-call
+    /// timeout fired) — OP is browning out. Handlers surface this as
     /// `503 upstream_unavailable` rather than a generic token-exchange error,
     /// and the mint path short-circuits before holding any DB connection
     /// (auth-sdk §8.7).
@@ -839,28 +770,28 @@ pub enum OidcRpError {
 }
 
 impl OidcRpError {
-    /// Map a [`HydraError`](crate::hydra_client::HydraError) from the shared
+    /// Map a [`OpError`](crate::op_client::OpError) from the shared
     /// breaker-guarded client into an `OidcRpError`, tagging it with the
-    /// `context` of the call site (`"token"`, `"introspect"`, `"revoke"`) so
-    /// the surfaced `Display` still identifies WHICH Hydra call failed — the
+    /// `context` of the call site (`"token"`, `"revoke"`) so
+    /// the surfaced `Display` still identifies WHICH OP call failed — the
     /// per-site discriminator the pre-shared-client code carried in its
     /// inline `format!` prefixes. The brownout-vs-transport distinction is
     /// preserved: breaker-open / bounded-timeout → `UpstreamUnavailable`
     /// (→ 503), a transport error → `TokenExchange` (already counted as a
-    /// breaker failure inside [`hydra_client::call`](crate::hydra_client::call)).
-    fn from_hydra(e: crate::hydra_client::HydraError, context: &str) -> Self {
-        use crate::hydra_client::HydraError;
+    /// breaker failure inside [`op_client::call`](crate::op_client::call)).
+    fn from_op(e: crate::op_client::OpError, context: &str) -> Self {
+        use crate::op_client::OpError;
         match e {
-            HydraError::Open | HydraError::Timeout(_) => {
+            OpError::Open | OpError::Timeout(_) => {
                 OidcRpError::UpstreamUnavailable(format!("{context} {e}"))
             }
-            HydraError::Upstream(msg) => {
+            OpError::Upstream(msg) => {
                 OidcRpError::TokenExchange(format!("{context} send: {msg}"))
             }
         }
     }
 
-    /// `true` when this error is a Hydra brownout (breaker open or bounded
+    /// `true` when this error is a OP brownout (breaker open or bounded
     /// timeout) — the signal handlers use to emit `503 upstream_unavailable`.
     #[must_use]
     pub const fn is_upstream_unavailable(&self) -> bool {
@@ -868,7 +799,7 @@ impl OidcRpError {
     }
 }
 
-/// `/oauth2/token` response body (subset). Hydra emits the OIDC standard
+/// `/oauth2/token` response body (subset). OP emits the OIDC standard
 /// fields; we only deserialize what we use.
 #[derive(Debug, Serialize, Deserialize)]
 struct TokenResponse {
@@ -900,8 +831,8 @@ pub struct TokenSet {
 
 /// Browser-supplied parameters for [`OidcRp::build_browser_authorize_url`]
 /// (auth-sdk Slice 1b-browser). Every value originates in the SDK and is
-/// passed through to Hydra verbatim — the gateway holds no PKCE verifier
-/// (the browser does). `prompt` is optional (omitted ⇒ Hydra SSO skip).
+/// passed through to OP verbatim — the gateway holds no PKCE verifier
+/// (the browser does). `prompt` is optional (omitted ⇒ OP SSO skip).
 #[derive(Debug, Clone)]
 pub struct BrowserAuthorizeParams<'a> {
     /// PKCE S256 challenge the browser derived from its own verifier.
@@ -918,14 +849,14 @@ pub struct BrowserAuthorizeParams<'a> {
     /// omitted in the common interactive case).
     pub prompt: Option<&'a str>,
     /// Optional provider hint (`google`/`github`/`password`) passed through to
-    /// Hydra as `idp_hint` so the login UI can pre-select / route to the named
+    /// OP as `idp_hint` so the login UI can pre-select / route to the named
     /// upstream IdP (auth-sdk Slice 1b-browser, Phase-1 `SignInOptions.provider`).
-    /// Omitted ⇒ Hydra/login-UI shows the default provider picker.
+    /// Omitted ⇒ OP/login-UI shows the default provider picker.
     pub idp_hint: Option<&'a str>,
 }
 
 /// Server-side state stashed in the signed `__Host-zs_oidc_stash` cookie
-/// between the initial 302 → hydra and the eventual callback. Sized to
+/// between the initial 302 → op and the eventual callback. Sized to
 /// fit comfortably under the 4 KiB cookie limit (well under, in
 /// practice: ~250 bytes JSON + 64 byte signature).
 ///
@@ -934,6 +865,7 @@ pub struct BrowserAuthorizeParams<'a> {
 #[derive(Debug, Serialize, Deserialize)]
 struct Stash {
     state: String,
+    client_id: String,
     verifier: String,
     nonce: String,
     original_path: String,
@@ -985,7 +917,7 @@ impl Stash {
 //   `/__zeroship/auth/logout`. The gateway looks this up server-side to resolve
 //   `ZeroShip-User` on every request.
 // - `__Host-zs_oidc_stash` — the signed PKCE+state stash. 10 min max-age,
-//   set on the redirect to hydra, cleared on callback.
+//   set on the redirect to op, cleared on callback.
 //
 // Both use the `__Host-` prefix which RFC 6265bis (§4.1.3) requires
 // `Path=/`, no `Domain=`, and `Secure`. RFC 6265bis §4.1.3.2 makes
@@ -1130,7 +1062,7 @@ pub struct WorkerUser<'a> {
     /// OAuth scopes granted to THIS app for this user (auth-sdk Slice 3,
     /// spec §1.4). A PERMANENT kernel-contract field on the `ZeroShip-User`
     /// projection: app code reads it via `env.auth.getUser().scopes`. Sourced
-    /// from the token `scope` claim (Bearer wrapper + raw-Hydra arms) or the
+    /// from the token `scope` claim (Bearer wrapper + raw-OP arms) or the
     /// session/anchor `granted_scopes` (cookie/anchor arms). Always present
     /// (empty when the token/session carries no scopes), so the worker JSON
     /// shape is stable across every auth arm.
@@ -1165,9 +1097,16 @@ pub fn encode_user_header(
 mod tests {
     use super::*;
 
+    const TEST_BROKER_MASTER: &[u8] = b"gateway-test-broker-master-secret-32-bytes";
+
+    fn test_broker_secret() -> BrokerSecret {
+        BrokerSecret::from_bytes(TEST_BROKER_MASTER.to_vec()).expect("valid test broker secret")
+    }
+
     fn make_stash() -> Stash {
         Stash {
             state: "s".into(),
+            client_id: "oac_myapp".into(),
             verifier: "v".into(),
             nonce: "n".into(),
             original_path: "/p".into(),
@@ -1179,16 +1118,16 @@ mod tests {
     fn authorize_url_has_required_params() {
         let rp = OidcRp::new(
             "https://auth.zeroship.ai",
-            "gateway",
-            "secret",
+            test_broker_secret(),
             b"signing-key-1234".to_vec(),
         );
         let (url, stash) = rp.build_authorize_redirect(
+            "oac_myapp",
             "/some/path",
             "https://myapp.zeroship.ai/__zeroship/auth/callback",
         );
-        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"));
-        assert!(url.contains("client_id=gateway"));
+        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/authorize?"));
+        assert!(url.contains("client_id=oac_myapp"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("code_challenge="));
@@ -1212,8 +1151,7 @@ mod tests {
         // param lands and the per-app client_id (not "gateway") is used.
         let rp = OidcRp::new(
             "https://auth.zeroship.ai",
-            "gateway",
-            "secret",
+            test_broker_secret(),
             b"k".repeat(32),
         );
         let params = BrowserAuthorizeParams {
@@ -1226,7 +1164,7 @@ mod tests {
             idp_hint: None,
         };
         let url = rp.build_browser_authorize_url("oac_myapp", &params);
-        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"), "{url}");
+        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/authorize?"), "{url}");
         // PER-APP client_id, never the gateway confidential client.
         assert!(url.contains("client_id=oac_myapp"), "{url}");
         assert!(!url.contains("client_id=gateway"), "{url}");
@@ -1241,7 +1179,7 @@ mod tests {
             url.contains("redirect_uri=https%3A%2F%2Fmyapp.zeroship.ai%2F__zeroship%2Fauth%2Fpopup-callback"),
             "{url}"
         );
-        // No prompt in the common case (so Hydra's SSO skip fires).
+        // No prompt in the common case (so OP's SSO skip fires).
         assert!(!url.contains("prompt="), "default omits prompt: {url}");
         // No idp_hint unless the SDK supplied a provider.
         assert!(!url.contains("idp_hint="), "default omits idp_hint: {url}");
@@ -1251,7 +1189,7 @@ mod tests {
     fn browser_authorize_url_passes_prompt_through_when_present() {
         // `prompt=consent` (incremental-scope step-up) and `prompt=login`
         // (re-auth) are passed straight through; an empty prompt is dropped.
-        let rp = OidcRp::new("https://auth.zeroship.ai", "gateway", "s", b"k".repeat(32));
+        let rp = OidcRp::new("https://auth.zeroship.ai", test_broker_secret(), b"k".repeat(32));
         let base = BrowserAuthorizeParams {
             code_challenge: "c",
             state: "s",
@@ -1273,11 +1211,11 @@ mod tests {
 
     /// Fix 5 (MAJOR): `SignInOptions.provider` is threaded through as the
     /// `idp_hint` authorize-URL param so the login UI can route to the named
-    /// upstream IdP. A present hint lands in the Hydra URL; an empty one is
+    /// upstream IdP. A present hint lands in the OP URL; an empty one is
     /// dropped (mirrors the `prompt` passthrough discipline).
     #[test]
     fn browser_authorize_url_passes_idp_hint_through_when_present() {
-        let rp = OidcRp::new("https://auth.zeroship.ai", "gateway", "s", b"k".repeat(32));
+        let rp = OidcRp::new("https://auth.zeroship.ai", test_broker_secret(), b"k".repeat(32));
         let base = BrowserAuthorizeParams {
             code_challenge: "c",
             state: "s",
@@ -1303,7 +1241,7 @@ mod tests {
 
     #[test]
     fn browser_authorize_url_trims_trailing_slash() {
-        let rp = OidcRp::new("https://auth.zeroship.ai/", "gateway", "s", b"k".repeat(32));
+        let rp = OidcRp::new("https://auth.zeroship.ai/", test_broker_secret(), b"k".repeat(32));
         let params = BrowserAuthorizeParams {
             code_challenge: "c",
             state: "s",
@@ -1314,60 +1252,54 @@ mod tests {
             idp_hint: None,
         };
         let url = rp.build_browser_authorize_url("oac_app", &params);
-        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"), "no double slash: {url}");
+        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/authorize?"), "no double slash: {url}");
     }
 
     #[test]
     fn new_derives_issuer_from_auth_ui_url_with_trailing_slash() {
-        // Default — issuer is auth_ui_url with one trailing slash, matching
-        // hydra's `urls.self.issuer` shape.
         let rp = OidcRp::new(
             "https://auth.zeroship.ai",
-            "gateway",
-            "secret",
+            test_broker_secret(),
             b"k".repeat(32),
         );
-        assert_eq!(rp.issuer, "https://auth.zeroship.ai/");
+        assert_eq!(rp.issuer, "https://auth.zeroship.ai/oauth2");
 
         // Trimming is idempotent — trailing slash on auth_ui_url must not
         // produce `//`.
         let rp = OidcRp::new(
             "https://auth.zeroship.ai/",
-            "gateway",
-            "secret",
+            test_broker_secret(),
             b"k".repeat(32),
         );
-        assert_eq!(rp.issuer, "https://auth.zeroship.ai/");
+        assert_eq!(rp.issuer, "https://auth.zeroship.ai/oauth2");
     }
 
     #[test]
     fn with_issuer_overrides_default_iss() {
-        // Tests dial loopback hydra but expect the canonical hydra
+        // Tests dial loopback auth but expect the canonical OP
         // issuer string — `with_issuer` decouples the two.
         let rp = OidcRp::new(
             "http://127.0.0.1:4444",
-            "gateway",
-            "secret",
+            test_broker_secret(),
             b"k".repeat(32),
         )
-        .with_issuer("https://auth.zeroship.ai/");
-        // `auth_ui_url` still drives /oauth2/token + JWKS (loopback).
+        .with_issuer("https://auth.zeroship.ai/oauth2");
+        // `auth_ui_url` still drives /token + JWKS (loopback).
         assert_eq!(rp.auth_ui_url, "http://127.0.0.1:4444");
-        // `issuer` is the logical hydra issuer that ID tokens carry.
-        assert_eq!(rp.issuer, "https://auth.zeroship.ai/");
+        // `issuer` is the logical OP issuer that ID tokens carry.
+        assert_eq!(rp.issuer, "https://auth.zeroship.ai/oauth2");
     }
 
     #[test]
     fn authorize_url_trims_trailing_slash_on_auth_ui_url() {
         let rp = OidcRp::new(
             "https://auth.zeroship.ai/",
-            "gateway",
-            "secret",
+            test_broker_secret(),
             b"k".repeat(32),
         );
-        let (url, _) = rp.build_authorize_redirect("/", "https://app/cb");
-        // No double slash before `/oauth2/auth`.
-        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/auth?"));
+        let (url, _) = rp.build_authorize_redirect("oac_app", "/", "https://app/cb");
+        // No double slash before `/authorize`.
+        assert!(url.starts_with("https://auth.zeroship.ai/oauth2/authorize?"));
     }
 
     #[test]

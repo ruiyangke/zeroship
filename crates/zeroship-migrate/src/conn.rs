@@ -172,7 +172,7 @@ pub struct ExecutorConfig {
     /// executor into a privileged profile.
     pub(crate) trust: crate::model::policy::TrustProfile,
     /// PRIVATE (`pub(crate)`). The schema allowlist a Platform guard permits
-    /// references to (e.g. `zeroship` / `oauth_hydra` / `public`). Empty for
+    /// references to (e.g. `zeroship` / `public`). Empty for
     /// Confined (the `project_schema` is the sole permitted schema there) and for
     /// Trusted (no cross-schema confinement at all).
     pub(crate) platform_schemas: Vec<String>,
@@ -319,12 +319,12 @@ impl ExecutorConfig {
     ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
     ///   unqualified `up` name can never resolve to the journal — C1).
     /// - **Platform** ⇒ the full configured schema allowlist (e.g.
-    ///   `"zeroship", "oauth_hydra", "public"`). The platform changelog relies on
+    ///   `"zeroship", "public"`). The platform changelog relies on
     ///   this: V0001's `CREATE EXTENSION citext` is deliberately unqualified and
     ///   must resolve a creation target (`public`) — and at that point the
     ///   `zeroship` schema does not yet exist, so a `zeroship`-only path would
     ///   error `3F000 no schema has been selected to create in`. Cross-schema
-    ///   resolution between `zeroship`/`oauth_hydra`/`public` also needs them all
+    ///   resolution between `zeroship`/`public` also needs them all
     ///   on the path. This mirrors the Liquibase deployment, where the `postgres`
     ///   principal runs with `search_path = zeroship, public`.
     /// - **Trusted** ⇒ the project schema (the `_` fallback). Trusted has no

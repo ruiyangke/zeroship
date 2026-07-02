@@ -14,6 +14,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
+use crate::auth::validate_control_key;
+
 /// Generate a 32-byte CSPRNG verifier, base64url-encoded (no padding).
 #[must_use]
 pub fn generate_verifier() -> String {
@@ -27,6 +29,34 @@ pub fn generate_verifier() -> String {
 pub fn s256_challenge(verifier: &str) -> String {
     let digest = Sha256::digest(verifier.as_bytes());
     URL_SAFE_NO_PAD.encode(digest)
+}
+
+/// Verify a PKCE S256 verifier against a stored challenge per RFC 7636 §4.6.
+#[must_use]
+pub fn verify_s256(verifier: &str, expected_challenge: &str) -> bool {
+    is_valid_verifier(verifier)
+        && is_valid_s256_challenge(expected_challenge)
+        && validate_control_key(&s256_challenge(verifier), expected_challenge)
+}
+
+/// RFC 7636 §4.1 verifier syntax: 43-128 unreserved ASCII characters.
+#[must_use]
+pub fn is_valid_verifier(verifier: &str) -> bool {
+    (43..=128).contains(&verifier.len()) && verifier.bytes().all(is_pkce_unreserved)
+}
+
+/// S256 is a SHA-256 digest encoded base64url-no-pad: exactly 43 chars.
+#[must_use]
+pub fn is_valid_s256_challenge(challenge: &str) -> bool {
+    challenge.len() == 43 && challenge.bytes().all(is_base64url_no_pad)
+}
+
+fn is_pkce_unreserved(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~')
+}
+
+fn is_base64url_no_pad(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')
 }
 
 #[cfg(test)]
@@ -69,5 +99,20 @@ mod tests {
         assert_eq!(c1, c2);
         // 32-byte SHA256 -> 43 base64url chars (no padding).
         assert_eq!(c1.len(), 43);
+    }
+
+    #[test]
+    fn verify_s256_accepts_valid_pair() {
+        let verifier = generate_verifier();
+        let challenge = s256_challenge(&verifier);
+        assert!(verify_s256(&verifier, &challenge));
+    }
+
+    #[test]
+    fn verify_s256_rejects_wrong_or_plain_values() {
+        let verifier = generate_verifier();
+        assert!(!verify_s256(&verifier, &s256_challenge("wrong-verifier-value-that-is-long-enough")));
+        assert!(!verify_s256(&verifier, &verifier));
+        assert!(!verify_s256("short", &s256_challenge("short")));
     }
 }

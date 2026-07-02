@@ -7,6 +7,7 @@ use ntex::web::{self, FromRequest, HttpRequest, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
+use zeroship_authn::VerifiedPrincipal;
 
 use crate::{http_util, AppState};
 
@@ -168,63 +169,12 @@ async fn guard_from_bearer(
     let Some(raw) = zeroship_core::auth::extract_bearer(header) else {
         return Ok(None);
     };
-    let claims = match state.pat_issuer.verify(raw) {
-        Ok(claims) => claims,
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "control: bearer was not a valid PAT; trying OAuth introspection"
-            );
-            return oauth_guard_from_bearer(raw, state, request_ip, request_id).await;
-        }
-    };
-    let token_id = Uuid::parse_str(&claims.jti)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid bearer token id"))?;
-    let owner_id = Uuid::parse_str(&claims.owner)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid bearer owner"))?;
-
-    let rows = state
-        .control_pg
-        .query(
-            "SELECT owner_id FROM zeroship.permission_tokens \
-             WHERE id = $1 \
-               AND owner_id = $2 \
-               AND policy_hash = $3 \
-               AND kind = 'pat' \
-               AND revoked_at IS NULL \
-               AND (expires_at IS NULL OR expires_at > NOW())",
-            &[&token_id, &owner_id, &claims.policy_hash],
-        )
+    state
+        .bearer_verifier()
+        .verify_bearer(raw, request_ip, request_id)
         .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "control: permission token lookup failed");
-            web::error::ErrorInternalServerError("permission token lookup failed")
-        })?;
-    let row = rows
-        .first()
-        .ok_or_else(|| web::error::ErrorUnauthorized("permission token not active"))?;
-    let principal_id: Uuid = row.get("owner_id");
-
-    if let Err(err) = state
-        .control_pg
-        .execute(
-            "UPDATE zeroship.permission_tokens SET last_used_at = NOW() WHERE id = $1",
-            &[&token_id],
-        )
-        .await
-    {
-        tracing::warn!(error = %err, "control: permission token last_used_at update failed");
-    }
-
-    Ok(Some(AuthzGuard {
-        principal_id,
-        token_id: Some(token_id),
-        token_policy: None,
-        mfa_verified: false,
-        mfa_age_seconds: None,
-        request_ip,
-        request_id,
-    }))
+        .map(AuthzGuard::from)
+        .map(Some)
 }
 
 fn request_id(req: &HttpRequest) -> String {
@@ -247,71 +197,16 @@ fn now_unix() -> Result<i64, String> {
     .map_err(|err| format!("clock overflow: {err}"))
 }
 
-async fn oauth_guard_from_bearer(
-    token: &str,
-    state: &AppState,
-    request_ip: Option<IpAddr>,
-    request_id: String,
-) -> Result<Option<AuthzGuard>, web::Error> {
-    let result = state
-        .hydra_introspector
-        .introspect(token)
-        .await
-        .map_err(|err| {
-            tracing::warn!(error = %err, "control: hydra introspect failed");
-            web::error::ErrorUnauthorized("oauth introspection failed")
-        })?;
-    if !result.active {
-        return Err(unauthorized_json("inactive_token"));
+impl From<VerifiedPrincipal> for AuthzGuard {
+    fn from(principal: VerifiedPrincipal) -> Self {
+        Self {
+            principal_id: principal.principal_id,
+            token_id: principal.token_id,
+            token_policy: principal.token_policy,
+            mfa_verified: principal.mfa_verified,
+            mfa_age_seconds: principal.mfa_age_seconds,
+            request_ip: principal.request_ip,
+            request_id: principal.request_id,
+        }
     }
-    if !result.aud.as_ref().is_some_and(|audiences| {
-        audiences
-            .iter()
-            .any(|audience| audience == &state.expected_oauth_audience)
-    }) {
-        return Err(unauthorized_json("wrong_audience"));
-    }
-
-    let sub = result
-        .sub
-        .ok_or_else(|| web::error::ErrorUnauthorized("missing oauth sub"))?;
-    let principal_id =
-        Uuid::parse_str(&sub).map_err(|_| web::error::ErrorUnauthorized("invalid oauth sub"))?;
-
-    let raw_scope = result.scope.unwrap_or_default();
-    let scopes = parse_resource_server_scopes(&raw_scope)
-        .map_err(|_| web::error::ErrorUnauthorized("invalid oauth scope"))?;
-    let token_policy = authz::scopes_to_policy(&scopes);
-
-    Ok(Some(AuthzGuard {
-        principal_id,
-        token_id: None,
-        token_policy: Some(token_policy),
-        mfa_verified: false,
-        mfa_age_seconds: None,
-        request_ip,
-        request_id,
-    }))
-}
-
-fn parse_resource_server_scopes(raw: &str) -> Result<Vec<authz::Scope>, authz::ParseScopeError> {
-    raw.split_whitespace()
-        .filter(|scope| !is_standard_oidc_scope(scope))
-        .map(authz::Scope::parse)
-        .collect()
-}
-
-fn is_standard_oidc_scope(scope: &str) -> bool {
-    matches!(
-        scope,
-        "openid" | "offline_access" | "profile" | "email" | "address" | "phone"
-    )
-}
-
-fn unauthorized_json(error: &'static str) -> web::Error {
-    web::error::InternalError::from_response(
-        error,
-        HttpResponse::Unauthorized().json(&json!({ "error": error })),
-    )
-    .into()
 }

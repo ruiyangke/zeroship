@@ -182,7 +182,8 @@ export interface SignInOptions {
    * login (`auth.zeroship.ai/login`): an in-page iframe on the same-site console
    * when `immersive` is enabled, a popup window everywhere else. `'google'` /
    * `'github'` are federated providers, always a popup window (their IdP refuses
-   * to be framed). All three are forwarded to Hydra as `idp_hint`. Whatever the
+   * to be framed). All three are forwarded to the native auth service as
+   * `idp_hint`. Whatever the
    * surface, the credential is never handled by app/console JS — the iframe and
    * the popup both isolate it inside the auth origin.
    */
@@ -195,8 +196,8 @@ export interface SignInOptions {
   /**
    * OIDC `prompt` passthrough for step-up re-authentication. `login` forces a
    * fresh credential challenge; `consent` re-shows the consent screen. Omitted
-   * by default so Hydra's SSO skip fires. Forwarded verbatim to
-   * `GET /__zeroship/auth/authorize` → Hydra (`browser_auth.rs`).
+   * by default so the auth service's SSO skip can fire. Forwarded verbatim to
+   * `GET /__zeroship/auth/authorize` (`browser_auth.rs`).
    */
   prompt?: "login" | "consent";
 }

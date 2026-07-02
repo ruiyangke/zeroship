@@ -1,10 +1,10 @@
 //! Signed, short-lived "pending 2FA" stash for the login challenge (ISS-11).
 //!
 //! When a password login succeeds for a user with a CONFIRMED TOTP credential,
-//! we must NOT `accept_login` to hydra yet — a second factor is required. But
-//! HTTP is stateless across the two POSTs (password form, then code form), so
-//! the "password was already verified for THIS user against THIS hydra
-//! challenge" fact has to ride with the browser. We carry it in a short-lived
+//! we must NOT complete the login yet — a second factor is required. But HTTP
+//! is stateless across the two POSTs (password form, then code form), so the
+//! "password was already verified for THIS user against THIS native return
+//! target" fact has to ride with the browser. We carry it in a short-lived
 //! HMAC-signed cookie, exactly like the OAuth federation stash
 //! (`ui::oauth_stash`): the cookie is non-forgeable (MAC'd against the auth
 //! `stash_signing_key`) and self-expiring, so it is NOT a bearer session — it
@@ -39,20 +39,20 @@ pub struct TotpChallenge {
     /// Credential version captured at password-verify time; a later change
     /// (password reset / forced logout) invalidates this challenge.
     pub credential_version: i64,
-    /// hydra's pending login id we will `accept_login` once factor 2 passes.
-    pub login_challenge: String,
+    /// Validated same-origin path to redirect to once factor 2 passes.
+    pub return_to: String,
     pub iat: i64,
     pub exp: i64,
 }
 
 impl TotpChallenge {
     #[must_use]
-    pub fn new(user_id: uuid::Uuid, credential_version: i64, login_challenge: String) -> Self {
+    pub fn new(user_id: uuid::Uuid, credential_version: i64, return_to: String) -> Self {
         let iat = unix_now();
         Self {
             user_id,
             credential_version,
-            login_challenge,
+            return_to,
             iat,
             exp: iat.saturating_add(CHALLENGE_MAX_AGE_SECS),
         }
@@ -186,7 +186,7 @@ mod tests {
         let c = TotpChallenge {
             user_id: uuid::Uuid::new_v4(),
             credential_version: 1,
-            login_challenge: "lc".into(),
+            return_to: "/oauth2/authorize".into(),
             iat: now - 1000,
             exp: now - 600,
         };
@@ -200,7 +200,7 @@ mod tests {
         let c = TotpChallenge {
             user_id: uuid::Uuid::new_v4(),
             credential_version: 1,
-            login_challenge: "lc".into(),
+            return_to: "/oauth2/authorize".into(),
             iat: now + 120,
             exp: now + 600,
         };

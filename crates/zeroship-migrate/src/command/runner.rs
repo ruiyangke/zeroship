@@ -77,7 +77,7 @@ pub struct RunConfig {
     /// `--schema`, conventionally `zeroship`).
     pub project_schema: String,
     /// The Platform schema allowlist (`--schema`, repeatable; default
-    /// `zeroship`,`oauth_hydra`,`public`).
+    /// `zeroship`,`public`).
     pub schemas: Vec<String>,
     /// The `CREATE EXTENSION` allowlist (default `citext`,`uuid-ossp`).
     pub extensions: Vec<String>,
@@ -2077,11 +2077,7 @@ async fn probe_once(engine: &Engine, database_url: &str) -> Result<(), String> {
 /// Convenience for the bin: the conventional Platform schema allowlist default.
 #[must_use]
 pub fn default_platform_schemas() -> Vec<String> {
-    vec![
-        "zeroship".to_string(),
-        "oauth_hydra".to_string(),
-        "public".to_string(),
-    ]
+    vec!["zeroship".to_string(), "public".to_string()]
 }
 
 /// Convenience for the bin: the conventional Platform extension allowlist default.

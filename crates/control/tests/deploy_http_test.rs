@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::{
     AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest,
-    ManifestMetadata, ScopeDef, WorkerCode,
+    ManifestMetadata, RuntimeDescriptorEntry, ScopeDef, WorkerCode,
 };
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
@@ -143,12 +143,14 @@ fn manifest_for(
         asset_version: 0,
         sourcemaps: HashMap::new(),
         auth: Default::default(),
+        net: Default::default(),
         metadata: ManifestMetadata {
             compiler: Some("test".into()),
             built_at: "2026-04-29T00:00:00Z".into(),
         },
         exports: None,
         migrations: Vec::new(),
+        runtime_descriptor: None,
     }
 }
 
@@ -305,16 +307,13 @@ async fn build_state_inner(db_url: &str, label: &str, provision_dsn: Option<Stri
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg,
-        hydra_admin_url: "http://127.0.0.1:4445".to_string(),
         app_base_domain: "zeroship.localhost".to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        pat_issuer: Arc::new(zeroship_control::token_handlers::PatIssuer::dev_insecure()),
-        hydra_introspector: Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-            "http://127.0.0.1:9",
-        )),
+        pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
+        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),
@@ -814,16 +813,22 @@ fn zship_with_ir_migration(ir_name: &str, ir_body: &str) -> Vec<u8> {
     let server_hash = sha256_hex(server);
     let ir_bytes = ir_body.as_bytes().to_vec();
     let ir_hash = sha256_hex(&ir_bytes);
+    let descriptor = br#"{"version":1,"collections":{}}"#;
+    let descriptor_hash = sha256_hex(descriptor);
 
     let mut manifest = manifest_for(Some(&server_hash), &[]);
     manifest.migrations = vec![zeroship_bundle::MigrationFileEntry {
         name: ir_name.to_string(),
         hash: ir_hash.clone(),
     }];
+    manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
+        hash: descriptor_hash.clone(),
+    });
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let blobs = vec![
         (server_hash.clone(), server.to_vec()),
         (ir_hash.clone(), ir_bytes),
+        (descriptor_hash, descriptor.to_vec()),
     ];
     build_zship(&manifest_bytes, &blobs, true)
 }

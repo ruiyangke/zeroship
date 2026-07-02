@@ -6,7 +6,7 @@
 //! missing `AUTH_RELAY_SMTP_HOST` so the real boot path is not weakened.
 //!
 //! These are process-level: `--check-config` exits inside `main` before the DB /
-//! Hydra / server come up, so no live services are needed. We drive the compiled
+//! server come up, so no live services are needed. We drive the compiled
 //! binary via `CARGO_BIN_EXE_zeroship-auth` (provided to integration test
 //! targets) under a wiped env so a stray `AUTH_*` in the dev shell can't taint
 //! the assertion.
@@ -52,10 +52,6 @@ fn check_config_short_circuits_before_relay_smtp_validation() {
         "--dev-insecure",
         // Explicit default — make the SMTP-host requirement unambiguous.
         "--relay-forward-mailer=smtp",
-        "--hydra-admin-url",
-        "http://127.0.0.1:4445",
-        "--hydra-public-url",
-        "http://127.0.0.1:4444",
     ]);
 
     assert!(
@@ -70,9 +66,9 @@ fn check_config_short_circuits_before_relay_smtp_validation() {
         "the relay-SMTP requirement must not gate --check-config; stderr=\n{stderr}"
     );
     // The resolved config report must actually be emitted (it is the whole point
-    // of the dry-run). The report prints `hydra_admin_url = …` on stdout.
+    // of the dry-run). The report prints `auth_provider = …` on stdout.
     assert!(
-        stdout.contains("hydra_admin_url = http://127.0.0.1:4445"),
+        stdout.contains("auth_provider = native"),
         "--check-config must print the resolved config report; stdout=\n{stdout}"
     );
 }
@@ -90,10 +86,6 @@ fn check_config_short_circuits_before_transactional_smtp_validation() {
         "--mailer=smtp",
         // Relay set to stdout so ONLY the transactional SMTP requirement is in play.
         "--relay-forward-mailer=stdout",
-        "--hydra-admin-url",
-        "http://127.0.0.1:4445",
-        "--hydra-public-url",
-        "http://127.0.0.1:4444",
     ]);
 
     assert!(
@@ -114,7 +106,7 @@ fn check_config_short_circuits_before_transactional_smtp_validation() {
 /// The fix must NOT weaken the REAL boot path: a normal boot (no
 /// `--check-config`) with `--relay-forward-mailer=smtp` and no
 /// `AUTH_RELAY_SMTP_HOST` must STILL fail fast with the named env var, before any
-/// DB / Hydra work. We assert it exits non-zero AND emits the exact requirement
+/// DB work. We assert it exits non-zero AND emits the exact requirement
 /// message — proving the runtime validation was merely relocated past the
 /// dry-run early-return, not deleted.
 #[test]
@@ -125,10 +117,6 @@ fn real_boot_still_enforces_relay_smtp_host() {
         "postgres://127.0.0.1:1/unreachable-on-purpose",
         "--dev-insecure",
         "--relay-forward-mailer=smtp",
-        "--hydra-admin-url",
-        "http://127.0.0.1:4445",
-        "--hydra-public-url",
-        "http://127.0.0.1:4444",
     ]);
 
     assert!(

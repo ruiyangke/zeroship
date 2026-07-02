@@ -14,8 +14,8 @@
 //! typ is not `zeroship-sess+jwt` (e.g. an RFC 9068 `at+jwt` access token), so a
 //! resource-server access token can never be replayed as a session cookie, and
 //! the cookie — which is inert identity, never a capability — can never be
-//! presented as authorization on the Bearer/DPoP arms (those recognize only a
-//! raw-Hydra `iss`, not this token).
+//! presented as authorization on the Bearer arm (which recognizes only a
+//! raw OP `iss`, not this token).
 //!
 //! ## What the cookie carries — identity + scopes only, NOT a capability
 //!
@@ -31,7 +31,7 @@
 //!
 //! Identity verification is stateless (local signature + `kid` + `iss` + `exp`
 //! + `app` binding — no DB). The revocation gate is NOT: the cookie arm runs the
-//! SAME per-app family-marker check the Bearer/DPoP arms use —
+//! SAME per-app family-marker check the Bearer arm uses —
 //! `is_family_revoked_since(client_id = app, sub = pws_, iat)`
 //! ([`zeroship_core::wrapper_revocation`]) — and that is a direct
 //! `SELECT EXISTS` against a pooled connection, with NO in-memory TTL cache in
@@ -70,7 +70,7 @@ pub struct SessionClaims {
     /// cookie arm rejects a cookie whose `app` does not match the resolved
     /// route's client (audience binding, same role as the wrapper `aud`/Host).
     pub app: String,
-    /// Per-app pairwise subject (`pws_…`). NEVER the global Hydra UUID.
+    /// Per-app pairwise subject (`pws_…`). NEVER the global OP UUID.
     pub sub: String,
     pub iat: i64,
     pub exp: i64,

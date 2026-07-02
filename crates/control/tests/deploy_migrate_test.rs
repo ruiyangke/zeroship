@@ -1166,7 +1166,7 @@ async fn deploy_migrate_refuses_understated_unique_drop_from_live_fact() {
         {"op":"createTable","name":"users","columns":[
             {"name":"email","type":"text","nullable":false}
         ]},
-        {"op":"createIndex","table":"users","columns":["email"],
+        {"op":"createIndex","table":"users","columns":[{"kind":"column","name":"email"}],
          "name":"users_email_uniq","unique":true}
     ]}"#;
     let dir1 = migrations_dir(&[("0001_create_users.ir.json", create)]);
@@ -1975,18 +1975,29 @@ async fn deploy_migrate_two_concurrent_same_project_deploys_serialize_a1() {
         {"op":"addColumn","table":"members","column":"nickname","type":"text","nullable":true}
     ]}"#;
     let dir_b = migrations_dir(&[("0003_add_nickname.ir.json", touch)]);
-    // Spin until A has at least started (acquired its lock) so B genuinely contends.
-    while !a_done.get()
-        && conn
+    // Spin until A has at least started (acquired THIS app's project lock) so B
+    // genuinely contends. Other parallel tests also use advisory locks, so this
+    // must probe the exact `hashtext(project_id)` key instead of pg_locks globally.
+    while !a_done.get() {
+        let acquired: bool = conn
             .query_one(
-                "SELECT count(*) FROM pg_locks WHERE locktype='advisory'",
-                &[],
+                "SELECT pg_try_advisory_lock(hashtext($1)::bigint)",
+                &[&schema],
             )
             .await
-            .map(|r| r.get::<_, i64>(0))
-            .unwrap_or(0)
-            == 0
-    {}
+            .map(|r| r.get(0))
+            .unwrap_or(false);
+        if acquired {
+            let _ = conn
+                .execute(
+                    "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+                    &[&schema],
+                )
+                .await;
+        } else {
+            break;
+        }
+    }
     let b_result = apply_bundle_migrations(&admin_dsn(), &app_id, &dir_b).await;
 
     // B could only finish after acquiring the lock, which A held until it committed

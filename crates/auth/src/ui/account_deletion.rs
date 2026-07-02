@@ -3,9 +3,9 @@
 //!
 //! `/me/delete` does NOT erase anything synchronously. It begins the lifecycle:
 //! soft-disable + schedule + revoke sessions (all in one DB transaction via
-//! [`users::request_deletion`]), then tear down hydra login sessions, send a
-//! confirm/undo email, and audit. The irreversible erasure happens later, after
-//! the grace window, in `cron::account_reaper`.
+//! [`users::request_deletion`]), then sends a confirm/undo email and audits.
+//! The irreversible erasure happens later, after the grace window, in
+//! `cron::account_reaper`.
 //!
 //! `/me/delete/cancel` reverses an in-flight request within the grace window
 //! ([`users::cancel_deletion`]) and audits.
@@ -24,14 +24,14 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::cron::account_reaper::GRACE_DAYS;
 use crate::csrf;
-use crate::hydra_client::HydraAdmin;
+use crate::oidc;
 use crate::sessions::login as session_cookie;
+use crate::store::sessions;
 use crate::store::users::{self, UserRow};
 use zeroship_mailer::templates::{
     build_email, AccountDeletionRequestedHtml, AccountDeletionRequestedText,
 };
 use zeroship_mailer::{Address, Mailer};
-use crate::store::sessions;
 
 #[derive(Debug, Deserialize)]
 pub struct CsrfForm {
@@ -49,8 +49,8 @@ pub async fn request(
     form: web::types::Form<CsrfForm>,
     cfg: web::types::State<Arc<AuthConfig>>,
     db: web::types::State<Arc<compio_postgres::Client>>,
-    admin: web::types::State<HydraAdmin>,
     mailer: web::types::State<Arc<dyn Mailer>>,
+    issuer: web::types::State<Arc<oidc::Issuer>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf, cfg.insecure_dev) {
         return redirect_to_login();
@@ -71,10 +71,18 @@ pub async fn request(
         }
     };
 
-    // Tear down hydra login sessions (best-effort, mirrors password-reset).
-    let subject = user.id.to_string();
-    if let Err(e) = admin.delete_login_sessions(&subject).await {
-        tracing::warn!(error = %e, user_id = %user.id, "account-deletion hydra login-session revocation failed");
+    match oidc::backchannel_logout::emit_for_user(db.as_ref(), issuer.as_ref(), user.id).await {
+        Ok(report) => tracing::info!(
+            user_id = %user.id,
+            attempted = report.attempted,
+            delivered = report.delivered,
+            "account-deletion: emitted OIDC back-channel logout tokens"
+        ),
+        Err(e) => tracing::error!(
+            error = %e,
+            user_id = %user.id,
+            "account-deletion: BCL emission failed"
+        ),
     }
 
     // Confirm/undo email (best-effort: a send failure must not change the
