@@ -184,9 +184,9 @@ class AuthClientImpl implements AuthClient {
     const usePopup = opts.popup !== false;
     const scopes = opts.scopes ?? this.scope;
     // `prompt` is an OIDC passthrough for step-up (login/consent); the gateway
-    // forwards it to Hydra verbatim. `provider` (password/google/github) is
-    // threaded through as the Hydra `idp_hint` so the login UI can route to /
-    // pre-select the named upstream IdP (Fix 5 — it is no longer dropped).
+    // forwards it to the native auth service verbatim. `provider`
+    // (password/google/github) is threaded through as `idp_hint` so the login UI
+    // can route to / pre-select the named upstream IdP (Fix 5 — it is no longer dropped).
     const prompt = opts.prompt;
     const provider = opts.provider;
 

@@ -320,9 +320,8 @@ implementation**. The SDK ships in the app template, but there is **no reference
 
 ## 6. Auth (env.auth + IdP + SDK)
 
-A full OpenID Connect 1.0 / OAuth 2.1 identity platform. `crates/auth` is the login UI and
-identity service (ntex, Postgres, Hydra admin client); ory/hydra is the OIDC kernel sidecar;
-the gateway is the OIDC RP for every hosted app; `env.auth` (AuthPlugin) is the per-request V8
+A full OpenID Connect 1.0 / OAuth 2.1 identity platform. `crates/auth` is the login UI,
+identity service, and native OIDC OP (ntex, Postgres); the gateway is the OIDC RP for every hosted app; `env.auth` (AuthPlugin) is the per-request V8
 primitive; `@zeroship/auth` ships a server helper, headless browser client, and React adapter.
 Covers password/Google/GitHub, magic-link, TOTP 2FA, sessions, GDPR erasure, relay email,
 audit, and a dev-tier parity implementation.
@@ -343,9 +342,9 @@ audit, and a dev-tier parity implementation.
 | TOTP backup codes | 🟢 | internal | `crates/auth/src/identity/totp.rs` | — | `crates/auth/src/identity/totp.rs` | 10 single-use Argon2id-hashed codes. |
 | IdP session management | 🟢 | GET /me/sessions, POST /me/sessions/{id}/revoke | `crates/auth/src/sessions/login.rs`, `store/sessions.rs`, `ui/sessions.rs` | `docs/reference/auth.md` | — | 12h hard / 30m sliding; __Host- cookie. |
 | GDPR deletion request / erasure | 🟢 | POST /me/delete, /me/delete/cancel; cron | `crates/auth/src/ui/account_deletion.rs`, `cron/account_reaper.rs` | `docs/reference/auth.md` | `crates/auth/src/cron/account_reaper.rs` | 30-day grace; branches on Stripe history. |
-| OIDC consent flow | 🟢 | GET /consent, POST /consent/accept, /deny | `crates/auth/src/ui/consent.rs`, `hydra_client/consent.rs` | `docs/reference/auth.md` | — | Mints relay alias at consent. |
-| Device Authorization Grant (RFC 8628) | 🟢 | GET/POST /device | `crates/auth/src/ui/device.rs`, `hydra_client/device.rs` | `docs/reference/auth.md` | — | Requires IdP session; CSRF. |
-| RP-initiated logout | 🟢 | GET/POST /logout | `crates/auth/src/ui/logout.rs`, `hydra_client/logout.rs` | `docs/reference/auth.md` | — | Hydra urls.logout. |
+| OIDC consent flow | 🟢 | GET /consent, POST /consent/accept, /deny | `crates/auth/src/ui/consent.rs`, `oidc/authorization_code.rs` | `docs/reference/auth.md` | — | Mints relay alias at consent. |
+| Device Authorization Grant (RFC 8628) | 🟢 | GET/POST /device; POST /oauth2/device/authorization | `crates/auth/src/ui/device.rs`, `oidc/device_token.rs` | `docs/reference/auth.md` | — | Requires IdP session; CSRF. |
+| RP-initiated logout | 🟢 | GET/POST /oauth2/logout | `crates/auth/src/ui/logout.rs`, `oidc/refresh.rs` | `docs/reference/auth.md` | — | Revokes local OP session + refresh families. |
 | OIDC backchannel logout (BCL 1.0) | 🟢 | POST /oidc/backchannel-logout (gateway) | `crates/gateway/src/backchannel_logout.rs` | `docs/reference/auth.md` | — | jti replay prevention; per-app + global. |
 | User profile page (/me) | 🟡 | GET /me | `crates/auth/src/ui/me.rs` | `docs/reference/auth.md` | — | Link-a-new-provider deferred ("coming soon"). |
 | JWK rotation cron | 🟢 | internal | `crates/auth/src/cron/jwk_rotation.rs` | — | `crates/runtime/tests/` (jwk_rotation_test) | Daily; EdDSA + RS256. |
@@ -368,7 +367,7 @@ audit, and a dev-tier parity implementation.
 | Dev-tier auth provider | 🟢 | internal (ZEROSHIP_DEV=1) | `crates/runtime/src/core/dev_auth.rs` | `docs/reference/auth-dev-tier.md` | `sdks/auth/tests/dev-tier.test.ts` | Distinct cookie; contract parity. |
 | Pairwise subject identifier (pws_) | 🟢 | internal (User.id) | `crates/gateway/src/identities.rs`, `auth_token.rs` | `docs/reference/auth.md` | — | Per-app opaque; global usr_ never exposed. |
 | CSRF protection (double-submit) | 🟢 | internal | `crates/auth/src/csrf.rs` | — | — | Constant-time; __Host- prefix in prod. |
-| Hydra admin client | 🟢 | internal | `crates/auth/src/hydra_client/` | — | — | cyper (no tokio). |
+| Native OP issuer/signing | 🟢 | internal | `crates/auth/src/oidc/issuer.rs`, `oidc/signing.rs` | `docs/reference/auth.md` | — | EdDSA signing; public JWK metadata. |
 | Security headers middleware | 🟢 | internal | `crates/auth/src/headers.rs` | — | — | Per-route frame-ancestors for immersive iframe. |
 | Bootstrap (JWK seeding + client reg) | 🟢 | internal (boot) | `crates/auth/src/bootstrap/` | — | — | Advisory lock; backchannel_logout_uri per client. |
 | Startup validation | 🟢 | internal | `crates/auth/src/startup_validation.rs` | — | — | Refuses start on misconfig. |
@@ -499,7 +498,7 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | Stateless signed session cookie | 🟢 | internal | `crates/gateway/src/session_token.rs`, `signing.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | Ed25519; verified locally, no DB. |
 | OIDC RP authorize→callback→mint | 🟢 | GET /__zeroship/auth/callback | `crates/gateway/src/oidc_rp.rs`, `router/dispatch.rs` | `docs/reference/auth.md` | `crates/gateway/tests/oidc_rp_e2e.rs` | HMAC-signed stash cookie. |
 | DPoP proof verification + jti replay (RFC 9449) | 🟢 | internal | `crates/gateway/src/router/auth.rs`, `lib.rs` | `docs/reference/auth.md` | `crates/gateway/tests/dpop_e2e.rs` | 120s window; per-app client_id binding. |
-| OIDC back-channel logout webhook | 🟢 | POST /oidc/backchannel-logout | `crates/gateway/src/backchannel_logout.rs` | — | `crates/gateway/tests/backchannel_logout_test.rs` | DB released before outbound Hydra revoke. |
+| OIDC back-channel logout webhook | 🟢 | POST /oidc/backchannel-logout | `crates/gateway/src/backchannel_logout.rs` | — | `crates/gateway/tests/backchannel_logout_test.rs` | Revokes app sessions and token families. |
 | auth.zeroship.ai reverse proxy | 🟢 | internal | `crates/gateway/src/router/dispatch.rs` | — | `crates/gateway/tests/oidc_rp_e2e.rs` | XFF re-authored (SEC-3); exact host match. |
 | CSRF origin guard (cookie mutations) | 🟢 | internal | `crates/gateway/src/router/auth.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/tests/oidc_rp_e2e.rs` | Mismatch drops cookie; Bearer/DPoP exempt. |
 | Route-level OAuth scope enforcement | 🟢 | internal | `crates/gateway/src/router/auth.rs`, `compiled.rs` | `docs/reference/auth.md` | `crates/gateway/src/sync.rs` | Only User/Admin routes; anon never 403s. |
@@ -519,7 +518,7 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | Redirect and rewrite actions | 🟢 | internal | `crates/gateway/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/gateway/src/compiled.rs` | Recursive rewrites unsupported. |
 | WS subscription affinity routing | 🟡 | internal | `crates/gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | Affinity runs; WS proxy returns 501 (use zeroship serve). |
 | API key validation (legacy) | 🟡 | internal | `crates/gateway/src/auth.rs` | — | — | check_api_key not called from main dispatch. |
-| Hydra client with circuit breaker | 🟢 | internal | `crates/gateway/src/hydra_client.rs`, `oidc_rp.rs` | — | `crates/gateway/tests/hydra_breaker_test.rs` | 4xx doesn't trip; only transport/timeouts. |
+| Native OP client with circuit breaker | 🟢 | internal | `crates/gateway/src/op_client.rs`, `oidc_rp.rs` | — | `crates/gateway/tests/op_breaker_test.rs` | 4xx doesn't trip; only transport/timeouts. |
 | Per-app anchor store (reload-recovery) | 🟢 | internal | `crates/gateway/src/anchors.rs` | `docs/reference/auth.md` | `crates/gateway/tests/auth_token_anchors_test.rs` | 30-day; single-flight per anchor. |
 | Gateway sessions store (audit/revocation) | 🟢 | internal | `crates/gateway/src/sessions.rs` | `docs/reference/auth.md` | `crates/gateway/tests/sessions_test.rs` | Not read on hot path (R1b). |
 | Per-app identities store (pws_ + relay) | 🟢 | internal | `crates/gateway/src/identities.rs` | `docs/reference/auth.md` | `crates/gateway/tests/identities_relay_test.rs` | Relay lookup fail → empty email. |
@@ -539,7 +538,7 @@ are internally accessed; end-users hit it indirectly via HTTP.
 The creator/admin API server: app CRUD, deploy ingest, env/secrets, route and version feeds,
 billing/Stripe Connect, platform admin, Cedar authz, PAT issuance, OAuth client management,
 audit, and crons. It is a pure REST resource server (no OIDC RP of its own after R5); every
-caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspected via Hydra.
+caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspected via the native OP.
 `@zeroship/control` wraps the HTTP surface for platform-owned code.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
@@ -558,18 +557,18 @@ caller authenticates via a PAT (Ed25519/JWT) or an OAuth access token introspect
 | Secret key rotation (re-encrypt) | 🟢 | internal (EnvStore::rotate_app) | `crates/control/src/env_store.rs` | — | — | No HTTP endpoint to trigger yet. |
 | Secret process.env exposure list | 🟢 | GET/PUT /api/apps/{id}/env/expose | `crates/control/src/env_handlers.rs`, `env_store.rs` | `docs/reference/control.md` | — | Atomic; audited. |
 | Audit log read (per-app) | 🟢 | GET /api/apps/{id}/audit | `crates/control/src/env_handlers.rs`, `audit.rs` | `docs/reference/control.md` | — | Append-only with tamper trigger. |
-| Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/control/src/authz_guard.rs` | — | `crates/control/tests/authz_guard_oauth_test.rs` | PAT first, then Hydra introspection. |
+| Cedar-backed authorization (AuthzGuard) | 🟢 | internal | `crates/control/src/authz_guard.rs` | — | `crates/control/tests/authz_guard_oauth_test.rs` | PAT first, then native OP introspection. |
 | Personal Access Token (PAT) issuance | 🟢 | POST/GET /api/me/tokens, DELETE /{id} | `crates/control/src/token_handlers.rs` | — | `crates/control/tests/token_handlers_test.rs` | Grant-subset; no PAT-chains; 365d max. |
 | Platform admin role management | 🟢 | POST/DELETE/GET /api/admin/users/{id}/role | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Invalidates EntityCache. |
 | Platform Cedar policy CRUD | 🟢 | GET/PUT/DELETE /api/admin/platform-policies | `crates/control/src/admin_handlers.rs` | — | `crates/control/tests/admin_handlers_test.rs` | Validated before write; audit diff. |
 | App audit-lock | 🟢 | POST /api/admin/apps/{id}/audit-lock | `crates/control/src/admin_handlers.rs` | — | — | Flag stored; not yet enforced in sweep. |
 | App suspension | 🟡 | POST /api/admin/apps/{id}/suspend | `crates/control/src/admin_handlers.rs` | — | — | Flag written; gateway does not act on it. |
-| First-party OAuth client registration | 🟢 | POST/GET/DELETE /api/admin/oauth-clients | `crates/control/src/oauth_handlers.rs` | — | `crates/control/tests/oauth_handlers_test.rs` | Hydra-rollback on DB failure. |
+| First-party OAuth client registration | 🟢 | POST/GET/DELETE /api/admin/oauth-clients | `crates/control/src/oauth_handlers.rs` | — | `crates/control/tests/oauth_handlers_test.rs` | Native OP registry rows. |
 | Per-app OAuth client provisioning (auto) | 🟢 | internal (create_app + deploy) | `crates/control/src/app_oauth_client.rs` | — | `crates/control/tests/app_oauth_client_test.rs` | Idempotent; non-destructive URI merge. |
 | Custom-domain OAuth redirect URI sync | 🟡 | internal (sync_app_redirect_uris) | `crates/control/src/app_oauth_client.rs` | — | — | Implemented/tested; no production caller. |
 | App-declared OAuth scope registry | 🟢 | internal (deploy) | `crates/control/src/app_oauth_client.rs`, `api.rs` | — | `crates/control/tests/app_oauth_client_test.rs` | Hard-fails deploy on vocab collision. |
 | OAuth grant listing (user-facing) | 🟢 | GET /api/me/oauth-grants | `crates/control/src/oauth_grants_handlers.rs` | — | `crates/control/tests/oauth_grants_handlers_test.rs` | Joined with client metadata. |
-| OAuth grant revocation (user-facing) | 🟢 | DELETE /api/me/oauth-grants/{client_id} | `crates/control/src/oauth_grants_handlers.rs` | — | `crates/control/tests/oauth_grants_handlers_test.rs` | Owned connection; family marker; Hydra delete. |
+| OAuth grant revocation (user-facing) | 🟢 | DELETE /api/me/oauth-grants/{client_id} | `crates/control/src/oauth_grants_handlers.rs` | — | `crates/control/tests/oauth_grants_handlers_test.rs` | Owned connection; family marker; grant delete. |
 | Stripe Connect onboarding | 🟡 | POST /api/creators/{id}/stripe/onboard | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | — | Placeholder URL; real account_links TODO. |
 | Stripe Connect account link / unlink | 🟢 | POST /callback, DELETE /api/creators/{id}/stripe | `crates/control/src/stripe_handlers.rs`, `stripe_store.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_store.rs` | Cascades payouts. |
 | Stripe webhook ingest (invoice.paid) | 🟢 | POST /internal/webhooks/stripe | `crates/control/src/stripe_handlers.rs` | `docs/reference/billing-metering.md` | `crates/control/tests/stripe_webhook_test.rs` | HMAC; idempotent on event_id. |
@@ -622,10 +621,10 @@ code on disk**.
 | Build-time Cedar lint (build.rs) | 🟢 | internal | `crates/authz/build.rs` | `docs/proposals/authorization.md` | — | Panics on invalid Cedar. |
 | DEFAULT_PLATFORM_ROLE ('none') | 🟢 | internal | `crates/authz/src/entities.rs` | — | `crates/authz/tests/platform_policies_test.rs` | Zero-privilege default (C1 IDOR fix). |
 | PAT EdDSA JWT signing (PatIssuer) | 🟢 | internal | `crates/control/src/token_handlers.rs` | `docs/proposals/authorization.md` | `crates/control/src/token_handlers.rs` | Unix perm check; JWK thumbprint kid. |
-| OAuth Hydra introspection in AuthzGuard | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | — | Audience check; unknown scope → 401. |
+| OAuth native OP introspection in AuthzGuard | 🟢 | internal | `crates/control/src/authz_guard.rs` | `docs/proposals/authorization.md` | — | Audience check; unknown scope → 401. |
 | OAuth Device Authorization Grant UI | 🟢 | HTTP endpoint | `crates/auth/src/ui/device.rs` | `docs/proposals/authorization.md` | — | CSRF; emits device_grant_accepted. |
-| OAuth client registration (admin) | 🟢 | HTTP endpoint | `crates/control/src/oauth_handlers.rs` | — | — | Scope validation; Hydra+DB transactional. |
-| User OAuth grant listing/revocation | 🟢 | HTTP endpoint | `crates/control/src/oauth_grants_handlers.rs` | — | — | Deletes Hydra consent sessions. |
+| OAuth client registration (admin) | 🟢 | HTTP endpoint | `crates/control/src/oauth_handlers.rs` | — | — | Scope validation; DB transactional. |
+| User OAuth grant listing/revocation | 🟢 | HTTP endpoint | `crates/control/src/oauth_grants_handlers.rs` | — | — | Deletes consent grants and revokes token families. |
 | P10: Toggle-matrix UI for PAT policies | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No dashboard route; no cedar-wasm. |
 | P11: Orgs + analyzer + incident lock | 🔵 | internal | — | `docs/proposals/authorization.md` | — | No org CRUD/table/analyzer/lock policy. |
 | P12: End-user authz in worker (env.authz) | 🔵 | `env.authz.*` / `@zeroship/permissions` | — | `docs/proposals/authorization.md` | — | No plugin-authz crate; no SDK; no manifest field. |
@@ -934,7 +933,7 @@ observability, and OIDC/OAuth protocol primitives.
 | OIDC — BCL logout_token verifier | 🟢 | internal (auth BCL) | `crates/core/src/logout_token.rs` | — | — | events claim; nonce-absent. |
 | DPoP — RFC 9449 proof verifier | 🟢 | internal (auth Bearer+DPoP) | `crates/core/src/dpop.rs` | — | — | RFC 7638 thumbprint; HMAC/none blocked. |
 | PKCE — RFC 7636 verifier + S256 | 🟢 | internal | `crates/core/src/pkce.rs` | — | — | 43-char verifier. |
-| Hydra introspector + LRU cache | 🟢 | internal (control authz) | `crates/core/src/hydra.rs` | — | `crates/core/tests/hydra_introspect.rs` | SHA-256(token) cache key; 5-min TTL. |
+| Native OP client + LRU cache | 🟢 | internal (gateway/control authz) | `crates/gateway/src/op_client.rs`, `crates/control/src/authz_guard.rs` | — | `crates/gateway/tests/op_breaker_test.rs` | SHA-256(token) cache key; 5-min TTL. |
 | Wrapper revocation — per-app family marker | 🟢 | internal (gateway/auth signout) | `crates/core/src/wrapper_revocation.rs` | `docs/reference/auth.md` | — | Per-app scope; 24h retention. |
 | SuperJSON — wire-compatible encode/decode | 🟢 | internal (RPC) | `crates/core/src/superjson.rs` | `docs/reference/rpc.md` | `crates/core/tests/superjson_test.rs` | npm superjson@2 wire; 17 fixtures. |
 | Preview port allowlist / denylist | 🟢 | internal (sandbox) | `crates/core/src/preview_ports.rs` | — | `crates/core/src/preview_ports.rs` | HARDCODED_DENY + DEFAULT_DENY; shared. |
@@ -946,7 +945,7 @@ observability, and OIDC/OAuth protocol primitives.
 The `zeroship` binary (serve/deploy/login/logout/whoami/secret/var), the `create-zeroship-app`
 scaffolder, and the `@zeroship/vite-plugin` dev/build loop. Dev tier is zero-config: SQLite
 replaces Postgres, redb replaces Redis, LocalFs replaces S3, and an in-process dev-auth provider
-replaces the Hydra/gateway stack. Production builds produce a `.zship` archive consumed by
+replaces the external auth/gateway stack. Production builds produce a `.zship` archive consumed by
 `zeroship deploy`.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
@@ -1190,7 +1189,7 @@ path-validation rules, and the missing SDK test suite.
 
 **Auth:** the four crons (JWK rotation, audit retention, token sweep, account reaper), rate
 limiting, the mailer abstraction + drivers, email suppression, relay email forwarding, CSRF
-double-submit, the Hydra admin client, security-headers middleware, bootstrap/JWK seeding, startup
+double-submit, native OP signing, security-headers middleware, JWK publication, startup
 validation, account eligibility, the `@zeroship/auth` React adapter, `requestScopes`,
 `onAuthStateChange`, TOTP backup codes, and the pairwise subject identifier.
 
@@ -1206,7 +1205,7 @@ protocol, the WS subscription frame protocol + close codes, mask-policy flush, t
 capability boundary (P9 §8), the `user.index()` fallback, and the `@zeroship/bootstrap` package.
 
 **Gateway:** back-channel logout endpoint, the auth.zeroship.ai reverse-proxy split, app-response
-header sanitization (SEC-9), trust-proxy IP derivation, the Hydra circuit breaker, the per-thread
+header sanitization (SEC-9), trust-proxy IP derivation, the native OP circuit breaker, the per-thread
 PG pool, RLS GUC tenant isolation, the `x-wall-time-ms` header, global rate limiting + concurrency
 limiting config, insecure-dev semantics, Ed25519 key rotation, and the Redis idempotency-store
 backend contract.
@@ -1252,7 +1251,7 @@ the SEC-7 env rotation, the per-thread cyper client, and SSG-only handling.
 wire format, pool config, TLS gaps); `typed_id`, the wire types, the AES-256-GCM at-rest crypto
 (and the per-app HKDF gap), the auth utils (ZeroShip-User header, pairwise, HMAC), the
 `urn:zeroship:` secret system (vault/awssm unresolvable), observability log formats, the DPoP /
-BCL verifiers, the Hydra introspector, SuperJSON (Rust side), the preview port allowlist, and
+BCL verifiers, the native OP client, SuperJSON (Rust side), the preview port allowlist, and
 wrapper revocation.
 
 **@zeroship/ui:** every component, layout, block, and section is documented **only in Storybook**;

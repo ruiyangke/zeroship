@@ -9,7 +9,7 @@ dev domain. From the repo root:
 ```bash
 # Build everything ahead (so `up` never builds): the single shared image
 # (control/gateway/worker/auth/sandbox + the `zeroship` CLI) plus the external
-# images (postgres, hydra, caddy, verdaccio).
+# images (postgres, caddy, verdaccio).
 docker compose build                   # all Dockerfile-based services
 docker compose pull                    # external images
 
@@ -39,9 +39,8 @@ stack is up, open:
   describe an app and it builds + deploys it (requires `OPENAI_API_KEY`, see
   below). The console is a gateway-fronted zeroship app, so Caddy proxies this
   host straight to the gateway.
-- **`http://auth.zeroship.localhost`** — login / OIDC (Caddy splits this host:
-  `/oauth2/*` and `/.well-known/*` go to Hydra `:4444`, everything else to the
-  `zeroship-auth` UI on `:9092`)
+- **`http://auth.zeroship.localhost`** — login UI and native OIDC OP
+  endpoints, proxied to `zeroship-auth` on `:9092`
 - **`http://api.zeroship.localhost`** — the gateway (explicit API host)
 - **`http://<app>.zeroship.localhost`** — any deployed creator app; the
   `*.zeroship.localhost` catch-all routes app subdomains to the gateway
@@ -70,13 +69,12 @@ point; these raw ports remain mapped for direct debugging):
 - `control` (`zeroship-control`) → `localhost:9090`
 - `gateway` (`zeroship-gate`) → `localhost:8000`
 - `auth` (`zeroship-auth`) → `localhost:9092`
-- `hydra` (`oryd/hydra`) → `localhost:4444` (public) / `localhost:4445` (admin, dev-only)
 - `sandbox` (`zeroship-sandbox`) → `localhost:9091`
 - `redis` (`env.kv` store) has no host port
 - `worker` (`zeroship-worker`) has no host port; scale it with `--scale worker=N`
 
-The one-shot `migrate` and `hydra-migrate` services run to completion and exit;
-`verdaccio` publishes loopback-only on `localhost:4873`.
+The one-shot `migrate` service runs to completion and exits; `verdaccio`
+publishes loopback-only on `localhost:4873`.
 
 ### Image build
 
@@ -126,31 +124,18 @@ non-loopback because app/admin auth is relaxed — only do this on a trusted net
 
 ### Auth service
 
-The `auth` service runs `zeroship-auth`, the OIDC IdP UI + RP that sits in front
-of the hydra kernel. The gateway redirects unauthenticated end users to it via
-the Caddy-fronted host (`--auth-ui-url http://auth.zeroship.localhost`). It runs
-with `--dev-insecure` (relaxes cookie/secret guards for the private compose
-network), `--bootstrap` (first-boot JWK + client creation), and
-`--allow-remote-hydra-admin` (the admin API lives at the non-loopback
-`http://hydra:4445`). The hydra URLs are NOT passed as flags: `hydra_public_url`
-(`http://auth.zeroship.localhost`) and `hydra_admin_url` (`http://hydra:4445`)
-come from the `[auth]` section of `ops/zeroship.toml`, auto-discovered at the
-well-known `/etc/zeroship/zeroship.toml` mount — the same overlay that supplies
-`trusted_oauth_clients` and `frame_ancestor_origins`. The DB DSN comes from
-`[secrets].auth_db_url` (a `urn:zeroship:env:AUTH_DB_URL` reference resolved from
-the service's `AUTH_DB_URL` env), not a literal `--db-url`. It mounts the
-localhost OIDC client config, `ops/auth-clients-dev.toml`, at the well-known
-`--clients-config` path (`/etc/zeroship/auth-clients.toml`), which it reconciles
-against hydra admin at boot. That file declares the `console`, `cli`, and
-`gateway` clients with `*.zeroship.localhost` redirect/logout URIs. The stash
-signing key is unset; under `--dev-insecure` it falls back to the built-in dev
-key.
+The `auth` service runs `zeroship-auth`, the native OIDC OP and login UI. The
+gateway redirects unauthenticated end users to the Caddy-fronted host
+(`--auth-ui-url http://auth.zeroship.localhost`). It runs with `--dev-insecure`
+for local HTTP cookies and weak dev secrets, plus `--bootstrap` so the local
+service can publish signing metadata and initialize first-boot state.
 
-The hydra kernel itself mounts `ops/hydra-dev.yaml` (not the prod
-`ops/hydra.yaml`): same `:4444`/`:4445` listeners, but the issuer/public base is
-`http://auth.zeroship.localhost` and `strategies.access_token` is `jwt` so RPs
-verify tokens locally against the JWKS at
-`http://auth.zeroship.localhost/.well-known/jwks.json`.
+`AUTH_PUBLIC_URL` is set to `https://auth.zeroship.localhost`, so discovery and
+token `iss` use `https://auth.zeroship.localhost/oauth2`. The DB DSN comes from
+`[secrets].auth_db_url` (a `urn:zeroship:env:AUTH_DB_URL` reference resolved from
+the service's `AUTH_DB_URL` env), not a literal `--db-url`. The shared
+`ops/zeroship.toml` overlay supplies `trusted_oauth_clients` and
+`frame_ancestor_origins`.
 
 ### Blob store
 
@@ -238,11 +223,9 @@ well-known path.)
 The overlay is the source of truth for the config-covered values, so they are
 defined ONCE instead of being repeated as per-service flags:
 
-- `[auth]` — Hydra URLs (`hydra_public_url = http://auth.zeroship.localhost`,
-  the Caddy-fronted issuer; `hydra_admin_url = http://hydra:4445`, network-internal),
-  `trusted_oauth_clients`, and `frame_ancestor_origins`. `control`, `gateway`,
-  and `auth` no longer pass `--hydra-public-url` / `--hydra-admin-url`; `auth` no
-  longer passes `FRAME_ANCESTOR_ORIGINS`.
+- `[auth]` — native OP trust settings: `trusted_oauth_clients` and
+  `frame_ancestor_origins`. `AUTH_PUBLIC_URL` stays on the `auth` service env
+  because it is the auth-service issuer setting for this deployment.
 - `[observability]` — shared `rust_log` / `log_format` (every service, worker
   included).
 - `[secrets]` — REFERENCE-only (`urn:zeroship:env:<VAR>`, never a plaintext
@@ -330,9 +313,8 @@ The one-shot `migrate` service runs `zeroship-migrate migrate --dir
 /db/migrations --profile platform` (Flyway-style files in `db/migrations/`)
 after Postgres is healthy and before control/auth start — they `depends_on` it
 with `service_completed_successfully`, so they only ever boot against a
-fully-migrated schema. Hydra migrates its own schema separately
-(`hydra-migrate`). See [Database migrations](db-migrations.md) for the layout,
-`ops/db-migrate.sh`, and how to add a migration.
+fully-migrated schema. See [Database migrations](db-migrations.md) for the
+layout, `ops/db-migrate.sh`, and how to add a migration.
 
 ## Related docs
 

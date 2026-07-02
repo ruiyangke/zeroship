@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 const CLIENT_ID: &str = "zeroship-cli";
-const DEFAULT_AUTH_URL: &str = "https://auth.zeroship.ai";
 const DEFAULT_CONTROL_URL: &str = "http://localhost:9090";
 const SCOPE: &str = "openid offline_access apps:deploy apps:read apps:write";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
@@ -75,47 +74,25 @@ struct HttpResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CliDeviceFlow {
-    Hydra,
     Supabase,
     Platform,
 }
 
 pub fn cmd_login(args: &[String]) -> Result<(), String> {
     let provider = parse_provider(args)?;
-    let auth_url = crate::flag_str(args, "--auth-url=")
-        .or_else(|| flag_value(args, "--auth-url"))
-        .unwrap_or_else(|| DEFAULT_AUTH_URL.into());
     match provider {
-        CliDeviceFlow::Hydra => login_hydra(&auth_url, true),
         CliDeviceFlow::Supabase | CliDeviceFlow::Platform => {
             let control_url = crate::flag_str(args, "--control=")
                 .or_else(|| flag_value(args, "--control"))
                 .or_else(|| std::env::var("ZEROSHIP_CONTROL_URL").ok())
                 .unwrap_or_else(|| DEFAULT_CONTROL_URL.into());
-            login_supabase(&control_url, true)
+            login_control_device_flow(&control_url, true)
         }
     }
 }
 
 pub fn cmd_logout() -> Result<(), String> {
-    let creds = read_credentials()?;
-    if credential_provider(&creds)? == CliDeviceFlow::Hydra {
-        let revoke_url = endpoint(&creds.auth_url, "/oauth2/revoke");
-        let resp = post_form(
-            &revoke_url,
-            &[
-                ("token", creds.refresh_token.as_str()),
-                ("token_type_hint", "refresh_token"),
-                ("client_id", creds.client_id.as_str()),
-            ],
-        )?;
-        if !(200..300).contains(&resp.status) {
-            return Err(format!(
-                "revoke failed (HTTP {}): {}",
-                resp.status, resp.body
-            ));
-        }
-    }
+    let _ = read_credentials()?;
 
     let path = credentials_path()?;
     match std::fs::remove_file(&path) {
@@ -152,7 +129,6 @@ pub fn load_credentials() -> Result<Credentials, String> {
     }
 
     let token = match credential_provider(&creds)? {
-        CliDeviceFlow::Hydra => refresh_hydra(&creds)?,
         CliDeviceFlow::Supabase => refresh_supabase_credentials(&creds)?,
         CliDeviceFlow::Platform => {
             return Err("saved platform token expired; run `zeroship login` again".to_string());
@@ -167,60 +143,7 @@ pub fn load_credentials() -> Result<Credentials, String> {
     Ok(creds)
 }
 
-fn login_hydra(auth_url: &str, print_prompt: bool) -> Result<(), String> {
-    let auth_url = auth_url.trim_end_matches('/');
-    let device_url = endpoint(auth_url, "/oauth2/device/auth");
-    let resp = post_form(
-        &device_url,
-        &[("client_id", CLIENT_ID), ("scope", SCOPE)],
-    )?;
-    if !(200..300).contains(&resp.status) {
-        return Err(format!(
-            "device authorization failed (HTTP {}): {}",
-            resp.status, resp.body
-        ));
-    }
-    let device: DeviceAuthResponse = serde_json::from_str(&resp.body)
-        .map_err(|e| format!("parse device authorization response: {e}"))?;
-    let interval = device.interval.unwrap_or(5).max(1);
-
-    if print_prompt {
-        eprintln!("To sign in:");
-        eprintln!("  1. Open: {}", device.verification_uri);
-        eprintln!("  2. Enter code: {}", device.user_code);
-        eprintln!();
-        eprintln!("Waiting for approval...");
-    }
-
-    let token = poll_for_token(auth_url, &device, interval)?;
-    let expires_at = now_secs()?.saturating_add(token.expires_in.unwrap_or(3600));
-    let creds = Credentials {
-        access_token: require_access_token(token.access_token, "token response")?,
-        refresh_token: token
-            .refresh_token
-            .ok_or_else(|| "token response did not include refresh_token".to_string())?,
-        expires_at,
-        auth_url: auth_url.to_string(),
-        client_id: CLIENT_ID.to_string(),
-        provider: "hydra".to_string(),
-        control_url: None,
-        token_endpoint: None,
-        anon_key: None,
-        userinfo_url: None,
-    };
-    save_credentials(&creds)?;
-
-    let user = userinfo(&creds)?;
-    let identity = user
-        .email
-        .or(user.sub)
-        .or(user.id)
-        .unwrap_or_else(|| "<unknown>".into());
-    println!("Signed in as {identity}");
-    Ok(())
-}
-
-fn login_supabase(control_url: &str, print_prompt: bool) -> Result<(), String> {
+fn login_control_device_flow(control_url: &str, print_prompt: bool) -> Result<(), String> {
     let control_url = control_url.trim_end_matches('/');
     let device_url = endpoint(control_url, "/api/device/auth");
     let resp = post_json(
@@ -254,7 +177,7 @@ fn login_supabase(control_url: &str, print_prompt: bool) -> Result<(), String> {
         eprintln!("Waiting for approval...");
     }
 
-    let bound = poll_for_supabase_token(control_url, &device, interval)?;
+    let bound = poll_for_control_device_token(control_url, &device, interval)?;
     if bound.provider.as_deref() != Some("platform") {
         return Err("device token response did not name provider=platform".to_string());
     }
@@ -280,62 +203,7 @@ fn login_supabase(control_url: &str, print_prompt: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn poll_for_token(
-    auth_url: &str,
-    device: &DeviceAuthResponse,
-    initial_interval: u64,
-) -> Result<TokenResponse, String> {
-    let token_url = endpoint(auth_url, "/oauth2/token");
-    let deadline = now_secs()?.saturating_add(device.expires_in);
-    let mut interval = initial_interval;
-
-    loop {
-        let resp = post_form(
-            &token_url,
-            &[
-                (
-                    "grant_type",
-                    "urn:ietf:params:oauth:grant-type:device_code",
-                ),
-                ("device_code", device.device_code.as_str()),
-                ("client_id", CLIENT_ID),
-            ],
-        )?;
-        if (200..300).contains(&resp.status) {
-            return serde_json::from_str(&resp.body)
-                .map_err(|e| format!("parse token response: {e}"));
-        }
-
-        let err = serde_json::from_str::<TokenErrorResponse>(&resp.body).ok();
-        let kind = err.as_ref().map(|e| e.error.clone());
-        match kind.as_deref() {
-            Some("authorization_pending") => {}
-            Some("slow_down") => interval = interval.saturating_add(5),
-            Some("expired_token") => return Err("device code expired".into()),
-            Some("access_denied") => return Err("device authorization denied".into()),
-            Some(other) => {
-                let description = err
-                    .and_then(|e| e.error_description)
-                    .map(|s| format!(": {s}"))
-                    .unwrap_or_default();
-                return Err(format!("token polling failed: {other}{description}"));
-            }
-            None => {
-                return Err(format!(
-                    "token polling failed (HTTP {}): {}",
-                    resp.status, resp.body
-                ));
-            }
-        }
-
-        if now_secs()? >= deadline {
-            return Err("device authorization timed out".into());
-        }
-        std::thread::sleep(Duration::from_secs(interval));
-    }
-}
-
-fn poll_for_supabase_token(
+fn poll_for_control_device_token(
     control_url: &str,
     device: &DeviceAuthResponse,
     initial_interval: u64,
@@ -388,7 +256,6 @@ fn poll_for_supabase_token(
 
 fn userinfo(creds: &Credentials) -> Result<UserInfo, String> {
     let (url, headers) = match credential_provider(creds)? {
-        CliDeviceFlow::Hydra => (endpoint(&creds.auth_url, "/userinfo"), Vec::new()),
         CliDeviceFlow::Platform => return Ok(userinfo_from_platform_token(&creds.access_token)),
         CliDeviceFlow::Supabase => {
             let anon_key = creds
@@ -407,26 +274,6 @@ fn userinfo(creds: &Credentials) -> Result<UserInfo, String> {
         return Err(format!("userinfo failed (HTTP {}): {}", resp.status, resp.body));
     }
     serde_json::from_str(&resp.body).map_err(|e| format!("parse userinfo response: {e}"))
-}
-
-fn refresh_hydra(creds: &Credentials) -> Result<TokenResponse, String> {
-    let token_url = endpoint(&creds.auth_url, "/oauth2/token");
-    let resp = post_form(
-        &token_url,
-        &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", creds.refresh_token.as_str()),
-            ("client_id", creds.client_id.as_str()),
-        ],
-    )?;
-    if !(200..300).contains(&resp.status) {
-        return Err(format!(
-            "refresh failed (HTTP {}): {}",
-            resp.status, resp.body
-        ));
-    }
-
-    serde_json::from_str(&resp.body).map_err(|e| format!("parse refresh token response: {e}"))
 }
 
 fn refresh_supabase_credentials(creds: &Credentials) -> Result<TokenResponse, String> {
@@ -500,17 +347,16 @@ fn credential_provider(creds: &Credentials) -> Result<CliDeviceFlow, String> {
 
 fn parse_provider_value(provider: &str) -> Result<CliDeviceFlow, String> {
     match provider.trim().to_ascii_lowercase().as_str() {
-        "" | "hydra" => Ok(CliDeviceFlow::Hydra),
+        "" | "platform" => Ok(CliDeviceFlow::Platform),
         "supabase" => Ok(CliDeviceFlow::Supabase),
-        "platform" => Ok(CliDeviceFlow::Platform),
         other => Err(format!(
-            "unknown auth provider {other:?}; expected hydra|supabase|platform"
+            "unknown auth provider {other:?}; expected platform|supabase"
         )),
     }
 }
 
 fn default_provider() -> String {
-    "hydra".to_string()
+    "platform".to_string()
 }
 
 fn require_access_token(value: Option<String>, context: &str) -> Result<String, String> {
@@ -590,10 +436,6 @@ fn write_private_file(path: &std::path::Path, body: &[u8]) -> Result<(), String>
 #[cfg(not(unix))]
 fn write_private_file(path: &std::path::Path, body: &[u8]) -> Result<(), String> {
     std::fs::write(path, body).map_err(|e| format!("write {}: {e}", path.display()))
-}
-
-fn post_form(url: &str, pairs: &[(&str, &str)]) -> Result<HttpResponse, String> {
-    post_form_with_headers(url, pairs, &[])
 }
 
 fn post_form_with_headers(
@@ -743,10 +585,18 @@ mod tests {
 
     #[test]
     fn device_grant_request_shape() {
-        let body = form_body(&[("client_id", CLIENT_ID), ("scope", SCOPE)]);
+        let body = form_body(&[("grant_type", "refresh_token"), ("refresh_token", "rt")]);
+        assert_eq!(body, "grant_type=refresh_token&refresh_token=rt");
+    }
+
+    #[test]
+    fn provider_parser_defaults_to_platform() {
+        assert_eq!(parse_provider_value("").unwrap(), CliDeviceFlow::Platform);
+        assert_eq!(parse_provider_value("platform").unwrap(), CliDeviceFlow::Platform);
+        assert_eq!(parse_provider_value("supabase").unwrap(), CliDeviceFlow::Supabase);
         assert_eq!(
-            body,
-            "client_id=zeroship-cli&scope=openid+offline_access+apps%3Adeploy+apps%3Aread+apps%3Awrite"
+            parse_provider_value("legacy").unwrap_err(),
+            "unknown auth provider \"legacy\"; expected platform|supabase"
         );
     }
 }
