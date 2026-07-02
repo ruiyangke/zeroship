@@ -46,15 +46,17 @@ async function golden(stem: string): Promise<any> {
 
 /** Normalize a `createTable` op for parity comparison: the committed golden is the
  *  RUST RE-SERIALIZATION of the typed IR, which fills `constraints`/`indexes` with
- *  serde defaults (`[]`) on serialize; the fluent recorder OMITS empty arrays. Both
- *  deserialize to the same typed op (absent == empty), so we drop empty
- *  `constraints`/`indexes` on both sides before comparing. */
+ *  serde defaults (`[]`) and Slice-2 `primaryKey:null` on serialize; the fluent
+ *  recorder omits defaulted fields until later slices populate `primaryKey`. Both
+ *  deserialize to the same typed op, so we drop defaulted fields on both sides
+ *  before comparing. */
 function normalizeOps(ops: any[]): any[] {
   return ops.map((op) => {
     if (op.op !== "createTable") return op;
     const out = { ...op };
     if (Array.isArray(out.constraints) && out.constraints.length === 0) delete out.constraints;
     if (Array.isArray(out.indexes) && out.indexes.length === 0) delete out.indexes;
+    if (out.primaryKey === null) delete out.primaryKey;
     return out;
   });
 }

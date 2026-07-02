@@ -113,6 +113,7 @@ fn checksum_of_ir_byte_stable_golden() {
                 nullable: Some(false),
                 default: None,
                 unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
@@ -141,7 +142,7 @@ fn checksum_of_ir_byte_stable_golden() {
     // anchor) reuses this same Rust `MigrationFlags::default()` serialization, so
     // there is no separate JS serializer to bump.
     const EXPECTED: &str =
-        "de42570b961099e8ef7395b647dca7f6a9ece61c6f41f96e576f23e86da06eab";
+        "7ff87feeb2ebbd27142cd5f187005195eadd609fd8c71d6df20d1028ba87721c";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),
@@ -536,6 +537,7 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
             nullable: Some(false),
             default: None,
             unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+        primary_key: None,
         constraints: vec![],
         indexes: vec![],
         runtime_options: None,

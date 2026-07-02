@@ -159,6 +159,90 @@ fn ir_column_facet_fields_are_camel_case() {
 }
 
 #[test]
+fn create_table_primary_key_round_trips_and_schema_carries_field() {
+    use zeroship_migrate::model::ir::{ColType, IrColumn};
+
+    let op = Op::CreateTable {
+        name: "membership".into(),
+        columns: vec![
+            IrColumn {
+                name: "account_id".into(),
+                ty: ColType::Text,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
+            IrColumn {
+                name: "team".into(),
+                ty: ColType::Text,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            },
+        ],
+        primary_key: Some(vec!["account_id".into(), "team".into()]),
+        constraints: vec![],
+        indexes: vec![],
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let v = serde_json::to_value(&op).unwrap();
+    assert_eq!(
+        v["primaryKey"],
+        serde_json::json!(["account_id", "team"]),
+        "composite primaryKey serializes at the createTable top level: {v}"
+    );
+    let back: Op = serde_json::from_value(v).unwrap();
+    match back {
+        Op::CreateTable { primary_key, .. } => {
+            assert_eq!(primary_key, Some(vec!["account_id".into(), "team".into()]));
+        }
+        _ => panic!("expected CreateTable"),
+    }
+
+    let no_pk = Op::CreateTable {
+        name: "audit".into(),
+        columns: vec![],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let no_pk_v = serde_json::to_value(&no_pk).unwrap();
+    assert_eq!(
+        no_pk_v.get("primaryKey"),
+        Some(&serde_json::Value::Null),
+        "None serializes explicitly as primaryKey:null: {no_pk_v}"
+    );
+
+    let schema = schemars::schema_for!(zeroship_migrate::MigrationIr);
+    let schema_value = serde_json::to_value(&schema).expect("schema -> value");
+    let create_table = schema_value["$defs"]["Op"]["oneOf"]
+        .as_array()
+        .expect("Op oneOf")
+        .iter()
+        .find(|branch| branch["properties"]["op"]["const"] == "createTable")
+        .expect("createTable branch");
+    assert!(
+        create_table["properties"].get("primaryKey").is_some(),
+        "createTable schema branch must carry primaryKey: {create_table}"
+    );
+}
+
+#[test]
 fn migration_ir_envelope_stays_snake_case() {
     // The envelope + flags keep snake_case per the §2.3 normative example.
     let json = r#"{"ir_version":1,"name":"n","owner_app":"app_x","ops":[],

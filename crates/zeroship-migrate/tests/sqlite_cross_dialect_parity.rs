@@ -237,6 +237,7 @@ fn common_ops() -> Vec<Op> {
                     false,
                 ),
             ],
+            primary_key: None,
             constraints: vec![pk_id()],
             indexes: Vec::new(),
             runtime_options: None,
@@ -259,6 +260,7 @@ fn common_ops() -> Vec<Op> {
                 total,
                 order_status,
             ],
+            primary_key: None,
             constraints: vec![pk_id()],
             indexes: vec![IrIndex {
                 name: Some("orders_account_status_active_idx".to_string()),
@@ -650,6 +652,7 @@ fn table_check_constraints_fail_closed_until_expr_renderer_lands() {
         name: "check_probe".to_string(),
         schema: None,
         columns: vec![col("qty", ColType::Int, false)],
+        primary_key: None,
         constraints: vec![IrConstraint {
             name: Some("check_probe_qty_positive".to_string()),
             kind: IrConstraintKind::Check {
@@ -679,6 +682,7 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         name: "orders".to_string(),
         schema: None,
         columns: vec![identity_id(), col("account_id", ColType::BigInt, false)],
+        primary_key: None,
         constraints: vec![
             pk_id(),
             IrConstraint {
@@ -706,6 +710,7 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         name: "accounts".to_string(),
         schema: None,
         columns: vec![identity_id(), col("name", ColType::Text, false)],
+        primary_key: None,
         constraints: vec![
             pk_id(),
             IrConstraint {

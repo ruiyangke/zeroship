@@ -377,7 +377,7 @@ export type GrantTarget =
  *  `dropView` is GONE (the intentional wire break) — the guard is now the uniform
  *  `existenceGuard?` token. */
 export type Op =
-  | { op: "createTable"; name: string; columns: IrColumn[]; constraints?: IrConstraint[]; indexes?: IrIndex[]; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "createTable"; name: string; columns: IrColumn[]; primaryKey: string[] | null; constraints?: IrConstraint[]; indexes?: IrIndex[]; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }

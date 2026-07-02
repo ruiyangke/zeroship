@@ -446,6 +446,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
