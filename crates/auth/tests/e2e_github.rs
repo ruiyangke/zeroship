@@ -160,7 +160,9 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         return;
     };
 
-    let return_to = native_authorize_return_to();
+    let base_return_to = native_authorize_return_to();
+    let return_to_after_prompt = format!("{base_return_to}&idp_hint=github");
+    let return_to = format!("{return_to_after_prompt}&prompt=login");
     let start_query = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("return_to", &return_to)
         .finish();
@@ -176,6 +178,14 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
     let stash_cookie = read_set_cookie(&resp, "zsidp_github_stash")
         .expect("stash cookie on /oauth/github/start");
     let mock_authorize_loc = location(&resp);
+    assert_eq!(
+        common::extract_query_param(&mock_authorize_loc, "prompt").as_deref(),
+        Some("login")
+    );
+    assert_eq!(
+        common::extract_query_param(&mock_authorize_loc, "max_age"),
+        None
+    );
 
     let resp = fx
         .http
@@ -208,7 +218,7 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         "native callback should use see-other re-entry"
     );
     let final_loc = location(&resp);
-    assert_eq!(final_loc, return_to);
+    assert_eq!(final_loc, return_to_after_prompt);
     assert!(
         !final_loc.contains("login_verifier"),
         "native callback must not continue through accept_login"

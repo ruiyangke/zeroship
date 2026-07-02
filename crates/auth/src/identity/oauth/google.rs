@@ -1,7 +1,7 @@
 //! Google OIDC federation client.
 //!
 //! Flow:
-//!   1. `start_authorize_url(cfg)` — random state, nonce, PKCE pair.
+//!   1. `start_authorize_url(cfg, upstream_prompt)` — random state, nonce, PKCE pair.
 //!   2. `complete_callback(cfg, code, verifier, expected_nonce, jwks)`
 //!      — token exchange, ID-token verify (via `core::oidc_verify`
 //!      against Google's JWKS), return [`GoogleIdentity`].
@@ -16,6 +16,7 @@ use zeroship_core::pkce::{generate_verifier, s256_challenge};
 
 use crate::config::AuthConfig;
 use crate::error::{AuthError, Result};
+use crate::identity::oauth::UpstreamPrompt;
 
 /// Subset of Google's `/token` response. The access token is consumed
 /// only for OIDC `at_hash` verification when Google includes that claim.
@@ -63,7 +64,10 @@ pub struct GoogleIdentity {
 /// # Errors
 ///
 /// [`AuthError::Config`] if `google_client_id` is not configured.
-pub fn start_authorize_url(cfg: &AuthConfig) -> Result<AuthorizeStart> {
+pub fn start_authorize_url(
+    cfg: &AuthConfig,
+    upstream_prompt: Option<UpstreamPrompt>,
+) -> Result<AuthorizeStart> {
     let client_id = cfg
         .google_client_id
         .as_deref()
@@ -76,7 +80,8 @@ pub fn start_authorize_url(cfg: &AuthConfig) -> Result<AuthorizeStart> {
     let state = generate_verifier();
     let nonce = generate_verifier();
 
-    let query = url::form_urlencoded::Serializer::new(String::new())
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query
         .append_pair("response_type", "code")
         .append_pair("client_id", client_id)
         .append_pair("redirect_uri", &cfg.google_redirect_uri)
@@ -86,8 +91,14 @@ pub fn start_authorize_url(cfg: &AuthConfig) -> Result<AuthorizeStart> {
         .append_pair("state", &state)
         .append_pair("nonce", &nonce)
         .append_pair("code_challenge", &challenge)
-        .append_pair("code_challenge_method", "S256")
-        .finish();
+        .append_pair("code_challenge_method", "S256");
+    if let Some(prompt) = upstream_prompt {
+        query.append_pair("prompt", prompt.prompt_value());
+        if prompt.requests_login() {
+            query.append_pair("max_age", "0");
+        }
+    }
+    let query = query.finish();
     let url = format!("{}?{query}", cfg.google_auth_url);
 
     Ok(AuthorizeStart {
@@ -211,7 +222,7 @@ mod tests {
     #[test]
     fn start_authorize_url_well_formed() {
         let cfg = cfg_with_google();
-        let start = start_authorize_url(&cfg).expect("start");
+        let start = start_authorize_url(&cfg, None).expect("start");
         assert!(
             start.url.starts_with(cfg.google_auth_url.as_str()),
             "url base: {}",
@@ -242,10 +253,38 @@ mod tests {
     }
 
     #[test]
+    fn start_authorize_url_propagates_forced_prompt() {
+        let cfg = cfg_with_google();
+        let start = start_authorize_url(
+            &cfg,
+            UpstreamPrompt::from_oidc_prompt(Some("login select_account"), None),
+        )
+        .expect("start");
+        let parsed = url::Url::parse(&start.url).expect("parse authorize url");
+
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(name, _)| name == "prompt")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("login select_account")
+        );
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(name, _)| name == "max_age")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
     fn start_authorize_url_errors_when_client_id_missing() {
         let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://x/y"]);
         cfg.google_client_id = None;
-        let err = start_authorize_url(&cfg).expect_err("must fail without client_id");
+        let err = start_authorize_url(&cfg, None).expect_err("must fail without client_id");
         assert!(matches!(err, AuthError::Config(_)), "got: {err:?}");
     }
 }

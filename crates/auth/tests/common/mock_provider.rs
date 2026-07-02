@@ -57,7 +57,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use ntex::http::header::{HeaderValue, LOCATION};
 use ntex::web::{self, HttpResponse};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 
 /// Whether the mock should behave like Google (OIDC + ID token + JWKS)
 /// or like GitHub (OAuth 2.0 + `/user` + `/user/emails`).
@@ -340,6 +340,10 @@ struct GoogleIdClaims<'a> {
     picture: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    c_hash: Option<String>,
 }
 
 #[allow(clippy::future_not_send)]
@@ -369,6 +373,7 @@ async fn google_token(
     let iss = build_iss(&req);
 
     let now = chrono::Utc::now().timestamp();
+    let access_token = format!("access-{}", uuid::Uuid::new_v4().simple());
     let claims = GoogleIdClaims {
         iss: &iss,
         sub: &state.user.subject,
@@ -380,6 +385,8 @@ async fn google_token(
         name: state.user.name.as_deref(),
         picture: state.user.picture.as_deref(),
         nonce: flow.nonce.as_deref(),
+        at_hash: Some(oidc_token_hash(Algorithm::EdDSA, access_token.as_bytes())),
+        c_hash: Some(oidc_token_hash(Algorithm::EdDSA, form.code.as_bytes())),
     };
 
     let mut header = Header::new(Algorithm::EdDSA);
@@ -388,11 +395,24 @@ async fn google_token(
         .expect("sign id_token");
 
     HttpResponse::Ok().json(&GoogleTokenResponse {
-        access_token: format!("access-{}", uuid::Uuid::new_v4().simple()),
+        access_token,
         id_token,
         token_type: "Bearer",
         expires_in: 3600,
     })
+}
+
+fn oidc_token_hash(alg: Algorithm, input: &[u8]) -> String {
+    match alg {
+        Algorithm::EdDSA => {
+            let digest = Sha512::digest(input);
+            URL_SAFE_NO_PAD.encode(&digest[..32])
+        }
+        _ => {
+            let digest = Sha256::digest(input);
+            URL_SAFE_NO_PAD.encode(&digest[..16])
+        }
+    }
 }
 
 #[derive(Serialize)]
