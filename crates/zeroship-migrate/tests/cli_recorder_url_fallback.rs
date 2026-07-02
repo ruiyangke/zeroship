@@ -72,7 +72,7 @@ fn build_with_recorder_url_warns_loudly_on_local_fallback() {
         "the warning must name the requested option; got: {stderr}"
     );
 
-    // The committed artifact still landed (the fallback recorded it locally).
+    // The transient build still reports the fallback path.
     let stdout = String::from_utf8_lossy(&build_out.stdout);
     assert!(
         stdout.contains("HostedFellBackToLocal"),

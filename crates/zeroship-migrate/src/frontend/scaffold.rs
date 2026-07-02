@@ -124,15 +124,15 @@ pub fn scaffold_new_ts(name: &str) -> Result<String, ScaffoldError> {
     Ok(format!(
         r#"// Migration: {name}
 //
-// Authored against the @zeroship/migrate op.* DSL. The build step records this
-// into a committed `<version>_{name}.ir.json` artifact (build-once authority).
+// Authored against the @zeroship/migrate op.* DSL. Build/gen-types record this
+// through the sandboxed recorder and keep the canonical IR in memory.
 //
 // DETERMINISM (§4.3): any time/uuid seed column MUST default to the DB-evaluated
 // synth scalar — use the c.fn.now / c.fn.genRandomUuid synth defaults (shown
 // below) so the value is computed at apply time. Do NOT seed defaults from a host
-// clock or RNG: a host-side timestamp/random would bake a frozen value into the
-// committed artifact and diverge across replays. The determinism lint flags those
-// host accessors as a warning the AI loop self-corrects on.
+// clock or RNG: a host-side timestamp/random would bake a frozen value into each
+// transient recording and may diverge across replays. The determinism lint flags
+// those host accessors as a warning the AI loop self-corrects on.
 import {{ table, t }} from "@zeroship/migrate";
 
 export function up() {{
@@ -147,7 +147,7 @@ export function up() {{
   // When you DO need a SEEDED uuid/timestamp column, default it to the DB-evaluated
   // synth scalar so the value is computed at apply time — deterministic by
   // construction, NEVER a host clock / RNG (those bake a frozen value into the
-  // committed artifact and diverge across replays). Uncomment to use:
+  // transient recording and may diverge across replays). Uncomment to use:
   //   table("{name}").column("token").add({{ type: t.uuid().notNull().default({{ fn: "genRandomUuid" }}) }});
   //   table("{name}").column("expires_at").add({{ type: t.timestamp().notNull().default({{ fn: "now" }}) }});
 }}
