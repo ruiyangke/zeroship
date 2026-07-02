@@ -20,7 +20,7 @@ import type {
   PolicyCmd,
   Privilege,
 } from "./generated/ir.js";
-import { __pgPush, __pgResolveExpr } from "./ops.js";
+import { __pgDomain, __pgPush, __pgResolveExpr, __pgSequence } from "./ops.js";
 
 type Node = Record<string, unknown>;
 
@@ -33,6 +33,17 @@ export type {
   PolicyCmd,
   Privilege,
 } from "./generated/ir.js";
+
+export type {
+  AlterSequenceArgs,
+  CreateDomainArgs,
+  CreateSequenceArgs,
+  DomainHandle,
+  DropDomainArgs,
+  DropSequenceArgs,
+  SequenceHandle,
+  SequenceOwnedBy,
+} from "./types.js";
 
 export interface CreateSchemaArgs {
   name: string;
@@ -138,24 +149,6 @@ export interface PgRawArgs {
   reason: string;
 }
 
-export interface PgNamespace {
-  createSchema(args: CreateSchemaArgs): Node;
-  dropSchema(args: DropSchemaArgs): Node;
-  createExtension(args: CreateExtensionArgs): Node;
-  dropExtension(args: DropExtensionArgs): Node;
-  createRole(args: CreateRoleArgs): Node;
-  alterRole(args: AlterRoleArgs): Node;
-  dropRole(args: DropRoleArgs): Node;
-  dropOwnedBy(args: DropOwnedByArgs): Node;
-  grant(args: GrantArgs): Node;
-  revoke(args: RevokeArgs): Node;
-  createPolicy(args: CreatePolicyArgs): Node;
-  dropPolicy(args: DropPolicyArgs): Node;
-  createFunction(args: CreateFunctionArgs): Node;
-  dropFunction(args: DropFunctionArgs): Node;
-  raw(args: PgRawArgs): Node;
-}
-
 function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
   const err = new Error(message) as Error & Record<string, unknown>;
   err.code = code;
@@ -180,173 +173,188 @@ function record(op: Node): Node {
   return __pgPush(compact(op));
 }
 
-export const pg: PgNamespace = {
-  createSchema(args) {
-    requireString(args.name, "pg.createSchema({ name })");
-    return record({
-      op: "createSchema",
-      name: args.name,
-      ifNotExists: args.ifNotExists,
-      authorization: args.authorization,
-    });
-  },
-  dropSchema(args) {
-    requireString(args.name, "pg.dropSchema({ name })");
-    return record({
-      op: "dropSchema",
-      name: args.name,
-      ifExists: args.ifExists,
-      cascade: args.cascade,
-    });
-  },
-  createExtension(args) {
-    requireString(args.name, "pg.createExtension({ name })");
-    return record({
-      op: "createExtension",
-      name: args.name,
-      ifNotExists: args.ifNotExists,
-      schema: args.schema,
-    });
-  },
-  dropExtension(args) {
-    requireString(args.name, "pg.dropExtension({ name })");
-    return record({ op: "dropExtension", name: args.name, ifExists: args.ifExists });
-  },
-  createRole(args) {
-    requireString(args.name, "pg.createRole({ name })");
-    return record({
-      op: "createRole",
-      name: args.name,
-      login: args.login,
-      password: args.password,
-      bypassRls: args.bypassRls,
-      createRole: args.createRole,
-      createDb: args.createDb,
-      superuser: args.superuser,
-      inRole: args.inRole,
-      setSearchPath: args.setSearchPath,
-      ifNotExists: args.ifNotExists,
-    });
-  },
-  alterRole(args) {
-    requireString(args.name, "pg.alterRole({ name })");
-    return record({
-      op: "alterRole",
-      name: args.name,
-      setSearchPath: args.setSearchPath,
-      resetSearchPath: args.resetSearchPath,
-    });
-  },
-  dropRole(args) {
-    requireString(args.name, "pg.dropRole({ name })");
-    return record({ op: "dropRole", name: args.name, ifExists: args.ifExists });
-  },
-  dropOwnedBy(args) {
-    if (!Array.isArray(args.roles)) {
-      throw structuredError("OP_INVALID", "pg.dropOwnedBy({ roles }): roles must be an array");
-    }
-    return record({ op: "dropOwnedBy", roles: args.roles });
-  },
-  grant(args) {
-    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
-      throw structuredError("OP_INVALID", "pg.grant({ privileges }): privileges must be a non-empty array");
-    }
-    if (args.on === null || typeof args.on !== "object") {
-      throw structuredError("OP_INVALID", "pg.grant({ on }): on must be a target object");
-    }
-    if (!Array.isArray(args.to) || args.to.length === 0) {
-      throw structuredError("OP_INVALID", "pg.grant({ to }): to must be a non-empty array");
-    }
-    return record({
-      op: "grant",
-      privileges: args.privileges,
-      on: args.on,
-      to: args.to,
-      withGrantOption: args.withGrantOption,
-    });
-  },
-  revoke(args) {
-    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
-      throw structuredError("OP_INVALID", "pg.revoke({ privileges }): privileges must be a non-empty array");
-    }
-    if (args.on === null || typeof args.on !== "object") {
-      throw structuredError("OP_INVALID", "pg.revoke({ on }): on must be a target object");
-    }
-    if (!Array.isArray(args.from) || args.from.length === 0) {
-      throw structuredError("OP_INVALID", "pg.revoke({ from }): from must be a non-empty array");
-    }
-    return record({
-      op: "revoke",
-      privileges: args.privileges,
-      on: args.on,
-      from: args.from,
-    });
-  },
-  createPolicy(args) {
-    requireString(args.name, "pg.createPolicy({ name })");
-    requireString(args.table, "pg.createPolicy({ table })");
-    if (Array.isArray(args.to) && args.to.length === 0) {
-      throw structuredError("OP_INVALID", "pg.createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
-    }
-    if (args.using === undefined) {
-      throw structuredError("OP_INVALID", "pg.createPolicy({ using }): using is required (the renderer always emits USING)");
-    }
-    return record({
-      op: "createPolicy",
-      name: args.name,
-      table: args.table,
-      schema: args.schema,
-      forCmd: args.for || "all",
-      to: args.to,
-      using: __pgResolveExpr(args.using),
-      withCheck: __pgResolveExpr(args.withCheck),
-    });
-  },
-  dropPolicy(args) {
-    requireString(args.name, "pg.dropPolicy({ name })");
-    requireString(args.table, "pg.dropPolicy({ table })");
-    return record({
-      op: "dropPolicy",
-      name: args.name,
-      table: args.table,
-      schema: args.schema,
-      ifExists: args.ifExists,
-    });
-  },
-  createFunction(args) {
-    requireString(args.name, "pg.createFunction({ name })");
-    requireString(args.returns, "pg.createFunction({ returns })");
-    requireString(args.language, "pg.createFunction({ language })");
-    requireString(args.body, "pg.createFunction({ body })");
-    return record({
-      op: "createFunction",
-      name: args.name,
-      schema: args.schema,
-      args: args.args,
-      returns: args.returns,
-      language: args.language,
-      replace: args.replace,
-      volatility: args.volatility,
-      body: args.body,
-    });
-  },
-  dropFunction(args) {
-    requireString(args.name, "pg.dropFunction({ name })");
-    return record({
-      op: "dropFunction",
-      name: args.name,
-      schema: args.schema,
-      argTypes: args.argTypes,
-      ifExists: args.ifExists,
-    });
-  },
-  raw(args) {
-    requireString(args.sql, "pg.raw({ sql })");
-    requireString(args.reason, "pg.raw({ reason })");
-    return record({
-      op: "pgRaw",
-      sql: args.sql,
-      reason: args.reason,
-    });
-  },
-};
+export const domain = __pgDomain;
+export const sequence = __pgSequence;
+
+export function schema(args: CreateSchemaArgs): Node {
+  requireString(args.name, "schema({ name })");
+  return record({
+    op: "createSchema",
+    name: args.name,
+    ifNotExists: args.ifNotExists,
+    authorization: args.authorization,
+  });
+}
+
+export function dropSchema(args: DropSchemaArgs): Node {
+  requireString(args.name, "dropSchema({ name })");
+  return record({
+    op: "dropSchema",
+    name: args.name,
+    ifExists: args.ifExists,
+    cascade: args.cascade,
+  });
+}
+
+export function extension(args: CreateExtensionArgs): Node {
+  requireString(args.name, "extension({ name })");
+  return record({
+    op: "createExtension",
+    name: args.name,
+    ifNotExists: args.ifNotExists,
+    schema: args.schema,
+  });
+}
+
+export function dropExtension(args: DropExtensionArgs): Node {
+  requireString(args.name, "dropExtension({ name })");
+  return record({ op: "dropExtension", name: args.name, ifExists: args.ifExists });
+}
+
+export function role(args: CreateRoleArgs): Node {
+  requireString(args.name, "role({ name })");
+  return record({
+    op: "createRole",
+    name: args.name,
+    login: args.login,
+    password: args.password,
+    bypassRls: args.bypassRls,
+    createRole: args.createRole,
+    createDb: args.createDb,
+    superuser: args.superuser,
+    inRole: args.inRole,
+    setSearchPath: args.setSearchPath,
+    ifNotExists: args.ifNotExists,
+  });
+}
+
+export function alterRole(args: AlterRoleArgs): Node {
+  requireString(args.name, "alterRole({ name })");
+  return record({
+    op: "alterRole",
+    name: args.name,
+    setSearchPath: args.setSearchPath,
+    resetSearchPath: args.resetSearchPath,
+  });
+}
+
+export function dropRole(args: DropRoleArgs): Node {
+  requireString(args.name, "dropRole({ name })");
+  return record({ op: "dropRole", name: args.name, ifExists: args.ifExists });
+}
+
+export function dropOwnedBy(args: DropOwnedByArgs): Node {
+  if (!Array.isArray(args.roles)) {
+    throw structuredError("OP_INVALID", "dropOwnedBy({ roles }): roles must be an array");
+  }
+  return record({ op: "dropOwnedBy", roles: args.roles });
+}
+
+export function grant(args: GrantArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "grant({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.to) || args.to.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ to }): to must be a non-empty array");
+  }
+  return record({
+    op: "grant",
+    privileges: args.privileges,
+    on: args.on,
+    to: args.to,
+    withGrantOption: args.withGrantOption,
+  });
+}
+
+export function revoke(args: RevokeArgs): Node {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "revoke({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.from) || args.from.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ from }): from must be a non-empty array");
+  }
+  return record({
+    op: "revoke",
+    privileges: args.privileges,
+    on: args.on,
+    from: args.from,
+  });
+}
+
+export function createPolicy(args: CreatePolicyArgs): Node {
+  requireString(args.name, "createPolicy({ name })");
+  requireString(args.table, "createPolicy({ table })");
+  if (Array.isArray(args.to) && args.to.length === 0) {
+    throw structuredError("OP_INVALID", "createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+  }
+  if (args.using === undefined) {
+    throw structuredError("OP_INVALID", "createPolicy({ using }): using is required (the renderer always emits USING)");
+  }
+  return record({
+    op: "createPolicy",
+    name: args.name,
+    table: args.table,
+    schema: args.schema,
+    forCmd: args.for || "all",
+    to: args.to,
+    using: __pgResolveExpr(args.using),
+    withCheck: __pgResolveExpr(args.withCheck),
+  });
+}
+
+export function dropPolicy(args: DropPolicyArgs): Node {
+  requireString(args.name, "dropPolicy({ name })");
+  requireString(args.table, "dropPolicy({ table })");
+  return record({
+    op: "dropPolicy",
+    name: args.name,
+    table: args.table,
+    schema: args.schema,
+    ifExists: args.ifExists,
+  });
+}
+
+export function createFunction(args: CreateFunctionArgs): Node {
+  requireString(args.name, "createFunction({ name })");
+  requireString(args.returns, "createFunction({ returns })");
+  requireString(args.language, "createFunction({ language })");
+  requireString(args.body, "createFunction({ body })");
+  return record({
+    op: "createFunction",
+    name: args.name,
+    schema: args.schema,
+    args: args.args,
+    returns: args.returns,
+    language: args.language,
+    replace: args.replace,
+    volatility: args.volatility,
+    body: args.body,
+  });
+}
+
+export function dropFunction(args: DropFunctionArgs): Node {
+  requireString(args.name, "dropFunction({ name })");
+  return record({
+    op: "dropFunction",
+    name: args.name,
+    schema: args.schema,
+    argTypes: args.argTypes,
+    ifExists: args.ifExists,
+  });
+}
+
+export function raw(args: PgRawArgs): Node {
+  requireString(args.sql, "raw({ sql })");
+  requireString(args.reason, "raw({ reason })");
+  return record({
+    op: "pgRaw",
+    sql: args.sql,
+    reason: args.reason,
+  });
+}

@@ -35,11 +35,14 @@ const PKG_ROOT = resolve(HERE, "..");
 const DOC = resolve(PKG_ROOT, "../../docs/reference/migrate-op-dsl.md");
 
 // The full documented import vocabulary the fragment harness exposes. The
-// fluent-only redesign exports just `{ table, t, fromDb, lintDeterminism }`; an op
+// fluent-only redesign exports just the documented core vocabulary; an op
 // the doc names but the package does not export fails THIS import line at compile
 // time. (The flat ops are GONE — a doc that still imports them fails the gate.)
 const VOCAB_PREAMBLE = `import {
   table,
+  view,
+  enumType,
+  comment,
   t, fromDb, lintDeterminism,
 } from "@zeroship/migrate";
 import { t as dbT } from "@zeroship/db";

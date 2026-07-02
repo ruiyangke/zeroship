@@ -202,15 +202,16 @@ export interface TypeLexicon {
   int(): ColumnDef;
   bigInt(): ColumnDef;
   float(): ColumnDef;
-  /** A named enum reference declared with `pgEnum(name, values)`. */
+  /** A named enum reference declared with `enumType(name).create({ values })`. */
   enum(name: string | EnumHandle): ColumnDef;
-  /** A named domain reference declared with `pgDomain(name).create(...)`. */
+  /** A named domain reference declared with `domain(name).create(...)` from `@zeroship/migrate/pg`. */
   domain(name: string | DomainHandle): ColumnDef;
   /** An application-level encrypted column wrapping an inner type. */
   encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType): ColumnDef;
 }
 
 export interface CreateEnumArgs {
+  values: readonly string[];
   schema?: string;
 }
 
@@ -221,8 +222,7 @@ export interface DropEnumArgs {
 
 export interface EnumHandle {
   readonly name: string;
-  readonly values: readonly string[];
-  create(args?: CreateEnumArgs): EnumHandle;
+  create(args: CreateEnumArgs): EnumHandle;
   drop(args?: DropEnumArgs): EnumHandle;
   comment(text: string | null, args?: { schema?: string }): EnumHandle;
 }
@@ -807,10 +807,10 @@ export interface IndexRef {
 }
 
 /**
- * The recorder-bound handle `table(name, opts?)` returns — the SOLE public
- * authoring surface (§3). It is a REUSABLE value carrying only `{ name,
- * schemaDefault }`; every terminal records EAGERLY onto the ambient recorder and
- * returns the handle, so it is valid for unlimited chaining + var-reuse (§4). The
+ * The recorder-bound handle `table(name, opts?)` returns. It is a REUSABLE value
+ * carrying only `{ name, schemaDefault }`; every terminal records EAGERLY onto the
+ * ambient recorder and returns the handle, so it is valid for unlimited chaining
+ * + var-reuse (§4). The
  * `{ schema }` from `table()` is the DEFAULT injected into every recorded op; a
  * per-op `schema` overrides it (by key presence — an absent/`undefined` per-op
  * schema keeps the table default).

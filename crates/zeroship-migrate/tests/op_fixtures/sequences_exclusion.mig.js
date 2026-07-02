@@ -1,7 +1,8 @@
 // op.* migration fixture — standalone sequences and exclusion constraints.
 // Covers the resettable sequence fields where explicit null carries SQL meaning
 // (`OWNED BY NONE`) and the closed exclusion-operator set.
-import { sequence, table } from "@zeroship/migrate";
+import { table } from "@zeroship/migrate";
+import { sequence } from "@zeroship/migrate/pg";
 
 export const name = "sequences_exclusion";
 

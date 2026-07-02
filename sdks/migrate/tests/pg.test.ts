@@ -5,7 +5,23 @@ import { test } from "node:test";
 
 import { table } from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
-import { pg } from "../src/pg.js";
+import {
+  alterRole,
+  createFunction,
+  createPolicy,
+  dropExtension,
+  dropFunction,
+  dropOwnedBy,
+  dropPolicy,
+  dropRole,
+  dropSchema,
+  extension,
+  grant,
+  raw,
+  revoke,
+  role,
+  schema,
+} from "../src/pg.js";
 
 function record(up: () => void): any[] {
   __begin();
@@ -18,46 +34,51 @@ test("@zeroship/migrate/pg subpath resolves through package exports", async () =
   const resolved = resolveImport("@zeroship/migrate/pg");
   assert.match(resolved, /\/dist\/pg\.js$/);
   const imported = await import("@zeroship/migrate/pg");
-  assert.equal(typeof imported.pg.raw, "function");
-  assert.equal(imported.pg.sql, undefined);
+  assert.equal((imported as any).pg, undefined);
+  assert.equal(typeof imported.schema, "function");
+  assert.equal(typeof imported.raw, "function");
+  assert.equal(typeof imported.createFunction, "function");
+  assert.equal(typeof imported.domain, "function");
+  assert.equal(typeof imported.sequence, "function");
+  assert.equal(imported.sql, undefined);
 });
 
-test("SA-8: pg.grant/revoke reject empty privilege/role arrays and a non-object target", () => {
+test("SA-8: grant/revoke reject empty privilege/role arrays and a non-object target", () => {
   assert.throws(
-    () => record(() => pg.grant({ privileges: [], on: { kind: "table", names: ["u"] }, to: ["r"] } as any)),
+    () => record(() => grant({ privileges: [], on: { kind: "table", names: ["u"] }, to: ["r"] } as any)),
     (e: any) => e.code === "OP_INVALID" && /privileges must be a non-empty array/.test(e.message),
   );
   assert.throws(
-    () => record(() => pg.grant({ privileges: ["select"], on: "u" as any, to: ["r"] } as any)),
+    () => record(() => grant({ privileges: ["select"], on: "u" as any, to: ["r"] } as any)),
     (e: any) => e.code === "OP_INVALID" && /on must be a target object/.test(e.message),
   );
   assert.throws(
-    () => record(() => pg.revoke({ privileges: ["select"], on: { kind: "table", names: ["u"] }, from: [] } as any)),
+    () => record(() => revoke({ privileges: ["select"], on: { kind: "table", names: ["u"] }, from: [] } as any)),
     (e: any) => e.code === "OP_INVALID" && /from must be a non-empty array/.test(e.message),
   );
 });
 
-test("SA-10/SA-11: pg.createPolicy requires using and rejects an explicit empty to[]", () => {
+test("SA-10/SA-11: createPolicy requires using and rejects an explicit empty to[]", () => {
   assert.throws(
-    () => record(() => pg.createPolicy({ name: "p", table: "u" } as any)),
+    () => record(() => createPolicy({ name: "p", table: "u" } as any)),
     (e: any) => e.code === "OP_INVALID" && /using is required/.test(e.message),
   );
   assert.throws(
     () =>
       record(() =>
-        pg.createPolicy({ name: "p", table: "u", to: [], using: (c: any) => c("x").isNotNull() } as any),
+        createPolicy({ name: "p", table: "u", to: [], using: (c: any) => c("x").isNotNull() } as any),
       ),
     (e: any) => e.code === "OP_INVALID" && /to must be a non-empty role array/.test(e.message),
   );
 });
 
-test("pg namespace records every standalone vendor op shape", () => {
+test("vendor named exports record every standalone vendor op shape", () => {
   const ops = record(() => {
-    pg.createSchema({ name: "zs", ifNotExists: true, authorization: "owner" });
-    pg.dropSchema({ name: "zs", ifExists: true, cascade: true });
-    pg.createExtension({ name: "citext", ifNotExists: true, schema: "public" });
-    pg.dropExtension({ name: "citext", ifExists: true });
-    pg.createRole({
+    schema({ name: "zs", ifNotExists: true, authorization: "owner" });
+    dropSchema({ name: "zs", ifExists: true, cascade: true });
+    extension({ name: "citext", ifNotExists: true, schema: "public" });
+    dropExtension({ name: "citext", ifExists: true });
+    role({
       name: "app_role",
       login: true,
       password: "secret",
@@ -69,21 +90,21 @@ test("pg namespace records every standalone vendor op shape", () => {
       setSearchPath: ["zs", "public"],
       ifNotExists: true,
     });
-    pg.alterRole({ name: "app_role", setSearchPath: ["zs"], resetSearchPath: true });
-    pg.dropRole({ name: "app_role", ifExists: true });
-    pg.dropOwnedBy({ roles: ["app_role"] });
-    pg.grant({
+    alterRole({ name: "app_role", setSearchPath: ["zs"], resetSearchPath: true });
+    dropRole({ name: "app_role", ifExists: true });
+    dropOwnedBy({ roles: ["app_role"] });
+    grant({
       privileges: ["select", "usage"],
       on: { kind: "schema", names: ["zs"] },
       to: ["app_role"],
       withGrantOption: true,
     });
-    pg.revoke({
+    revoke({
       privileges: ["update"],
       on: { kind: "table", names: ["users"], schema: "zs" },
       from: ["public"],
     });
-    pg.createPolicy({
+    createPolicy({
       name: "tenant_only",
       table: "users",
       schema: "zs",
@@ -92,8 +113,8 @@ test("pg namespace records every standalone vendor op shape", () => {
       using: (c) => c("app_id").eq("app_demo"),
       withCheck: (c) => c("app_id").isNotNull(),
     });
-    pg.dropPolicy({ name: "tenant_only", table: "users", schema: "zs", ifExists: true });
-    pg.createFunction({
+    dropPolicy({ name: "tenant_only", table: "users", schema: "zs", ifExists: true });
+    createFunction({
       name: "tenant_guard",
       schema: "zs",
       args: [{ name: "tenant_id", type: "text", mode: "in" }],
@@ -103,13 +124,13 @@ test("pg namespace records every standalone vendor op shape", () => {
       volatility: "stable",
       body: "SELECT true;",
     });
-    pg.dropFunction({
+    dropFunction({
       name: "tenant_guard",
       schema: "zs",
       argTypes: ["text"],
       ifExists: true,
     });
-    pg.raw({
+    raw({
       sql: "SELECT set_config('a', 'x', false)",
       reason: "set a test GUC in raw SQL",
     });
@@ -238,19 +259,21 @@ test("table-scoped pg methods record RLS and policy op shapes", () => {
   ]);
 });
 
-test("pg.raw requires reason and never records binds", () => {
+test("raw requires reason and never records binds", () => {
   assert.throws(
-    () => record(() => { pg.raw({ sql: "SELECT 1" } as any); }),
-    (e: any) => e.code === "OP_INVALID" && /pg\.raw\(\{ reason \}\) must be a string/.test(e.message),
+    () => record(() => { raw({ sql: "SELECT 1" } as any); }),
+    (e: any) => e.code === "OP_INVALID" && /raw\(\{ reason \}\) must be a string/.test(e.message),
   );
 
   const [op] = record(() => {
-    pg.raw({ sql: "SELECT 1", reason: "raw smoke test", binds: ["x"] } as any);
+    raw({ sql: "SELECT 1", reason: "raw smoke test", binds: ["x"] } as any);
   });
   assert.deepEqual(op, { op: "pgRaw", sql: "SELECT 1", reason: "raw smoke test" });
   assert.equal("binds" in op, false);
 });
 
-test("pg.sql is not exposed", () => {
-  assert.equal((pg as any).sql, undefined);
+test("sql is not exposed", async () => {
+  const imported = await import("../src/pg.js");
+  assert.equal((imported as any).sql, undefined);
+  assert.equal((imported as any).pg, undefined);
 });

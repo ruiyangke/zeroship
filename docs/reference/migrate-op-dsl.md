@@ -1,15 +1,23 @@
 # `@zeroship/migrate` — the op DSL
 
 `@zeroship/migrate` is the no-raw-SQL, fully-structured authoring surface for
-zeroship database migrations. A migration is a `.ts` module that imports
-`{ table, t }` and exports a single `default { name?, up, down? }` object. You
+zeroship database migrations. A migration is a `.ts` module that imports the
+portable core helpers it needs from `@zeroship/migrate` and exports a single
+`default { name?, up, down? }` object. You
 describe schema changes (DDL) and data migrations (DML) once through the fluent
 `table()` handle; the engine lowers them per-dialect and applies them faithfully
 to **both Postgres and SQLite** from one script.
 
-`table(name, { schema? })` is the **sole** authoring entry. There is no flat
-`createTable`/`addColumn`/… vocabulary — every operation is a method (or a
-selector terminal) on the handle `table()` returns.
+The portable core value exports are `table`, `view`, `enumType`, `comment`, `t`,
+`fromDb`, and `lintDeterminism`. `index`/`foreignKey`/`check`/`unique` stay fluent
+methods on the table handle; they are not top-level exports. `domain` and
+`sequence` are Postgres-only and live under `@zeroship/migrate/pg`.
+
+`table(name, { schema? })` is the table authoring entry. There is no flat
+`createTable`/`addColumn`/… vocabulary — table operations are methods (or selector
+terminals) on the handle `table()` returns. `enumType(name)` is also an inert
+handle: it records nothing until `.create({ values, schema? })`, `.drop(...)`, or
+`.comment(...)` is called.
 
 There is **no raw SQL** anywhere on this surface — no `Raw` type, no `sql\`\``
 escape, no string fragments. Every transform and predicate is a fluent
@@ -102,20 +110,23 @@ example above hand-writes `down()` for exactly this reason: it contains a
 DML or lossy DDL — an author-supplied `down()` is itself a structured migration
 (its own op calls), never a raw-SQL string.
 
-## The `table()` entry point
+## Core Entry Points
 
-The **entire** authoring surface is reached through one import: `table` (plus the
-`t` column-type lexicon). There is no flat op vocabulary and no `op.` prefix.
+The portable authoring surface is reached through direct named exports from
+`@zeroship/migrate`. There is no flat op vocabulary and no `op.` prefix.
 
 ```ts
-import { table, t } from "@zeroship/migrate";
+import { table, view, enumType, comment, t } from "@zeroship/migrate";
 ```
 
 The complete exported vocabulary (`sdks/migrate/src/index.ts`):
 
 | Export | Purpose |
 | --- | --- |
-| `table` | the sole authoring entry — returns the reusable `TableHandle` |
+| `table` | table DDL/DML entry — returns the reusable `TableHandle` |
+| `view` | cross-dialect view entry — returns a `ViewHandle` |
+| `enumType` | portable enum entry — returns an inert `EnumHandle`; `.create({ values })` records |
+| `comment` | standalone structured object comments |
 | `t` | the immutable column-type lexicon |
 | `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
 | `lintDeterminism` | the best-effort determinism source scan |
@@ -1084,10 +1095,13 @@ the `--check` generated-artifact gate on a production build. See
 for the build/watch wiring.
 
 > **Implemented: Postgres vendor primitives.** The `@zeroship/migrate/pg`
-> subpath exposes the Postgres-only, operator-gated primitive layer
-> (grants/roles/policies/functions/triggers/extensions/RLS) so the platform's
-> own privileged DDL can be authored in the DSL. The engine lowers these 19
-> vendor ops through the Postgres vendor renderer, hard-gated to the
+> subpath exposes direct named exports, not a `pg` namespace object. The current
+> vendor value exports are `schema`, `dropSchema`, `extension`, `dropExtension`,
+> `role`, `alterRole`, `dropRole`, `dropOwnedBy`, `grant`, `revoke`,
+> `createPolicy`, `dropPolicy`, `createFunction`, `dropFunction`, `domain`,
+> `sequence`, and `raw`. These are Postgres-only and operator-gated so the
+> platform's own privileged DDL can be authored in the DSL. The engine lowers
+> these vendor ops through the Postgres vendor renderer, hard-gated to the
 > Trusted/Platform profile and unreachable from a Confined creator migration by
 > construction.
 

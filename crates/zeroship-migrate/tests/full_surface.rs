@@ -918,7 +918,8 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
 #[test]
 fn sequences_and_exclusion_constraints_record_canonical_ir() {
     let src = r#"
-        import { sequence, table, t } from "@zeroship/migrate";
+        import { table, t } from "@zeroship/migrate";
+        import { sequence } from "@zeroship/migrate/pg";
         export default { name: "n", up() {
             sequence("invoice_seq").create({
                 as: t.bigInt(),
