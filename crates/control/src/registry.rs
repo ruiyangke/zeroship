@@ -100,15 +100,6 @@ fn source_chain(err: &dyn std::error::Error) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct Registry {
     db_url: String,
-    /// Privileged provisioning DSN used ONLY by deploy-time migrations to
-    /// `CREATE SCHEMA "<app_id>"` + `CREATE ROLE migrator_<app_id>`. This is a
-    /// SEPARATE admin role carrying `CREATEROLE` + `CREATE` on the database —
-    /// distinct from the least-privilege `db_url` (`zeroship_control`), which
-    /// is BYPASSRLS but deliberately has NEITHER privilege (V0025). `None`
-    /// means none was configured, in which case deploy-migrate provisioning is
-    /// expected to fail; the operator must supply `--provision-db`. Carries a
-    /// password, so it is never logged.
-    provision_db_url: Option<String>,
 }
 
 /// Open a new compio-postgres connection and detach its driver task onto the
@@ -139,21 +130,7 @@ impl Registry {
 
         Ok(Self {
             db_url: db_url.to_string(),
-            provision_db_url: None,
         })
-    }
-
-    /// Attach the privileged provisioning DSN used by deploy-time migrations to
-    /// create the per-app schema + `migrator_<app_id>` role. This is a SEPARATE
-    /// admin role (`CREATEROLE` + `CREATE` on the database) — NOT the
-    /// least-privilege `zeroship_control` DSN this registry reads/writes the
-    /// control schema on. Wire this from `--provision-db` /
-    /// `PROVISION_DATABASE_URL`. Builder-style so the many single-DSN callers
-    /// (control reads/writes its own schema on `db_url`) need no change.
-    #[must_use]
-    pub fn with_provisioning_dsn(mut self, provision_db_url: String) -> Self {
-        self.provision_db_url = Some(provision_db_url);
-        self
     }
 
     /// Open a fresh connection. Crate-internal: stores + internal
@@ -162,28 +139,6 @@ impl Registry {
     /// the store types (e.g. `EnvStore::__raw_ciphertext_for_test`).
     pub(crate) async fn conn(&self) -> Result<Client, RegistryError> {
         open_conn(&self.db_url).await.map_err(RegistryError::from)
-    }
-
-    /// The PRIVILEGED provisioning DSN the P6 deploy-migrate step
-    /// ([`crate::deploy_migrate::apply_bundle_migrations`]) opens its own
-    /// `zeroship-migrate` admin connection on to provision the per-app schema +
-    /// `migrator_<app_id>` role and apply the bundle's migrations.
-    ///
-    /// This is **NOT** the registry's own `db_url`. That least-privilege
-    /// `zeroship_control` role is BYPASSRLS but carries NEITHER `CREATEROLE`
-    /// NOR `CREATE` on the database (V0025 — see its header note: the per-app
-    /// schema/role provisioning needs a CREATEROLE/CREATEDB principal, and the
-    /// shipped `migrate` service runs as the `postgres` superuser). Reusing
-    /// `db_url` here is exactly what made every migration-carrying deploy 503
-    /// at `CREATE SCHEMA` / `CREATE ROLE`.
-    ///
-    /// Returns `None` when no provisioning DSN was configured; the caller maps
-    /// that to a `migration_infrastructure` error (the operator must supply
-    /// `--provision-db` / `PROVISION_DATABASE_URL`). Carries a password, so this
-    /// is `pub(crate)`; never logged.
-    #[must_use]
-    pub(crate) fn migrate_dsn(&self) -> Option<&str> {
-        self.provision_db_url.as_deref()
     }
 
     /// Validate that `plan_id` names a real, UNARCHIVED plan in the catalog.
@@ -879,51 +834,5 @@ fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
         api_key: row.get("api_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Construct a `Registry` without dialing a DB (the `new()` connect probe
-    /// is irrelevant to the DSN-selection logic under test).
-    fn registry(db_url: &str) -> Registry {
-        Registry {
-            db_url: db_url.to_string(),
-            provision_db_url: None,
-        }
-    }
-
-    /// REGRESSION (control-migrate-dsn-no-createrole): deploy-time migrations
-    /// must run on the PRIVILEGED provisioning DSN, NOT the least-privilege
-    /// control DSN. The bug returned `db_url` (the `zeroship_control` role,
-    /// which lacks CREATEROLE + CREATE-on-db per V0025), so `CREATE SCHEMA` /
-    /// `CREATE ROLE` 503'd and no migration-carrying deploy could go live.
-    #[test]
-    fn migrate_dsn_returns_provisioning_dsn_not_control_dsn() {
-        let control_dsn = "postgres://zeroship_control:pw@db/zeroship";
-        let provision_dsn = "postgres://postgres:pw@db/zeroship";
-        let reg = registry(control_dsn).with_provisioning_dsn(provision_dsn.to_string());
-
-        assert_eq!(
-            reg.migrate_dsn(),
-            Some(provision_dsn),
-            "deploy-migrate must use the privileged provisioning DSN"
-        );
-        assert_ne!(
-            reg.migrate_dsn(),
-            Some(control_dsn),
-            "deploy-migrate must NOT reuse the least-priv control DSN (the bug)"
-        );
-    }
-
-    /// When no provisioning DSN is configured, `migrate_dsn()` is `None` so the
-    /// deploy handler fails fast with `migration_infrastructure` rather than
-    /// silently dialing the wrong (least-priv) DSN.
-    #[test]
-    fn migrate_dsn_is_none_when_unconfigured() {
-        let reg = registry("postgres://zeroship_control:pw@db/zeroship");
-        assert_eq!(reg.migrate_dsn(), None);
     }
 }

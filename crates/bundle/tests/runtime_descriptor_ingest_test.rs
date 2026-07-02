@@ -1,5 +1,4 @@
-//! Faithful end-to-end ingest test for the migration-first **runtime schema
-//! descriptor** slot (P4a).
+//! Faithful end-to-end ingest test for the runtime schema descriptor slot.
 //!
 //! Builds a real `.zship`-shaped `tar.zst` (manifest.json first, then
 //! `blobs/<hash>` entries — exactly the wire format the vite packer emits),
@@ -7,18 +6,18 @@
 //! [`LocalDiskBlobStore`], then reads back the stored manifest + the descriptor
 //! blob and asserts the descriptor survives byte-identical.
 //!
-//! This exercises the full carrying capacity P4a adds: serde of the new
+//! This exercises the full carrying capacity of the descriptor slot: serde,
 //! `runtime_descriptor` slot, `collect_expected_hashes` requiring the descriptor
 //! blob to be present in the tar (a missing blob would 400), and the blob's
-//! content-addressed round-trip. It does NOT touch the runtime read path — P4b
-//! owns that.
+//! content-addressed round-trip. Migration documents are applied through the
+//! migration service and are rejected if a legacy manifest still carries them.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use uuid::Uuid;
 use zeroship_bundle::blob::{sha256_hex, BlobStore, LocalDiskBlobStore};
-use zeroship_bundle::{ingest, Manifest, RuntimeDescriptorEntry};
+use zeroship_bundle::{ingest, IngestError, Manifest, RuntimeDescriptorEntry};
 
 fn tmpdir() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -34,7 +33,10 @@ fn tmpdir() -> PathBuf {
 /// packer's archive layout so the test drives the real ingest contract.
 fn pack(manifest: &Manifest, blobs: &[(String, Vec<u8>)]) -> Vec<u8> {
     let manifest_json = serde_json::to_vec(manifest).unwrap();
+    pack_raw_manifest(&manifest_json, blobs)
+}
 
+fn pack_raw_manifest(manifest_json: &[u8], blobs: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut tar_buf: Vec<u8> = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_buf);
@@ -45,7 +47,7 @@ fn pack(manifest: &Manifest, blobs: &[(String, Vec<u8>)]) -> Vec<u8> {
         header.set_mode(0o644);
         header.set_cksum();
         builder
-            .append_data(&mut header, "manifest.json", manifest_json.as_slice())
+            .append_data(&mut header, "manifest.json", manifest_json)
             .unwrap();
 
         // blobs/<hash>, sorted by hash for determinism.
@@ -119,8 +121,8 @@ async fn descriptor_survives_pack_then_ingest_byte_identical() {
 
 #[compio::test]
 async fn absent_descriptor_ingests_to_none() {
-    // No migrations / no descriptor: pack + ingest must succeed with the slot
-    // left None (an app may ship no schema).
+    // No descriptor: pack + ingest must succeed with the slot left None (an app
+    // may ship no schema).
     let manifest = base_manifest();
     assert!(manifest.runtime_descriptor.is_none());
 
@@ -138,6 +140,43 @@ async fn absent_descriptor_ingests_to_none() {
         stored.runtime_descriptor.is_none(),
         "absent descriptor must remain None after ingest"
     );
+}
+
+#[compio::test]
+async fn legacy_manifest_migrations_key_is_rejected() {
+    let body = br#"{"ir_version":1,"name":"legacy","ops":[]}"#.to_vec();
+    let body_hash = sha256_hex(&body);
+    let manifest_json = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "assets": {},
+        "runtime_assets": {},
+        "asset_version": 0,
+        "sourcemaps": {},
+        "metadata": { "built_at": "2026-06-25T00:00:00Z" },
+        "migrations": [
+            { "name": "20260625000000_legacy.ir.json", "hash": body_hash.clone() }
+        ]
+    }))
+    .unwrap();
+    let archive = pack_raw_manifest(&manifest_json, &[(body_hash, body)]);
+
+    let store: Arc<dyn BlobStore> =
+        Arc::new(LocalDiskBlobStore::new(tmpdir()).expect("local store"));
+    let app_id = Uuid::now_v7();
+
+    let err = ingest(&store, &app_id, &archive)
+        .await
+        .expect_err("legacy manifest.migrations must be rejected");
+    match err {
+        IngestError::BadRequest { error, detail } => {
+            assert_eq!(error, "invalid manifest");
+            assert!(
+                detail.contains("manifest.migrations") && detail.contains("migration service"),
+                "legacy manifest error should point at migration service, got {detail}"
+            );
+        }
+        other => panic!("expected bad manifest error, got {other:?}"),
+    }
 }
 
 #[compio::test]

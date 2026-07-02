@@ -32,8 +32,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use zeroship_bundle::{
-    AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest,
-    ManifestMetadata, RuntimeDescriptorEntry, ScopeDef, WorkerCode,
+    AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest, ManifestMetadata, ScopeDef,
+    WorkerCode,
 };
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
@@ -149,7 +149,6 @@ fn manifest_for(
             built_at: "2026-04-29T00:00:00Z".into(),
         },
         exports: None,
-        migrations: Vec::new(),
         runtime_descriptor: None,
     }
 }
@@ -242,21 +241,6 @@ impl Drop for Fixture {
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 async fn build_test_state(db_url: &str, label: &str) -> Fixture {
-    build_state_inner(db_url, label, None).await
-}
-
-/// Like [`build_test_state`] but ALSO attaches a privileged provisioning DSN
-/// (`with_provisioning_dsn`) so the P6 deploy-migrate phase can actually
-/// `CREATE SCHEMA` / `CREATE ROLE` + apply the bundle's `.ir.json` migrations.
-/// PR9c HIGH (operator-only gate) e2e: drives the REAL deploy() → migrate phase
-/// through `?approved_versions=`. In test the control DB superuser (`:5440
-/// postgres/zeroship`) IS a CREATEROLE principal, so reusing `db_url` as the
-/// provisioning DSN puts the per-app schema in the same DB we can introspect.
-async fn build_migrate_capable_state(db_url: &str, label: &str) -> Fixture {
-    build_state_inner(db_url, label, Some(db_url.to_string())).await
-}
-
-async fn build_state_inner(db_url: &str, label: &str, provision_dsn: Option<String>) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("dtmp-{label}"));
 
@@ -268,10 +252,6 @@ async fn build_state_inner(db_url: &str, label: &str, provision_dsn: Option<Stri
     );
 
     let registry = Registry::new(db_url).await.expect("registry");
-    let registry = match provision_dsn {
-        Some(dsn) => registry.with_provisioning_dsn(dsn),
-        None => registry,
-    };
     zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY, false)
         .expect("env store");
@@ -793,48 +773,48 @@ async fn deploy_noncolliding_scope_returns_200() {
 }
 
 // ---------------------------------------------------------------------------
-// PR9c HIGH — the operator-only `?approved_versions=` go-live gate, driven
-// through the REAL `deploy()` HTTP handler (NOT the apply seam in isolation,
-// NOT the cedar policy in isolation). This is the e2e the critique flagged as
-// MISSING: before this, the actual wiring (query parse → `AppsApproveMigration`
-// 403 → actor stamp → seam routing) was pinned ONLY by a source-grep guard test
-// that asserts STRING PRESENCE, not behavior. A refactor that drops/reorders the
-// `AppsApproveMigration` check, mis-parses the query, or routes a creator's set
-// as approved would pass every behavioral test and only fail the brittle grep
-// (exactly the faithful-e2e failure mode). These three cases pin the real
-// handler→gate→seam path.
+// Deploy/migration decoupling
 // ---------------------------------------------------------------------------
 
-/// A `.zship` carrying ONE `.ir.json` migration file (`name`, `body`) plus a
-/// worker module (so the bundle is a valid deploy). The IR body is its own
-/// content-addressed blob referenced from `manifest.migrations`.
-fn zship_with_ir_migration(ir_name: &str, ir_body: &str) -> Vec<u8> {
+fn zship_with_legacy_migrations_key() -> Vec<u8> {
     let server = b"export default { fetch() { return new Response('ok'); } }";
     let server_hash = sha256_hex(server);
-    let ir_bytes = ir_body.as_bytes().to_vec();
-    let ir_hash = sha256_hex(&ir_bytes);
-    let descriptor = br#"{"version":1,"collections":{}}"#;
-    let descriptor_hash = sha256_hex(descriptor);
-
-    let mut manifest = manifest_for(Some(&server_hash), &[]);
-    manifest.migrations = vec![zeroship_bundle::MigrationFileEntry {
-        name: ir_name.to_string(),
-        hash: ir_hash.clone(),
-    }];
-    manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
-        hash: descriptor_hash.clone(),
-    });
-    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
-    let blobs = vec![
-        (server_hash.clone(), server.to_vec()),
-        (ir_hash.clone(), ir_bytes),
-        (descriptor_hash, descriptor.to_vec()),
-    ];
-    build_zship(&manifest_bytes, &blobs, true)
+    let ir = br#"{"ir_version":1,"name":"legacy","ops":[{"op":"createTable","name":"legacy_notes","columns":[{"name":"title","type":"text","nullable":false}]}]}"#;
+    let ir_hash = sha256_hex(ir);
+    let manifest_json = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "worker": {
+            "entry": "index.js",
+            "modules": { "index.js": server_hash.clone() },
+        },
+        "assets": {},
+        "runtime_assets": {},
+        "asset_version": 0,
+        "sourcemaps": {},
+        "metadata": {
+            "compiler": "test",
+            "built_at": "2026-06-29T00:00:00Z",
+        },
+        "migrations": [
+            { "name": "20260629000000_legacy.ir.json", "hash": ir_hash.clone() },
+        ],
+    }))
+    .unwrap();
+    build_zship(
+        &manifest_json,
+        &[(server_hash, server.to_vec()), (ir_hash, ir.to_vec())],
+        true,
+    )
 }
 
-/// Mount the single deploy route under the test app, mirroring `main.rs`'s
-/// PayloadConfig.
+fn worker_only_zship() -> Vec<u8> {
+    let server = b"export default { fetch() { return new Response('ok'); } }";
+    let server_hash = sha256_hex(server);
+    let manifest = manifest_for(Some(&server_hash), &[]);
+    let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+    build_zship(&manifest_bytes, &[(server_hash, server.to_vec())], true)
+}
+
 async fn deploy_service(
     state: Arc<AppState>,
 ) -> ntex::Pipeline<
@@ -856,351 +836,108 @@ async fn deploy_service(
     .await
 }
 
-/// Whether `col` exists on the per-app schema's `table` (the per-app schema is
-/// `"<app_id>"`, created by the migrate phase in the provisioning DB = the
-/// control DB in test).
-async fn http_column_exists(
-    conn: &compio_postgres::Client,
-    app_id: &Uuid,
-    table: &str,
-    col: &str,
-) -> bool {
+async fn schema_exists(conn: &compio_postgres::Client, app_id: &Uuid) -> bool {
     let schema = app_id.to_string();
     let rows = conn
         .query(
-            "SELECT 1 FROM information_schema.columns \
-             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
-            &[&schema, &table, &col],
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
+            &[&schema],
         )
         .await
-        .expect("column probe");
+        .expect("schema probe");
     !rows.is_empty()
 }
 
-/// The DISTINCT journal actors stamped in the per-app meta journal — the
-/// forensic `by` column the §2.2 immutable journal records. An operator-approved
-/// go-live stamps `deploy-ir-approved:<approver>`; a routine deploy stamps the
-/// static `deploy-ir`.
-async fn http_journal_actors(conn: &compio_postgres::Client, app_id: &Uuid) -> Vec<String> {
-    let meta = format!("{}_migrations", app_id);
-    let q = format!("\"{}\".schema_migrations", meta.replace('"', "\"\""));
-    let lit = q.replace('\'', "''");
-    let present = conn
-        .query(&format!("SELECT to_regclass('{lit}') IS NOT NULL AS p"), &[])
-        .await
-        .expect("regclass probe");
-    if !present[0].get::<_, bool>("p") {
-        return Vec::new();
-    }
-    let rows = conn
-        .query(
-            &format!("SELECT DISTINCT \"by\" AS actor FROM {q} ORDER BY actor"),
-            &[],
-        )
-        .await
-        .expect("read journal actors");
-    rows.iter().map(|r| r.get::<_, String>("actor")).collect()
-}
-
-/// Drop the per-app schema + meta schema + migrator role so a re-run is clean.
-async fn http_cleanup_app_schema(conn: &compio_postgres::Client, app_id: &Uuid) {
-    let schema = app_id.to_string();
-    let role = zeroship_migrate::migrator_role_name(&schema).unwrap();
-    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    let _ = conn
-        .batch_execute(&format!(
-            "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE;",
-            q(&schema),
-            q(&format!("{schema}_migrations"))
-        ))
-        .await;
-    let _ = conn
-        .batch_execute(&format!("DROP ROLE IF EXISTS {}", q(&role)))
-        .await;
-}
-
-/// Seed a creator-owned app + return `(app_id, owner_id)`. The owner is a fresh
-/// non-admin user; the app's `members(handle)` table is created by a FIRST
-/// routine deploy through the SAME HTTP handler (so the rename EXPAND has a live
-/// table to target). The routine create needs no approval, so we use admin here
-/// to keep the setup orthogonal to the gate under test.
-async fn setup_app_with_members<S>(
-    fx: &Fixture,
-    app: &ntex::Pipeline<S>,
-    label: &str,
-) -> (Uuid, Uuid)
-where
-    S: ntex::Service<
-        ntex::http::Request,
-        Response = ntex::web::WebResponse,
-        Error = ntex::web::Error,
-    >,
-{
-    let owner_id = seed_owner(&fx.state, label).await;
-    let app_name = format!("{label}-{}", &Uuid::new_v4().simple().to_string()[..10]);
+#[compio::test]
+async fn deploy_rejects_legacy_migration_approval_query() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
+        return;
+    };
+    let fx = build_test_state(&db_url, "legacy-query").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let owner_id = seed_owner(&fx.state, "legacy-query").await;
     let record = fx
         .state
         .registry
         .create_app(
-            &app_name,
+            &format!("legacy-query-{}", &Uuid::new_v4().simple().to_string()[..10]),
             &zeroship_control::bootstrap_console::free_plan_id(),
             &owner_id,
         )
         .await
         .expect("create app");
     let app_id = record.id;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let bundle = worker_only_zship();
 
-    let create = r#"{"ir_version":1,"name":"create_members","ops":[
-        {"op":"createTable","name":"members","columns":[
-            {"name":"handle","type":"text","nullable":false}
-        ]}
-    ]}"#;
-    let body = zship_with_ir_migration("0001_create_members.ir.json", create);
-    let admin = common::authz_fixture::admin_pat(&fx.state).await;
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", admin.bearer())
-        .header("content-type", "application/x-zship")
-        .set_payload(body)
-        .to_request();
-    let resp = test::call_service(app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "routine createTable deploy #1 must succeed"
-    );
-    admin.cleanup(&fx.state).await;
-    (app_id, owner_id)
-}
-
-/// The renameColumn `.ir.json` body (handle → username) — the online-rename whose
-/// EXPAND is destructive/approval-gated.
-const RENAME_IR: &str = r#"{"ir_version":1,"name":"rename_handle","ops":[
-    {"op":"renameColumn","table":"members","from":"handle","to":"username","type":"text"}
-]}"#;
-
-/// Discover the operator-reviewed version-id set the approval channel must carry
-/// for the rename bundle — the SAME read-only plan the control-plane approval
-/// endpoint surfaces (so the test approves the REAL reviewed set, never a blanket
-/// pass). Reconstructs the bundle dir on disk + runs `plan_reviewed_versions`
-/// against the provisioning DSN (= the control DB in test).
-async fn rename_reviewed_versions(db_url: &str, app_id: &Uuid) -> Vec<String> {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("zship-http-rev-{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).expect("mkdir reviewed dir");
-    std::fs::write(dir.join("0002_rename_handle.ir.json"), RENAME_IR).expect("write ir");
-    let versions = zeroship_control::deploy_migrate::plan_reviewed_versions(db_url, app_id, &dir)
-        .await
-        .expect("plan reviewed versions");
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        !versions.is_empty(),
-        "the online rename must require approval for at least one version"
-    );
-    versions
-}
-
-// (1) A creator holding only `apps:deploy` (owns the app, NO platform role)
-// POSTing `?approved_versions=<v>` is 403'd by the operator-only
-// `AppsApproveMigration` gate BEFORE the migrate phase — and NO migration runs.
-#[compio::test]
-async fn deploy_approved_versions_by_creator_is_403_and_runs_no_migration() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
-    let fx = build_migrate_capable_state(&db_url, "approve-creator").await;
-    let app = deploy_service(fx.state.clone()).await;
-    let (app_id, owner_id) = setup_app_with_members(&fx, &app, "approve-creator").await;
-
-    let reviewed = rename_reviewed_versions(&db_url, &app_id).await;
-    let approved_q = reviewed.join(",");
-
-    // The creator PAT: owns the app (cedar `app_owner_of`), holds apps:deploy, but
-    // NOT `migrations:approve` (excluded by app_owner.cedar). The owner is the
-    // bundle author — the anti-bypass principal the gate must refuse.
-    let creator = common::authz_fixture::creator_deploy_pat(&fx.state, owner_id).await;
-    let body = zship_with_ir_migration("0002_rename_handle.ir.json", RENAME_IR);
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy?approved_versions={approved_q}"))
-        .header("authorization", creator.bearer())
-        .header("content-type", "application/x-zship")
-        .set_payload(body)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "a creator (apps:deploy, no migrations:approve) passing ?approved_versions= must be 403'd \
-         BEFORE the migrate phase — owning the app must NOT grant self-approval of its destructive \
-         migrations"
-    );
-
-    // FAIL CLOSED: the gate fired before the migrate phase — the EXPAND never ran.
-    assert!(
-        http_column_exists(&fx.state.control_pg, &app_id, "members", "handle").await,
-        "the old column is untouched — the refused approval ran no migration"
-    );
-    assert!(
-        !http_column_exists(&fx.state.control_pg, &app_id, "members", "username").await,
-        "the new column was NEVER created — the EXPAND never reached apply"
-    );
-
-    creator.cleanup(&fx.state).await;
-    http_cleanup_app_schema(&fx.state.control_pg, &app_id).await;
-    let _ = fx.state.registry.delete_app(&app_id).await;
-}
-
-// (2) An ADMIN (platform role ⇒ `migrations:approve`) POSTing the SAME
-// `?approved_versions=<v>` completes the EXPAND and journals the
-// `deploy-ir-approved:<approver>` forensic actor.
-#[compio::test]
-async fn deploy_approved_versions_by_admin_completes_expand_and_journals_approver() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
-    let fx = build_migrate_capable_state(&db_url, "approve-admin").await;
-    let app = deploy_service(fx.state.clone()).await;
-    let (app_id, _owner_id) = setup_app_with_members(&fx, &app, "approve-admin").await;
-
-    let reviewed = rename_reviewed_versions(&db_url, &app_id).await;
-    let approved_q = reviewed.join(",");
-
-    let admin = common::authz_fixture::admin_pat(&fx.state).await;
-    let body = zship_with_ir_migration("0002_rename_handle.ir.json", RENAME_IR);
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy?approved_versions={approved_q}"))
-        .header("authorization", admin.bearer())
-        .header("content-type", "application/x-zship")
-        .set_payload(body)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "an admin (migrations:approve) approving the reviewed set completes the EXPAND go-live"
-    );
-
-    // The EXPAND completed: the NEW column exists, the OLD column is still present
-    // (the CONTRACT is pending, cross-deploy).
-    assert!(
-        http_column_exists(&fx.state.control_pg, &app_id, "members", "username").await,
-        "the approved EXPAND created the new column"
-    );
-    assert!(
-        http_column_exists(&fx.state.control_pg, &app_id, "members", "handle").await,
-        "the old column is still present — the CONTRACT is pending, not applied"
-    );
-
-    // The forensic actor is the operator-approved marker carrying the approver's
-    // principal — NOT the static routine `deploy-ir` string.
-    let actors = http_journal_actors(&fx.state.control_pg, &app_id).await;
-    assert!(
-        actors.iter().any(|a| a.starts_with("deploy-ir-approved:")),
-        "an operator-approved go-live must journal `deploy-ir-approved:<approver>`, got {actors:?}"
-    );
-
-    admin.cleanup(&fx.state).await;
-    http_cleanup_app_schema(&fx.state.control_pg, &app_id).await;
-    let _ = fx.state.registry.delete_app(&app_id).await;
-}
-
-// (3) An ABSENT/empty `?approved_versions=` is a ROUTINE deploy: the operator-only
-// gate never fires (so even a creator could run it), but the online-rename EXPAND
-// is REFUSED at the approval gate (422) and NOTHING migrates.
-#[compio::test]
-async fn deploy_without_approved_versions_refuses_expand_routine() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
-    let fx = build_migrate_capable_state(&db_url, "approve-empty").await;
-    let app = deploy_service(fx.state.clone()).await;
-    let (app_id, owner_id) = setup_app_with_members(&fx, &app, "approve-empty").await;
-
-    // The creator deploys the rename with NO approval query — the gate does not
-    // fire (empty set ⇒ routine), but the EXPAND is refused at the approval gate.
-    let creator = common::authz_fixture::creator_deploy_pat(&fx.state, owner_id).await;
-    let body = zship_with_ir_migration("0002_rename_handle.ir.json", RENAME_IR);
-    let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", creator.bearer())
-        .header("content-type", "application/x-zship")
-        .set_payload(body)
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "a routine deploy (no ?approved_versions=) carrying an online-rename EXPAND is refused \
-         at the approval gate with 422 — the destructive op never completes"
-    );
-
-    // FAIL CLOSED: nothing migrated.
-    assert!(
-        http_column_exists(&fx.state.control_pg, &app_id, "members", "handle").await,
-        "old column untouched on the refused routine deploy"
-    );
-    assert!(
-        !http_column_exists(&fx.state.control_pg, &app_id, "members", "username").await,
-        "the EXPAND was refused — no new column"
-    );
-
-    creator.cleanup(&fx.state).await;
-    http_cleanup_app_schema(&fx.state.control_pg, &app_id).await;
-    let _ = fx.state.registry.delete_app(&app_id).await;
-}
-
-// (4) PR9c H2 — an admin approving a go-live with a WRONG `?expected_manifest=`
-// (standing in for a set tampered/reordered between approval and apply) is refused
-// 422 by the real handler BEFORE any DDL, and NOTHING migrates. Pins the
-// query-param → run_deploy_migrations → prevalidate H2 gate wiring end to end.
-#[compio::test]
-async fn deploy_approved_with_wrong_expected_manifest_is_422_and_runs_no_migration() {
-    let Some(db_url) = db_url() else {
-        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
-        return;
-    };
-    let fx = build_migrate_capable_state(&db_url, "approve-h2").await;
-    let app = deploy_service(fx.state.clone()).await;
-    let (app_id, _owner_id) = setup_app_with_members(&fx, &app, "approve-h2").await;
-
-    let reviewed = rename_reviewed_versions(&db_url, &app_id).await;
-    let approved_q = reviewed.join(",");
-    // A wrong reviewed-manifest hash (64 hex chars) — the arrived bundle cannot
-    // recompute it, so the H2 gate refuses before any DDL.
-    let wrong_manifest = "deadbeef".repeat(8);
-
-    let admin = common::authz_fixture::admin_pat(&fx.state).await;
-    let body = zship_with_ir_migration("0002_rename_handle.ir.json", RENAME_IR);
     let req = test::TestRequest::post()
         .uri(&format!(
-            "/api/apps/{app_id}/deploy?approved_versions={approved_q}&expected_manifest={wrong_manifest}"
+            "/api/apps/{app_id}/deploy?approved_versions=abc&expected_manifest={}",
+            "deadbeef".repeat(8)
         ))
-        .header("authorization", admin.bearer())
+        .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
-        .set_payload(body)
+        .set_payload(bundle)
         .to_request();
     let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = test::read_body(resp).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json error body");
     assert_eq!(
-        resp.status(),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "an approved go-live whose bundle does not match the operator-approved manifest hash is \
-         refused 422 before any DDL"
+        json.get("error").and_then(|v| v.as_str()),
+        Some("migration_approval_removed")
     );
 
-    // FAIL CLOSED: the EXPAND never ran.
-    assert!(
-        http_column_exists(&fx.state.control_pg, &app_id, "members", "handle").await,
-        "old column untouched — the H2 mismatch ran no migration"
-    );
-    assert!(
-        !http_column_exists(&fx.state.control_pg, &app_id, "members", "username").await,
-        "the EXPAND never reached apply"
-    );
-
-    admin.cleanup(&fx.state).await;
-    http_cleanup_app_schema(&fx.state.control_pg, &app_id).await;
     let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
+}
+
+#[compio::test]
+async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
+    let Some(db_url) = db_url() else {
+        eprintln!("[deploy_http_test] CONTROL_TEST_DB not set — skipping");
+        return;
+    };
+    let fx = build_test_state(&db_url, "legacy-manifest").await;
+    let app = deploy_service(fx.state.clone()).await;
+    let owner_id = seed_owner(&fx.state, "legacy-manifest").await;
+    let record = fx
+        .state
+        .registry
+        .create_app(
+            &format!("legacy-manifest-{}", &Uuid::new_v4().simple().to_string()[..10]),
+            &zeroship_control::bootstrap_console::free_plan_id(),
+            &owner_id,
+        )
+        .await
+        .expect("create app");
+    let app_id = record.id;
+    let pat = common::authz_fixture::admin_pat(&fx.state).await;
+    let bundle = zship_with_legacy_migrations_key();
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .header("authorization", pat.bearer())
+        .header("content-type", "application/x-zship")
+        .set_payload(bundle)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = test::read_body(resp).await;
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json error body");
+    assert!(
+        json.get("detail")
+            .and_then(|v| v.as_str())
+            .is_some_and(|detail| detail.contains("manifest.migrations")
+                && detail.contains("migration service")),
+        "legacy manifest error should point to the migration service: {json}"
+    );
+    assert!(
+        !schema_exists(&fx.state.control_pg, &app_id).await,
+        "deploy must not create/apply the per-app schema from a legacy migration-bearing bundle"
+    );
+
+    let _ = fx.state.registry.delete_app(&app_id).await;
+    pat.cleanup(&fx.state).await;
 }

@@ -10,7 +10,7 @@ use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Scope, Statement};
-use zeroship_control::token_handlers::PatIssuer;
+use zeroship_authn::PatIssuer;
 use zeroship_migrated::auth::{
     AuthError, Authenticator, ControlPlaneAuthenticator, VerifiedCaller,
 };
@@ -116,7 +116,22 @@ async fn admin_conn() -> Client {
         let _ = conn.run().await;
     })
     .detach();
+    ensure_migrated_service_tables(&client).await;
     client
+}
+
+async fn ensure_migrated_service_tables(conn: &Client) {
+    conn.batch_execute("SELECT pg_advisory_lock(7330067);")
+        .await
+        .expect("lock migrated service table setup");
+    conn.batch_execute(include_str!(
+        "../../../db/migrations/V0067__migrated_service.sql"
+    ))
+    .await
+    .expect("ensure migrated service tables");
+    conn.batch_execute("SELECT pg_advisory_unlock(7330067);")
+        .await
+        .expect("unlock migrated service table setup");
 }
 
 async fn cleanup_app(conn: &Client, app_id: &Uuid) {
@@ -408,14 +423,27 @@ async fn issue_pat_for_policy(
 }
 
 fn real_authenticator(conn: Client, issuer: Arc<PatIssuer>) -> ControlPlaneAuthenticator {
-    ControlPlaneAuthenticator::new(
-        Arc::new(conn),
-        zeroship_authz::load_platform_policies().expect("policies parse"),
+    let auth_provider = Arc::new(zeroship_core::auth_provider::AuthProvider::Platform(
+        zeroship_core::auth_provider::PlatformProvider::new(
+            zeroship_core::auth_provider::PlatformConfig::new(
+                "http://127.0.0.1:1/oauth2",
+                Some("http://127.0.0.1:1/.well-known/jwks.json".to_string()),
+            )
+            .expect("test platform auth config"),
+        ),
+    ));
+    let control_pg = Arc::new(conn);
+    let bearer_verifier = zeroship_authn::BearerVerifier::new(
         issuer,
-        Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-            "http://127.0.0.1:1",
-        )),
+        Arc::clone(&control_pg),
+        auth_provider,
+        zeroship_core::auth::default_trusted_oauth_clients(),
         "control.zeroship.ai".to_string(),
+    );
+    ControlPlaneAuthenticator::new(
+        control_pg,
+        zeroship_authz::load_platform_policies().expect("policies parse"),
+        bearer_verifier,
     )
 }
 
@@ -533,7 +561,7 @@ async fn policy_api_submits_gets_and_lists_versioned_policy_pg() {
     seed_app(&conn, app_id, owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -614,7 +642,7 @@ async fn policy_api_rejects_escalating_draft_at_submit_pg() {
     seed_app(&conn, app_id, owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -654,7 +682,7 @@ async fn policy_api_rejects_malformed_toml_at_submit_pg() {
     seed_app(&conn, app_id, owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -692,7 +720,7 @@ async fn policy_api_rejects_cross_app_get_and_put() {
     let other_app = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("app-a-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("app-a-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -727,7 +755,7 @@ async fn apply_api_accepts_apps_migrate_owner_and_applies_ir_pg() {
     seed_app(&conn, app_id, owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -810,7 +838,7 @@ async fn destructive_apply_requires_operator_approval_then_applies_pg() {
     seed_user(&conn, operator_id, "operator").await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
     auth.insert_actions(
         "operator-token",
         operator_id,
@@ -934,7 +962,7 @@ async fn approval_repreflight_engine_error_audits_rejected_preflight_pg() {
     seed_user(&conn, operator_id, "operator").await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
     auth.insert_actions(
         "operator-token",
         operator_id,
@@ -1051,7 +1079,7 @@ async fn approval_refuses_stale_ceiling_after_operator_tightening_pg() {
     seed_user(&conn, operator_id, "operator").await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
     auth.insert_actions(
         "operator-token",
         operator_id,
@@ -1160,7 +1188,7 @@ async fn approval_repreflight_refuses_when_current_policy_changes_reviewed_scope
     seed_user(&conn, operator_id, "operator").await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("creator-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("creator-token", owner_id, [Scope::AppsDeploy], [app_id]);
     auth.insert_actions(
         "operator-token",
         operator_id,
@@ -1276,7 +1304,7 @@ async fn approve_endpoint_real_authenticator_denies_creator_and_allows_operator_
         &conn,
         &issuer,
         owner_id,
-        policy_for("migrated creator migrate only", vec![Action::AppsMigrate]),
+        policy_for("migrated creator migrate only", vec![Action::AppsDeploy]),
         "migrated creator PAT",
     )
     .await;
@@ -1372,7 +1400,7 @@ async fn apply_api_uses_stored_current_policy_when_no_inline_draft_pg() {
     seed_app(&conn, app_id, owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1414,7 +1442,7 @@ async fn apply_api_5xx_detail_is_generic_and_does_not_leak_internals() {
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let bad_provision_dsn =
         "host=127.0.0.1 port=1 user=postgres password=zeroship dbname=zeroship_control_test"
             .to_string();
@@ -1452,7 +1480,7 @@ async fn apply_api_rejects_bearer_without_apps_migrate_scope() {
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("no-scope-token", owner_id, [Scope::AppsDeploy], [app_id]);
+    auth.insert("no-scope-token", owner_id, [Scope::AppsRead], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1478,7 +1506,7 @@ async fn apply_api_rejects_bearer_for_different_app() {
     let other_app = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("wrong-app-token", owner_id, [Scope::AppsMigrate], [other_app]);
+    auth.insert("wrong-app-token", owner_id, [Scope::AppsDeploy], [other_app]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1506,7 +1534,7 @@ async fn apply_api_rejects_confined_denied_vendor_op_pg() {
     seed_app(&conn, app_id, owner_id).await;
 
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1547,7 +1575,7 @@ async fn apply_api_rejects_policy_draft_escalation_without_clamping() {
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1583,7 +1611,7 @@ async fn apply_api_rejects_malformed_policy_draft_fail_closed() {
     let app_id = Uuid::now_v7();
     let owner_id = Uuid::new_v4();
     let auth = Arc::new(StaticAuthenticator::new());
-    auth.insert("good-token", owner_id, [Scope::AppsMigrate], [app_id]);
+    auth.insert("good-token", owner_id, [Scope::AppsDeploy], [app_id]);
     let (state, tmp) = state_for(auth);
     let svc = test::init_service(
         web::App::new()
@@ -1625,7 +1653,7 @@ async fn real_delegating_authenticator_accepts_apps_migrate_owner_pat() {
         &conn,
         &issuer,
         owner_id,
-        policy_for("migrated apps migrate", vec![Action::AppsMigrate]),
+        policy_for("migrated apps migrate", vec![Action::AppsDeploy]),
         "migrated integration PAT",
     )
     .await;
@@ -1633,7 +1661,7 @@ async fn real_delegating_authenticator_accepts_apps_migrate_owner_pat() {
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn, issuer);
     let caller = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsMigrate)
+        .verify_bearer(&token, app_id, Scope::AppsDeploy)
         .await
         .expect("PAT owner with apps:migrate verifies");
     assert_eq!(caller.principal_id, owner_id);
@@ -1655,7 +1683,7 @@ async fn real_delegating_authenticator_rejects_pat_without_apps_migrate_scope() 
         &conn,
         &issuer,
         owner_id,
-        policy_for("migrated apps deploy only", vec![Action::AppsDeploy]),
+        policy_for("migrated apps read only", vec![Action::AppsRead]),
         "migrated no-scope PAT",
     )
     .await;
@@ -1663,7 +1691,7 @@ async fn real_delegating_authenticator_rejects_pat_without_apps_migrate_scope() 
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn, issuer);
     let err = authenticator
-        .verify_bearer(&token, app_id, Scope::AppsMigrate)
+        .verify_bearer(&token, app_id, Scope::AppsDeploy)
         .await
         .expect_err("PAT without apps:migrate must be denied");
     assert!(matches!(err, AuthError::Forbidden));
@@ -1687,7 +1715,7 @@ async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
         &conn,
         &issuer,
         owner_id,
-        policy_for("migrated apps migrate", vec![Action::AppsMigrate]),
+        policy_for("migrated apps migrate", vec![Action::AppsDeploy]),
         "migrated wrong-app PAT",
     )
     .await;
@@ -1695,7 +1723,7 @@ async fn real_delegating_authenticator_rejects_pat_for_different_app_owner() {
     let auth_conn = admin_conn().await;
     let authenticator = real_authenticator(auth_conn, issuer);
     let err = authenticator
-        .verify_bearer(&token, other_app_id, Scope::AppsMigrate)
+        .verify_bearer(&token, other_app_id, Scope::AppsDeploy)
         .await
         .expect_err("PAT for one owner must not authorize a different app");
     assert!(matches!(err, AuthError::Forbidden));
@@ -1712,7 +1740,7 @@ async fn real_delegating_authenticator_rejects_malformed_bearer() {
     let issuer = Arc::new(PatIssuer::dev_insecure());
     let authenticator = real_authenticator(auth_conn, issuer);
     let err = authenticator
-        .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsMigrate)
+        .verify_bearer("not-a-jwt", Uuid::now_v7(), Scope::AppsDeploy)
         .await
         .expect_err("malformed bearer must be denied");
     assert!(matches!(err, AuthError::Unauthorized));

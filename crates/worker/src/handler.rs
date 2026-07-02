@@ -1423,7 +1423,7 @@ async fn load_on_demand(
     let env_entry = crate::sync::get_env(envs, app_id)
         .ok_or_else(|| "env cache missing after env insert".to_string())?;
     // Resolve the bundled RuntimeSchemaDescriptor (if any) so the runtime
-    // sources the schema from the migration fold. Absent with no migrations →
+    // sources the schema from the generated descriptor. Absent descriptor means
     // schema-less app; expected-but-missing/corrupt descriptors are load errors.
     let descriptor_json = match crate::sync::runtime_descriptor_json(
         manifest,

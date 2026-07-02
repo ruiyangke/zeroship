@@ -28,7 +28,6 @@ import { create as tarCreate } from "tar";
 import mime from "mime";
 
 import {
-  discoverMigrations,
   GEN_TYPES_OUT_DEFAULT,
   RUNTIME_DESCRIPTOR_FILE,
 } from "./migrations.js";
@@ -98,18 +97,11 @@ interface Manifest {
   /** Inert outbound TCP request hints. Grants live only in control's table. */
   net?: NetConfig;
   /**
-   * The op.* DSL migrations carried by the bundle (PR4 A4). Each entry's `name`
-   * is the committed `<14-digit>_<desc>.ir.json` filename; `hash` is the sha256 of
-   * the committed bytes (consumed VERBATIM by the packer — never re-emitted). The
-   * control plane hands these to `zeroship-migrate` before go-live (§5.1).
-   */
-  migrations?: MigrationFileEntry[];
-  /**
    * The generated runtime schema descriptor (`schema.runtime.json`) carried by
-   * the bundle (migration-first P4a). Content-addressed like a migration:
-   * `{ hash }` is the sha256 of the `gen-types`-emitted descriptor bytes,
-   * staged as a blob. `undefined` when the app ships no migrations / no
-   * descriptor. Mirrors the Rust `bundle::manifest::RuntimeDescriptorEntry`.
+   * the bundle. `{ hash }` is the sha256 of the `gen-types`-emitted descriptor
+   * bytes, staged as a blob. Migration documents are applied through the
+   * migration service and are not carried by the `.zship`. Mirrors the Rust
+   * `bundle::manifest::RuntimeDescriptorEntry`.
    *
    * The runtime/worker path reads this descriptor and exposes it as
    * `globalThis.__zsRuntimeDescriptor` for bootstrap schema install.
@@ -125,15 +117,6 @@ interface NetRequest {
   host: string;
   port: number;
   reason: string;
-}
-
-/** One migration file carried by the `.zship` (`manifest.migrations[i]`). Mirrors
- *  the Rust `bundle::manifest::MigrationFileEntry`. */
-interface MigrationFileEntry {
-  /** The committed `.ir.json` filename (bare; no path separators). */
-  name: string;
-  /** sha256 (lowercase, 64 hex) of the committed `.ir.json` blob. */
-  hash: Sha256Hex;
 }
 
 /** The runtime schema descriptor carried by the `.zship`
@@ -216,25 +199,16 @@ export interface ZshipOptions {
     net?: NetConfig;
   };
   /**
-   * The op.* DSL migrations dir relative to `root` (default `migrations`). The
-   * packer discovers `migrations/*.ts`, records each one lacking a committed
-   * `<name>.ir.json` via the PR4a recorder (the vite-plugin is a thin client of the
-   * SAME recorder — it shells the `zeroship-migrate-js` CLI; never an in-process
-   * eval of untrusted `.ts`), reads each committed `.ir.json` VERBATIM, and
-   * contributes `{ name, hash }` entries into `manifest.migrations` + stages the
-   * blob. Set `migrations: false` to disable discovery.
+   * Migration/typegen settings. The packer never carries migration documents in
+   * the `.zship`; it only reads the generated `schema.runtime.json` descriptor
+   * and stages that descriptor as `manifest.runtime_descriptor`. Set
+   * `migrations: false` to disable descriptor packing.
    */
   migrations?:
     | false
     | {
         /** Migrations dir relative to root (default `migrations`). */
         dir?: string;
-        /** The declaring/deploying app (`app_…`). */
-        ownerApp?: string;
-        /** The hosted recorder URL (falls back to `ZEROSHIP_RECORDER_URL`). */
-        recorderUrl?: string;
-        /** Path to the `zeroship-migrate-js` CLI (default on PATH). */
-        cliPath?: string;
         /**
          * The `gen-types` output dir relative to `root` (default
          * `GEN_TYPES_OUT_DEFAULT`). The packer reads
@@ -476,47 +450,24 @@ export async function emitZship(
     manifest.net = options.rpcExtras.net;
   }
 
-  // 8b. Discover + bundle op.* migrations (PR4 A4). The committed `.ir.json`
-  //     bytes are staged as content blobs (deduped by hash, exactly like assets)
-  //     and contributed to `manifest.migrations` — consumed VERBATIM, never
-  //     re-emitted. The packer COPIES; the bundle entry hash is the sha256 of the
-  //     on-disk committed bytes.
+  // 8b. Carry the generated runtime schema descriptor. Migration documents are
+  //     applied through the migration service and are NOT transported in the
+  //     `.zship`. The packer only stages `schema.runtime.json` so runtime boot can
+  //     install the typed `env.db` surface for the deployed code.
   if (options.migrations !== false) {
-    const migEntries = await discoverMigrations({
-      root,
-      migrationsDir: options.migrations?.dir,
-      ownerApp: options.migrations?.ownerApp,
-      recorderUrl: options.migrations?.recorderUrl,
-      cliPath: options.migrations?.cliPath,
-    });
-    if (migEntries.length > 0) {
-      manifest.migrations = migEntries.map((m) => ({ name: m.name, hash: m.hash }));
-      for (const m of migEntries) {
-        if (!blobsByHash.has(m.hash)) blobsByHash.set(m.hash, m.bytes);
-      }
-      log(`bundled ${migEntries.length} op.* migration(s)`);
-    }
-
-    // 8c. Carry the generated runtime schema descriptor (migration-first P4a).
-    //     `gen-types` emits `<genTypesOut>/schema.runtime.json` by folding the
-    //     migration set; the packer reads it VERBATIM, stages it as a content
-    //     blob (deduped by hash, exactly like a migration), and records
-    //     `manifest.runtime_descriptor = { hash }`. Absent is valid only when
-    //     the app ships no migrations; migrations without a descriptor are an
-    //     invalid build because the runtime must not silently boot schema-less.
     const genTypesOut = options.migrations?.genTypesOut ?? GEN_TYPES_OUT_DEFAULT;
     const descriptorPath = resolve(root, genTypesOut, RUNTIME_DESCRIPTOR_FILE);
     let descriptorBytes: Buffer | undefined;
     try {
       descriptorBytes = await fs.readFile(descriptorPath);
     } catch {
-      if (migEntries.length > 0) {
+      if (await hasMigrationSources(root, options.migrations?.dir)) {
         throw new Error(
-          `zship: found ${migEntries.length} migration(s) but missing runtime schema descriptor at ` +
-            `${descriptorPath}; run gen-types before packing`
+          `zship: found migration source files but missing runtime schema descriptor at ` +
+            `${descriptorPath}; run gen-types before packing and apply migrations through the migration service`
         );
       }
-      descriptorBytes = undefined; // no migrations + no descriptor → schema-less app
+      descriptorBytes = undefined;
     }
     if (descriptorBytes != null) {
       validateRuntimeDescriptorBytes(descriptorBytes);
@@ -676,6 +627,17 @@ async function collectFiles(
 
   await walk(startDir);
   return out;
+}
+
+async function hasMigrationSources(root: string, migrationsDir?: string): Promise<boolean> {
+  const dir = resolve(root, migrationsDir ?? "migrations");
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return false;
+  }
+  return entries.some((name) => /^\d{14}_[A-Za-z0-9_]+\.ts$/.test(name));
 }
 
 // ── Manifest helpers ────────────────────────────────────────────────────────
@@ -878,28 +840,8 @@ function validateManifest(
       }
     }
   }
-  // Every migration entry's hash must be valid sha256 hex AND have a blob (the
-  // committed `.ir.json` bytes staged verbatim — the packer copies, never
-  // re-emits). Mirrors the Rust `crates/bundle/src/unpack.rs` migration check.
-  for (const mig of m.migrations ?? []) {
-    if (!isSha256Hex(mig.hash)) {
-      throw new Error(
-        `zship: migration ${mig.name} hash ${mig.hash} is not lowercase 64-char sha256 hex`
-      );
-    }
-    if (!blobsByHash.has(mig.hash)) {
-      throw new Error(
-        `zship: migration ${mig.name} hash ${mig.hash} has no corresponding blob`
-      );
-    }
-  }
-  if ((m.migrations?.length ?? 0) > 0 && m.runtime_descriptor == null) {
-    throw new Error(
-      "zship: manifest has migrations but no runtime_descriptor; apps with migrations must carry schema.runtime.json"
-    );
-  }
-  // The runtime schema descriptor blob (migration-first P4a) — hash must be
-  // valid sha256 hex AND have a staged blob. Mirrors the Rust
+  // The runtime schema descriptor blob — hash must be valid sha256 hex AND have
+  // a staged blob. Mirrors the Rust
   // `crates/bundle/src/{manifest,unpack}.rs` descriptor checks.
   if (m.runtime_descriptor != null) {
     const h = m.runtime_descriptor.hash;

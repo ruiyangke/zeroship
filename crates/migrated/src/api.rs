@@ -6,7 +6,7 @@ use ntex::web::types::{Json, Path, Query, State};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_authz::{Action, Scope};
+use zeroship_authz::Action;
 
 use crate::apply::{
     apply_error_kind, apply_ir_documents, approve_pending_migration, ApplyMigrationsRequest,
@@ -62,7 +62,7 @@ pub async fn apply(
     let app_id = app_id.into_inner();
     let caller = match state
         .authenticator
-        .verify_action(token, app_id, Scope::AppsMigrate.action())
+        .verify_action(token, app_id, Action::AppsDeploy)
         .await
     {
         Ok(caller) => caller,
@@ -257,7 +257,7 @@ async fn verify_apps_migrate(
     };
     state
         .authenticator
-        .verify_action(token, app_id, Scope::AppsMigrate.action())
+        .verify_action(token, app_id, Action::AppsDeploy)
         .await
         .map_err(auth_error_response)
 }
