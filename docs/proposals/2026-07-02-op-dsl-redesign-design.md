@@ -469,17 +469,27 @@ pg.view("legacy_report").create({ as: pg.rawSelect("SELECT … LATERAL …") });
 
 ## 5. IR v2 — the one clean break
 
-<!-- Revised 2026-07-02: addressing critic MINOR #1 — "one clean break" oversold; the IR shape is additively extended across P0–P4 even though the v1→v2 break is one-shot. Stated honestly. -->
+<!-- Revised 2026-07-02 (operator directive): DO NOT BUMP the ir_version integer. "v2"/"IR v2"
+     here is a GENERATION LABEL for the design, NOT the wire integer. The engine is already at
+     CURRENT_IR_VERSION = 6 and STAYS 6 through the whole rewrite — the wire shape changes IN
+     PLACE. Rationale: pre-launch + committed .ir.json ELIMINATED (build-time/in-memory only,
+     never persisted) ⇒ there are NO stored artifacts to version against, so a bump buys nothing.
+     The ir_version FIELD + fail-closed version check are KEPT (code-evolution discipline: reject
+     a malformed/future artifact loudly via closed-enum deny_unknown_fields) — just never bumped.
+     Read every "ir_version: 2" / "v1→v2 break" / "bump" below as "the wire shape changes in place
+     at the current integer (6), one destructive shape break, no version increment." -->
 **Honest framing of "one break" (MINOR #1).** Precisely: there is **one destructive wire break**
-(v1→v2, at P0 — the v1 loader is deleted, goldens regenerated once). After that, the v2 shape is
+(the v1 authoring shapes are deleted, goldens regenerated once, at P0). After that, the shape is
 **additively extended** across P3/P4 as vendor waves land (new `Op`/`Expr` variants, SelectAst v2).
-`ir_version` stays `2` throughout because closed-enum `deny_unknown_fields` deserialize means each
-addition is a superset a prior reader fails **loudly** on, not a silent-compat surface — additive
-within-v2 growth is code-evolution discipline (K1), not a user-compat shim. So "frozen IR" (K1) is
-true at the **end** of the train; during it, the shape grows additively under a fixed version. This
-is acceptable pre-launch, but the doc says so rather than implying the shape is inert from P0.
+The `ir_version` integer stays **fixed (6, unbumped)** throughout because closed-enum
+`deny_unknown_fields` deserialize means each addition is a superset a prior reader fails **loudly**
+on, not a silent-compat surface — additive growth is code-evolution discipline (K1), not a
+user-compat shim. So "frozen IR" (K1) is true at the **end** of the train; during it, the shape
+grows additively under a fixed version. Acceptable pre-launch; the doc says so rather than implying
+the shape is inert from P0.
 
-`ir_version: 2`; goldens regenerated once; the v1 loader is deleted (pre-launch). Hostile
+Wire shape changes in place at `ir_version: 6` (no bump); goldens regenerated once; the v1
+authoring shapes are deleted (pre-launch, no alias). Hostile
 `.ir.json` still fails to parse via closed internally-tagged enums + `deny_unknown_fields` +
 `IrScalar` domain enforcement. Checksum = SHA-256 over the canonical serde byte stream, as
 today. `dialect_scope`, expression tier, and capability sets are **derived, never serialized
