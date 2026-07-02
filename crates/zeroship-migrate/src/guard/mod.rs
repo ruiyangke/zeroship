@@ -814,7 +814,7 @@ impl SqlGuard {
                 }
             }
             // CREATE SCHEMA — deny-by-default for Confined; ALLOW iff Platform
-            // (§4.1; 0001/0027 create the platform/oauth_hydra schemas). When
+            // (§4.1; platform migrations create platform schemas). When
             // Platform, fall through to the cross-schema confinement below (the
             // schema being created is checked against the allowlist there).
             NodeEnum::CreateSchemaStmt(_) => {
@@ -1312,7 +1312,7 @@ fn foreign_schema_literal_in_body(body: &str, scope: &SchemaScope) -> Option<Str
         }
         // (1) platform schema named directly. The `PLATFORM_SCHEMAS` lexical
         //     backstop fires for any schema in PLATFORM_SCHEMAS that the scope
-        //     did NOT permit (port schemas `zeroship`/`oauth_hydra`/`public`
+        //     did NOT permit (port schemas `zeroship`/`public`
         //     are not in PLATFORM_SCHEMAS, so they already pass — §4.2/HIGH-3).
         if denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, lit) {
             return Some(lit.to_string());
@@ -2720,8 +2720,8 @@ fn stmt_text(sql: &str, raw_stmt: &protobuf::RawStmt) -> String {
 mod tests {
     use super::*;
 
-    /// A Platform guard over the real port allowlist (`zeroship` / `oauth_hydra`
-    /// / `public`) + the two ported extensions. Minted via the `for_test` seam,
+    /// A Platform guard over the real port allowlist (`zeroship` / `public`) +
+    /// the two ported extensions. Minted via the `for_test` seam,
     /// which is `#[cfg(test)]`-only.
     fn platform_guard() -> SqlGuard {
         SqlGuard::new(platform_guard_config())
@@ -2731,11 +2731,7 @@ mod tests {
         let cap = OperatorCapability::for_test();
         GuardConfig::platform(
             &cap,
-            vec![
-                "zeroship".to_string(),
-                "oauth_hydra".to_string(),
-                "public".to_string(),
-            ],
+            vec!["zeroship".to_string(), "public".to_string()],
             vec!["citext".to_string(), "uuid-ossp".to_string()],
         )
     }
@@ -2838,17 +2834,17 @@ mod tests {
         let allowed = [
             // role mgmt
             "CREATE ROLE zeroship_auth NOLOGIN",
-            "ALTER ROLE oauth_hydra SET search_path = oauth_hydra, public",
-            "ALTER ROLE oauth_hydra RESET search_path",
-            "DROP ROLE IF EXISTS oauth_hydra",
+            "ALTER ROLE zeroship_auth SET search_path = zeroship, public",
+            "ALTER ROLE zeroship_auth RESET search_path",
+            "DROP ROLE IF EXISTS zeroship_auth",
             // grant / privilege mgmt
-            "GRANT CONNECT ON DATABASE zeroship TO oauth_hydra",
-            "GRANT USAGE ON SCHEMA public TO oauth_hydra",
-            "REVOKE USAGE ON SCHEMA public FROM oauth_hydra",
+            "GRANT CONNECT ON DATABASE zeroship TO zeroship_auth",
+            "GRANT USAGE ON SCHEMA public TO zeroship_auth",
+            "REVOKE USAGE ON SCHEMA public FROM zeroship_auth",
             "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship GRANT SELECT ON TABLES TO zeroship_app",
             // schema
-            "CREATE SCHEMA IF NOT EXISTS oauth_hydra AUTHORIZATION oauth_hydra",
-            "DROP SCHEMA IF EXISTS oauth_hydra CASCADE",
+            "CREATE SCHEMA IF NOT EXISTS zeroship AUTHORIZATION zeroship_auth",
+            "DROP SCHEMA IF EXISTS zeroship CASCADE",
             // RLS — the four toggles
             "ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY",
             "ALTER TABLE zeroship.app_secrets FORCE ROW LEVEL SECURITY",
@@ -2860,12 +2856,12 @@ mod tests {
             "DROP POLICY IF EXISTS tenant_isolation ON zeroship.app_secrets",
             // extensions (allowlisted under Platform)
             "CREATE EXTENSION citext",
-            "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA oauth_hydra",
+            "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\" WITH SCHEMA public",
             "DROP EXTENSION IF EXISTS \"uuid-ossp\"",
             // DROP OWNED BY (0025 rollback)
             "DROP OWNED BY zeroship_auth",
             // cross-schema references within the allowlist
-            "CREATE TABLE oauth_hydra.clients(id int primary key)",
+            "CREATE TABLE public.clients(id int primary key)",
             "INSERT INTO public.t SELECT * FROM zeroship.app_secrets",
         ];
         for sql in allowed {
@@ -2917,11 +2913,11 @@ mod tests {
         END
         $bootstrap$;";
 
-    /// 0027's shape: a DO block with a bare (parsed) CREATE ROLE inside.
-    const HYDRA_DO: &str = "DO $$
+    /// A platform role bootstrap shape: a DO block with a bare (parsed) CREATE ROLE inside.
+    const PLATFORM_ROLE_DO: &str = "DO $$
         BEGIN
-            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'oauth_hydra') THEN
-                CREATE ROLE oauth_hydra LOGIN PASSWORD 'zeroship';
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'zeroship_gateway') THEN
+                CREATE ROLE zeroship_gateway NOLOGIN;
             END IF;
         END
         $$;";
@@ -2935,9 +2931,9 @@ mod tests {
             g.check(BOOTSTRAP_DO)
         );
         assert!(
-            g.check(HYDRA_DO).is_ok(),
-            "0027 hydra DO should pass under Platform: {:?}",
-            g.check(HYDRA_DO)
+            g.check(PLATFORM_ROLE_DO).is_ok(),
+            "platform role DO should pass under Platform: {:?}",
+            g.check(PLATFORM_ROLE_DO)
         );
     }
 
@@ -2945,7 +2941,10 @@ mod tests {
     fn t4b_neg_do_block_privileged_ddl_denied_under_confined() {
         let g = confined_guard();
         assert!(is_denied(&g, BOOTSTRAP_DO), "0025 bootstrap DO must DENY under Confined");
-        assert!(is_denied(&g, HYDRA_DO), "0027 hydra DO must DENY under Confined");
+        assert!(
+            is_denied(&g, PLATFORM_ROLE_DO),
+            "platform role DO must DENY under Confined"
+        );
     }
 
     #[test]
@@ -3324,12 +3323,12 @@ mod tests {
 
     #[test]
     fn t2_platform_func_def_and_literal_refs_respect_allowlist() {
-        let g = platform_guard(); // Allowlist(zeroship, oauth_hydra, public)
+        let g = platform_guard(); // Allowlist(zeroship, public)
         // allowlisted schema → OK
         assert!(g
-            .check("CREATE FUNCTION oauth_hydra.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
+            .check("CREATE FUNCTION public.f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$")
             .is_ok());
-        assert!(g.check("SELECT nextval('oauth_hydra.s')").is_ok());
+        assert!(g.check("SELECT nextval('public.s')").is_ok());
         // non-allowlisted (creator) schema → still CrossSchema
         assert!(matches!(
             g.check("SELECT 'proj_acme.t'::regclass"),
@@ -3340,7 +3339,7 @@ mod tests {
     #[test]
     fn schema_scope_permits_is_case_insensitive() {
         assert!(SchemaScope::Single("Zeroship".into()).permits("zeroship"));
-        assert!(SchemaScope::Allowlist(vec!["OAuth_Hydra".into()]).permits("oauth_hydra"));
+        assert!(SchemaScope::Allowlist(vec!["PubLic".into()]).permits("public"));
         assert!(!SchemaScope::Single("zeroship".into()).permits("control"));
     }
 

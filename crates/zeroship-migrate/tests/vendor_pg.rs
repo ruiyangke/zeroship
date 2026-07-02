@@ -55,12 +55,12 @@ fn render_create_extension_with_schema() {
     let op = Op::CreateExtension {
         name: "uuid-ossp".into(),
         if_not_exists: Some(true),
-        schema: Some("oauth_hydra".into()),
+        schema: Some("public".into()),
     };
     // The hyphenated extension name must be double-quoted by the seam.
     assert_eq!(
         render_up(&op),
-        r#"CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "oauth_hydra""#
+        r#"CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "public""#
     );
 }
 

@@ -201,10 +201,6 @@ pub fn native_authorize_return_to(client_id: &str, redirect_uri: &str) -> String
     format!("/oauth2/authorize?{q}")
 }
 
-pub fn provider_mirror_column() -> String {
-    ["hy", "dra_client_id"].concat()
-}
-
 // ─── DB cleanup ──────────────────────────────────────────────────────────
 
 /// Delete sessions + user row for `email`. CITEXT columns require an explicit

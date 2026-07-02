@@ -6,7 +6,7 @@ use ntex::web::{self, test};
 use serde_json::json;
 use uuid::Uuid;
 
-use common::{provider_mirror_column, test_auth_config};
+use common::test_auth_config;
 
 /// Mirror of control plane `client_id_for_app` (`oac_<base62-app-id>`). The
 /// consent classifier decodes this prefix to resolve `zeroship.app_scope_defs`.
@@ -162,14 +162,10 @@ impl ConsentTestApp {
             .iter()
             .map(|scope| (*scope).to_owned())
             .collect::<Vec<_>>();
-        let sql = format!(
-            "INSERT INTO zeroship.oauth_clients \
-                 (client_id, client_name, redirect_uris, scopes, skip_consent, {}) \
-             VALUES ($1, 'zeroship builder', $2, $3, $4, $1)",
-            provider_mirror_column()
-        );
         pg.execute(
-            &sql,
+            "INSERT INTO zeroship.oauth_clients \
+                 (client_id, client_name, redirect_uris, scopes, skip_consent) \
+             VALUES ($1, 'zeroship builder', $2, $3, $4)",
             &[&client_id, &redirect_uris, &client_scopes, &skip],
         )
         .await

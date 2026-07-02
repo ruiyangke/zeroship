@@ -220,7 +220,7 @@ CREATE TABLE zeroship.jwk_key_state (
 -- PRIMARY revocation mechanism for the Bearer arm: keyed PER-APP on
 -- (client_id, sub) so revoking a user on app A leaves app B untouched.
 -- `sub` is TEXT to hold BOTH the wrapper's pws_ pairwise subject and the
--- raw-Hydra global UUID. The Bearer arm rejects a token when a row exists
+-- global UUID subject. The Bearer arm rejects a token when a row exists
 -- with revoked_after > token.iat. See crates/core/src/wrapper_revocation.rs
 -- (revoke_family / is_family_revoked_since / sweep_expired_families).
 CREATE TABLE zeroship.token_revocations (

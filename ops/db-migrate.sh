@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # db-migrate.sh — dev wrapper around the `zeroship-migrate` binary for the
-# zeroship platform schema (the zeroship / oauth_hydra / public schemas). Hydra
-# owns its own schema via `hydra migrate`; this tool does not touch it.
+# zeroship platform schema (the zeroship / public schemas).
 #
 # The migrations live in db/migrations/ (Flyway-style `V<NNNN>__*.sql` /
 # `.down.sql` / `R__*.sql`) and are applied by the `migrate` compose service at

@@ -326,15 +326,14 @@ async fn insert_oauth_client(
     let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let client_secret_hash = client_secret.map(hash_api_key);
     let refresh_allowed = body.grant_types.iter().any(|grant| grant == "refresh_token");
-    // TODO(P6): drop oauth_clients.hydra_client_id column; placeholder write until then.
     let rows = state
         .control_pg
         .query(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                 skip_consent, created_by, hydra_client_id, client_secret_hash, \
+                 skip_consent, created_by, client_secret_hash, \
                  refresh_allowed, token_endpoint_auth_method) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $1, $9, $10, $11) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
              RETURNING client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
                        skip_consent, created_at, created_by",
             &[

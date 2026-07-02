@@ -156,9 +156,9 @@ async fn seed_user_client(
     ];
     db.execute(
         "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, hydra_client_id, \
+            (client_id, client_name, redirect_uris, scopes, skip_consent, \
              token_endpoint_auth_method, brokered, refresh_allowed) \
-         VALUES ($1, 'Gateway OP e2e', $2, $3, TRUE, $1, 'client_secret_basic', TRUE, TRUE)",
+         VALUES ($1, 'Gateway OP e2e', $2, $3, TRUE, 'client_secret_basic', TRUE, TRUE)",
         &[&client_id, &vec![REDIRECT_URI.to_string()], &scopes],
     )
     .await

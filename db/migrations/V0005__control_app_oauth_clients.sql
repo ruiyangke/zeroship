@@ -2,7 +2,7 @@
 -- (auth-sdk Slice 1d, spec §1.1 / §8.1).
 --
 -- The OAuth client identity itself — client_id (the zeroship.oauth_grants FK
--- target), redirect_uris, scopes, skip_consent, hydra_client_id — lives in the
+-- target), redirect_uris, scopes, skip_consent — lives in the
 -- EXISTING zeroship.oauth_clients (ensure_app_client writes it there, exactly
 -- like bootstrap_builder.rs does for the builder client). This table holds only
 -- the per-app-specific bits oauth_clients lacks: the app_id ↔ client_id link
@@ -19,7 +19,7 @@ CREATE TABLE zeroship.app_oauth_clients (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
--- redirect_uris, scopes, skip_consent, hydra_client_id are NOT here — they live
+-- redirect_uris, scopes, skip_consent are NOT here — they live
 -- on zeroship.oauth_clients (the zeroship.oauth_grants FK target + the
 -- skip_consent the consent fast path reads). ensure_app_client (§1.1) writes
 -- BOTH the oauth_clients row (skip_consent=FALSE) and this extension row.

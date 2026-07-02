@@ -52,7 +52,7 @@ http = { workspace = true }
 rand = "0.8"
 # auth-sdk Slice 1b-anchors — per-node mint single-flight uses
 # `futures::future::Shared` to coalesce concurrent `?mint=1` minters for
-# one anchor into a single Hydra refresh (the round-6 BLOCKER design).
+# one anchor into a single refresh (the round-6 BLOCKER design).
 futures = { workspace = true }
 # Phase 8 U1 — gateway-issued wrapper-token signing key. PKCS#8
 # PEM/DER loader for an Ed25519 private key (`openssl genpkey

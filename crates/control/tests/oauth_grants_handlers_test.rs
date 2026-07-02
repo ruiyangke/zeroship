@@ -258,8 +258,8 @@ async fn insert_client(state: &AppState, client_id: &str, created_by: Uuid) {
         .execute(
             "INSERT INTO zeroship.oauth_clients \
                 (client_id, client_name, client_uri, logo_uri, redirect_uris, scopes, \
-                 skip_consent, created_by, hydra_client_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, false, $7, $1)",
+                 skip_consent, created_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, false, $7)",
             &[
                 &client_id,
                 &format!("Client {client_id}"),

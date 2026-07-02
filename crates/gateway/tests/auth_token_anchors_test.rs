@@ -1132,8 +1132,8 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
     client
         .execute(
             "INSERT INTO zeroship.oauth_clients \
-                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
-             VALUES ($1, $2, $3, $4, $1) ON CONFLICT (client_id) DO NOTHING",
+                (client_id, client_name, redirect_uris, scopes) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT (client_id) DO NOTHING",
             &[
                 &CLIENT_ID,
                 &"Anchor Test App",
@@ -2261,8 +2261,8 @@ async fn seed_app_and_client_for(
     client
         .execute(
             "INSERT INTO zeroship.oauth_clients \
-                (client_id, client_name, redirect_uris, scopes, hydra_client_id) \
-             VALUES ($1, $2, $3, $4, $1) ON CONFLICT (client_id) DO NOTHING",
+                (client_id, client_name, redirect_uris, scopes) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT (client_id) DO NOTHING",
             &[
                 &client_id,
                 &format!("{app_name} App"),

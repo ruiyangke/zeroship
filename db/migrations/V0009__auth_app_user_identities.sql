@@ -20,7 +20,7 @@
 --     It is a column rather than the PK because the natural key is
 --     (app_client_id, global_user_id): re-grant UPSERTS that one row (clears
 --     revoked_at), and the pairwise_sub index serves the relay reverse-lookup.
---   - global_user_id is UUID (FK to zeroship.users.id), the GLOBAL Hydra subject.
+--   - global_user_id is UUID (FK to zeroship.users.id), the GLOBAL subject.
 --     The pws_ is NEVER stored next to the UUID in the cookie/anchor tables;
 --     it lives here as the persisted projection.
 --   - relay_email stays NULL until Slice 5 populates it on first email-scope
@@ -34,7 +34,7 @@ CREATE TABLE zeroship.app_user_identities (
     -- this app's pairwise/relay identity rows — closing the orphaned-live-alias
     -- gap the old best-effort companion UPDATE used to cover.
     app_client_id   TEXT        NOT NULL REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE,  -- per-app OAuth client_id (oac_<base62>); see header
-    global_user_id  UUID        NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,  -- GLOBAL Hydra subject
+    global_user_id  UUID        NOT NULL REFERENCES zeroship.users(id) ON DELETE CASCADE,  -- GLOBAL subject
     pairwise_sub    TEXT        NOT NULL,            -- pws_… == derive_pairwise(salt, global_user_id, sector); DETERMINISTIC
     relay_email     TEXT,                            -- {token}@{relay_domain}; NULL until email scope granted (Slice 5)
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

@@ -106,7 +106,7 @@ pub struct Manifest {
     /// never platform-delegated. On deploy the control plane validates them
     /// (format + platform-vocab collision), persists them to
     /// `control.app_scope_defs`, and mirrors the allowlist into the per-app
-    /// Hydra client `scope` — all atomically (auth-sdk Slice 3, spec §5.1).
+    /// OAuth client `scope` — all atomically (auth-sdk Slice 3, spec §5.1).
     #[serde(default, skip_serializing_if = "AuthConfig::is_empty")]
     pub auth: AuthConfig,
 

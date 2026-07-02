@@ -23,9 +23,7 @@ use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 
-use common::{
-    location, pkce_challenge_s256, pkce_verifier, provider_mirror_column, test_auth_config,
-};
+use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/cb";
@@ -484,14 +482,10 @@ async fn seed_user_client(
     )
     .await
     .expect("seed app");
-    let sql = format!(
-        "INSERT INTO zeroship.oauth_clients \
-            (client_id, client_name, redirect_uris, scopes, skip_consent, {}) \
-         VALUES ($1, 'P3 OP test', $2, $3, FALSE, $1)",
-        provider_mirror_column()
-    );
     db.execute(
-        &sql,
+        "INSERT INTO zeroship.oauth_clients \
+            (client_id, client_name, redirect_uris, scopes, skip_consent) \
+         VALUES ($1, 'P3 OP test', $2, $3, FALSE)",
         &[
             &client_id,
             &vec![REDIRECT_URI.to_string()],

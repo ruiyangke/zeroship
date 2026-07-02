@@ -16,10 +16,6 @@ use zeroship_auth::config::AuthConfig;
 use zeroship_auth::identity::{magic_link, password, password_reset};
 use zeroship_auth::store::{sessions, users};
 
-fn provider_mirror_column() -> String {
-    ["hy", "dra_client_id"].concat()
-}
-
 fn test_cfg(db_url: &str) -> AuthConfig {
     let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
@@ -658,15 +654,11 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 
     // Seed the per-app OAuth client + app the anchor FKs require.
     let client_id = format!("oac_anchor_{}", Uuid::new_v4().simple());
-    let oauth_client_sql = format!(
-        "INSERT INTO zeroship.oauth_clients \
-                (client_id, client_name, redirect_uris, scopes, {}) \
-             VALUES ($1, $2, $3, $4, $1)",
-        provider_mirror_column()
-    );
     client
         .execute(
-            &oauth_client_sql,
+            "INSERT INTO zeroship.oauth_clients \
+                (client_id, client_name, redirect_uris, scopes) \
+             VALUES ($1, $2, $3, $4)",
             &[
                 &client_id,
                 &format!("Client {client_id}"),
