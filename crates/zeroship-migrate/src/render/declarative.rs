@@ -1273,17 +1273,14 @@ fn column_snapshot_for_field(
 /// Every collection table gets these injected by [`desired_snapshot`], matching
 /// what `installSchema` materialises, so the desired snapshot round-trips to the
 /// live table the SDK creates.
+#[cfg(test)]
 fn system_field_columns() -> Vec<ColumnSnapshot> {
-    let ts = "timestamp with time zone";
-    vec![
-        ColumnSnapshot { name: "id".into(), data_type: "text".into(), nullable: false, ..Default::default() },
-        ColumnSnapshot { name: "created_at".into(), data_type: ts.into(), nullable: false, ..Default::default() },
-        ColumnSnapshot { name: "updated_at".into(), data_type: ts.into(), nullable: false, ..Default::default() },
-        ColumnSnapshot { name: "created_by".into(), data_type: "text".into(), nullable: true, ..Default::default() },
-        ColumnSnapshot { name: "updated_by".into(), data_type: "text".into(), nullable: true, ..Default::default() },
-        ColumnSnapshot { name: "version".into(), data_type: "integer".into(), nullable: false, ..Default::default() },
-        ColumnSnapshot { name: "deleted_at".into(), data_type: ts.into(), nullable: true, ..Default::default() },
-    ]
+    let shape = crate::model::profile::PolicyProfile::confined().system_shape;
+    shape
+        .columns
+        .iter()
+        .map(system_column_snapshot)
+        .collect()
 }
 
 /// The columns the platform auto-indexes on every table (#6). Mirrors
@@ -1293,20 +1290,28 @@ fn system_field_columns() -> Vec<ColumnSnapshot> {
 /// is deliberately NOT indexed (bumped on every UPDATE — index thrash).
 const SYSTEM_INDEXED_COLS: &[&str] = &["deleted_at", "updated_at", "created_by"];
 
-/// The three implicit B-tree system indexes, as [`IndexSnapshot`]s (#6).
-///
-/// The platform auto-creates these for every table; the live snapshot always
-/// carries them, so the desired snapshot must too — otherwise the differ reads
-/// each as an out-of-band index to DROP (phantom drift). Names match plugin-db's
-/// `index_name(table, &[col], false)` = `<table>_<col>_idx`, NAMEDATALEN-capped.
-fn system_field_indexes(table: &str) -> Vec<IndexSnapshot> {
-    SYSTEM_INDEXED_COLS
+fn system_column_snapshot(
+    column: &crate::model::profile::InjectedSystemColumnPolicy,
+) -> ColumnSnapshot {
+    ColumnSnapshot {
+        name: column.name.clone(),
+        data_type: column.data_type.clone(),
+        nullable: column.nullable,
+        ..Default::default()
+    }
+}
+
+fn system_index_snapshots(
+    table: &str,
+    indexes: &[crate::model::profile::InjectedSystemIndexPolicy],
+) -> Vec<IndexSnapshot> {
+    indexes
         .iter()
-        .map(|col| {
+        .map(|idx| {
             IndexSnapshot::btree(
-                non_unique_index_name(table, col),
+                non_unique_index_name(table, &idx.columns.join("_")),
                 false,
-                vec![(*col).to_string()],
+                idx.columns.clone(),
             )
         })
         .collect()
@@ -1562,7 +1567,12 @@ pub(crate) fn build_table_snapshot(
     d: &CollectionDescriptor,
     dialect: SqlDialect,
 ) -> Result<TableSnapshot, DeclarativeError> {
-    build_table_snapshot_impl(project_schema, d, dialect, SnapshotSystemMode::InjectConfined)
+    build_table_snapshot_impl(
+        project_schema,
+        d,
+        dialect,
+        SnapshotResolvedShape::confined(&d.name),
+    )
 }
 
 /// Build a snapshot from already-resolved `createTable` IR columns.
@@ -1575,293 +1585,316 @@ pub(crate) fn build_resolved_table_snapshot(
     d: &CollectionDescriptor,
     dialect: SqlDialect,
 ) -> Result<TableSnapshot, DeclarativeError> {
-    build_table_snapshot_impl(project_schema, d, dialect, SnapshotSystemMode::ResolvedIr)
+    build_table_snapshot_impl(project_schema, d, dialect, SnapshotResolvedShape::empty())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SnapshotSystemMode {
-    InjectConfined,
-    ResolvedIr,
+#[derive(Debug, Clone)]
+struct SnapshotResolvedShape {
+    columns: Vec<ColumnSnapshot>,
+    indexes: Vec<IndexSnapshot>,
+    primary_key: Option<Vec<String>>,
+}
+
+impl SnapshotResolvedShape {
+    fn empty() -> Self {
+        Self {
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            primary_key: None,
+        }
+    }
+
+    fn confined(table: &str) -> Self {
+        let shape = crate::model::profile::PolicyProfile::confined().system_shape;
+        let primary_key = match shape.primary_key {
+            crate::model::profile::TablePrimaryKeyPolicy::ExplicitColumns(columns) => {
+                Some(columns)
+            }
+            crate::model::profile::TablePrimaryKeyPolicy::Author(_) => None,
+        };
+        Self {
+            columns: shape.columns.iter().map(system_column_snapshot).collect(),
+            indexes: system_index_snapshots(table, &shape.indexes),
+            primary_key,
+        }
+    }
+
+    fn has_column(&self, name: &str) -> bool {
+        self.columns.iter().any(|c| c.name == name)
+    }
 }
 
 fn build_table_snapshot_impl(
     project_schema: &str,
     d: &CollectionDescriptor,
     dialect: SqlDialect,
-    mode: SnapshotSystemMode,
+    resolved_shape: SnapshotResolvedShape,
 ) -> Result<TableSnapshot, DeclarativeError> {
-        let mut columns = if matches!(mode, SnapshotSystemMode::InjectConfined) {
-            system_field_columns()
-        } else {
-            Vec::new()
-        };
-        // #6: the three implicit B-tree system indexes the platform auto-creates
-        // for every table (`deleted_at`, `updated_at`, `created_by`), modelled so
-        // they round-trip — see `system_field_indexes`.
-        let mut indexes: Vec<IndexSnapshot> = if matches!(mode, SnapshotSystemMode::InjectConfined) {
-            system_field_indexes(&d.name)
-        } else {
-            Vec::new()
-        };
-        let mut constraints: Vec<ConstraintSnapshot> = Vec::new();
+    let folds_system_id = resolved_shape.has_column("id");
+    let mut columns = resolved_shape.columns;
+    // #6: the three implicit B-tree system indexes the platform auto-creates
+    // for every table (`deleted_at`, `updated_at`, `created_by`), modelled so
+    // they round-trip — see `system_field_indexes`.
+    let mut indexes: Vec<IndexSnapshot> = resolved_shape.indexes;
+    let mut constraints: Vec<ConstraintSnapshot> = Vec::new();
 
-        if matches!(mode, SnapshotSystemMode::InjectConfined) {
-            let mut snap = TableSnapshot {
-                columns: Vec::new(),
-                indexes: Vec::new(),
-                constraints: Vec::new(),
-                runtime_options: d.runtime_options.clone(),
-                comment: None,
-                stored_create_sql: None,
-            };
-            push_primary_key_snapshot(&d.name, &mut snap, &["id".into()]);
-            constraints.extend(snap.constraints);
-            indexes.extend(snap.indexes);
-        }
-
-        for f in &d.fields {
-            // #5 id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
-            // system `id` PK column already injected by `system_field_columns`,
-            // NOT a second column. FOLD it: validate the declared prefix (defense
-            // in depth — mirrors plugin-db `query.rs:648-653` + `validate_id_prefix`)
-            // and SKIP it, so we neither duplicate the `id` column nor emit a
-            // bogus second PK. A field NAMED `id` with any OTHER type is rejected
-            // by the field-name fence below (an `id` column may only be the
-            // system PK).
-            if matches!(mode, SnapshotSystemMode::InjectConfined) && f.name == "id" {
-                if f.ty == "id" {
-                    if let Some(prefix) = &f.id_prefix {
-                        validate_id_prefix(prefix)?;
-                    }
-                    // **MED-1 fail-closed** — the id-fold DISCARDS this field (it is a
-                    // prefix declaration for the already-injected system PK, not a
-                    // second column), so a column-level modifier carried on it is
-                    // SILENTLY LOST. The op.* `ir_column_to_field` remaps ANY
-                    // `id`-named `uuid` column to type `"id"`, so a hand-authored
-                    // `id: t.uuid().unique()` / `id: t.uuid().default(<literal>)` would
-                    // reach here and have its `unique` / `default` quietly swallowed —
-                    // a fail-closed→silent-drop regression. REJECT those discarded
-                    // modifiers instead.
-                    //
-                    // NOTE — only `unique` + a user `default` are checked, NOT
-                    // nullability: the system PK is ALWAYS NOT NULL irrespective of the
-                    // folded field's `required` flag, and the declarative `t.id(prefix)`
-                    // descriptor legitimately leaves `required` at its default (`false`)
-                    // — the NOT NULL is injected by `system_field_columns`, not carried
-                    // on the field — so the fold ignoring `nullable` is correct, not a
-                    // drop. A legitimate `t.id(prefix?)` carries NO user `default` (its
-                    // synth `genRandomUuid` maps to `None`) and is never a column-level
-                    // UNIQUE (the PK implies it), so this never fires for the real id
-                    // shape — only for a modifier that would otherwise vanish.
-                    if f.unique || f.default.is_some() {
-                        return Err(DeclarativeError::Invalid(format!(
-                            "field 'id' folds into the system primary key, so a \
-                             column-level modifier on it would be silently discarded: \
-                             {}{}— declare the id as a bare `t.id(prefix?)` (the system \
-                             PK is already NOT NULL, unique, and DB-defaulted)",
-                            if f.unique { "unique " } else { "" },
-                            if f.default.is_some() { "default " } else { "" },
-                        )));
-                    }
-                    continue;
-                }
-                if f.identity.is_some() {
-                    if !matches!(f.ty.as_str(), "int" | "integer" | "bigInt") {
-                        return Err(DeclarativeError::Invalid(format!(
-                            "field 'id' may replace the system primary key only as an \
-                             integer identity column, not '{}'",
-                            f.ty
-                        )));
-                    }
-                    let replacement = column_snapshot_for_field(f, dialect)?;
-                    if let Some(existing) = columns.iter_mut().find(|c| c.name == "id") {
-                        *existing = replacement;
-                    }
-                    continue;
-                }
-                return Err(DeclarativeError::Invalid(format!(
-                    "field 'id' is reserved for the platform system primary key; a \
-                     re-declaration must be `t.id(prefix?)` (type 'id') or an integer \
-                     identity primary key, not '{}'",
-                    f.ty
-                )));
-            }
-            columns.push(column_snapshot_for_field(f, dialect)?);
-            // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) gets a
-            // hidden `<col>_masked TEXT` sibling column at CREATE time (resolved by
-            // the SHARED kernel's `mask_sibling_column_for_field`). The sibling is a
-            // real physical column, so the desired snapshot models it or it
-            // phantom-drifts against the live table the engine creates. It round-
-            // trips as a plain nullable TEXT column.
-            //
-            // **P4 HALF A** — the `__zsmask:kind=…,classification=…` sentinel that
-            // plugin-db reads at RUNTIME (via `pg_description`) to drive the mask
-            // read-pass is now EMITTED into the generated DDL: it rides on the
-            // sibling column's `mask_sentinel`, which `render_create_table` /
-            // `render_add_column` turn into a `COMMENT ON COLUMN` statement. Built
-            // by the SHARED codec (`zeroship_schema::query::mask_sentinel_for_field`
-            // → `build_mask_sentinel`) so it is byte-identical to the one
-            // `registerModel` writes. `snapshot_schema` never introspects COMMENTs,
-            // so the sentinel is not a snapshot drift attribute (excluded from
-            // `ColumnSnapshot` equality) — the sibling COLUMN itself round-trips as
-            // a plain nullable TEXT column.
-            if mask_sibling_for_field(f).is_some() {
-                let comment_sentinel =
-                    zeroship_schema::query::mask_sentinel_for_field(&field_to_sdk_def(f));
-                columns.push(ColumnSnapshot {
-                    name: format!("{}_masked", f.name),
-                    data_type: "text".into(),
-                    nullable: true,
-                    default: None,
-                    generated: None,
-                    identity: None,
-                    encryption_sentinel: None,
-                    comment_sentinel,
-                    ..Default::default()
-                });
-            }
-            // CHECK constraints (#3 literal-pin, #4 min/max + enum). These are
-            // INLINED at CREATE TABLE (like plugin-db's `def_to_constraints`); the
-            // declarative differ does not re-diff CHECK bodies (only FOREIGN KEY
-            // bodies), so a CHECK round-trips at the name+kind level — its
-            // pg_get_constraintdef-normalised body is not byte-compared (see the
-            // round-trip tests). The `definition` carries the emitted DDL clause so
-            // `render_create_table` can inline it.
-            for chk in field_check_constraints(&d.name, f) {
-                constraints.push(chk);
-            }
-            // A `unique: true` field becomes a unique index (A1 rule). The
-            // name mirrors plugin-db's deterministic per-field index name.
-            if f.unique {
-                indexes.push(IndexSnapshot::btree(
-                    unique_index_name(&d.name, &f.name),
-                    true,
-                    vec![f.name.clone()],
-                ));
-            }
-            // **T12** — a vector field (`t.vector(dims, { metric })`) emits a
-            // pgvector ANN index (`USING ivfflat` with the metric-appropriate
-            // opclass). The live snapshot carries it as `access_method =
-            // 'ivfflat'`, so the desired snapshot must model it identically or it
-            // phantom-drops; routed through the shared `zeroship-schema` kernel so
-            // the opclass + name match plugin-db's runtime form byte-for-byte.
-            if f.ty == "vector" {
-                if let Some(spec) = vector_index_snapshot(&d.name, f) {
-                    indexes.push(spec);
-                }
-            }
-            // **T13** — a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
-            // spatial index over its `geography(POINT, 4326)` column. The live
-            // snapshot carries it as `access_method = 'gist'`, so the desired
-            // snapshot must model it identically or the runtime-created GiST index
-            // phantom-drops (and spatial search degrades to a full scan). Mirrors
-            // plugin-db's `SpatialIndex::ensure_spatial_index`.
-            if f.ty == "geoPoint" {
-                if let Some(spec) = geo_index_snapshot(&d.name, f) {
-                    indexes.push(spec);
-                }
-            }
-            // A `ref` field declares a FOREIGN KEY constraint.
-            if f.ty == "ref" {
-                if let Some(target) = &f.references {
-                    // #2 cross-app: a `<otherApp>.<table>` schema-qualified
-                    // target is REJECTED here, fail-closed (mirrors
-                    // `crates/plugin-db/src/cross_app_fk.rs`): every FK must stay
-                    // inside the project schema. Surfaced as a dedicated, clearer
-                    // error for that shape before the generic bare-ident check.
-                    reject_cross_app_ref(&d.name, target)?;
-                    // #3-ref: the FK target table is interpolated into
-                    // `REFERENCES <schema>.<target>(id)`; validate it as a bare
-                    // identifier at the author boundary (mirroring how table /
-                    // column names are checked) so a malformed / injecting ref
-                    // target (`control.users`, `x"; DROP …`, `;`) is rejected
-                    // up-front rather than relying on downstream quoting alone.
-                    validate_ident("ref target", target)?;
-                    constraints.push(ConstraintSnapshot {
-                        name: fk_constraint_name(&f.name),
-                        kind: "FOREIGN KEY".into(),
-                        // EXACT canonical catalog spelling (#1): the target is
-                        // schema-qualified, NO space before `(id)`, policy clauses
-                        // render in catalog order (`ON UPDATE` then `ON DELETE`),
-                        // and default actions are omitted per dialect. Built to
-                        // match live byte-for-byte so a policy FK re-diffs clean.
-                        definition: fk_definition_for_dialect(
-                            &f.name,
-                            project_schema,
-                            target,
-                            f.on_delete.as_deref(),
-                            f.on_update.as_deref(),
-                            f.deferrable.unwrap_or(true),
-                            dialect,
-                        ),
-                        comment: None,
-                    });
-                }
-            }
-        }
-
-        for idx in &d.indexes {
-            // Carry the declared columns through VERBATIM (1a) — recovering them
-            // from the index name was unsound for composite / custom-named
-            // indexes. `render_create_index` emits this list directly.
-            indexes.push(IndexSnapshot::btree(
-                idx.name.clone(),
-                idx.unique,
-                idx.columns.clone(),
-            ));
-        }
-
-        // **T12** — full-text search, DIALECT-AWARE (the only dialect-divergent
-        // part of the snapshot):
-        //
-        // - **Postgres**: every `.fts()`-marked text column folds into ONE composite
-        //   `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN index
-        //   (Q-P4-B, matching plugin-db's runtime `__fts` / `<coll>__fts_idx`
-        //   contract the data plane's `fts_search` reads). The generated-column form
-        //   is trigger-free, so the whole FTS shape is pure DDL the engine owns.
-        // - **SQLite**: `tsvector` has no SQLite spelling, so there is NO `__fts`
-        //   column and NO GIN index. Instead the FTS index is an FTS5 **virtual
-        //   table** (`<coll>__fts`) over the source columns + AFTER triggers — the
-        //   SAME structure plugin-db's runtime `ensure_fts_index` and the shared
-        //   `zeroship_schema::fts_sqlite` builders produce. It is modelled as an
-        //   `IndexSnapshot` with `access_method = "fts5"` over the SOURCE columns so
-        //   the SQLite emitter emits the vtable+triggers and a live re-diff (the
-        //   drift introspector recognises the vtable) round-trips ZERO-drift.
-        //
-        // Without modelling the engine-built FTS objects in `desired`, the live
-        // ones would be unknown to the differ and phantom-dropped; modelling them
-        // also makes the engine the authority that EMITS them (the schema-authority
-        // cutover intent).
-        match dialect {
-            SqlDialect::Postgres => {
-                if let Some((fts_col, fts_idx)) = fts_objects_pg(&d.name, &d.fields) {
-                    columns.push(fts_col);
-                    indexes.push(fts_idx);
-                }
-            }
-            SqlDialect::Sqlite => {
-                if let Some(fts_idx) = fts_index_snapshot_sqlite(&d.name, &d.fields) {
-                    indexes.push(fts_idx);
-                }
-            }
-            SqlDialect::Mysql => {}
-        }
-
-        // Deterministic ordering (snapshot_schema sorts everything by name).
-        columns.sort_by(|a, b| a.name.cmp(&b.name));
-        indexes.sort_by(|a, b| a.name.cmp(&b.name));
-        constraints.sort_by(|a, b| a.name.cmp(&b.name));
-
-        // An author-built DESIRED snapshot carries no raw CREATE text (it is
-        // introspection-only; H1). It rides as `None` and is excluded from equality.
-        Ok(TableSnapshot {
-            columns,
-            indexes,
-            constraints,
+    if let Some(primary_key) = &resolved_shape.primary_key {
+        let mut snap = TableSnapshot {
+            columns: Vec::new(),
+            indexes: Vec::new(),
+            constraints: Vec::new(),
             runtime_options: d.runtime_options.clone(),
             comment: None,
             stored_create_sql: None,
-        })
+        };
+        push_primary_key_snapshot(&d.name, &mut snap, primary_key);
+        constraints.extend(snap.constraints);
+        indexes.extend(snap.indexes);
+    }
+
+    for f in &d.fields {
+        // #5 id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
+        // system `id` PK column already injected by `system_field_columns`,
+        // NOT a second column. FOLD it: validate the declared prefix (defense
+        // in depth — mirrors plugin-db `query.rs:648-653` + `validate_id_prefix`)
+        // and SKIP it, so we neither duplicate the `id` column nor emit a
+        // bogus second PK. A field NAMED `id` with any OTHER type is rejected
+        // by the field-name fence below (an `id` column may only be the
+        // system PK).
+        if folds_system_id && f.name == "id" {
+            if f.ty == "id" {
+                if let Some(prefix) = &f.id_prefix {
+                    validate_id_prefix(prefix)?;
+                }
+                // **MED-1 fail-closed** — the id-fold DISCARDS this field (it is a
+                // prefix declaration for the already-injected system PK, not a
+                // second column), so a column-level modifier carried on it is
+                // SILENTLY LOST. The op.* `ir_column_to_field` remaps ANY
+                // `id`-named `uuid` column to type `"id"`, so a hand-authored
+                // `id: t.uuid().unique()` / `id: t.uuid().default(<literal>)` would
+                // reach here and have its `unique` / `default` quietly swallowed —
+                // a fail-closed→silent-drop regression. REJECT those discarded
+                // modifiers instead.
+                //
+                // NOTE — only `unique` + a user `default` are checked, NOT
+                // nullability: the system PK is ALWAYS NOT NULL irrespective of the
+                // folded field's `required` flag, and the declarative `t.id(prefix)`
+                // descriptor legitimately leaves `required` at its default (`false`)
+                // — the NOT NULL is injected by `system_field_columns`, not carried
+                // on the field — so the fold ignoring `nullable` is correct, not a
+                // drop. A legitimate `t.id(prefix?)` carries NO user `default` (its
+                // synth `genRandomUuid` maps to `None`) and is never a column-level
+                // UNIQUE (the PK implies it), so this never fires for the real id
+                // shape — only for a modifier that would otherwise vanish.
+                if f.unique || f.default.is_some() {
+                    return Err(DeclarativeError::Invalid(format!(
+                        "field 'id' folds into the system primary key, so a \
+                         column-level modifier on it would be silently discarded: \
+                         {}{}— declare the id as a bare `t.id(prefix?)` (the system \
+                         PK is already NOT NULL, unique, and DB-defaulted)",
+                        if f.unique { "unique " } else { "" },
+                        if f.default.is_some() { "default " } else { "" },
+                    )));
+                }
+                continue;
+            }
+            if f.identity.is_some() {
+                if !matches!(f.ty.as_str(), "int" | "integer" | "bigInt") {
+                    return Err(DeclarativeError::Invalid(format!(
+                        "field 'id' may replace the system primary key only as an \
+                         integer identity column, not '{}'",
+                        f.ty
+                    )));
+                }
+                let replacement = column_snapshot_for_field(f, dialect)?;
+                if let Some(existing) = columns.iter_mut().find(|c| c.name == "id") {
+                    *existing = replacement;
+                }
+                continue;
+            }
+            return Err(DeclarativeError::Invalid(format!(
+                "field 'id' is reserved for the platform system primary key; a \
+                 re-declaration must be `t.id(prefix?)` (type 'id') or an integer \
+                 identity primary key, not '{}'",
+                f.ty
+            )));
+        }
+        columns.push(column_snapshot_for_field(f, dialect)?);
+        // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) gets a
+        // hidden `<col>_masked TEXT` sibling column at CREATE time (resolved by
+        // the SHARED kernel's `mask_sibling_column_for_field`). The sibling is a
+        // real physical column, so the desired snapshot models it or it
+        // phantom-drifts against the live table the engine creates. It round-
+        // trips as a plain nullable TEXT column.
+        //
+        // **P4 HALF A** — the `__zsmask:kind=…,classification=…` sentinel that
+        // plugin-db reads at RUNTIME (via `pg_description`) to drive the mask
+        // read-pass is now EMITTED into the generated DDL: it rides on the
+        // sibling column's `mask_sentinel`, which `render_create_table` /
+        // `render_add_column` turn into a `COMMENT ON COLUMN` statement. Built
+        // by the SHARED codec (`zeroship_schema::query::mask_sentinel_for_field`
+        // → `build_mask_sentinel`) so it is byte-identical to the one
+        // `registerModel` writes. `snapshot_schema` never introspects COMMENTs,
+        // so the sentinel is not a snapshot drift attribute (excluded from
+        // `ColumnSnapshot` equality) — the sibling COLUMN itself round-trips as
+        // a plain nullable TEXT column.
+        if mask_sibling_for_field(f).is_some() {
+            let comment_sentinel =
+                zeroship_schema::query::mask_sentinel_for_field(&field_to_sdk_def(f));
+            columns.push(ColumnSnapshot {
+                name: format!("{}_masked", f.name),
+                data_type: "text".into(),
+                nullable: true,
+                default: None,
+                generated: None,
+                identity: None,
+                encryption_sentinel: None,
+                comment_sentinel,
+                ..Default::default()
+            });
+        }
+        // CHECK constraints (#3 literal-pin, #4 min/max + enum). These are
+        // INLINED at CREATE TABLE (like plugin-db's `def_to_constraints`); the
+        // declarative differ does not re-diff CHECK bodies (only FOREIGN KEY
+        // bodies), so a CHECK round-trips at the name+kind level — its
+        // pg_get_constraintdef-normalised body is not byte-compared (see the
+        // round-trip tests). The `definition` carries the emitted DDL clause so
+        // `render_create_table` can inline it.
+        for chk in field_check_constraints(&d.name, f) {
+            constraints.push(chk);
+        }
+        // A `unique: true` field becomes a unique index (A1 rule). The
+        // name mirrors plugin-db's deterministic per-field index name.
+        if f.unique {
+            indexes.push(IndexSnapshot::btree(
+                unique_index_name(&d.name, &f.name),
+                true,
+                vec![f.name.clone()],
+            ));
+        }
+        // **T12** — a vector field (`t.vector(dims, { metric })`) emits a
+        // pgvector ANN index (`USING ivfflat` with the metric-appropriate
+        // opclass). The live snapshot carries it as `access_method =
+        // 'ivfflat'`, so the desired snapshot must model it identically or it
+        // phantom-drops; routed through the shared `zeroship-schema` kernel so
+        // the opclass + name match plugin-db's runtime form byte-for-byte.
+        if f.ty == "vector" {
+            if let Some(spec) = vector_index_snapshot(&d.name, f) {
+                indexes.push(spec);
+            }
+        }
+        // **T13** — a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
+        // spatial index over its `geography(POINT, 4326)` column. The live
+        // snapshot carries it as `access_method = 'gist'`, so the desired
+        // snapshot must model it identically or the runtime-created GiST index
+        // phantom-drops (and spatial search degrades to a full scan). Mirrors
+        // plugin-db's `SpatialIndex::ensure_spatial_index`.
+        if f.ty == "geoPoint" {
+            if let Some(spec) = geo_index_snapshot(&d.name, f) {
+                indexes.push(spec);
+            }
+        }
+        // A `ref` field declares a FOREIGN KEY constraint.
+        if f.ty == "ref" {
+            if let Some(target) = &f.references {
+                // #2 cross-app: a `<otherApp>.<table>` schema-qualified
+                // target is REJECTED here, fail-closed (mirrors
+                // `crates/plugin-db/src/cross_app_fk.rs`): every FK must stay
+                // inside the project schema. Surfaced as a dedicated, clearer
+                // error for that shape before the generic bare-ident check.
+                reject_cross_app_ref(&d.name, target)?;
+                // #3-ref: the FK target table is interpolated into
+                // `REFERENCES <schema>.<target>(id)`; validate it as a bare
+                // identifier at the author boundary (mirroring how table /
+                // column names are checked) so a malformed / injecting ref
+                // target (`control.users`, `x"; DROP …`, `;`) is rejected
+                // up-front rather than relying on downstream quoting alone.
+                validate_ident("ref target", target)?;
+                constraints.push(ConstraintSnapshot {
+                    name: fk_constraint_name(&f.name),
+                    kind: "FOREIGN KEY".into(),
+                    // EXACT canonical catalog spelling (#1): the target is
+                    // schema-qualified, NO space before `(id)`, policy clauses
+                    // render in catalog order (`ON UPDATE` then `ON DELETE`),
+                    // and default actions are omitted per dialect. Built to
+                    // match live byte-for-byte so a policy FK re-diffs clean.
+                    definition: fk_definition_for_dialect(
+                        &f.name,
+                        project_schema,
+                        target,
+                        f.on_delete.as_deref(),
+                        f.on_update.as_deref(),
+                        f.deferrable.unwrap_or(true),
+                        dialect,
+                    ),
+                    comment: None,
+                });
+            }
+        }
+    }
+
+    for idx in &d.indexes {
+        // Carry the declared columns through VERBATIM (1a) — recovering them
+        // from the index name was unsound for composite / custom-named
+        // indexes. `render_create_index` emits this list directly.
+        indexes.push(IndexSnapshot::btree(
+            idx.name.clone(),
+            idx.unique,
+            idx.columns.clone(),
+        ));
+    }
+
+    // **T12** — full-text search, DIALECT-AWARE (the only dialect-divergent
+    // part of the snapshot):
+    //
+    // - **Postgres**: every `.fts()`-marked text column folds into ONE composite
+    //   `__fts` GENERATED tsvector column + a `<coll>__fts_idx` GIN index
+    //   (Q-P4-B, matching plugin-db's runtime `__fts` / `<coll>__fts_idx`
+    //   contract the data plane's `fts_search` reads). The generated-column form
+    //   is trigger-free, so the whole FTS shape is pure DDL the engine owns.
+    // - **SQLite**: `tsvector` has no SQLite spelling, so there is NO `__fts`
+    //   column and NO GIN index. Instead the FTS index is an FTS5 **virtual
+    //   table** (`<coll>__fts`) over the source columns + AFTER triggers — the
+    //   SAME structure plugin-db's runtime `ensure_fts_index` and the shared
+    //   `zeroship_schema::fts_sqlite` builders produce. It is modelled as an
+    //   `IndexSnapshot` with `access_method = "fts5"` over the SOURCE columns so
+    //   the SQLite emitter emits the vtable+triggers and a live re-diff (the
+    //   drift introspector recognises the vtable) round-trips ZERO-drift.
+    //
+    // Without modelling the engine-built FTS objects in `desired`, the live
+    // ones would be unknown to the differ and phantom-dropped; modelling them
+    // also makes the engine the authority that EMITS them (the schema-authority
+    // cutover intent).
+    match dialect {
+        SqlDialect::Postgres => {
+            if let Some((fts_col, fts_idx)) = fts_objects_pg(&d.name, &d.fields) {
+                columns.push(fts_col);
+                indexes.push(fts_idx);
+            }
+        }
+        SqlDialect::Sqlite => {
+            if let Some(fts_idx) = fts_index_snapshot_sqlite(&d.name, &d.fields) {
+                indexes.push(fts_idx);
+            }
+        }
+        SqlDialect::Mysql => {}
+    }
+
+    // Deterministic ordering (snapshot_schema sorts everything by name).
+    columns.sort_by(|a, b| a.name.cmp(&b.name));
+    indexes.sort_by(|a, b| a.name.cmp(&b.name));
+    constraints.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // An author-built DESIRED snapshot carries no raw CREATE text (it is
+    // introspection-only; H1). It rides as `None` and is excluded from equality.
+    Ok(TableSnapshot {
+        columns,
+        indexes,
+        constraints,
+        runtime_options: d.runtime_options.clone(),
+        comment: None,
+        stored_create_sql: None,
+    })
 }
 
 /// Second pass of [`desired_snapshot_for_dialect`] — over the per-table

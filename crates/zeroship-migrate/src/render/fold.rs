@@ -1433,8 +1433,8 @@ fn apply_fold_named_type_column_metadata(
 /// round-trip oracle.
 ///
 /// Fail-closed parity with the lower:
-/// - a user composite / per-column PRIMARY KEY is refused (the platform owns the
-///   synthetic `id` PK — a second PK is never satisfiable);
+/// - a create-table PRIMARY KEY is carried by the op's top-level `primary_key`;
+///   stale constraint-form PKs are ignored here after validation;
 /// - validate rejects CHECK before fold; this helper keeps a defensive backstop;
 /// - a multi-column / non-`id`-referencing FK is refused;
 /// - a partial-index `where` is refused (closed-AST predicate);
@@ -1461,18 +1461,11 @@ fn fold_create_table_specs(
 ) -> Result<(), FoldError> {
     for c in constraints {
         match &c.kind {
-            IrConstraintKind::Pk { columns } => {
-                if columns.as_slice() == ["id"]
-                    && snap
-                        .columns
-                        .iter()
-                        .any(|col| col.name == "id" && col.identity.is_some())
-                {
-                    continue;
-                }
-                return Err(FoldError::Unsupported(
-                    "validated createTable user PRIMARY KEY reached fold",
-                ));
+            IrConstraintKind::Pk { .. } => {
+                // `createTable` primary keys fold from the resolved top-level
+                // `primary_key` field. Validation owns rejection of constraint-form
+                // PKs; the fold must not re-apply a platform-owned-id policy.
+                continue;
             }
             IrConstraintKind::Check { .. } => {
                 return Err(FoldError::Unsupported("validated createTable CHECK reached fold"));
@@ -2050,10 +2043,14 @@ pub fn fold_to_field_defs(
     for op in ops {
         match op {
             Op::CreateTable { name, columns, constraints, .. } => {
+                let system_prefix_len = confined_resolved_system_prefix_len(columns);
                 let mut cols: indexmap::IndexMap<String, crate::render::declarative::FieldDescriptor> =
                     indexmap::IndexMap::new();
-                for c in columns {
-                    cols.insert(c.name.clone(), ir_column_to_field(c));
+                for (idx, c) in columns.iter().enumerate() {
+                    cols.insert(
+                        c.name.clone(),
+                        fold_create_column_to_field(c, idx < system_prefix_len),
+                    );
                 }
                 tables.insert(name.clone(), cols);
                 for c in constraints {
@@ -2229,6 +2226,63 @@ pub fn fold_to_field_defs(
     Ok(out)
 }
 
+fn fold_create_column_to_field(
+    c: &IrColumn,
+    in_confined_system_prefix: bool,
+) -> crate::render::declarative::FieldDescriptor {
+    let mut field = ir_column_to_field(c);
+    if in_confined_system_prefix && c.name == "id" && c.id_prefix.is_some() {
+        field.ty = "id".to_string();
+        field.required = false;
+    }
+    field
+}
+
+fn confined_resolved_system_prefix_len(columns: &[IrColumn]) -> usize {
+    let shape = crate::model::profile::PolicyProfile::confined().system_shape;
+    if columns.len() < shape.columns.len() {
+        return 0;
+    }
+    let matches = columns
+        .iter()
+        .zip(&shape.columns)
+        .all(|(actual, expected)| resolved_system_column_matches(actual, expected));
+    if matches {
+        shape.columns.len()
+    } else {
+        0
+    }
+}
+
+fn resolved_system_column_matches(
+    actual: &IrColumn,
+    expected: &crate::model::profile::InjectedSystemColumnPolicy,
+) -> bool {
+    if actual.name != expected.name {
+        return false;
+    }
+    if actual.name == "id" && actual.identity.is_some() {
+        return matches!(actual.ty, ColType::Int | ColType::BigInt);
+    }
+    actual.ty == system_column_type_token(&expected.data_type)
+        && actual.nullable == Some(expected.nullable)
+        && actual.default.is_none()
+        && actual.unique.is_none()
+        && actual.vector_metric.is_none()
+        && actual.mask.is_none()
+        && actual.generated.is_none()
+        && actual.identity.is_none()
+}
+
+fn system_column_type_token(data_type: &str) -> ColType {
+    match data_type {
+        "text" => ColType::Text,
+        "timestamp with time zone" => ColType::Timestamp,
+        "integer" => ColType::Int,
+        _ => ColType::Text,
+    }
+}
+
 // ===========================================================================
 // Migration-first P2b — the KEYSTONE producer: descriptor → op.* `createTable`.
 //
@@ -2253,9 +2307,10 @@ pub fn fold_to_field_defs(
 // ===========================================================================
 
 /// A structured error from the [`descriptors_to_create_ops`] producer. The only
-/// failure modes are an unmappable type token and an unrepresentable CHECK facet
-/// value (a non-numeric `min`/`max`, an unscalar `enum` member) — fail closed
-/// rather than emit an op whose fold would silently drop the facet.
+/// failure modes are an unmappable type token, an unrepresentable CHECK facet
+/// value (a non-numeric `min`/`max`, an unscalar `enum` member), or a confined
+/// table-shape resolution error — fail closed rather than emit an op whose fold
+/// would silently drop the facet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProduceError {
     /// A descriptor field carried a `type` token with no closed [`ColType`].
@@ -2279,6 +2334,13 @@ pub enum ProduceError {
         /// Which facet (`min`/`max`/`enum`).
         facet: &'static str,
     },
+    /// The confined table-shape resolver rejected the produced createTable op.
+    TableShape {
+        /// The table.
+        table: String,
+        /// Human-readable resolver error.
+        message: String,
+    },
 }
 
 impl std::fmt::Display for ProduceError {
@@ -2292,6 +2354,9 @@ impl std::fmt::Display for ProduceError {
                 f,
                 "produce: `{table}.{column}` has an unrepresentable `{facet}` facet value"
             ),
+            ProduceError::TableShape { table, message } => {
+                write!(f, "produce: `{table}` could not resolve table shape: {message}")
+            }
         }
     }
 }
@@ -2481,14 +2546,15 @@ fn facet_check_constraints(
 /// - **enum / min / max** — as CHECK constraints in the closed-AST shapes
 ///   [`recover_check_facet`] lifts back ([`facet_check_constraints`]).
 ///
-/// One `Op::CreateTable` per descriptor, in descriptor order. The columns are the
-/// descriptor's USER fields ONLY — matching what `fold_to_field_defs` reconstructs
-/// (no system-field injection on either side), so the §6(b) keystone compares the
-/// SAME column set on both sides.
+/// One resolved `Op::CreateTable` per descriptor, in descriptor order. The columns
+/// include the confined profile's resolved system fields, the top-level
+/// `primary_key` is explicit, and system indexes are carried as ordinary IR
+/// indexes before checksum/fold.
 ///
 /// # Errors
-/// [`ProduceError`] for an unmappable type token or an unrepresentable CHECK facet
-/// value — fail closed, never an op whose fold would silently drop the facet.
+/// [`ProduceError`] for an unmappable type token, an unrepresentable CHECK facet
+/// value, or a table-shape resolution error — fail closed, never an op whose fold
+/// would silently drop the facet.
 pub fn descriptors_to_create_ops(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
 ) -> Result<Vec<Op>, ProduceError> {
@@ -2554,7 +2620,7 @@ pub fn descriptors_to_create_ops(
             }
             constraints.extend(facet_check_constraints(&d.name, f)?);
         }
-        ops.push(Op::CreateTable {
+        let op = Op::CreateTable {
             name: d.name.clone(),
             columns,
             primary_key: None,
@@ -2563,7 +2629,33 @@ pub fn descriptors_to_create_ops(
             runtime_options: Some(d.runtime_options.clone()),
             schema: None,
             existence_guard: None,
-        });
+        };
+        let ir = crate::model::ir::MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: format!("produce_{}", d.name),
+            owner_app: d.owner_app.clone(),
+            ops: vec![op],
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        let resolved = crate::model::table_shape::resolve_create_table_policy(
+            &ir,
+            &crate::model::profile::PolicyProfile::confined(),
+        )
+        .map_err(|source| ProduceError::TableShape {
+            table: d.name.clone(),
+            message: source.to_string(),
+        })?;
+        ops.push(
+            resolved
+                .ops
+                .into_iter()
+                .next()
+                .expect("single-op IR resolves to single-op IR"),
+        );
     }
     Ok(ops)
 }
@@ -3843,7 +3935,7 @@ mod tests {
     }
 
     #[test]
-    fn create_table_user_pk_is_unsupported() {
+    fn create_table_constraint_form_pk_is_validate_refused() {
         let pk = IrConstraint {
             name: None,
             kind: IrConstraintKind::Pk { columns: vec!["a".to_string(), "b".to_string()] },
@@ -3858,8 +3950,13 @@ mod tests {
             schema: None,
             existence_guard: None,
         };
-        let err = fold(&[op]).unwrap_err();
-        assert!(matches!(err, FoldError::Unsupported(m) if m.contains("PRIMARY KEY")));
+        let err = validate_ops(vec![op], Dialect::Postgres);
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(
+            err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"),
+            "constraint-form createTable PK must be refused by validation: {err:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4715,9 +4812,50 @@ mod tests {
             ],
         );
         let ops = descriptors_to_create_ops(&[d]).unwrap();
+        let Op::CreateTable { columns, primary_key, indexes, .. } = &ops[0] else {
+            panic!("createTable")
+        };
+        assert_eq!(
+            columns
+                .iter()
+                .take(7)
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "id",
+                "created_at",
+                "updated_at",
+                "created_by",
+                "updated_by",
+                "version",
+                "deleted_at"
+            ],
+            "producer emits the resolved confined system-field prefix"
+        );
+        assert_eq!(
+            primary_key.as_deref(),
+            Some(&["id".to_string()][..]),
+            "producer carries the resolved top-level primary key"
+        );
+        assert_eq!(indexes.len(), 3, "producer carries resolved system indexes");
         let defs = fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA).unwrap();
         let keys: Vec<&str> = defs["t"].as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["zeta", "alpha", "mid"], "declared order preserved, not sorted");
+        assert_eq!(
+            keys,
+            vec![
+                "id",
+                "created_at",
+                "updated_at",
+                "created_by",
+                "updated_by",
+                "version",
+                "deleted_at",
+                "zeta",
+                "alpha",
+                "mid"
+            ],
+            "resolved system prefix is carried and declared order is preserved, not sorted"
+        );
     }
 
     #[test]

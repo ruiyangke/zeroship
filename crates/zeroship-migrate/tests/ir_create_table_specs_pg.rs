@@ -22,8 +22,9 @@ use zeroship_migrate::model::load::IrLoadError;
 use zeroship_migrate::model::validate::{UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::{
     apply::executor::LockMode,
-    provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema,
-    resolve_create_table_policy, MigrationEngine, MigrationIr, PolicyProfile, SqlDialect,
+    apply::role::deprovision_migrator, provision_migrator, AppliedPlan, Approval, ExecutorConfig,
+    IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PolicyProfile, SqlDialect,
+    resolve_create_table_policy,
 };
 
 const DEFAULT_DSN: &str =
@@ -93,9 +94,21 @@ async fn author_and_apply(
     reg: &std::collections::BTreeMap<String, String>,
     approval: Approval,
 ) {
+    let policy = PolicyProfile::confined();
+    let _ = author_and_apply_with_policy(conn, cfg, ir, reg, approval, &policy).await;
+}
+
+async fn author_and_apply_with_policy(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    ir: &str,
+    reg: &std::collections::BTreeMap<String, String>,
+    approval: Approval,
+    policy: &PolicyProfile,
+) -> AppliedPlan {
     let raw: MigrationIr = serde_json::from_str(ir).expect("test IR parses before resolution");
-    let resolved = resolve_create_table_policy(&raw, &PolicyProfile::confined())
-        .expect("test IR resolves confined table shape");
+    let resolved =
+        resolve_create_table_policy(&raw, policy).expect("test IR resolves table shape");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
     let document = zeroship_migrate::model::load::load_ir_document(
@@ -104,7 +117,7 @@ async fn author_and_apply(
         zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
         None,
-        None,
+        Some(policy),
     )
     .expect("load gate");
     let plan = author
@@ -117,11 +130,12 @@ async fn author_and_apply(
             approval,
             &zeroship_migrate::PostgresBackend::new(conn),
             cfg,
-            APP,
-            LockMode::Acquire,
-        )
-        .await
-        .expect("apply the authored createTable plan on PG");
+        APP,
+        LockMode::Acquire,
+    )
+    .await
+    .expect("apply the authored createTable plan on PG");
+    plan
 }
 
 /// `pg_constraint` row count for a named constraint of a given contype on a table.
@@ -160,6 +174,28 @@ async fn column_occurrences(conn: &Client, schema: &str, table: &str, column: &s
         .await
         .expect("query information_schema.columns");
     rows[0].get::<_, i64>(0)
+}
+
+async fn primary_key_columns(conn: &Client, schema: &str, table: &str) -> Option<Vec<String>> {
+    let rows = conn
+        .query(
+            "SELECT a.attname \
+             FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+             WHERE n.nspname = $1 AND t.relname = $2 AND c.contype = 'p' \
+             ORDER BY k.ord",
+            &[&schema, &table],
+        )
+        .await
+        .expect("query primary key columns");
+    if rows.is_empty() {
+        None
+    } else {
+        Some(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
+    }
 }
 
 /// Slice 4 regression: a resolved confined `createTable` applies with exactly one
@@ -254,6 +290,100 @@ async fn create_table_level_unique_fk_and_index_apply_on_pg() {
     assert!(
         index_exists(&conn, &schema, "memberships", "m_team_idx").await,
         "the extra table-level index must be present in the live catalog (was silently dropped pre-fix)"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn platform_composite_primary_key_lowers_and_applies_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
+    let policy = PolicyProfile::platform();
+
+    let ir = r#"{"ir_version":1,"name":"create_memberships","ops":[
+        {"op":"createTable","name":"memberships","columns":[
+            {"name":"account_id","type":"uuid","nullable":false},
+            {"name":"team","type":"text","nullable":false}
+        ],
+        "primaryKey":["account_id","team"],
+        "constraints":[],
+        "indexes":[]}
+    ]}"#;
+    let plan = author_and_apply_with_policy(
+        &conn,
+        &cfg,
+        ir,
+        &registry(&[]),
+        Approval::None,
+        &policy,
+    )
+    .await;
+    let create_sql = plan
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            zeroship_migrate::PlanStep::Ddl(m) if m.up.contains("CREATE TABLE") => Some(&m.up),
+            _ => None,
+        })
+        .expect("CREATE TABLE step");
+    assert!(
+        create_sql.contains("PRIMARY KEY (account_id, team)"),
+        "platform composite primaryKey must lower to a composite PRIMARY KEY:\n{create_sql}"
+    );
+    assert_eq!(
+        primary_key_columns(&conn, &schema, "memberships").await,
+        Some(vec!["account_id".to_string(), "team".to_string()]),
+        "live PG must have the composite primary key"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn platform_null_primary_key_lowers_and_applies_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
+    let policy = PolicyProfile::platform();
+
+    let ir = r#"{"ir_version":1,"name":"create_events","ops":[
+        {"op":"createTable","name":"events","columns":[
+            {"name":"stream","type":"text","nullable":false},
+            {"name":"payload","type":"json","nullable":false}
+        ],
+        "primaryKey":null,
+        "constraints":[],
+        "indexes":[]}
+    ]}"#;
+    let plan = author_and_apply_with_policy(
+        &conn,
+        &cfg,
+        ir,
+        &registry(&[]),
+        Approval::None,
+        &policy,
+    )
+    .await;
+    let create_sql = plan
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            zeroship_migrate::PlanStep::Ddl(m) if m.up.contains("CREATE TABLE") => Some(&m.up),
+            _ => None,
+        })
+        .expect("CREATE TABLE step");
+    assert!(
+        !create_sql.contains("PRIMARY KEY"),
+        "platform primaryKey:null must lower with no PRIMARY KEY:\n{create_sql}"
+    );
+    assert_eq!(
+        primary_key_columns(&conn, &schema, "events").await,
+        None,
+        "live PG must have no primary key"
     );
 
     teardown(&conn, &cfg).await;
