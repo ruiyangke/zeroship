@@ -93,6 +93,7 @@ fn all_types_ops() -> Vec<Op> {
     vec![Op::CreateTable {
         name: "gadgets".into(),
         columns,
+        primary_key: None,
         constraints: vec![fk],
         indexes: Vec::new(),
         runtime_options: None,
@@ -182,6 +183,7 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
                 IrColumn { name: "author_id".into(), ty: ColType::Text, nullable: Some(false), default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                 IrColumn { name: "status".into(), ty: ColType::Text, nullable: Some(false), default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
             ],
+            primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
             runtime_options: Some(TableRuntimeOptions {
@@ -273,6 +275,7 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
                 col(&status, ColType::Text),
                 unique_slug,
             ],
+            primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
             runtime_options: None,

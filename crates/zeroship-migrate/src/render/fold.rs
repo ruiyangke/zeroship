@@ -2552,6 +2552,7 @@ pub fn descriptors_to_create_ops(
         ops.push(Op::CreateTable {
             name: d.name.clone(),
             columns,
+            primary_key: None,
             constraints,
             indexes: Vec::new(),
             runtime_options: Some(d.runtime_options.clone()),
@@ -2705,6 +2706,7 @@ mod tests {
         Op::CreateTable {
             name: name.to_string(),
             columns,
+            primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
             runtime_options: None,
@@ -3697,6 +3699,7 @@ mod tests {
         let memberships = Op::CreateTable {
             name: "memberships".to_string(),
             columns: vec![col("team_id", ColType::Text, false), col("slot", ColType::Text, false)],
+            primary_key: None,
             constraints: vec![
                 unique_constraint(Some("m_slot_uq"), &["slot"]),
                 IrConstraint {
@@ -3737,6 +3740,7 @@ mod tests {
                     col("author_id", ColType::Text, false),
                     col("status", ColType::Text, false),
                 ],
+                primary_key: None,
                 constraints: Vec::new(),
                 indexes: Vec::new(),
                 runtime_options: Some(TableRuntimeOptions {
@@ -3810,6 +3814,7 @@ mod tests {
         let op = Op::CreateTable {
             name: "t".to_string(),
             columns: vec![col("a", ColType::Text, false), col("b", ColType::Text, false)],
+            primary_key: None,
             constraints: vec![pk],
             indexes: Vec::new(),
             runtime_options: None,
@@ -3914,6 +3919,7 @@ mod tests {
         Op::CreateTable {
             name: name.to_string(),
             columns,
+            primary_key: None,
             constraints,
             indexes,
             runtime_options: Default::default(),

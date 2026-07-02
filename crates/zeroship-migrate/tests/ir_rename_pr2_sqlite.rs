@@ -144,6 +144,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             ops: vec![Op::CreateTable {
                 name: d.name.clone(),
                 columns: cols,
+                primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
                 runtime_options: None,
@@ -313,6 +314,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
                     nullable: Some(false),
                     default: None,
                     unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
                 runtime_options: None,

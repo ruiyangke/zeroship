@@ -3111,6 +3111,7 @@ mod tests {
         Op::CreateTable {
             name: name.to_string(),
             columns: Vec::new(),
+            primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
             runtime_options: None,

@@ -3136,6 +3136,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -3336,6 +3337,7 @@ mod tests {
         let bad_create = ir_with(vec![Op::CreateTable {
             name: "t".into(),
             columns: vec![],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
@@ -3359,6 +3361,7 @@ mod tests {
         let ok_create = ir_with(vec![Op::CreateTable {
             name: "t".into(),
             columns: vec![],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
@@ -3458,6 +3461,7 @@ mod tests {
                     IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                     IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                 ],
+                primary_key: None,
                 constraints: vec![],
                 indexes: vec![IrIndex {
                     name: None,
@@ -3524,6 +3528,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![IrIndex {
                 name: None,
@@ -3562,6 +3567,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -3593,6 +3599,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
                 kind: IrConstraintKind::Check {
@@ -3772,6 +3779,7 @@ mod tests {
                 generated: None,
                 identity: None,
             }],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
@@ -3839,6 +3847,7 @@ mod tests {
                 generated: None,
                 identity: None,
             }],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
@@ -3866,6 +3875,7 @@ mod tests {
                 generated: None,
                 identity: None,
             }],
+            primary_key: None,
             constraints: vec![],
             indexes: vec![],
             runtime_options: None,
