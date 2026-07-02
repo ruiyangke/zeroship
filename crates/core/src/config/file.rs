@@ -41,7 +41,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
-    /// Auth-domain configuration shared by binaries that integrate with Hydra.
+    /// Auth-domain configuration shared by platform binaries.
     #[serde(default)]
     pub auth: AuthSection,
     /// Observability configuration shared by platform binaries.
@@ -58,11 +58,7 @@ pub struct FileConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AuthSection {
-    /// Hydra admin API base URL.
-    pub hydra_admin_url: Option<String>,
-    /// Hydra public issuer/base URL.
-    pub hydra_public_url: Option<String>,
-    /// Platform auth provider backend (`hydra` or `supabase`).
+    /// Platform auth provider backend (`platform` or `supabase`).
     pub auth_provider: Option<String>,
     /// Supabase Auth / GoTrue base URL used when the auth provider is Supabase.
     pub supabase_url: Option<String>,
@@ -228,8 +224,6 @@ mod tests {
     fn load_none_returns_defaults() {
         let config = FileConfig::load(None).expect("load default config");
 
-        assert!(config.auth.hydra_admin_url.is_none());
-        assert!(config.auth.hydra_public_url.is_none());
         assert!(config.auth.auth_provider.is_none());
         assert!(config.auth.supabase_url.is_none());
         assert!(config.auth.supabase_anon_key.is_none());
@@ -274,8 +268,6 @@ frame_ancestor_origins = ["https://console.zeroship.ai", "https://staging-consol
             "full.toml",
             r#"
 [auth]
-hydra_admin_url = "http://hydra:4445"
-hydra_public_url = "https://auth.zeroship.ai"
 auth_provider = "supabase"
 supabase_url = "https://project.supabase.test"
 supabase_anon_key = "anon-test-key"
@@ -292,14 +284,6 @@ log_format = "json"
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
-        assert_eq!(
-            config.auth.hydra_admin_url.as_deref(),
-            Some("http://hydra:4445")
-        );
-        assert_eq!(
-            config.auth.hydra_public_url.as_deref(),
-            Some("https://auth.zeroship.ai")
-        );
         assert_eq!(config.auth.auth_provider.as_deref(), Some("supabase"));
         assert_eq!(
             config.auth.supabase_url.as_deref(),
@@ -350,16 +334,13 @@ log_format = "json"
             "auth-only.toml",
             r#"
 [auth]
-hydra_admin_url = "http://hydra:4445"
+auth_provider = "platform"
 "#,
         );
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
-        assert_eq!(
-            config.auth.hydra_admin_url.as_deref(),
-            Some("http://hydra:4445")
-        );
+        assert_eq!(config.auth.auth_provider.as_deref(), Some("platform"));
         assert!(config.observability.log_filter.is_none());
         assert!(config.observability.log_format.is_none());
     }
@@ -376,8 +357,6 @@ rust_log = "debug"
 
         let config = FileConfig::load(Some(&file.path)).expect("load config");
 
-        assert!(config.auth.hydra_admin_url.is_none());
-        assert!(config.auth.hydra_public_url.is_none());
         assert!(config.auth.auth_provider.is_none());
         assert!(config.auth.supabase_url.is_none());
         assert!(config.auth.supabase_anon_key.is_none());
@@ -418,7 +397,7 @@ rust_log = "debug"
             "unknown-auth-key.toml",
             r#"
 [auth]
-hydra_pubic_url = "https://typo.example"
+platform_issur = "https://typo.example"
 "#,
         );
 
@@ -434,7 +413,7 @@ hydra_pubic_url = "https://typo.example"
             "tcl-absent.toml",
             r#"
 [auth]
-hydra_admin_url = "http://hydra:4445"
+auth_provider = "platform"
 "#,
         );
 

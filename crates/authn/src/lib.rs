@@ -326,10 +326,6 @@ impl BearerVerifier {
                 VerifyTokenError::MissingIssuer | VerifyTokenError::UnknownIssuer(_) => {
                     web::error::ErrorUnauthorized("unknown oauth issuer").into()
                 }
-                VerifyTokenError::HydraIntrospection(err) => {
-                    tracing::warn!(error = %err, "control: hydra introspect failed");
-                    web::error::ErrorUnauthorized("oauth introspection failed").into()
-                }
                 VerifyTokenError::PlatformVerification(err) => {
                     tracing::warn!(error = %err, "control: platform token verify failed");
                     web::error::ErrorUnauthorized("platform token verification failed").into()
