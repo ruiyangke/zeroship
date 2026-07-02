@@ -1,13 +1,14 @@
 // `@zeroship/migrate` — the fluent DSL records the same frozen wire ops the
 // engine recorder + golden corpus pin. The DSL's `__begin`/`__drain` ambient
 // recorder (the build-evaluator seam) is driven directly so a test can assert the
-// recorded op objects without the Rust V8 host. Authoring is via the SOLE public
-// entry `table()`.
+// recorded op objects without the Rust V8 host. Table authoring is via the
+// reusable public entry `table()`.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { t, table, comment, lintDeterminism, pgEnum, sequence } from "../src/index.js";
+import { t, table, comment, lintDeterminism, enumType } from "../src/index.js";
+import { sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 
@@ -18,11 +19,34 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-test("SA-7: pgEnum rejects an empty values[] at authoring time", () => {
+test("@zeroship/migrate core exports enumType and omits pg-only/old names", async () => {
+  const imported = await import("@zeroship/migrate");
+  assert.equal(typeof imported.enumType, "function");
+  assert.equal((imported as any).pgEnum, undefined);
+  assert.equal((imported as any).pgDomain, undefined);
+  assert.equal((imported as any).domain, undefined);
+  assert.equal((imported as any).sequence, undefined);
+});
+
+test("SA-7: enumType.create rejects an empty values[] at authoring time", () => {
   assert.throws(
-    () => record(() => pgEnum("empty_enum", [])),
+    () => record(() => enumType("empty_enum").create({ values: [] })),
     (e: any) => e.code === "OP_INVALID" && /non-empty string\[\]/.test(e.message),
   );
+});
+
+test("enumType is inert until a terminal records", () => {
+  const ops = record(() => {
+    enumType("inert_enum");
+  });
+  assert.deepEqual(ops, []);
+
+  const createOps = record(() => {
+    enumType("active_enum").create({ values: ["a", "b"] });
+  });
+  assert.deepEqual(createOps, [
+    { op: "createEnum", name: "active_enum", values: ["a", "b"] },
+  ]);
 });
 
 test("SA-6: sequence({ as }) rejects a type outside { int, bigInt }", () => {

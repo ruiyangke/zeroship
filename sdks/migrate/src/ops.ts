@@ -21,9 +21,9 @@
 // corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
 // contract.
 //
-// `table()` is the SOLE public entry. The flat op-functions are GONE from the
-// public API; their op-construction logic survives as the internal `recordX`
-// helpers the handle delegates to (so the IR is unchanged). Every terminal
+// `table()` is the reusable table DDL/DML entry. The flat op-functions are GONE
+// from the public API; their op-construction logic survives as the internal
+// `recordX` helpers the handle delegates to (so the IR is unchanged). Every terminal
 // RECORDS one canonical op object onto the ambient per-migration recorder
 // synchronously, returning the handle. Recording OUTSIDE an active recorder
 // throws a structured `OP_OUTSIDE_RECORDER`.
@@ -734,18 +734,12 @@ function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
   return typeArg as ColType;
 }
 
-export function pgEnum(
-  name: string,
-  values: readonly string[],
-  args: CreateEnumArgs = {},
-): EnumHandle {
-  const enumValues = stringArray(values, "pgEnum(name, values)");
-  recordCreateEnum(name, enumValues, args);
+export function enumType(name: string): EnumHandle {
+  requireString(name, "enumType(name)");
   const handle: EnumHandle = {
     name,
-    values: enumValues,
-    create(createArgs: CreateEnumArgs = {}) {
-      recordCreateEnum(name, enumValues, createArgs);
+    create(createArgs: CreateEnumArgs) {
+      recordCreateEnum(name, createArgs);
       return handle;
     },
     drop(dropArgs: DropEnumArgs = {}) {
@@ -760,8 +754,8 @@ export function pgEnum(
   return handle;
 }
 
-export function pgDomain(name: string): DomainHandle {
-  requireString(name, "pgDomain(name)");
+export function __pgDomain(name: string): DomainHandle {
+  requireString(name, "domain(name)");
   const handle: DomainHandle = {
     name,
     create(args: CreateDomainArgs) {
@@ -780,7 +774,7 @@ export function pgDomain(name: string): DomainHandle {
   return handle;
 }
 
-export function sequence(name: string): SequenceHandle {
+export function __pgSequence(name: string): SequenceHandle {
   requireString(name, "sequence(name)");
   const handle: SequenceHandle = {
     name,
@@ -973,13 +967,16 @@ function stringArray(values: unknown, what: string): string[] {
   return [...values];
 }
 
-function recordCreateEnum(name: string, values: readonly string[], args: CreateEnumArgs = {}): void {
-  requireString(name, "pgEnum(name, values)");
-  const enumValues = stringArray(values, "pgEnum(name, values)");
+function recordCreateEnum(name: string, args: CreateEnumArgs): void {
+  requireString(name, "enumType(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "enumType(name).create({ values, ... }) needs an object");
+  }
+  const enumValues = stringArray(args.values, "enumType(name).create({ values })");
   if (enumValues.length === 0) {
     throw structuredError(
       "OP_INVALID",
-      "pgEnum(name, values): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
+      "enumType(name).create({ values }): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
     );
   }
   pushOrDeferUp(
@@ -993,7 +990,7 @@ function recordCreateEnum(name: string, values: readonly string[], args: CreateE
 }
 
 function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
-  requireString(name, "pgEnum(name, values).drop()");
+  requireString(name, "enumType(name).drop()");
   push(
     compact({
       op: "dropEnum",
@@ -1005,12 +1002,12 @@ function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
 }
 
 function recordCreateDomain(name: string, args: CreateDomainArgs): void {
-  requireString(name, "pgDomain(name)");
+  requireString(name, "domain(name)");
   if (!args || typeof args !== "object") {
-    throw structuredError("OP_INVALID", "pgDomain(name).create({ as, ... }) needs an object");
+    throw structuredError("OP_INVALID", "domain(name).create({ as, ... }) needs an object");
   }
   if (args.notNull !== undefined && typeof args.notNull !== "boolean") {
-    throw structuredError("OP_INVALID", "pgDomain(name).create({ notNull }): notNull must be a boolean");
+    throw structuredError("OP_INVALID", "domain(name).create({ notNull }): notNull must be a boolean");
   }
   pushOrDeferUp(
     compact({
@@ -1026,7 +1023,7 @@ function recordCreateDomain(name: string, args: CreateDomainArgs): void {
 }
 
 function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
-  requireString(name, "pgDomain(name).drop()");
+  requireString(name, "domain(name).drop()");
   push(
     compact({
       op: "dropDomain",
@@ -2074,7 +2071,7 @@ function resolveTriggerAction(args: CreateTriggerArgs): Node {
   return { kind: "body", statements };
 }
 
-// ── (E) The fluent `table()` handle — the SOLE public entry (§3) ──
+// ── (E) The fluent `table()` handle — the reusable table entry (§3) ──
 
 /** Per-op-wins-over-table-default schema precedence (§3/§4): a per-op `schema`
  *  overrides the table default only when the KEY is present with a defined value;

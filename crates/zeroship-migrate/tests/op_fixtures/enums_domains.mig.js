@@ -1,14 +1,18 @@
-import { pgDomain, pgEnum, table, t } from "@zeroship/migrate";
+import { enumType, table, t } from "@zeroship/migrate";
+import { domain } from "@zeroship/migrate/pg";
 
-const planTier = pgEnum("plan_tier", ["free", "pro"]);
-const billingPeriod = pgDomain("billing_period").create({
-  as: t.integer(),
-  check: (c) => c("VALUE").ge(1),
-  default: 1,
-  notNull: true,
-});
+const planTier = enumType("plan_tier");
+const billingPeriod = domain("billing_period");
 
 export function up() {
+  planTier.create({ values: ["free", "pro"] });
+  billingPeriod.create({
+    as: t.integer(),
+    check: (c) => c("VALUE").ge(1),
+    default: 1,
+    notNull: true,
+  });
+
   table("subscriptions").create({
     columns: {
       tier: t.enum(planTier).notNull(),
@@ -16,6 +20,6 @@ export function up() {
     },
   });
 
-  pgEnum("legacy_tier", ["legacy"]).drop({ ifExists: true });
-  pgDomain("legacy_period").drop({ ifExists: true });
+  enumType("legacy_tier").create({ values: ["legacy"] }).drop({ ifExists: true });
+  domain("legacy_period").drop({ ifExists: true });
 }

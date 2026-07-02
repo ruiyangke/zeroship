@@ -4,14 +4,14 @@ import { test } from "node:test";
 import {
   __begin as pubBegin,
   __drain as pubDrain,
-  sequence as pubSequence,
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
+import { sequence as pubSequence } from "../src/pg.js";
 import {
   __begin as engBegin,
   __drain as engDrain,
-  sequence as engSequence,
+  __pgSequence as engSequence,
   t as engT,
   table as engTable,
 } from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";

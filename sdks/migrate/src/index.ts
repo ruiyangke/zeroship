@@ -19,13 +19,11 @@
 //   };
 
 export {
-  // the SOLE public authoring entry — the reusable fluent TableHandle
+  // table DDL/DML entry — the reusable fluent TableHandle
   table,
   // cross-dialect view authoring entry — emits the closed SelectAst by default
   view,
-  pgEnum,
-  pgDomain,
-  sequence,
+  enumType,
   comment,
   // the immutable fluent column-type lexicon
   t,
@@ -80,16 +78,8 @@ export type {
   CommentTarget,
   CommentTargetArg,
   EnumHandle,
-  DomainHandle,
-  SequenceHandle,
   CreateEnumArgs,
   DropEnumArgs,
-  CreateDomainArgs,
-  DropDomainArgs,
-  CreateSequenceArgs,
-  AlterSequenceArgs,
-  DropSequenceArgs,
-  SequenceOwnedBy,
   // op-arg shapes
   InsertArgs,
   UpdateArgs,

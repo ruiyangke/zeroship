@@ -20,7 +20,21 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { t, table } from "../src/index.js";
-import { pg } from "../src/pg.js";
+import {
+  alterRole,
+  createFunction,
+  dropExtension,
+  dropFunction,
+  dropOwnedBy,
+  dropRole,
+  dropSchema,
+  extension,
+  grant,
+  raw,
+  revoke,
+  role,
+  schema,
+} from "../src/pg.js";
 import { __begin, __drain } from "../src/ops.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -181,12 +195,12 @@ test("ddl_rename_table fluent-recorded ops equal the committed golden", async ()
 
 test("pg_vendor typed pg surface records ops equal the committed golden", async () => {
   const ops = record(() => {
-    pg.createExtension({ name: "citext", ifNotExists: true });
-    pg.dropExtension({ name: "citext", ifExists: true });
-    pg.createSchema({ name: "zeroship", ifNotExists: true });
-    pg.dropSchema({ name: "zeroship", ifExists: true, cascade: true });
+    extension({ name: "citext", ifNotExists: true });
+    dropExtension({ name: "citext", ifExists: true });
+    schema({ name: "zeroship", ifNotExists: true });
+    dropSchema({ name: "zeroship", ifExists: true, cascade: true });
 
-    pg.createRole({
+    role({
       name: "zeroship_auth",
       login: true,
       password: "zeroship_auth",
@@ -194,16 +208,16 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
       setSearchPath: ["zeroship", "public"],
       ifNotExists: true,
     });
-    pg.alterRole({ name: "zeroship_auth", setSearchPath: ["zeroship", "public"] });
-    pg.dropRole({ name: "zeroship_auth", ifExists: true });
-    pg.dropOwnedBy({ roles: ["zeroship_auth"] });
+    alterRole({ name: "zeroship_auth", setSearchPath: ["zeroship", "public"] });
+    dropRole({ name: "zeroship_auth", ifExists: true });
+    dropOwnedBy({ roles: ["zeroship_auth"] });
 
-    pg.grant({
+    grant({
       privileges: ["select", "insert", "update", "delete"],
       on: { kind: "table", names: ["users"], schema: "zeroship" },
       to: ["zeroship_auth"],
     });
-    pg.revoke({
+    revoke({
       privileges: ["update", "delete", "truncate"],
       on: { kind: "table", names: ["audit_events"], schema: "zeroship" },
       from: ["public"],
@@ -224,7 +238,7 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     secrets.disableRowLevelSecurity();
     secrets.noForceRowLevelSecurity();
 
-    pg.createFunction({
+    createFunction({
       name: "audit_events_block_tamper",
       schema: "zeroship",
       returns: "trigger",
@@ -251,13 +265,13 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     });
     audit.dropTrigger({ name: "audit_events_block_update", ifExists: true });
 
-    pg.dropFunction({
+    dropFunction({
       name: "audit_events_block_tamper",
       schema: "zeroship",
       ifExists: true,
     });
 
-    pg.raw({
+    raw({
       sql: "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
       reason: "set tenant app GUC for pg vendor fixture",
     });
