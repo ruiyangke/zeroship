@@ -84,13 +84,13 @@ export interface ZeroshipOptions {
   devAuth?: boolean | DevAuthUser | { user: DevAuthUser } | { users: DevAuthUser[]; defaultUserId?: string };
   /**
    * Migration-first type generation. The plugin shells the EXISTING
-   * `zeroship-migrate-js gen-types` subcommand to fold the committed `.ir.json`
-   * migration set into the typed `env.db` surface (`env.db.ts` +
+   * `zeroship-migrate-js gen-types` subcommand to record migration `.ts`
+   * sources transiently and fold them into the typed `env.db` surface (`env.db.ts` +
    * `schema.runtime.json`):
    *  - in dev, on any change under the migrations dir (fire-and-forget,
    *    log-on-error, never crashes the dev server);
-   *  - at build, once in `buildStart`, with a `--check` DRIFT GATE in
-   *    production (a stale committed artifact fails the build).
+   *  - at build, once in `buildStart`, with a `--check` generated-artifact check in
+   *    production (stale generated artifacts fail the build).
    *
    * The artifacts are emitted into a COMMITTED dir (default
    * `generated/zeroship/`). Include `generated/zeroship/env.db.ts` in the app

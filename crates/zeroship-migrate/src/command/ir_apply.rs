@@ -71,8 +71,8 @@ use crate::{
     MigrationEngine, SqlDialect, SqliteBackend,
 };
 
-/// Discover committed `*.ir.json` files in a migration directory, ordered
-/// deterministically by path.
+/// Discover `*.ir.json` files in a migration directory, ordered deterministically
+/// by path.
 ///
 /// An empty directory, or one with no IR artifacts, returns an empty vector. The
 /// caller is responsible for deciding whether non-IR siblings are legal for that
@@ -353,8 +353,8 @@ pub async fn apply_bundle_ir_postgres(
     }
 }
 
-/// Apply a committed `.ir.json` bundle to Postgres through a sealed
-/// shared-infra policy profile.
+/// Apply an `.ir.json` bundle to Postgres through a sealed shared-infra policy
+/// profile.
 ///
 /// Stage M2-1 deliberately delegates to the existing `GuardConfig` apply path
 /// after verifying the in-process MAC and ceiling version. The sealed profile can
@@ -426,7 +426,7 @@ pub async fn apply_standalone(
 
 /// Apply a Platform `.ts` migration corpus to Postgres by recording each source
 /// file to transient IR at migrate time, then feeding that IR through the same
-/// guarded lower + apply core as committed `.ir.json`.
+/// guarded lower + apply core as IR bundle apply.
 ///
 /// This is Model C for trusted platform authors: `.ts` is the committed source of
 /// truth, `.ir.json` is never written, and the existing sandboxed recorder is reused
