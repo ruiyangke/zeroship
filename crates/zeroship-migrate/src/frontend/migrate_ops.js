@@ -4,8 +4,8 @@
 // `import { table, t } from "@zeroship/migrate"` migration into the canonical
 // `.ir.json` the lean engine deserializes.
 //
-// FLUENT-ONLY: `table()` is the SOLE public entry. The flat op-functions and the
-// `e.*` node helper are GONE (pre-launch, no back-compat). Their op-construction
+// FLUENT-ONLY: `table()` is the reusable table DDL/DML entry. The flat
+// op-functions and the `e.*` node helper are GONE (pre-launch, no back-compat). Their op-construction
 // logic survives as the internal `recordX` helpers the handle delegates to, so the
 // emitted wire ops are byte-identical to the pre-redesign flat surface — EXCEPT
 // the C1 FK-actions delta. The `.ir.json` shape is frozen and dialect-neutral; the
@@ -665,14 +665,12 @@ function colTypeOf(typeArg) {
   return typeArg;
 }
 
-export function pgEnum(name, values, args = {}) {
-  const enumValues = stringArray(values, "pgEnum(name, values)");
-  recordCreateEnum(name, enumValues, args);
+export function enumType(name) {
+  requireString(name, "enumType(name)");
   const handle = {
     name,
-    values: enumValues,
-    create(createArgs = {}) {
-      recordCreateEnum(name, enumValues, createArgs);
+    create(createArgs) {
+      recordCreateEnum(name, createArgs);
       return handle;
     },
     drop(dropArgs = {}) {
@@ -687,8 +685,8 @@ export function pgEnum(name, values, args = {}) {
   return handle;
 }
 
-export function pgDomain(name) {
-  requireString(name, "pgDomain(name)");
+export function __pgDomain(name) {
+  requireString(name, "domain(name)");
   const handle = {
     name,
     create(args) {
@@ -707,7 +705,7 @@ export function pgDomain(name) {
   return handle;
 }
 
-export function sequence(name) {
+export function __pgSequence(name) {
   requireString(name, "sequence(name)");
   const handle = {
     name,
@@ -932,13 +930,16 @@ function stringArray(values, what) {
   return [...values];
 }
 
-function recordCreateEnum(name, values, args = {}) {
-  requireString(name, "pgEnum(name, values)");
-  const enumValues = stringArray(values, "pgEnum(name, values)");
+function recordCreateEnum(name, args) {
+  requireString(name, "enumType(name)");
+  if (!args || typeof args !== "object") {
+    throw structuredError("OP_INVALID", "enumType(name).create({ values, ... }) needs an object");
+  }
+  const enumValues = stringArray(args.values, "enumType(name).create({ values })");
   if (enumValues.length === 0) {
     throw structuredError(
       "OP_INVALID",
-      "pgEnum(name, values): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
+      "enumType(name).create({ values }): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
     );
   }
   pushOrDeferUp(
@@ -952,7 +953,7 @@ function recordCreateEnum(name, values, args = {}) {
 }
 
 function recordDropEnum(name, args = {}) {
-  requireString(name, "pgEnum(name, values).drop()");
+  requireString(name, "enumType(name).drop()");
   push(
     compact({
       op: "dropEnum",
@@ -964,12 +965,12 @@ function recordDropEnum(name, args = {}) {
 }
 
 function recordCreateDomain(name, args) {
-  requireString(name, "pgDomain(name)");
+  requireString(name, "domain(name)");
   if (!args || typeof args !== "object") {
-    throw structuredError("OP_INVALID", "pgDomain(name).create({ as, ... }) needs an object");
+    throw structuredError("OP_INVALID", "domain(name).create({ as, ... }) needs an object");
   }
   if (args.notNull !== undefined && typeof args.notNull !== "boolean") {
-    throw structuredError("OP_INVALID", "pgDomain(name).create({ notNull }): notNull must be a boolean");
+    throw structuredError("OP_INVALID", "domain(name).create({ notNull }): notNull must be a boolean");
   }
   pushOrDeferUp(
     compact({
@@ -985,7 +986,7 @@ function recordCreateDomain(name, args) {
 }
 
 function recordDropDomain(name, args = {}) {
-  requireString(name, "pgDomain(name).drop()");
+  requireString(name, "domain(name).drop()");
   push(
     compact({
       op: "dropDomain",
@@ -1894,7 +1895,7 @@ function resolveTriggerAction(args) {
 }
 
 // ===========================================================================
-// (E) The fluent `table()` handle — the SOLE public entry (§3). The byte-for-byte
+// (E) The fluent `table()` handle — the reusable table entry (§3). The byte-for-byte
 // twin of `sdks/migrate/src/ops.ts`'s `table()`. A reusable value carrying only
 // `{ name, schemaDefault }`; terminals record EAGERLY and return the handle, so it
 // is valid for unlimited chaining + var-reuse (§4). A per-op `schema` overrides
@@ -2258,7 +2259,7 @@ export function view(name, opts = {}) {
 }
 
 // ===========================================================================
-// VENDOR (`@zeroship/migrate/pg`) — the standalone `pg.*` namespace for the
+// VENDOR (`@zeroship/migrate/pg`) — standalone named exports for the
 // database-/role-/schema-level privileged primitives (vendor spec §2.1–2.6,
 // §2.11). These have no table handle to hang off. Each eagerly records a vendor
 // op onto the ambient recorder, byte-identically to the Rust `Op` wire shape
@@ -2266,179 +2267,191 @@ export function view(name, opts = {}) {
 // engine's capability gate refuses every one fail-closed under a confined
 // capability set; the rendered SQL is then deny-list-scanned at lower.
 // ===========================================================================
-export const pg = {
-  createSchema(args) {
-    requireString(args.name, "pg.createSchema({ name })");
-    return push(compact({
-      op: "createSchema",
-      name: args.name,
-      ifNotExists: args.ifNotExists,
-      authorization: args.authorization,
-    }));
-  },
-  dropSchema(args) {
-    requireString(args.name, "pg.dropSchema({ name })");
-    return push(compact({
-      op: "dropSchema",
-      name: args.name,
-      ifExists: args.ifExists,
-      cascade: args.cascade,
-    }));
-  },
-  createExtension(args) {
-    requireString(args.name, "pg.createExtension({ name })");
-    return push(compact({
-      op: "createExtension",
-      name: args.name,
-      ifNotExists: args.ifNotExists,
-      schema: args.schema,
-    }));
-  },
-  dropExtension(args) {
-    requireString(args.name, "pg.dropExtension({ name })");
-    return push(compact({ op: "dropExtension", name: args.name, ifExists: args.ifExists }));
-  },
-  createRole(args) {
-    requireString(args.name, "pg.createRole({ name })");
-    return push(compact({
-      op: "createRole",
-      name: args.name,
-      login: args.login,
-      password: args.password,
-      bypassRls: args.bypassRls,
-      createRole: args.createRole,
-      createDb: args.createDb,
-      superuser: args.superuser,
-      inRole: args.inRole,
-      setSearchPath: args.setSearchPath,
-      ifNotExists: args.ifNotExists,
-    }));
-  },
-  alterRole(args) {
-    requireString(args.name, "pg.alterRole({ name })");
-    return push(compact({
-      op: "alterRole",
-      name: args.name,
-      setSearchPath: args.setSearchPath,
-      resetSearchPath: args.resetSearchPath,
-    }));
-  },
-  dropRole(args) {
-    requireString(args.name, "pg.dropRole({ name })");
-    return push(compact({ op: "dropRole", name: args.name, ifExists: args.ifExists }));
-  },
-  dropOwnedBy(args) {
-    if (!Array.isArray(args.roles)) {
-      throw structuredError("OP_INVALID", "pg.dropOwnedBy({ roles }): roles must be an array");
-    }
-    return push(compact({ op: "dropOwnedBy", roles: args.roles }));
-  },
-  grant(args) {
-    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
-      throw structuredError("OP_INVALID", "pg.grant({ privileges }): privileges must be a non-empty array");
-    }
-    if (args.on === null || typeof args.on !== "object") {
-      throw structuredError("OP_INVALID", "pg.grant({ on }): on must be a target object");
-    }
-    if (!Array.isArray(args.to) || args.to.length === 0) {
-      throw structuredError("OP_INVALID", "pg.grant({ to }): to must be a non-empty array");
-    }
-    return push(compact({
-      op: "grant",
-      privileges: args.privileges,
-      on: args.on,
-      to: args.to,
-      withGrantOption: args.withGrantOption,
-    }));
-  },
-  revoke(args) {
-    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
-      throw structuredError("OP_INVALID", "pg.revoke({ privileges }): privileges must be a non-empty array");
-    }
-    if (args.on === null || typeof args.on !== "object") {
-      throw structuredError("OP_INVALID", "pg.revoke({ on }): on must be a target object");
-    }
-    if (!Array.isArray(args.from) || args.from.length === 0) {
-      throw structuredError("OP_INVALID", "pg.revoke({ from }): from must be a non-empty array");
-    }
-    return push(compact({
-      op: "revoke",
-      privileges: args.privileges,
-      on: args.on,
-      from: args.from,
-    }));
-  },
-  createPolicy(args) {
-    requireString(args.name, "pg.createPolicy({ name })");
-    requireString(args.table, "pg.createPolicy({ table })");
-    if (Array.isArray(args.to) && args.to.length === 0) {
-      throw structuredError("OP_INVALID", "pg.createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
-    }
-    if (args.using === undefined) {
-      throw structuredError("OP_INVALID", "pg.createPolicy({ using }): using is required (the renderer always emits USING)");
-    }
-    return push(compact({
-      op: "createPolicy",
-      name: args.name,
-      table: args.table,
-      schema: args.schema,
-      forCmd: args.for || "all",
-      to: args.to,
-      using: resolveExpr(args.using),
-      withCheck: resolveExpr(args.withCheck),
-    }));
-  },
-  dropPolicy(args) {
-    requireString(args.name, "pg.dropPolicy({ name })");
-    requireString(args.table, "pg.dropPolicy({ table })");
-    return push(compact({
-      op: "dropPolicy",
-      name: args.name,
-      table: args.table,
-      schema: args.schema,
-      ifExists: args.ifExists,
-    }));
-  },
-  createFunction(args) {
-    requireString(args.name, "pg.createFunction({ name })");
-    requireString(args.returns, "pg.createFunction({ returns })");
-    requireString(args.language, "pg.createFunction({ language })");
-    requireString(args.body, "pg.createFunction({ body })");
-    return push(compact({
-      op: "createFunction",
-      name: args.name,
-      schema: args.schema,
-      args: args.args,
-      returns: args.returns,
-      language: args.language,
-      replace: args.replace,
-      volatility: args.volatility,
-      body: args.body,
-    }));
-  },
-  dropFunction(args) {
-    requireString(args.name, "pg.dropFunction({ name })");
-    return push(compact({
-      op: "dropFunction",
-      name: args.name,
-      schema: args.schema,
-      argTypes: args.argTypes,
-      ifExists: args.ifExists,
-    }));
-  },
-  /** The gated raw-statement escape as an explicit { sql, reason } call (vendor
-   *  spec section 2.11). Verbatim text is pg_query-scanned by the guard at lower.
-   *  Emits the canonical pgRaw wire op. */
-  raw(args) {
-    requireString(args.sql, "pg.raw({ sql })");
-    requireString(args.reason, "pg.raw({ reason })");
-    return push(compact({
-      op: "pgRaw",
-      sql: args.sql,
-      reason: args.reason,
-    }));
-  },
-};
+export function schema(args) {
+  requireString(args.name, "schema({ name })");
+  return push(compact({
+    op: "createSchema",
+    name: args.name,
+    ifNotExists: args.ifNotExists,
+    authorization: args.authorization,
+  }));
+}
+
+export function dropSchema(args) {
+  requireString(args.name, "dropSchema({ name })");
+  return push(compact({
+    op: "dropSchema",
+    name: args.name,
+    ifExists: args.ifExists,
+    cascade: args.cascade,
+  }));
+}
+
+export function extension(args) {
+  requireString(args.name, "extension({ name })");
+  return push(compact({
+    op: "createExtension",
+    name: args.name,
+    ifNotExists: args.ifNotExists,
+    schema: args.schema,
+  }));
+}
+
+export function dropExtension(args) {
+  requireString(args.name, "dropExtension({ name })");
+  return push(compact({ op: "dropExtension", name: args.name, ifExists: args.ifExists }));
+}
+
+export function role(args) {
+  requireString(args.name, "role({ name })");
+  return push(compact({
+    op: "createRole",
+    name: args.name,
+    login: args.login,
+    password: args.password,
+    bypassRls: args.bypassRls,
+    createRole: args.createRole,
+    createDb: args.createDb,
+    superuser: args.superuser,
+    inRole: args.inRole,
+    setSearchPath: args.setSearchPath,
+    ifNotExists: args.ifNotExists,
+  }));
+}
+
+export function alterRole(args) {
+  requireString(args.name, "alterRole({ name })");
+  return push(compact({
+    op: "alterRole",
+    name: args.name,
+    setSearchPath: args.setSearchPath,
+    resetSearchPath: args.resetSearchPath,
+  }));
+}
+
+export function dropRole(args) {
+  requireString(args.name, "dropRole({ name })");
+  return push(compact({ op: "dropRole", name: args.name, ifExists: args.ifExists }));
+}
+
+export function dropOwnedBy(args) {
+  if (!Array.isArray(args.roles)) {
+    throw structuredError("OP_INVALID", "dropOwnedBy({ roles }): roles must be an array");
+  }
+  return push(compact({ op: "dropOwnedBy", roles: args.roles }));
+}
+
+export function grant(args) {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "grant({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.to) || args.to.length === 0) {
+    throw structuredError("OP_INVALID", "grant({ to }): to must be a non-empty array");
+  }
+  return push(compact({
+    op: "grant",
+    privileges: args.privileges,
+    on: args.on,
+    to: args.to,
+    withGrantOption: args.withGrantOption,
+  }));
+}
+
+export function revoke(args) {
+  if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ privileges }): privileges must be a non-empty array");
+  }
+  if (args.on === null || typeof args.on !== "object") {
+    throw structuredError("OP_INVALID", "revoke({ on }): on must be a target object");
+  }
+  if (!Array.isArray(args.from) || args.from.length === 0) {
+    throw structuredError("OP_INVALID", "revoke({ from }): from must be a non-empty array");
+  }
+  return push(compact({
+    op: "revoke",
+    privileges: args.privileges,
+    on: args.on,
+    from: args.from,
+  }));
+}
+
+export function createPolicy(args) {
+  requireString(args.name, "createPolicy({ name })");
+  requireString(args.table, "createPolicy({ table })");
+  if (Array.isArray(args.to) && args.to.length === 0) {
+    throw structuredError("OP_INVALID", "createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+  }
+  if (args.using === undefined) {
+    throw structuredError("OP_INVALID", "createPolicy({ using }): using is required (the renderer always emits USING)");
+  }
+  return push(compact({
+    op: "createPolicy",
+    name: args.name,
+    table: args.table,
+    schema: args.schema,
+    forCmd: args.for || "all",
+    to: args.to,
+    using: resolveExpr(args.using),
+    withCheck: resolveExpr(args.withCheck),
+  }));
+}
+
+export function dropPolicy(args) {
+  requireString(args.name, "dropPolicy({ name })");
+  requireString(args.table, "dropPolicy({ table })");
+  return push(compact({
+    op: "dropPolicy",
+    name: args.name,
+    table: args.table,
+    schema: args.schema,
+    ifExists: args.ifExists,
+  }));
+}
+
+export function createFunction(args) {
+  requireString(args.name, "createFunction({ name })");
+  requireString(args.returns, "createFunction({ returns })");
+  requireString(args.language, "createFunction({ language })");
+  requireString(args.body, "createFunction({ body })");
+  return push(compact({
+    op: "createFunction",
+    name: args.name,
+    schema: args.schema,
+    args: args.args,
+    returns: args.returns,
+    language: args.language,
+    replace: args.replace,
+    volatility: args.volatility,
+    body: args.body,
+  }));
+}
+
+export function dropFunction(args) {
+  requireString(args.name, "dropFunction({ name })");
+  return push(compact({
+    op: "dropFunction",
+    name: args.name,
+    schema: args.schema,
+    argTypes: args.argTypes,
+    ifExists: args.ifExists,
+  }));
+}
+
+/** The gated raw-statement escape as an explicit { sql, reason } call (vendor
+ *  spec section 2.11). Verbatim text is pg_query-scanned by the guard at lower.
+ *  Emits the canonical pgRaw wire op. */
+export function raw(args) {
+  requireString(args.sql, "raw({ sql })");
+  requireString(args.reason, "raw({ reason })");
+  return push(compact({
+    op: "pgRaw",
+    sql: args.sql,
+    reason: args.reason,
+  }));
+}
 
 // ===========================================================================
 // (C) Determinism lint. Flag CALLS to JS nondeterminism accessors (`Date.now()` /

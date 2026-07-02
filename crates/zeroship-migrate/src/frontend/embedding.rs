@@ -23,7 +23,27 @@ const ZEROSHIP_DB_DIST_JS: &str = include_str!("../../../../sdks/db/dist/index.j
 const MYSQL2_PROMISE_BUNDLE_JS: &str = include_str!("vendor/mysql2-3.14.1.bundle.mjs");
 
 /// `@zeroship/migrate/pg` is a subpath shim over the same recorder-state module.
-const MIGRATE_PG_SHIM_JS: &str = r#"export { pg } from "@zeroship/migrate";"#;
+const MIGRATE_PG_SHIM_JS: &str = r#"
+export {
+  schema,
+  dropSchema,
+  extension,
+  dropExtension,
+  role,
+  alterRole,
+  dropRole,
+  dropOwnedBy,
+  grant,
+  revoke,
+  createPolicy,
+  dropPolicy,
+  createFunction,
+  dropFunction,
+  raw,
+  __pgDomain as domain,
+  __pgSequence as sequence,
+} from "@zeroship/migrate";
+"#;
 
 /// Minimal `zeroship` facade required by the `@zeroship/db` bundle.
 const ZEROSHIP_FACADE_STUB_JS: &str = r#"

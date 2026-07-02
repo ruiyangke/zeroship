@@ -1,12 +1,12 @@
 import { table, t } from "@zeroship/migrate";
-import { pg } from "@zeroship/migrate/pg";
+import { extension, grant, role, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_ts_vendor";
 
 export function up() {
-  pg.createExtension({ name: "citext", ifNotExists: true });
-  pg.createSchema({ name: "zeroship", ifNotExists: true });
-  pg.createRole({
+  extension({ name: "citext", ifNotExists: true });
+  schema({ name: "zeroship", ifNotExists: true });
+  role({
     name: "zeroship_ts_test_app",
     login: true,
     password: "zeroship_ts_test_app",
@@ -22,7 +22,7 @@ export function up() {
     },
   });
 
-  pg.grant({
+  grant({
     privileges: ["select"],
     on: { kind: "table", names: ["ts_accounts"], schema: "zeroship" },
     to: ["zeroship_ts_test_app"],
