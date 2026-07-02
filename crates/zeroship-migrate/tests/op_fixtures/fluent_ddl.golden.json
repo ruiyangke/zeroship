@@ -123,17 +123,10 @@
           }
         }
       ],
-      "primaryKey": null,
-      "constraints": [
-        {
-          "kind": {
-            "kind": "pk",
-            "columns": [
-              "id"
-            ]
-          }
-        }
+      "primaryKey": [
+        "id"
       ],
+      "constraints": [],
       "indexes": []
     },
     {
@@ -151,17 +144,11 @@
           "nullable": false
         }
       ],
-      "primaryKey": null,
+      "primaryKey": [
+        "account_id",
+        "team"
+      ],
       "constraints": [
-        {
-          "kind": {
-            "kind": "pk",
-            "columns": [
-              "account_id",
-              "team"
-            ]
-          }
-        },
         {
           "name": "memberships_team_uq",
           "kind": {

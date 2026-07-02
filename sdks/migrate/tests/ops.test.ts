@@ -68,7 +68,7 @@ test("t.text() is nullable-by-default; .notNull() opts in", () => {
   assert.equal(cols[1].nullable, false, "t.text().notNull() records nullable:false");
 });
 
-test("t.id() records a uuid PK + genRandomUuid default + hoisted pk constraint", () => {
+test("t.id() records a uuid PK + genRandomUuid default + top-level primaryKey", () => {
   const ops = record(() => {
     table("u").create({ columns: { id: t.id() } });
   });
@@ -76,40 +76,47 @@ test("t.id() records a uuid PK + genRandomUuid default + hoisted pk constraint",
   assert.equal(col.type, "uuid");
   assert.equal(col.nullable, false);
   assert.deepEqual(col.default, { fn: { fn: "genRandomUuid" } });
-  assert.deepEqual(ops[0].constraints, [{ kind: { kind: "pk", columns: ["id"] } }]);
+  assert.deepEqual(ops[0].primaryKey, ["id"]);
+  assert.equal(ops[0].constraints, undefined);
 });
 
-test("create() with a composite primaryKey records the table-level pk", () => {
+test("create() without primaryKey leaves the top-level field absent", () => {
+  const ops = record(() => table("u").create({ columns: { name: t.text() } }));
+  assert.equal(Object.prototype.hasOwnProperty.call(ops[0], "primaryKey"), false);
+  assert.equal(ops[0].constraints, undefined);
+});
+
+test("create() with a composite primaryKey records the top-level primaryKey", () => {
   const ops = record(() =>
     table("m").create({
       columns: { a: t.uuid().notNull(), b: t.text().notNull() },
       primaryKey: ["a", "b"],
     }),
   );
-  assert.deepEqual(ops[0].constraints, [{ kind: { kind: "pk", columns: ["a", "b"] } }]);
+  assert.deepEqual(ops[0].primaryKey, ["a", "b"]);
+  assert.equal(ops[0].constraints, undefined);
 });
 
 test("C2 — create() column that is both .unique() + .primaryKey() emits NO column-level unique", () => {
   // A PRIMARY KEY already implies uniqueness, so the per-column image must NOT
   // carry `unique:true` (lock-step with the addColumn-path suppression + the
-  // differ) — only the table-level pk constraint is recorded.
+  // differ) — only the top-level primaryKey is recorded.
   const ops = record(() =>
     table("u").create({ columns: { x: t.text().unique().primaryKey() } }),
   );
   const col = ops[0].columns[0];
   assert.equal(col.name, "x");
   assert.equal(col.unique, undefined, "no redundant column-level unique alongside the pk");
-  assert.deepEqual(
-    ops[0].constraints,
-    [{ kind: { kind: "pk", columns: ["x"] } }],
-    "the sole constraint is the pk, not a redundant unique",
-  );
+  assert.deepEqual(ops[0].primaryKey, ["x"]);
+  assert.equal(ops[0].constraints, undefined, "no pk is hoisted into constraints");
   // Order-independence + a plain .unique() (no pk) still emits the column-level unique.
   const ops2 = record(() =>
     table("u").create({ columns: { x: t.text().primaryKey().unique(), y: t.text().unique() } }),
   );
   assert.equal(ops2[0].columns[0].unique, undefined, "order-independent: pk column drops unique");
   assert.equal(ops2[0].columns[1].unique, true, "a non-pk .unique() column still records unique");
+  assert.deepEqual(ops2[0].primaryKey, ["x"]);
+  assert.equal(ops2[0].constraints, undefined, "order-independent: no pk is hoisted");
 });
 
 test(".column().add() carries a fluent ColumnDef's modifiers", () => {

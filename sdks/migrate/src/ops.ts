@@ -1163,9 +1163,9 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
     cols.push(def.__toIrColumn(colName));
     if (def._primaryKey) pkCols.push(colName);
   }
-  // A composite `primaryKey: [...]` wins over per-column `.primaryKey()` hoists.
-  const pk = args.primaryKey && args.primaryKey.length > 0 ? args.primaryKey : pkCols;
-  if (pk.length > 0) constraints.push({ kind: { kind: "pk", columns: pk } });
+  // An explicit `primaryKey` wins over per-column `.primaryKey()` collection:
+  // undefined = unresolved policy default, null = explicit no-PK, string[] = author PK.
+  const primaryKey = args.primaryKey !== undefined ? args.primaryKey : pkCols.length ? pkCols : undefined;
 
   for (const uq of args.uniques ?? []) {
     constraints.push(compact({ name: uq.name, kind: { kind: "unique", columns: uq.columns } }));
@@ -1204,6 +1204,7 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
       op: "createTable",
       name,
       columns: cols,
+      primaryKey,
       constraints: constraints.length ? constraints : undefined,
       indexes: indexes.length ? indexes : undefined,
       runtimeOptions: runtimeOptionsFromCreateArgs(args),

@@ -461,7 +461,7 @@ pub fn validate_op_scoped(
         };
 
     match op {
-        Op::CreateTable { name, columns, constraints, indexes, .. } => {
+        Op::CreateTable { name, columns, primary_key, constraints, indexes, .. } => {
             // A createTable is self-contained: resolve ColRefs against its own
             // declared columns PLUS the seven platform system fields the engine
             // auto-injects at lower/render time (`declarative::SYSTEM_FIELD_NAMES`).
@@ -484,9 +484,11 @@ pub fn validate_op_scoped(
             for c in constraints {
                 check_constraint(&c.kind, &scope)?;
             }
-            let pk_cols = constraints.iter().find_map(|c| match &c.kind {
-                IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
-                _ => None,
+            let pk_cols = primary_key.as_deref().or_else(|| {
+                constraints.iter().find_map(|c| match &c.kind {
+                    IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
+                    _ => None,
+                })
             });
             // **Migration-first P2a (§4)** — the per-column declared-only facets
             // (`id_prefix` / `vector_metric`) carry validate-time bounds: the IR's
@@ -968,6 +970,7 @@ fn validate_op_support(
     match op {
         Op::CreateTable {
             columns,
+            primary_key,
             constraints,
             indexes,
             ..
@@ -977,6 +980,11 @@ fn validate_op_support(
                 .any(|col| default_is_synth(col.default.as_ref()))
             {
                 check(Feature::SynthDefault)?;
+            }
+            if let Some(pk_columns) = primary_key {
+                if !is_system_owned_pk(pk_columns, columns) {
+                    check(Feature::UserPrimaryKey)?;
+                }
             }
             for constraint in constraints {
                 match &constraint.kind {
@@ -3369,6 +3377,32 @@ mod tests {
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
         assert!(validate_ir_scoped(&ok_create, Dialect::Postgres, &[], None).is_ok());
+    }
+
+    #[test]
+    fn create_table_top_level_primary_key_is_still_validate_refused() {
+        let ir = ir_with(vec![op_json(
+            r#"{
+              "op": "createTable",
+              "name": "memberships",
+              "columns": [
+                { "name": "account_id", "type": "uuid", "nullable": false },
+                { "name": "team", "type": "text", "nullable": false }
+              ],
+              "primaryKey": ["account_id", "team"],
+              "constraints": [],
+              "indexes": []
+            }"#,
+        )]);
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("top-level createTable user PK must remain validate-refused");
+        assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(
+            err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"),
+            "PK refusal should explain platform-owned PK, got: {err}"
+        );
     }
 
     // (E) MED — ColRef resolution at the apply/render seam. At LOAD the DML scope

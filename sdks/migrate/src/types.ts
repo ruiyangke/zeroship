@@ -684,10 +684,9 @@ export interface SetTableOptionsArgs {
  *    `Expr`→SQL renderer (same deferral as stand-alone `.check(name).add({expr})`
  *    / `addConstraint(check)`). Partial-index `where` renders on PostgreSQL and
  *    SQLite; MySQL refuses it fail-closed because MySQL has no partial indexes.
- *  - `primaryKey` (composite) and a column's `.primaryKey()` are HARD errors at
- *    apply: the platform OWNS the synthetic `id TEXT PRIMARY KEY`, so a second PK
- *    is never satisfiable (both backends reject two PRIMARY KEYs). Use `t.id()` for
- *    the (single, platform-managed) primary key.
+ *  - `primaryKey` (composite) and a column's `.primaryKey()` are represented in
+ *    the recorded IR. Current confined/platform policy still decides later whether
+ *    an authored PK is accepted, rejected, or replaced by the system shape.
  *
  *  None of the above is ever a silent no-op — an unsupported spec fails closed at
  *  lower time. */
@@ -699,10 +698,9 @@ export interface CreateTableArgs {
   softDelete?: boolean;
   versioning?: boolean;
   strictness?: TableStrictness;
-  /** Composite PK. DEFERRED/UNSUPPORTED at apply — the platform owns the synthetic
-   *  `id` primary key; a composite/per-column user PK is a HARD lower error (a
-   *  second PRIMARY KEY is never satisfiable). Use `t.id()`. */
-  primaryKey?: string[];
+  /** Table primary key intent: undefined leaves the policy default unresolved,
+   *  null requests no PK, and a string array records an explicit/composite PK. */
+  primaryKey?: string[] | null;
   uniques?: Array<{ name: string; columns: string[] }>;
   /** DEFERRED at apply — the CHECK predicate is a closed-AST `expr` awaiting the
    *  Wave-C `Expr`→SQL renderer; a table-level check is a HARD lower error today
