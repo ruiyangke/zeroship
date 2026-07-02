@@ -4,7 +4,7 @@
 #
 # The gateway's SEC-5 default makes every RPC procedure `auth: user`. Proving an
 # authenticated round-trip through the gateway needs a valid app session — which
-# normally comes from the interactive Hydra OAuth dance. This harness OFFLINE-
+# normally comes from the interactive native-OP OAuth dance. This harness OFFLINE-
 # MINTS that session the same way the admin PAT is minted (sign a real token with
 # the harness-controlled gateway Ed25519 key + seed the backing rows), so the
 # gateway's REAL session-cookie validation + `ZeroShip-User` derivation runs
