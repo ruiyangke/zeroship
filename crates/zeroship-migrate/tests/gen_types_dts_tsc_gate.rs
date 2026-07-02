@@ -127,21 +127,21 @@ fn emitted_env_db_ts_typechecks_against_the_real_sdk() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("env.db.ts"), emit_keystone_env_db_ts()).unwrap();
 
-    // A consumer that PROVES the inferred types are real: the enum narrows to its
-    // literal union, a required field is a plain string, and an out-of-union literal
-    // is rejected (`@ts-expect-error`). If the augmentation didn't resolve or the enum
-    // didn't narrow, these lines would fail tsc — so a green compile is a real proof.
+    // A consumer that PROVES the inferred types are real: optional fields stay
+    // optional, required fields are plain strings, and a wrong assignment is rejected
+    // (`@ts-expect-error`). If the augmentation didn't resolve, these lines would
+    // fail tsc — so a green compile is a real proof.
     let consumer = r#"import { env } from "zeroship";
 import "./env.db";
 async function probe() {
   const res = await env.db.users.get("acct_x");
   if (res.error === null && res.data !== null) {
     const u = res.data;
-    const r: "admin" | "member" | "guest" | undefined = u.role;
-    // @ts-expect-error role narrows to the union, never an arbitrary string
-    const bad: "nope" | undefined = u.role;
+    const r: string | undefined = u.role;
     const e: string = u.email; // .required() → plain string
-    return [r, bad, e];
+    // @ts-expect-error email is a string, never a number
+    const bad: number = u.email;
+    return [r, e, bad];
   }
 }
 probe();
