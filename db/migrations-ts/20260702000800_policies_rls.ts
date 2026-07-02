@@ -1,62 +1,35 @@
-import { raw } from "@zeroship/migrate/pg";
+import { table } from "@zeroship/migrate";
 
 export const name = "policies_rls";
 
 export function up() {
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.app_secrets ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.app_session_anchors ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.app_spend_limit ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.app_spend_state ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.app_user_identities ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.gateway_sessions ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.plan_change_events ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.spend_state_history ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow enableRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE zeroship.usage_aggregates ENABLE ROW LEVEL SECURITY", reason: "enableRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_secrets FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_session_anchors FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_limit FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_state FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_user_identities FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.plan_change_events FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow forceRowLevelSecurity to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "ALTER TABLE ONLY zeroship.usage_aggregates FORCE ROW LEVEL SECURITY", reason: "forceRowLevelSecurity targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.app_secrets USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid)) WITH CHECK ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.app_session_anchors USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid)) WITH CHECK ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.app_spend_limit USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid)) WITH CHECK ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.app_spend_state USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.app_user_identities USING ((app_client_id = current_setting('zeroship.tenant_client'::text, true))) WITH CHECK ((app_client_id = current_setting('zeroship.tenant_client'::text, true)))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.gateway_sessions USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid)) WITH CHECK ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.plan_change_events USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.spend_state_history USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
-  // TODO(dsl-v2): allow createPolicy to target trusted platform tables created outside table().create(), or add exact platform table registration
-  raw({ sql: "CREATE POLICY tenant_isolation ON zeroship.usage_aggregates USING ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid)) WITH CHECK ((app_id = (current_setting('zeroship.tenant_app'::text, true))::uuid))", reason: "createPolicy targets raw-created platform tables that are not registered in the v2 ownership registry" });
+  table("app_secrets", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("app_session_anchors", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("app_spend_limit", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("app_spend_state", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("app_user_identities", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("gateway_sessions", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("plan_change_events", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("spend_state_history", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("usage_aggregates", { schema: "zeroship" }).enableRowLevelSecurity();
+  table("app_secrets", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("app_session_anchors", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("app_spend_limit", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("app_spend_state", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("app_user_identities", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("gateway_sessions", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("plan_change_events", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("spend_state_history", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("usage_aggregates", { schema: "zeroship" }).forceRowLevelSecurity();
+  table("app_secrets", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")), withCheck: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
+  table("app_session_anchors", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")), withCheck: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
+  table("app_spend_limit", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")), withCheck: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
+  table("app_spend_state", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
+  table("app_user_identities", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_client_id").eq(c.fn.currentSetting("zeroship.tenant_client", true)), withCheck: (c) => c("app_client_id").eq(c.fn.currentSetting("zeroship.tenant_client", true)) });
+  table("gateway_sessions", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")), withCheck: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
+  table("plan_change_events", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
+  table("spend_state_history", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
+  table("usage_aggregates", { schema: "zeroship" }).createPolicy({ name: "tenant_isolation", using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")), withCheck: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")) });
 }
 
 export function down() {

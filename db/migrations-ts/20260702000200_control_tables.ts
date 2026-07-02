@@ -1,50 +1,298 @@
+import { table, t } from "@zeroship/migrate";
 import { raw } from "@zeroship/migrate/pg";
 
 export const name = "control_tables";
 
 export function up() {
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_audit (\n    id uuid DEFAULT gen_random_uuid() NOT NULL,\n    app_id uuid,\n    creator_id uuid,\n    actor_user_id uuid,\n    actor_token_id uuid,\n    action text NOT NULL,\n    resource text,\n    source_ip inet,\n    detail jsonb,\n    occurred_at timestamp with time zone DEFAULT now() NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_env_expose (\n    app_id uuid NOT NULL,\n    key_name text NOT NULL,\n    updated_at timestamp with time zone DEFAULT now() NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_members (\n    app_id uuid NOT NULL,\n    user_id uuid NOT NULL,\n    role text NOT NULL,\n    added_at timestamp with time zone DEFAULT now() NOT NULL,\n    added_by uuid,\n    CONSTRAINT app_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'editor'::text, 'viewer'::text])))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_net_grants (\n    app_id uuid NOT NULL,\n    host text NOT NULL,\n    port integer NOT NULL,\n    granted_by text NOT NULL,\n    granted_at timestamp with time zone DEFAULT now() NOT NULL,\n    note text,\n    CONSTRAINT app_net_grants_port_check CHECK (((port >= 1) AND (port <= 65535)))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_oauth_clients (\n    app_id uuid NOT NULL,\n    client_id text NOT NULL,\n    sector_identifier text NOT NULL,\n    created_at timestamp with time zone DEFAULT now() NOT NULL,\n    updated_at timestamp with time zone DEFAULT now() NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_scope_defs (\n    app_id uuid NOT NULL,\n    scope_id text NOT NULL,\n    label text NOT NULL,\n    description text\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_secrets (\n    app_id uuid NOT NULL,\n    key_name text NOT NULL,\n    ciphertext bytea NOT NULL,\n    updated_at timestamp with time zone DEFAULT now() NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_usage (\n    app_id uuid NOT NULL,\n    resource text NOT NULL,\n    value bigint DEFAULT 0 NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_usage_history (\n    app_id uuid NOT NULL,\n    period text NOT NULL,\n    counters jsonb NOT NULL,\n    created_at timestamp with time zone DEFAULT now() NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.app_vars (\n    app_id uuid NOT NULL,\n    key_name text NOT NULL,\n    value text NOT NULL,\n    updated_at timestamp with time zone DEFAULT now() NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.apps (\n    id uuid DEFAULT gen_random_uuid() NOT NULL,\n    name text NOT NULL,\n    plan_id text DEFAULT 'free'::text NOT NULL,\n    deploy_hash text,\n    api_key text NOT NULL,\n    api_key_hash text DEFAULT ''::text NOT NULL,\n    env_version bigint DEFAULT 0 NOT NULL,\n    suspended boolean DEFAULT false NOT NULL,\n    audit_locked boolean DEFAULT false NOT NULL,\n    manifest_json text,\n    created_at timestamp with time zone DEFAULT now() NOT NULL,\n    updated_at timestamp with time zone DEFAULT now() NOT NULL,\n    system boolean DEFAULT false NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.creator_account_history (\n    id uuid DEFAULT gen_random_uuid() NOT NULL,\n    creator_id uuid NOT NULL,\n    stripe_account_id text NOT NULL,\n    linked_at timestamp with time zone DEFAULT now() NOT NULL,\n    unlinked_at timestamp with time zone\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.creator_accounts (\n    creator_id uuid NOT NULL,\n    stripe_account_id text NOT NULL,\n    onboarded_at timestamp with time zone DEFAULT now() NOT NULL,\n    unlinked_at timestamp with time zone,\n    charges_enabled boolean DEFAULT false NOT NULL,\n    payouts_enabled boolean DEFAULT false NOT NULL,\n    details_submitted boolean DEFAULT false NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.migrated_app_policies (\n    app_id uuid NOT NULL,\n    version bigint NOT NULL,\n    raw_toml text NOT NULL,\n    parsed_profile jsonb NOT NULL,\n    effective_profile jsonb NOT NULL,\n    ceiling_id text NOT NULL,\n    ceiling_version bigint NOT NULL,\n    submitted_by uuid NOT NULL,\n    submitted_at timestamp with time zone DEFAULT now() NOT NULL,\n    CONSTRAINT migrated_app_policies_ceiling_version_check CHECK ((ceiling_version > 0)),\n    CONSTRAINT migrated_app_policies_version_check CHECK ((version > 0))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.migrated_migration_audit (\n    audit_id uuid DEFAULT gen_random_uuid() NOT NULL,\n    app_id uuid NOT NULL,\n    migration_id uuid NOT NULL,\n    migration_versions jsonb DEFAULT '[]'::jsonb NOT NULL,\n    action text NOT NULL,\n    outcome text NOT NULL,\n    principal_id uuid NOT NULL,\n    effective_profile jsonb NOT NULL,\n    sealed_profile jsonb,\n    ceiling_id text NOT NULL,\n    ceiling_version bigint NOT NULL,\n    detail jsonb DEFAULT '{}'::jsonb NOT NULL,\n    created_at timestamp with time zone DEFAULT now() NOT NULL,\n    CONSTRAINT migrated_migration_audit_action_check CHECK ((action = ANY (ARRAY['submit'::text, 'reject_pending'::text, 'approve'::text, 'apply'::text]))),\n    CONSTRAINT migrated_migration_audit_ceiling_version_check CHECK ((ceiling_version > 0))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.migrated_migrations (\n    app_id uuid NOT NULL,\n    migration_id uuid NOT NULL,\n    status text NOT NULL,\n    request_body jsonb NOT NULL,\n    effective_profile jsonb NOT NULL,\n    ceiling_id text NOT NULL,\n    ceiling_version bigint NOT NULL,\n    gated_versions jsonb DEFAULT '[]'::jsonb NOT NULL,\n    submitted_by uuid NOT NULL,\n    submitted_at timestamp with time zone DEFAULT now() NOT NULL,\n    approved_by uuid,\n    approved_at timestamp with time zone,\n    applied_at timestamp with time zone,\n    last_error text,\n    CONSTRAINT migrated_migrations_ceiling_version_check CHECK ((ceiling_version > 0)),\n    CONSTRAINT migrated_migrations_status_check CHECK ((status = ANY (ARRAY['submitted'::text, 'pending_approval'::text, 'approved'::text, 'applied'::text, 'failed'::text])))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.net_policy_catalog (\n    key text NOT NULL,\n    value_json jsonb NOT NULL,\n    updated_by text,\n    updated_at timestamp with time zone DEFAULT now() NOT NULL\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.payouts (\n    id uuid DEFAULT gen_random_uuid() NOT NULL,\n    creator_id uuid NOT NULL,\n    event_id text NOT NULL,\n    event_type text NOT NULL,\n    gross_amount bigint NOT NULL,\n    platform_fee bigint NOT NULL,\n    net_amount bigint NOT NULL,\n    currency text NOT NULL,\n    occurred_at timestamp with time zone NOT NULL,\n    payload_hash bytea,\n    created_at timestamp with time zone DEFAULT now() NOT NULL,\n    CONSTRAINT control_payouts_currency_shape CHECK ((currency ~ '^[a-z]{3}$'::text)),\n    CONSTRAINT control_payouts_fee_lte_gross CHECK ((platform_fee <= gross_amount)),\n    CONSTRAINT control_payouts_fee_nonnegative CHECK ((platform_fee >= 0)),\n    CONSTRAINT control_payouts_gross_nonnegative CHECK ((gross_amount >= 0)),\n    CONSTRAINT control_payouts_net_matches_amounts CHECK ((net_amount = (gross_amount - platform_fee))),\n    CONSTRAINT control_payouts_net_nonnegative CHECK ((net_amount >= 0))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.permission_tokens (\n    id uuid NOT NULL,\n    owner_id uuid NOT NULL,\n    kind text NOT NULL,\n    client_id text,\n    name text NOT NULL,\n    policies jsonb NOT NULL,\n    policy_hash text NOT NULL,\n    created_at timestamp with time zone DEFAULT now() NOT NULL,\n    expires_at timestamp with time zone,\n    revoked_at timestamp with time zone,\n    last_used_at timestamp with time zone,\n    CONSTRAINT permission_tokens_kind_check CHECK ((kind = ANY (ARRAY['pat'::text, 'oauth_grant'::text])))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.platform_admin_roles (\n    user_id uuid NOT NULL,\n    role text NOT NULL,\n    granted_at timestamp with time zone DEFAULT now() NOT NULL,\n    granted_by uuid,\n    CONSTRAINT platform_admin_roles_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'support'::text, 'billing'::text, 'readonly'::text])))\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
-  // TODO(dsl-v2): add an exact/platform table creation mode that does not inject app runtime system fields or the synthetic id primary key
-  raw({ sql: "CREATE TABLE zeroship.platform_policies (\n    id text NOT NULL,\n    cedar_source text NOT NULL,\n    enabled boolean DEFAULT true NOT NULL,\n    updated_at timestamp with time zone DEFAULT now() NOT NULL,\n    updated_by uuid\n)", reason: "table().create currently routes through the app collection snapshot and injects runtime system fields, so it cannot reproduce an exact platform table" });
+  table("app_audit", { schema: "zeroship" }).create({
+    columns: {
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      app_id: t.uuid(),
+      creator_id: t.uuid(),
+      actor_user_id: t.uuid(),
+      actor_token_id: t.uuid(),
+      action: t.text().notNull(),
+      resource: t.text(),
+      source_ip: t.text(),
+      detail: t.json(),
+      occurred_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["id"],
+  });
+  // TODO(dsl-v2): add structural column type support for inet
+  raw({ sql: "ALTER TABLE ONLY zeroship.app_audit ALTER COLUMN source_ip TYPE inet USING source_ip::inet", reason: "column app_audit.source_ip uses PostgreSQL type inet, which is not in the current closed column lexicon/lowerer use-site set" });
+  table("app_env_expose", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      key_name: t.text().notNull(),
+      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["app_id", "key_name"],
+  });
+  table("app_members", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      user_id: t.uuid().notNull(),
+      role: t.text().notNull(),
+      added_at: t.timestamp().notNull().default({ fn: "now" }),
+      added_by: t.uuid(),
+    },
+    primaryKey: ["app_id", "user_id"],
+  });
+  // TODO(dsl-v2): CHECK constraint app_members.app_members_role_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.app_members ADD CONSTRAINT app_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'editor'::text, 'viewer'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("app_net_grants", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      host: t.text().notNull(),
+      port: t.integer().notNull(),
+      granted_by: t.text().notNull(),
+      granted_at: t.timestamp().notNull().default({ fn: "now" }),
+      note: t.text(),
+    },
+    primaryKey: ["app_id", "host", "port"],
+  });
+  // TODO(dsl-v2): CHECK constraint app_net_grants.app_net_grants_port_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.app_net_grants ADD CONSTRAINT app_net_grants_port_check CHECK (((port >= 1) AND (port <= 65535)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("app_oauth_clients", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      client_id: t.text().notNull(),
+      sector_identifier: t.text().notNull(),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["app_id"],
+  });
+  table("app_scope_defs", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      scope_id: t.text().notNull(),
+      label: t.text().notNull(),
+      description: t.text(),
+    },
+    primaryKey: ["app_id", "scope_id"],
+  });
+  table("app_secrets", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      key_name: t.text().notNull(),
+      ciphertext: t.bytes().notNull(),
+      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["app_id", "key_name"],
+  });
+  table("app_usage", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      resource: t.text().notNull(),
+      value: t.bigInt().notNull().default(0),
+    },
+    primaryKey: ["app_id", "resource"],
+  });
+  table("app_usage_history", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      period: t.text().notNull(),
+      counters: t.json().notNull(),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: null,
+  });
+  table("app_vars", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      key_name: t.text().notNull(),
+      value: t.text().notNull(),
+      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["app_id", "key_name"],
+  });
+  table("apps", { schema: "zeroship" }).create({
+    columns: {
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      name: t.text().notNull(),
+      plan_id: t.text().notNull().default("free"),
+      deploy_hash: t.text(),
+      api_key: t.text().notNull(),
+      api_key_hash: t.text().notNull().default(""),
+      env_version: t.bigInt().notNull().default(0),
+      suspended: t.boolean().notNull().default(false),
+      audit_locked: t.boolean().notNull().default(false),
+      manifest_json: t.text(),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+      system: t.boolean().notNull().default(false),
+    },
+    primaryKey: ["id"],
+  });
+  table("creator_account_history", { schema: "zeroship" }).create({
+    columns: {
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      creator_id: t.uuid().notNull(),
+      stripe_account_id: t.text().notNull(),
+      linked_at: t.timestamp().notNull().default({ fn: "now" }),
+      unlinked_at: t.timestamp(),
+    },
+    primaryKey: ["id"],
+  });
+  table("creator_accounts", { schema: "zeroship" }).create({
+    columns: {
+      creator_id: t.uuid().notNull(),
+      stripe_account_id: t.text().notNull(),
+      onboarded_at: t.timestamp().notNull().default({ fn: "now" }),
+      unlinked_at: t.timestamp(),
+      charges_enabled: t.boolean().notNull().default(false),
+      payouts_enabled: t.boolean().notNull().default(false),
+      details_submitted: t.boolean().notNull().default(false),
+    },
+    primaryKey: ["creator_id"],
+  });
+  table("migrated_app_policies", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      version: t.bigInt().notNull(),
+      raw_toml: t.text().notNull(),
+      parsed_profile: t.json().notNull(),
+      effective_profile: t.json().notNull(),
+      ceiling_id: t.text().notNull(),
+      ceiling_version: t.bigInt().notNull(),
+      submitted_by: t.uuid().notNull(),
+      submitted_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["app_id", "version"],
+  });
+  // TODO(dsl-v2): CHECK constraint migrated_app_policies.migrated_app_policies_ceiling_version_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_app_policies ADD CONSTRAINT migrated_app_policies_ceiling_version_check CHECK ((ceiling_version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint migrated_app_policies.migrated_app_policies_version_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_app_policies ADD CONSTRAINT migrated_app_policies_version_check CHECK ((version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("migrated_migration_audit", { schema: "zeroship" }).create({
+    columns: {
+      audit_id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      app_id: t.uuid().notNull(),
+      migration_id: t.uuid().notNull(),
+      migration_versions: t.json().notNull(),
+      action: t.text().notNull(),
+      outcome: t.text().notNull(),
+      principal_id: t.uuid().notNull(),
+      effective_profile: t.json().notNull(),
+      sealed_profile: t.json(),
+      ceiling_id: t.text().notNull(),
+      ceiling_version: t.bigInt().notNull(),
+      detail: t.json().notNull(),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["audit_id"],
+  });
+  // TODO(dsl-v2): json array default is not expressible in createTable column defaults yet
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ALTER COLUMN migration_versions SET DEFAULT '[]'::jsonb", reason: "column migrated_migration_audit.migration_versions requires exact default '[]'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
+  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ALTER COLUMN detail SET DEFAULT '{}'::jsonb", reason: "column migrated_migration_audit.detail requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
+  // TODO(dsl-v2): CHECK constraint migrated_migration_audit.migrated_migration_audit_action_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ADD CONSTRAINT migrated_migration_audit_action_check CHECK ((action = ANY (ARRAY['submit'::text, 'reject_pending'::text, 'approve'::text, 'apply'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint migrated_migration_audit.migrated_migration_audit_ceiling_version_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ADD CONSTRAINT migrated_migration_audit_ceiling_version_check CHECK ((ceiling_version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("migrated_migrations", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.uuid().notNull(),
+      migration_id: t.uuid().notNull(),
+      status: t.text().notNull(),
+      request_body: t.json().notNull(),
+      effective_profile: t.json().notNull(),
+      ceiling_id: t.text().notNull(),
+      ceiling_version: t.bigInt().notNull(),
+      gated_versions: t.json().notNull(),
+      submitted_by: t.uuid().notNull(),
+      submitted_at: t.timestamp().notNull().default({ fn: "now" }),
+      approved_by: t.uuid(),
+      approved_at: t.timestamp(),
+      applied_at: t.timestamp(),
+      last_error: t.text(),
+    },
+    primaryKey: ["app_id", "migration_id"],
+  });
+  // TODO(dsl-v2): json array default is not expressible in createTable column defaults yet
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migrations ALTER COLUMN gated_versions SET DEFAULT '[]'::jsonb", reason: "column migrated_migrations.gated_versions requires exact default '[]'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
+  // TODO(dsl-v2): CHECK constraint migrated_migrations.migrated_migrations_ceiling_version_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migrations ADD CONSTRAINT migrated_migrations_ceiling_version_check CHECK ((ceiling_version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint migrated_migrations.migrated_migrations_status_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migrations ADD CONSTRAINT migrated_migrations_status_check CHECK ((status = ANY (ARRAY['submitted'::text, 'pending_approval'::text, 'approved'::text, 'applied'::text, 'failed'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("net_policy_catalog", { schema: "zeroship" }).create({
+    columns: {
+      key: t.text().notNull(),
+      value_json: t.json().notNull(),
+      updated_by: t.text(),
+      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["key"],
+  });
+  table("payouts", { schema: "zeroship" }).create({
+    columns: {
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      creator_id: t.uuid().notNull(),
+      event_id: t.text().notNull(),
+      event_type: t.text().notNull(),
+      gross_amount: t.bigInt().notNull(),
+      platform_fee: t.bigInt().notNull(),
+      net_amount: t.bigInt().notNull(),
+      currency: t.text().notNull(),
+      occurred_at: t.timestamp().notNull(),
+      payload_hash: t.bytes(),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
+    },
+    primaryKey: ["id"],
+  });
+  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_currency_shape needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_currency_shape CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_fee_lte_gross needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_fee_lte_gross CHECK ((platform_fee <= gross_amount))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_fee_nonnegative needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_fee_nonnegative CHECK ((platform_fee >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_gross_nonnegative needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_gross_nonnegative CHECK ((gross_amount >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_net_matches_amounts needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_net_matches_amounts CHECK ((net_amount = (gross_amount - platform_fee)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_net_nonnegative needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_net_nonnegative CHECK ((net_amount >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("permission_tokens", { schema: "zeroship" }).create({
+    columns: {
+      id: t.uuid().notNull(),
+      owner_id: t.uuid().notNull(),
+      kind: t.text().notNull(),
+      client_id: t.text(),
+      name: t.text().notNull(),
+      policies: t.json().notNull(),
+      policy_hash: t.text().notNull(),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      expires_at: t.timestamp(),
+      revoked_at: t.timestamp(),
+      last_used_at: t.timestamp(),
+    },
+    primaryKey: ["id"],
+  });
+  // TODO(dsl-v2): CHECK constraint permission_tokens.permission_tokens_kind_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.permission_tokens ADD CONSTRAINT permission_tokens_kind_check CHECK ((kind = ANY (ARRAY['pat'::text, 'oauth_grant'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("platform_admin_roles", { schema: "zeroship" }).create({
+    columns: {
+      user_id: t.uuid().notNull(),
+      role: t.text().notNull(),
+      granted_at: t.timestamp().notNull().default({ fn: "now" }),
+      granted_by: t.uuid(),
+    },
+    primaryKey: ["user_id"],
+  });
+  // TODO(dsl-v2): CHECK constraint platform_admin_roles.platform_admin_roles_role_check needs the Expr->SQL renderer
+  raw({ sql: "ALTER TABLE ONLY zeroship.platform_admin_roles ADD CONSTRAINT platform_admin_roles_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'support'::text, 'billing'::text, 'readonly'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("platform_policies", { schema: "zeroship" }).create({
+    columns: {
+      id: t.text().notNull(),
+      cedar_source: t.text().notNull(),
+      enabled: t.boolean().notNull().default(true),
+      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+      updated_by: t.uuid(),
+    },
+    primaryKey: ["id"],
+  });
 }
 
 export function down() {
