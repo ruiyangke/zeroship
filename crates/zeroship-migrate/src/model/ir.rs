@@ -2777,6 +2777,401 @@ impl Op {
         !self.vendor_capabilities().is_empty()
     }
 
+    /// Static dialect support declaration for this concrete op shape.
+    ///
+    /// This is intentionally not wired into validation in this slice. It mirrors
+    /// current validate/lower behavior so tests can pin the matrix before later
+    /// slices move selected refusals earlier.
+    #[must_use]
+    pub fn support(&self) -> crate::model::support::Support {
+        use crate::model::support::{
+            supported, unsupported, DialectSupport, RenderMode, Support, ADD_CONSTRAINT_FEATURES,
+            ALTER_COLUMN_TYPE_FEATURES, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT,
+            CAP_MATERIALIZED_VIEW, CAP_POLICY, CAP_RAW_MATERIALIZED_VIEW, CAP_RAW_SQL, CAP_RLS,
+            CAP_ROLE, CAP_SCHEMA, COMMENT_FEATURES, CREATE_INDEX_FEATURES, CREATE_TABLE_FEATURES,
+            CREATE_TRIGGER_FEATURES, CREATE_VIEW_FEATURES, INSERT_FEATURES, PG_RAW_FEATURES,
+            RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES,
+        };
+        use crate::model::validate::CODE_UNSUPPORTED;
+
+        let all_offline = DialectSupport::all_supported(RenderMode::Offline);
+        let all_unsupported = |reason: &'static str| {
+            DialectSupport::unsupported_all(CODE_UNSUPPORTED, reason)
+        };
+        let pg_only = |reason: &'static str| {
+            DialectSupport::postgres_only(RenderMode::Offline, reason)
+        };
+
+        match self {
+            Op::CreateTable { .. } => Support::core(all_offline, CREATE_TABLE_FEATURES),
+            Op::SetTableOptions { .. } => Support::core(all_offline, &[]),
+            Op::DropTable { .. } => Support::core(all_offline, &[]),
+            Op::RenameTable { .. } => Support::core(all_offline, &[]),
+            Op::AddColumn { .. } => Support::core(all_offline, &[]),
+            Op::DropColumn { .. } => Support::core(all_offline, &[]),
+            Op::CreateIndex {
+                columns,
+                using,
+                r#where,
+                ..
+            } => {
+                let sqlite = if matches!(
+                    using,
+                    Some(
+                        IndexMethod::Gin
+                            | IndexMethod::Gist
+                            | IndexMethod::Ivfflat
+                            | IndexMethod::Hnsw
+                            | IndexMethod::Fts5
+                    )
+                ) {
+                    unsupported(
+                        CODE_UNSUPPORTED,
+                        "createIndex non-btree methods are unsupported on SQLite",
+                    )
+                } else {
+                    supported(RenderMode::Offline)
+                };
+                let mysql = if columns
+                    .iter()
+                    .any(|element| matches!(element, IndexElement::Expr { .. }))
+                {
+                    unsupported(
+                        CODE_UNSUPPORTED,
+                        "createIndex expression elements are not supported on MySQL",
+                    )
+                } else if r#where.is_some() {
+                    unsupported(
+                        CODE_UNSUPPORTED,
+                        "createIndex partial predicates require partial-index support; MySQL does not support partial indexes",
+                    )
+                } else if matches!(
+                    using,
+                    Some(
+                        IndexMethod::Gin
+                            | IndexMethod::Gist
+                            | IndexMethod::Ivfflat
+                            | IndexMethod::Hnsw
+                            | IndexMethod::Fts5
+                    )
+                ) {
+                    unsupported(
+                        CODE_UNSUPPORTED,
+                        "createIndex non-btree methods are unsupported on MySQL",
+                    )
+                } else {
+                    supported(RenderMode::Offline)
+                };
+                Support::core(
+                    DialectSupport::new(supported(RenderMode::Offline), sqlite, mysql),
+                    CREATE_INDEX_FEATURES,
+                )
+            }
+            Op::Comment { .. } => Support::core(
+                pg_only("COMMENT ON is PostgreSQL-only in the current engine"),
+                COMMENT_FEATURES,
+            ),
+            Op::DropIndex { .. } => Support::core(all_offline, &[]),
+            Op::AlterColumnType { using, .. } => {
+                let dialects = if using.is_some() {
+                    all_unsupported(
+                        "alterColumnType.using expression rendering is deferred in the current engine",
+                    )
+                } else {
+                    DialectSupport::new(
+                        supported(RenderMode::Offline),
+                        supported(RenderMode::LiveResolved),
+                        supported(RenderMode::Offline),
+                    )
+                };
+                Support::core(dialects, ALTER_COLUMN_TYPE_FEATURES)
+            }
+            Op::AlterColumnNullability { .. } => Support::core(
+                DialectSupport::new(
+                    supported(RenderMode::Offline),
+                    supported(RenderMode::LiveResolved),
+                    supported(RenderMode::Offline),
+                ),
+                &[],
+            ),
+            Op::RenameColumn {
+                existence_guard, ..
+            } => {
+                let dialects = if existence_guard.is_some() {
+                    all_unsupported(
+                        "renameColumn ifExists guards cannot be attributed to a single migration unit today",
+                    )
+                } else {
+                    DialectSupport::new(
+                        supported(RenderMode::LiveResolved),
+                        supported(RenderMode::LiveResolved),
+                        unsupported(
+                            CODE_UNSUPPORTED,
+                            "renameColumn is not live-rendered for MySQL in render-only Phase 1",
+                        ),
+                    )
+                };
+                Support::core(dialects, RENAME_COLUMN_FEATURES)
+            }
+            Op::AddConstraint { constraint, .. } => {
+                let dialects = match &constraint.kind {
+                    IrConstraintKind::Check { .. } => all_unsupported(
+                        "addConstraint(check) expression rendering is deferred in the current engine",
+                    ),
+                    IrConstraintKind::Pk { .. } => all_unsupported(
+                        "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
+                    ),
+                    IrConstraintKind::Fk {
+                        columns,
+                        references_columns,
+                        ..
+                    } if columns.is_empty() => all_unsupported(
+                        "addConstraint(fk) with no local column is unsupported",
+                    ),
+                    IrConstraintKind::Fk { columns, .. } if columns.len() != 1 => {
+                        all_unsupported("addConstraint(fk) multi-column is a later wave")
+                    }
+                    IrConstraintKind::Fk {
+                        references_columns,
+                        ..
+                    } if !(references_columns.is_empty()
+                        || (references_columns.len() == 1 && references_columns[0] == "id")) =>
+                    {
+                        all_unsupported(
+                            "addConstraint(fk) referencing a non-id column is a later wave",
+                        )
+                    }
+                    IrConstraintKind::Exclusion { .. } => pg_only(
+                        "exclusion constraints are PostgreSQL-only in the current engine",
+                    ),
+                    IrConstraintKind::Fk { .. } | IrConstraintKind::Unique { .. } => {
+                        DialectSupport::new(
+                            supported(RenderMode::Offline),
+                            supported(RenderMode::LiveResolved),
+                            supported(RenderMode::Offline),
+                        )
+                    }
+                };
+                Support::core(dialects, ADD_CONSTRAINT_FEATURES)
+            }
+            Op::DropConstraint { .. } => Support::core(
+                DialectSupport::new(
+                    supported(RenderMode::Offline),
+                    supported(RenderMode::LiveResolved),
+                    supported(RenderMode::Offline),
+                ),
+                &[],
+            ),
+            Op::Insert { on_conflict, .. } => {
+                let dialects = if on_conflict.is_some() {
+                    pg_only("insert onConflict is PostgreSQL-only in the current engine")
+                } else {
+                    all_offline
+                };
+                Support::core(dialects, INSERT_FEATURES)
+            }
+            Op::Update { .. } => Support::core(all_offline, &[]),
+            Op::Delete { .. } => Support::core(all_offline, &[]),
+            Op::Backfill { .. } => {
+                Support::core(DialectSupport::all_supported(RenderMode::LiveResolved), &[])
+            }
+            Op::CreateView {
+                query,
+                replace,
+                materialized,
+                ..
+            } => {
+                let materialized = materialized.unwrap_or(false);
+                let raw = matches!(query, ViewQuery::Raw { .. });
+                if materialized && replace.unwrap_or(false) {
+                    let caps = if raw {
+                        CAP_RAW_MATERIALIZED_VIEW
+                    } else {
+                        CAP_MATERIALIZED_VIEW
+                    };
+                    Support::vendor(
+                        caps,
+                        all_unsupported(
+                            "createView replace+materialized is unsupported in the current engine",
+                        ),
+                        CREATE_VIEW_FEATURES,
+                    )
+                } else if materialized {
+                    let caps = if raw {
+                        CAP_RAW_MATERIALIZED_VIEW
+                    } else {
+                        CAP_MATERIALIZED_VIEW
+                    };
+                    Support::vendor(
+                        caps,
+                        pg_only("materialized views are PostgreSQL-only in the current engine"),
+                        CREATE_VIEW_FEATURES,
+                    )
+                } else {
+                    Support::core(all_offline, CREATE_VIEW_FEATURES)
+                }
+            }
+            Op::DropView { materialized, .. } => {
+                if materialized.unwrap_or(false) {
+                    Support::vendor(
+                        CAP_MATERIALIZED_VIEW,
+                        pg_only("materialized views are PostgreSQL-only in the current engine"),
+                        CREATE_VIEW_FEATURES,
+                    )
+                } else {
+                    Support::core(all_offline, &[])
+                }
+            }
+            Op::CreateEnum { .. } => Support::core(all_offline, &[]),
+            Op::DropEnum { .. } => Support::core(all_offline, &[]),
+            Op::CreateDomain { .. } => Support::core(all_offline, &[]),
+            Op::DropDomain { .. } => Support::core(all_offline, &[]),
+            Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
+                Support::core(
+                    pg_only("standalone sequence objects are PostgreSQL-only in the current engine"),
+                    SEQUENCE_FEATURES,
+                )
+            }
+            Op::CreateSchema { .. } | Op::DropSchema { .. } => Support::vendor(
+                CAP_SCHEMA,
+                pg_only("schema vendor primitives are PostgreSQL-only"),
+                &[],
+            ),
+            Op::CreateExtension { .. } | Op::DropExtension { .. } => Support::vendor(
+                CAP_EXTENSION,
+                pg_only("extension vendor primitives are PostgreSQL-only"),
+                &[],
+            ),
+            Op::CreateRole {
+                superuser,
+                if_not_exists,
+                ..
+            } => {
+                let dialects = if superuser.unwrap_or(false) && if_not_exists.unwrap_or(false) {
+                    all_unsupported(
+                        "createRole cannot combine superuser:true with ifNotExists:true",
+                    )
+                } else {
+                    pg_only("role vendor primitives are PostgreSQL-only")
+                };
+                Support::vendor(CAP_ROLE, dialects, &[])
+            }
+            Op::AlterRole { .. } | Op::DropRole { .. } | Op::DropOwnedBy { .. } => {
+                Support::vendor(
+                    CAP_ROLE,
+                    pg_only("role vendor primitives are PostgreSQL-only"),
+                    &[],
+                )
+            }
+            Op::Grant { .. } | Op::Revoke { .. } => Support::vendor(
+                CAP_GRANT,
+                pg_only("grant vendor primitives are PostgreSQL-only"),
+                &[],
+            ),
+            Op::EnableRls { .. }
+            | Op::ForceRls { .. }
+            | Op::DisableRls { .. }
+            | Op::NoForceRls { .. } => Support::vendor(
+                CAP_RLS,
+                pg_only("RLS vendor primitives are PostgreSQL-only"),
+                &[],
+            ),
+            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => Support::vendor(
+                CAP_POLICY,
+                pg_only("policy vendor primitives are PostgreSQL-only"),
+                &[],
+            ),
+            Op::CreateTrigger {
+                timing,
+                events,
+                for_each,
+                action,
+                when,
+                ..
+            } => {
+                let pg = match action {
+                    TriggerAction::Body { .. } => unsupported(
+                        CODE_UNSUPPORTED,
+                        "Postgres triggers must execute a named trigger function",
+                    ),
+                    TriggerAction::ExecuteFunction { .. } => supported(RenderMode::Offline),
+                };
+                let sqlite = if matches!(action, TriggerAction::ExecuteFunction { .. }) {
+                    unsupported(
+                        CODE_UNSUPPORTED,
+                        "SQLite has no CREATE TRIGGER EXECUTE FUNCTION form",
+                    )
+                } else if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
+                    unsupported(CODE_UNSUPPORTED, "SQLite has no TRUNCATE trigger event")
+                } else if matches!(for_each, ForEach::Statement) {
+                    unsupported(CODE_UNSUPPORTED, "SQLite triggers are row-level only")
+                } else {
+                    supported(RenderMode::Offline)
+                };
+                let mysql = if matches!(action, TriggerAction::ExecuteFunction { .. }) {
+                    unsupported(
+                        CODE_UNSUPPORTED,
+                        "MySQL has no CREATE TRIGGER EXECUTE FUNCTION form",
+                    )
+                } else if events.len() != 1 {
+                    unsupported(
+                        CODE_UNSUPPORTED,
+                        "MySQL CREATE TRIGGER accepts exactly one trigger event",
+                    )
+                } else if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
+                    unsupported(CODE_UNSUPPORTED, "MySQL has no TRUNCATE trigger event")
+                } else if matches!(timing, TriggerTiming::InsteadOf) {
+                    unsupported(CODE_UNSUPPORTED, "MySQL does not support INSTEAD OF triggers")
+                } else if matches!(for_each, ForEach::Statement) {
+                    unsupported(CODE_UNSUPPORTED, "MySQL triggers are row-level only")
+                } else if when.is_some() {
+                    unsupported(CODE_UNSUPPORTED, "MySQL triggers do not support WHEN predicates")
+                } else if let TriggerAction::Body { statements } = action {
+                    if statements.iter().any(|stmt| {
+                        matches!(
+                            stmt,
+                            TriggerStmt::Raise {
+                                level: RaiseLevel::Ignore,
+                                ..
+                            }
+                        )
+                    }) {
+                        unsupported(CODE_UNSUPPORTED, "MySQL cannot render RAISE IGNORE")
+                    } else {
+                        supported(RenderMode::Offline)
+                    }
+                } else {
+                    unsupported(CODE_UNSUPPORTED, "unreachable trigger action")
+                };
+                Support::core(
+                    DialectSupport::new(pg, sqlite, mysql),
+                    CREATE_TRIGGER_FEATURES,
+                )
+            }
+            Op::DropTrigger { .. } => Support::core(all_offline, &[]),
+            Op::CreateFunction { .. } | Op::DropFunction { .. } => Support::vendor(
+                CAP_FUNCTION,
+                pg_only("function vendor primitives are PostgreSQL-only"),
+                &[],
+            ),
+            Op::PgRaw { binds, .. } => {
+                let dialects = if binds.is_empty() {
+                    pg_only("pg.sql raw statements are PostgreSQL-only")
+                } else {
+                    DialectSupport::new(
+                        unsupported(
+                            CODE_UNSUPPORTED,
+                            "PgRaw.binds are rejected until a parameterized raw executor path exists",
+                        ),
+                        unsupported(CODE_UNSUPPORTED, "pg.sql raw statements are PostgreSQL-only"),
+                        unsupported(CODE_UNSUPPORTED, "pg.sql raw statements are PostgreSQL-only"),
+                    )
+                };
+                Support::vendor(CAP_RAW_SQL, dialects, PG_RAW_FEATURES)
+            }
+        }
+    }
+
     /// All VENDOR capabilities this op requires. Most ops require at most one; a
     /// raw materialized view requires both the raw-view-body and materialized-view
     /// capabilities.
