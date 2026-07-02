@@ -30,6 +30,10 @@ const DEVICE_CODE_BYTES: usize = 32;
 const DEVICE_TTL_SECS: i64 = 600;
 const INITIAL_POLL_INTERVAL_SECS: i32 = 5;
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+const USER_CODE_GROUP_LEN: usize = 4;
+const USER_CODE_GROUPS: usize = 3;
+const USER_CODE_CHAR_LEN: usize = USER_CODE_GROUP_LEN * USER_CODE_GROUPS;
+const USER_CODE_FORMATTED_LEN: usize = USER_CODE_CHAR_LEN + (USER_CODE_GROUPS - 1);
 const USER_CODE_ATTEMPTS: usize = 8;
 const OP_DEVICE_PROVIDER: &str = "op";
 const DEFAULT_DEVICE_SCOPE: &str = "openid";
@@ -499,26 +503,63 @@ fn generate_device_code() -> String {
 
 fn generate_user_code() -> String {
     let mut rng = rand::thread_rng();
-    let mut code = [0_u8; 9];
-    for ch in &mut code[..4] {
-        let idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
-        *ch = USER_CODE_ALPHABET[idx];
+    let mut code = String::with_capacity(USER_CODE_FORMATTED_LEN);
+    for idx in 0..USER_CODE_CHAR_LEN {
+        if idx > 0 && idx % USER_CODE_GROUP_LEN == 0 {
+            code.push('-');
+        }
+        let alphabet_idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
+        code.push(char::from(USER_CODE_ALPHABET[alphabet_idx]));
     }
-    code[4] = b'-';
-    for ch in &mut code[5..] {
-        let idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
-        *ch = USER_CODE_ALPHABET[idx];
-    }
-    String::from_utf8(code.to_vec()).expect("user code alphabet is ascii")
+    code
 }
 
 fn normalize_user_code(value: &str) -> String {
-    value
+    let chars: String = value
         .trim()
         .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '-')
         .map(|ch| ch.to_ascii_uppercase())
-        .collect()
+        .collect();
+
+    if chars.len() != USER_CODE_CHAR_LEN
+        || !chars
+            .as_bytes()
+            .iter()
+            .all(|ch| USER_CODE_ALPHABET.contains(ch))
+    {
+        return value
+            .trim()
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .map(|ch| ch.to_ascii_uppercase())
+            .collect();
+    }
+
+    let mut normalized = String::with_capacity(USER_CODE_FORMATTED_LEN);
+    for (idx, ch) in chars.chars().enumerate() {
+        if idx > 0 && idx % USER_CODE_GROUP_LEN == 0 {
+            normalized.push('-');
+        }
+        normalized.push(ch);
+    }
+    normalized
+}
+
+pub(crate) fn valid_user_code(value: &str) -> bool {
+    let code = normalize_user_code(value);
+    let bytes = code.as_bytes();
+    bytes.len() == USER_CODE_FORMATTED_LEN
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(idx, ch)| {
+                if (idx + 1) % (USER_CODE_GROUP_LEN + 1) == 0 {
+                    *ch == b'-'
+                } else {
+                    USER_CODE_ALPHABET.contains(ch)
+                }
+            })
 }
 
 fn sha256_hex(value: &str) -> String {

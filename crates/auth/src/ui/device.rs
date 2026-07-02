@@ -16,12 +16,11 @@ use crate::csrf;
 use crate::headers;
 use crate::identity::eligibility;
 use crate::oidc::device_token::{self, DeviceApproval};
+use crate::ratelimit::{self, Bucket, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{DevicePage, DeviceScopeView, SupabaseDevicePage};
 use zeroship_authz::Scope;
-
-const MAX_USER_CODE_BYTES: usize = 32;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceForm {
@@ -56,7 +55,7 @@ pub async fn get(
     if user_code.is_empty() {
         return render_form("", None, StatusCode::OK, cfg.insecure_dev, None);
     }
-    if !valid_user_code(user_code) {
+    if !device_token::valid_user_code(user_code) {
         return render_form(
             user_code,
             Some("invalid or expired code"),
@@ -140,7 +139,7 @@ pub async fn post(
             None,
         );
     }
-    if !valid_user_code(user_code) {
+    if !device_token::valid_user_code(user_code) {
         return render_form(
             "",
             Some("invalid or expired code"),
@@ -149,6 +148,8 @@ pub async fn post(
             None,
         );
     }
+
+    let session = current_session(&req, cfg.as_ref(), db.as_ref()).await;
 
     let pending = match device_token::native_user_code_details(db.as_ref(), user_code).await {
         Ok(details) => details,
@@ -164,6 +165,12 @@ pub async fn post(
         }
     };
     let Some(pending) = pending else {
+        if let Some(resp) =
+            rate_limit_failed_user_code_attempt(db.as_ref(), &req, session.as_ref(), insecure_dev)
+                .await
+        {
+            return resp;
+        }
         return render_form(
             user_code,
             Some("invalid or expired code"),
@@ -173,7 +180,7 @@ pub async fn post(
         );
     };
 
-    let Some(session) = current_session(&req, cfg.as_ref(), db.as_ref()).await else {
+    let Some(session) = session else {
         return redirect("/login");
     };
 
@@ -220,13 +227,21 @@ pub async fn post(
             emit_device_grant_audit(db.as_ref(), &req, &session).await;
             render_device_approved()
         }
-        Ok(DeviceApproval::NotFound) => render_form(
-            user_code,
-            Some("invalid or expired code"),
-            StatusCode::BAD_REQUEST,
-            insecure_dev,
-            None,
-        ),
+        Ok(DeviceApproval::NotFound) => {
+            if let Some(resp) =
+                rate_limit_failed_user_code_attempt(db.as_ref(), &req, Some(&session), insecure_dev)
+                    .await
+            {
+                return resp;
+            }
+            render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+                insecure_dev,
+                None,
+            )
+        }
         Err(e) => {
             tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
             render_form(
@@ -259,6 +274,59 @@ async fn emit_device_grant_audit(
         },
     )
     .await;
+}
+
+async fn rate_limit_failed_user_code_attempt(
+    db: &compio_postgres::Client,
+    req: &HttpRequest,
+    session: Option<&sessions::Session>,
+    insecure_dev: bool,
+) -> Option<HttpResponse> {
+    let ip = headers::client_ip(req);
+    if let Some(session) = session {
+        let key = format!("device:user_ip:{}:{ip}", session.user_id);
+        if let Some(resp) = consume_failed_attempt_bucket(
+            db,
+            &key,
+            Bucket::LOGIN_EIP,
+            insecure_dev,
+        )
+        .await
+        {
+            return Some(resp);
+        }
+    }
+
+    let key = format!("device:ip:{ip}");
+    consume_failed_attempt_bucket(db, &key, Bucket::LOGIN_IP, insecure_dev).await
+}
+
+async fn consume_failed_attempt_bucket(
+    db: &compio_postgres::Client,
+    key: &str,
+    bucket: Bucket,
+    insecure_dev: bool,
+) -> Option<HttpResponse> {
+    match ratelimit::consume(db, key, bucket).await {
+        Ok(RateLimitDecision::Allowed) => None,
+        Ok(RateLimitDecision::Throttled(_)) => Some(render_form(
+            "",
+            Some("too many attempts, try again later"),
+            StatusCode::TOO_MANY_REQUESTS,
+            insecure_dev,
+            None,
+        )),
+        Err(e) => {
+            tracing::error!(error = %e, bucket = %key, "device user-code rate-limit consume failed");
+            Some(render_form(
+                "",
+                Some("try again later"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                insecure_dev,
+                None,
+            ))
+        }
+    }
 }
 
 /// Double-submit CSRF check for the device-confirmation POST. Mirrors the
@@ -470,20 +538,18 @@ fn csp_source_origin(raw_url: &str) -> Option<String> {
     Some(format!("{}://{}{}", parsed.scheme(), host, port))
 }
 
-fn valid_user_code(user_code: &str) -> bool {
-    !user_code.is_empty() && user_code.len() <= MAX_USER_CODE_BYTES
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn device_user_code_is_bounded() {
-        assert!(valid_user_code("ABCD-EFGH"));
-        assert!(valid_user_code(&"A".repeat(32)));
-        assert!(!valid_user_code(""));
-        assert!(!valid_user_code(&"A".repeat(33)));
+    fn device_user_code_format_is_bounded() {
+        assert!(device_token::valid_user_code("BCDF-GHJK-LMNP"));
+        assert!(device_token::valid_user_code("bcdf ghjk lmnp"));
+        assert!(!device_token::valid_user_code("ABCD-EFGH"));
+        assert!(!device_token::valid_user_code(&"A".repeat(32)));
+        assert!(!device_token::valid_user_code(""));
+        assert!(!device_token::valid_user_code(&"A".repeat(33)));
     }
 
     #[test]
@@ -491,7 +557,7 @@ mod tests {
         let supabase_auth_url = "https://project.supabase.test/auth/v1";
         let control_approve_url = "https://control.zeroship.test/api/device/approve";
         let body = SupabaseDevicePage {
-            user_code: "BCDF-GHJK",
+            user_code: "BCDF-GHJK-LMNP",
             error: None,
             csrf: "csrf-token",
             script_nonce: "script-nonce",
@@ -502,7 +568,7 @@ mod tests {
         .render()
         .expect("render supabase device template");
         assert!(body.contains("Authorize device"), "{body}");
-        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK""#), "{body}");
+        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK-LMNP""#), "{body}");
         assert!(body.contains(r#"name="csrf""#), "{body}");
         assert!(body.contains(r#"value="csrf-token""#), "{body}");
         assert!(body.contains("https://project.supabase.test/auth/v1"), "{body}");
@@ -561,7 +627,7 @@ mod tests {
             label: "Read app metadata".to_string(),
         }];
         let body = DevicePage {
-            user_code: "BCDF-GHJK",
+            user_code: "BCDF-GHJK-LMNP",
             error: None,
             csrf: "csrf-token",
             confirm: true,
@@ -576,6 +642,6 @@ mod tests {
         assert!(body.contains("Read app metadata"), "{body}");
         assert!(body.contains("apps:read"), "{body}");
         assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");
-        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK""#), "{body}");
+        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK-LMNP""#), "{body}");
     }
 }
