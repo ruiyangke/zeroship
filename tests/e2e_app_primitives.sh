@@ -22,10 +22,10 @@
 #
 # Known findings this harness SURFACES (see the report at the end):
 #   * SEC-5 fail-closed default — db-todos RPC procedures declare no `auth`,
-#     so the gateway defaults them to `User` ⇒ 401 without a real OIDC/Hydra
-#     session. There is NO `--dev-insecure` shortcut to mint an app session,
+#     so the gateway defaults them to `User` ⇒ 401 without a real OIDC (native
+#     OP) session. There is NO `--dev-insecure` shortcut to mint an app session,
 #     so authenticated env.db RPC through the gateway is not headlessly
-#     reachable without standing up Hydra. (gateway-auth gap)
+#     reachable without standing up the native OP. (gateway-auth gap)
 #   * SCHEMA-INIT bug — any app exporting a declared schema (every env.db app)
 #     fails module init on the production worker: the runtime's embedded
 #     runtime-entry does `await import("@zeroship/bootstrap/install-schema")`,
@@ -273,7 +273,7 @@ GW_BODY="$(echo "$GW_RESP" | head -1)"
 if [ "$GW_CODE" = "200" ] && echo "$GW_BODY" | grep -q '"json"'; then
   pass "db-todos users.public via gateway returned a row"
 elif [ "$GW_CODE" = "401" ]; then
-  known "gateway gates db-todos RPC at 401 (SEC-5 fail-closed default; no headless app session without Hydra). body=$GW_BODY"
+  known "gateway gates db-todos RPC at 401 (SEC-5 fail-closed default; no headless app session without the native OP). body=$GW_BODY"
 else
   known "db-todos RPC via gateway: HTTP $GW_CODE body=$GW_BODY"
 fi
