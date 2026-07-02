@@ -96,8 +96,8 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("accounts").unique("accounts_external_uq").add({ columns: ["external_id"] });
     table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
     table("accounts").constraint("accounts_legacy_chk").drop();
-    table("accounts").column("balance").alter({ type: t.numeric(14, 2) });
-    table("accounts").column("profile").alter({ nullable: false });
+    table("accounts").column("balance").setType({ to: t.numeric(14, 2) });
+    table("accounts").column("profile").setNotNull();
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
     table("accounts").index("accounts_active_email_idx").add({
       columns: ["email"],
@@ -105,7 +105,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
       where: (c) => c("active").isTrue(),
     });
     table("accounts").column("nickname").add({ type: t.text() });
-    table("accounts").column("nickname").alter({ nullable: false });
+    table("accounts").column("nickname").setNotNull();
   });
   const g = await golden("fluent_ddl");
   assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));

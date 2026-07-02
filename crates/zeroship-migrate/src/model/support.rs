@@ -395,7 +395,7 @@ pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[FeatureSuppor
     Feature::AlterColumnUsing,
     DialectSupport::unsupported_all(
         UNSUPPORTED,
-        "alterColumnType.using expression rendering is deferred in the current engine",
+        "setColumnType.using expression rendering is deferred in the current engine",
     ),
 )];
 

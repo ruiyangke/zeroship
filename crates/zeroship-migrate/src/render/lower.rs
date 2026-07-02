@@ -428,7 +428,7 @@ pub enum IrLowerError {
         reason: &'static str,
     },
     /// A DDL op whose body carries a closed-AST [`crate::model::expr::Expr`] (a `CHECK`
-    /// constraint predicate, or an `alterColumnType` `using` cast) that the
+    /// constraint predicate, or an `setColumnType` `using` cast) that the
     /// Wave-C expression→SQL renderer must materialize. The op family lowers; the
     /// Expr-bearing variant waits on that renderer (the same wave the DML
     /// executors wait on — there is no `Expr`→SQL path yet). Carries the slot tag.
@@ -1893,26 +1893,32 @@ impl IrAuthor {
                 }
                 vec![decl.lower_drop_index(table.as_deref(), &idx)]
             }
-            Op::AlterColumnType { table, column, ty, using, .. } => {
+            Op::SetColumnType {
+                table,
+                column,
+                to_type,
+                using,
+                ..
+            } => {
                 // SQLite has NO `ALTER COLUMN` — a type change is reconciled by the
                 // differ's 12-step table REBUILD, which needs the full live table
                 // structure (not available in this pure-render lower). So stand-alone
-                // alterColumnType lowers on PG only; on SQLite it routes through the
+                // setColumnType lowers on PG only; on SQLite it routes through the
                 // declarative diff rebuild seam (fail-closed here).
-                self.require_capability_for(Capability::NativeAlterColumn, "alterColumnType")?;
+                self.require_capability_for(Capability::NativeAlterColumn, "setColumnType")?;
                 // A `using` cast is a closed-AST `Expr`; rendering an `Expr` to SQL is
                 // the Wave-C expression renderer (the same wave the DML executors wait
                 // on). Until it lands, a cast-bearing type change cannot lower.
                 if using.is_some() {
-                    return Err(IrLowerError::ExprRenderDeferred("alterColumnType.using"));
+                    return Err(IrLowerError::ExprRenderDeferred("setColumnType.using"));
                 }
                 // Build the desired `ColumnSnapshot` via the SHARED builder (a
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled (§6.5).
                 let mut col =
-                    self.add_column_snapshot(table, column, ty, None, None, None, None, None, None)?;
-                if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
-                    match ty {
+                    self.add_column_snapshot(table, column, to_type, None, None, None, None, None, None)?;
+                if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
+                    match to_type {
                         ColType::Enum { name }
                             if !self.dialect.supports(Capability::MaterializedEnumType) =>
                         {
@@ -1934,7 +1940,7 @@ impl IrAuthor {
                         _ => {
                             let source_col = IrColumn {
                                 name: column.clone(),
-                                ty: ty.clone(),
+                                ty: to_type.clone(),
                                 nullable: None,
                                 default: None,
                                 unique: None,
@@ -1953,7 +1959,7 @@ impl IrAuthor {
                         }
                     }
                 }
-                // **PR10 Part B** — alterColumnType ifExists: the SOURCE column must
+                // **PR10 Part B** — setColumnType ifExists: the SOURCE column must
                 // EXIST (presence-only — an alter intentionally CHANGES the shape, so
                 // there is nothing to shape-verify).
                 if let Some(g) = guard {
@@ -1966,13 +1972,10 @@ impl IrAuthor {
                 }
                 vec![decl.lower_alter_column_type(table, &col)]
             }
-            Op::AlterColumnNullability { table, column, nullable, .. } => {
-                // Same SQLite rebuild constraint as alterColumnType.
-                self.require_capability_for(
-                    Capability::NativeAlterColumn,
-                    "alterColumnNullability",
-                )?;
-                // **PR10 Part B** — alterColumnNullability ifExists: presence-only.
+            Op::SetColumnNotNull { table, column, .. } => {
+                // Same SQLite rebuild constraint as setColumnType.
+                self.require_capability_for(Capability::NativeAlterColumn, "setColumnNotNull")?;
+                // **PR10 Part B** — setColumnNotNull ifExists: presence-only.
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
                         schema: eff_schema.clone(),
@@ -1981,7 +1984,52 @@ impl IrAuthor {
                         direction: g.into(),
                     });
                 }
-                vec![decl.lower_alter_column_nullability(table, column, *nullable)]
+                vec![decl.lower_alter_column_nullability(table, column, false)]
+            }
+            Op::DropColumnNotNull { table, column, .. } => {
+                // Same SQLite rebuild constraint as setColumnType.
+                self.require_capability_for(Capability::NativeAlterColumn, "dropColumnNotNull")?;
+                if let Some(g) = guard {
+                    probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                        direction: g.into(),
+                    });
+                }
+                vec![decl.lower_alter_column_nullability(table, column, true)]
+            }
+            Op::SetColumnDefault { table, column, value, .. } => {
+                // Same SQLite rebuild constraint as setColumnType.
+                self.require_capability_for(Capability::NativeAlterColumn, "setColumnDefault")?;
+                if matches!(value, IrDefault::Fn { .. }) {
+                    return Err(IrLowerError::ExprRenderDeferred(
+                        "setColumnDefault value (synth now/genRandomUuid)",
+                    ));
+                }
+                let default_sql = render_ir_default(value, self.dialect)?;
+                if let Some(g) = guard {
+                    probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                        direction: g.into(),
+                    });
+                }
+                vec![decl.lower_set_column_default(table, column, &default_sql)]
+            }
+            Op::DropColumnDefault { table, column, .. } => {
+                // Same SQLite rebuild constraint as setColumnType.
+                self.require_capability_for(Capability::NativeAlterColumn, "dropColumnDefault")?;
+                if let Some(g) = guard {
+                    probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        column: column.clone(),
+                        direction: g.into(),
+                    });
+                }
+                vec![decl.lower_drop_column_default(table, column)]
             }
             Op::RenameColumn { table, from, to, ty, .. } => {
                 // §2.6.1 — ONE online-rename plan step, dialect-chosen at lower
@@ -2884,7 +2932,7 @@ impl IrAuthor {
     /// built by the shared kernel, never re-spelled here (§6.5).
     ///
     /// Returns ONLY the main column (the callers that just need the column's
-    /// `data_type` — `alterColumnType`, the rename type-assertion). The masked-sibling
+    /// `data_type` — `setColumnType`, the rename type-assertion). The masked-sibling
     /// fidelity belongs to the ADD path; use [`Self::add_column_snapshot_with_sibling`]
     /// there (#174).
     #[allow(clippy::too_many_arguments)]
@@ -4343,8 +4391,11 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::RenameTable { .. } => "renameTable",
         Op::DropColumn { .. } => "dropColumn",
         Op::DropIndex { .. } => "dropIndex",
-        Op::AlterColumnType { .. } => "alterColumnType",
-        Op::AlterColumnNullability { .. } => "alterColumnNullability",
+        Op::SetColumnType { .. } => "setColumnType",
+        Op::SetColumnNotNull { .. } => "setColumnNotNull",
+        Op::DropColumnNotNull { .. } => "dropColumnNotNull",
+        Op::SetColumnDefault { .. } => "setColumnDefault",
+        Op::DropColumnDefault { .. } => "dropColumnDefault",
         Op::RenameColumn { .. } => "renameColumn",
         Op::AddConstraint { .. } => "addConstraint",
         Op::DropConstraint { .. } => "dropConstraint",
@@ -5974,6 +6025,103 @@ mod tests {
         author
             .lower(&ir_lit, &LiveSchema::default())
             .expect("a literal default must still lower");
+    }
+
+    #[test]
+    fn set_column_type_using_is_validate_and_lower_refused() {
+        use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::SetColumnType {
+                table: "events".into(),
+                column: "kind".into(),
+                to_type: ColType::Text,
+                using: Some(Expr::ColRef { name: "kind".into() }),
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+
+        let err = validate_ir(&ir, Dialect::Postgres, &[])
+            .expect_err("setColumnType.using must be refused before render");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("setColumnType.using"));
+
+        let lower_err = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&ir, &LiveSchema::default())
+            .expect_err("direct lower keeps the defensive ExprRenderDeferred boundary");
+        assert!(
+            matches!(lower_err, IrLowerError::ExprRenderDeferred(slot) if slot == "setColumnType.using"),
+            "expected ExprRenderDeferred for setColumnType.using, got {lower_err:?}"
+        );
+    }
+
+    #[test]
+    fn set_column_default_literal_renders_and_synth_validates_refused() {
+        use crate::model::ir::{IrScalar, SynthDefaultFn};
+        use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+
+        let literal_ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::SetColumnDefault {
+                table: "events".into(),
+                column: "kind".into(),
+                value: IrDefault::Literal { value: IrScalar::Str("new".into()) },
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        validate_ir(&literal_ir, Dialect::Postgres, &[]).expect("literal setColumnDefault validates");
+        let migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&literal_ir, &LiveSchema::default())
+            .expect("literal setColumnDefault lowers");
+        assert_eq!(migrations.len(), 1);
+        assert!(
+            migrations[0]
+                .up
+                .contains("ALTER COLUMN \"kind\" SET DEFAULT 'new'"),
+            "literal default must render as SET DEFAULT, got {}",
+            migrations[0].up
+        );
+
+        let synth_ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::SetColumnDefault {
+                table: "events".into(),
+                column: "at".into(),
+                value: IrDefault::Fn { r#fn: SynthDefaultFn::Now },
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let err = validate_ir(&synth_ir, Dialect::Postgres, &[])
+            .expect_err("synth setColumnDefault must be validate-refused");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("setColumnDefault synth defaults"));
     }
 
     // MED-1 (code-critic, this fix): the destructive/approval gate for a UNIQUE-index

@@ -206,10 +206,10 @@ fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
         .lower(
             &ir(vec![
                 create_enum(),
-                Op::AlterColumnType {
+                Op::SetColumnType {
                     table: "subscriptions".to_string(),
                     column: "tier".to_string(),
-                    ty: ColType::Enum {
+                    to_type: ColType::Enum {
                         name: "plan_tier".to_string(),
                     },
                     using: None,

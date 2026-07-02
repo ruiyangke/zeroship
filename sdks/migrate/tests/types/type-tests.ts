@@ -44,7 +44,7 @@ export function antiRotMigration(): void {
   });
   table("nonexistent_table").column("column_that_was_dropped").add({ type: t.text() });
   table("nonexistent_table").column("column_that_was_dropped").drop();
-  table("nonexistent_table").column("legacy_col").alter({ nullable: false });
+  table("nonexistent_table").column("legacy_col").setNotNull();
   table("nonexistent_table").foreignKey("fk").add({
     columns: ["author_id"],
     references: { table: "another_missing_table", columns: ["id"] },
@@ -225,7 +225,7 @@ export function existenceGuardsTypecheck(): void {
   table("t").create({ columns: { n: t.integer() }, ifNotExists: true });
   table("t").column("email").add({ type: t.text(), ifNotExists: true });
   table("t").column("legacy").drop({ ifExists: true });
-  table("t").column("a").alter({ type: t.bigInt() });
+  table("t").column("a").setType({ to: t.bigInt() });
   table("t").constraint("c").drop({ ifExists: true });
 }
 

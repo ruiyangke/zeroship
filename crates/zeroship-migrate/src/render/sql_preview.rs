@@ -500,8 +500,11 @@ fn op_subject(op: &Op) -> String {
         Op::SetTableOptions { table, .. } => quote_dotted(&[table]),
         Op::AddColumn { table, column, .. }
         | Op::DropColumn { table, column, .. }
-        | Op::AlterColumnType { table, column, .. }
-        | Op::AlterColumnNullability { table, column, .. } => quote_dotted(&[table, column]),
+        | Op::SetColumnType { table, column, .. }
+        | Op::SetColumnNotNull { table, column, .. }
+        | Op::DropColumnNotNull { table, column, .. }
+        | Op::SetColumnDefault { table, column, .. }
+        | Op::DropColumnDefault { table, column, .. } => quote_dotted(&[table, column]),
         Op::CreateIndex { table, name, .. } => match name {
             Some(n) => quote_dotted(&[table, n]),
             None => quote_dotted(&[table]),

@@ -133,7 +133,7 @@ export interface IdentityOptions {
  * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.ref(target)`/`.primaryKey()`
  * /`.unique()` opt in. ONE column-type representation — every column-type
  * position (`create.columns`/`.column().add()`/`.column().rename()`/
- * `.column().alter()`) takes a `ColumnDef`.
+ * `.column().setType()`) takes a `ColumnDef`.
  *
  * **IMMUTABLE (§4):** every modifier returns a FRESH `ColumnDef` — it does NOT
  * mutate the receiver — so a hoisted type var (`const t1 = t.text().notNull()`)
@@ -333,6 +333,9 @@ export type DbSynthSymbol =
  *  the exact native function identities above are normalized to
  *  `fnSynth(now/genRandomUuid)`; all other functions are rejected. */
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
+
+/** A column default value accepted by default-bearing column terminals. */
+export type DefaultValue = ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" };
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
@@ -738,7 +741,11 @@ export interface ColumnRef {
   drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
   /** Named ⇒ no from/to swap. `type` is the column's type after rename. */
   rename(args: { to: string; type: ColumnDef; schema?: string }): TableHandle;
-  alter(args: { type?: ColumnDef; nullable?: boolean; using?: ExprFn; schema?: string }): TableHandle;
+  setType(args: { to: ColumnDef; using?: ExprFn; schema?: string }): TableHandle;
+  setNotNull(args?: { schema?: string }): TableHandle;
+  dropNotNull(args?: { schema?: string }): TableHandle;
+  setDefault(value: DefaultValue, args?: { schema?: string }): TableHandle;
+  dropDefault(args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
 

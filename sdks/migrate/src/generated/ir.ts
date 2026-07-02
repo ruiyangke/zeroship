@@ -395,8 +395,11 @@ export type Op =
       existenceGuard?: ExistenceGuard | null;
     }
   | { op: "dropIndex"; name: string; table?: string | null; unique?: boolean | null; concurrently?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "alterColumnType"; table: string; column: string; type: ColType; using?: Expr | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "alterColumnNullability"; table: string; column: string; nullable: boolean; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "setColumnType"; table: string; column: string; toType: ColType; using?: Expr | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "setColumnNotNull"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropColumnNotNull"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "setColumnDefault"; table: string; column: string; value: IrDefault; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "dropColumnDefault"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameColumn"; table: string; from: string; to: string; type: ColType; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }

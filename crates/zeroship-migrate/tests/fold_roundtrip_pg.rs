@@ -33,7 +33,7 @@
 //! `fold_add_column_emission_metadata_matches_builder_golden`), which assert the
 //! fold's emitted `default` / sentinels match `build_table_snapshot` DIRECTLY (not
 //! via this Eq-blind oracle). The fold's fail-closed refusal of an encryption-
-//! contract-changing `alterColumnType` (the apply path cannot re-stamp the
+//! contract-changing `setColumnType` (the apply path cannot re-stamp the
 //! sentinel) is likewise a `src/fold.rs` unit concern.
 //!
 //! Requires `:5440` (the `*_pg` suite convention) + `MIGRATE_REQUIRE_DB=1`; run
@@ -318,10 +318,10 @@ async fn fold_equals_introspect_pg() {
     //   to-collision error) are covered by the `fold.rs` unit tests. The oracle
     //   stays on the SINGLE-deploy ops whose live end-state the fold reproduces.
 
-    // (5) alterColumnType + alterColumnNullability (PG-only).
+    // (5) setColumnType + setColumnNotNull (PG-only).
     let alters = r#"{"ir_version":1,"name":"alters","ops":[
-        {"op":"alterColumnType","table":"users","column":"age","type":"bigInt"},
-        {"op":"alterColumnNullability","table":"users","column":"nickname","nullable":false}
+        {"op":"setColumnType","table":"users","column":"age","toType":"bigInt"},
+        {"op":"setColumnNotNull","table":"users","column":"nickname"}
     ]}"#;
     all_ops.extend(apply_doc(&conn, &cfg, alters, &full, Approval::Approved).await);
 

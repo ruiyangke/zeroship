@@ -221,7 +221,7 @@ async fn drop_column_cascades_dependent_unique_constraint() {
     teardown(&conn, &cfg).await;
 }
 
-/// ADVERSARIAL #C — interleave: addColumn, then alterColumnType + alterColumnNullability
+/// ADVERSARIAL #C — interleave: addColumn, then setColumnType + setColumnNotNull
 /// on the SAME freshly-added column, chained across docs. The headline corpus alters
 /// only original createTable columns; this chains alters onto an added column.
 #[compio::test]
@@ -249,8 +249,8 @@ async fn add_then_alter_same_column_chained() {
     all.extend(apply_doc(&conn, &cfg, add, &reg, Approval::None).await);
 
     let alter = r#"{"ir_version":1,"name":"alter","ops":[
-        {"op":"alterColumnType","table":"t","column":"n","type":"bigInt"},
-        {"op":"alterColumnNullability","table":"t","column":"n","nullable":false}
+        {"op":"setColumnType","table":"t","column":"n","toType":"bigInt"},
+        {"op":"setColumnNotNull","table":"t","column":"n"}
     ]}"#;
     all.extend(apply_doc(&conn, &cfg, alter, &reg, Approval::Approved).await);
 

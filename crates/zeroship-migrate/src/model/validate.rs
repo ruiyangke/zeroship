@@ -30,7 +30,7 @@
 //! JS side runs an optional best-effort structural hint over the SAME schemars
 //! schema. Rule (c) — `ColRef` resolution against the live target table — runs
 //! at the apply/render seam (§3.3.1.1(c) is an apply-time check): at IR load the
-//! live column set is generally unknown for the DML ops, `alterColumnType`,
+//! live column set is generally unknown for the DML ops, `setColumnType`,
 //! `addConstraint` and `createIndex`, so those positions validate
 //! [`TargetScope::structural_only`] here and the seam re-runs the walk with a
 //! resolved column set. A self-contained `createTable` DOES resolve (c) against
@@ -308,7 +308,7 @@ pub fn validate_expr(
 ///   them).
 /// - `createIndex` — each index element expression + the `where` partial-index
 ///   predicate (closed AST since the property-A fix).
-/// - `alterColumnType` — the `using` cast expression (closed AST since the
+/// - `setColumnType` — the `using` cast expression (closed AST since the
 ///   property-A fix).
 /// - `addConstraint` — a `Check` constraint `expr`.
 /// - `update` — every `set` RHS + the optional `where`.
@@ -316,7 +316,7 @@ pub fn validate_expr(
 /// - `backfill` — every `set` RHS + the optional `filter`.
 ///
 /// Ops with no expression slot (e.g. `dropTable`, `addColumn`, `insert`) walk to
-/// `Ok(())`. For the DML ops (`update`/`delete`/`backfill`) and `alterColumnType`
+/// `Ok(())`. For the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
 /// the live-schema column set is generally not known at IR-load time, so the
 /// scope is [`TargetScope::structural_only`] — the structural checks (a),(b),(d)
 /// still run; the apply/render seam (a later wave) re-runs the walk with a
@@ -414,6 +414,7 @@ pub fn validate_op_scoped(
     validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
     validate_sequence_options(op, target_dialect, op_index, ts_location)?;
     validate_function_type_refs(op, target_dialect, op_index, ts_location)?;
+    validate_column_alter_boundaries(op, target_dialect, op_index, ts_location)?;
 
     // Constraint-embedded expressions validate against the given table scope.
     let check_constraint =
@@ -527,7 +528,7 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
-        Op::AlterColumnType { table, using, .. } => {
+        Op::SetColumnType { table, using, .. } => {
             if let Some(cast) = using {
                 let scope = TargetScope::structural_only(table);
                 validate_expr(cast, target_dialect, &scope, op_index, ts_location)?;
@@ -789,7 +790,10 @@ pub fn validate_op_scoped(
         Op::DropTable { .. }
         | Op::RenameTable { .. }
         | Op::DropColumn { .. }
-        | Op::AlterColumnNullability { .. }
+        | Op::SetColumnNotNull { .. }
+        | Op::DropColumnNotNull { .. }
+        | Op::SetColumnDefault { .. }
+        | Op::DropColumnDefault { .. }
         | Op::RenameColumn { .. }
         | Op::DropConstraint { .. }
         | Op::CreateEnum { .. }
@@ -972,6 +976,40 @@ fn validate_function_type_refs(
         _ => {}
     }
     Ok(())
+}
+
+fn validate_column_alter_boundaries(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let reject = |reason: &'static str, suggested_fix: &'static str| AuthoringError {
+        code: CODE_UNSUPPORTED.to_string(),
+        kind: Some(UnsupportedKind::Expr),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: reason.to_string(),
+        suggested_fix: Some(suggested_fix.to_string()),
+    };
+
+    match op {
+        crate::model::ir::Op::SetColumnType {
+            using: Some(_), ..
+        } => Err(reject(
+            "setColumnType.using expression rendering is deferred in the current engine",
+            "omit `using` for now, or defer this type change until the expression-to-SQL renderer lands",
+        )),
+        crate::model::ir::Op::SetColumnDefault {
+            value: crate::model::ir::IrDefault::Fn { .. },
+            ..
+        } => Err(reject(
+            "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
+            "use a typed literal default for now, or set the synth default through a later renderer-enabled migration",
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn view_body_error(
@@ -1792,7 +1830,7 @@ fn validate_identity_placement(
 
 /// **Apply/render-seam ColRef resolution (rule (c), MED).** Re-run the
 /// expression-AST walk for the ops whose live-schema column set was NOT known at
-/// IR-load time — the DML ops (`update`/`delete`/`backfill`) and `alterColumnType`
+/// IR-load time — the DML ops (`update`/`delete`/`backfill`) and `setColumnType`
 /// — now that the render/apply seam HAS the live columns. For each such op whose
 /// target table appears in `live_columns`, the embedded predicates / set RHS /
 /// cast are re-validated with a **RESOLVING** [`TargetScope`], so an unresolved
@@ -1802,12 +1840,12 @@ fn validate_identity_placement(
 /// `live_columns` maps a target table → its live column names (system fields
 /// included). An op whose table is absent from the map keeps the structural-only
 /// scope (the (c) check is skipped — the caller could not resolve that table).
-/// Non-DML / non-`alterColumnType` ops are revalidated structurally (a),(b),(d)
+/// Non-DML / non-`setColumnType` ops are revalidated structurally (a),(b),(d)
 /// — harmless and keeps the walk total.
 ///
 /// This is the seam the design (`validate_ir` doc, "the apply/render seam re-runs
 /// the walk with a resolved column set to enforce (c)") names. In PR1 the DML /
-/// `alterColumnType` LOWER is still deferred (`IrAuthor::lower` returns
+/// `setColumnType` LOWER is still deferred (`IrAuthor::lower` returns
 /// `UnsupportedOp`), so this resolution is exercised as a stand-alone seam +
 /// regression; once DML lowering lands (PR6a) the apply path calls this BEFORE
 /// rendering the DML statement.
@@ -1834,7 +1872,7 @@ pub fn validate_ir_resolved(
 ///
 /// This is the seam the DML LOWER calls ([`crate::render::lower::IrAuthor::lower_dml_op`]):
 /// at lower/apply the live schema HAS been introspected, so each DML op
-/// (`update`/`delete`/`backfill`) / `alterColumnType` resolves its embedded
+/// (`update`/`delete`/`backfill`) / `setColumnType` resolves its embedded
 /// `ColRef`s against the live target-table columns BEFORE the SQL template is
 /// assembled. A `ColRef` to a column NOT on the enclosing target table (or a
 /// synthesized cross-table reference) is rejected with the structured
@@ -1845,7 +1883,7 @@ pub fn validate_ir_resolved(
 /// `live_columns` maps a target table → its live column names (system fields
 /// included). An op whose table is ABSENT from the map keeps the structural-only
 /// scope (the (c) check is skipped — the caller could not resolve that table; the
-/// (a)/(b)/(d) structural checks still run). A non-DML / non-`alterColumnType` op
+/// (a)/(b)/(d) structural checks still run). A non-DML / non-`setColumnType` op
 /// re-runs the structural [`validate_op`] (harmless; keeps the walk total).
 ///
 /// # Errors
@@ -1860,7 +1898,8 @@ pub fn validate_op_resolved(
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
     let ts = ts_location;
-    // The op's target table (for the DML / alterColumnType ops we resolve).
+    validate_column_alter_boundaries(op, target_dialect, op_index, ts)?;
+    // The op's target table (for the DML / setColumnType ops we resolve).
     let resolved_scope = |table: &str| -> Option<Vec<String>> { live_columns.get(table).cloned() };
     match op {
         Op::Update { table, set, r#where, .. } => {
@@ -1897,7 +1936,7 @@ pub fn validate_op_resolved(
                 validate_op(op, target_dialect, op_index, ts)?;
             }
         }
-        Op::AlterColumnType { table, using, .. } => {
+        Op::SetColumnType { table, using, .. } => {
             if let (Some(cols), Some(cast)) = (resolved_scope(table), using) {
                 let scope = TargetScope::new(table, &cols);
                 validate_expr(cast, target_dialect, &scope, op_index, ts)?;
@@ -1910,7 +1949,7 @@ pub fn validate_op_resolved(
         // When the target table resolves, walk every `IrValue::Expr` through a real
         // resolving `TargetScope` so a ColRef to a non-existent column is rejected
         // here, not as an opaque mid-statement DB error — symmetric with the
-        // Update/Delete/Backfill/AlterColumnType arms above.
+        // Update/Delete/Backfill/SetColumnType arms above.
         Op::Insert { table, rows, on_conflict, .. } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
@@ -3359,19 +3398,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_ir_walks_alter_column_type_using_cast() {
-        // The property-A fix made alterColumnType.using a closed Expr — the
-        // walker must reach it. A splitPart cast operand with a bad delim rejects.
-        let ir = ir_with(vec![Op::AlterColumnType {
+    fn validate_ir_refuses_set_column_type_using_until_expr_renderer_lands() {
+        let ir = ir_with(vec![Op::SetColumnType {
             table: "users".into(),
             column: "a".into(),
-            ty: ColType::Int,
+            to_type: ColType::Int,
             using: Some(split(", ", 1)),
             schema: None,
             existence_guard: None,
         }]);
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
-        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("setColumnType.using"));
         assert_eq!(err.op_index, 0);
     }
 
