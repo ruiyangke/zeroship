@@ -1,4 +1,4 @@
-//! Regression coverage for AuthzGuard's Hydra OAuth bearer branch.
+//! Regression coverage for AuthzGuard's platform OAuth bearer branch.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -14,7 +14,6 @@ use ed25519_dalek::SigningKey;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::http::StatusCode;
 use ntex::web::{self, test, HttpResponse};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
@@ -23,20 +22,15 @@ use zeroship_control::{
     StripeStore,
 };
 use zeroship_authz::{Action, Resource};
-use zeroship_core::auth_provider::{
-    AuthProvider, DualIssuerProvider, HydraProvider, LegacyAuthProvider, PlatformConfig,
-    PlatformProvider,
-};
+use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 
 #[allow(dead_code)]
 mod common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
-const LEGACY_HYDRA_ISSUER: &str = "https://hydra.zeroship.test";
 const PLATFORM_ISSUER: &str = "https://auth.zeroship.test";
 const PLATFORM_KID: &str = "platform-control-authz-kid";
 const PLATFORM_KEY_SEED: u8 = 31;
-const OAUTH_TOKEN: &str = "eyJhbGciOiJub25lIn0.eyJpc3MiOiJodHRwczovL2h5ZHJhLnplcm9zaGlwLnRlc3QifQ.";
 
 fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")
@@ -53,117 +47,13 @@ fn tmpdir(label: &str) -> PathBuf {
     path
 }
 
-#[derive(Debug, Clone)]
-struct MockMode {
-    status: u16,
-    body: Value,
-}
-
-#[derive(Debug)]
-struct MockState {
-    mode: MockMode,
-}
-
-struct MockHydra {
-    base: String,
-    shutdown: Option<mpsc::Sender<()>>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl MockHydra {
-    fn active(sub: impl ToString, scope: &str) -> Self {
-        Self::active_with_aud(sub, scope, vec!["control.zeroship.ai"])
-    }
-
-    fn active_with_aud(sub: impl ToString, scope: &str, aud: Vec<&str>) -> Self {
-        let now = unix_now_secs();
-        Self::fixed(
-            200,
-            json!({
-                "active": true,
-                "sub": sub.to_string(),
-                "scope": scope,
-                "aud": aud,
-                "client_id": "oauth-test-client",
-                "iat": now,
-                "exp": now + 3600,
-            }),
-        )
-    }
-
-    fn inactive() -> Self {
-        Self::fixed(200, json!({ "active": false }))
-    }
-
-    fn fixed(status: u16, body: Value) -> Self {
-        let state = Arc::new(MockState {
-            mode: MockMode { status, body },
-        });
-        let factory_state = state.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            ntex::rt::System::build()
-                .name("control-authz-oauth-mock")
-                .testing()
-                .build(ntex::rt::DefaultRuntime)
-                .block_on(async move {
-                    let server = web::test::server(move || {
-                        let state = factory_state.clone();
-                        async move {
-                            web::App::new().state(state).service(
-                                web::resource("/admin/oauth2/introspect")
-                                    .route(web::post().to(introspect_handler)),
-                            )
-                        }
-                    })
-                    .await;
-                    let addr = server.addr();
-                    started_tx.send(addr).expect("send mock server addr");
-                    let _ = shutdown_rx.recv();
-                    drop(server);
-                });
-        });
-        let addr = started_rx.recv().expect("mock server starts");
-        Self {
-            base: format!("http://{addr}"),
-            shutdown: Some(shutdown_tx),
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for MockHydra {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct IntrospectForm {
-    token: String,
-}
-
-async fn introspect_handler(
-    state: web::types::State<Arc<MockState>>,
-    form: web::types::Form<IntrospectForm>,
-) -> HttpResponse {
-    assert_eq!(form.token, OAUTH_TOKEN);
-    let status = StatusCode::from_u16(state.mode.status).expect("valid status");
-    HttpResponse::build(status).json(&state.mode.body)
-}
-
 struct Fixture {
     state: Arc<AppState>,
     user_id: Uuid,
     app_id: Option<Uuid>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
+    _jwks: Option<PlatformJwksMock>,
 }
 
 impl Fixture {
@@ -212,21 +102,17 @@ impl Drop for Fixture {
     }
 }
 
-async fn fixture_with_hydra(hydra: &MockHydra, label: &str, user_id: Uuid) -> Option<Fixture> {
-    fixture_with_auth_provider(
-        hydra,
-        label,
-        user_id,
-        zeroship_control::hydra_auth_provider(&hydra.base),
-    )
-    .await
+async fn fixture_with_platform(label: &str, user_id: Uuid) -> Option<Fixture> {
+    let jwks = PlatformJwksMock::start();
+    let auth_provider = platform_auth_provider(jwks.jwks_url());
+    fixture_with_auth_provider(label, user_id, auth_provider, Some(jwks)).await
 }
 
 async fn fixture_with_auth_provider(
-    hydra: &MockHydra,
     label: &str,
     user_id: Uuid,
     auth_provider: Arc<AuthProvider>,
+    jwks: Option<PlatformJwksMock>,
 ) -> Option<Fixture> {
     let Some(db_url) = db_url() else {
         eprintln!("[authz_guard_oauth_test] AUTH_DB_URL not set - skipping");
@@ -266,7 +152,6 @@ async fn fixture_with_auth_provider(
         trust_proxy: false,
         deploy_tmp_dir: deploy_tmp_dir.clone(),
         control_pg: Arc::new(control_pg_client),
-        hydra_admin_url: hydra.base.clone(),
         app_base_domain: "zeroship.localhost".to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
@@ -297,6 +182,7 @@ async fn fixture_with_auth_provider(
         app_id: None,
         blob_root,
         deploy_tmp_dir,
+        _jwks: jwks,
     })
 }
 
@@ -437,39 +323,66 @@ async fn raw_app_deploy_check(
     }
 }
 
-fn bearer() -> String {
-    format!("Bearer {OAUTH_TOKEN}")
-}
-
 fn bearer_for(token: &str) -> String {
     format!("Bearer {token}")
 }
 
-fn platform_auth_provider(jwks_url: String, hydra_admin_url: &str) -> Arc<AuthProvider> {
-    let platform = PlatformProvider::new(
+fn bearer_for_scope(subject: Uuid, scope: &str) -> String {
+    bearer_for(&platform_token(subject, scope, PLATFORM_ISSUER))
+}
+
+fn bearer_for_subject(subject: impl ToString, scope: &str) -> String {
+    bearer_for(&platform_token_subject(
+        subject,
+        scope,
+        PLATFORM_ISSUER,
+        vec!["control.zeroship.ai"],
+        "zeroship-cli",
+    ))
+}
+
+fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
+    Arc::new(AuthProvider::Platform(PlatformProvider::new(
         PlatformConfig::new(PLATFORM_ISSUER, Some(jwks_url)).expect("platform config"),
-    );
-    let legacy = LegacyAuthProvider::Hydra(HydraProvider::new_with_issuer(
-        zeroship_core::hydra::HydraIntrospector::new(hydra_admin_url),
-        LEGACY_HYDRA_ISSUER,
-    ));
-    Arc::new(AuthProvider::DualIssuer(DualIssuerProvider::new(
-        platform,
-        legacy,
     )))
 }
 
 fn platform_token(subject: Uuid, scope: &str, issuer: &str) -> String {
+    platform_token_with_client_id(subject, scope, issuer, "zeroship-cli")
+}
+
+fn platform_token_with_client_id(
+    subject: Uuid,
+    scope: &str,
+    issuer: &str,
+    client_id: &str,
+) -> String {
+    platform_token_subject(
+        subject.to_string(),
+        scope,
+        issuer,
+        vec!["control.zeroship.ai"],
+        client_id,
+    )
+}
+
+fn platform_token_subject(
+    subject: impl ToString,
+    scope: &str,
+    issuer: &str,
+    aud: Vec<&str>,
+    client_id: &str,
+) -> String {
     let now = unix_now_secs();
     let claims = json!({
         "iss": issuer,
         "sub": subject.to_string(),
-        "aud": "control.zeroship.ai",
+        "aud": aud,
         "exp": now + 3600,
         "iat": now,
         "nbf": now.saturating_sub(1),
         "jti": Uuid::new_v4().to_string(),
-        "client_id": "zeroship-cli",
+        "client_id": client_id,
         "scope": scope,
     });
     let mut header = Header::new(Algorithm::EdDSA);
@@ -563,17 +476,12 @@ async fn platform_jwks_handler(body: web::types::State<Arc<RwLock<String>>>) -> 
 }
 
 #[compio::test]
-async fn dual_issuer_accepts_platform_deploy_and_legacy_hydra_but_rejects_unknown_issuer() {
+async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read");
-    let jwks = PlatformJwksMock::start();
-    let auth_provider = platform_auth_provider(jwks.jwks_url(), &hydra.base);
-    let Some(mut fx) =
-        fixture_with_auth_provider(&hydra, "dual-issuer", user_id, auth_provider).await
-    else {
+    let Some(mut fx) = fixture_with_platform("platform-issuer", user_id).await else {
         return;
     };
-    let app_id = create_app(&mut fx, "dual-issuer").await;
+    let app_id = create_app(&mut fx, "platform-issuer").await;
     let app = init_control!(fx);
 
     let platform_deploy = platform_token(user_id, "apps:deploy", PLATFORM_ISSUER);
@@ -586,17 +494,6 @@ async fn dual_issuer_accepts_platform_deploy_and_legacy_hydra_but_rejects_unknow
     let body: Value =
         serde_json::from_slice(&test::read_body(resp).await).expect("platform body json");
     assert_eq!(body["principal_id"], user_id.to_string());
-
-    let req = test::TestRequest::get()
-        .uri("/api/apps")
-        .header("authorization", bearer())
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "legacy Hydra-shaped token must still verify during issuer migration"
-    );
 
     let unknown_issuer = platform_token(user_id, "apps:read", "https://unknown-issuer.test");
     let req = test::TestRequest::get()
@@ -612,12 +509,7 @@ async fn dual_issuer_accepts_platform_deploy_and_legacy_hydra_but_rejects_unknow
 #[compio::test]
 async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read");
-    let jwks = PlatformJwksMock::start();
-    let auth_provider = platform_auth_provider(jwks.jwks_url(), &hydra.base);
-    let Some(mut fx) =
-        fixture_with_auth_provider(&hydra, "platform-revoked", user_id, auth_provider).await
-    else {
+    let Some(mut fx) = fixture_with_platform("platform-revoked", user_id).await else {
         return;
     };
     let app_id = create_app(&mut fx, "platform-revoked").await;
@@ -628,7 +520,7 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-             VALUES ('zeroship-cli', $1, NOW()) \
+             VALUES ('zeroship-cli', $1, NOW() + INTERVAL '5 seconds') \
              ON CONFLICT (client_id, sub) DO UPDATE \
              SET revoked_after = EXCLUDED.revoked_after",
             &[&user_id.to_string()],
@@ -657,19 +549,15 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
 #[compio::test]
 async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_platform_token() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read apps:deploy");
-    let jwks = PlatformJwksMock::start();
-    let auth_provider = platform_auth_provider(jwks.jwks_url(), &hydra.base);
-    let Some(fx) =
-        fixture_with_auth_provider(&hydra, "bearer-verifier", user_id, auth_provider).await
-    else {
+    let Some(fx) = fixture_with_platform("bearer-verifier", user_id).await else {
         return;
     };
 
+    let oauth_token = platform_token(user_id, "apps:read apps:deploy", PLATFORM_ISSUER);
     let oauth = fx
         .state
         .bearer_verifier()
-        .verify_bearer(OAUTH_TOKEN, None, "direct-oauth".to_string())
+        .verify_bearer(&oauth_token, None, "direct-oauth".to_string())
         .await
         .expect("OAuth bearer verifies directly");
     assert_eq!(oauth.principal_id, user_id);
@@ -712,15 +600,17 @@ async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_plat
     assert_eq!(pat_principal.token_id, Some(token_id));
     assert!(pat_principal.token_policy.is_none());
 
-    let platform = platform_token(user_id, "apps:deploy", PLATFORM_ISSUER);
+    let revoked_client_id = "zeroship-cli-revoked";
+    let platform =
+        platform_token_with_client_id(user_id, "apps:deploy", PLATFORM_ISSUER, revoked_client_id);
     fx.state
         .control_pg
         .execute(
             "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-             VALUES ('zeroship-cli', $1, NOW()) \
+             VALUES ($2, $1, NOW() + INTERVAL '5 seconds') \
              ON CONFLICT (client_id, sub) DO UPDATE \
              SET revoked_after = EXCLUDED.revoked_after",
-            &[&user_id.to_string()],
+            &[&user_id.to_string(), &revoked_client_id],
         )
         .await
         .expect("insert direct platform token revocation marker");
@@ -742,8 +632,8 @@ async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_plat
         .state
         .control_pg
         .execute(
-            "DELETE FROM zeroship.token_revocations WHERE client_id = 'zeroship-cli' AND sub = $1",
-            &[&user_id.to_string()],
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&revoked_client_id, &user_id.to_string()],
         )
         .await;
     fx.cleanup().await;
@@ -752,8 +642,7 @@ async fn bearer_verifier_directly_accepts_pat_and_oauth_and_rejects_revoked_plat
 #[compio::test]
 async fn oauth_token_with_apps_read_can_list_apps() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read apps:deploy");
-    let Some(fx) = fixture_with_hydra(&hydra, "apps-read", user_id).await else {
+    let Some(fx) = fixture_with_platform("apps-read", user_id).await else {
         return;
     };
     let app = init_control!(fx);
@@ -761,7 +650,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:read apps:deploy"))
         .header("x-request-id", request_id.as_str())
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -808,8 +697,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
 #[compio::test]
 async fn creator_self_service_creates_and_lists_only_own_apps() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:write apps:read");
-    let Some(mut fx) = fixture_with_hydra(&hydra, "self-service", user_id).await else {
+    let Some(mut fx) = fixture_with_platform("self-service", user_id).await else {
         return;
     };
 
@@ -834,7 +722,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
     let create_name = format!("mine-{}", Uuid::new_v4().simple());
     let req = test::TestRequest::post()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:write apps:read"))
         .set_json(&json!({ "name": create_name }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -852,7 +740,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
     // 2. List — the creator sees their app, scoped to ownership.
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:write apps:read"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -915,8 +803,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
 #[compio::test]
 async fn billing_platform_role_lists_apps_fleet_wide() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read");
-    let Some(fx) = fixture_with_hydra(&hydra, "billing-fleet", user_id).await else {
+    let Some(fx) = fixture_with_platform("billing-fleet", user_id).await else {
         return;
     };
     // The staffer holds the platform `billing` role — fleet-wide `apps:read`
@@ -942,7 +829,7 @@ async fn billing_platform_role_lists_apps_fleet_wide() {
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -985,8 +872,7 @@ async fn billing_platform_role_lists_apps_fleet_wide() {
 #[compio::test]
 async fn oauth_token_without_required_scope_returns_403() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read");
-    let Some(mut fx) = fixture_with_hydra(&hydra, "missing-deploy", user_id).await else {
+    let Some(mut fx) = fixture_with_platform("missing-deploy", user_id).await else {
         return;
     };
     grant_platform_role(&fx.state, user_id, "admin").await;
@@ -995,7 +881,7 @@ async fn oauth_token_without_required_scope_returns_403() {
 
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -1004,23 +890,24 @@ async fn oauth_token_without_required_scope_returns_403() {
 }
 
 #[compio::test]
-async fn inactive_oauth_token_returns_401() {
+async fn invalid_oauth_token_returns_401() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::inactive();
-    let Some(fx) = fixture_with_hydra(&hydra, "inactive", user_id).await else {
+    let Some(fx) = fixture_with_platform("invalid-token", user_id).await else {
         return;
     };
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", "Bearer not-a-jwt")
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let body: Value =
-        serde_json::from_slice(&test::read_body(resp).await).expect("inactive token json");
-    assert_eq!(body["error"], "inactive_token");
+    let body = test::read_body(resp).await;
+    assert!(
+        !body.is_empty(),
+        "invalid platform bearer should return a non-empty 401 response"
+    );
 
     fx.cleanup().await;
 }
@@ -1028,15 +915,21 @@ async fn inactive_oauth_token_returns_401() {
 #[compio::test]
 async fn oauth_token_wrong_audience_returns_401() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active_with_aud(user_id, "apps:read", vec!["gateway"]);
-    let Some(fx) = fixture_with_hydra(&hydra, "wrong-audience", user_id).await else {
+    let Some(fx) = fixture_with_platform("wrong-audience", user_id).await else {
         return;
     };
     let app = init_control!(fx);
 
+    let token = platform_token_subject(
+        user_id,
+        "apps:read",
+        PLATFORM_ISSUER,
+        vec!["gateway"],
+        "zeroship-cli",
+    );
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for(&token))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1047,15 +940,14 @@ async fn oauth_token_wrong_audience_returns_401() {
 #[compio::test]
 async fn invalid_oauth_sub_returns_401() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active("not-a-uuid", "apps:read");
-    let Some(fx) = fixture_with_hydra(&hydra, "invalid-sub", user_id).await else {
+    let Some(fx) = fixture_with_platform("invalid-sub", user_id).await else {
         return;
     };
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_subject("not-a-uuid", "apps:read"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1066,15 +958,14 @@ async fn invalid_oauth_sub_returns_401() {
 #[compio::test]
 async fn unknown_scope_returns_401_not_silently_dropped() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read bogus:scope");
-    let Some(fx) = fixture_with_hydra(&hydra, "unknown-scope", user_id).await else {
+    let Some(fx) = fixture_with_platform("unknown-scope", user_id).await else {
         return;
     };
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:read bogus:scope"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1085,15 +976,14 @@ async fn unknown_scope_returns_401_not_silently_dropped() {
 #[compio::test]
 async fn invalid_app_resource_id_returns_400_before_cedar() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read");
-    let Some(fx) = fixture_with_hydra(&hydra, "invalid-resource-id", user_id).await else {
+    let Some(fx) = fixture_with_platform("invalid-resource-id", user_id).await else {
         return;
     };
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/raw-app/app%22%3B%20permit%20%28principal%2C%20action%2C%20resource%29%3B")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -1104,8 +994,7 @@ async fn invalid_app_resource_id_returns_400_before_cedar() {
 #[compio::test]
 async fn oauth_token_subset_of_user_two_call_enforcement() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:read");
-    let Some(mut fx) = fixture_with_hydra(&hydra, "token-subset", user_id).await else {
+    let Some(mut fx) = fixture_with_platform("token-subset", user_id).await else {
         return;
     };
     grant_platform_role(&fx.state, user_id, "admin").await;
@@ -1114,14 +1003,14 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     let req = test::TestRequest::delete()
         .uri(&format!("/api/apps/{app_id}"))
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:read"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -1132,8 +1021,7 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
 #[compio::test]
 async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
     let user_id = Uuid::new_v4();
-    let hydra = MockHydra::active(user_id, "apps:delete");
-    let Some(mut fx) = fixture_with_hydra(&hydra, "user-subset", user_id).await else {
+    let Some(mut fx) = fixture_with_platform("user-subset", user_id).await else {
         return;
     };
     // The app is owned by a DIFFERENT principal; `user_id` is only a viewer.
@@ -1146,7 +1034,7 @@ async fn user_without_admin_role_oauth_scope_does_not_grant_apps_delete() {
 
     let req = test::TestRequest::delete()
         .uri(&format!("/api/apps/{app_id}"))
-        .header("authorization", bearer())
+        .header("authorization", bearer_for_scope(user_id, "apps:delete"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);

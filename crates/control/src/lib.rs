@@ -66,25 +66,14 @@ pub use zeroship_core::auth::trusted_clients::{
     default_trusted_oauth_clients, resolve_trusted_oauth_clients,
 };
 
-pub fn hydra_auth_provider(
-    admin_url: impl Into<String>,
-) -> Arc<zeroship_core::auth_provider::AuthProvider> {
-    Arc::new(zeroship_core::auth_provider::AuthProvider::Hydra(
-        zeroship_core::auth_provider::HydraProvider::new(
-            zeroship_core::hydra::HydraIntrospector::new(admin_url),
-        ),
-    ))
-}
-
-pub fn hydra_auth_provider_with_issuer(
-    admin_url: impl Into<String>,
+pub fn platform_auth_provider(
     issuer: impl Into<String>,
+    jwks_url: Option<String>,
 ) -> Arc<zeroship_core::auth_provider::AuthProvider> {
-    Arc::new(zeroship_core::auth_provider::AuthProvider::Hydra(
-        zeroship_core::auth_provider::HydraProvider::new_with_issuer(
-            zeroship_core::hydra::HydraIntrospector::new(admin_url),
-            issuer,
-        ),
+    let config = zeroship_core::auth_provider::PlatformConfig::new(issuer, jwks_url)
+        .expect("valid platform auth provider config");
+    Arc::new(zeroship_core::auth_provider::AuthProvider::Platform(
+        zeroship_core::auth_provider::PlatformProvider::new(config),
     ))
 }
 
@@ -200,10 +189,6 @@ pub struct AppState {
     /// server with NO OIDC RP of its own — the bespoke `ConsoleOidcRp` +
     /// `console_sessions` surface was removed in the R5 cutover.
     pub control_pg: Arc<compio_postgres::Client>,
-    /// Hydra admin API base URL. Control uses this for admin-owned OAuth
-    /// client registration/deletion; Hydra remains the source of truth for
-    /// generated client secrets.
-    pub hydra_admin_url: String,
     /// Apex domain hosted creator apps serve under, e.g. `zeroship.ai`
     /// (prod) or `zeroship.localhost` (dev). An app named `myapp` serves
     /// at `myapp.{app_base_domain}`; the per-app OAuth client's
@@ -307,16 +292,15 @@ impl AppState {
         format!("{name}.{}", self.app_base_domain)
     }
 
-    /// Idempotently provision (or reconcile) the per-app public PKCE OAuth
+    /// Idempotently provision (or reconcile) the per-app OAuth
     /// client for `app_id` named `name`, using the apex host derived from
     /// `app_base_domain`. Wraps [`app_oauth_client::ensure_app_client`] with
-    /// a fresh control-DB connection + a `HydraAdmin` over `hydra_admin_url`.
-    /// Slice 1d (spec §1.1). On success returns the per-app `client_id`
+    /// a fresh control-DB connection. Slice 1d (spec §1.1). On success returns the per-app `client_id`
     /// (`oac_<base62-app-id>`).
     ///
     /// `declared_scopes` are the app's manifest `auth.scopes` (Slice 3,
-    /// spec §5.1): validated + mirrored into both the Hydra client `scope`
-    /// allowlist and `control.app_scope_defs` atomically. Pass `&[]` at app
+    /// spec §5.1): validated + mirrored into `control.oauth_clients.scopes`
+    /// and `control.app_scope_defs` atomically. Pass `&[]` at app
     /// **create** (no manifest yet); the deploy path passes the deployed
     /// manifest's declared scopes.
     ///
@@ -335,7 +319,6 @@ impl AppState {
         let scheme = self.app_scheme();
         let apex = self.apex_host_for_app(name);
         let hosts = vec![apex];
-        let hydra = zeroship_auth::hydra_client::HydraAdmin::new(self.hydra_admin_url.clone());
         let mut conn = self
             .registry
             .conn()
@@ -343,31 +326,10 @@ impl AppState {
             .map_err(|e| format!("control db conn: {e}"))?;
         app_oauth_client::ensure_app_client(
             // Creator apps are NEVER first-party (spec §5.2): skip_consent=false.
-            &mut conn, &hydra, app_id, name, scheme, &hosts, declared_scopes, false,
+            &mut conn, app_id, name, scheme, &hosts, declared_scopes, false,
         )
         .await
         .map_err(|e| e.to_string())
-    }
-
-    /// Delete the per-app public PKCE OAuth client from Hydra for `app_id`
-    /// (Slice 1d, spec §1.1: "on app delete → DELETE /admin/clients/<id>").
-    /// Wraps [`app_oauth_client::delete_app_client`] over a `HydraAdmin` built
-    /// from `hydra_admin_url`. The `control.oauth_clients` /
-    /// `control.app_oauth_clients` DB rows cascade-delete with the
-    /// `control.apps` row, so this only removes the Hydra-side registration.
-    ///
-    /// Hydra's `DELETE /admin/clients/{id}` is idempotent (404 → Ok), so a
-    /// re-run or a never-provisioned app is a clean no-op.
-    ///
-    /// # Errors
-    /// Surfaces the underlying [`app_oauth_client::AppOauthClientError`] as a
-    /// string. Callers log + continue: a leaked Hydra client is best-effort
-    /// GC, not a delete-blocking failure.
-    pub async fn delete_app_oauth_client(&self, app_id: &uuid::Uuid) -> Result<(), String> {
-        let hydra = zeroship_auth::hydra_client::HydraAdmin::new(self.hydra_admin_url.clone());
-        app_oauth_client::delete_app_client(&hydra, app_id)
-            .await
-            .map_err(|e| e.to_string())
     }
 
     /// Return whether `client_id` is present in a trusted-client set.

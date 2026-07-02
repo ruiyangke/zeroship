@@ -4,19 +4,14 @@
 //! the control plane authenticates every request through the `AuthzGuard`
 //! bearer path. PAT minting still requires an INTERACTIVE (non-PAT) principal,
 //! which is now an OAuth/BFF session access token (the `oauth_guard_from_bearer`
-//! arm: `token_id == None`). So these tests drive the handlers with an OAuth
-//! Bearer introspected against a mock hydra (the SAME harness shape
-//! `authz_guard_oauth_test` uses) rather than a console-session cookie.
+//! arm: `token_id == None`). So these tests drive the handlers with a signed
+//! platform access token rather than a console-session cookie.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ntex::http::StatusCode;
-use ntex::web::{self, test, HttpResponse};
-use serde::Deserialize;
+use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -28,120 +23,10 @@ use zeroship_control::{
 
 mod common;
 
-const OAUTH_TOKEN: &str = "fake-console-session-token";
-
 fn db_url() -> Option<String> {
     std::env::var("AUTH_DB_URL")
         .or_else(|_| std::env::var("PG_TEST_URL"))
         .ok()
-}
-
-fn unix_now_secs() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_secs(),
-    )
-    .expect("clock fits i64")
-}
-
-// ── mock hydra introspection server (mirrors authz_guard_oauth_test) ────────
-//
-// The OAuth-bearer arm of `AuthzGuard` introspects the token against
-// hydra-admin. The mock returns the fixture user as `sub` with a broad scope —
-// the OAuth scope does NOT gate PAT minting (the grant-subset check uses the
-// principal's DB-side platform role / app membership, with `token_policy =
-// None`), it only needs to resolve to a valid non-PAT principal.
-#[derive(Debug)]
-struct MockState {
-    body: Value,
-}
-
-struct MockHydra {
-    base: String,
-    shutdown: Option<mpsc::Sender<()>>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl MockHydra {
-    fn active(sub: impl ToString) -> Self {
-        // Scope must be the authz platform vocabulary only (`parse_scope_string`
-        // rejects bare OIDC identity scopes like `openid`). The OAuth scope does
-        // NOT gate PAT minting — `validate_grant_subset` checks the principal's
-        // DB-side platform role with `token_policy = None` — so any valid
-        // platform scope suffices to resolve the non-PAT principal.
-        let now = unix_now_secs();
-        let body = json!({
-            "active": true,
-            "sub": sub.to_string(),
-            "scope": "apps:read apps:deploy",
-            "aud": ["control.zeroship.ai"],
-            "client_id": "oac_console_test",
-            "iat": now,
-            "exp": now + 3600,
-        });
-        let state = Arc::new(MockState { body });
-        let factory_state = state.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            ntex::rt::System::build()
-                .name("control-token-handlers-oauth-mock")
-                .testing()
-                .build(ntex::rt::DefaultRuntime)
-                .block_on(async move {
-                    let server = web::test::server(move || {
-                        let state = factory_state.clone();
-                        async move {
-                            web::App::new().state(state).service(
-                                web::resource("/admin/oauth2/introspect")
-                                    .route(web::post().to(introspect_handler)),
-                            )
-                        }
-                    })
-                    .await;
-                    let addr = server.addr();
-                    started_tx.send(addr).expect("send mock server addr");
-                    let _ = shutdown_rx.recv();
-                    drop(server);
-                });
-        });
-        let addr = started_rx.recv().expect("mock server starts");
-        Self {
-            base: format!("http://{addr}"),
-            shutdown: Some(shutdown_tx),
-            thread: Some(thread),
-        }
-    }
-}
-
-impl Drop for MockHydra {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct IntrospectForm {
-    token: String,
-}
-
-async fn introspect_handler(
-    state: web::types::State<Arc<MockState>>,
-    form: web::types::Form<IntrospectForm>,
-) -> HttpResponse {
-    assert_eq!(form.token, OAUTH_TOKEN);
-    HttpResponse::Ok().json(&state.body)
-}
-
-fn bearer() -> String {
-    format!("Bearer {OAUTH_TOKEN}")
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -158,8 +43,7 @@ struct Fixture {
     user_id: Uuid,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
-    // Keep the mock introspection server alive for the test's lifetime.
-    _hydra: MockHydra,
+    _jwks: common::PlatformJwks,
 }
 
 impl Fixture {
@@ -206,7 +90,7 @@ impl Fixture {
                 .expect("insert platform role");
         }
 
-        let hydra = MockHydra::active(user_id);
+        let jwks = common::PlatformJwks::start();
 
         let state = Arc::new(AppState {
             registry,
@@ -226,14 +110,13 @@ impl Fixture {
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg,
-            hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
-            auth_provider: zeroship_control::hydra_auth_provider(&hydra.base),
+            auth_provider: common::platform_auth_provider(jwks.jwks_url()),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             metering_provider: zeroship_control::metering::provider::build_provider(
                 &zeroship_control::metering::provider::MeteringProviderConfig::native(),
@@ -255,7 +138,7 @@ impl Fixture {
             user_id,
             blob_root,
             deploy_tmp_dir,
-            _hydra: hydra,
+            _jwks: jwks,
         }
     }
 
@@ -347,7 +230,7 @@ async fn audit_event_count(state: &AppState, user_id: Uuid, event_type: &str) ->
 }
 
 macro_rules! create_pat {
-    ($app:expr, $name:expr) => {{
+    ($app:expr, $user_id:expr, $name:expr) => {{
         let body = json!({
             "name": $name,
             "policies": deploy_policy(),
@@ -356,7 +239,10 @@ macro_rules! create_pat {
         let req = test::TestRequest::post()
             .uri("/me/tokens")
             .header("accept", "application/json")
-            .header("authorization", bearer())
+            .header(
+                "authorization",
+                common::platform_bearer($user_id, "apps:read apps:deploy"),
+            )
             .set_json(&body)
             .to_request();
         let resp = test::call_service(&$app, req).await;
@@ -386,7 +272,7 @@ async fn create_pat_with_valid_policy_returns_jwt() {
     let fx = Fixture::new(&db_url, "valid", Some("admin")).await;
     let app = init_control!(fx);
 
-    let json = create_pat!(app, "CI deploy");
+    let json = create_pat!(app, fx.user_id, "CI deploy");
     let id = json.get("id").and_then(Value::as_str).expect("id");
     let token = json
         .get("token")
@@ -421,7 +307,7 @@ async fn create_pat_with_policy_exceeding_user_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .set_json(&json!({
             "name": "too broad",
             "policies": deploy_policy(),
@@ -465,7 +351,7 @@ async fn app_owner_can_create_any_resource_pat_for_owned_action() {
         .expect("create owned app (seeds app + owner app_members atomically)");
     let app = init_control!(fx);
 
-    let created = create_pat!(app, "owner deploy");
+    let created = create_pat!(app, fx.user_id, "owner deploy");
     assert!(created.get("token").and_then(Value::as_str).is_some());
 
     // Drop the owned app (CASCADE removes its `app_members` row) before the
@@ -490,7 +376,7 @@ async fn create_pat_with_invalid_resource_id_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .set_json(&json!({
             "name": "bad resource",
             "policies": {
@@ -531,7 +417,7 @@ async fn create_pat_with_empty_statement_actions_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .set_json(&json!({
             "name": "empty actions",
             "policies": {
@@ -569,7 +455,7 @@ async fn create_pat_with_empty_statement_resources_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .set_json(&json!({
             "name": "empty resources",
             "policies": {
@@ -607,7 +493,7 @@ async fn create_pat_with_mfa_condition_returns_400() {
     let req = test::TestRequest::post()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .set_json(&json!({
             "name": "mfa condition",
             "policies": {
@@ -643,13 +529,13 @@ async fn list_pats_returns_user_tokens_without_secret() {
     let fx = Fixture::new(&db_url, "list", Some("admin")).await;
     let app = init_control!(fx);
 
-    create_pat!(app, "CI deploy A");
-    create_pat!(app, "CI deploy B");
+    create_pat!(app, fx.user_id, "CI deploy A");
+    create_pat!(app, fx.user_id, "CI deploy B");
 
     let req = test::TestRequest::get()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -672,12 +558,12 @@ async fn delete_pat_marks_revoked() {
     let fx = Fixture::new(&db_url, "delete", Some("admin")).await;
     let app = init_control!(fx);
 
-    let created = create_pat!(app, "CI deploy");
+    let created = create_pat!(app, fx.user_id, "CI deploy");
     let id = created.get("id").and_then(Value::as_str).expect("id");
     let req = test::TestRequest::delete()
         .uri(&format!("/me/tokens/{id}"))
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -688,7 +574,7 @@ async fn delete_pat_marks_revoked() {
     let req = test::TestRequest::get()
         .uri("/me/tokens")
         .header("accept", "application/json")
-        .header("authorization", bearer())
+        .header("authorization", common::platform_bearer(fx.user_id, "apps:read apps:deploy"))
         .to_request();
     let resp = test::call_service(&app, req).await;
     let bytes = test::read_body(resp).await;
