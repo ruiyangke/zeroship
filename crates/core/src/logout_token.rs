@@ -1,9 +1,8 @@
 //! OIDC Back-Channel Logout 1.0 `logout_token` JWT verifier.
 //!
-//! When a user signs out via hydra's `/oauth2/sessions/logout` endpoint,
-//! hydra POSTs a signed `logout_token` JWT to every RP's registered
-//! `backchannel_logout_uri`. The RP must verify the JWT and revoke the
-//! affected sessions.
+//! When a user signs out at the OP, it POSTs a signed `logout_token` JWT to
+//! every RP's registered `backchannel_logout_uri`. The RP must verify the JWT
+//! and revoke the affected sessions.
 //!
 //! This module owns the verification side of that contract. The
 //! signature-verification path reuses the existing [`JwksCache`] (with
@@ -45,7 +44,7 @@ const IAT_SKEW_SECS: i64 = 300;
 /// from an untrusted token.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogoutToken {
-    /// Issuer — matches the configured hydra issuer URL.
+    /// Issuer — matches the configured OP issuer URL.
     pub iss: String,
     /// Audience. Per RFC 7519 this is either a string or an array of
     /// strings; we keep it as `Value` and let the signature-verification
@@ -66,8 +65,7 @@ pub struct LogoutToken {
     /// present.
     #[serde(default)]
     pub sub: Option<String>,
-    /// Session id (hydra-issued). Either `sub` or `sid` (or both) MUST
-    /// be present.
+    /// Session id. Either `sub` or `sid` (or both) MUST be present.
     #[serde(default)]
     pub sid: Option<String>,
     /// MUST NOT be present per BCL §2.4. If found, [`verify`] rejects
@@ -625,7 +623,7 @@ mod tests {
         // candidates (caller rejects).
         let (key, _cache) = make_key();
 
-        // String aud (Hydra's per-app client_id case).
+        // String aud (per-app client_id case).
         let mut c = happy_claims();
         c["aud"] = json!("oac_myapp");
         let token = sign(&key, &c);

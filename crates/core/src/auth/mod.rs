@@ -170,13 +170,13 @@ pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 /// gateway-issued wrapper token's `sub` is ALWAYS one of these (auth-sdk
 /// §6.2/G4) — the self-describing-subject invariant (Batch A fix 2) lets the
 /// wrapper fast-paths reject, defense-in-depth, any wrapper whose `sub` is the
-/// global Hydra UUID rather than a projected pairwise pseudonym.
+/// global user UUID rather than a projected pairwise pseudonym.
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
 /// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
 /// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base62 (`[0-9A-Za-z]`)
 /// chars. The gateway wrapper / session cookie is JS-readable by app code, so
-/// it MUST NOT carry the global Hydra UUID in any claim; a `sub` that survives
+/// it MUST NOT carry the global user UUID in any claim; a `sub` that survives
 /// this predicate can never be the un-projected global identity (a bare UUID
 /// has no `pws_` prefix).
 ///
@@ -192,8 +192,8 @@ pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 ///   gateway itself signed — so the `sub` is already trusted; this predicate is
 ///   a defense-in-depth minter-bug containment check (reject a wrapper a mint
 ///   bug failed to project), never the thing that decides trust.
-/// - The Bearer arm NEVER consumes an inbound `pws_` as identity at all —
-///   they re-derive it with [`derive_pairwise`] from the verified global Hydra
+/// - The Bearer arm NEVER consumes an inbound `pws_` as identity at all:
+///   it re-derives it with [`derive_pairwise`] from the verified global
 ///   subject. There is no path where an attacker-supplied `pws_` is trusted for
 ///   an authz/lookup decision on the strength of its shape.
 ///
@@ -261,21 +261,21 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 /// break-glass).
 ///
 /// `salt` is the platform-wide pairwise secret (config); `global_user_id` is
-/// the global Hydra subject (the `usr_…` UUID string); `sector` is the app's
+/// the global user subject (the `usr_…` UUID string); `sector` is the app's
 /// stable apex origin (`RouteEntry.sector_identifier`).
 ///
 /// ## Input canonicalization (Batch A M1)
 ///
-/// The `global_user_id` argument reaches this function from two shapes across
-/// the writers/readers: the RAW Hydra `sub` string (the raw-Hydra Bearer
-/// reader) and `Uuid::to_string()` (`/session` exchange +
-/// `?mint=1`, `/signout`, the control disconnect-app cascade). Those are
-/// byte-identical only WHILE Hydra emits a canonical hyphenated-lowercase
-/// UUID. If Hydra ever emits a non-canonical form (uppercase / braces /
-/// no-dash), a session cookie's `pws_` would diverge from the
-/// `/signout`-written family marker's `pws_`, silently breaking cross-arm
-/// revocation. To make the `pws_` independent of the inbound spelling, we
-/// canonicalize HERE in the ONE place every writer and reader funnels through:
+/// The `global_user_id` argument reaches this function from multiple shapes
+/// across the writers/readers: a verified `sub` string and `Uuid::to_string()`
+/// (`/session` exchange + `?mint=1`, `/signout`, the control disconnect-app
+/// cascade). Those are byte-identical only while the issuer emits a canonical
+/// hyphenated-lowercase UUID. If the issuer ever emits a non-canonical form
+/// (uppercase / braces / no-dash), a session cookie's `pws_` would diverge
+/// from the `/signout`-written family marker's `pws_`, silently breaking
+/// cross-arm revocation. To make the `pws_` independent of the inbound
+/// spelling, we canonicalize HERE in the ONE place every writer and reader
+/// funnels through:
 /// if `global_user_id` parses as a UUID we hash its canonical
 /// `Uuid::to_string()` (hyphenated lowercase); otherwise (a non-UUID subject —
 /// which the user-session arms already reject before deriving) we hash it
@@ -285,7 +285,7 @@ pub fn derive_pairwise_salt(pairwise_salt_secret_bytes: &[u8]) -> [u8; 32] {
 pub fn derive_pairwise(salt: &[u8], global_user_id: &str, sector: &str) -> String {
     // Normalize the subject to its canonical UUID spelling when it is one, so
     // the derived `pws_` is byte-identical no matter whether the caller passed
-    // the raw Hydra sub or `Uuid::to_string()`. Non-UUID subjects (never a
+    // the raw provider sub or `Uuid::to_string()`. Non-UUID subjects (never a
     // real end-user identity on the pairwise paths) hash verbatim.
     let canonical = Uuid::parse_str(global_user_id)
         .map(|u| u.to_string())
@@ -633,10 +633,10 @@ mod tests {
     #[test]
     fn pairwise_is_invariant_to_inbound_uuid_spelling() {
         // Batch A M1 regression: the writers feed `derive_pairwise` either the
-        // RAW Hydra sub string (e.g. `/token` passing `claims.sub`) or the
+        // raw provider sub string (e.g. `/token` passing `claims.sub`) or the
         // canonical `Uuid::to_string()` (e.g. `/signout`, control cascade). If
-        // Hydra ever emits a NON-canonical sub spelling (uppercase / braces /
-        // no-dash), a `/token`-minted wrapper's `pws_` MUST still equal the
+        // the issuer ever emits a non-canonical sub spelling (uppercase /
+        // braces / no-dash), a `/token`-minted wrapper's `pws_` MUST still equal the
         // `pws_` a `/signout`-style `revoke_family(derive_pairwise(uuid.to_string()))`
         // writes — otherwise a signout silently fails to revoke the live wrapper.
         let salt = b"platform-pairwise-salt";

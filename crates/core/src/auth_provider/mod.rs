@@ -1,12 +1,9 @@
-//! Platform auth-provider token verification seam.
+//! Platform auth-provider token verification.
 //!
-//! This is enum dispatch rather than a boxed async trait. The cyper-based
-//! Hydra client is thread-local/`!Send`, so the hot path keeps inherent
-//! `async fn`s and matches on the selected concrete provider.
+//! This is enum dispatch rather than a boxed async trait, keeping the hot path
+//! on inherent `async fn`s with matches on the selected concrete provider.
 
 use thiserror::Error;
-
-use crate::hydra::{HydraIntrospector, IntrospectError, IntrospectResult};
 
 mod platform;
 mod supabase;
@@ -22,7 +19,6 @@ pub use supabase::{
 /// The selected platform auth provider.
 #[derive(Debug)]
 pub enum AuthProvider {
-    Hydra(HydraProvider),
     Supabase(SupabaseProvider),
     Platform(PlatformProvider),
     DualIssuer(DualIssuerProvider),
@@ -32,7 +28,6 @@ impl AuthProvider {
     #[allow(clippy::future_not_send)]
     pub async fn verify_token(&self, token: &str) -> Result<VerifiedToken, VerifyTokenError> {
         match self {
-            Self::Hydra(provider) => provider.verify_token(token).await,
             Self::Supabase(provider) => provider
                 .verify_token(token)
                 .await
@@ -48,7 +43,6 @@ impl AuthProvider {
     #[must_use]
     pub fn issuer(&self) -> &str {
         match self {
-            Self::Hydra(provider) => provider.issuer(),
             Self::Supabase(provider) => provider.issuer(),
             Self::Platform(provider) => provider.issuer(),
             Self::DualIssuer(provider) => provider.legacy_issuer(),
@@ -60,14 +54,13 @@ impl AuthProvider {
         match self {
             Self::Platform(provider) => Some(provider.issuer()),
             Self::DualIssuer(provider) => Some(provider.platform_issuer()),
-            Self::Hydra(_) | Self::Supabase(_) => None,
+            Self::Supabase(_) => None,
         }
     }
 
     #[must_use]
     pub fn supabase_url(&self) -> Option<&str> {
         match self {
-            Self::Hydra(_) => None,
             Self::Supabase(provider) => Some(provider.url()),
             Self::Platform(_) => None,
             Self::DualIssuer(provider) => provider.supabase_url(),
@@ -77,7 +70,6 @@ impl AuthProvider {
     #[must_use]
     pub fn supabase_anon_key(&self) -> Option<&str> {
         match self {
-            Self::Hydra(_) => None,
             Self::Supabase(provider) => Some(provider.anon_key()),
             Self::Platform(_) => None,
             Self::DualIssuer(provider) => provider.supabase_anon_key(),
@@ -87,7 +79,6 @@ impl AuthProvider {
     #[must_use]
     pub fn supabase_service_role_key(&self) -> Option<&str> {
         match self {
-            Self::Hydra(_) => None,
             Self::Supabase(provider) => provider.service_role_key(),
             Self::Platform(_) => None,
             Self::DualIssuer(provider) => provider.supabase_service_role_key(),
@@ -157,7 +148,6 @@ impl DualIssuerProvider {
 /// `AuthProvider` so the dual verifier's async dispatch is not recursive.
 #[derive(Debug)]
 pub enum LegacyAuthProvider {
-    Hydra(HydraProvider),
     Supabase(SupabaseProvider),
 }
 
@@ -165,7 +155,6 @@ impl LegacyAuthProvider {
     #[allow(clippy::future_not_send)]
     async fn verify_token(&self, token: &str) -> Result<VerifiedToken, VerifyTokenError> {
         match self {
-            Self::Hydra(provider) => provider.verify_token(token).await,
             Self::Supabase(provider) => provider
                 .verify_token(token)
                 .await
@@ -176,7 +165,6 @@ impl LegacyAuthProvider {
     #[must_use]
     pub fn issuer(&self) -> &str {
         match self {
-            Self::Hydra(provider) => provider.issuer(),
             Self::Supabase(provider) => provider.issuer(),
         }
     }
@@ -184,7 +172,6 @@ impl LegacyAuthProvider {
     #[must_use]
     fn supabase_url(&self) -> Option<&str> {
         match self {
-            Self::Hydra(_) => None,
             Self::Supabase(provider) => Some(provider.url()),
         }
     }
@@ -192,7 +179,6 @@ impl LegacyAuthProvider {
     #[must_use]
     fn supabase_anon_key(&self) -> Option<&str> {
         match self {
-            Self::Hydra(_) => None,
             Self::Supabase(provider) => Some(provider.anon_key()),
         }
     }
@@ -200,7 +186,6 @@ impl LegacyAuthProvider {
     #[must_use]
     fn supabase_service_role_key(&self) -> Option<&str> {
         match self {
-            Self::Hydra(_) => None,
             Self::Supabase(provider) => provider.service_role_key(),
         }
     }
@@ -209,7 +194,6 @@ impl LegacyAuthProvider {
 impl From<LegacyAuthProvider> for AuthProvider {
     fn from(provider: LegacyAuthProvider) -> Self {
         match provider {
-            LegacyAuthProvider::Hydra(provider) => Self::Hydra(provider),
             LegacyAuthProvider::Supabase(provider) => Self::Supabase(provider),
         }
     }
@@ -231,8 +215,8 @@ pub struct VerifiedToken {
     pub client_id: Option<String>,
     /// Issued-at timestamp, epoch seconds, when present and trusted.
     pub iat: Option<u64>,
-    /// Provider token audiences. The Hydra control-plane deploy-token path
-    /// gates this against the expected platform OAuth audience.
+    /// Provider token audiences. Resource servers gate this against their
+    /// expected OAuth audience.
     pub aud: Option<Vec<String>>,
 }
 
@@ -242,58 +226,15 @@ pub enum ProviderAuthz {
     GoTrueRole(String),
 }
 
-/// Hydra-backed token verifier.
-#[derive(Debug)]
-pub struct HydraProvider {
-    introspector: HydraIntrospector,
-    issuer: String,
-}
-
-impl HydraProvider {
-    #[must_use]
-    pub fn new(introspector: HydraIntrospector) -> Self {
-        let issuer = introspector.admin_url().to_owned();
-        Self {
-            introspector,
-            issuer,
-        }
-    }
-
-    #[must_use]
-    pub fn new_with_issuer(
-        introspector: HydraIntrospector,
-        issuer: impl Into<String>,
-    ) -> Self {
-        Self {
-            introspector,
-            issuer: issuer.into(),
-        }
-    }
-
-    #[allow(clippy::future_not_send)]
-    pub async fn verify_token(&self, token: &str) -> Result<VerifiedToken, VerifyTokenError> {
-        let result = self.introspector.introspect(token).await?;
-        hydra_verified_token(result)
-    }
-
-    #[must_use]
-    pub fn issuer(&self) -> &str {
-        &self.issuer
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum VerifyTokenError {
-    #[error("hydra introspection failed: {0}")]
-    HydraIntrospection(#[from] IntrospectError),
-
     #[error("platform token verification failed: {0}")]
     PlatformVerification(PlatformVerifyError),
 
     #[error("inactive token")]
     InactiveToken,
 
-    #[error("hydra introspection response missing subject")]
+    #[error("provider token missing subject")]
     MissingSubject,
 
     #[error("JWT bearer missing issuer")]
@@ -301,25 +242,6 @@ pub enum VerifyTokenError {
 
     #[error("unknown token issuer: {0}")]
     UnknownIssuer(String),
-}
-
-fn hydra_verified_token(result: IntrospectResult) -> Result<VerifiedToken, VerifyTokenError> {
-    if !result.active {
-        return Err(VerifyTokenError::InactiveToken);
-    }
-
-    let provider_subject = result.sub.ok_or(VerifyTokenError::MissingSubject)?;
-    Ok(VerifiedToken {
-        provider_subject,
-        email: result.email,
-        email_verified: result.email_verified.unwrap_or(false),
-        session_id: result.session_id,
-        provider_authz: ProviderAuthz::OAuthScope(result.scope.unwrap_or_default()),
-        exp: result.exp.unwrap_or_default(),
-        client_id: result.client_id,
-        iat: result.iat,
-        aud: result.aud,
-    })
 }
 
 /// Peek the unverified `iss` claim from a compact JWS payload.
@@ -350,39 +272,6 @@ pub fn unverified_issuer(token: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hydra_introspection_maps_to_verified_token() {
-        let verified = hydra_verified_token(IntrospectResult {
-            active: true,
-            sub: Some("usr_01HABC".to_string()),
-            scope: Some("apps:read apps:deploy".to_string()),
-            aud: Some(vec!["control.zeroship.ai".to_string()]),
-            client_id: Some("oauth-test-client".to_string()),
-            email: Some("creator@example.test".to_string()),
-            email_verified: None,
-            session_id: Some("sid_123".to_string()),
-            exp: Some(1_800_000_000),
-            iat: Some(1_700_000_000),
-        })
-        .expect("active token maps");
-
-        assert_eq!(verified.provider_subject, "usr_01HABC");
-        assert_eq!(verified.email.as_deref(), Some("creator@example.test"));
-        assert!(!verified.email_verified);
-        assert_eq!(verified.session_id.as_deref(), Some("sid_123"));
-        assert_eq!(
-            verified.provider_authz,
-            ProviderAuthz::OAuthScope("apps:read apps:deploy".to_string())
-        );
-        assert_eq!(verified.exp, 1_800_000_000);
-        assert_eq!(verified.client_id.as_deref(), Some("oauth-test-client"));
-        assert_eq!(verified.iat, Some(1_700_000_000));
-        assert_eq!(
-            verified.aud.as_deref(),
-            Some(&["control.zeroship.ai".to_string()][..])
-        );
-    }
 
     #[test]
     fn unverified_issuer_peeks_only_compact_jws_payloads() {
