@@ -1,8 +1,8 @@
-//! Live-PG coverage for the committed-IR apply core that creator deploys still use.
+//! Live-PG coverage for the IR-document apply core used by deploy plumbing.
 //!
-//! Model C removed the Platform runner's committed `.ir.json` corpus branch: platform
+//! Model C removed the Platform runner's physical IR corpus branch: platform
 //! migrations are `.ts`-only and record transient IR at migrate time. The shared
-//! committed-IR apply core remains for creator/control-plane deploys, so this file
+//! IR-document apply core remains for creator/control-plane deploys, so this file
 //! keeps the Confined denial coverage and pins the runner's Platform IR refusal.
 
 use std::path::{Path, PathBuf};
@@ -17,6 +17,201 @@ const DEFAULT_DSN: &str =
 const TEST_DB_NAME: &str = "zeroship_migrate_ir_test";
 
 const CONFINED_ROLE: &str = "zeroship_ir_confined_role";
+const PLATFORM_VENDOR_IR: &str = r#"{
+  "ir_version": 6,
+  "name": "platform_vendor_ir",
+  "owner_app": "platform",
+  "ops": [
+    {
+      "op": "createExtension",
+      "name": "citext",
+      "ifNotExists": true
+    },
+    {
+      "op": "createSchema",
+      "name": "zeroship",
+      "ifNotExists": true
+    },
+    {
+      "op": "createRole",
+      "name": "zeroship_ir_test_app",
+      "login": true,
+      "password": "zeroship_ir_test_app",
+      "setSearchPath": [
+        "zeroship",
+        "public"
+      ],
+      "ifNotExists": true
+    },
+    {
+      "op": "createTable",
+      "name": "ir_accounts",
+      "schema": "zeroship",
+      "columns": [
+        {
+          "name": "id",
+          "type": "int",
+          "nullable": false,
+          "identity": {
+            "always": true
+          }
+        },
+        {
+          "name": "app_id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "email",
+          "type": "text",
+          "nullable": false
+        }
+      ],
+      "constraints": [],
+      "indexes": []
+    },
+    {
+      "op": "grant",
+      "privileges": [
+        "select",
+        "insert",
+        "update",
+        "delete"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "ir_accounts"
+        ],
+        "schema": "zeroship"
+      },
+      "to": [
+        "zeroship_ir_test_app"
+      ]
+    },
+    {
+      "op": "enableRls",
+      "table": "ir_accounts",
+      "schema": "zeroship"
+    },
+    {
+      "op": "forceRls",
+      "table": "ir_accounts",
+      "schema": "zeroship"
+    },
+    {
+      "op": "createPolicy",
+      "name": "tenant_isolation",
+      "table": "ir_accounts",
+      "schema": "zeroship",
+      "forCmd": "all",
+      "using": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zeroship.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      },
+      "withCheck": {
+        "node": "binOp",
+        "op": "eq",
+        "lhs": {
+          "node": "colRef",
+          "name": "app_id"
+        },
+        "rhs": {
+          "node": "cast",
+          "operand": {
+            "node": "fnCall",
+            "fn": "currentSetting",
+            "args": [
+              {
+                "node": "literal",
+                "value": "zeroship.tenant_app"
+              },
+              {
+                "node": "literal",
+                "value": true
+              }
+            ]
+          },
+          "target": "text"
+        }
+      }
+    }
+  ]
+}
+"#;
+const CONFINED_ROLE_IR: &str = r#"{
+  "ir_version": 6,
+  "name": "confined_role_denied",
+  "owner_app": "app_confined",
+  "ops": [
+    {
+      "op": "createRole",
+      "name": "zeroship_ir_confined_role",
+      "ifNotExists": true
+    }
+  ]
+}
+"#;
+const CONFINED_GRANT_IR: &str = r#"{
+  "ir_version": 6,
+  "name": "confined_grant_denied",
+  "owner_app": "app_confined",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "ir_confined_grants",
+      "schema": "zeroship",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        }
+      ],
+      "constraints": [],
+      "indexes": []
+    },
+    {
+      "op": "grant",
+      "privileges": [
+        "select"
+      ],
+      "on": {
+        "kind": "table",
+        "names": [
+          "ir_confined_grants"
+        ],
+        "schema": "zeroship"
+      },
+      "to": [
+        "public"
+      ]
+    }
+  ]
+}
+"#;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_PLATFORM_IR_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -89,12 +284,6 @@ fn token() -> String {
         .unwrap()
         .as_nanos();
     format!("{pid}_{nanos}")
-}
-
-fn fixture_dir(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/platform_ir_fixtures")
-        .join(name)
 }
 
 fn platform_cfg(dir: &Path, meta: &str, yes: bool) -> RunConfig {
@@ -186,12 +375,25 @@ impl Drop for TempDir {
     }
 }
 
+fn transient_ir_corpus(tok: &str, name: &str, file_name: &str, body: &str) -> TempDir {
+    let dir = TempDir::new(&format!("{tok}_{name}"));
+    dir.write(file_name, body);
+    dir
+}
+
 #[compio::test]
-async fn platform_runner_rejects_committed_ir_corpus() {
-    let cfg = platform_cfg(&fixture_dir("apply"), "platform_ir_meta_unused", false);
+async fn platform_runner_rejects_physical_ir_corpus() {
+    let tok = token();
+    let dir = transient_ir_corpus(
+        &tok,
+        "apply",
+        "20260630000000_platform_vendor.ir.json",
+        PLATFORM_VENDOR_IR,
+    );
+    let cfg = platform_cfg(dir.path(), "platform_ir_meta_unused", false);
     let err = run_migrate(&cfg)
         .await
-        .expect_err("Platform runner no longer accepts committed .ir.json corpora");
+        .expect_err("Platform runner no longer accepts physical IR corpora");
     assert!(
         format!("{err}").contains("unsupported platform migration corpus"),
         "got: {err}"
@@ -205,15 +407,22 @@ async fn confined_ir_still_denies_role_and_grant_vendor_ops() {
     let conn = pg().await;
     let backend = PostgresBackend::new(&conn);
     let guard = GuardConfig::confined("zeroship");
+    let tok = token();
 
     let role_meta = format!("confined_ir_role_meta_{}", token());
     reset(&conn, &role_meta).await;
     let role_cfg = confined_exec_cfg(&role_meta);
+    let role_dir = transient_ir_corpus(
+        &tok,
+        "confined_role",
+        "20260630000000_role.ir.json",
+        CONFINED_ROLE_IR,
+    );
     let role_err = zeroship_migrate::apply_bundle_ir_postgres(
         &backend,
         "zeroship",
         "app_confined",
-        &fixture_dir("confined_role"),
+        role_dir.path(),
         &role_cfg,
         &guard,
         Approval::Approved,
@@ -234,11 +443,17 @@ async fn confined_ir_still_denies_role_and_grant_vendor_ops() {
     let grant_meta = format!("confined_ir_grant_meta_{}", token());
     reset(&conn, &grant_meta).await;
     let grant_cfg = confined_exec_cfg(&grant_meta);
+    let grant_dir = transient_ir_corpus(
+        &tok,
+        "confined_grant",
+        "20260630000000_grant.ir.json",
+        CONFINED_GRANT_IR,
+    );
     let grant_err = zeroship_migrate::apply_bundle_ir_postgres(
         &backend,
         "zeroship",
         "app_confined",
-        &fixture_dir("confined_grant"),
+        grant_dir.path(),
         &grant_cfg,
         &guard,
         Approval::Approved,

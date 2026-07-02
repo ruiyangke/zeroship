@@ -27,13 +27,13 @@ export default defineConfig({
 | `serverEntry` | auto-detected | Overrides server-entry discovery for dev and build. |
 | `devServerPort` | `3001` | Port for the zeroship dev runtime. |
 | `mode` | `"full"` | `"full"` builds client + SSR worker; `"static"` skips the SSR sub-build and omits `manifest.worker`. |
-| `migrations.dir` | `"migrations"` | The op.* migration dir holding the committed `.ir.json` set. Both the `.zship` packer and the gen-types step read it. |
+| `migrations.dir` | `"migrations"` | The op.* migration source dir. The gen-types step reads it to fold migrations into the generated `env.db` artifacts; `.zship` packing does not carry or read migration documents. |
 | `migrations.genTypesOut` | `"generated/zeroship"` | Where the gen-types step writes `env.db.ts` + `schema.runtime.json`. Commit this dir and include `generated/zeroship/env.db.ts` in the app tsconfig. |
 | `migrations.cliPath` | resolved (`ZEROSHIP_MIGRATE_JS_BIN` → `node_modules/.bin`) | Explicit path to the `zeroship-migrate-js` CLI. |
 
 ## Migration-first type generation (`gen-types`)
 
-The plugin shells the **existing** `zeroship-migrate-js gen-types --dir <migrations> --out <outDir> [--check]` subcommand to fold the committed `.ir.json` migration set into the typed `env.db` surface — two artifacts, `env.db.ts` (a generated `@zeroship/db` `t.*()` schema module) and `schema.runtime.json` (the `RuntimeSchemaDescriptor`). The plugin never re-implements type generation; it is a thin client of the same CLI it already shells for `record`/`build`.
+The plugin shells the **existing** `zeroship-migrate-js gen-types --dir <migrations> --out <outDir> [--check]` subcommand to fold the migration set into the typed `env.db` surface — two artifacts, `env.db.ts` (a generated `@zeroship/db` `t.*()` schema module) and `schema.runtime.json` (the `RuntimeSchemaDescriptor`). The plugin never re-implements type generation; it is a thin client of the same CLI it already shells for `record`/`build`.
 
 When it runs:
 
