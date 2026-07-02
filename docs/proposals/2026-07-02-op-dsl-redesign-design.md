@@ -578,8 +578,10 @@ enum Tier { Core, Vendor(&'static [VendorCapability]) }
   positioned enum edits are explicitly matrixed), but a construct with **no** portable base form
   cannot be an `op.*` root with two permanent validate-refusal cells. It must be a `Vendor` op on
   `pg.*`. This is the mechanical rule that keeps `pg.domain`/`pg.sequence` out of the portable root.
-- **validate** computes derived `dialect_scope` = ∩ of every op's + every expression node's
-  `dialects` set, and refuses out-of-scope targets with structured
+- **validate** computes derived `dialect_scope` = ∩ of every op's + every expression node's + every
+  **value carrier's** `dialects` set. A `Dialectal<T>` value carrier (§6.4) contributes
+  `{ legs present } ∪ (all dialects if a `default` leg is present)`; a bare value contributes all
+  dialects. validate refuses out-of-scope targets with structured
   `DIALECT_UNSUPPORTED { op, dialect, suggested_fix }` — at validate, **never lower**. (validate's
   input taxonomy — including the pending-contract facet — is pinned in §9.3; it does **not** read
   the live DB.)
@@ -786,12 +788,17 @@ The two guards are complementary: checksum pins IR determinism (node-level); gol
 dialect's golden simply shows its selected leg.
 
 **Reversibility.** Op reversibility stays the **static per-`Op`-variant class of §5.3** — a
-`Dialectal`-wrapped *value* does not change it (a value leg carries no inverse-information-loss;
-that lives in the op — `dropColumn`, lossy `setType`). The one interaction: an op whose
-reversibility is *conditional on a value* (e.g. `setType` — reversible only if the cast is lossless)
-evaluates that condition on the **selected dialect's leg**, so a `Dialectal` type whose `pg` leg is a
-lossless widen but whose `mysql` leg is a lossy narrow is `Conditionally reversible` per-dialect — a
-property of the `setType` op's existing §5.3 class, not a new "meet of legs" rule.
+`Dialectal`-wrapped *value* does not change the class (a value leg carries no inverse-information-loss;
+that lives in the op — `dropColumn`, lossy `setType`). The one interaction is with the
+**Conditionally-reversible** class (§5.3), whose auto-`down` is derivable only when a value-dependent
+condition holds (e.g. `setType` — reversible only if the cast is lossless). Because a migration has a
+**single, multi-dialect `down`** (not a per-dialect one), down-derivation checks that condition across
+**all** the `Dialectal` value's legs and derives auto-`down` **only if every leg passes**; if any leg
+fails (e.g. a `Dialectal` type whose `pg` leg is a lossless widen but whose `mysql` leg is a lossy
+narrow), auto-`down` is **refused** with `DOWN_NOT_DERIVABLE { op, dialect, reason }` and the author
+supplies an explicit (itself multi-dialect) `down`. This is the existing Conditionally-reversible
+check run per-leg with an all-must-pass rule — not a new "meet of legs" reversibility class, and it
+never makes a non-conditional op's class payload-dependent.
 
 **Coverage note.** The platform schema is PostgreSQL-only, so for the platform-migration payoff
 `dialect(...)` is rarely needed — the `pg` leg (or a vendor node) suffices, and the `dialect`-budget
@@ -835,14 +842,27 @@ above 5** (target 0). Each surviving raw op is listed in an in-repo `raw-budget.
 reason; the gate fails on unlisted additions. Belt-and-braces with the in-IR `reason`: the
 budget file is the ledger, the IR field is the provenance.
 
-**A separate `dialect`-budget (§6.4).** `Dialectal(...)` overrides are counted **independently**
-of raw, in a `dialect-budget.toml`, and gated on **creator** migrations (not the PG-only platform
-corpus, where the count is ~0 and the gate would be hollow — design-critic H4). The two are kept
-apart on purpose (H3): a `dialect` override is a *"Layer-1 intent node not yet built"* debt that
-should trend to **zero** as the intent-node set grows, so its budget ratchets **downward** over
-releases; `raw` has a sanctioned-forever floor. Merging them would let a stable raw floor mask a
-growing portability gap. Each override's `reason` is in the checksummed IR (§7.2 treatment,
-applied to `Dialectal.reason`), so the ledger and the provenance agree for both escape kinds.
+**A separate `dialect`-budget (§6.4), enforced where the code lives.** `Dialectal(...)` overrides
+are counted **independently** of raw. They are kept apart on purpose (H3): a `dialect` override is a
+*"Layer-1 intent node not yet built"* debt that should trend to **zero** as the intent-node set
+grows, so its budget ratchets **downward** over releases, whereas `raw` has a sanctioned-forever
+floor — merging them would let a stable raw floor mask a growing portability gap.
+
+The enforcement point differs by *whose* migrations they are, because the platform holds **no
+creator codebases** (build-local→deploy; AGENTS.md) so this repo's CI cannot see creator migrations
+(design-critic NEW-2):
+- **Platform's own migrations** (`db/migrations-ts/`) — a repo CI gate against a `dialect-budget.toml`,
+  exactly like the raw gate. The platform is PostgreSQL-only, so this count is ~0 by construction.
+- **Creator migrations** — computed at the creator's **local build** by the vite-plugin/CLI (the
+  same pass that emits the IR). It is surfaced to the author as a **lint/count** and is available as
+  an **opt-in hard gate** in the creator's own project config/CI; the platform additionally records
+  the per-migration `dialect`-override count at **deploy** as **telemetry** (a soft signal shown to
+  the creator, e.g. "this migration is non-portable in N places"), never a deploy block. So the
+  guardrail runs on the population that actually triggers it, without the platform pretending to CI
+  code it does not hold.
+
+Each override's `reason` is in the checksummed IR (§7.2 treatment, applied to `Dialectal.reason`),
+so the ledger and the provenance agree for both escape kinds, in both locations.
 
 ### 7.2 `pg.sql` binds: resolved by unrepresentability
 
@@ -928,8 +948,8 @@ form; per-terminal/option support is shown by the dialect cells. **Vendor** = st
 | Triggers: UPDATE OF, constraint, transition tables, setEnabled, WHEN with OLD/NEW | Core WHEN portable; depth Vendor | ✅ | WHEN ✅; depth ⛔ | WHEN ✅; depth ⛔ |
 | Views: SelectAst v2 (distinct/group/having/agg/window/set-ops/non-recursive CTE/subquery-FROM) | Core basic; v2 depth Vendor | ✅ | basic ✅ | basic ✅ |
 | Matviews: create WITH NO DATA, indexes, REFRESH [CONCURRENTLY] | Vendor | ✅ | ⛔ | ⛔ |
-| Expressions Tier P (in/between/like/isDistinctFrom/dateAdd/…) | Core | ✅ | ✅ | ✅ |
-| Expressions Tier PG (regex/ilike/json/array/castTo/currentSetting/agg+window) | Vendor | ✅ | ⛔ | ⛔ |
+| Expressions — Layer 1 portable value nodes (in/between/like/isDistinctFrom/dateAdd/…) | Core | ✅ | ✅ | ✅ |
+| Expressions — PG-only value nodes (single-leg §6.4: regex/ilike/json/array/castTo/currentSetting/agg+window) | Vendor | ✅ | ⛔ | ⛔ |
 | DML insert/update/del (mandatory where), backfills | Core | ✅ | ✅ | ✅ |
 | View bodies beyond SelectAst line | **Raw** (rawSelect) | ✅ | ⛔ | ⛔ |
 | Function/trigger bodies | **Raw** (parse-guarded) | ✅ | ⛔ | ⛔ |
