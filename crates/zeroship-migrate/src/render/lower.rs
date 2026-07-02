@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::analysis::analyze::Advisory;
 use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
 use crate::model::expr::Expr;
+use crate::model::load::op_created_table;
 use crate::render::declarative::{
     build_resolved_table_snapshot, build_table_snapshot, push_primary_key_snapshot,
     CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
@@ -1192,10 +1193,7 @@ impl IrAuthor {
         let created_tables: Vec<String> = ir
             .ops
             .iter()
-            .filter_map(|op| match op {
-                Op::CreateTable { name, .. } => Some(name.clone()),
-                _ => None,
-            })
+            .filter_map(|op| op_created_table(op).map(str::to_string))
             .collect();
         let (steps, fragments) = self
             .lower_guarded(&ir, guard_cfg, live)
@@ -4889,6 +4887,16 @@ mod tests {
         crate::model::profile::PolicyProfile::platform()
     }
 
+    fn platform_guard() -> GuardConfig {
+        let cap = crate::model::capability::OperatorCapability::for_test();
+        GuardConfig::platform(&cap, vec!["zeroship".into(), "public".into()], vec![])
+    }
+
+    fn platform_author(owner: &str, guard: &GuardConfig) -> IrAuthor {
+        IrAuthor::new("zeroship", owner, SqlDialect::Postgres)
+            .with_schema_scope(guard.schema_scope().expect("platform guard has a schema scope"))
+    }
+
     fn validate_ir_platform(
         ir: &MigrationIr,
         dialect: crate::model::validate::Dialect,
@@ -6582,6 +6590,116 @@ mod tests {
         assert_eq!(out.created_tables, vec!["fresh".to_string()], "the createTable is reported");
         assert!(out.migrations().iter().any(|m| m.up.contains("CREATE TABLE \"app\".\"fresh\"")));
         assert!(!out.fragments.is_empty(), "fragments are attributed");
+    }
+
+    #[test]
+    fn load_and_lower_guarded_platform_table_with_same_file_attachments() {
+        let bytes = r#"{"ir_version":1,"name":"platform_attach","ops":[
+            {"op":"createTable","name":"platform_apps","schema":"zeroship","columns":[
+                {"name":"id","type":"text","nullable":false}
+            ],"primaryKey":["id"],"constraints":[],"indexes":[]},
+            {"op":"createTable","name":"platform_registry","schema":"zeroship","columns":[
+                {"name":"app_id","type":"text","nullable":false},
+                {"name":"route","type":"text","nullable":false},
+                {"name":"target","type":"text","nullable":false}
+            ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]},
+            {"op":"addConstraint","table":"platform_registry","schema":"zeroship",
+                "constraint":{"name":"platform_registry_app_fk",
+                    "kind":{"kind":"fk","columns":["app_id"],
+                        "referencesTable":"platform_apps","referencesColumns":["id"]}}},
+            {"op":"createIndex","table":"platform_registry","schema":"zeroship",
+                "name":"platform_registry_target_idx",
+                "columns":[{"kind":"column","name":"target"}]},
+            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"forceRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"createPolicy","name":"tenant_isolation","table":"platform_registry",
+                "schema":"zeroship","forCmd":"all",
+                "using":{"node":"literal","value":true}},
+            {"op":"comment","target":{"kind":"table","schema":"zeroship",
+                "name":"platform_registry"},"comment":"Platform route registry"},
+            {"op":"createFunction","name":"platform_registry_touch","schema":"zeroship",
+                "returns":"trigger","language":"plpgsql","replace":true,
+                "body":"BEGIN RETURN NEW; END;"},
+            {"op":"createTrigger","name":"platform_registry_touch_trg",
+                "table":"platform_registry","schema":"zeroship","timing":"before",
+                "events":["update"],"forEach":"row",
+                "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
+        ]}"#;
+        let guard = platform_guard();
+        let profile = platform_profile();
+        let out = platform_author("platform", &guard)
+            .load_and_lower_guarded(
+                bytes,
+                "platform",
+                &registry(&[]),
+                &LiveSchema::default(),
+                &guard,
+                Some(&profile),
+            )
+            .expect("platform exact createTable attachments validate + guarded-lower");
+        assert_eq!(
+            out.created_tables,
+            vec!["platform_apps".to_string(), "platform_registry".to_string()],
+            "created table reporting must use the same helper as ownership registration"
+        );
+        let sql = out.migrations().iter().map(|m| m.up.as_str()).collect::<Vec<_>>().join(";\n");
+        assert!(sql.contains("CREATE TABLE \"zeroship\".\"platform_registry\""), "{sql}");
+        assert!(sql.contains("PRIMARY KEY (app_id, route)"), "{sql}");
+        assert!(sql.contains("ADD CONSTRAINT"), "{sql}");
+        assert!(sql.contains("\"platform_registry_app_fk\""), "{sql}");
+        assert!(sql.contains("CREATE INDEX"), "{sql}");
+        assert!(sql.contains("\"platform_registry_target_idx\""), "{sql}");
+        assert!(sql.contains("ENABLE ROW LEVEL SECURITY"), "{sql}");
+        assert!(sql.contains("FORCE ROW LEVEL SECURITY"), "{sql}");
+        assert!(sql.contains("CREATE POLICY"), "{sql}");
+        assert!(sql.contains("\"tenant_isolation\""), "{sql}");
+        assert!(sql.contains("COMMENT ON TABLE \"zeroship\".\"platform_registry\""), "{sql}");
+        assert!(sql.contains("CREATE TRIGGER"), "{sql}");
+        assert!(sql.contains("\"platform_registry_touch_trg\""), "{sql}");
+    }
+
+    #[test]
+    fn load_and_lower_guarded_cross_file_attach_uses_created_table_registry_update() {
+        let create = r#"{"ir_version":1,"name":"platform_create","ops":[
+            {"op":"createTable","name":"platform_registry","schema":"zeroship","columns":[
+                {"name":"app_id","type":"text","nullable":false},
+                {"name":"route","type":"text","nullable":false},
+                {"name":"target","type":"text","nullable":false}
+            ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]}
+        ]}"#;
+        let attach = r#"{"ir_version":1,"name":"platform_attach_later","ops":[
+            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"comment","target":{"kind":"table","schema":"zeroship",
+                "name":"platform_registry"},"comment":"Platform route registry"}
+        ]}"#;
+        let guard = platform_guard();
+        let profile = platform_profile();
+        let mut owners = registry(&[]);
+        let first = platform_author("platform", &guard)
+            .load_and_lower_guarded(
+                create,
+                "platform",
+                &owners,
+                &LiveSchema::default(),
+                &guard,
+                Some(&profile),
+            )
+            .expect("first file creates the platform table");
+        assert_eq!(first.created_tables, vec!["platform_registry".to_string()]);
+        for table in first.created_tables {
+            owners.entry(table).or_insert_with(|| "platform".to_string());
+        }
+
+        platform_author("platform", &guard)
+            .load_and_lower_guarded(
+                attach,
+                "platform",
+                &owners,
+                &LiveSchema::default(),
+                &guard,
+                Some(&profile),
+            )
+            .expect("later-file structural attach passes after registry update");
     }
 
     // F-MED (code-critic, #92/#93): the drift anchor on the IR path is the

@@ -118,6 +118,20 @@ pub enum IrLoadError {
 /// owner case is legible in the error.
 const UNKNOWN_OWNER: &str = "<unregistered>";
 
+/// The table NEWLY CREATED by an [`Op`], if any.
+///
+/// Ownership registration is deliberately shape-agnostic: a `createTable`
+/// establishes attachability for the named table no matter which profile
+/// resolved it, which system fields were injected or omitted, or which primary
+/// key shape it carries.
+#[must_use]
+pub(crate) fn op_created_table(op: &Op) -> Option<&str> {
+    match op {
+        Op::CreateTable { name, .. } => Some(name),
+        _ => None,
+    }
+}
+
 /// The single target table of an [`Op`] for the ownership check. Every op the IR
 /// admits operates on exactly one table (the closed `Op` enum carries a `name`
 /// for `createTable`, a `table` for every alter/DML op, and `DropIndex` carries
@@ -236,8 +250,8 @@ pub fn enforce_ir_ownership(
     let mut owners: BTreeMap<&str, &str> =
         registry.iter().map(|(t, o)| (t.as_str(), o.as_str())).collect();
     for op in &ir.ops {
-        if let Op::CreateTable { name, .. } = op {
-            owners.entry(name.as_str()).or_insert(deploying_app);
+        if let Some(table) = op_created_table(op) {
+            owners.entry(table).or_insert(deploying_app);
         }
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
@@ -653,6 +667,117 @@ mod tests {
             load_ir_document(&bytes, "app_a", Dialect::Postgres, &reg, None, Some(&profile))
                 .unwrap();
         assert_eq!(ir.owner_app, "app_a", "owner_app must be server-stamped");
+    }
+
+    #[test]
+    fn load_registers_platform_exact_create_table_for_structural_attachments() {
+        // Platform resolved createTable carries exactly the author fields (no
+        // confined system fields) and may use a composite PK. Ownership is
+        // shape-agnostic: same-file structural attachments must resolve against
+        // the table registered by the createTable pre-pass.
+        let ops = r#"[
+            {"op":"createTable","name":"platform_registry","schema":"zeroship","columns":[
+                {"name":"app_id","type":"text","nullable":false},
+                {"name":"route","type":"text","nullable":false},
+                {"name":"target","type":"text","nullable":false}
+            ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]},
+            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"forceRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"createPolicy","name":"tenant_isolation","table":"platform_registry",
+                "schema":"zeroship","forCmd":"all",
+                "using":{"node":"literal","value":true}},
+            {"op":"comment","target":{"kind":"table","schema":"zeroship",
+                "name":"platform_registry"},"comment":"Platform route registry"},
+            {"op":"createIndex","table":"platform_registry","schema":"zeroship",
+                "name":"platform_registry_target_idx",
+                "columns":[{"kind":"column","name":"target"}]},
+            {"op":"createFunction","name":"platform_registry_touch","schema":"zeroship",
+                "returns":"trigger","language":"plpgsql","replace":true,
+                "body":"BEGIN RETURN NEW; END;"},
+            {"op":"createTrigger","name":"platform_registry_touch_trg",
+                "table":"platform_registry","schema":"zeroship","timing":"before",
+                "events":["update"],"forEach":"row",
+                "action":{"kind":"executeFunction","name":"platform_registry_touch"}}
+        ]"#;
+        let bytes = ir_json(ops, "");
+        let reg = registry(&[]);
+        let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zeroship".into()]);
+        let profile = platform_profile();
+        let ir = load_ir_document(
+            &bytes,
+            "platform",
+            Dialect::Postgres,
+            &reg,
+            Some(&scope),
+            Some(&profile),
+        )
+        .expect("platform exact createTable must register ownership for same-file attachments");
+        assert_eq!(ir.owner_app, "platform");
+    }
+
+    #[test]
+    fn load_refuses_unknown_table_structural_attach_fail_closed() {
+        let ops = r#"[{"op":"enableRls","table":"never_declared","schema":"zeroship"}]"#;
+        let bytes = ir_json(ops, "");
+        let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zeroship".into()]);
+        let profile = platform_profile();
+        let err = load_ir_document(
+            &bytes,
+            "platform",
+            Dialect::Postgres,
+            &registry(&[]),
+            Some(&scope),
+            Some(&profile),
+        )
+        .expect_err("attach to an unowned/unknown table must fail closed");
+        match err {
+            IrLoadError::NotTableOwner { table, owner, op_index, .. } => {
+                assert_eq!(table, "never_declared");
+                assert_eq!(owner, UNKNOWN_OWNER);
+                assert_eq!(op_index, 0);
+            }
+            other => panic!("expected NotTableOwner for unknown-table attach, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn load_confined_resolved_create_table_ownership_is_unchanged() {
+        let raw = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: String::new(),
+            ops: vec![create_table("fresh"), Op::AddColumn {
+                table: "fresh".into(),
+                column: "x".into(),
+                ty: ColType::Int,
+                nullable: None,
+                default: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: crate::model::ir::IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let confined = crate::model::profile::PolicyProfile::confined();
+        let resolved = crate::model::table_shape::resolve_create_table_policy(&raw, &confined)
+            .expect("confined createTable resolves system fields");
+        let bytes = serde_json::to_string(&resolved).expect("resolved IR serializes");
+        load_ir_document(
+            &bytes,
+            "app_a",
+            Dialect::Postgres,
+            &registry(&[]),
+            None,
+            Some(&confined),
+        )
+        .expect("confined resolved createTable still registers ownership");
     }
 
     #[test]
