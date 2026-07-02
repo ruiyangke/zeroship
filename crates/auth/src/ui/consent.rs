@@ -19,8 +19,10 @@ use crate::csrf;
 use crate::error::AuthError;
 use crate::oidc::auth_request::AuthRequest;
 use crate::oidc::authorization_code::{
-    persist_consent_grant, return_to_after_prompt_interaction,
+    authorization_error_redirect_location, persist_consent_grant,
+    return_to_after_prompt_interaction,
 };
+use crate::oidc::Issuer;
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::sessions as session_store;
@@ -50,9 +52,17 @@ pub async fn get_consent(
     query: ntex::web::types::Query<ConsentQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    issuer: ntex::web::types::State<Arc<Issuer>>,
 ) -> HttpResponse {
     let query = query.into_inner();
-    get_consent_native(req, query.return_to.as_deref(), cfg.as_ref(), db.as_ref()).await
+    get_consent_native(
+        req,
+        query.return_to.as_deref(),
+        cfg.as_ref(),
+        db.as_ref(),
+        issuer.as_ref(),
+    )
+    .await
 }
 
 #[allow(clippy::future_not_send)]
@@ -61,6 +71,7 @@ async fn get_consent_native(
     raw_return_to: Option<&str>,
     cfg: &AuthConfig,
     db: &compio_postgres::Client,
+    issuer: &Issuer,
 ) -> HttpResponse {
     let return_to = return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
     let session = match resolve_native_session(&req, cfg, db).await {
@@ -97,7 +108,7 @@ async fn get_consent_native(
         }
     };
     if classified.has_unknown {
-        return oauth_error_redirect(&ctx, "invalid_scope");
+        return oauth_error_redirect(&ctx, "invalid_scope", issuer.issuer());
     }
 
     render_consent_page(&return_to, &info, db, cfg, classified.can_grant, &app_scope_defs)
@@ -123,13 +134,14 @@ pub async fn post_consent_accept(
     form: ntex::web::types::Form<ConsentDecisionForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    issuer: ntex::web::types::State<Arc<Issuer>>,
 ) -> HttpResponse {
     let form = form.into_inner();
     if !csrf_valid(&req, &form, cfg.as_ref()) {
         return render_error_forbidden(PublicErrorMessage::InvalidRequest);
     }
 
-    post_consent_accept_native(req, &form, cfg.as_ref(), db.as_ref()).await
+    post_consent_accept_native(req, &form, cfg.as_ref(), db.as_ref(), issuer.as_ref()).await
 }
 
 #[allow(clippy::future_not_send)]
@@ -138,6 +150,7 @@ async fn post_consent_accept_native(
     form: &ConsentDecisionForm,
     cfg: &AuthConfig,
     db: &compio_postgres::Client,
+    issuer: &Issuer,
 ) -> HttpResponse {
     let return_to = return_to::sanitize(form.return_to.as_deref(), return_to::SAFE_DEFAULT);
     let session = match resolve_native_session(&req, cfg, db).await {
@@ -167,7 +180,7 @@ async fn post_consent_accept_native(
         }
     };
     match classify_and_authorize(db, &info, &app_scope_defs).await {
-        Ok(c) if c.has_unknown => return oauth_error_redirect(&ctx, "invalid_scope"),
+        Ok(c) if c.has_unknown => return oauth_error_redirect(&ctx, "invalid_scope", issuer.issuer()),
         Ok(c) if c.can_grant => {}
         Ok(_) => {
             return render_consent_page(&return_to, &info, db, cfg, false, &app_scope_defs)
@@ -263,13 +276,14 @@ pub async fn post_consent_deny(
     form: ntex::web::types::Form<ConsentDecisionForm>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
+    issuer: ntex::web::types::State<Arc<Issuer>>,
 ) -> HttpResponse {
     let form = form.into_inner();
     if !csrf_valid(&req, &form, cfg.as_ref()) {
         return render_error_forbidden(PublicErrorMessage::InvalidRequest);
     }
 
-    post_consent_deny_native(req, &form, cfg.as_ref(), db.as_ref()).await
+    post_consent_deny_native(req, &form, cfg.as_ref(), db.as_ref(), issuer.as_ref()).await
 }
 
 #[allow(clippy::future_not_send)]
@@ -278,6 +292,7 @@ async fn post_consent_deny_native(
     form: &ConsentDecisionForm,
     cfg: &AuthConfig,
     db: &compio_postgres::Client,
+    issuer: &Issuer,
 ) -> HttpResponse {
     let return_to = return_to::sanitize(form.return_to.as_deref(), return_to::SAFE_DEFAULT);
     let ctx = match load_native_consent_context(db, &return_to).await {
@@ -309,7 +324,7 @@ async fn post_consent_deny_native(
     )
     .await;
 
-    oauth_error_redirect(&ctx, "access_denied")
+    oauth_error_redirect(&ctx, "access_denied", issuer.issuer())
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────
@@ -408,22 +423,20 @@ fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> NativeCo
     }
 }
 
-fn oauth_error_redirect(ctx: &NativeConsentContext, error: &str) -> HttpResponse {
-    let mut url = match url::Url::parse(&ctx.request.redirect_uri) {
+fn oauth_error_redirect(ctx: &NativeConsentContext, error: &str, issuer: &str) -> HttpResponse {
+    let url = match authorization_error_redirect_location(
+        &ctx.request.redirect_uri,
+        error,
+        ctx.request.state.as_deref(),
+        issuer,
+    ) {
         Ok(url) => url,
         Err(err) => {
             tracing::warn!(error = %err, redirect_uri = %ctx.request.redirect_uri, "native consent redirect_uri parse failed after registry validation");
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
-    {
-        let mut query = url.query_pairs_mut();
-        query.append_pair("error", error);
-        if let Some(state) = ctx.request.state.as_deref() {
-            query.append_pair("state", state);
-        }
-    }
-    return_to::see_other(url.as_str())
+    return_to::see_other(&url)
         .header("cache-control", "no-store")
         .finish()
 }
