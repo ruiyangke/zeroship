@@ -32,6 +32,12 @@ fn ops(ir: &Value) -> &Vec<Value> {
     ir.get("ops").and_then(|o| o.as_array()).expect("ops array")
 }
 
+fn column_named<'a>(cols: &'a [Value], name: &str) -> &'a Value {
+    cols.iter()
+        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+        .unwrap_or_else(|| panic!("missing column {name}: {cols:#?}"))
+}
+
 /// `t.text()` records `nullable: true` (nullable by default) and `t.text()`
 /// .notNull() records `nullable: false` — the §3.2 nullable-by-default rule.
 #[test]
@@ -44,18 +50,18 @@ fn t_text_nullable_by_default_notnull_opts_in() {
     "#;
     let ir = record(src, "nullable");
     let cols = ops(&ir)[0].get("columns").and_then(|c| c.as_array()).unwrap();
+    let a = column_named(cols, "a");
+    let b = column_named(cols, "b");
     // Nullable-by-default: `a` OMITS `nullable` (its absence is the dialect default),
     // never records `nullable: false`.
-    assert_eq!(cols[0].get("name").unwrap(), "a");
     assert!(
-        cols[0].get("nullable").is_none(),
+        a.get("nullable").is_none(),
         "t.text() is nullable-by-default; `nullable` must be omitted (got {:?})",
-        cols[0]
+        a
     );
     // notNull() records the explicit `nullable: false`.
-    assert_eq!(cols[1].get("name").unwrap(), "b");
     assert_eq!(
-        cols[1].get("nullable").and_then(|n| n.as_bool()),
+        b.get("nullable").and_then(|n| n.as_bool()),
         Some(false),
         "t.text().notNull() must record nullable: false"
     );
@@ -574,10 +580,22 @@ fn fluent_insert_normalizes_bigint_and_bytes_scalars() {
     let ir = record(src, "scalars");
     let cols = ops(&ir)[0].get("columns").and_then(|c| c.as_array()).unwrap();
     // seq default -> {literal:{value:{decimal:"9007199254740993"}}}
-    let seq_default = cols[1].get("default").unwrap().get("literal").unwrap().get("value").unwrap();
+    let seq_default = column_named(cols, "seq")
+        .get("default")
+        .unwrap()
+        .get("literal")
+        .unwrap()
+        .get("value")
+        .unwrap();
     assert_eq!(seq_default.get("decimal").unwrap(), "9007199254740993");
     // salt default -> {literal:{value:{bytes:"AQID/w=="}}}
-    let salt_default = cols[2].get("default").unwrap().get("literal").unwrap().get("value").unwrap();
+    let salt_default = column_named(cols, "salt")
+        .get("default")
+        .unwrap()
+        .get("literal")
+        .unwrap()
+        .get("value")
+        .unwrap();
     assert_eq!(salt_default.get("bytes").unwrap(), "AQID/w==");
     // insert row carriers
     let row = &ops(&ir)[1].get("rows").unwrap().as_array().unwrap()[0];
@@ -799,7 +817,7 @@ fn twin_create_table_carries_schema_and_guard() {
     let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").create({ columns: { id: t.integer() }, schema: "app2", ifNotExists: true });
+            table("t").create({ columns: { qty: t.integer() }, schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "create_schema_guard");
@@ -1233,7 +1251,7 @@ fn twin_table_surface_records_full_expected_op_sequence() {
     assert_guard(&ops(&ir)[10], "ifExists");
 }
 
-/// `table().create({ columns, primaryKey, uniques, indexes, ifNotExists })`
+/// `table().create({ columns, uniques, indexes, ifNotExists })`
 /// records the table-level constraints/indexes AND the schema/guard on the one
 /// `createTable` op.
 #[test]
@@ -1246,7 +1264,6 @@ fn twin_table_create_with_table_level_specs_carries_schema_and_guard() {
                     account_id: t.uuid().notNull(),
                     team: t.text().notNull(),
                 },
-                primaryKey: ["account_id", "team"],
                 uniques: [{ name: "m_team_uq", columns: ["team"] }],
                 indexes: [{ name: "m_account_idx", columns: ["account_id"] }],
                 ifNotExists: true,

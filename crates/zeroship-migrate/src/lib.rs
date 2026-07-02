@@ -177,6 +177,7 @@ pub use model::profile::{
     TablePrimaryKeyPolicy, TableRewrite, TableSystemShapePolicy, seal_effective_profile,
     CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
 };
+pub use model::table_shape::{resolve_create_table_policy, TableShapeError};
 // The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
 // path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.
 pub use zeroship_schema::query::SqlDialect;

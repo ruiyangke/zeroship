@@ -31,7 +31,7 @@ use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::{PlanStep, RenameStep};
 use zeroship_migrate::{
     apply::executor::LockMode, Approval, ExecutorConfig, MigrationBackend, MigrationEngine, SqlDialect,
-    SqliteBackend,
+    SqliteBackend, PolicyProfile, resolve_create_table_policy,
 };
 use zeroship_schema::query::SqlDialect as SchemaDialect;
 
@@ -157,6 +157,8 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
             preconditions: vec![],
             checksum: None,
         };
+        let ir =
+            resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
         let steps = author.lower_steps(&ir, &LiveSchema::default()).expect("lower create");
         engine
             .apply_plan(&steps, Approval::None, be, &exec_cfg(), "deploy", LockMode::Acquire)
@@ -182,7 +184,11 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     // Seed rows BEFORE the rename — they must survive the rebuild.
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     be.actor()
-        .exec("INSERT INTO main.people (id, nickname) VALUES ('p1','ada'),('p2','grace')")
+        .exec(
+            "INSERT INTO main.people (id, created_at, updated_at, version, nickname) VALUES \
+             ('p1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'ada'), \
+             ('p2','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'grace')",
+        )
         .await
         .expect("seed");
 

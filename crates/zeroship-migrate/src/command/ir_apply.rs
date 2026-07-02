@@ -61,6 +61,7 @@ use crate::apply::executor::{ApplyError, LockMode};
 use crate::apply::journal::{DeployRecoveryScope, PendingContract};
 use crate::approval::ApprovalScope;
 use crate::frontend::{record_migration_transient, BuildError, DiscoveredMigration, RecordVia};
+use crate::PolicyProfile;
 use crate::model::migration::Migration;
 use crate::model::profile::{SealError, SealVerifier, SealedProfile};
 use crate::render::step::PlanStep;
@@ -473,7 +474,8 @@ pub async fn apply_platform_ts_postgres(
                 .and_then(|n| n.to_str())
                 .unwrap_or("<unknown>")
                 .to_string();
-            let recorded = record_migration_transient(migration, owner_app, record_via)
+            let recorded =
+                record_migration_transient(migration, owner_app, record_via, &PolicyProfile::platform())
                 .map_err(|source| PostgresIrApplyError::Record {
                     file: display.clone(),
                     source,

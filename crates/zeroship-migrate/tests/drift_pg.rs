@@ -16,6 +16,7 @@ use zeroship_migrate::{
     LiveSchema, Migration, MigrationFlags, MigrationId, MigrationIr, Op, RollbackRequest,
     RollbackTarget, SafeI64, SafeU64, ScalarFn, SchemaScope, SchemaSnapshot, SequenceOwnedBy,
     SqlDialect, StructuralDrift, TableSnapshot, UnaryOp, CURRENT_IR_VERSION,
+    PolicyProfile, resolve_create_table_policy,
 };
 
 const DEFAULT_DSN: &str =
@@ -1512,6 +1513,12 @@ async fn sequence_options_round_trip_and_out_of_band_option_drift_is_reported() 
             owned_by: Some(None),
         },
     ];
+    let ops = resolve_create_table_policy(
+        &ir_doc("sequence_options_roundtrip", ops),
+        &PolicyProfile::confined(),
+    )
+    .expect("sequence options test IR resolves")
+    .ops;
     let migrations = lower_ir_migrations(sch, "sequence_options_roundtrip", &ops);
     apply(&conn, &cfg, &migrations, Approval::None, "actor")
         .await

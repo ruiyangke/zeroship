@@ -9,13 +9,38 @@
       "columns": [
         {
           "name": "id",
-          "type": "uuid",
-          "nullable": false,
-          "default": {
-            "fn": {
-              "fn": "genRandomUuid"
-            }
-          }
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
         },
         {
           "name": "total",
@@ -32,9 +57,36 @@
           "type": "text"
         }
       ],
-      "primaryKey": null,
+      "primaryKey": [
+        "id"
+      ],
       "constraints": [],
-      "indexes": []
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
     },
     {
       "op": "createIndex",

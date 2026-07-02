@@ -31,7 +31,7 @@ use zeroship_migrate::model::ir::{
 use zeroship_migrate::render::lower::{IrAuthor, LiveSchema};
 use zeroship_migrate::apply::journal::Phase;
 use zeroship_migrate::model::migration::Migration;
-use zeroship_migrate::SqliteBackend;
+use zeroship_migrate::{resolve_create_table_policy, PolicyProfile, SqliteBackend};
 use zeroship_schema::query::SqlDialect;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -72,6 +72,8 @@ fn lower(op: Op) -> Vec<Migration> {
         preconditions: vec![],
         checksum: None,
     };
+    let ir = resolve_create_table_policy(&ir, &PolicyProfile::confined())
+        .expect("guard test IR resolves");
     let author = IrAuthor::new("main", "app_test", SqlDialect::Sqlite);
     author.lower(&ir, &LiveSchema::default()).expect("guarded op lowers")
 }

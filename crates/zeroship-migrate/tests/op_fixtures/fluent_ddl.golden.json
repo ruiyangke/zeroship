@@ -9,13 +9,38 @@
       "columns": [
         {
           "name": "id",
-          "type": "uuid",
-          "nullable": false,
-          "default": {
-            "fn": {
-              "fn": "genRandomUuid"
-            }
-          }
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
         },
         {
           "name": "email",
@@ -41,7 +66,7 @@
           }
         },
         {
-          "name": "created_at",
+          "name": "authored_at",
           "type": "timestamp",
           "nullable": false,
           "default": {
@@ -127,12 +152,72 @@
         "id"
       ],
       "constraints": [],
-      "indexes": []
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
     },
     {
       "op": "createTable",
       "name": "memberships",
       "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
         {
           "name": "account_id",
           "type": "uuid",
@@ -145,8 +230,7 @@
         }
       ],
       "primaryKey": [
-        "account_id",
-        "team"
+        "id"
       ],
       "constraints": [
         {
@@ -193,6 +277,30 @@
             {
               "kind": "column",
               "name": "account_id"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
             }
           ]
         }
