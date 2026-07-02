@@ -1079,14 +1079,14 @@ the `--check` drift gate on a production build. See
 [vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
 for the build/watch wiring.
 
-> **In progress (design — not yet shipped).** Two follow-on tracks extend this
-> surface; treat them as design references, not implemented features:
-> - **The `@zeroship/migrate/pg` vendor primitive layer** — a Postgres-only,
->   operator-gated superset (grants/roles/policies/functions/triggers/extensions/RLS)
->   so the platform's own privileged DDL can be authored in the DSL and the Liquibase
->   changelog retired. Hard-gated to the Trusted/Platform profile, unreachable from a
->   Confined creator migration by construction. Design:
->   [docs/proposals/2026-06-25-vendor-pg-primitives.md](../proposals/2026-06-25-vendor-pg-primitives.md).
+> **Implemented: Postgres vendor primitives.** The `@zeroship/migrate/pg`
+> subpath exposes the Postgres-only, operator-gated primitive layer
+> (grants/roles/policies/functions/triggers/extensions/RLS) so the platform's
+> own privileged DDL can be authored in the DSL. The engine lowers these 19
+> vendor ops through the Postgres vendor renderer, hard-gated to the
+> Trusted/Platform profile and unreachable from a Confined creator migration by
+> construction.
+
 ## Offline SQL preview (`plan`)
 
 `zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact

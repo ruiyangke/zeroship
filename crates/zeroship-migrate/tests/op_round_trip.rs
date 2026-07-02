@@ -2,17 +2,18 @@
 //! builder + round-trip fixtures").
 //!
 //! This is the load-bearing cross-implementation gate the design names as the
-//! AUTHORITATIVE anti-drift mechanism: a corpus of `.ir.json` files that BOTH the
-//! JS `op.*` builder and the Rust engine must agree on (value equality via the
-//! typed-value checksum `Checksum::of_ir`). The IR wire shape is frozen, so this
-//! gate must exist at freeze time — it is what guarantees the JS builder and the
-//! Rust loader never drift in their interpretation of an op list.
+//! AUTHORITATIVE anti-drift mechanism: a corpus of golden JSON snapshots that
+//! BOTH the JS `op.*` builder and the Rust engine must agree on (value equality
+//! via the typed-value checksum `Checksum::of_ir`). The IR wire shape is frozen,
+//! so this gate must exist at freeze time — it is what guarantees the JS builder
+//! and the Rust loader never drift in their interpretation of an op list.
 //!
 //! Three gates, per the normative §2.5 (mechanisms 1–3):
 //!
 //! 1. **Golden corpus byte-stability.** Each `op_fixtures/<name>.mig.js` is recorded
 //!    by the REAL V8 `op.*` recorder ([`record_migration_to_json_unsandboxed`]) and its
-//!    `.ir.json` is gated against the committed `op_fixtures/<name>.ir.json`. Run
+//!    canonical IR JSON is gated against the committed
+//!    `op_fixtures/<name>.golden.json`. Run
 //!    `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip` to
 //!    regenerate after an intentional shape change, then commit the goldens.
 //!
@@ -40,6 +41,7 @@ use zeroship_migrate::frontend::{
 use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
 
 const OWNER: &str = "app_corpus";
+const GOLDEN_SUFFIX: &str = ".golden.json";
 
 /// The fixtures dir (`tests/op_fixtures/`).
 fn fixtures_dir() -> PathBuf {
@@ -59,6 +61,10 @@ fn fixture_stems() -> Vec<String> {
     stems.sort();
     assert!(!stems.is_empty(), "the op.* corpus must have at least one .mig.js fixture");
     stems
+}
+
+fn golden_path(stem: &str) -> PathBuf {
+    fixtures_dir().join(format!("{stem}{GOLDEN_SUFFIX}"))
 }
 
 /// The authoritative `Checksum::of_ir` over a loaded IR's op list (PR1 default-flags
@@ -106,7 +112,7 @@ fn record_via_child_to_json(mig_src: &str, stem: &str) -> String {
     json
 }
 
-/// GATE 1 + 2: for every fixture, the JS-recorded `.ir.json` is byte-stable against
+/// GATE 1 + 2: for every fixture, the JS-recorded IR JSON is byte-stable against
 /// the committed golden AND its op-list checksum value-equals the golden's.
 #[test]
 fn corpus_is_byte_stable_and_value_equal() {
@@ -115,36 +121,37 @@ fn corpus_is_byte_stable_and_value_equal() {
         let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
 
-        // Record through the REAL V8 op.* recorder → canonical `.ir.json` string.
+        // Record through the REAL V8 op.* recorder -> canonical IR JSON string.
         let recorded = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("record {stem}: {e}"));
 
-        let golden_path = fixtures_dir().join(format!("{stem}.ir.json"));
+        let golden_path = golden_path(&stem);
         if update {
             std::fs::write(&golden_path, recorded.as_bytes())
-                .unwrap_or_else(|e| panic!("write {stem}.ir.json: {e}"));
+                .unwrap_or_else(|e| panic!("write {stem}{GOLDEN_SUFFIX}: {e}"));
             continue;
         }
 
         // GATE 1 — byte-stability against the committed golden.
         let golden = std::fs::read_to_string(&golden_path).unwrap_or_else(|e| {
             panic!(
-                "{stem}.ir.json missing or unreadable ({e}). Run \
+                "{stem}{GOLDEN_SUFFIX} missing or unreadable ({e}). Run \
                  `UPDATE_CORPUS=1 cargo test -p zeroship-migrate --test op_round_trip` \
                  to generate the corpus, then commit it."
             )
         });
         assert_eq!(
             recorded, golden,
-            "{stem}.ir.json is stale (the JS recorder's output drifted from the committed \
+            "{stem}{GOLDEN_SUFFIX} is stale (the JS recorder's output drifted from the committed \
              golden). Regenerate with UPDATE_CORPUS=1 and commit."
         );
 
         // Both the JS-emitted bytes and the committed golden must deserialize through
         // the REAL frozen `MigrationIr` contract (camelCase ops, closed AST, the
         // numeric domain) — the gate biting if the JS emitted an out-of-contract op.
-        let from_js: MigrationIr = serde_json::from_str(&recorded)
-            .unwrap_or_else(|e| panic!("{stem}: JS-recorded .ir.json violates the IR contract: {e}"));
+        let from_js: MigrationIr = serde_json::from_str(&recorded).unwrap_or_else(|e| {
+            panic!("{stem}: JS-recorded IR JSON violates the IR contract: {e}")
+        });
         let from_golden: MigrationIr = serde_json::from_str(&golden)
             .unwrap_or_else(|e| panic!("{stem}: committed golden violates the IR contract: {e}"));
 
