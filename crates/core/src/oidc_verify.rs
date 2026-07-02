@@ -4,7 +4,7 @@
 //! OIDC RP) to verify ID tokens issued by the configured OP. The JWKS endpoint
 //! lives at `https://auth.zeroship.ai/.well-known/jwks.json` in prod, or
 //! wherever the deployment configures it. This module fetches keys on demand,
-//! caches for 5 minutes, and force-refreshes on signature verification failure.
+//! caches for 5 minutes, and force-refreshes only when no matching key is cached.
 //!
 //! Token verification covers: signature (against any cached public key
 //! matching `kid` and `alg`), `iss`, `aud`, `exp` (+ `nbf` if present),
@@ -91,11 +91,17 @@ pub enum OidcError {
     #[error("at_hash present but no access token was provided")]
     AtHashInputMissing,
 
+    #[error("at_hash missing while access token binding was requested")]
+    AtHashClaimMissing,
+
     #[error("at_hash mismatch")]
     AtHashMismatch,
 
     #[error("c_hash present but no authorization code was provided")]
     CHashInputMissing,
+
+    #[error("c_hash missing while authorization code binding was requested")]
+    CHashClaimMissing,
 
     #[error("c_hash mismatch")]
     CHashMismatch,
@@ -419,8 +425,9 @@ pub struct TokenClaims {
 
 /// Verify an OIDC ID token. Returns the claims on success.
 ///
-/// On the first verification failure (likely cause: JWKS rotated under
-/// us), the cache is force-refreshed and verification is retried once.
+/// If no cached key matches the token `kid` + `alg` (likely cause: JWKS
+/// rotated under us), the cache is force-refreshed and verification is
+/// retried once.
 ///
 /// # Errors
 /// - `DecodeHeader` if the JWT header is malformed or has no `kid`.
@@ -465,12 +472,14 @@ pub async fn verify_id_token(
         Ok(data.claims)
     };
 
-    let claims = if let Ok(c) = try_verify(cache.keys().await?) {
-        c
-    } else {
-        // Likely cause: JWKS rotated. Force-refresh once and retry.
-        cache.refresh().await?;
-        try_verify(cache.keys().await?)?
+    let claims = match try_verify(cache.keys().await?) {
+        Ok(c) => c,
+        Err(OidcError::NoMatchingKey(_)) => {
+            // Likely cause: JWKS rotated. Force-refresh once and retry.
+            cache.refresh().await?;
+            try_verify(cache.keys().await?)?
+        }
+        Err(e) => return Err(e),
     };
 
     // Defense-in-depth: `jsonwebtoken` already checks iss/aud against
@@ -500,19 +509,29 @@ pub async fn verify_id_token(
             return Err(OidcError::NbfInFuture);
         }
     }
-    if let Some(at_hash) = claims.at_hash.as_deref() {
-        let input = expected_at_hash_input.ok_or(OidcError::AtHashInputMissing)?;
+    if let Some(input) = expected_at_hash_input {
+        let at_hash = claims
+            .at_hash
+            .as_deref()
+            .ok_or(OidcError::AtHashClaimMissing)?;
         let expected = oidc_token_hash(alg, input.as_bytes());
         if !constant_time_eq(at_hash.as_bytes(), expected.as_bytes()) {
             return Err(OidcError::AtHashMismatch);
         }
+    } else if claims.at_hash.is_some() {
+        return Err(OidcError::AtHashInputMissing);
     }
-    if let Some(c_hash) = claims.c_hash.as_deref() {
-        let input = expected_c_hash_input.ok_or(OidcError::CHashInputMissing)?;
+    if let Some(input) = expected_c_hash_input {
+        let c_hash = claims
+            .c_hash
+            .as_deref()
+            .ok_or(OidcError::CHashClaimMissing)?;
         let expected = oidc_token_hash(alg, input.as_bytes());
         if !constant_time_eq(c_hash.as_bytes(), expected.as_bytes()) {
             return Err(OidcError::CHashMismatch);
         }
+    } else if claims.c_hash.is_some() {
+        return Err(OidcError::CHashInputMissing);
     }
 
     Ok(claims)
@@ -719,6 +738,87 @@ mod tests {
         ))
         .expect_err("wrong access token must reject at_hash");
         assert!(matches!(err, OidcError::AtHashMismatch), "got: {err:?}");
+
+        let mut claims_without_at_hash = claims.clone();
+        claims_without_at_hash
+            .as_object_mut()
+            .expect("claims object")
+            .remove("at_hash");
+        let token = sign(&key, &claims_without_at_hash);
+        let err = poll_ready(verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            Some(access_token),
+            None,
+        ))
+        .expect_err("missing at_hash must reject when access token input is supplied");
+        assert!(
+            matches!(err, OidcError::AtHashClaimMissing),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verifies_c_hash_and_rejects_missing_or_mismatch() {
+        let (key, cache) = make_key();
+        let code = "authorization-code-under-test";
+        let claims = json!({
+            "sub": "usr_alice",
+            "iss": "https://auth.zeroship.ai/",
+            "aud": "gateway",
+            "exp": now_secs() + 300,
+            "iat": now_secs(),
+            "nonce": "nonce-123",
+            "c_hash": oidc_token_hash(Algorithm::EdDSA, code.as_bytes()),
+        });
+        let token = sign(&key, &claims);
+
+        poll_ready(verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            None,
+            Some(code),
+        ))
+        .expect("matching c_hash verifies");
+
+        let err = poll_ready(verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            None,
+            Some("wrong-code"),
+        ))
+        .expect_err("wrong authorization code must reject c_hash");
+        assert!(matches!(err, OidcError::CHashMismatch), "got: {err:?}");
+
+        let mut claims_without_c_hash = claims.clone();
+        claims_without_c_hash
+            .as_object_mut()
+            .expect("claims object")
+            .remove("c_hash");
+        let token = sign(&key, &claims_without_c_hash);
+        let err = poll_ready(verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-123"),
+            None,
+            Some(code),
+        ))
+        .expect_err("missing c_hash must reject when authorization code input is supplied");
+        assert!(
+            matches!(err, OidcError::CHashClaimMissing),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -803,7 +903,7 @@ mod resilience_tests {
     use super::*;
     use ed25519_dalek::pkcs8::EncodePrivateKey;
     use ed25519_dalek::SigningKey;
-    use jsonwebtoken::{encode, EncodingKey, Header};
+    use jsonwebtoken::{encode, DecodingKey, EncodingKey, Header};
     use ntex::web::{self, HttpResponse};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc};
@@ -920,6 +1020,7 @@ mod resilience_tests {
     /// fetched over the wire.
     struct TestKeyPair {
         encoding: EncodingKey,
+        decoding: DecodingKey,
         kid: String,
         jwks_body: String,
     }
@@ -929,6 +1030,7 @@ mod resilience_tests {
         let pkcs8 = sk.to_pkcs8_der().expect("encode pkcs8");
         let encoding = EncodingKey::from_ed_der(pkcs8.as_bytes());
         let pub_b64 = URL_SAFE_NO_PAD.encode(sk.verifying_key().to_bytes());
+        let decoding = DecodingKey::from_ed_components(&pub_b64).expect("decode key");
         let kid = "jwks-resilience-kid".to_string();
         let jwks_body = serde_json::json!({
             "keys": [{
@@ -942,8 +1044,29 @@ mod resilience_tests {
         .to_string();
         TestKeyPair {
             encoding,
+            decoding,
             kid,
             jwks_body,
+        }
+    }
+
+    fn cached_key(kp: &TestKeyPair) -> CachedKey {
+        CachedKey {
+            kid: kp.kid.clone(),
+            alg: Algorithm::EdDSA,
+            decoding: kp.decoding.clone(),
+        }
+    }
+
+    fn cache_with_keys(url: String, keys: Vec<CachedKey>) -> JwksCache {
+        JwksCache {
+            url,
+            inner: Arc::new(RwLock::new(JwksState {
+                keys,
+                fetched_at: Some(Instant::now()),
+            })),
+            ttl: Duration::from_secs(300),
+            fetch_timeout: TEST_FETCH_TIMEOUT,
         }
     }
 
@@ -999,6 +1122,50 @@ mod resilience_tests {
         )
         .await
         .expect("token verifies against freshly-fetched key");
+    }
+
+    #[compio::test]
+    async fn verify_id_token_refreshes_jwks_only_for_missing_key() {
+        let kp = make_keypair();
+        let mock = MockJwks::start(kp.jwks_body.clone());
+        let token = sign(&kp, &fresh_claims());
+
+        let cache = cache_with_keys(mock.jwks_url(), vec![cached_key(&kp)]);
+        let err = verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "control",
+            Some("nonce-xyz"),
+            None,
+            None,
+        )
+        .await
+        .expect_err("audience mismatch must reject");
+        assert!(matches!(err, OidcError::Verify(_)), "got: {err:?}");
+        assert_eq!(
+            mock.hits(),
+            0,
+            "signature-independent failures must not force a JWKS refresh"
+        );
+
+        let cache = cache_with_keys(mock.jwks_url(), Vec::new());
+        verify_id_token(
+            &cache,
+            &token,
+            "https://auth.zeroship.ai/",
+            "gateway",
+            Some("nonce-xyz"),
+            None,
+            None,
+        )
+        .await
+        .expect("missing key should refresh and verify against the fetched JWKS");
+        assert_eq!(
+            mock.hits(),
+            1,
+            "NoMatchingKey should force exactly one JWKS refresh"
+        );
     }
 
     #[compio::test]

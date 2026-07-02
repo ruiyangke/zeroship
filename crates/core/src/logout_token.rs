@@ -32,6 +32,8 @@ use crate::oidc_verify::{JwksCache, OidcError};
 pub const BCL_EVENT: &str = "http://schemas.openid.net/event/backchannel-logout";
 /// Recommended JWT `typ` for OIDC Back-Channel Logout tokens.
 pub const LOGOUT_TOKEN_TYP: &str = "logout+jwt";
+/// Media-type form accepted by RFC 8417 explicit typing guidance.
+pub const LOGOUT_TOKEN_MEDIA_TYP: &str = "application/logout+jwt";
 
 /// Maximum allowed skew between the JWT `iat` and the verifier's clock.
 /// Tokens older than this (or that claim to be issued from the future
@@ -187,6 +189,9 @@ pub enum LogoutError {
     #[error("verify: {0}")]
     Verify(#[from] OidcError),
 
+    #[error("logout_token typ header must be logout+jwt or application/logout+jwt, got {got}")]
+    InvalidTyp { got: String },
+
     #[error("nonce claim present (forbidden by OIDC BCL §2.4)")]
     NonceForbidden,
 
@@ -206,10 +211,10 @@ pub enum LogoutError {
 /// Verify a BCL `logout_token` JWT and return its parsed claims.
 ///
 /// Steps (in order):
-/// 1. Decode the JWT header → look up the signing key by `kid` + `alg`
-///    in the shared [`JwksCache`]. On a cache miss (or first-attempt
-///    verify failure), the cache is force-refreshed once and the
-///    lookup retried.
+/// 1. Decode the JWT header, require `typ: logout+jwt` (or
+///    `application/logout+jwt`), then look up the signing key by `kid` + `alg`
+///    in the shared [`JwksCache`]. On a cache miss, the cache is
+///    force-refreshed once and the lookup retried.
 /// 2. Verify the EdDSA signature, `iss`, `aud`, and `exp` via
 ///    `jsonwebtoken::decode`.
 /// 3. Run the BCL-specific claim checks:
@@ -229,8 +234,14 @@ pub async fn verify(
     expected_iss: &str,
     expected_aud: &str,
 ) -> Result<LogoutToken, LogoutError> {
-    // 1. Decode header → kid + alg.
+    // 1. Decode header → typ + kid + alg.
     let header = decode_header(token).map_err(|e| OidcError::DecodeHeader(e.to_string()))?;
+    let typ = header.typ.as_deref();
+    if typ != Some(LOGOUT_TOKEN_TYP) && typ != Some(LOGOUT_TOKEN_MEDIA_TYP) {
+        return Err(LogoutError::InvalidTyp {
+            got: typ.unwrap_or("<missing>").to_string(),
+        });
+    }
     let kid = header
         .kid
         .clone()
@@ -424,8 +435,13 @@ mod tests {
     /// is a [`serde_json::Value`] so each test can supply exactly the
     /// shape under test (missing fields, extra fields, etc.).
     fn sign(key: &TestKey, claims: &serde_json::Value) -> String {
+        sign_with_typ(key, claims, Some(LOGOUT_TOKEN_TYP))
+    }
+
+    fn sign_with_typ(key: &TestKey, claims: &serde_json::Value, typ: Option<&str>) -> String {
         let mut header = Header::new(Algorithm::EdDSA);
         header.kid = Some(key.kid.clone());
+        header.typ = typ.map(str::to_owned);
         encode(&header, claims, &key.encoding).expect("encode jwt")
     }
 
@@ -481,6 +497,32 @@ mod tests {
             Some(&json!({})),
             "events must round-trip as the exact empty-object marker"
         );
+    }
+
+    #[compio::test]
+    async fn accepts_logout_token_typ_forms() {
+        let (key, cache) = make_key();
+        for typ in [LOGOUT_TOKEN_TYP, LOGOUT_TOKEN_MEDIA_TYP] {
+            let token = sign_with_typ(&key, &happy_claims(), Some(typ));
+            verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+                .await
+                .unwrap_or_else(|err| panic!("{typ} should verify, got: {err:?}"));
+        }
+    }
+
+    #[compio::test]
+    async fn rejects_wrong_or_missing_typ_header() {
+        let (key, cache) = make_key();
+        for typ in [Some("JWT"), None] {
+            let token = sign_with_typ(&key, &happy_claims(), typ);
+            let err = verify(&cache, &token, "https://auth.zeroship.ai/", "gateway")
+                .await
+                .expect_err("logout_token must reject non-logout typ headers");
+            assert!(
+                matches!(err, LogoutError::InvalidTyp { .. }),
+                "got: {err:?}"
+            );
+        }
     }
 
     #[compio::test]
