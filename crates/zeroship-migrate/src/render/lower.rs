@@ -1674,11 +1674,9 @@ impl IrAuthor {
                 // FK/UNIQUE/CHECK from `snap.constraints` and `CREATE INDEX` from
                 // `snap.indexes`; this stamps the op's specs onto the SAME snapshot so
                 // a named unique / check / table-level FK / extra index appears in the
-                // live catalog. Architecturally-unsupportable specs (a composite or
-                // per-column user PK — the platform OWNS the `id` PK; a CHECK — its
-                // closed-AST `expr` waits on the Wave-C Expr→SQL renderer, like
-                // stand-alone `addConstraint(check)`) FAIL CLOSED here, never a silent
-                // no-op.
+                // live catalog. The resolved table primary key is rendered from the
+                // top-level `primary_key` field above; validation owns any policy
+                // decision about author primary keys.
                 self.fold_create_table_specs(name, &eff_schema, &mut snap, constraints, indexes)?;
                 // The SQLite CREATE routes through the shared `zeroship_schema`
                 // emitter, which consumes the SDK schema `Value` — built here from
@@ -2776,20 +2774,11 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         for c in constraints {
             match &c.kind {
-                IrConstraintKind::Pk { columns } => {
-                    if columns.as_slice() == ["id"]
-                        && snap
-                            .columns
-                            .iter()
-                            .any(|col| col.name == "id" && col.identity.is_some())
-                    {
-                        continue;
-                    }
-                    // The platform owns the `id` PK; a user composite / per-column PK
-                    // would emit a SECOND `PRIMARY KEY`, which both backends reject.
-                    return Err(IrLowerError::UnsupportedOp(
-                        "validated createTable user PRIMARY KEY reached lower",
-                    ));
+                IrConstraintKind::Pk { .. } => {
+                    // `createTable` renders primary keys from the resolved top-level
+                    // `primary_key` field. Constraint-form PKs are a validation concern;
+                    // lower must not re-apply the old platform-owned-id policy here.
+                    continue;
                 }
                 IrConstraintKind::Check { .. } => {
                     return Err(IrLowerError::UnsupportedOp(
@@ -4913,6 +4902,10 @@ mod tests {
         )
     }
 
+    fn migration_sql_pairs(migs: &[Migration]) -> Vec<(String, Option<String>)> {
+        migs.iter().map(|m| (m.up.clone(), m.down.clone())).collect()
+    }
+
     /// Build a one-op `createTable` IR for the guard-per-fragment tests.
     fn create_table_ir(table: &str, cols: Vec<TIrColumn>) -> MigrationIr {
         MigrationIr {
@@ -5022,6 +5015,168 @@ mod tests {
         assert!(
             !create.up.contains("UNIQUE (\"handle\")"),
             "the lower must NOT over-quote the UNIQUE column; got:\n{}",
+            create.up
+        );
+    }
+
+    #[test]
+    fn create_table_top_level_composite_primary_key_renders_pg() {
+        let mut ir = create_table_ir(
+            "memberships",
+            vec![
+                TIrColumn {
+                    name: "account_id".into(),
+                    ty: ColType::Uuid,
+                    nullable: Some(false),
+                    default: None,
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
+                TIrColumn {
+                    name: "team".into(),
+                    ty: ColType::Text,
+                    nullable: Some(false),
+                    default: None,
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
+            ],
+        );
+        if let Op::CreateTable { primary_key, .. } = &mut ir.ops[0] {
+            *primary_key = Some(vec!["account_id".into(), "team".into()]);
+        }
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let migs = author
+            .lower(&ir, &LiveSchema::default())
+            .expect("lower platform composite PK createTable");
+        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        assert!(
+            create.up.contains("PRIMARY KEY (account_id, team)"),
+            "top-level composite primary_key must render as a composite PK:\n{}",
+            create.up
+        );
+    }
+
+    #[test]
+    fn create_table_null_primary_key_renders_no_pk_pg() {
+        let ir = create_table_ir(
+            "events",
+            vec![
+                TIrColumn {
+                    name: "stream".into(),
+                    ty: ColType::Text,
+                    nullable: Some(false),
+                    default: None,
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
+                TIrColumn {
+                    name: "payload".into(),
+                    ty: ColType::Json,
+                    nullable: Some(false),
+                    default: None,
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                },
+            ],
+        );
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let migs = author
+            .lower(&ir, &LiveSchema::default())
+            .expect("lower platform null-PK createTable");
+        let create = migs.iter().find(|m| m.up.contains("CREATE TABLE")).expect("create");
+        assert!(
+            !create.up.contains("PRIMARY KEY"),
+            "primary_key:null must render no PRIMARY KEY clause:\n{}",
+            create.up
+        );
+    }
+
+    #[test]
+    fn same_resolved_create_table_ir_lowers_identically_across_profiles_pg() {
+        let raw = MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::CreateTable {
+                name: "widgets".into(),
+                columns: vec![TIrColumn {
+                    name: "title".into(),
+                    ty: ColType::Text,
+                    nullable: Some(false),
+                    default: None,
+                    unique: None,
+                    id_prefix: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                }],
+                primary_key: None,
+                constraints: vec![],
+                indexes: vec![],
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let confined = crate::model::profile::PolicyProfile::confined();
+        let platform = platform_profile();
+        let resolved = crate::model::table_shape::resolve_create_table_policy(&raw, &confined)
+            .expect("confined createTable resolves to explicit system shape");
+        let bytes = serde_json::to_string(&resolved).expect("resolved IR serializes");
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        let confined_sql = author
+            .load_and_lower(
+                &bytes,
+                "app_a",
+                &registry(&[]),
+                &LiveSchema::default(),
+                Some(&confined),
+            )
+            .expect("resolved confined IR validates and lowers under confined profile");
+        let platform_sql = author
+            .load_and_lower(
+                &bytes,
+                "app_a",
+                &registry(&[]),
+                &LiveSchema::default(),
+                Some(&platform),
+            )
+            .expect("same resolved IR validates and lowers under platform profile");
+        assert_eq!(
+            migration_sql_pairs(&confined_sql),
+            migration_sql_pairs(&platform_sql),
+            "lowered SQL must be a function of the resolved IR, not the active profile"
+        );
+        let create = confined_sql
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create");
+        assert!(
+            create.up.contains("\"id\" text PRIMARY KEY NOT NULL"),
+            "confined resolved CreateTable must still render the inline id PK byte-shape:\n{}",
             create.up
         );
     }

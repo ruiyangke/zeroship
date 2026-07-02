@@ -19,9 +19,9 @@
 //! generated side runs the REAL `descriptors_to_create_ops` producer + the REAL
 //! `fold_to_field_defs` recovery seam — no shims.
 
+use zeroship_migrate::frontend::eval_schema_to_ir;
 use zeroship_migrate::render::declarative::{descriptor_to_sdk_schema, CollectionDescriptor};
 use zeroship_migrate::{descriptors_to_create_ops, fold_to_field_defs, SqlDialect};
-use zeroship_migrate::frontend::eval_schema_to_ir;
 
 const KEYSTONE: &str = include_str!("fixtures/keystone_schema.js");
 const SCHEMA: &str = "public";
@@ -34,6 +34,22 @@ fn declarative_field_defs(
         .iter()
         .map(|d| (d.name.clone(), descriptor_to_sdk_schema(d)))
         .collect()
+}
+
+fn generated_authored_subset(
+    generated_def: &serde_json::Value,
+    authored_def: &serde_json::Value,
+) -> serde_json::Value {
+    let generated = generated_def.as_object().expect("generated field map");
+    let authored = authored_def.as_object().expect("authored field map");
+    let mut subset = serde_json::Map::new();
+    for key in authored.keys() {
+        let value = generated
+            .get(key)
+            .unwrap_or_else(|| panic!("generated side missing authored field {key}"));
+        subset.insert(key.clone(), value.clone());
+    }
+    serde_json::Value::Object(subset)
 }
 
 #[test]
@@ -49,8 +65,11 @@ fn keystone_authored_vs_generated_field_defs_are_byte_identical() {
     let generated =
         fold_to_field_defs(&ops, SqlDialect::Postgres, SCHEMA).expect("fold-and-recover");
 
-    // BYTE-IDENTICAL per collection. Compare the serialized canonical JSON so a
-    // failure prints the exact divergence.
+    // BYTE-IDENTICAL per collection for the authored fields. Slice 6 makes the
+    // produced createTable carry the resolved confined system-field prefix too;
+    // those policy-injected fields are asserted by the fold unit tests and the
+    // gen-types CLI golden, while this keystone stays focused on declared facet
+    // fidelity.
     assert_eq!(
         authored.keys().collect::<Vec<_>>(),
         generated.keys().collect::<Vec<_>>(),
@@ -61,7 +80,11 @@ fn keystone_authored_vs_generated_field_defs_are_byte_identical() {
             .get(collection)
             .unwrap_or_else(|| panic!("generated side missing collection {collection}"));
         let a = serde_json::to_string_pretty(authored_def).unwrap();
-        let b = serde_json::to_string_pretty(generated_def).unwrap();
+        let b = serde_json::to_string_pretty(&generated_authored_subset(
+            generated_def,
+            authored_def,
+        ))
+        .unwrap();
         assert_eq!(
             a, b,
             "keystone parity DRIFT for collection `{collection}`:\n\
