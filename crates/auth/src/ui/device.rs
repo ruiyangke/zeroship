@@ -43,6 +43,7 @@ pub struct DeviceQuery {
 
 #[allow(clippy::future_not_send)]
 pub async fn get(
+    req: HttpRequest,
     query: ntex::web::types::Query<DeviceQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
     db: ntex::web::types::State<Arc<compio_postgres::Client>>,
@@ -68,15 +69,27 @@ pub async fn get(
         Ok(Some(details)) => {
             render_form(user_code, None, StatusCode::OK, cfg.insecure_dev, Some(&details))
         }
-        Ok(None) => render_form(
-            user_code,
-            Some("invalid or expired code"),
-            StatusCode::BAD_REQUEST,
-            cfg.insecure_dev,
-            None,
-        ),
+        Ok(None) => {
+            if let Some(resp) =
+                rate_limit_failed_get_user_code_attempt(db.as_ref(), &req, cfg.as_ref()).await
+            {
+                return resp;
+            }
+            render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+                cfg.insecure_dev,
+                None,
+            )
+        }
         Err(e) => {
             tracing::error!(error = %e, "native device user-code detail lookup failed");
+            if let Some(resp) =
+                rate_limit_failed_get_user_code_attempt(db.as_ref(), &req, cfg.as_ref()).await
+            {
+                return resp;
+            }
             render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -86,6 +99,15 @@ pub async fn get(
             )
         }
     }
+}
+
+async fn rate_limit_failed_get_user_code_attempt(
+    db: &compio_postgres::Client,
+    req: &HttpRequest,
+    cfg: &AuthConfig,
+) -> Option<HttpResponse> {
+    let session = current_session(req, cfg, db).await;
+    rate_limit_failed_user_code_attempt(db, req, session.as_ref(), cfg.insecure_dev).await
 }
 
 /// `/device` POST — approve a native OP device grant. Anonymous browsers are

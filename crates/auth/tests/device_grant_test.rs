@@ -16,6 +16,8 @@ use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
 use zeroship_auth::store::{sessions as session_store, users};
 
+const DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS: usize = 60;
+
 #[derive(Debug, serde::Deserialize)]
 struct DeviceAuthorizationResponse {
     device_code: String,
@@ -111,6 +113,47 @@ fn unique_test_client_ip() -> String {
     ip.parse::<std::net::IpAddr>()
         .expect("generated test client IP must parse");
     ip
+}
+
+fn generated_user_code() -> String {
+    const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+    let id = Uuid::new_v4();
+    let bytes = id.as_bytes();
+    let mut user_code = String::with_capacity(14);
+    for idx in 0..12 {
+        if idx == 4 || idx == 8 {
+            user_code.push('-');
+        }
+        let ch =
+            USER_CODE_ALPHABET[(usize::from(bytes[idx]) + idx) % USER_CODE_ALPHABET.len()];
+        user_code.push(char::from(ch));
+    }
+    user_code
+}
+
+async fn unique_unknown_user_code(
+    pg: &compio_postgres::Client,
+    except: Option<&str>,
+) -> String {
+    for _ in 0..16 {
+        let user_code = generated_user_code();
+        if except.is_some_and(|except| except == user_code.as_str()) {
+            continue;
+        }
+        let row = pg
+            .query_one(
+                "SELECT COUNT(*)::BIGINT AS n FROM zeroship.device_grants WHERE user_code = $1",
+                &[&user_code],
+            )
+            .await
+            .expect("count candidate unknown user_code");
+        if row.get::<_, i64>("n") == 0 {
+            assert_user_code_format(&user_code);
+            return user_code;
+        }
+    }
+    panic!("failed to generate an unknown device user_code");
 }
 
 fn assert_user_code_format(user_code: &str) {
@@ -233,6 +276,29 @@ async fn fetch_device_page(http: &cyper::Client, auth_base: &str, path: &str) ->
         .unwrap_or_else(|| panic!("GET /device must set a zsidp_csrf cookie; got: {raw:?}"));
     let body = resp.text().await.expect("GET /device body");
     (csrf, body)
+}
+
+#[allow(clippy::future_not_send)]
+async fn get_device_with_user_code_from_ip(
+    http: &cyper::Client,
+    auth_base: &str,
+    user_code: &str,
+    xff_ip: &str,
+) -> (u16, String) {
+    let resp = http
+        .request(
+            http::Method::GET,
+            format!("{auth_base}/device?user_code={user_code}"),
+        )
+        .expect("build GET /device with user_code")
+        .header("x-forwarded-for", format!("198.51.100.1, {xff_ip}"))
+        .expect("xff")
+        .send()
+        .await
+        .expect("send GET /device with user_code");
+    let status = resp.status().as_u16();
+    let body = resp.text().await.expect("GET /device body");
+    (status, body)
 }
 
 #[ntex::test]
@@ -487,6 +553,164 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
     let _ = pg
         .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
         .await;
+    drop(srv);
+}
+
+/// Regression for the `verification_uri_complete` gap: GET `/device?user_code=...`
+/// must not remain an unauthenticated code-enumeration oracle. Pre-fix, every
+/// well-formed unknown code returned 400 forever. Post-fix, the anonymous
+/// `device:ip:<ip>` LOGIN_IP bucket rejects the 61st failed lookup for one IP,
+/// while a valid pending code still renders the confirmation page without
+/// consuming that failed-attempt bucket.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_get_ratelimit] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-get-ratelimit-{}", Uuid::new_v4().simple());
+    let client_name = "native device GET rate-limit test";
+    insert_native_device_client(&pg, &client_id, client_name, &["openid"]).await;
+    let authz = request_device_authorization(&http, &auth_base, &client_id, "openid").await;
+
+    let xff_ip = unique_test_client_ip();
+    let ip_key = format!("device:ip:{xff_ip}");
+    let user_ip_like = format!("device:user_ip:%:{xff_ip}");
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
+
+    let wrong_code = unique_unknown_user_code(&pg, Some(&authz.user_code)).await;
+    let mut last_status = 0_u16;
+    for attempt in 1..=DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS + 1 {
+        let (status, body) =
+            get_device_with_user_code_from_ip(&http, &auth_base, &wrong_code, &xff_ip).await;
+        last_status = status;
+        if attempt <= DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS {
+            assert_eq!(
+                status, 400,
+                "unknown GET user_code attempt {attempt} should fail normally before the IP bucket is empty: {body}"
+            );
+        }
+    }
+    assert_eq!(
+        last_status, 429,
+        "GET verification_uri_complete guessing from one anonymous IP must be throttled"
+    );
+
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&ip_key],
+        )
+        .await
+        .expect("count anonymous device IP bucket");
+    assert_eq!(row.get::<_, i64>("n"), 1);
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key LIKE $1",
+            &[&user_ip_like],
+        )
+        .await
+        .expect("count unexpected device user/IP buckets");
+    assert_eq!(
+        row.get::<_, i64>("n"),
+        0,
+        "anonymous GET attempts must drain device:ip only, not device:user_ip"
+    );
+
+    let (status, body) =
+        get_device_with_user_code_from_ip(&http, &auth_base, &authz.user_code, &xff_ip).await;
+    assert_eq!(
+        status, 200,
+        "a valid verification_uri_complete deep-link must still render even after failed attempts are throttled"
+    );
+    assert!(body.contains(client_name), "{body}");
+    assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");
+
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
+    drop(srv);
+}
+
+/// Regression for the per-IP backstop path the original POST test did not cover:
+/// with no session cookie, wrong `/device` submissions must still drain
+/// `device:ip:<ip>` and throttle. Pre-fix for that coverage gap, only the
+/// signed-in `device:user_ip` bucket was asserted.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_ip_backstop] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+
+    let xff_ip = unique_test_client_ip();
+    let ip_key = format!("device:ip:{xff_ip}");
+    let user_ip_like = format!("device:user_ip:%:{xff_ip}");
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
+
+    let wrong_code = unique_unknown_user_code(&pg, None).await;
+    let csrf = fetch_csrf_token(&http, &auth_base).await;
+    let csrf_cookie = format!("zsidp_csrf={csrf}");
+    let mut last_status = 0_u16;
+    for attempt in 1..=DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS + 1 {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("user_code", &wrong_code)
+            .append_pair("confirm", "authorize")
+            .append_pair("csrf", &csrf)
+            .finish();
+        let resp = http
+            .request(http::Method::POST, format!("{auth_base}/device"))
+            .expect("build anonymous wrong-code POST /device")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .expect("content-type")
+            .header("cookie", csrf_cookie.clone())
+            .expect("csrf cookie")
+            .header("x-forwarded-for", format!("198.51.100.1, {xff_ip}"))
+            .expect("xff")
+            .body(body)
+            .send()
+            .await
+            .expect("send anonymous wrong-code POST /device");
+        last_status = resp.status().as_u16();
+        if attempt <= DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS {
+            assert_eq!(
+                last_status, 400,
+                "anonymous wrong-code POST attempt {attempt} should fail normally before the IP bucket is empty"
+            );
+        }
+    }
+    assert_eq!(
+        last_status, 429,
+        "anonymous POST guesses must be bounded by the device:ip LOGIN_IP bucket"
+    );
+
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key = $1",
+            &[&ip_key],
+        )
+        .await
+        .expect("count anonymous POST device IP bucket");
+    assert_eq!(row.get::<_, i64>("n"), 1);
+    let row = pg
+        .query_one(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.rate_limits WHERE bucket_key LIKE $1",
+            &[&user_ip_like],
+        )
+        .await
+        .expect("count unexpected POST device user/IP buckets");
+    assert_eq!(
+        row.get::<_, i64>("n"),
+        0,
+        "anonymous POST attempts must not create a device:user_ip bucket"
+    );
+
+    cleanup_rate_limits_like(&pg, &[&ip_key, &user_ip_like]).await;
     drop(srv);
 }
 

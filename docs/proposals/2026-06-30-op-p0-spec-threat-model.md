@@ -191,7 +191,7 @@ Ordered validation and processing:
 2. Look up the client; it must be a public CLI/device client and allowed to use the device grant. RFC 8628 §3.1.
 3. Validate requested scopes against the client allowlist. If omitted, use the CLI default scope set. Unknown or disallowed scopes return `invalid_scope`. RFC 6749 §3.3.
 4. Generate `device_code` with at least 256 bits of entropy. Store only `device_code_hash = HMAC-SHA256(device_code_hash_key, device_code)`. RFC 8628 §5.1. Maps C9.
-5. Generate `user_code` from the non-confusable alphabet already used by the tree (`BCDFGHJKLMNPQRSTVWXZ`), grouped as `XXXX-XXXX`, with enough entropy and an attempt/rate-limit budget. RFC 8628 §6.1. Maps C9.
+5. Generate `user_code` from the non-confusable alphabet already used by the tree (`BCDFGHJKLMNPQRSTVWXZ`), grouped as `XXXX-XXXX-XXXX`, with enough entropy and an attempt/rate-limit budget. RFC 8628 §6.1. Maps C9.
 6. Insert a device grant row with status `pending`, `client_id`, canonical scopes, `expires_at = now + 10 minutes`, `interval = 5`, `last_polled_at = NULL`, and no subject. Unique constraints cover `device_code_hash` and active `user_code`.
 
 Success response (RFC 8628 §3.2):
@@ -199,9 +199,9 @@ Success response (RFC 8628 §3.2):
 ```json
 {
   "device_code": "<opaque>",
-  "user_code": "BCDF-GHJK",
+  "user_code": "BCDF-GHJK-LMNP",
   "verification_uri": "https://auth.zeroship.ai/device",
-  "verification_uri_complete": "https://auth.zeroship.ai/device?user_code=BCDF-GHJK",
+  "verification_uri_complete": "https://auth.zeroship.ai/device?user_code=BCDF-GHJK-LMNP",
   "expires_in": 600,
   "interval": 5
 }
@@ -661,7 +661,7 @@ If a private key is suspected compromised:
 | Consent CSRF | Consent accept/deny POST uses CSRF token; POST re-runs scope classifier and never trusts rendered UI; grants updated under advisory lock. | RFC 6749 §10.12; RFC 9700 §4.7 | `consent_accept_requires_csrf`; `consent_accept_reclassifies_unknown_scope`. |
 | Clickjacking / UI framing of login, consent, device-approval pages | Every OP-rendered HTML response sets `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`; the OP UI is never legitimately framed (immersive same-site login, not an embedded consent iframe). | RFC 9700 §4 (consent-page framing); OWASP clickjacking | `consent_page_sets_frame_ancestors_none`; `authorize_ui_sets_x_frame_options_deny`. |
 | Device-code phishing | Verification UI shows client name/scopes and requires explicit signed-in user approval; `verification_uri_complete` convenience does not auto-approve. | RFC 8628 §5.4 | `device_verification_requires_explicit_approval`; `device_complete_uri_does_not_skip_approval`. Residual: user may type code into phishing site; user education and origin `auth.zeroship.ai` remain necessary. |
-| Device `user_code` brute force | Non-confusable high-entropy code; rate-limit attempts by IP/session/code; short 10-minute expiry; failed attempts audited. | RFC 8628 §5.1, §5.2, §6.1 | `device_user_code_rate_limit`; `device_user_code_expires`; `device_code_entropy_shape`. |
+| Device `user_code` brute force | Non-confusable high-entropy code; rate-limit failed attempts by IP plus signed-in user/session context, not by guessed code, so code rotation cannot reset the bound; short 10-minute expiry; failed attempts audited. | RFC 8628 §5.1, §5.2, §6.1 | `device_user_code_rate_limit`; `device_user_code_expires`; `device_code_entropy_shape`. |
 | Device polling abuse | Enforce `interval`; too-fast polls return `slow_down` and add 5 seconds. | RFC 8628 §3.4, §3.5 | `device_poll_before_interval_returns_slow_down_and_increments_interval`. |
 | Scope escalation | `/authorize` validates against client allowlist and `app_scope_defs`; POST consent re-runs classifier; `/token` cannot expand scopes. | RFC 6749 §3.3; RFC 6749 §5.2 `invalid_scope` | `authorize_unknown_scope_invalid_scope`; `token_scope_override_rejected`; `consent_union_does_not_drop_prior_scopes`. |
 | Cross-app subject/email correlation | App tokens and ID tokens use pairwise `sub`; creator-app email claim is relay alias minted at consent, not real inbox. | OIDC Core §8.1, §8.2 | `app_tokens_use_pairwise_sub`; `email_scope_uses_relay_alias`. Residual: user may voluntarily reveal real email inside app. |
