@@ -81,7 +81,7 @@ services:
   #
   # Runs the SAME `zeroship-platform:dev` image the native services use (the
   # Dockerfile builds + installs the `zeroship-migrate` bin), under the
-  # PLATFORM trust profile (the widened guard for the zeroship/oauth_hydra/public
+  # PLATFORM trust profile (the widened guard for the zeroship/public
   # schemas — design 2026-06-17-platform-migrations-flyway-mode). The `migrate`
   # subcommand applies all pending files once. `--yes` is required because the
   # ported platform set contains reviewed in-place schema evolutions (DROP
