@@ -16,10 +16,10 @@
 //! SQLite Body triggers are created and introspected on SQLite, while the same
 //! Body trigger fails closed on Postgres (`triggerBody`). PostgreSQL-only
 //! sequence/exclusion constructs fail closed on SQLite. Table-level CHECK
-//! constraints are also pinned as a current op.* gap: they fail closed with
-//! `ExprRenderDeferred` until the shared CHECK expression renderer lands. SQLite
-//! table-level FK/UNIQUE constraints are pinned as fail-closed until the SQLite
-//! CREATE emitter threads those table constraints into its descriptor path.
+//! constraints are also pinned as a current op.* gap: they validate-refuse until
+//! the shared CHECK expression renderer lands. SQLite table-level FK/UNIQUE
+//! constraints validate-refuse until the SQLite CREATE emitter threads those
+//! table constraints into its descriptor path.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -30,6 +30,7 @@ use zeroship_migrate::model::ir::{
     ForEach, RaiseLevel, SelectAst, SelectItem, TableRef, TriggerAction, TriggerEvent,
     TriggerStmt, TriggerTiming, ViewQuery,
 };
+use zeroship_migrate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::{
     provision_migrator, apply::role::deprovision_migrator, Approval, BinaryOp, ColType, ColumnOrExpr,
     ExclusionElement, ExclusionMethod, ExclusionOperator, Expr, GeneratedCol, GuardConfig,
@@ -664,17 +665,12 @@ fn table_check_constraints_fail_closed_until_expr_renderer_lands() {
             existence_guard: None,
     };
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-        let err = IrAuthor::new(PROJECT, OWNER, dialect)
-            .lower(
-                &ir("table_check_gap", vec![check_op.clone()]),
-                &LiveSchema::default(),
-            )
-            .expect_err("table CHECK constraints are currently fail-closed");
-        assert!(matches!(
-            err,
-            IrLowerError::ExprRenderDeferred("createTable check")
-        ));
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let err = validate_ir(&ir("table_check_gap", vec![check_op.clone()]), dialect, &[])
+            .expect_err("table CHECK constraints are currently validate-refused");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("CHECK"));
     }
 }
 
@@ -700,13 +696,11 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         runtime_options: None,
             existence_guard: None,
     };
-    let fk_err = IrAuthor::new(PROJECT, OWNER, SqlDialect::Sqlite)
-        .lower(&ir("sqlite_fk_gap", vec![fk_op]), &LiveSchema::default())
-        .expect_err("SQLite table-level FK is currently fail-closed");
-    assert!(
-        matches!(fk_err, IrLowerError::UnsupportedOp(msg) if msg.contains("table-level FOREIGN KEY")),
-        "unexpected SQLite FK error: {fk_err:?}"
-    );
+    let fk_err = validate_ir(&ir("sqlite_fk_gap", vec![fk_op]), Dialect::Sqlite, &[])
+        .expect_err("SQLite table-level FK is currently validate-refused");
+    assert_eq!(fk_err.code, CODE_UNSUPPORTED);
+    assert_eq!(fk_err.kind, Some(UnsupportedKind::Op));
+    assert!(fk_err.reason.contains("foreign keys"));
 
     let unique_op = Op::CreateTable {
         name: "accounts".to_string(),
@@ -725,16 +719,11 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
         runtime_options: None,
             existence_guard: None,
     };
-    let unique_err = IrAuthor::new(PROJECT, OWNER, SqlDialect::Sqlite)
-        .lower(
-            &ir("sqlite_unique_gap", vec![unique_op]),
-            &LiveSchema::default(),
-        )
-        .expect_err("SQLite table-level UNIQUE is currently fail-closed");
-    assert!(
-        matches!(unique_err, IrLowerError::UnsupportedOp(msg) if msg.contains("table-level UNIQUE")),
-        "unexpected SQLite UNIQUE error: {unique_err:?}"
-    );
+    let unique_err = validate_ir(&ir("sqlite_unique_gap", vec![unique_op]), Dialect::Sqlite, &[])
+        .expect_err("SQLite table-level UNIQUE is currently validate-refused");
+    assert_eq!(unique_err.code, CODE_UNSUPPORTED);
+    assert_eq!(unique_err.kind, Some(UnsupportedKind::Op));
+    assert!(unique_err.reason.contains("unique"));
 }
 
 #[compio::test]

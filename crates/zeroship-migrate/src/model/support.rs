@@ -1,8 +1,8 @@
 //! Static support declarations for the migration op DSL.
 //!
-//! This module is data-only in the DSL v2 P0 slices. It deliberately does not
-//! change validation or lowering behavior; callers can inspect the declarations
-//! while the existing engine remains the source of runtime behavior.
+//! Validation consumes these declarations before expression walking. Lowering
+//! still keeps defensive guards for invalid direct callers, but author-facing
+//! dialect/refusal diagnostics are sourced from this support matrix.
 
 use crate::model::capability::VendorCapability;
 
@@ -168,10 +168,12 @@ pub enum Feature {
     TableLevelUnique,
     TableLevelCheck,
     CompositeForeignKey,
+    ForeignKeyNoLocalColumn,
     NonIdForeignKey,
     ExclusionConstraint,
     NativeAlterColumn,
     AlterColumnUsing,
+    SynthDefault,
     RenameColumnGuard,
     InsertOnConflict,
     MaterializedView,
@@ -294,6 +296,14 @@ const UNSUPPORTED_ALL_CHECK_EXPR: DialectSupport = DialectSupport::unsupported_a
     "CHECK expression rendering is deferred in the current engine",
 );
 
+const UNSUPPORTED_ALL_SYNTH_DEFAULT: DialectSupport = DialectSupport::unsupported_all(
+    UNSUPPORTED,
+    "synth default rendering is deferred until the expression/default renderer lands",
+);
+
+const UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN: DialectSupport =
+    DialectSupport::unsupported_all(UNSUPPORTED, "foreign keys need exactly one local column");
+
 const UNSUPPORTED_ALL_COMPOSITE_FK: DialectSupport =
     DialectSupport::unsupported_all(UNSUPPORTED, "multi-column foreign keys are a later wave");
 
@@ -324,6 +334,7 @@ const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::postgres_on
 
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
+    FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT),
     FeatureSupport::new(Feature::TableLevelCheck, UNSUPPORTED_ALL_CHECK_EXPR),
     FeatureSupport::new(
         Feature::TableLevelForeignKey,
@@ -336,6 +347,7 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
             supported(RenderMode::Offline),
         ),
     ),
+    FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
     FeatureSupport::new(Feature::CompositeForeignKey, UNSUPPORTED_ALL_COMPOSITE_FK),
     FeatureSupport::new(Feature::NonIdForeignKey, UNSUPPORTED_ALL_NON_ID_FK),
     FeatureSupport::new(
@@ -351,6 +363,28 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(Feature::ExclusionConstraint, PG_ONLY_EXCLUSION_CONSTRAINT),
     FeatureSupport::new(
+        Feature::ExpressionIndex,
+        DialectSupport::new(
+            supported(RenderMode::Offline),
+            supported(RenderMode::Offline),
+            unsupported(
+                UNSUPPORTED,
+                "createIndex expression elements are not supported on MySQL",
+            ),
+        ),
+    ),
+    FeatureSupport::new(
+        Feature::PartialIndex,
+        DialectSupport::new(
+            supported(RenderMode::Offline),
+            supported(RenderMode::Offline),
+            unsupported(
+                UNSUPPORTED,
+                "MySQL does not support partial indexes",
+            ),
+        ),
+    ),
+    FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
         DialectSupport::postgres_only(
             RenderMode::Offline,
@@ -358,6 +392,9 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
         ),
     ),
 ];
+
+pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] =
+    &[FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT)];
 
 pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(
@@ -409,6 +446,7 @@ pub(crate) const RENAME_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::n
 
 pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
+    FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
     FeatureSupport::new(Feature::CompositeForeignKey, UNSUPPORTED_ALL_COMPOSITE_FK),
     FeatureSupport::new(Feature::NonIdForeignKey, UNSUPPORTED_ALL_NON_ID_FK),
     FeatureSupport::new(Feature::TableLevelCheck, UNSUPPORTED_ALL_CHECK_EXPR),
@@ -420,6 +458,9 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
         ),
     ),
 ];
+
+pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] =
+    &[FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT)];
 
 pub(crate) const INSERT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::InsertOnConflict,

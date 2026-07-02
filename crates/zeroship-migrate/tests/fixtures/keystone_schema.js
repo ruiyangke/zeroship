@@ -1,7 +1,8 @@
 // Keystone fixture (Migration-first P2b §6b). A schema authored DECLARATIVELY,
-// exercising the facets the author->generate->fold chain must round-trip
-// LOSSLESSLY: type matrix, ref (Id brand), vector + metric, encrypted, id-prefix,
-// enum (union), and numeric min/max bounds (CHECK-borne facets).
+// exercising the P0-supported facets the author->generate->fold chain must
+// round-trip LOSSLESSLY: type matrix, ref (Id brand), vector + metric, encrypted,
+// and id-prefix. CHECK-borne enum/min/max facets are P1 once the Expr->SQL
+// renderer lands.
 import { t } from "@zeroship/db";
 
 const users = {
@@ -9,9 +10,8 @@ const users = {
   // introspection cannot recover; carried on the IR column.
   id: t.id("acct"),
   email: t.string().required().unique(),
-  age: t.number().min(0).max(120),
-  // An enum membership (lifted from a CHECK on the fold side).
-  role: t.string().enum("admin", "member", "guest"),
+  age: t.number(),
+  role: t.string(),
   active: t.boolean(),
   // A DEFAULT-mode encrypted column — the §6 keystone goodie. `t.encrypted()`
   // stamps `encrypted: { mode:"randomised", keyId:"default", wraps:"string" }` AND a

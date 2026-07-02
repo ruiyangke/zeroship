@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use zeroship_migrate::model::ir::ExistenceGuard;
-use zeroship_migrate::render::lower::{IrAuthor, IrLowerError};
+use zeroship_migrate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
     fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
     ExclusionMethod, ExclusionOperator, Expr, IndexElement, IrConstraint, IrConstraintKind,
@@ -132,14 +133,11 @@ fn postgres_renders_valid_descending_sequence() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_sequences() {
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let err = IrAuthor::new(SCHEMA, OWNER, dialect)
-            .lower(&ir(vec![create_sequence_op()]), &LiveSchema::default())
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            IrLowerError::SequenceUnsupported { kind: "sequence", dialect: d } if d == dialect
-        ));
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir(&ir(vec![create_sequence_op()]), dialect, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(err.reason.contains("sequence"));
     }
 }
 
@@ -237,20 +235,19 @@ fn postgres_renders_comment_on_all_structured_targets() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_comment_on() {
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let err = IrAuthor::new(SCHEMA, OWNER, dialect)
-            .lower(
-                &ir(vec![Op::Comment {
-                    target: CommentTarget::Table { schema: None, name: "users".into() },
-                    comment: Some("Users".into()),
-                }]),
-                &LiveSchema::default(),
-            )
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            IrLowerError::UnsupportedOp("COMMENT ON is PostgreSQL-only")
-        ));
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir(
+            &ir(vec![Op::Comment {
+                target: CommentTarget::Table { schema: None, name: "users".into() },
+                comment: Some("Users".into()),
+            }]),
+            dialect,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(err.reason.contains("COMMENT ON"));
     }
 }
 
@@ -387,10 +384,8 @@ fn postgres_and_sqlite_render_expression_index_elements() {
 
 #[test]
 fn mysql_fail_closes_on_expression_index_elements() {
-    let live = BTreeSet::from(["users".to_string()]);
-    let err = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Mysql)
-        .lower(
-            &ir(vec![Op::CreateIndex {
+    let err = validate_ir(
+        &ir(vec![Op::CreateIndex {
                 table: "users".into(),
                 columns: vec![IndexElement::Expr { expr: lower_email_expr() }],
                 name: Some("users_email_lower_idx".into()),
@@ -401,21 +396,19 @@ fn mysql_fail_closes_on_expression_index_elements() {
                 schema: None,
                 existence_guard: None,
             }]),
-            &LiveSchema::from(&live),
-        )
+        Dialect::Mysql,
+        &[],
+    )
         .unwrap_err();
-    assert!(matches!(
-        err,
-        IrLowerError::UnsupportedOp("createIndex expression elements are not supported on MySQL")
-    ));
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(UnsupportedKind::Op));
+    assert!(err.reason.contains("expression elements"));
 }
 
 #[test]
 fn mysql_fail_closes_on_partial_index_predicate() {
-    let live = BTreeSet::from(["users".to_string()]);
-    let err = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Mysql)
-        .lower(
-            &ir(vec![Op::CreateIndex {
+    let err = validate_ir(
+        &ir(vec![Op::CreateIndex {
                 table: "users".into(),
                 columns: vec![idx_col("active")],
                 name: Some("users_active_idx".into()),
@@ -426,15 +419,13 @@ fn mysql_fail_closes_on_partial_index_predicate() {
                 schema: None,
                 existence_guard: None,
             }]),
-            &LiveSchema::from(&live),
-        )
+        Dialect::Mysql,
+        &[],
+    )
         .unwrap_err();
-    assert!(matches!(
-        err,
-        IrLowerError::UnsupportedOp(
-            "createIndex partial predicates require partial-index support; MySQL does not support partial indexes"
-        )
-    ));
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(UnsupportedKind::Op));
+    assert!(err.reason.contains("partial indexes"));
 }
 
 fn exclusion_constraint() -> IrConstraint {
@@ -534,25 +525,21 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_exclusion_constraints() {
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let err = IrAuthor::new(SCHEMA, OWNER, dialect)
-            .lower(
-                &ir(vec![Op::AddConstraint {
-                    table: "bookings".into(),
-                    constraint: exclusion_constraint(),
-                    schema: None,
-                    existence_guard: None,
-                }]),
-                &LiveSchema::from(&BTreeSet::from(["bookings".to_string()])),
-            )
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            IrLowerError::ExclusionConstraintUnsupported {
-                kind: "exclusionConstraint",
-                dialect: d
-            } if d == dialect
-        ));
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir(
+            &ir(vec![Op::AddConstraint {
+                table: "bookings".into(),
+                constraint: exclusion_constraint(),
+                schema: None,
+                existence_guard: None,
+            }]),
+            dialect,
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(err.reason.contains("exclusion"));
     }
 }
 

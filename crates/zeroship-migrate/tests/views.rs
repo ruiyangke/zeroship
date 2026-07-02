@@ -8,7 +8,7 @@ use zeroship_migrate::model::ir::{
 };
 use zeroship_migrate::render::lower::{IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema};
 use zeroship_migrate::model::validate::{
-    validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
+    validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zeroship_migrate::{fold_ops, SchemaScope, SchemaSnapshot, ViewSnapshot};
 use zeroship_schema::query::SqlDialect;
@@ -135,14 +135,17 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
         "CREATE MATERIALIZED VIEW \"app\".\"active_users\" AS SELECT \"id\", \"email\" FROM \"app\".\"users\" WHERE (\"deleted_at\" IS NULL)"
     );
 
-    let err = lower_up(SqlDialect::Sqlite, create_structured_view(None, Some(true))).unwrap_err();
-    assert!(matches!(
-        *err,
-        IrLowerError::ViewUnsupported {
-            kind: "materializedView",
-            dialect: SqlDialect::Sqlite
-        }
-    ));
+    let trusted = SchemaScope::Unconfined;
+    let err = validate_ir_scoped(
+        &ir(create_structured_view(None, Some(true))),
+        Dialect::Sqlite,
+        &[],
+        Some(&trusted),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(UnsupportedKind::Op));
+    assert!(err.reason.contains("materialized"));
 }
 
 #[test]
@@ -150,12 +153,17 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     // SA-13: Postgres has no CREATE OR REPLACE MATERIALIZED VIEW. The renderer
     // must fail closed rather than silently emit a plain CREATE MATERIALIZED VIEW
     // (which would drop the `replace` request) or destructively DROP+CREATE.
-    let err = lower_up(SqlDialect::Postgres, create_structured_view(Some(true), Some(true)))
-        .unwrap_err();
-    assert!(
-        matches!(*err, IrLowerError::UnsupportedOp(msg) if msg.contains("MATERIALIZED VIEW")),
-        "expected an UnsupportedOp on replace+materialized, got {err:?}"
-    );
+    let trusted = SchemaScope::Unconfined;
+    let err = validate_ir_scoped(
+        &ir(create_structured_view(Some(true), Some(true))),
+        Dialect::Postgres,
+        &[],
+        Some(&trusted),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(UnsupportedKind::Op));
+    assert!(err.reason.contains("replace+materialized"));
     // The non-contradictory shapes still lower fine.
     assert!(lower_up(SqlDialect::Postgres, create_structured_view(Some(true), None)).is_ok());
     assert!(lower_up(SqlDialect::Postgres, create_structured_view(None, Some(true))).is_ok());

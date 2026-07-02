@@ -11,8 +11,8 @@
 //! - **bind-safety**: an `insert`/`update` whose value carries SQL metacharacters
 //!   (quote/semicolon/comment) is stored VERBATIM (one native `?n` bind) and cannot
 //!   alter the statement shape — the table and its rows survive intact.
-//! - **`onConflict` is a HARD error on SQLite** (`DmlError::OnConflictNotPortable`,
-//!   `dialect_scope = PgOnly`) — rejected at lower, never silently applied.
+//! - **`onConflict` is a HARD error on SQLite** (`dialect_scope = PgOnly`) —
+//!   rejected at validate-time, never silently applied.
 //! - **a batched `backfill` is PORTABLE on SQLite** (PR6b) — lowers to a
 //!   `PlanStep::Backfill` the SQLite batched executor consumes (§2.3.1).
 //! - **column-scoping (rule (c), §3.3.1.1(c))**: a `ColRef` to a column not on the
@@ -499,29 +499,30 @@ async fn bind_safety_metacharacters_on_sqlite() {
 
 /// `insert { onConflict }` is a HARD authoring error on SQLite (PG-only, §9). The
 /// IDENTICAL `.ir.json` would load+render on PG (covered in the PG e2e); here it is
-/// rejected at LOWER with `DmlError::OnConflictNotPortable` — never silently
-/// applied without the conflict clause.
+/// rejected at validate-time via the support matrix — never silently applied without
+/// the conflict clause.
 #[compio::test]
 async fn on_conflict_rejected_on_sqlite() {
     let ir = r#"{"ir_version":1,"name":"upsert","ops":[
         {"op":"insert","table":"codes","columns":["code"],"rows":[[1]],
          "onConflict":{"columns":["code"]}}
     ]}"#;
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
-    let document = zeroship_migrate::model::load::load_ir_document(
+    let err = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         &registry(&[("codes", APP)]),
         None,
     )
-    .expect("load gate (onConflict is a LOWER-time reject, not a load-gate reject)");
-    let err = author
-        .lower_plan(&document, &LiveSchema::default())
-        .expect_err("onConflict must be rejected on SQLite");
+    .expect_err("onConflict must be validate-refused on SQLite");
+    let zeroship_migrate::model::load::IrLoadError::Validate(err) = err else {
+        panic!("expected validate error, got {err:?}");
+    };
+    assert_eq!(err.code, zeroship_migrate::CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(zeroship_migrate::UnsupportedKind::Op));
     assert!(
-        matches!(err, IrLowerError::DmlAssemble(zeroship_migrate::render::dml::DmlError::OnConflictNotPortable { .. })),
-        "expected OnConflictNotPortable, got {err:?}"
+        err.reason.contains("onConflict") && err.reason.contains("PostgreSQL-only"),
+        "expected support-matrix onConflict refusal, got {err}"
     );
 }
 
