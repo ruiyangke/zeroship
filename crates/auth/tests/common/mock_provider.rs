@@ -386,7 +386,12 @@ async fn google_token(
         picture: state.user.picture.as_deref(),
         nonce: flow.nonce.as_deref(),
         at_hash: Some(oidc_token_hash(Algorithm::EdDSA, access_token.as_bytes())),
-        c_hash: Some(oidc_token_hash(Algorithm::EdDSA, form.code.as_bytes())),
+        // Faithful to real Google (response_type=code): the TOKEN-endpoint
+        // id_token carries NO c_hash (OIDC Core 3.1.3.6 — c_hash is only for the
+        // authorization-endpoint id_token of implicit/hybrid). Emitting one here
+        // masked a real bug (google.rs passing Some(code) → CHashClaimMissing on
+        // every live login). Keep it None so the e2e exercises the real shape.
+        c_hash: None,
     };
 
     let mut header = Header::new(Algorithm::EdDSA);
