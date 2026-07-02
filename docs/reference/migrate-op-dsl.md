@@ -20,9 +20,9 @@ back door to hand-written SQL.
 
 The TypeScript authoring surface lives in `sdks/migrate/src/` (the npm
 `@zeroship/migrate` package). Its engine-side twin — the recorder the Rust
-runtime evaluates in V8 to turn a migration into the frozen `.ir.json` wire
-artifact — lives in `crates/zeroship-migrate/src/frontend/migrate_ops.js`. Both emit
-the identical dialect-neutral op objects; the `.ir.json` shape is the frozen
+runtime evaluates in V8 to turn a migration into the frozen IR wire shape —
+lives in `crates/zeroship-migrate/src/frontend/migrate_ops.js`. Both emit the
+identical dialect-neutral op objects; the canonical IR shape is the frozen
 contract.
 
 ```ts
@@ -77,8 +77,8 @@ export interface Migration {
   per-migration recorder, synchronously (no `await`). This is the
   vitest/jest/Playwright pattern: `import { table }` then call it. The
   build/dev evaluator installs a fresh recorder before calling `up()` (and
-  again before `down()`), drains the recorded op list, and renders it to the
-  checksummed `.ir.json` artifact.
+  again before `down()`), drains the recorded op list, and canonicalizes it as
+  transient IR.
 - Authoring **outside an active recorder** — at module top level, or after
   `up()` returns (e.g. from a stray `setTimeout`) — throws a structured
   `OP_OUTSIDE_RECORDER` error. The op cannot be silently lost.
@@ -820,11 +820,11 @@ surface is the engine-pinned `c.fn.splitPart`.
 
 ### Determinism: don't bake a clock or RNG into a migration
 
-A migration is recorded once into a committed artifact, so a **called**
-`Date.now()` / `Math.random()` / `crypto.randomUUID()` / `new Date()` in an op
-argument freezes a build-time value (deterministic within that artifact, but
-almost never what you want). The recorder handles this by translation, not by a
-gate:
+A migration is recorded by the sandboxed recorder whenever build/gen-types needs
+IR, so a **called** `Date.now()` / `Math.random()` / `crypto.randomUUID()` /
+`new Date()` in an op argument still freezes a build-time value for that
+recording (almost never what you want). The recorder handles this by translation,
+not by a gate:
 
 - The **bare native symbol** (no parens) — `Date.now`, `Math.random`,
   `crypto.randomUUID` — records as the DB-evaluated fnSynth scalar (identical IR
@@ -1032,9 +1032,9 @@ apply-relevant change.
 Migration-first: the op.* migration set is the source of truth for the schema, and
 the typed `env.db` surface is **generated from it** rather than from a separate
 declared schema object on the app entry. The `zeroship-migrate-js gen-types`
-subcommand loads the committed `.ir.json` set in version order, **folds** it into a
-per-collection field map (the same fold the engine uses internally), and emits two
-artifacts:
+subcommand records each `migrations/*.ts` source file through the sandboxed
+recorder in version order, folds the transient IR into a per-collection field map
+(the same fold the engine uses internally), and emits two artifacts:
 
 - **`schema.runtime.json`** — the v1 `RuntimeSchemaDescriptor`:
   `{ version, collections: { [name]: { fields, options, indexes } } }`. It is
@@ -1052,8 +1052,9 @@ artifacts:
 # emit (writes both artifacts into the output dir)
 zeroship-migrate-js gen-types --dir migrations --out generated/zeroship
 
-# CI drift gate (no DB, no write): regenerate in memory and diff against the
-# committed artifacts — fails non-zero if they no longer track the migrations
+# CI generated-artifact check (no DB, no write): regenerate in memory and diff
+# against the committed generated artifacts — fails non-zero if they no longer
+# track the migrations
 zeroship-migrate-js gen-types --dir migrations --out generated/zeroship --check
 ```
 
@@ -1075,18 +1076,18 @@ retired `@zeroship/db/env` declared-schema alias:
 
 The `@zeroship/vite-plugin` is a thin client of this same CLI: it regenerates the
 artifacts on dev-server boot and on any change under the migrations dir, and runs
-the `--check` drift gate on a production build. See
+the `--check` generated-artifact gate on a production build. See
 [vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
 for the build/watch wiring.
 
-> **In progress (design — not yet shipped).** Two follow-on tracks extend this
-> surface; treat them as design references, not implemented features:
-> - **The `@zeroship/migrate/pg` vendor primitive layer** — a Postgres-only,
->   operator-gated superset (grants/roles/policies/functions/triggers/extensions/RLS)
->   so the platform's own privileged DDL can be authored in the DSL and the Liquibase
->   changelog retired. Hard-gated to the Trusted/Platform profile, unreachable from a
->   Confined creator migration by construction. Design:
->   [docs/proposals/2026-06-25-vendor-pg-primitives.md](../proposals/2026-06-25-vendor-pg-primitives.md).
+> **Implemented: Postgres vendor primitives.** The `@zeroship/migrate/pg`
+> subpath exposes the Postgres-only, operator-gated primitive layer
+> (grants/roles/policies/functions/triggers/extensions/RLS) so the platform's
+> own privileged DDL can be authored in the DSL. The engine lowers these 19
+> vendor ops through the Postgres vendor renderer, hard-gated to the
+> Trusted/Platform profile and unreachable from a Confined creator migration by
+> construction.
+
 ## Offline SQL preview (`plan`)
 
 `zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact
@@ -1139,15 +1140,15 @@ preview never fabricates SQL for these; it emits a clearly-labeled
 
 The preview's header and trailing `-- preview: N statement(s) rendered, M
 runtime-resolved` summary make the offline-renderable subset and the labeled
-remainder explicit. Both `.sql` (Flyway/dbmate) and `.ir.json` (creator) artifacts
+remainder explicit. Both `.sql` (Flyway/dbmate) and explicit `.ir.json` IR files
 in the directory are previewed.
 
 ## Appendix: the hero example as IR
 
-A migration is recorded into a dialect-neutral `.ir.json` artifact (the frozen
-wire contract the engine loads). For reference — and because the
-bi-dialect-apply CI gate (below) applies exactly this artifact on **both**
-Postgres and SQLite — here is a representative split-name migration as IR:
+A migration records into dialect-neutral IR (the frozen wire contract the engine
+loads). For reference — and because the bi-dialect-apply CI gate (below) applies
+exactly this IR on **both** Postgres and SQLite — here is a representative
+split-name migration as IR:
 structurally equivalent to the hero `up()` ([Module shape](#module-shape)) — the
 same two `addColumn`s, a `c.fn.splitPart` backfill, and a `dropColumn`, applying
 byte-identically on PG and SQLite from this one artifact.

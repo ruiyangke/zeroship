@@ -167,14 +167,14 @@ pub struct RuntimeDescriptorEntry {
     pub hash: String,
 }
 
-/// One committed migration file produced by the migration build frontend.
+/// One logical migration file entry produced by the migration build frontend.
 ///
 /// Migration documents are applied through the standalone migration service and
 /// are not carried in [`Manifest`]. The type remains in this crate because the
 /// frozen migration engine uses it as a shared build-artifact record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationFileEntry {
-    /// Migration filename, e.g. `20240617123000_create_users.ir.json`.
+    /// Logical migration filename, e.g. `20240617123000_create_users.ir.json`.
     pub name: String,
     /// sha256 hash (lowercase, 64 hex chars) of the migration file body.
     pub hash: String,

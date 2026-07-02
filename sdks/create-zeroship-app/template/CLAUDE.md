@@ -12,7 +12,7 @@ tells you how the project is shaped and the contract to build against.
 - `src/App.tsx` / `src/main.tsx` — the **React client**. It imports the server
   functions and calls them like local async functions; the Vite plugin rewrites
   those imports into RPC calls.
-- `migrations/` — committed `op.*` schema migrations. **This is the schema source
+- `migrations/` — committed `op.*` `.ts` schema migrations. **This is the schema source
   of truth** — you do NOT export a schema object from app code.
 - `generated/zeroship/env.db.ts` — the generated typing for `env.db`, folded from
   the migrations. `generated/zeroship/schema.runtime.json` — the runtime descriptor.
@@ -59,8 +59,10 @@ the handler with `env.auth.getUser()` / `env.auth.requireUser()`.
 
 - `env.db` — typed structured CRUD, `env.db.<collection>.find()/insert()/delete()`,
   **no raw SQL**. The types come from `migrations/` → `generated/zeroship/env.db.ts`.
-  **To add/change a table: edit a migration** (op.* DSL), then regenerate the
-  generated artifacts via the Vite build or `zeroship-migrate-js gen-types`.
+  **To add/change a table: edit a migration** (op.* DSL). Gen-types records
+  `migrations/*.ts` in the sandbox and folds transient IR in memory; there is no
+  committed `.ir.json` sibling. Regenerate the generated artifacts via the Vite
+  build or `zeroship-migrate-js gen-types`.
 - `@zeroship/storage` — `bucket("name").put/get/delete/list`, object storage.
 - `@zeroship/kv` — ephemeral key-value: get/set with TTL, atomic counters, leases.
 - `env.auth` — request identity: `getUser()` → user or `null`, `requireUser()`
@@ -76,8 +78,8 @@ pnpm build      # → dist/app.zship
 `pnpm build` runs `vite build`; the zeroship plugin discovers the `"use server"`
 RPC functions, folds migrations into the generated `env.db` types, bundles the
 server module + static client, and writes `dist/app.zship`. If a build that
-ships migrations runs the gen-types drift gate, keep `zeroship-migrate-js` on
-PATH (or set `ZEROSHIP_MIGRATE_JS_BIN`).
+ships migrations runs the gen-types generated-artifact check, keep
+`zeroship-migrate-js` on PATH (or set `ZEROSHIP_MIGRATE_JS_BIN`).
 
 ## Deploy
 

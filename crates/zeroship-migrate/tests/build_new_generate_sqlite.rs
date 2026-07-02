@@ -2,9 +2,9 @@
 //! on a REAL temp-file SQLite backend, and the deterministic-by-construction scaffold.
 //!
 //! - Scaffold via `scaffold_new_ts`, edit the `.ts` to a real createTable+addColumn,
-//!   `build_migrations` to produce the committed `<name>.ir.json`, then APPLY the
-//!   committed `.ir.json` through `IrAuthor::load_and_lower` + `engine.apply` on a
-//!   real SQLite temp-file backend (LOCAL record path).
+//!   `build_migrations` to produce transient canonical IR, then APPLY that IR
+//!   through `IrAuthor::load_and_lower` + `engine.apply` on a real SQLite temp-file
+//!   backend (LOCAL record path).
 //! - The scaffold is deterministic by construction: it contains `c.fn.now()` /
 //!   `{ fn: "now" }` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
 //!   `crypto.randomUUID()`, and recording it has ZERO determinism findings.
@@ -122,19 +122,23 @@ async fn new_edit_build_apply_on_sqlite() {
     let _scaffold = scaffold_new_ts("notes").expect("scaffold");
     write(mig_dir.path(), &format!("{stem}.ts"), EDITED_TS);
 
-    // `build` records via the LOCAL sandboxed child → committed `.ir.json`.
-    let outcome = build_migrations(mig_dir.path(), APP, &via()).expect("build records the artifact");
+    // `build` records via the LOCAL sandboxed child → transient canonical IR.
+    let outcome = build_migrations(mig_dir.path(), APP, &via()).expect("build records transient IR");
     assert_eq!(outcome.migrations.len(), 1);
     let committed = String::from_utf8(outcome.migrations[0].committed_bytes.clone()).unwrap();
     assert!(committed.contains("createTable") || committed.contains("\"op\": \"createTable\""));
+    assert!(
+        !mig_dir.path().join(format!("{stem}.ir.json")).exists(),
+        "build must not write a committed .ir.json"
+    );
 
-    // APPLY the committed `.ir.json` through the REAL gate + lower on SQLite.
+    // APPLY the transient `.ir.json` through the REAL gate + lower on SQLite.
     let p = backend_paths("notes");
     let be = SqliteBackend::open(&p.app, &p.journal).expect("open sqlite backend");
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
         .load_and_lower(&committed, APP, &BTreeMap::new(), &LiveSchema::default())
-        .expect("the committed .ir.json must lower on SQLite");
+        .expect("the transient .ir.json must lower on SQLite");
     assert!(!migrations.is_empty());
 
     let engine = MigrationEngine::new();
@@ -163,24 +167,28 @@ async fn new_edit_build_apply_on_sqlite() {
 }
 
 #[compio::test]
-async fn build_is_idempotent_committed_artifact_read_verbatim() {
+async fn build_records_deterministic_transient_ir_without_writing_artifact() {
     assert_child_built();
     let mig_dir = tempfile::tempdir().unwrap();
     let stem = "20240617140000_notes";
     write(mig_dir.path(), &format!("{stem}.ts"), EDITED_TS);
 
-    // First build records + writes the committed `.ir.json`.
+    // First build records transient canonical IR.
     let first = build_migrations(mig_dir.path(), APP, &via()).expect("first build");
     assert_eq!(first.migrations[0].record_path, zeroship_migrate::frontend::RecordPath::Local);
     let first_bytes = first.migrations[0].committed_bytes.clone();
 
-    // A second build reads the committed artifact VERBATIM (build-once authority) —
-    // it does NOT re-record, and the bytes are identical.
+    // A second build re-records from the same deterministic source and the bytes are
+    // identical; no committed artifact is used.
     let second = build_migrations(mig_dir.path(), APP, &via()).expect("second build");
     assert_eq!(
         second.migrations[0].record_path,
-        zeroship_migrate::frontend::RecordPath::CommittedVerbatim,
-        "a committed .ir.json must be read verbatim, not re-recorded"
+        zeroship_migrate::frontend::RecordPath::Local,
+        "build records fresh transient IR"
     );
     assert_eq!(second.migrations[0].committed_bytes, first_bytes);
+    assert!(
+        !mig_dir.path().join(format!("{stem}.ir.json")).exists(),
+        "build must not write a committed .ir.json"
+    );
 }

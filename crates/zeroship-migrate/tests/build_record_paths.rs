@@ -3,7 +3,7 @@
 //!
 //! - A HOSTED thin client that returns a RETRYABLE `StructuredError`
 //!   (recorder-unreachable / 503-class) makes the build FALL BACK to LOCAL recording
-//!   — NOT a build failure — and still produces a committed `.ir.json` with the
+//!   — NOT a build failure — and still produces transient canonical IR with the
 //!   correct typed-value checksum.
 //! - A HOSTED thin client that returns a NON-retryable authoring reject (422) IS
 //!   surfaced as a build error (no silent fallback).
@@ -111,8 +111,8 @@ fn hosted_unreachable_falls_back_to_local_not_a_build_failure() {
         RecordPath::HostedFellBackToLocal,
         "the build must record the fallback path"
     );
-    // The committed `.ir.json` exists on disk.
-    assert!(dir.path().join(format!("{stem}.ir.json")).exists());
+    // The IR stays in memory; no committed `.ir.json` is written.
+    assert!(!dir.path().join(format!("{stem}.ir.json")).exists());
     assert!(!m.checksum.is_empty(), "a typed-value checksum was folded");
 }
 
@@ -197,8 +197,8 @@ fn build_allows_date_now_call_with_soft_warning() {
         m.warnings
     );
     assert!(
-        dir.path().join(format!("{stem}.ir.json")).exists(),
-        "Date.now() call should still write a committed artifact"
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "Date.now() call must not write a committed artifact"
     );
 }
 
@@ -222,8 +222,8 @@ fn date_now_inside_comment_or_string_is_not_a_false_reject() {
         .expect("comment/string mentions of nondeterministic APIs record normally");
     assert_eq!(outcome.migrations.len(), 1);
     assert!(
-        dir.path().join(format!("{stem}.ir.json")).exists(),
-        "deterministic source with inert Date.now/Math.random text must commit IR"
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "deterministic source with inert Date.now/Math.random text must not write IR"
     );
 }
 
@@ -254,8 +254,8 @@ fn math_random_calls_evaluate_and_do_not_hard_fail() {
         outcome.migrations[0].warnings
     );
     assert!(
-        dir.path().join(format!("{stem}.ir.json")).exists(),
-        "Math.random() calls should still write a committed artifact"
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "Math.random() calls must not write a committed artifact"
     );
 }
 
@@ -275,7 +275,7 @@ fn date_now_arithmetic_call_evaluates_and_does_not_hard_fail() {
     let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local())
         .expect("Date.now() arithmetic call evaluates and records");
     assert_eq!(outcome.migrations.len(), 1);
-    assert!(dir.path().join(format!("{stem}.ir.json")).exists());
+    assert!(!dir.path().join(format!("{stem}.ir.json")).exists());
 }
 
 #[test]
@@ -347,10 +347,10 @@ fn local_and_hosted_paths_yield_same_typed_value_checksum() {
         "the LOCAL and HOSTED record paths must yield the SAME typed-value checksum (§8.9.2)"
     );
 
-    // The committed BYTES are also byte-identical across the two paths (canonical
+    // The transient BYTES are also byte-identical across the two paths (canonical
     // serialization + same owner stamp).
     assert_eq!(
         local.migrations[0].committed_bytes, hosted.migrations[0].committed_bytes,
-        "the committed .ir.json bytes are byte-stable across record paths"
+        "the transient .ir.json bytes are byte-stable across record paths"
     );
 }

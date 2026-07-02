@@ -10,21 +10,23 @@ pnpm install
 pnpm dev
 ```
 
-Production builds that ship migrations run the gen-types drift gate. Keep
+Production builds that ship migrations run the gen-types generated-artifact check. Keep
 `zeroship-migrate-js` on PATH, or set `ZEROSHIP_MIGRATE_JS_BIN=/path/to/zeroship-migrate-js`.
 
 - **http://localhost:5173** — your app
 - **.zeroship/** — local dev state (SQLite data, uploaded files). Git-ignored.
 - **src/index.ts** — server functions (marked `"use server"`). React UI calls
   these like regular functions; the plugin turns them into RPC.
-- **migrations/** — committed op.* schema migrations; this is the schema source.
+- **migrations/** — committed op.* `.ts` schema migrations; this is the schema source.
 - **generated/zeroship/env.db.ts** — generated `env.db` typing from the migration fold.
 - **generated/zeroship/schema.runtime.json** — generated runtime descriptor shipped in the bundle.
 - **src/App.tsx** — React client.
 
 App code does not export a schema object. Add or change tables by editing
-migrations, then regenerate/check the generated artifacts through the Vite
-plugin build or `zeroship-migrate-js gen-types`.
+`migrations/*.ts`; gen-types records those files in the sandbox and folds the
+transient IR in memory. There is no committed `.ir.json` sibling. Regenerate/check
+the generated artifacts through the Vite plugin build or `zeroship-migrate-js
+gen-types`.
 
 ## What's wired
 
