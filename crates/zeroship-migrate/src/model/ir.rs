@@ -2750,19 +2750,14 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_exists: Option<bool>,
     },
-    /// **VENDOR** — the gated raw-statement escape (`pg.sql\`…\``, vendor spec
-    /// §2.11). Records the verbatim SQL + optional typed binds. Operator-only and
-    /// STILL parse-scanned by the guard deny-list at lower. Non-empty `binds` are
-    /// rejected at validate/lower/render until PgRaw has a real parameterized
-    /// executor path; values must not be inlined as SQL text.
+    /// **VENDOR** — the gated raw-statement escape (vendor spec §2.11). Records
+    /// the verbatim SQL plus required audit metadata. Operator-only and STILL
+    /// parse-scanned by the guard deny-list at lower.
     PgRaw {
         /// The verbatim SQL statement (no trailing `;`).
         sql: String,
-        /// Optional typed binds. Non-empty is currently unsupported and refused
-        /// fail-closed; retained in the wire shape for the future parameterized
-        /// PgRaw executor path.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        binds: Vec<IrScalar>,
+        /// Required author-supplied audit reason for using raw SQL.
+        reason: String,
     },
 }
 
@@ -3154,19 +3149,8 @@ impl Op {
                 pg_only("function vendor primitives are PostgreSQL-only"),
                 &[],
             ),
-            Op::PgRaw { binds, .. } => {
-                let dialects = if binds.is_empty() {
-                    pg_only("pg.sql raw statements are PostgreSQL-only")
-                } else {
-                    DialectSupport::new(
-                        unsupported(
-                            CODE_UNSUPPORTED,
-                            "PgRaw.binds are rejected until a parameterized raw executor path exists",
-                        ),
-                        unsupported(CODE_UNSUPPORTED, "pg.sql raw statements are PostgreSQL-only"),
-                        unsupported(CODE_UNSUPPORTED, "pg.sql raw statements are PostgreSQL-only"),
-                    )
-                };
+            Op::PgRaw { .. } => {
+                let dialects = pg_only("pgRaw statements are PostgreSQL-only");
                 Support::vendor(CAP_RAW_SQL, dialects, PG_RAW_FEATURES)
             }
         }

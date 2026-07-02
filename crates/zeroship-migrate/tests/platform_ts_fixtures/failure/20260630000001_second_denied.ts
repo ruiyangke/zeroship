@@ -9,5 +9,8 @@ export function up() {
       id: t.bigInt().identity({ always: true }).primaryKey(),
     },
   });
-  pg.raw({ sql: "ALTER SYSTEM SET log_min_duration_statement = '2s'" });
+  pg.raw({
+    sql: "ALTER SYSTEM SET log_min_duration_statement = '2s'",
+    reason: "raw ALTER SYSTEM failure fixture",
+  });
 }

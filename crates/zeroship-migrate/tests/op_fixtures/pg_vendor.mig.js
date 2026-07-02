@@ -93,5 +93,8 @@ export function up() {
   });
 
   // ── the gated raw escape (vendor spec §2.11) ──
-  pg.sql`SELECT set_config('zeroship.tenant_app', ${"app_demo"}, false)`;
+  pg.raw({
+    sql: "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
+    reason: "set tenant app GUC for pg vendor fixture",
+  });
 }
