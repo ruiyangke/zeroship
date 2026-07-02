@@ -635,12 +635,22 @@ implicit.
 
 ## 6. Cross-dialect values: two layers (portable intent nodes + a per-dialect escape)
 
-<!-- Revised 2026-07-02 (operator decision): the flat "Tier-P / Tier-PG" framing is replaced by a
-     TWO-LAYER model that applies UNIFORMLY to every dialect-divergent value — expressions, column
-     types, defaults, index methods, storage options — not just expressions. Vendor-PG-only is no
-     longer a separate tier; it is the degenerate single-leg case of Layer 2. -->
+<!-- Revised 2026-07-02 (operator decision + design-critic pass): the TWO-LAYER model governs
+     dialect-divergent VALUE positions (expressions, column types, defaults, index methods, storage
+     options) — NOT whole ops. Op-level dialect availability stays the separate op-capability Tier
+     (§5.2 `Tier{Core,Vendor}`, unchanged): a whole PG-only op like `createPolicy`/`enableRls`/
+     `grant`/`createFunction`/`domain` is not a "value with legs" and cannot be wrapped by `dialect`.
+     The single-leg collapse below applies ONLY to PG-only VALUE nodes. The one combinator is
+     `dialect({...})` (the earlier `.on()` fluent form was dropped — it and the map are isomorphic;
+     the combinator is position-agnostic + unambiguous). -->
 
-**The model in one line:** a value is either **engine-proven-portable** (Layer 1) or
+**Two axes, kept distinct.** (1) **Op-capability tier** (§5.2 `Tier{Core, Vendor}`): whether a whole
+op is portable-core or PG-vendor, refusing on unsupported dialects — unchanged by this section.
+(2) **Value portability layer** (this section): how a *value inside* an op (a type, default,
+expression, index method) handles dialect divergence. The two are orthogonal; the rest of §6 is
+about axis (2).
+
+**The value model in one line:** a value is either **engine-proven-portable** (Layer 1) or
 **author-asserted per-dialect** (Layer 2); `raw` is the last resort; author-time dialect
 branching is forbidden.
 
@@ -653,15 +663,20 @@ branching is forbidden.
   **once, by us**, and amortized across every user. Growing this node set is the primary way we
   shrink divergence. (This is the closed AST of §6.1, and the same intent principle extends to
   types/defaults/index-methods.)
-- **Layer 2 — the per-dialect escape (`.on(dialect, override)`), author-asserted.** For the long
-  tail no intent node covers. A portable base value plus selective per-dialect overrides
-  (§6.4). Because the author supplies the divergent legs, the engine can no longer *prove*
-  equivalence — so Layer 2 carries the same discipline as `raw`: **`reason`-marked, budgeted,
-  counted, leaf-granularity, no nesting.** A value's un-portability is therefore *measurable*
-  (`.on()` count + `raw` count), CI-gated.
-- **Vendor-PG-only = the degenerate Layer-2 case** — a value with only the `pg` leg and no
-  portable default refuses on SQLite/MySQL via the normal validity==applicability mechanism
-  (§5.2). It is not a separate tier; §6.2's PG-only node set is exactly this case.
+- **Layer 2 — the per-dialect escape `dialect({ default?, pg?, sqlite?, mysql? })`, author-asserted.**
+  For the long tail no intent node covers. A portable base (the `default` leg) plus selective
+  per-dialect overrides (§6.4). Because the author supplies the divergent legs, the engine can no
+  longer *prove* equivalence — so Layer 2 carries `raw`-like discipline: **`reason`-marked,
+  leaf-granularity, no nesting, and its own budget** — a **separate `dialect`-budget** (distinct
+  from the `raw` budget), gated on **creator** migrations (§7.1), because a `dialect` override is a
+  "not-yet-a-proven-intent-node" debt that should trend to **zero** as Layer 1 grows, whereas `raw`
+  has a sanctioned-forever floor. A migration's cross-dialect debt is measurable as the
+  `dialect`-override count; its raw-escape debt is the `raw` count — two distinct signals, not one.
+- **A PG-only *value* node = the degenerate single-leg case** — a `dialect({ pg: … })` with no other
+  leg and no `default` refuses on SQLite/MySQL via the normal validity==applicability mechanism
+  (§5.2, §6.4). This is only about *value* positions; it does **not** subsume whole PG-only ops
+  (those stay op-capability `Vendor` tier per the note above). §6.2's PG-only expression nodes are
+  this value-level case.
 - **Forbidden: author-time dialect branching** (`up(m, { dialect }) { if (dialect==='pg') … }`).
   It destroys the single-source multi-dialect IR — the recorded artifact becomes dialect-specific
   and loses checksum-once + render-all-three-from-one-source. Ruled out at the surface (the
@@ -680,7 +695,7 @@ three-dialect evaluation parity proof** (PG :5440 / in-process SQLite / MySQL Js
 before it is admitted, following the splitPart-envelope discipline. A node that fails or lacks
 its proof is **not admitted as Layer 1** — but it no longer blocks a release, because the author
 retains two honest fallbacks: keep the portable base and supply the divergent leg via
-**`.on(dialect, override)`** (Layer 2, §6.4), or use a vendor node where one exists. So the
+**`dialect({ default, pg?, … })`** (Layer 2, §6.4), or use a vendor node where one exists. So the
 portable claim stays engine-proven without schedule hostage-taking, and "not yet a proven
 intent node" degrades to a *marked, budgeted* per-dialect override rather than silent raw.
 
@@ -714,55 +729,76 @@ set. A core-authored op containing a PG-only node is doubly impossible: the core
 construct it (tsc), and validate refuses hand-forged IR (`VENDOR_EXPR_DENIED` /
 `EXPR_NOT_PORTABLE`, with the exact node and both resolutions in `suggested_fix`).
 
-### 6.4 Layer 2: the per-dialect escape (`.on`) — uniform across every value position
+### 6.4 Layer 2: the `dialect(...)` per-dialect escape — one combinator, every value position
 
-`.on(dialect, override)` is **not expression-specific.** It is a uniform combinator available
+The escape is a **single combinator**, `dialect({ default?, pg?, sqlite?, mysql? })`, usable
 wherever a dialect-divergent value is expected — column types, defaults, index methods, storage
-options, *and* expressions — so authors learn one mechanism:
+options, *and* expressions. (The earlier fluent `.on()` form was dropped: it and the combinator are
+isomorphic, and the combinator is position-agnostic — no per-builder chaining — and unambiguous
+about which value it modifies.)
 
 ```ts
-col.type("text").on("pg", "jsonb").on("mysql", "json")   // portable base + overrides
-.default(fn.now())                                        // Layer-1 intent node, no .on needed
-.default(portable_uuid_fn).on("mysql", pg_or_my_uuid)     // override only where it diverges
-.index("logs_ts").using("btree").on("pg", "brin")
-check("first_of_month", dayOfMonth(period).eq(1))         // Layer-1 intent node
-check("kind_ok", membership(kind, ALLOWED)                // Layer-1 (renders IN everywhere)
-  .on("pg", pgExpr`kind = ANY(ARRAY[...])`))              // …with a pg-native override if wanted
+col.type(dialect({ default: "text", pg: "jsonb", mysql: "json" }))   // portable base + overrides
+.default(fn.now())                                                   // Layer-1 intent node — no dialect() needed
+.default(dialect({ pg: fn.genRandomUuid(), mysql: myUuid }))         // override only where it diverges
+.index("logs_ts").using(dialect({ default: "btree", pg: "brin" }))
+check("first_of_month", dayOfMonth(period).eq(1))                    // Layer-1 intent node
+check("kind_ok", dialect({ default: membership(kind, ALLOWED),       // Layer-1 base (renders IN everywhere)…
+                           pg: pgExpr`kind = ANY(ARRAY[...])` }))     // …with a pg-native override if wanted
 ```
 
-**Shape.** `.on(dialect, value)` reads base-first: the bare value is the portable default,
-overrides are additive. The IR envelope is uniform per wrappable type `T`:
-`OneOf<T> = { default?: T; pg?: T; sqlite?: T; mysql?: T }` — at least one leg present. A missing
-leg with **no `default`** → the enclosing op **validate-refuses that dialect** (the §5.2
-validity==applicability mechanism, identical to everything else). The `default` leg *is* the
-"enhance a portable declaration with a selective override" ergonomic; omit it to express
-"PG-only" (the §6.2 case) or "PG + SQLite only," etc.
+**Shape.** The IR envelope is uniform per wrappable type `T`:
+`Dialectal<T> = { default?: T; pg?: T; sqlite?: T; mysql?: T }` — at least one leg present. The
+`default` leg is the portable base ("enhance a declaration with a selective override"); omit it to
+express "PG-only" (the §6.2 value case) or "PG + SQLite only," etc. A dialect with **no matching
+leg and no `default`** makes the value **unavailable on that dialect** → the enclosing op
+**validate-refuses that dialect** (§5.2). Concretely, `Dialectal<T>` contributes to the op's derived
+`dialect_scope` (§5.2): its dialect set = `{ legs present } ∪ (all dialects if default present)`,
+and the op's `dialect_scope` is the intersection over all its values' sets — so the refusal is
+*wired*, not just asserted. `Dialectal` never appears inside `RenderMode::LiveResolved` reasoning
+(it is a compile-time value selection, orthogonal to live-schema rebuild).
 
 **Guardrails (mandatory — without them the portable claim is hollow):**
-- **Layer 1 is the default.** `.on` is the escape *when* an intent node can't (yet) be proven —
-  never a shortcut past finding one. Review + the budget enforce this.
-- **`reason`-marked + budgeted + counted.** Each `.on` override carries a `reason`; the total is
-  bounded by a `raw-budget.toml`-style cap (shared with `raw`, §7.1) and surfaced by the export/
-  census gate. A migration's un-portability is the sum of `.on` overrides + `raw` islands — a
-  number, CI-gated, not a vibe.
-- **Leaf granularity, never op-level.** `.on` wraps a *value* (type/default/expr/method); it
-  never wraps a whole `table().create()` per dialect — the structural skeleton (columns, PK,
+- **Layer 1 is the default.** `dialect(...)` is the escape *when* an intent node can't (yet) be
+  proven — never a shortcut past finding one. Review + the budget enforce this.
+- **`reason`-marked + its OWN budget.** Each `dialect(...)` override carries a `reason` (checksummed,
+  like `raw.reason` — §7.2). It counts against a **separate `dialect`-budget**, distinct from the
+  `raw` budget (§7.1), and enforced on **creator** migrations (§7.1) — because a `dialect` override
+  is *"an intent node we haven't built yet"* debt that must trend to **zero** as Layer 1 grows,
+  whereas `raw` has a sanctioned-forever floor. Merging the two would hide the signal. A migration
+  therefore reports **two** numbers: `dialect`-override count (cross-dialect debt) and `raw` count
+  (raw-escape debt).
+- **Leaf granularity, never op-level.** `dialect(...)` wraps a *value* (type/default/expr/method);
+  it never wraps a whole `table().create()` per dialect — the structural skeleton (columns, PK,
   index shape, constraint skeleton) stays single-source-portable.
-- **No nesting.** An `.on` leg is a concrete value, not another `OneOf` — flattened at record.
+- **No nesting.** A leg is a concrete value — which **may** be a Layer-1 (dialect-polymorphic)
+  intent node (e.g. `default: json()`) but **not** another `Dialectal` (flattened at record). A
+  Layer-1 node in a leg is still one concrete IR value; it is not nesting.
 
-**IR + determinism.** The `OneOf<T>` envelope carries **all** legs, so the checksum hashes every
-leg (deterministic, profile-independent — §5's invariant). Rendering selects the target dialect's
-leg (or `default`). It composes with the existing per-dialect goldens (`sql_preview_{pg,sqlite,
-mysql}`) with **no new golden machinery** — each dialect's golden simply shows its selected leg.
+**IR + determinism.** The checksum hashes the **IR structure**, which never contains per-dialect SQL
+*text* — only nodes and `Dialectal` legs. So a `Dialectal` value hashes all its legs (in canonical
+key order), and a Layer-1 intent node hashes as *the node* (dialect-neutral), never its per-dialect
+expansion. One rule, applied structurally, to both. Consequently a change to a **Layer-1 mapping**
+(how `json()` renders on MySQL) does *not* change the checksum — it is an **engine** change, caught
+by the per-dialect render goldens (`sql_preview_{pg,sqlite,mysql}` shift), not by the IR checksum.
+The two guards are complementary: checksum pins IR determinism (node-level); goldens pin rendering
+(expansion-level). `Dialectal` composes with those goldens with **no new golden machinery** — each
+dialect's golden simply shows its selected leg.
 
-**Reversibility.** An `OneOf`-wrapped value's reversibility (§5.3) is the meet of its legs' classes
-(any `Irreversible` leg ⇒ the op is `Irreversible`); the `down`-derivation consults the same
-per-dialect legs.
+**Reversibility.** Op reversibility stays the **static per-`Op`-variant class of §5.3** — a
+`Dialectal`-wrapped *value* does not change it (a value leg carries no inverse-information-loss;
+that lives in the op — `dropColumn`, lossy `setType`). The one interaction: an op whose
+reversibility is *conditional on a value* (e.g. `setType` — reversible only if the cast is lossless)
+evaluates that condition on the **selected dialect's leg**, so a `Dialectal` type whose `pg` leg is a
+lossless widen but whose `mysql` leg is a lossy narrow is `Conditionally reversible` per-dialect — a
+property of the `setType` op's existing §5.3 class, not a new "meet of legs" rule.
 
 **Coverage note.** The platform schema is PostgreSQL-only, so for the platform-migration payoff
-`.on` is rarely needed — the `pg` leg (or a vendor node) suffices. `.on`'s real value is
-**creator** portable schemas that hit one stubborn divergence, and it is what lets the P1 intent-
-node set land incrementally (an un-proven node degrades to a budgeted `.on`, not a release block).
+`dialect(...)` is rarely needed — the `pg` leg (or a vendor node) suffices, and the `dialect`-budget
+is ~0 there. Its real value is **creator** portable schemas that hit one stubborn divergence — which
+is exactly the population the `dialect`-budget gates. It is also what lets the Layer-1 intent-node
+set land incrementally: an un-proven node degrades to a budgeted `dialect(...)` override, not a
+release block.
 
 ---
 
@@ -798,6 +834,15 @@ A CI test counts `pgRaw`/`rawSelect` ops across the ported platform migration se
 above 5** (target 0). Each surviving raw op is listed in an in-repo `raw-budget.toml` with its
 reason; the gate fails on unlisted additions. Belt-and-braces with the in-IR `reason`: the
 budget file is the ledger, the IR field is the provenance.
+
+**A separate `dialect`-budget (§6.4).** `Dialectal(...)` overrides are counted **independently**
+of raw, in a `dialect-budget.toml`, and gated on **creator** migrations (not the PG-only platform
+corpus, where the count is ~0 and the gate would be hollow — design-critic H4). The two are kept
+apart on purpose (H3): a `dialect` override is a *"Layer-1 intent node not yet built"* debt that
+should trend to **zero** as the intent-node set grows, so its budget ratchets **downward** over
+releases; `raw` has a sanctioned-forever floor. Merging them would let a stable raw floor mask a
+growing portability gap. Each override's `reason` is in the checksummed IR (§7.2 treatment,
+applied to `Dialectal.reason`), so the ledger and the provenance agree for both escape kinds.
 
 ### 7.2 `pg.sql` binds: resolved by unrepresentability
 
@@ -1322,10 +1367,10 @@ discipline: `cargo test -p zeroship-migrate` (all targets, live PG :5440 for DB 
   required; capability presets serialized as policy-config files.
 - **P1 — the two-layer value system (large; highest technical risk) — §6.** Two workstreams:
   (a) **Layer-1 intent nodes** — node-by-node admission with live three-dialect parity proofs
-  (the closed AST makes partial delivery safe); (b) **Layer-2 `.on(dialect, override)`** — the
-  uniform per-dialect escape (`OneOf<T>` envelope + `default` leg, budgeted/`reason`-marked,
+  (the closed AST makes partial delivery safe); (b) **Layer-2 `dialect({...})`** — the
+  uniform per-dialect escape (`Dialectal<T>` envelope + `default` leg, own budget/`reason`-marked,
   refuse-uncovered-dialect) across types/defaults/exprs/index-methods. An un-proven node degrades
-  to a budgeted `.on`, not a release block. Also lands the **exact-platform-table keystone**
+  to a budgeted `dialect(...)` override, not a release block. Also lands the **exact-platform-table keystone**
   (policy-driven system-field injection + explicit/composite PK + ownership registration — the
   ~46% marker unblock, `P1_KEYSTONE_PLAN.md`), which is independent of (a)/(b).
 - **P2 — core surface rewrite (medium).** The `op` root; per-intent alter terminals; rendered
