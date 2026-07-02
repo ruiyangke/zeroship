@@ -22,8 +22,9 @@ use zeroship_migrate::{
     apply::executor::LockMode,
     frontend::record_migration_to_ir_unsandboxed,
     model::migration::MigrationId,
-    provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema,
-    MigrationBackend, MigrationEngine, SqlDialect,
+    apply::role::deprovision_migrator, provision_migrator, Approval, ExecutorConfig, IrAuthor,
+    LiveSchema, MigrationBackend, MigrationEngine, MigrationIr, PolicyProfile, SqlDialect,
+    resolve_create_table_policy,
 };
 
 const DEFAULT_DSN: &str =
@@ -97,6 +98,13 @@ fn unix_secs() -> i64 {
 
 const APP: &str = "app_test";
 
+fn resolve_ir_json(ir: &str) -> String {
+    let raw: MigrationIr = serde_json::from_str(ir).expect("test IR parses");
+    let resolved =
+        resolve_create_table_policy(&raw, &PolicyProfile::confined()).expect("test IR resolves");
+    serde_json::to_string(&resolved).expect("resolved test IR serializes")
+}
+
 /// Author a `.ir.json` (the deploying app `APP`) → REAL load-gate + assembler
 /// (`lower_plan`) → `apply_plan` on real PG. Asserts apply success.
 async fn author_and_apply(
@@ -106,9 +114,10 @@ async fn author_and_apply(
     reg: &std::collections::BTreeMap<String, String>,
     approval: Approval,
 ) -> zeroship_migrate::engine::DeclarativeDeployOutcome {
+    let ir = resolve_ir_json(ir);
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
     let document = zeroship_migrate::model::load::load_ir_document(
-        ir,
+        &ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Postgres,
         reg,

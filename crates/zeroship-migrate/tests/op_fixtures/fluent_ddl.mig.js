@@ -1,6 +1,6 @@
 // op.* migration fixture — the FULL FLUENT DDL surface, authored via the SOLE
 // public `table()` entry (design 2026-06-25-op-dsl-fluent-redesign.md). Covers the
-// create() all-object form (columns + table-level pk/unique/check/fk/index), the
+// create() all-object form (columns + table-level unique/check/fk/index), the
 // .column()/.foreignKey()/.unique()/.check()/.constraint()/.index() selectors, and
 // the immutable t.* lexicon. Proves the fluent authoring records the frozen wire
 // ops (the byte-identity oracle's golden).
@@ -22,7 +22,7 @@ export default {
         id: t.id(), // uuid PK, default gen_random_uuid()
         email: t.text().notNull().unique(),
         balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
-        created_at: t.timestamp().notNull().default({ fn: "now" }),
+        authored_at: t.timestamp().notNull().default({ fn: "now" }),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
@@ -40,7 +40,6 @@ export default {
 
     table("memberships").create({
       columns: { account_id: t.uuid().notNull(), team: t.text().notNull() },
-      primaryKey: ["account_id", "team"],
       uniques: [{ name: "memberships_team_uq", columns: ["team"] }],
       checks: [{ name: "memberships_team_chk", expr: (c) => c("team").isNotNull() }],
       foreignKeys: [

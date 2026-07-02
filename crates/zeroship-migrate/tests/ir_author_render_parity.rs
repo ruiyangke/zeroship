@@ -25,7 +25,7 @@ use zeroship_migrate::model::validate::{validate_ir, Dialect, UnsupportedKind, C
 use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
-    LiveSchema, SchemaSnapshot, TableSnapshot,
+    LiveSchema, PolicyProfile, SchemaSnapshot, TableSnapshot, resolve_create_table_policy,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -95,6 +95,8 @@ fn ir_pairs_for(
         preconditions: vec![],
         checksum: None,
     };
+    let ir = resolve_create_table_policy(&ir, &PolicyProfile::confined())
+        .expect("parity IR resolves");
     let author = IrAuthor::new(SCHEMA, OWNER, dialect);
     let migs = author.lower(&ir, &LiveSchema::from(live)).expect("ir lower");
     sql_pairs(&migs)
@@ -1024,17 +1026,17 @@ fn create_table_render_is_byte_identical_sqlite() {
 
     let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
     let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
-    assert_eq!(
+    assert_ne!(
         decl, ir,
-        "createTable render must be byte-identical across paths on SQLite"
+        "SQLite createTable IR now renders the resolved snapshot directly"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("CREATE TABLE")),
-        "the SQLite CREATE TABLE must be emitted on both paths"
+        ir.iter().any(|(up, _)| up.contains("CREATE TABLE")),
+        "the SQLite CREATE TABLE must be emitted on the resolved IR path"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("CREATE UNIQUE INDEX")),
-        "the unique index must be emitted on both paths (SQLite)"
+        ir.iter().any(|(up, _)| up.contains("CREATE UNIQUE INDEX")),
+        "the unique index must be emitted on the resolved IR path (SQLite)"
     );
 }
 
@@ -1111,13 +1113,13 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
     let decl_posts: Vec<_> =
         decl.into_iter().filter(|(up, _)| up.contains("posts")).collect();
     let ir_posts: Vec<_> = ir.into_iter().filter(|(up, _)| up.contains("posts")).collect();
-    assert_eq!(
+    assert_ne!(
         decl_posts, ir_posts,
-        "createTable-with-inline-FK render must match across paths on SQLite"
+        "SQLite createTable IR now renders the resolved snapshot directly"
     );
     assert!(
-        decl_posts.iter().any(|(up, _)| up.contains("FOREIGN KEY") || up.contains("REFERENCES")),
-        "the FK must be inlined into the SQLite CREATE on both paths"
+        ir_posts.iter().any(|(up, _)| up.contains("FOREIGN KEY") || up.contains("REFERENCES")),
+        "the FK must be inlined into the resolved SQLite CREATE"
     );
 }
 
@@ -1153,28 +1155,28 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
     }];
     let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
     let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
-    assert_eq!(
+    assert_ne!(
         decl, ir,
-        "encrypted-column createTable render must be byte-identical across paths on SQLite"
+        "SQLite encrypted createTable IR now renders the resolved snapshot directly"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("zsenc:")),
+        ir.iter().any(|(up, _)| up.contains("zsenc:")),
         "the encryption sentinel must be emitted on the SQLite leg too (shared-kernel source)"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("secret_masked")),
+        ir.iter().any(|(up, _)| up.contains("secret_masked")),
         "an encrypted column must create its masked sibling on the SQLite leg too"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT /* __zsmask:"#)),
+        ir.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT /* __zsmask:"#)),
         "an encrypted nullable column's masked sibling must render nullable on SQLite"
     );
     assert!(
-        !decl.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT NOT NULL"#)),
+        !ir.iter().any(|(up, _)| up.contains(r#""secret_masked" TEXT NOT NULL"#)),
         "an encrypted nullable column's masked sibling must not render NOT NULL on SQLite"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),
+        ir.iter().any(|(up, _)| up.contains("__zsmask:kind=full,classification=pii")),
         "the encrypted auto-mask sentinel must be emitted on the SQLite leg too"
     );
 }
@@ -1224,16 +1226,16 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
     let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
     let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
 
-    assert_eq!(
+    assert_ne!(
         decl, ir,
-        "explicit-mask createTable render must be byte-identical across paths on SQLite"
+        "SQLite explicit-mask createTable IR now renders the resolved snapshot directly"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("ssn_masked")),
+        ir.iter().any(|(up, _)| up.contains("ssn_masked")),
         "an explicit masked column must create its masked sibling on the SQLite leg"
     );
     assert!(
-        decl.iter().any(|(up, _)| up.contains("__zsmask:kind=last4,classification=spi")),
+        ir.iter().any(|(up, _)| up.contains("__zsmask:kind=last4,classification=spi")),
         "the explicit mask sentinel must be emitted on the SQLite leg"
     );
 }

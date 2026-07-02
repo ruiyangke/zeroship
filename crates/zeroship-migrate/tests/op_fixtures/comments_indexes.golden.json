@@ -21,8 +21,38 @@
       "columns": [
         {
           "name": "id",
-          "type": "uuid",
+          "type": "text",
           "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
         },
         {
           "name": "email",
@@ -48,7 +78,9 @@
           }
         }
       ],
-      "primaryKey": null,
+      "primaryKey": [
+        "id"
+      ],
       "constraints": [
         {
           "name": "users_email_uq",
@@ -60,7 +92,32 @@
           }
         }
       ],
-      "indexes": []
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
     },
     {
       "op": "createIndex",

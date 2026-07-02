@@ -21,8 +21,10 @@ use zeroship_migrate::frontend::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use zeroship_migrate::frontend::recorder_http::StructuredError;
 use zeroship_migrate::frontend::recorder_service::recorder_child_path;
 use zeroship_migrate::frontend::{
-    build_migrations, BuildError, RecordPath, RecordVia, RecorderClient, ResourceBudget,
+    build_migrations, record_migration_transient, BuildError, DiscoveredMigration, RecordPath,
+    RecordVia, RecorderClient, ResourceBudget,
 };
+use zeroship_migrate::PolicyProfile;
 
 const OWNER: &str = "app_paths";
 
@@ -50,6 +52,15 @@ fn assert_child_built() {
 
 fn write_mig(dir: &Path, stem: &str, ts: &str) {
     fs::write(dir.join(format!("{stem}.ts")), ts.as_bytes()).unwrap();
+}
+
+fn create_op(ir_json: &[u8]) -> serde_json::Value {
+    let ir: serde_json::Value = serde_json::from_slice(ir_json).expect("canonical IR JSON");
+    ir["ops"]
+        .as_array()
+        .and_then(|ops| ops.first())
+        .cloned()
+        .expect("first op")
 }
 
 /// A hosted client that ALWAYS reports recorder-unreachable (retryable 503).
@@ -114,6 +125,87 @@ fn hosted_unreachable_falls_back_to_local_not_a_build_failure() {
     // The IR stays in memory; no committed `.ir.json` is written.
     assert!(!dir.path().join(format!("{stem}.ir.json")).exists());
     assert!(!m.checksum.is_empty(), "a typed-value checksum was folded");
+}
+
+#[test]
+fn confined_build_records_resolved_system_shape_before_checksum() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_widgets";
+    write_mig(dir.path(), stem, MIG_TS);
+
+    let outcome = build_migrations(dir.path(), OWNER, &RecordVia::local()).expect("build");
+    let op = create_op(&outcome.migrations[0].committed_bytes);
+    let columns = op["columns"].as_array().expect("columns");
+    let names = columns
+        .iter()
+        .map(|c| c["name"].as_str().expect("column name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        &names[..7],
+        [
+            "id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "version",
+            "deleted_at"
+        ]
+    );
+    assert_eq!(op["primaryKey"], serde_json::json!(["id"]));
+    let indexes = op["indexes"].as_array().expect("system indexes");
+    assert_eq!(
+        indexes
+            .iter()
+            .map(|idx| idx["columns"][0]["name"].as_str().expect("index column"))
+            .collect::<Vec<_>>(),
+        vec!["deleted_at", "updated_at", "created_by"]
+    );
+}
+
+#[test]
+fn platform_transient_recording_keeps_author_columns_and_primary_key() {
+    assert_child_built();
+    let dir = tempfile::tempdir().unwrap();
+    let stem = "20240617120000_memberships";
+    let src = r#"
+        import { table, t } from "@zeroship/migrate";
+        export function up() {
+          table("memberships").create({
+            columns: {
+              account_id: t.uuid().notNull(),
+              team: t.text().notNull(),
+            },
+            primaryKey: ["account_id", "team"],
+          });
+        }
+    "#;
+    write_mig(dir.path(), stem, src);
+    let migration = DiscoveredMigration {
+        ts_path: dir.path().join(format!("{stem}.ts")),
+        version: "20240617120000".into(),
+        desc: "memberships".into(),
+        stem: stem.into(),
+    };
+
+    let recorded = record_migration_transient(
+        &migration,
+        OWNER,
+        &RecordVia::local(),
+        &PolicyProfile::platform(),
+    )
+    .expect("platform transient record");
+    let op = create_op(recorded.ir_json.as_bytes());
+    let names = op["columns"]
+        .as_array()
+        .expect("columns")
+        .iter()
+        .map(|c| c["name"].as_str().expect("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["account_id", "team"]);
+    assert_eq!(op["primaryKey"], serde_json::json!(["account_id", "team"]));
+    assert_eq!(op["indexes"], serde_json::json!([]));
 }
 
 #[test]

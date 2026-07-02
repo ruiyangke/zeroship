@@ -31,7 +31,7 @@ use zeroship_migrate::{
     },
     render::lower::{IrAuthor, LiveSchema},
     ApplyError, Approval, EngineError,
-    ExecutorConfig, MigrationEngine, PlanStep,
+    ExecutorConfig, MigrationEngine, PlanStep, PolicyProfile, resolve_create_table_policy,
 };
 use zeroship_migrate::apply::role::deprovision_migrator;
 use zeroship_migrate::{provision_migrator, record_started};
@@ -212,8 +212,9 @@ fn lower(cfg: &ExecutorConfig, op: Op) -> Vec<PlanStep> {
         preconditions: vec![],
         checksum: None,
     };
-    let author =
-        IrAuthor::new(&cfg.project_schema, "app_test", SqlDialect::Postgres);
+    let ir = resolve_create_table_policy(&ir, &PolicyProfile::confined())
+        .expect("guard test IR resolves");
+    let author = IrAuthor::new(&cfg.project_schema, "app_test", SqlDialect::Postgres);
     let migs = author.lower(&ir, &LiveSchema::default()).expect("guarded op lowers");
     migs.into_iter().map(PlanStep::Ddl).collect()
 }

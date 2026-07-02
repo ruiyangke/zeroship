@@ -10,6 +10,8 @@
 //! The recorder runs untrusted creator JS under the same sandbox parity as app
 //! code (§8.9).
 
+use crate::model::profile::PolicyProfile;
+use crate::model::table_shape::{resolve_create_table_policy, TableShapeError};
 use crate::MigrationIr;
 use zeroship_runtime::Runtime;
 
@@ -48,6 +50,9 @@ pub enum RecordError {
         /// The observed byte count.
         actual: usize,
     },
+    /// The recorded IR violated the active profile's table-shape policy.
+    #[error("recorded .ir.json violates active profile table shape: {0}")]
+    TableShape(#[from] TableShapeError),
 }
 
 /// A recorded migration plus the determinism lint outcome.
@@ -207,7 +212,7 @@ fn ir_from_value(ir_value: serde_json::Value) -> Result<MigrationIr, RecordError
         .map_err(|e| RecordError::Recording(e.to_string()))?;
     let ir = serde_json::from_str::<MigrationIr>(&bytes)
         .map_err(|e| RecordError::Contract(e.to_string()))?;
-    Ok(ir)
+    Ok(resolve_create_table_policy(&ir, &PolicyProfile::confined())?)
 }
 
 /// **UNSANDBOXED, in-process — for the test oracle / trusted-input use ONLY.**

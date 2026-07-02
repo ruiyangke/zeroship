@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 pub use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use super::recorder_service::{RecorderError, RecorderService};
+use crate::{resolve_create_table_policy, PolicyProfile};
 
 /// Max accepted client-controlled migration `name` (PR4a code-critic MED #5). A
 /// filename-derived label is short; cap it so an oversized name cannot reach the
@@ -214,9 +215,20 @@ pub fn handle_record(
         req.schema_types_blob.as_deref(),
     ) {
         Ok(result) => {
+            let resolved_ir_json = match resolve_ir_envelope(&result.ir_json) {
+                Ok(json) => json,
+                Err(e) => {
+                    return RecordHttpOutcome::Err(StructuredError {
+                        code: "RECORD_EVAL_ERROR".into(),
+                        message: format!("recorded IR did not resolve for checksum: {e}"),
+                        http_status: 422,
+                        retryable: false,
+                    })
+                }
+            };
             // Fold the single authoritative typed-value checksum over the recorded IR
             // (§2.4 point 2: the JS side emits ops; Rust folds the one checksum).
-            let checksum = match checksum_of_ir_envelope(&result.ir_json) {
+            let checksum = match checksum_of_ir_envelope(&resolved_ir_json) {
                 Ok(c) => c,
                 Err(e) => {
                     return RecordHttpOutcome::Err(StructuredError {
@@ -230,12 +242,31 @@ pub fn handle_record(
             RecordHttpOutcome::Ok(RecordHttpResponse {
                 // The deploy-time provenance gate re-records THIS exact source.
                 ts_provenance_blob: req.ts_source.clone(),
-                ir_json: result.ir_json,
+                ir_json: resolved_ir_json,
                 checksum,
             })
         }
         Err(e) => RecordHttpOutcome::Err((&e).into()),
     }
+}
+
+fn resolve_ir_envelope(ir_json: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Env {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ok: Option<bool>,
+        #[serde(default)]
+        ir: Option<serde_json::Value>,
+    }
+
+    let mut env: Env = serde_json::from_str(ir_json).map_err(|e| e.to_string())?;
+    let ir_value = env.ir.take().ok_or_else(|| "envelope missing `ir`".to_string())?;
+    let bytes = serde_json::to_string(&ir_value).map_err(|e| e.to_string())?;
+    let ir: crate::MigrationIr = serde_json::from_str(&bytes).map_err(|e| e.to_string())?;
+    let resolved =
+        resolve_create_table_policy(&ir, &PolicyProfile::confined()).map_err(|e| e.to_string())?;
+    env.ir = Some(serde_json::to_value(resolved).map_err(|e| e.to_string())?);
+    serde_json::to_string(&env).map_err(|e| e.to_string())
 }
 
 /// Fold the typed-value checksum (`Checksum::of_ir`) over the recorder's `.ir.json`

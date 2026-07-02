@@ -27,7 +27,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zeroship_migrate::{
     apply::executor::LockMode, frontend::record_migration_to_ir_unsandboxed, Approval, ExecutorConfig, IrAuthor, IrLowerError, LiveSchema,
-    MigrationEngine, SqlDialect, SqliteBackend,
+    MigrationEngine, MigrationIr, PolicyProfile, SqlDialect, SqliteBackend,
+    resolve_create_table_policy,
 };
 
 const PROJECT: &str = "prj_dml";
@@ -56,6 +57,15 @@ fn exec_cfg() -> ExecutorConfig {
 
 fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
+}
+
+fn resolve_ir(ir: &MigrationIr) -> MigrationIr {
+    resolve_create_table_policy(ir, &PolicyProfile::confined()).expect("test IR resolves")
+}
+
+fn resolved_ir_json(raw: &str) -> String {
+    let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
+    serde_json::to_string(&resolve_ir(&ir)).expect("resolved test IR serializes")
 }
 
 fn unix_secs() -> i64 {
@@ -99,9 +109,10 @@ async fn lower_and_apply(
     reg: &BTreeMap<String, String>,
     approval: Approval,
 ) {
+    let ir = resolved_ir_json(ir);
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(ir, APP, reg, &LiveSchema::default())
+        .load_and_lower(&ir, APP, reg, &LiveSchema::default())
         .expect("lower the .ir.json on SQLite");
     let engine = MigrationEngine::new();
     let plan = zeroship_migrate::AppliedPlan {
@@ -139,9 +150,10 @@ async fn lower_plan_and_apply(
     reg: &BTreeMap<String, String>,
     approval: Approval,
 ) -> zeroship_migrate::engine::DeclarativeDeployOutcome {
+    let ir = resolved_ir_json(ir);
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let document = zeroship_migrate::model::load::load_ir_document(
-        ir,
+        &ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,
@@ -163,7 +175,8 @@ async fn load_recorded_ir_and_apply(
     ir: &zeroship_migrate::MigrationIr,
     reg: &BTreeMap<String, String>,
 ) {
-    let bytes = serde_json::to_string(ir).expect("recorded IR serializes");
+    let resolved = resolve_ir(ir);
+    let bytes = serde_json::to_string(&resolved).expect("recorded IR serializes");
     let document = zeroship_migrate::model::load::load_ir_document(
         &bytes,
         APP,

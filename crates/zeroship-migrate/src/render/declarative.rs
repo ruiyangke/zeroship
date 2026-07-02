@@ -1312,6 +1312,23 @@ fn system_field_indexes(table: &str) -> Vec<IndexSnapshot> {
         .collect()
 }
 
+/// Stamp a resolved primary-key constraint and its implicit index onto a snapshot.
+pub(crate) fn push_primary_key_snapshot(
+    table: &str,
+    snap: &mut TableSnapshot,
+    columns: &[String],
+) {
+    let name = format!("{table}_pkey");
+    snap.constraints.push(ConstraintSnapshot {
+        name: name.clone(),
+        kind: "PRIMARY KEY".into(),
+        definition: format!("PRIMARY KEY ({})", constraintdef_cols(columns)),
+        comment: None,
+    });
+    snap.indexes
+        .push(IndexSnapshot::btree(name, true, columns.to_vec()));
+}
+
 /// Deterministic name for a non-unique single-column index
 /// (`<table>_<col>_idx`), matching plugin-db's `index_name(table, &[col], false)`
 /// and NAMEDATALEN-capped via [`crate::plan::author::cap_ident_name`] so a long
@@ -1545,36 +1562,62 @@ pub(crate) fn build_table_snapshot(
     d: &CollectionDescriptor,
     dialect: SqlDialect,
 ) -> Result<TableSnapshot, DeclarativeError> {
-        let mut columns = system_field_columns();
+    build_table_snapshot_impl(project_schema, d, dialect, SnapshotSystemMode::InjectConfined)
+}
+
+/// Build a snapshot from already-resolved `createTable` IR columns.
+///
+/// Unlike [`build_table_snapshot`], this path does not inject system fields,
+/// system indexes, or an `id` primary key. Callers must stamp the resolved
+/// `primaryKey` separately with [`push_primary_key_snapshot`].
+pub(crate) fn build_resolved_table_snapshot(
+    project_schema: &str,
+    d: &CollectionDescriptor,
+    dialect: SqlDialect,
+) -> Result<TableSnapshot, DeclarativeError> {
+    build_table_snapshot_impl(project_schema, d, dialect, SnapshotSystemMode::ResolvedIr)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotSystemMode {
+    InjectConfined,
+    ResolvedIr,
+}
+
+fn build_table_snapshot_impl(
+    project_schema: &str,
+    d: &CollectionDescriptor,
+    dialect: SqlDialect,
+    mode: SnapshotSystemMode,
+) -> Result<TableSnapshot, DeclarativeError> {
+        let mut columns = if matches!(mode, SnapshotSystemMode::InjectConfined) {
+            system_field_columns()
+        } else {
+            Vec::new()
+        };
         // #6: the three implicit B-tree system indexes the platform auto-creates
         // for every table (`deleted_at`, `updated_at`, `created_by`), modelled so
         // they round-trip — see `system_field_indexes`.
-        let mut indexes: Vec<IndexSnapshot> = system_field_indexes(&d.name);
+        let mut indexes: Vec<IndexSnapshot> = if matches!(mode, SnapshotSystemMode::InjectConfined) {
+            system_field_indexes(&d.name)
+        } else {
+            Vec::new()
+        };
         let mut constraints: Vec<ConstraintSnapshot> = Vec::new();
 
-        // The id PRIMARY KEY (Postgres names a bare `PRIMARY KEY` constraint
-        // `<table>_pkey`). Definition matches pg_get_constraintdef's spelling.
-        constraints.push(ConstraintSnapshot {
-            name: format!("{}_pkey", d.name),
-            kind: "PRIMARY KEY".into(),
-            definition: "PRIMARY KEY (id)".into(),
-            comment: None,
-        });
-        // A PRIMARY KEY also materialises an IMPLICIT unique index named
-        // `<table>_pkey` (pg_index reports it). The live snapshot always carries
-        // it, so the desired snapshot must too — otherwise the differ would read
-        // it as an out-of-band index to DROP. It is created by the `PRIMARY KEY`
-        // clause, never by a standalone CREATE INDEX, so the differ skips it
-        // (see `is_pk_index`).
-        indexes.push(IndexSnapshot::btree(
-            format!("{}_pkey", d.name),
-            true,
-            // The PK's implicit index covers `id` (live `pg_index` reports the
-            // same key column). The differ never emits DDL for it (see
-            // `is_pk_index`), but the snapshot must carry the column list so the
-            // attribute-aware diff stays clean against live.
-            vec!["id".into()],
-        ));
+        if matches!(mode, SnapshotSystemMode::InjectConfined) {
+            let mut snap = TableSnapshot {
+                columns: Vec::new(),
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+                runtime_options: d.runtime_options.clone(),
+                comment: None,
+                stored_create_sql: None,
+            };
+            push_primary_key_snapshot(&d.name, &mut snap, &["id".into()]);
+            constraints.extend(snap.constraints);
+            indexes.extend(snap.indexes);
+        }
 
         for f in &d.fields {
             // #5 id-fold: `id: t.id("prefix")` is a PREFIX DECLARATION for the
@@ -1585,7 +1628,7 @@ pub(crate) fn build_table_snapshot(
             // bogus second PK. A field NAMED `id` with any OTHER type is rejected
             // by the field-name fence below (an `id` column may only be the
             // system PK).
-            if f.name == "id" {
+            if matches!(mode, SnapshotSystemMode::InjectConfined) && f.name == "id" {
                 if f.ty == "id" {
                     if let Some(prefix) = &f.id_prefix {
                         validate_id_prefix(prefix)?;
@@ -1887,6 +1930,22 @@ fn desired_snapshot_second_pass(
 /// standalone CREATE/DROP INDEX, so the differ never emits DDL for it.
 fn is_pk_index(table: &str, index_name: &str) -> bool {
     index_name == format!("{table}_pkey")
+}
+
+fn primary_key_columns<'a>(table: &str, t: &'a TableSnapshot) -> Option<&'a [String]> {
+    t.indexes
+        .iter()
+        .find(|idx| idx.name == format!("{table}_pkey") && idx.unique)
+        .map(|idx| idx.columns.as_slice())
+}
+
+fn inline_pk_for_column(table: &str, t: &TableSnapshot, column: &str) -> bool {
+    matches!(primary_key_columns(table, t), Some(cols) if cols == [column])
+}
+
+fn should_render_table_pk(table: &str, t: &TableSnapshot, constraint: &ConstraintSnapshot) -> bool {
+    constraint.kind == "PRIMARY KEY"
+        && !matches!(primary_key_columns(table, t), Some(cols) if cols.len() == 1)
 }
 
 /// PHASE 4 — true if `index_name` is one of the three implicit system-field
@@ -4441,8 +4500,7 @@ impl DeclarativeAuthor {
     ) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         for c in &t.columns {
-            // `id` carries the inline PRIMARY KEY.
-            let inline_pk = c.name == "id";
+            let inline_pk = inline_pk_for_column(table, t, &c.name);
             let ty = column_type_for_render(c, SqlDialect::Postgres, inline_pk);
             let pk = primary_key_clause(c, SqlDialect::Postgres, inline_pk);
             let null = null_clause(c, SqlDialect::Postgres, inline_pk);
@@ -4489,7 +4547,11 @@ impl DeclarativeAuthor {
         // a named unique round-trips against the live catalog. CHECK is inlined the
         // same way; both are emission-only bodies the differ does not re-diff.
         for c in &t.constraints {
-            if c.kind == "CHECK" || c.kind == "UNIQUE" || c.kind == "EXCLUDE" {
+            if should_render_table_pk(table, t, c)
+                || c.kind == "CHECK"
+                || c.kind == "UNIQUE"
+                || c.kind == "EXCLUDE"
+            {
                 parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
             }
         }
@@ -4522,7 +4584,7 @@ impl DeclarativeAuthor {
     ) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         for c in &t.columns {
-            let inline_pk = c.name == "id";
+            let inline_pk = inline_pk_for_column(table, t, &c.name);
             let ty = column_type_for_render(c, SqlDialect::Sqlite, inline_pk);
             let pk = primary_key_clause(c, SqlDialect::Sqlite, inline_pk);
             let null = null_clause(c, SqlDialect::Sqlite, inline_pk);
@@ -4556,7 +4618,11 @@ impl DeclarativeAuthor {
             ));
         }
         for c in &t.constraints {
-            if c.kind == "CHECK" || c.kind == "UNIQUE" {
+            if should_render_table_pk(table, t, c)
+                || c.kind == "CHECK"
+                || c.kind == "UNIQUE"
+                || c.kind == "FOREIGN KEY"
+            {
                 parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
             }
         }
@@ -4566,8 +4632,12 @@ impl DeclarativeAuthor {
             parts.join(", ")
         )];
         let emitter = SqliteEmitter;
-        for idx in system_field_indexes(table) {
-            let (up, _) = emitter.create_index(table, &idx);
+        for idx in t
+            .indexes
+            .iter()
+            .filter(|idx| is_system_field_index(table, &idx.name))
+        {
+            let (up, _) = emitter.create_index(table, idx);
             statements.push(up);
         }
         statements
@@ -4582,7 +4652,7 @@ impl DeclarativeAuthor {
         let mut parts: Vec<String> = Vec::new();
         let mut consumed_enum_checks = BTreeSet::new();
         for c in &t.columns {
-            let inline_pk = c.name == "id";
+            let inline_pk = inline_pk_for_column(table, t, &c.name);
             let enum_check_name = check_constraint_name(table, &c.name, "enum");
             let enum_type = t
                 .constraints
@@ -4620,7 +4690,7 @@ impl DeclarativeAuthor {
             if consumed_enum_checks.contains(&c.name) {
                 continue;
             }
-            if c.kind == "CHECK" || c.kind == "UNIQUE" {
+            if should_render_table_pk(table, t, c) || c.kind == "CHECK" || c.kind == "UNIQUE" {
                 parts.push(format!(
                     "CONSTRAINT {} {}",
                     mysql_quote_ident(&c.name),
@@ -5075,19 +5145,13 @@ impl DeclarativeAuthor {
         // `up` is `join(";\n")` over it — byte-identical to the differ's render.
         let (statements, down) = match self.dialect {
             SqlDialect::Sqlite => {
-                // The Confined SQLite path routes the CREATE through the SHARED
-                // `zeroship_schema::query` emitter — the SAME call the differ's
-                // `render_create_table_sqlite` makes — fed the SDK schema `Value`
-                // `IrAuthor` built from the op's descriptor via `descriptor_to_sdk_schema`
-                // (the identical bridge `desired_snapshot_for_dialect` uses). So the
-                // §6.4 byte-identity holds on the SQLite leg too. The `down` is the
-                // unqualified `DROP TABLE` (main IS the app file), byte-identical to
-                // the differ's SQLite create-table down.
-                let statements = if has_generated_or_identity(snapshot) || has_inline_checks(snapshot) {
-                    self.render_create_table_sqlite_snapshot_statements(table, snapshot)
-                } else {
-                    self.render_create_table_sqlite_value_statements(table, sqlite_schema)?
-                };
+                // IR createTable now arrives with profile-managed system shape
+                // already resolved into the snapshot. Render that snapshot directly
+                // instead of handing resolved system columns back through the SDK
+                // value emitter, whose author-facing contract rightly rejects
+                // reserved system-field names.
+                let _ = sqlite_schema;
+                let statements = self.render_create_table_sqlite_snapshot_statements(table, snapshot);
                 (statements, format!("DROP TABLE {}", quote_ident(table)))
             }
             SqlDialect::Mysql => (

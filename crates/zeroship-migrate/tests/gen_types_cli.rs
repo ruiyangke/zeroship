@@ -48,9 +48,16 @@ import { t, schema as defineSchema, type Db } from "@zeroship/db";
 
 const schema = {
   users: defineSchema({
+    id: t.string().required(),
+    created_at: t.timestamp().required(),
+    updated_at: t.timestamp().required(),
+    created_by: t.string(),
+    updated_by: t.string(),
+    version: t.number().required(),
+    deleted_at: t.timestamp(),
     email: t.string().required().unique(),
     bio: t.string(),
-  }).uniqueIndex("users_email_key", ["email"]),
+  }).uniqueIndex("users_email_key", ["email"]).index("users_deleted_at_idx", ["deleted_at"]).index("users_updated_at_idx", ["updated_at"]).index("users_created_by_idx", ["created_by"]),
 } as const;
 
 declare module "zeroship" {
@@ -67,6 +74,31 @@ const EXPECTED_RUNTIME_DESCRIPTOR: &str = r#"{
   "collections": {
     "users": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true
+        },
+        "created_at": {
+          "type": "date",
+          "required": true
+        },
+        "updated_at": {
+          "type": "date",
+          "required": true
+        },
+        "created_by": {
+          "type": "string"
+        },
+        "updated_by": {
+          "type": "string"
+        },
+        "version": {
+          "type": "int",
+          "required": true
+        },
+        "deleted_at": {
+          "type": "date"
+        },
         "email": {
           "type": "string",
           "required": true,
@@ -88,6 +120,24 @@ const EXPECTED_RUNTIME_DESCRIPTOR: &str = r#"{
             "email"
           ],
           "unique": true
+        },
+        {
+          "name": "users_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "users_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "users_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
         }
       ]
     }

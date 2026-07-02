@@ -214,6 +214,20 @@ async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
         .is_empty()
 }
 
+async fn table_columns(conn: &Client, schema: &str, table: &str) -> Vec<String> {
+    conn.query(
+        "SELECT column_name FROM information_schema.columns \
+          WHERE table_schema = $1 AND table_name = $2 \
+          ORDER BY ordinal_position",
+        &[&schema, &table],
+    )
+    .await
+    .expect("query information_schema.columns")
+    .into_iter()
+    .map(|row| row.get::<_, String>("column_name"))
+    .collect()
+}
+
 async fn rls_flags(conn: &Client, schema: &str, table: &str) -> (bool, bool) {
     let row = conn
         .query_one(
@@ -326,6 +340,13 @@ async fn platform_ts_only_materializes_objects_without_writing_artifacts_and_rer
     assert!(
         table_exists(&conn, "zeroship", &corpus.accounts_table).await,
         "zeroship.ts_accounts table created"
+    );
+    let mut columns = table_columns(&conn, "zeroship", &corpus.accounts_table).await;
+    columns.sort();
+    assert_eq!(
+        columns,
+        vec!["app_id", "email", "id"],
+        "Platform profile must not inject confined system columns"
     );
     let (rls, force_rls) = rls_flags(&conn, "zeroship", &corpus.accounts_table).await;
     assert!(rls, "RLS enabled on zeroship.ts_accounts");

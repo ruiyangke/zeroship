@@ -33,7 +33,7 @@ use zeroship_bundle::manifest::MigrationFileEntry;
 use crate::model::ir::CanonicalOpList;
 use crate::model::ir::Op;
 use crate::plan::loader;
-use crate::{Checksum, MigrationFlags, MigrationIr};
+use crate::{resolve_create_table_policy, Checksum, MigrationFlags, MigrationIr, PolicyProfile};
 
 use super::recorder_protocol::MAX_TS_SOURCE_BYTES;
 use super::recorder_http::StructuredError;
@@ -454,6 +454,32 @@ fn canonicalize_ir_value(
     Ok((s.into_bytes(), ir))
 }
 
+fn resolve_ir_value(
+    ir_value: serde_json::Value,
+    profile: &PolicyProfile,
+    stem: &str,
+) -> Result<serde_json::Value, BuildError> {
+    let bytes = serde_json::to_string(&ir_value).map_err(|e| BuildError::CorruptArtifact {
+        stem: stem.to_string(),
+        message: e.to_string(),
+    })?;
+    let ir: MigrationIr =
+        serde_json::from_str(&bytes).map_err(|e| BuildError::CorruptArtifact {
+            stem: stem.to_string(),
+            message: format!("recorded IR violates the frozen contract: {e}"),
+        })?;
+    let resolved = resolve_create_table_policy(&ir, profile).map_err(|e| {
+        BuildError::CorruptArtifact {
+            stem: stem.to_string(),
+            message: e.to_string(),
+        }
+    })?;
+    serde_json::to_value(resolved).map_err(|e| BuildError::CorruptArtifact {
+        stem: stem.to_string(),
+        message: e.to_string(),
+    })
+}
+
 /// Record one `.ts` source via the LOCAL sandboxed child ([`SandboxPosture::Local`])
 /// and return the raw recorder envelope. The `.ts` dir is the landlock read-only
 /// allow-list root.
@@ -551,13 +577,15 @@ fn record_one(
     m: &DiscoveredMigration,
     owner_app: &str,
     via: &RecordVia<'_>,
+    profile: &PolicyProfile,
 ) -> Result<(Vec<u8>, MigrationIr, RecordPath, String), BuildError> {
     let ts_source = read_ts_source_bounded(&m.ts_path)?;
     let ts_dir = m.ts_path.parent().unwrap_or_else(|| Path::new("."));
 
     let (envelope, path) = record_envelope_once(m, owner_app, via, &ts_source, ts_dir)?;
     let parsed = parsed_record_envelope(&envelope, owner_app, &m.stem)?;
-    let (bytes, ir) = canonicalize_ir_value(parsed, &m.stem)?;
+    let resolved = resolve_ir_value(parsed, profile, &m.stem)?;
+    let (bytes, ir) = canonicalize_ir_value(resolved, &m.stem)?;
 
     Ok((bytes, ir, path, ts_source))
 }
@@ -575,8 +603,9 @@ pub fn record_migration_transient(
     m: &DiscoveredMigration,
     owner_app: &str,
     via: &RecordVia<'_>,
+    profile: &PolicyProfile,
 ) -> Result<TransientRecordedMigration, BuildError> {
-    let (bytes, ir, record_path, _ts_source) = record_one(m, owner_app, via)?;
+    let (bytes, ir, record_path, _ts_source) = record_one(m, owner_app, via, profile)?;
     let ir_json = String::from_utf8(bytes).map_err(|e| BuildError::InvalidSourceUtf8 {
         path: m.ts_path.clone(),
         message: e.utf8_error().to_string(),
@@ -672,7 +701,7 @@ pub fn build_migrations(
     via: &RecordVia<'_>,
 ) -> Result<BuildOutcome, BuildError> {
     let discovered = discover_migrations(dir)?;
-    build_discovered(&discovered, owner_app, via)
+    build_discovered(&discovered, owner_app, via, &PolicyProfile::confined())
 }
 
 /// Build EXACTLY ONE migration `.ts` by path (the CLI `record <file.ts>` surface):
@@ -713,7 +742,7 @@ pub fn build_one_migration(
     if only.is_empty() {
         return Err(BuildError::NotFound { stem });
     }
-    build_discovered(&only, owner_app, via)
+    build_discovered(&only, owner_app, via, &PolicyProfile::confined())
 }
 
 /// The shared per-migration build loop behind [`build_migrations`] (whole dir) and
@@ -723,12 +752,14 @@ fn build_discovered(
     discovered: &[DiscoveredMigration],
     owner_app: &str,
     via: &RecordVia<'_>,
+    profile: &PolicyProfile,
 ) -> Result<BuildOutcome, BuildError> {
     let mut out = Vec::with_capacity(discovered.len());
     for m in discovered {
         // Record fresh every time. The regex source lint is advisory only and must
         // never gate the build.
-        let (committed_bytes, ir, record_path, ts_source) = record_one(m, owner_app, via)?;
+        let (committed_bytes, ir, record_path, ts_source) =
+            record_one(m, owner_app, via, profile)?;
         let checksum = typed_checksum(&ir, &m.stem)?;
         let warnings = warn_on_advisory_determinism_lint(&m.stem, &ts_source);
         warn_on_confined_rejected_raw_sql(&m.stem, &ir);

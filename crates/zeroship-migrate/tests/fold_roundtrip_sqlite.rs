@@ -20,7 +20,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zeroship_migrate::{
     apply::executor::LockMode, fold_ops, model::ir::Op, sqlite_canonical_type, Approval, ExecutorConfig,
-    IrAuthor, LiveSchema, MigrationEngine, SchemaSnapshot, SqlDialect, SqliteBackend,
+    IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PolicyProfile, SchemaSnapshot, SqlDialect,
+    SqliteBackend, resolve_create_table_policy,
 };
 
 const PROJECT: &str = "prj_fold";
@@ -61,9 +62,13 @@ async fn apply_doc(
     live_tables: &BTreeSet<String>,
     approval: Approval,
 ) -> Vec<Op> {
+    let raw: MigrationIr = serde_json::from_str(ir).expect("test IR parses");
+    let resolved =
+        resolve_create_table_policy(&raw, &PolicyProfile::confined()).expect("test IR resolves");
+    let ir = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let document = zeroship_migrate::model::load::load_ir_document(
-        ir,
+        &ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,

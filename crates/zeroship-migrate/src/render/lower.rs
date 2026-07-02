@@ -32,8 +32,8 @@ use crate::analysis::analyze::Advisory;
 use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
 use crate::model::expr::Expr;
 use crate::render::declarative::{
-    build_table_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
-    FieldDescriptor, LoweredUnit,
+    build_resolved_table_snapshot, build_table_snapshot, push_primary_key_snapshot,
+    CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
@@ -1627,6 +1627,7 @@ impl IrAuthor {
             Op::CreateTable {
                 name,
                 columns,
+                primary_key,
                 constraints,
                 indexes,
                 runtime_options,
@@ -1641,7 +1642,10 @@ impl IrAuthor {
                 // author-supplied synth default is refused here rather than lost.
                 reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns, runtime_options.as_ref());
-                let mut snap = build_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                let mut snap = build_resolved_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                if let Some(pk) = primary_key {
+                    push_primary_key_snapshot(name, &mut snap, pk);
+                }
                 self.apply_named_type_metadata(name, columns, &mut snap, named_types)?;
                 // **#174 createTable parity** — keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
@@ -2682,7 +2686,7 @@ impl IrAuthor {
         CollectionDescriptor {
             name: name.to_string(),
             owner_app: self.decl.owner_app().to_string(),
-            fields: columns.iter().map(ir_column_to_field).collect(),
+            fields: columns.iter().map(ir_column_to_field_resolved_create).collect(),
             indexes: Vec::new(),
             runtime_options: runtime_options.cloned().unwrap_or_default(),
         }
@@ -2701,6 +2705,9 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         let mut changed = false;
         for c in columns {
+            if c.mask.is_none() && !matches!(c.ty, ColType::Encrypted { .. }) {
+                continue;
+            }
             if c.identity.is_some() {
                 continue;
             }
@@ -4558,6 +4565,16 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         identity: c.identity,
         ..Default::default()
     }
+}
+
+pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescriptor {
+    let mut field = ir_column_to_field(c);
+    if c.name == "id" && matches!(c.ty, ColType::Uuid) {
+        let (ty, references) = col_type_to_token(&c.ty);
+        field.ty = ty;
+        field.references = references;
+    }
+    field
 }
 
 /// The `wraps` token (`"string"` | `"number"` | `"bytes"`) an encrypted column's

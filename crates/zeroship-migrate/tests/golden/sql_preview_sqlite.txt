@@ -2,20 +2,10 @@
 -- plan "representative"  (dialect: sqlite)
 -- ============================================================
 
-CREATE TABLE IF NOT EXISTS "codes" (
-  id TEXT PRIMARY KEY,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  created_by TEXT NULL,
-  updated_by TEXT NULL,
-  version INTEGER NOT NULL DEFAULT 1,
-  deleted_at TEXT NULL,
-  "code" INTEGER NOT NULL,
-  "label" TEXT
-);
+CREATE TABLE "codes" ("code" INTEGER NOT NULL, "created_at" TEXT NOT NULL, "created_by" TEXT, "deleted_at" TEXT, "id" TEXT PRIMARY KEY NOT NULL, "label" TEXT, "updated_at" TEXT NOT NULL, "updated_by" TEXT, "version" INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS "codes_created_by_idx" ON "codes" ("created_by");
 CREATE INDEX IF NOT EXISTS "codes_deleted_at_idx" ON "codes" ("deleted_at");
 CREATE INDEX IF NOT EXISTS "codes_updated_at_idx" ON "codes" ("updated_at");
-CREATE INDEX IF NOT EXISTS "codes_created_by_idx" ON "codes" ("created_by");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "codes_code_key" ON "codes" ("code");
 

@@ -10,7 +10,7 @@ use zeroship_migrate::frontend::RecorderService;
 
 const MIGRATION: &str = r#"
 import { table, t } from "@zeroship/migrate";
-export function up() { table("http_tbl").create({ columns: { id: t.integer().notNull() } }); }
+export function up() { table("http_tbl").create({ columns: { title: t.text().notNull() } }); }
 "#;
 
 struct OwnsOne(&'static str, &'static str);
@@ -39,6 +39,28 @@ fn post_record_returns_ir_provenance_and_checksum() {
     match handle_record(&svc(), Some("pat_x"), &req) {
         RecordHttpOutcome::Ok(resp) => {
             assert!(resp.ir_json.contains("http_tbl"));
+            let env: serde_json::Value =
+                serde_json::from_str(&resp.ir_json).expect("resolved envelope parses");
+            let op = &env["ir"]["ops"][0];
+            assert_eq!(op["primaryKey"], serde_json::json!(["id"]));
+            let names = op["columns"]
+                .as_array()
+                .expect("columns")
+                .iter()
+                .map(|c| c["name"].as_str().expect("column name"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &names[..7],
+                [
+                    "id",
+                    "created_at",
+                    "updated_at",
+                    "created_by",
+                    "updated_by",
+                    "version",
+                    "deleted_at"
+                ]
+            );
             // ts_provenance_blob is the EXACT source (re-recorded by the §5.1 gate).
             assert_eq!(resp.ts_provenance_blob, MIGRATION);
             // checksum is a non-empty sha256 hex.

@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zeroship_migrate::{
     apply::executor::LockMode, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    LoadAndLowerError, MigrationEngine, SqlDialect, SqliteBackend,
+    LoadAndLowerError, MigrationEngine, MigrationIr, PolicyProfile, SqlDialect, SqliteBackend,
+    resolve_create_table_policy,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -45,6 +46,13 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
 }
 
+fn resolved_ir_json(raw: &str) -> String {
+    let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
+    let resolved =
+        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+    serde_json::to_string(&resolved).expect("resolved test IR serializes")
+}
+
 // Happy path: a valid `.ir.json` createTable is gated (SQLite dialect), lowered,
 // and APPLIED on a real SQLite backend — the table exists + journals.
 #[compio::test]
@@ -52,17 +60,17 @@ async fn ir_json_lowers_and_applies_on_sqlite() {
     let p = paths("ir_apply");
     let be = backend(&p);
 
-    let ir = r#"{"ir_version":1,"name":"create_notes","ops":[
+    let ir = resolved_ir_json(r#"{"ir_version":1,"name":"create_notes","ops":[
         {"op":"createTable","name":"notes","columns":[
             {"name":"title","type":"text","nullable":false},
             {"name":"body","type":"text"}
         ]}
-    ]}"#;
+    ]}"#);
 
     // The REAL fail-closed gate + lower, SQLite dialect.
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let migrations = author
-        .load_and_lower(ir, APP, &registry(&[]), &LiveSchema::default())
+        .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
         .expect("a valid .ir.json must lower on SQLite");
     assert!(!migrations.is_empty(), "lowering must yield migration(s)");
 
@@ -102,18 +110,18 @@ async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlit
     let be = backend(&p);
 
     // The JSON `\n` escape yields the literal three-byte run `a ; \n b ; c`.
-    let ir = r#"{"ir_version":1,"name":"create_docs","ops":[
+    let ir = resolved_ir_json(r#"{"ir_version":1,"name":"create_docs","ops":[
         {"op":"createTable","name":"docs","columns":[
             {"name":"note","type":"text","nullable":false,
              "default":{"literal":{"value":"a;\nb;c"}}}
         ]}
-    ]}"#;
+    ]}"#);
 
     // The REAL fail-closed gate + GUARDED lower (the production deploy entry).
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite);
     let guard_cfg = GuardConfig::confined_sqlite(PROJECT.to_string());
     let artifact = author
-        .load_and_lower_guarded(ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
+        .load_and_lower_guarded(&ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
         .expect("a portable ;\\n string default must lower through the guarded path on SQLite");
 
     // Per-statement attribution survived: the createTable's CREATE is ONE fragment
@@ -155,7 +163,10 @@ async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlit
 
     // The default really drives an INSERT: a row that omits `note` gets `a;\nb;c`.
     be.actor()
-        .exec("INSERT INTO docs (id) VALUES ('doc_1')")
+        .exec(
+            "INSERT INTO docs (id, created_at, updated_at, version) \
+             VALUES ('doc_1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1)",
+        )
         .await
         .expect("insert a row relying on the column default");
     let rows = be

@@ -23,7 +23,7 @@ use zeroship_migrate::model::validate::{UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::{
     apply::executor::LockMode,
     provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema,
-    MigrationEngine, SqlDialect,
+    resolve_create_table_policy, MigrationEngine, MigrationIr, PolicyProfile, SqlDialect,
 };
 
 const DEFAULT_DSN: &str =
@@ -93,9 +93,13 @@ async fn author_and_apply(
     reg: &std::collections::BTreeMap<String, String>,
     approval: Approval,
 ) {
+    let raw: MigrationIr = serde_json::from_str(ir).expect("test IR parses before resolution");
+    let resolved = resolve_create_table_policy(&raw, &PolicyProfile::confined())
+        .expect("test IR resolves confined table shape");
+    let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
     let document = zeroship_migrate::model::load::load_ir_document(
-        ir,
+        &resolved_json,
         APP,
         zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
@@ -143,6 +147,55 @@ async fn index_exists(conn: &Client, schema: &str, table: &str, name: &str) -> b
         .await
         .expect("query pg_indexes");
     !rows.is_empty()
+}
+
+async fn column_occurrences(conn: &Client, schema: &str, table: &str, column: &str) -> i64 {
+    let rows = conn
+        .query(
+            "SELECT COUNT(*)::bigint FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            &[&schema, &table, &column],
+        )
+        .await
+        .expect("query information_schema.columns");
+    rows[0].get::<_, i64>(0)
+}
+
+/// Slice 4 regression: a resolved confined `createTable` applies with exactly one
+/// copy of every system column. If lower re-injected after record-time resolution,
+/// this would fail at DDL time or show duplicate catalog entries.
+#[compio::test]
+async fn resolved_confined_create_table_applies_without_double_injection_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
+
+    let raw = r#"{"ir_version":1,"name":"create_widgets","ops":[
+        {"op":"createTable","name":"widgets","columns":[
+            {"name":"title","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, raw, &registry(&[]), Approval::None).await;
+
+    for column in [
+        "id",
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "version",
+        "deleted_at",
+        "title",
+    ] {
+        assert_eq!(
+            column_occurrences(&conn, &schema, "widgets", column).await,
+            1,
+            "{column} should appear exactly once"
+        );
+    }
+
+    teardown(&conn, &cfg).await;
 }
 
 /// HIGH-fix regression: a createTable carrying a table-level UNIQUE + a

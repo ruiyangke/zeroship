@@ -1,8 +1,8 @@
 use zeroship_migrate::{
     fold_ops, validate_ir, BinaryOp, ColType, Expr, GeneratedCol, IdentityCol, IrColumn,
     IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrLowerError, IrScalar, IrAuthor,
-    LiveSchema, MigrationIr, Op, UnsupportedKind, ValidatorDialect, CODE_COLUMN_FACET_CONFLICT,
-    CODE_UNSUPPORTED, CURRENT_IR_VERSION,
+    LiveSchema, MigrationIr, Op, PolicyProfile, UnsupportedKind, ValidatorDialect,
+    CODE_COLUMN_FACET_CONFLICT, CODE_UNSUPPORTED, CURRENT_IR_VERSION, resolve_create_table_policy,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -10,11 +10,11 @@ const SCHEMA: &str = "app";
 const OWNER: &str = "app_a";
 type LowerResult = Result<String, Box<IrLowerError>>;
 const SQLITE_SYSTEM_INDEXES: &str = r#";
+CREATE INDEX IF NOT EXISTS "line_items_created_by_idx" ON "line_items" ("created_by");
 CREATE INDEX IF NOT EXISTS "line_items_deleted_at_idx" ON "line_items" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "line_items_updated_at_idx" ON "line_items" ("updated_at");
-CREATE INDEX IF NOT EXISTS "line_items_created_by_idx" ON "line_items" ("created_by")"#;
+CREATE INDEX IF NOT EXISTS "line_items_updated_at_idx" ON "line_items" ("updated_at")"#;
 
-fn ir(op: Op) -> MigrationIr {
+fn raw_ir(op: Op) -> MigrationIr {
     MigrationIr {
         ir_version: CURRENT_IR_VERSION,
         name: "generated_identity_columns".to_string(),
@@ -26,6 +26,11 @@ fn ir(op: Op) -> MigrationIr {
         preconditions: Vec::new(),
         checksum: None,
     }
+}
+
+fn ir(op: Op) -> MigrationIr {
+    let ir = raw_ir(op);
+    resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves")
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
@@ -55,10 +60,21 @@ fn generated_total(stored: bool) -> GeneratedCol {
 }
 
 fn create_table(columns: Vec<IrColumn>, constraints: Vec<IrConstraint>) -> Op {
+    let mut primary_key = None;
+    let constraints = constraints
+        .into_iter()
+        .filter_map(|constraint| match &constraint.kind {
+            IrConstraintKind::Pk { columns } => {
+                primary_key = Some(columns.clone());
+                None
+            }
+            _ => Some(constraint),
+        })
+        .collect();
     Op::CreateTable {
         name: "line_items".to_string(),
         columns,
-        primary_key: None,
+        primary_key,
         constraints,
         indexes: Vec::new(),
         runtime_options: None,
@@ -217,7 +233,7 @@ fn identity_cannot_also_have_default_or_generated() {
         value: IrScalar::Int(1),
     });
     let err = validate_ir(
-        &ir(create_table(vec![id_with_default], vec![pk_id()])),
+        &raw_ir(create_table(vec![id_with_default], vec![pk_id()])),
         ValidatorDialect::Postgres,
         &[],
     )
@@ -231,7 +247,7 @@ fn identity_cannot_also_have_default_or_generated() {
         stored: true,
     });
     let err = validate_ir(
-        &ir(create_table(vec![id_with_generated], vec![pk_id()])),
+        &raw_ir(create_table(vec![id_with_generated], vec![pk_id()])),
         ValidatorDialect::Postgres,
         &[],
     )

@@ -38,7 +38,9 @@ use zeroship_migrate::frontend::{
     record_migration_to_json_unsandboxed, spawn_sandboxed_record, RecordRequest, ResourceBudget,
     SandboxPosture,
 };
-use zeroship_migrate::{Checksum, MigrationFlags, MigrationIr};
+use zeroship_migrate::{
+    resolve_create_table_policy, Checksum, MigrationFlags, MigrationIr, PolicyProfile,
+};
 
 const OWNER: &str = "app_corpus";
 const GOLDEN_SUFFIX: &str = ".golden.json";
@@ -106,7 +108,13 @@ fn record_via_child_to_json(mig_src: &str, stem: &str) -> String {
         .unwrap_or_else(|| panic!("{stem}: child envelope missing ir: {}", res.ir_json));
     let ir: MigrationIr = serde_json::from_value(ir_value)
         .unwrap_or_else(|e| panic!("{stem}: child IR violates MigrationIr: {e}"));
-    let mut json = serde_json::to_string_pretty(&ir)
+    canonical_confined_json(&ir, stem)
+}
+
+fn canonical_confined_json(ir: &MigrationIr, stem: &str) -> String {
+    let resolved = resolve_create_table_policy(ir, &PolicyProfile::confined())
+        .unwrap_or_else(|e| panic!("{stem}: resolve confined table shape: {e}"));
+    let mut json = serde_json::to_string_pretty(&resolved)
         .unwrap_or_else(|e| panic!("{stem}: serialize child IR: {e}"));
     json.push('\n');
     json
@@ -122,8 +130,11 @@ fn corpus_is_byte_stable_and_value_equal() {
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
 
         // Record through the REAL V8 op.* recorder -> canonical IR JSON string.
-        let recorded = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
+        let raw = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("record {stem}: {e}"));
+        let raw_ir: MigrationIr = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("{stem}: raw recorded IR violates contract: {e}"));
+        let recorded = canonical_confined_json(&raw_ir, &stem);
 
         let golden_path = golden_path(&stem);
         if update {
@@ -176,8 +187,11 @@ fn sandboxed_child_matches_in_process_corpus_including_pg_vendor_subpath() {
         let mig_src = std::fs::read_to_string(fixtures_dir().join(format!("{stem}.mig.js")))
             .unwrap_or_else(|e| panic!("read {stem}.mig.js: {e}"));
 
-        let in_process = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
+        let raw = record_migration_to_json_unsandboxed(&mig_src, OWNER, &stem)
             .unwrap_or_else(|e| panic!("in-process record {stem}: {e}"));
+        let raw_ir: MigrationIr = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("{stem}: raw recorded IR violates contract: {e}"));
+        let in_process = canonical_confined_json(&raw_ir, &stem);
         let child = record_via_child_to_json(&mig_src, &stem);
 
         assert_eq!(

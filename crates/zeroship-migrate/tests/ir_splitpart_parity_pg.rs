@@ -26,8 +26,9 @@ use compio_postgres::Client;
 use tempfile::TempDir;
 use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::{
-    apply::executor::LockMode, provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig,
-    IrAuthor, LiveSchema, MigrationEngine, SqlDialect, SqliteBackend,
+    apply::executor::LockMode, apply::role::deprovision_migrator, provision_migrator, Approval,
+    ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PolicyProfile,
+    SqlDialect, SqliteBackend, resolve_create_table_policy,
 };
 
 const DEFAULT_DSN: &str =
@@ -90,6 +91,13 @@ fn registry(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String
     pairs.iter().map(|(t, o)| (t.to_string(), o.to_string())).collect()
 }
 
+fn resolve_ir_json(ir: &str) -> String {
+    let raw: MigrationIr = serde_json::from_str(ir).expect("test IR parses");
+    let resolved =
+        resolve_create_table_policy(&raw, &PolicyProfile::confined()).expect("test IR resolves");
+    serde_json::to_string(&resolved).expect("resolved test IR serializes")
+}
+
 /// Apply ONE `.ir.json` on PG through the real authoring path
 /// (`load_ir_document` → `lower_plan` → `apply_plan`).
 async fn pg_apply(
@@ -99,9 +107,10 @@ async fn pg_apply(
     reg: &std::collections::BTreeMap<String, String>,
     approval: Approval,
 ) {
+    let ir = resolve_ir_json(ir);
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
     let document = zeroship_migrate::model::load::load_ir_document(
-        ir,
+        &ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Postgres,
         reg,
@@ -143,9 +152,10 @@ async fn sqlite_apply(
     reg: &std::collections::BTreeMap<String, String>,
     approval: Approval,
 ) {
+    let ir = resolve_ir_json(ir);
     let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Sqlite);
     let document = zeroship_migrate::model::load::load_ir_document(
-        ir,
+        &ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Sqlite,
         reg,

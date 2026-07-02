@@ -11,6 +11,8 @@ use crate::model::ir::{
     ColType, IndexElement, IrColumn, IrDefault, Op, SynthDefaultFn, CURRENT_IR_VERSION,
     SYSTEM_FIELD_NAMES, TableRuntimeOptions, TableStrictness,
 };
+use crate::model::profile::PolicyProfile;
+use crate::model::table_shape::{resolve_create_table_policy, TableShapeError};
 use crate::plan::loader::{is_valid_migration_name, suggest_migration_name};
 use crate::render::declarative::{
     is_system_managed_constraint, is_system_managed_index, DesiredSchema,
@@ -72,6 +74,9 @@ pub enum ScaffoldError {
         /// The constraint kind (`FOREIGN KEY` / `CHECK` / `UNIQUE`).
         kind: String,
     },
+    /// The synthesized IR violated the confined table-shape policy.
+    #[error("generated IR violates confined table shape: {0}")]
+    TableShape(#[from] TableShapeError),
 }
 
 /// Format a 14-digit `YYYYMMDDHHMMSS` UTC timestamp (the migration filename
@@ -533,6 +538,7 @@ pub fn generate_ops(
         preconditions: Vec::new(),
         checksum: None,
     };
+    let ir = resolve_create_table_policy(&ir, &PolicyProfile::confined())?;
 
     let ts_body = render_ts(name, &synth);
     Ok(GeneratedMigration {
