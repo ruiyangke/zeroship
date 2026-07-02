@@ -563,10 +563,10 @@ fn alter_column_type_render_is_byte_identical_pg() {
     let mut live_set = BTreeSet::new();
     live_set.insert("widgets".to_string());
     let ir = sql_pairs(&ir_lower_one(
-        Op::AlterColumnType {
+        Op::SetColumnType {
             table: "widgets".into(),
             column: "qty".into(),
-            ty: ColType::Float,
+            to_type: ColType::Float,
             using: None,
             schema: None,
             existence_guard: None,
@@ -574,12 +574,12 @@ fn alter_column_type_render_is_byte_identical_pg() {
         &live_set,
         SqlDialect::Postgres,
     ));
-    assert_eq!(decl, ir, "alterColumnType render must be byte-identical across paths");
+    assert_eq!(decl, ir, "setColumnType render must be byte-identical across paths");
     assert!(decl.iter().any(|(up, _)| up.contains("ALTER COLUMN \"qty\" TYPE")));
 }
 
 #[test]
-fn alter_column_nullability_render_is_byte_identical_pg() {
+fn set_column_not_null_render_is_byte_identical_pg() {
     use zeroship_migrate::model::ir::Op;
     // SET NOT NULL: live `name` nullable, desired required. The differ emits
     // `ALTER COLUMN … SET NOT NULL`.
@@ -612,17 +612,16 @@ fn alter_column_nullability_render_is_byte_identical_pg() {
     let mut live_set = BTreeSet::new();
     live_set.insert("people".to_string());
     let ir = sql_pairs(&ir_lower_one(
-        Op::AlterColumnNullability {
+        Op::SetColumnNotNull {
             table: "people".into(),
             column: "name".into(),
-            nullable: false,
             schema: None,
             existence_guard: None,
         },
         &live_set,
         SqlDialect::Postgres,
     ));
-    assert_eq!(decl, ir, "alterColumnNullability (SET NOT NULL) render must be byte-identical");
+    assert_eq!(decl, ir, "setColumnNotNull render must be byte-identical");
     assert!(decl.iter().any(|(up, _)| up.contains("SET NOT NULL")));
 }
 
@@ -918,25 +917,24 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
     };
     for (op, tag) in [
         (
-            Op::AlterColumnType {
+            Op::SetColumnType {
                 table: "widgets".into(),
                 column: "qty".into(),
-                ty: ColType::Float,
+                to_type: ColType::Float,
                 using: None,
                 schema: None,
                 existence_guard: None,
             },
-            "alterColumnType",
+            "setColumnType",
         ),
         (
-            Op::AlterColumnNullability {
+            Op::SetColumnNotNull {
                 table: "widgets".into(),
                 column: "qty".into(),
-                nullable: false,
                 schema: None,
                 existence_guard: None,
             },
-            "alterColumnNullability",
+            "setColumnNotNull",
         ),
         (
             Op::AddConstraint {

@@ -4,16 +4,35 @@
   "owner_app": "app_corpus",
   "ops": [
     {
-      "op": "alterColumnType",
+      "op": "setColumnType",
       "table": "orders",
       "column": "total",
-      "type": "bigInt"
+      "toType": "bigInt"
     },
     {
-      "op": "alterColumnNullability",
+      "op": "setColumnNotNull",
+      "table": "orders",
+      "column": "note"
+    },
+    {
+      "op": "dropColumnNotNull",
+      "table": "orders",
+      "column": "note"
+    },
+    {
+      "op": "setColumnDefault",
       "table": "orders",
       "column": "note",
-      "nullable": false
+      "value": {
+        "literal": {
+          "value": "memo"
+        }
+      }
+    },
+    {
+      "op": "dropColumnDefault",
+      "table": "orders",
+      "column": "note"
     },
     {
       "op": "renameColumn",

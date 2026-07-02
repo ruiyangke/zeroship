@@ -155,6 +155,67 @@ test("SELECTOR: a terminated selector records its op; all selectors terminated �
   );
 });
 
+test("COLUMN ALTER: per-intent terminals replace the old alter bag", () => {
+  record(() => {
+    const col = table("u").column("age") as any;
+    assert.equal(col.alter, undefined, ".column(name).alter must not exist");
+    col.drop();
+  });
+
+  const ops = record(() => {
+    const u = table("u", { schema: "app2" });
+    u.column("age").setType({ to: t.bigInt() });
+    u.column("age").setNotNull();
+    u.column("age").dropNotNull();
+    u.column("age").setDefault(42);
+    u.column("age").dropDefault();
+  });
+
+  assert.deepEqual(
+    ops.map((o) => o.op),
+    [
+      "setColumnType",
+      "setColumnNotNull",
+      "dropColumnNotNull",
+      "setColumnDefault",
+      "dropColumnDefault",
+    ],
+  );
+  assert.equal(ops.length, 5, "each terminal records exactly one op");
+  assert.deepEqual(ops[0], {
+    op: "setColumnType",
+    table: "u",
+    column: "age",
+    toType: "bigInt",
+    schema: "app2",
+  });
+  assert.deepEqual(ops[1], {
+    op: "setColumnNotNull",
+    table: "u",
+    column: "age",
+    schema: "app2",
+  });
+  assert.deepEqual(ops[2], {
+    op: "dropColumnNotNull",
+    table: "u",
+    column: "age",
+    schema: "app2",
+  });
+  assert.deepEqual(ops[3], {
+    op: "setColumnDefault",
+    table: "u",
+    column: "age",
+    value: { literal: { value: 42 } },
+    schema: "app2",
+  });
+  assert.deepEqual(ops[4], {
+    op: "dropColumnDefault",
+    table: "u",
+    column: "age",
+    schema: "app2",
+  });
+});
+
 // ── §3 — schema propagation + precedence ──
 
 test("SCHEMA: the table() default propagates onto every recorded op", () => {

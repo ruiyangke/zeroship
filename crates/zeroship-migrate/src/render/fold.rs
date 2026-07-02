@@ -769,7 +769,12 @@ pub fn fold_ops(
                 col.name = to.clone();
                 snap.columns.sort_by(|a, b| a.name.cmp(&b.name));
             }
-            Op::AlterColumnType { table, column, ty, .. } => {
+            Op::SetColumnType {
+                table,
+                column,
+                to_type,
+                ..
+            } => {
                 // Re-derive the new column shape from the new type via the shared
                 // builder (so `vector(N)` / `geography(...)` / encrypted-BYTEA
                 // spellings match introspection's `canonical_extension_type`). Keep
@@ -793,7 +798,7 @@ pub fn fold_ops(
                 let (mut new_col, _sibling) = add_column_snapshot(
                     table,
                     column,
-                    ty,
+                    to_type,
                     None,
                     None,
                     None,
@@ -803,8 +808,8 @@ pub fn fold_ops(
                     project_schema,
                     dialect,
                 )?;
-                if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
-                    match ty {
+                if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
+                    match to_type {
                         ColType::Enum { name }
                             if !dialect.supports(Capability::MaterializedEnumType) =>
                         {
@@ -826,7 +831,7 @@ pub fn fold_ops(
                         _ => {
                             let source_col = IrColumn {
                                 name: column.clone(),
-                                ty: ty.clone(),
+                                ty: to_type.clone(),
                                 nullable: None,
                                 default: None,
                                 unique: None,
@@ -862,14 +867,14 @@ pub fn fold_ops(
                     col.encryption_sentinel.is_some() || col.comment_sentinel.is_some();
                 if target_has_sentinel || source_has_sentinel {
                     return Err(FoldError::Unsupported(
-                        "alterColumnType to/from an encrypted (or masked) column \
+                        "setColumnType to/from an encrypted (or masked) column \
                          (the apply path cannot re-stamp the zsenc/zsmask sentinel; \
                          fail-closed rather than fold a stale encryption contract)",
                     ));
                 }
                 col.data_type = new_col.data_type;
             }
-            Op::AlterColumnNullability { table, column, nullable, .. } => {
+            Op::SetColumnNotNull { table, column, .. } => {
                 let snap = table_mut(&mut tables, table)?;
                 let col = snap
                     .columns
@@ -879,7 +884,53 @@ pub fn fold_ops(
                         table: table.clone(),
                         column: column.clone(),
                     })?;
-                col.nullable = *nullable;
+                col.nullable = false;
+            }
+            Op::DropColumnNotNull { table, column, .. } => {
+                let snap = table_mut(&mut tables, table)?;
+                let col = snap
+                    .columns
+                    .iter_mut()
+                    .find(|c| &c.name == column)
+                    .ok_or_else(|| FoldError::MissingColumn {
+                        table: table.clone(),
+                        column: column.clone(),
+                    })?;
+                col.nullable = true;
+            }
+            Op::SetColumnDefault { table, column, value, .. } => {
+                let rendered = match value {
+                    IrDefault::Literal { .. } => {
+                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
+                    }
+                    IrDefault::Fn { .. } => {
+                        return Err(FoldError::Unsupported(
+                            "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
+                        ));
+                    }
+                };
+                let snap = table_mut(&mut tables, table)?;
+                let col = snap
+                    .columns
+                    .iter_mut()
+                    .find(|c| &c.name == column)
+                    .ok_or_else(|| FoldError::MissingColumn {
+                        table: table.clone(),
+                        column: column.clone(),
+                    })?;
+                col.default = Some(rendered);
+            }
+            Op::DropColumnDefault { table, column, .. } => {
+                let snap = table_mut(&mut tables, table)?;
+                let col = snap
+                    .columns
+                    .iter_mut()
+                    .find(|c| &c.name == column)
+                    .ok_or_else(|| FoldError::MissingColumn {
+                        table: table.clone(),
+                        column: column.clone(),
+                    })?;
+                col.default = None;
             }
             Op::AddConstraint { table, constraint, .. } => {
                 // Build the constraint (+ its implicit index for UNIQUE/PK, which PG
@@ -3268,10 +3319,10 @@ mod tests {
     fn alter_column_type_rederives_data_type() {
         let snap = fold(&[
             create("users", vec![col("n", ColType::Int, false)]),
-            Op::AlterColumnType {
+            Op::SetColumnType {
                 table: "users".to_string(),
                 column: "n".to_string(),
-                ty: ColType::Text,
+                to_type: ColType::Text,
                 using: None,
                 schema: None,
                 existence_guard: None,
@@ -3281,18 +3332,18 @@ mod tests {
         let n = snap.tables["users"].columns.iter().find(|c| c.name == "n").unwrap();
         let text_n = fold(&[create("users", vec![col("n", ColType::Text, false)])]).unwrap();
         let want = text_n.tables["users"].columns.iter().find(|c| c.name == "n").unwrap();
-        assert_eq!(n.data_type, want.data_type, "alterColumnType re-derives the new data_type");
-        assert!(!n.nullable, "alterColumnType keeps existing nullability");
+        assert_eq!(n.data_type, want.data_type, "setColumnType re-derives the new data_type");
+        assert!(!n.nullable, "setColumnType keeps existing nullability");
     }
 
     #[test]
     fn alter_column_type_missing_column_errors() {
         let err = fold(&[
             create("users", vec![col("n", ColType::Int, true)]),
-            Op::AlterColumnType {
+            Op::SetColumnType {
                 table: "users".to_string(),
                 column: "ghost".to_string(),
-                ty: ColType::Text,
+                to_type: ColType::Text,
                 using: None,
                 schema: None,
                 existence_guard: None,
@@ -3306,20 +3357,19 @@ mod tests {
     }
 
     #[test]
-    fn alter_column_nullability_flips() {
+    fn drop_column_not_null_flips() {
         let snap = fold(&[
             create("users", vec![col("n", ColType::Int, false)]),
-            Op::AlterColumnNullability {
+            Op::DropColumnNotNull {
                 table: "users".to_string(),
                 column: "n".to_string(),
-                nullable: true,
                 schema: None,
                 existence_guard: None,
             },
         ])
         .unwrap();
         let n = snap.tables["users"].columns.iter().find(|c| c.name == "n").unwrap();
-        assert!(n.nullable, "alterColumnNullability set NULL");
+        assert!(n.nullable, "dropColumnNotNull set NULL");
     }
 
     fn unique_constraint(name: Option<&str>, cols: &[&str]) -> IrConstraint {
@@ -3778,7 +3828,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Finding #1 (MED) — alterColumnType to/from an encrypted column must NOT
+    // Finding #1 (MED) — setColumnType to/from an encrypted column must NOT
     // silently lose / carry a stale encryption sentinel. The fold fails closed
     // (the apply path cannot re-stamp the zsenc sentinel today).
     // -----------------------------------------------------------------------
@@ -3788,10 +3838,10 @@ mod tests {
     }
 
     fn alter_type(table: &str, column: &str, ty: ColType) -> Op {
-        Op::AlterColumnType {
+        Op::SetColumnType {
             table: table.to_string(),
             column: column.to_string(),
-            ty,
+            to_type: ty,
             using: None,
             schema: None,
             existence_guard: None,
@@ -3812,7 +3862,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION (Finding #1): plain→encrypted via `alterColumnType` is FAIL-CLOSED.
+    /// REGRESSION (Finding #1): plain→encrypted via `setColumnType` is FAIL-CLOSED.
     /// Pre-fix the fold transplanted ONLY `data_type` (bytea), keeping the OLD
     /// `encryption_sentinel=None` — so the folded encrypted column carried NO
     /// sentinel (a silently-wrong snapshot, since the oracle excludes the sentinel
@@ -3827,11 +3877,11 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(err, FoldError::Unsupported(m) if m.contains("encrypted")),
-            "plain→encrypted alterColumnType must fail closed, got {err:?}"
+            "plain→encrypted setColumnType must fail closed, got {err:?}"
         );
     }
 
-    /// REGRESSION (Finding #1, symmetric): encrypted→plain via `alterColumnType` is
+    /// REGRESSION (Finding #1, symmetric): encrypted→plain via `setColumnType` is
     /// also FAIL-CLOSED. The SOURCE column carries the sentinel; transplanting only
     /// `data_type` would leave the now-stale `zsenc` sentinel on a plaintext column.
     #[test]
@@ -3843,11 +3893,11 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(err, FoldError::Unsupported(m) if m.contains("encrypted")),
-            "encrypted→plain alterColumnType must fail closed, got {err:?}"
+            "encrypted→plain setColumnType must fail closed, got {err:?}"
         );
     }
 
-    /// A PLAIN→PLAIN `alterColumnType` (neither side encrypted) still works — the
+    /// A PLAIN→PLAIN `setColumnType` (neither side encrypted) still works — the
     /// fail-closed guard is scoped to the encryption-contract change only.
     #[test]
     fn alter_column_type_plain_to_plain_still_folds() {

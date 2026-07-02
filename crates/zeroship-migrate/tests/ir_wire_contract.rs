@@ -22,7 +22,7 @@
 //!   encodings of the same bytes hash identically.
 //! - **un-flattened constraint** — `IrConstraint.kind` is a nested object, not
 //!   a flattened sibling (so `deny_unknown_fields` is sound).
-//! - **property A (no raw SQL)** — `createIndex.where` + `alterColumnType.using`
+//! - **property A (no raw SQL)** — `createIndex.where` + `setColumnType.using`
 //!   are closed `Expr` AST nodes (not raw SQL strings), and `createIndex.using`
 //!   / `IrIndex.using` are the closed `IndexMethod` enum — a raw-SQL string or an
 //!   out-of-set method is rejected at load (code-critic HIGH + MED).
@@ -520,25 +520,25 @@ fn alter_column_type_using_is_a_closed_expr_not_raw_sql() {
     use zeroship_migrate::model::expr::{CastTarget, Expr};
     // The USING cast expression must be the closed AST (a Cast node here), never
     // raw SQL — property A is binding everywhere a transform/predicate appears.
-    let json = r#"{"op":"alterColumnType","table":"t","column":"a","type":"int",
+    let json = r#"{"op":"setColumnType","table":"t","column":"a","toType":"int",
         "using":{"node":"cast","operand":{"node":"colRef","name":"a"},
                  "target":"integer"}}"#;
     let op: Op = serde_json::from_str(json).unwrap();
     match op {
-        Op::AlterColumnType { using, .. } => {
+        Op::SetColumnType { using, .. } => {
             assert_eq!(
                 using,
                 Some(Expr::Cast {
                     operand: Box::new(Expr::col("a")),
                     target: CastTarget::Integer,
                 }),
-                "alterColumnType.using must deserialize into a closed Expr AST node"
+                "setColumnType.using must deserialize into a closed Expr AST node"
             );
         }
-        _ => panic!("expected AlterColumnType"),
+        _ => panic!("expected SetColumnType"),
     }
     // A raw SQL cast string must NOT deserialize.
-    let bad = r#"{"op":"alterColumnType","table":"t","column":"a","type":"int",
+    let bad = r#"{"op":"setColumnType","table":"t","column":"a","toType":"int",
         "using":"a::int"}"#;
     let err = serde_json::from_str::<Op>(bad).unwrap_err();
     assert!(

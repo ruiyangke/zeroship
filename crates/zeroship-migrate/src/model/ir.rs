@@ -2116,14 +2116,14 @@ pub enum Op {
         existence_guard: Option<ExistenceGuard>,
     },
     /// `ALTER TABLE … ALTER COLUMN … TYPE …`.
-    AlterColumnType {
+    SetColumnType {
         /// Target table.
         table: String,
         /// Target column.
         column: String,
         /// New type.
-        #[serde(rename = "type")]
-        ty: ColType,
+        #[serde(rename = "toType")]
+        to_type: ColType,
         /// `USING` cast expression (a closed-AST node, never raw SQL — property A).
         #[serde(skip_serializing_if = "Option::is_none")]
         using: Option<Expr>,
@@ -2134,14 +2134,54 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
-    /// `ALTER TABLE … ALTER COLUMN … SET/DROP NOT NULL`.
-    AlterColumnNullability {
+    /// `ALTER TABLE … ALTER COLUMN … SET NOT NULL`.
+    SetColumnNotNull {
         /// Target table.
         table: String,
         /// Target column.
         column: String,
-        /// The desired nullability.
-        nullable: bool,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
+    /// `ALTER TABLE … ALTER COLUMN … DROP NOT NULL`.
+    DropColumnNotNull {
+        /// Target table.
+        table: String,
+        /// Target column.
+        column: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
+    /// `ALTER TABLE … ALTER COLUMN … SET DEFAULT …`.
+    SetColumnDefault {
+        /// Target table.
+        table: String,
+        /// Target column.
+        column: String,
+        /// Structured default (typed literal only in P0; synth defaults are
+        /// validate-refused until the expression/default renderer lands).
+        value: IrDefault,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
+    /// `ALTER TABLE … ALTER COLUMN … DROP DEFAULT`.
+    DropColumnDefault {
+        /// Target table.
+        table: String,
+        /// Target column.
+        column: String,
         /// **PR10** — the schema qualifier (§2.7).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
@@ -2867,10 +2907,10 @@ impl Op {
                 COMMENT_FEATURES,
             ),
             Op::DropIndex { .. } => Support::core(all_offline, &[]),
-            Op::AlterColumnType { using, .. } => {
+            Op::SetColumnType { using, .. } => {
                 let dialects = if using.is_some() {
                     all_unsupported(
-                        "alterColumnType.using expression rendering is deferred in the current engine",
+                        "setColumnType.using expression rendering is deferred in the current engine",
                     )
                 } else {
                     DialectSupport::new(
@@ -2881,7 +2921,9 @@ impl Op {
                 };
                 Support::core(dialects, ALTER_COLUMN_TYPE_FEATURES)
             }
-            Op::AlterColumnNullability { .. } => Support::core(
+            Op::SetColumnNotNull { .. }
+            | Op::DropColumnNotNull { .. }
+            | Op::DropColumnDefault { .. } => Support::core(
                 DialectSupport::new(
                     supported(RenderMode::Offline),
                     supported(RenderMode::LiveResolved),
@@ -2889,6 +2931,20 @@ impl Op {
                 ),
                 &[],
             ),
+            Op::SetColumnDefault { value, .. } => {
+                let dialects = if matches!(value, IrDefault::Fn { .. }) {
+                    all_unsupported(
+                        "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
+                    )
+                } else {
+                    DialectSupport::new(
+                        supported(RenderMode::Offline),
+                        supported(RenderMode::LiveResolved),
+                        supported(RenderMode::Offline),
+                    )
+                };
+                Support::core(dialects, &[])
+            }
             Op::RenameColumn {
                 existence_guard, ..
             } => {
@@ -3172,8 +3228,11 @@ impl Op {
             | Op::DropColumn { .. }
             | Op::CreateIndex { .. }
             | Op::DropIndex { .. }
-            | Op::AlterColumnType { .. }
-            | Op::AlterColumnNullability { .. }
+            | Op::SetColumnType { .. }
+            | Op::SetColumnNotNull { .. }
+            | Op::DropColumnNotNull { .. }
+            | Op::SetColumnDefault { .. }
+            | Op::DropColumnDefault { .. }
             | Op::RenameColumn { .. }
             | Op::AddConstraint { .. }
             | Op::DropConstraint { .. }
@@ -3257,8 +3316,11 @@ impl Op {
             | Op::AddColumn { table, .. }
             | Op::DropColumn { table, .. }
             | Op::CreateIndex { table, .. }
-            | Op::AlterColumnType { table, .. }
-            | Op::AlterColumnNullability { table, .. }
+            | Op::SetColumnType { table, .. }
+            | Op::SetColumnNotNull { table, .. }
+            | Op::DropColumnNotNull { table, .. }
+            | Op::SetColumnDefault { table, .. }
+            | Op::DropColumnDefault { table, .. }
             | Op::RenameColumn { table, .. }
             | Op::AddConstraint { table, .. }
             | Op::DropConstraint { table, .. }
@@ -3322,8 +3384,11 @@ impl Op {
             | Op::DropColumn { schema, .. }
             | Op::CreateIndex { schema, .. }
             | Op::DropIndex { schema, .. }
-            | Op::AlterColumnType { schema, .. }
-            | Op::AlterColumnNullability { schema, .. }
+            | Op::SetColumnType { schema, .. }
+            | Op::SetColumnNotNull { schema, .. }
+            | Op::DropColumnNotNull { schema, .. }
+            | Op::SetColumnDefault { schema, .. }
+            | Op::DropColumnDefault { schema, .. }
             | Op::RenameColumn { schema, .. }
             | Op::AddConstraint { schema, .. }
             | Op::DropConstraint { schema, .. }
@@ -3386,8 +3451,11 @@ impl Op {
             | Op::DropColumn { existence_guard, .. }
             | Op::CreateIndex { existence_guard, .. }
             | Op::DropIndex { existence_guard, .. }
-            | Op::AlterColumnType { existence_guard, .. }
-            | Op::AlterColumnNullability { existence_guard, .. }
+            | Op::SetColumnType { existence_guard, .. }
+            | Op::SetColumnNotNull { existence_guard, .. }
+            | Op::DropColumnNotNull { existence_guard, .. }
+            | Op::SetColumnDefault { existence_guard, .. }
+            | Op::DropColumnDefault { existence_guard, .. }
             | Op::RenameColumn { existence_guard, .. }
             | Op::AddConstraint { existence_guard, .. }
             | Op::DropConstraint { existence_guard, .. }
@@ -3449,8 +3517,11 @@ impl Op {
             | Op::RenameTable { .. }
             | Op::DropColumn { .. }
             | Op::DropIndex { .. }
-            | Op::AlterColumnType { .. }
-            | Op::AlterColumnNullability { .. }
+            | Op::SetColumnType { .. }
+            | Op::SetColumnNotNull { .. }
+            | Op::DropColumnNotNull { .. }
+            | Op::SetColumnDefault { .. }
+            | Op::DropColumnDefault { .. }
             | Op::RenameColumn { .. }
             | Op::DropConstraint { .. }
             | Op::DropView { .. }

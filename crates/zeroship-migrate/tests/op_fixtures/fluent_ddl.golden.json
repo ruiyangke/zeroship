@@ -279,10 +279,10 @@
       "name": "accounts_legacy_chk"
     },
     {
-      "op": "alterColumnType",
+      "op": "setColumnType",
       "table": "accounts",
       "column": "balance",
-      "type": {
+      "toType": {
         "decimal": {
           "precision": 14,
           "scale": 2
@@ -290,10 +290,9 @@
       }
     },
     {
-      "op": "alterColumnNullability",
+      "op": "setColumnNotNull",
       "table": "accounts",
-      "column": "profile",
-      "nullable": false
+      "column": "profile"
     },
     {
       "op": "renameColumn",
@@ -329,10 +328,9 @@
       "type": "text"
     },
     {
-      "op": "alterColumnNullability",
+      "op": "setColumnNotNull",
       "table": "accounts",
-      "column": "nickname",
-      "nullable": false
+      "column": "nickname"
     }
   ],
   "flags": {},

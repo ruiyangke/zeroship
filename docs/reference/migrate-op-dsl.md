@@ -83,7 +83,7 @@ export interface Migration {
   `up()` returns (e.g. from a stray `setTimeout`) — throws a structured
   `OP_OUTSIDE_RECORDER` error. The op cannot be silently lost.
 - A **selector that is never terminated** (`table("u").column("email")` with no
-  `.add()`/`.drop()`/`.rename()`/`.alter()`) is a hard `SELECTOR_NOT_TERMINATED`
+  terminal such as `.add()`/`.drop()`/`.rename()`/`.setNotNull()`) is a hard `SELECTOR_NOT_TERMINATED`
   build error at drain — never a silent no-op (see
   [Selectors must be terminated](#selectors-must-be-terminated)).
 
@@ -189,7 +189,7 @@ the shadow-DB dry-run.
 ## The column-type lexicon (`t.*`)
 
 Every column-type position (`create`'s `columns`, `.column().add()`,
-`.column().rename()`, `.column().alter()`) takes a chainable `ColumnDef` produced
+`.column().rename()`, `.column().setType()`) takes a chainable `ColumnDef` produced
 by the fluent `t.*` lexicon. **Columns are nullable by default**; `.notNull()` is
 the rarer, riskier opt-in.
 
@@ -392,8 +392,10 @@ const orders = table("orders");
 orders.column("status").add({ type: t.text().notNull().default("new") });
 orders.column("legacy").drop({ ifExists: true });
 orders.column("label").rename({ to: "display_label", type: t.text() }); // named ⇒ no swap
-orders.column("total").alter({ type: t.numeric(14, 2), using: (c) => c("total").cast("real") });
-orders.column("note").alter({ nullable: true });
+orders.column("total").setType({ to: t.numeric(14, 2), using: (c) => c("total").cast("real") });
+orders.column("note").dropNotNull();
+orders.column("note").setDefault("memo");
+orders.column("note").dropDefault();
 ```
 
 `.column(name).add({ type })` honors **all** modifiers on `type`, including
@@ -562,8 +564,8 @@ table("other_app_table", { schema: "some_other_app" }).drop(); // → CROSS_SCHE
 
 The create/add family (`.create`, `.column().add`, `.index().add`,
 `.foreignKey/.unique/.check().add`) carries an `ifNotExists` option; the
-drop/alter family (`.drop`, `.column().drop`, `.index().drop`,
-`.constraint().drop`, `.column().alter`) carries an `ifExists` option. A guard on
+drop family (`.drop`, `.column().drop`, `.index().drop`,
+`.constraint().drop`) carries an `ifExists` option. A guard on
 the wrong family is a `GUARD_DIRECTION` authoring error.
 
 > **Supported as of op.* PR10 Part B** (executor-side catalog probe). The option
@@ -637,7 +639,8 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 > guard's "absent → no-op"). The guard is refused rather than silently dropped.
 > Every other guarded op (`createTable`/`addColumn`/`createIndex`/`addConstraint`
 > family; `dropTable`/`dropColumn`/`dropIndex`/`dropConstraint`;
-> `alterColumnType`/`alterColumnNullability`) is honored by the probe.
+> `setColumnType`/`setColumnNotNull`/`dropColumnNotNull`/`setColumnDefault`/
+> `dropColumnDefault`) is honored by the probe.
 
 ### SQLite-safe rebuild (automatic)
 

@@ -823,34 +823,49 @@ fn twin_rename_column_carries_schema() {
     assert_schema(op, "app2");
 }
 
-/// `table(name).column(col).alter({ type, schema })` records `alterColumnType`
+/// `table(name).column(col).setType({ to, schema })` records `setColumnType`
 /// carrying the schema qualifier. RED before the twin fix.
 #[test]
 fn twin_alter_column_type_carries_schema() {
     let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").column("a").alter({ type: t.bigInt(), schema: "app2" });
+            table("t").column("a").setType({ to: t.bigInt(), schema: "app2" });
         }};
     "#;
     let ir = record(src, "alter_type_schema_guard");
-    let op = op_named(&ir, "alterColumnType");
+    let op = op_named(&ir, "setColumnType");
     assert_schema(op, "app2");
 }
 
-/// `table(name).column(col).alter({ nullable, schema })` records
-/// `alterColumnNullability` carrying the schema qualifier. RED before the twin fix.
+/// `table(name).column(col).setNotNull({ schema })` records `setColumnNotNull`
+/// carrying the schema qualifier. RED before the twin fix.
 #[test]
 fn twin_alter_column_nullability_carries_schema() {
     let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").column("a").alter({ nullable: false, schema: "app2" });
+            table("t").column("a").setNotNull({ schema: "app2" });
         }};
     "#;
     let ir = record(src, "alter_null_schema_guard");
-    let op = op_named(&ir, "alterColumnNullability");
+    let op = op_named(&ir, "setColumnNotNull");
     assert_schema(op, "app2");
+}
+
+#[test]
+fn column_alter_bag_is_not_on_embedded_recorder_surface() {
+    let src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            const col = table("t").column("a");
+            if ("alter" in col) throw new Error("alter should not exist");
+            col.setNotNull();
+        }};
+    "#;
+    let ir = record(src, "column_alter_absent");
+    assert_eq!(ops(&ir).len(), 1);
+    assert_eq!(ops(&ir)[0].get("op").and_then(|v| v.as_str()), Some("setColumnNotNull"));
 }
 
 /// `addForeignKey` / `addUnique` / `addCheck` all record an `addConstraint` op
@@ -1170,7 +1185,7 @@ fn twin_table_surface_records_full_expected_op_sequence() {
             u.column("status").add({ type: t.text().notNull().default("new") });
             u.column("legacy").drop({ ifExists: true });
             u.column("label").rename({ to: "display_label", type: t.text() });
-            u.column("status").alter({ nullable: false });
+            u.column("status").setNotNull();
             u.foreignKey("u_team_fk").add({ columns: ["team"], references: { table: "teams", columns: ["name"] } });
             u.unique("u_email_uq").add({ columns: ["email"] });
             u.check("u_status_chk").add({ expr: (c) => c("status").isNotNull() });
@@ -1195,7 +1210,7 @@ fn twin_table_surface_records_full_expected_op_sequence() {
             "addColumn",
             "dropColumn",
             "renameColumn",
-            "alterColumnNullability",
+            "setColumnNotNull",
             "addConstraint",
             "addConstraint",
             "addConstraint",

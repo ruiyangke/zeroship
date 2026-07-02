@@ -4855,6 +4855,47 @@ impl DeclarativeAuthor {
         )
     }
 
+    /// Render an `ALTER TABLE … ALTER COLUMN … SET DEFAULT …` from a pre-rendered
+    /// literal default expression. Synth defaults are rejected before this seam.
+    fn render_set_column_default(&self, table: &str, col: &str, default_sql: &str) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+            self.qualified(table),
+            quote_ident(col),
+            default_sql
+        );
+        let down = format!(
+            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+            self.qualified(table),
+            quote_ident(col)
+        );
+        self.make(
+            &format!("set_column_default_{table}_{col}"),
+            up,
+            Some(down),
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
+    /// Render an `ALTER TABLE … ALTER COLUMN … DROP DEFAULT`. The previous default
+    /// is not present in the op payload, so the down migration is intentionally
+    /// absent.
+    fn render_drop_column_default(&self, table: &str, col: &str) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+            self.qualified(table),
+            quote_ident(col)
+        );
+        self.make(
+            &format!("drop_column_default_{table}_{col}"),
+            up,
+            None,
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
     /// Render a `CREATE [UNIQUE] INDEX IF NOT EXISTS …`.
     fn render_create_index(
         &self,
@@ -5319,6 +5360,19 @@ impl DeclarativeAuthor {
         nullable: bool,
     ) -> LoweredUnit {
         single_stmt(self.render_alter_column_nullability(table, col, nullable))
+    }
+
+    pub(crate) fn lower_set_column_default(
+        &self,
+        table: &str,
+        col: &str,
+        default_sql: &str,
+    ) -> LoweredUnit {
+        single_stmt(self.render_set_column_default(table, col, default_sql))
+    }
+
+    pub(crate) fn lower_drop_column_default(&self, table: &str, col: &str) -> LoweredUnit {
+        single_stmt(self.render_drop_column_default(table, col))
     }
 }
 

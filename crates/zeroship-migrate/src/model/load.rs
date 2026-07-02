@@ -144,8 +144,11 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::AddColumn { table, .. }
         | Op::DropColumn { table, .. }
         | Op::CreateIndex { table, .. }
-        | Op::AlterColumnType { table, .. }
-        | Op::AlterColumnNullability { table, .. }
+        | Op::SetColumnType { table, .. }
+        | Op::SetColumnNotNull { table, .. }
+        | Op::DropColumnNotNull { table, .. }
+        | Op::SetColumnDefault { table, .. }
+        | Op::DropColumnDefault { table, .. }
         | Op::RenameColumn { table, .. }
         | Op::AddConstraint { table, .. }
         | Op::DropConstraint { table, .. }
