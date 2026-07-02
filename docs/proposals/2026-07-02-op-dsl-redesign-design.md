@@ -633,20 +633,56 @@ The taxonomy is a **column in the §8 coverage checklist** — every new op stat
 a `down`-derivation unit per op. This closes K9 for the whole new surface rather than leaving it
 implicit.
 
-## 6. The expression language: one closed AST, two derived tiers
+## 6. Cross-dialect values: two layers (portable intent nodes + a per-dialect escape)
 
-One expression grammar — a closed internally-tagged enum, never parsed from text, serde-
-rejecting unknown node tags — reused by checks, generated columns, defaults, policies, partial
-indexes, exclusion targets, views, trigger `when`, and DML `set`/`where`. **Tier is derived
-from the node set used, never author-declared.**
+<!-- Revised 2026-07-02 (operator decision): the flat "Tier-P / Tier-PG" framing is replaced by a
+     TWO-LAYER model that applies UNIFORMLY to every dialect-divergent value — expressions, column
+     types, defaults, index methods, storage options — not just expressions. Vendor-PG-only is no
+     longer a separate tier; it is the degenerate single-leg case of Layer 2. -->
 
-### 6.1 Tier P (portable)
+**The model in one line:** a value is either **engine-proven-portable** (Layer 1) or
+**author-asserted per-dialect** (Layer 2); `raw` is the last resort; author-time dialect
+branching is forbidden.
 
-Admission rule (graft from Stance A): each new portable node ships with a **live three-dialect
-evaluation parity proof** (PG :5440 / in-process SQLite / MySQL JsDriverBackend) before it is
-admitted, following the splitPart-envelope discipline. A node that fails its proof is
-**demoted to Tier PG** rather than blocking a release — demotion is an explicit, documented
-mechanism, so the portable claim stays honest without schedule hostage-taking.
+- **Layer 1 — portable *intent* nodes (engine-owned mapping + parity proof).** The author
+  declares intent; the engine renders it correctly per dialect *and owns the equivalence proof*.
+  `col.json()` → jsonb/json/text; `col.uuid()` → uuid/char(36)/text; `fn.now()`;
+  `membership(x, [...])` → `IN`; `dayOfMonth(e).eq(1)` → EXTRACT/DAYOFMONTH/strftime. This is the
+  **preferred** path: the guarantee is engine-proven (not author-asserted) and the surface is
+  clean (the author never sees dialects). The cost — the three-dialect parity proof — is paid
+  **once, by us**, and amortized across every user. Growing this node set is the primary way we
+  shrink divergence. (This is the closed AST of §6.1, and the same intent principle extends to
+  types/defaults/index-methods.)
+- **Layer 2 — the per-dialect escape (`.on(dialect, override)`), author-asserted.** For the long
+  tail no intent node covers. A portable base value plus selective per-dialect overrides
+  (§6.4). Because the author supplies the divergent legs, the engine can no longer *prove*
+  equivalence — so Layer 2 carries the same discipline as `raw`: **`reason`-marked, budgeted,
+  counted, leaf-granularity, no nesting.** A value's un-portability is therefore *measurable*
+  (`.on()` count + `raw` count), CI-gated.
+- **Vendor-PG-only = the degenerate Layer-2 case** — a value with only the `pg` leg and no
+  portable default refuses on SQLite/MySQL via the normal validity==applicability mechanism
+  (§5.2). It is not a separate tier; §6.2's PG-only node set is exactly this case.
+- **Forbidden: author-time dialect branching** (`up(m, { dialect }) { if (dialect==='pg') … }`).
+  It destroys the single-source multi-dialect IR — the recorded artifact becomes dialect-specific
+  and loses checksum-once + render-all-three-from-one-source. Ruled out at the surface (the
+  migration function is not handed a dialect).
+
+One expression grammar underlies Layer 1 for the *expression* positions — a closed internally-
+tagged enum, never parsed from text, serde-rejecting unknown node tags — reused by checks,
+generated columns, defaults, policies, partial indexes, exclusion targets, views, trigger
+`when`, and DML `set`/`where`. **Layer membership is derived from the node/override set used,
+never author-declared.**
+
+### 6.1 Layer 1: portable intent nodes (the closed expression AST)
+
+Admission rule (graft from Stance A): each new portable intent node ships with a **live
+three-dialect evaluation parity proof** (PG :5440 / in-process SQLite / MySQL JsDriverBackend)
+before it is admitted, following the splitPart-envelope discipline. A node that fails or lacks
+its proof is **not admitted as Layer 1** — but it no longer blocks a release, because the author
+retains two honest fallbacks: keep the portable base and supply the divergent leg via
+**`.on(dialect, override)`** (Layer 2, §6.4), or use a vendor node where one exists. So the
+portable claim stays engine-proven without schedule hostage-taking, and "not yet a proven
+intent node" degrades to a *marked, budgeted* per-dialect override rather than silent raw.
 
 - v1 set carried over: 13 binops, 5 unaryops, case, coalesce/nullif/lower/upper/trim/length/
   abs, concat, portable casts, fnSynth concatWs/splitPart/now/genRandomUuid with pinned
@@ -660,7 +696,7 @@ mechanism, so the portable claim stays honest without schedule hostage-taking.
   triggers have OLD/NEW natively): valid only in trigger `when`/body positions, enforced by the
   `CtxSet` in the support declaration.
 
-### 6.2 Tier PG (vendor — only constructible from `pg`'s builder)
+### 6.2 The PG-only node set (the degenerate single-leg Layer-2 case)
 
 Regex (`~`, `~*`, `!~`), `ilike`; JSON/JSONB operators (`->`, `->>`, `#>`, `#>>`, `@>`, `?`,
 jsonb path as data, not text); array nodes (array literal, `= any(...)`, `@>`, `&&`);
@@ -674,9 +710,59 @@ frame? })`) — admitted **only inside SelectAst contexts**, enforced by the sam
 Core expression positions take `(c: ExprBuilder) => Expr`; vendor positions take
 `(c: PgExprBuilder) => Expr` where `PgExprBuilder extends ExprBuilder`. Rust-side,
 `ScalarFn::CurrentSetting`/`CurrentUser` move out of the shared enum into the vendor extension
-set. A core-authored op containing a Tier-PG node is doubly impossible: the core builder cannot
+set. A core-authored op containing a PG-only node is doubly impossible: the core builder cannot
 construct it (tsc), and validate refuses hand-forged IR (`VENDOR_EXPR_DENIED` /
 `EXPR_NOT_PORTABLE`, with the exact node and both resolutions in `suggested_fix`).
+
+### 6.4 Layer 2: the per-dialect escape (`.on`) — uniform across every value position
+
+`.on(dialect, override)` is **not expression-specific.** It is a uniform combinator available
+wherever a dialect-divergent value is expected — column types, defaults, index methods, storage
+options, *and* expressions — so authors learn one mechanism:
+
+```ts
+col.type("text").on("pg", "jsonb").on("mysql", "json")   // portable base + overrides
+.default(fn.now())                                        // Layer-1 intent node, no .on needed
+.default(portable_uuid_fn).on("mysql", pg_or_my_uuid)     // override only where it diverges
+.index("logs_ts").using("btree").on("pg", "brin")
+check("first_of_month", dayOfMonth(period).eq(1))         // Layer-1 intent node
+check("kind_ok", membership(kind, ALLOWED)                // Layer-1 (renders IN everywhere)
+  .on("pg", pgExpr`kind = ANY(ARRAY[...])`))              // …with a pg-native override if wanted
+```
+
+**Shape.** `.on(dialect, value)` reads base-first: the bare value is the portable default,
+overrides are additive. The IR envelope is uniform per wrappable type `T`:
+`OneOf<T> = { default?: T; pg?: T; sqlite?: T; mysql?: T }` — at least one leg present. A missing
+leg with **no `default`** → the enclosing op **validate-refuses that dialect** (the §5.2
+validity==applicability mechanism, identical to everything else). The `default` leg *is* the
+"enhance a portable declaration with a selective override" ergonomic; omit it to express
+"PG-only" (the §6.2 case) or "PG + SQLite only," etc.
+
+**Guardrails (mandatory — without them the portable claim is hollow):**
+- **Layer 1 is the default.** `.on` is the escape *when* an intent node can't (yet) be proven —
+  never a shortcut past finding one. Review + the budget enforce this.
+- **`reason`-marked + budgeted + counted.** Each `.on` override carries a `reason`; the total is
+  bounded by a `raw-budget.toml`-style cap (shared with `raw`, §7.1) and surfaced by the export/
+  census gate. A migration's un-portability is the sum of `.on` overrides + `raw` islands — a
+  number, CI-gated, not a vibe.
+- **Leaf granularity, never op-level.** `.on` wraps a *value* (type/default/expr/method); it
+  never wraps a whole `table().create()` per dialect — the structural skeleton (columns, PK,
+  index shape, constraint skeleton) stays single-source-portable.
+- **No nesting.** An `.on` leg is a concrete value, not another `OneOf` — flattened at record.
+
+**IR + determinism.** The `OneOf<T>` envelope carries **all** legs, so the checksum hashes every
+leg (deterministic, profile-independent — §5's invariant). Rendering selects the target dialect's
+leg (or `default`). It composes with the existing per-dialect goldens (`sql_preview_{pg,sqlite,
+mysql}`) with **no new golden machinery** — each dialect's golden simply shows its selected leg.
+
+**Reversibility.** An `OneOf`-wrapped value's reversibility (§5.3) is the meet of its legs' classes
+(any `Irreversible` leg ⇒ the op is `Irreversible`); the `down`-derivation consults the same
+per-dialect legs.
+
+**Coverage note.** The platform schema is PostgreSQL-only, so for the platform-migration payoff
+`.on` is rarely needed — the `pg` leg (or a vendor node) suffices. `.on`'s real value is
+**creator** portable schemas that hit one stubborn divergence, and it is what lets the P1 intent-
+node set land incrementally (an un-proven node degrades to a budgeted `.on`, not a release block).
 
 ---
 
@@ -1234,9 +1320,14 @@ discipline: `cargo test -p zeroship-migrate` (all targets, live PG :5440 for DB 
   serialization property tests; one-shot golden regeneration; delete v1 shapes +
   `ExprRenderDeferred` + all accepted-then-refused arms + `PgRaw.binds`; `PgRaw.reason`
   required; capability presets serialized as policy-config files.
-- **P1 — Tier-P expression expansion (large; highest technical risk).** Node-by-node admission
-  with live three-dialect parity proofs; demotion-to-Tier-PG as the documented retreat. A node
-  without a proof simply is not admitted — the closed AST makes partial delivery safe.
+- **P1 — the two-layer value system (large; highest technical risk) — §6.** Two workstreams:
+  (a) **Layer-1 intent nodes** — node-by-node admission with live three-dialect parity proofs
+  (the closed AST makes partial delivery safe); (b) **Layer-2 `.on(dialect, override)`** — the
+  uniform per-dialect escape (`OneOf<T>` envelope + `default` leg, budgeted/`reason`-marked,
+  refuse-uncovered-dialect) across types/defaults/exprs/index-methods. An un-proven node degrades
+  to a budgeted `.on`, not a release block. Also lands the **exact-platform-table keystone**
+  (policy-driven system-field injection + explicit/composite PK + ownership registration — the
+  ~46% marker unblock, `P1_KEYSTONE_PLAN.md`), which is independent of (a)/(b).
 - **P2 — core surface rewrite (medium).** The `op` root; per-intent alter terminals; rendered
   table-level constraints on all dialects (SQLite rebuild threading); index-element model
   (portable slice); enum evolution; single compiled recorder artifact replacing
