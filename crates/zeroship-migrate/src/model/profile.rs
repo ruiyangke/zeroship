@@ -24,68 +24,12 @@ const PLATFORM_LOCK_TIMEOUT_CEILING_MS: u64 = 3_000;
 const PLATFORM_STATEMENT_TIMEOUT_CEILING_MS: u64 = 60_000;
 
 /// Embedded least-privilege profile. This is also the fail-closed fallback.
-pub const CONFINED_PROFILE_TOML: &str = r#"
-[capabilities]
-extension = false
-schema = false
-role = { allow = false, attrs = [] }
-grant = false
-rls = false
-policy = false
-function = false
-raw_sql = false
-raw_view_body = false
-materialized_view = false
-cross_schema = false
-extensions = []
-schemas = []
-
-[operational]
-index_creation = "allow_blocking"
-lock_timeout_ms = 3000
-statement_timeout_ms = 60000
-table_rewrite = "allow"
-
-[data_security]
-require_rls = false
-no_hard_delete = false
-sensitive_columns = []
-destructive_ops = "allow"
-"#;
+pub const CONFINED_PROFILE_TOML: &str = include_str!("../../policy-profiles/confined.toml");
 
 /// Embedded platform profile. Its capability booleans match
 /// [`VendorCapabilities::operator`]; schema/extension allowlists remain explicit
 /// inputs and therefore default empty here.
-pub const PLATFORM_PROFILE_TOML: &str = r#"
-extends = "confined"
-
-[capabilities]
-extension = true
-schema = true
-role = { allow = true, attrs = [] }
-grant = true
-rls = true
-policy = true
-function = true
-raw_sql = true
-raw_view_body = true
-materialized_view = true
-cross_schema = true
-extensions = []
-schemas = []
-
-[operational]
-index_creation = "allow_blocking"
-lock_timeout_ms = 3000
-statement_timeout_ms = 60000
-table_rewrite = "allow"
-
-[data_security]
-require_rls = true
-no_hard_delete = false
-sensitive_columns = []
-destructive_ops = "forbid"
-"#;
+pub const PLATFORM_PROFILE_TOML: &str = include_str!("../../policy-profiles/platform.toml");
 
 /// A strict declarative migration policy profile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1509,6 +1453,20 @@ mod tests {
 
     #[test]
     fn confined_and_platform_presets_match_existing_vendor_capability_presets() {
+        assert!(!CONFINED_PROFILE_TOML.trim().is_empty());
+        assert!(!PLATFORM_PROFILE_TOML.trim().is_empty());
+        assert_eq!(
+            PolicyProfile::from_toml(CONFINED_PROFILE_TOML)
+                .unwrap()
+                .vendor_capabilities(),
+            VendorCapabilities::confined()
+        );
+        assert_eq!(
+            PolicyProfile::from_toml(PLATFORM_PROFILE_TOML)
+                .unwrap()
+                .vendor_capabilities(),
+            VendorCapabilities::operator()
+        );
         assert_eq!(
             PolicyProfile::confined().vendor_capabilities(),
             VendorCapabilities::confined()
