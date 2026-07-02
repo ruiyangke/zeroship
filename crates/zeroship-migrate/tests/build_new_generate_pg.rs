@@ -103,7 +103,7 @@ export function up() {
 "#;
     fs::write(mig_dir.path().join(format!("{stem}.ts")), ts.as_bytes()).unwrap();
 
-    // build via the LOCAL sandboxed child → committed `.ir.json`.
+    // build via the LOCAL sandboxed child → transient canonical IR.
     let outcome = build_migrations(
         mig_dir.path(),
         APP,
@@ -111,14 +111,18 @@ export function up() {
             budget: ResourceBudget::default(),
         },
     )
-    .expect("build records the committed artifact");
+    .expect("build records transient IR");
     let committed = String::from_utf8(outcome.migrations[0].committed_bytes.clone()).unwrap();
+    assert!(
+        !mig_dir.path().join(format!("{stem}.ir.json")).exists(),
+        "build must not write a committed .ir.json"
+    );
 
-    // Apply the committed `.ir.json` through the REAL gate + lower on PG.
+    // Apply the transient `.ir.json` through the REAL gate + lower on PG.
     let author = IrAuthor::new(&schema, APP, SqlDialect::Postgres);
     let migrations = author
         .load_and_lower(&committed, APP, &BTreeMap::new(), &LiveSchema::default())
-        .expect("committed .ir.json lowers on PG");
+        .expect("transient .ir.json lowers on PG");
     let engine = MigrationEngine::new();
     let plan = engine.plan(&migrations, &GuardConfig::confined(schema.clone()));
     assert!(plan.denied.is_empty(), "no denials: {:?}", plan.denied);

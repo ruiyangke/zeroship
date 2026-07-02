@@ -36,12 +36,12 @@
 //!   ban governs what a CREATOR writes by hand, not platform-emitted deploy `.sql`.
 //!
 //! - **`super::scaffold::generate_ops`** — the CREATOR-FACING PORTABLE autogenerate
-//!   path (PR4). Emits the op.* DSL (`.ts` + committed `.ir.json`) for the portable
-//!   structural subset (tables, columns, plain btree indexes) and FAILS CLOSED on
-//!   goodies (vector/postgis/FK/CHECK — author those by hand) so its output always
-//!   re-diffs to zero.
+//!   path (PR4). Emits the op.* DSL (`.ts`) for the portable structural subset
+//!   (tables, columns, plain btree indexes) and FAILS CLOSED on goodies
+//!   (vector/postgis/FK/CHECK — author those by hand) so its output always re-diffs
+//!   to zero.
 //!
-//! Reach for `generate_ops` to produce committed creator op.* artifacts; reach for
+//! Reach for `generate_ops` to produce creator op.* migration source; reach for
 //! `generate_migration` for the platform `.sql` schema-authority deploy path.
 
 use std::fmt::Write as _;

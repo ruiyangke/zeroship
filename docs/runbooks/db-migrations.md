@@ -225,9 +225,11 @@ itself:
   set, the operator may pass the reviewed bundle's **combined integrity manifest
   hash** on the approval channel (`?expected_manifest=<hash>`). The reviewer
   computes it out-of-band with `deploy_migrate::plan_reviewed_manifest` (the SAME
-  hash the apply recomputes — `.sql` flat set ++ every `.ir.json` file's lowered
-  migrations). When present, the approved apply **refuses the bundle before any
-  DDL** (`approved_manifest_mismatch`, 422) if the arrived set recomputes a
+  hash the apply recomputes over the reviewed migration documents: SQL migrations
+  where that path is used, platform `.ts` migrations lowered to transient IR, and
+  creator IR documents supplied in the apply request; `.zship` bundles do not carry
+  migration documents). When present, the approved apply **refuses the bundle
+  before any DDL** (`approved_manifest_mismatch`, 422) if the arrived set recomputes a
   different hash — a reorder / edit / insert / remove between review and apply.
   This closes the H2 TOCTOU: an approval that carries the manifest authorizes
   **exactly the reviewed bytes**, not merely a version-id list. The expected hash
@@ -240,8 +242,8 @@ itself:
 > set reordered/edited between review and apply under a matching version-id
 > approval is not refused. Pass `?expected_manifest=` (from
 > `plan_reviewed_manifest`) to make the approval tamper-proof — review the
-> migration set from a trusted source of truth, not the `.zship` alone, and stamp
-> its hash on the approval.
+> migration set from its trusted source (platform `.ts` sources or creator
+> in-request IR documents), not the `.zship`, and stamp its hash on the approval.
 
 ## Tests
 

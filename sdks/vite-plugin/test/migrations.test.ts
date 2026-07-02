@@ -2,10 +2,9 @@
  * Migration discovery/recording tests plus the `.zship` descriptor packing
  * contract.
  *
- * A migrations dir with one committed `.ir.json` yields a discovery entry whose
- * `hash` equals the sha256 of the on-disk bytes. The `.zship` packer does not
- * carry those migration documents; it only stages the generated
- * `schema.runtime.json` descriptor.
+ * A migrations dir with `.ts` sources records transient IR through the CLI and
+ * returns in-memory bytes. The `.zship` packer does not carry those migration
+ * documents; it only stages the generated `schema.runtime.json` descriptor.
  */
 
 import { test, describe } from "node:test";
@@ -32,9 +31,9 @@ async function makeFixture(
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-// A minimal, valid committed `.ir.json` (the bare MigrationIr doc, pretty +
-// trailing newline — the canonical byte convention).
-const COMMITTED_IR = `{
+// A minimal, valid transient `.ir.json` byte payload (the bare MigrationIr doc,
+// pretty + trailing newline — the canonical byte convention).
+const TRANSIENT_IR = `{
   "ir_version": 1,
   "name": "notes",
   "ops": [
@@ -66,44 +65,60 @@ const RUNTIME_DESCRIPTOR = `{
 }
 `;
 
+function recorderStubBody(irText: string): string {
+  return [
+    "#!/usr/bin/env node",
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    "if (process.env.ARGS_LOG) fs.writeFileSync(process.env.ARGS_LOG, JSON.stringify(args));",
+    "if (process.env.ZSTUB_FAIL === '1') { process.stderr.write('stub: synthetic record failure\\n'); process.exit(3); }",
+    "if (args[0] !== 'record') { process.stderr.write('stub: unknown cmd ' + args[0] + '\\n'); process.exit(2); }",
+    `process.stdout.write(${JSON.stringify(irText)});`,
+    "",
+  ].join("\n");
+}
+
 describe("op.* migration discovery", () => {
-  test("discoverMigrations: committed .ir.json hash equals on-disk sha256 (verbatim)", async () => {
+  test("discoverMigrations: records .ts through the CLI and hashes transient stdout", async () => {
     const stem = "20240617123000_notes";
     const fx = await makeFixture({
       [`migrations/${stem}.ts`]: "export function up() {}\n",
-      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
+      "stub-cli.js": recorderStubBody(TRANSIENT_IR),
     });
+    const cliPath = join(fx.root, "stub-cli.js");
     try {
-      const entries = await discoverMigrations({ root: fx.root });
+      await fs.chmod(cliPath, 0o755);
+      const entries = await discoverMigrations({ root: fx.root, cliPath });
       assert.equal(entries.length, 1);
-      const onDisk = await fs.readFile(join(fx.root, "migrations", `${stem}.ir.json`));
       assert.equal(entries[0].name, `${stem}.ir.json`);
-      assert.equal(
-        entries[0].hash,
-        sha256Hex(onDisk),
-        "the entry hash must equal the sha256 of the on-disk committed bytes"
+      assert.equal(entries[0].hash, sha256Hex(Buffer.from(TRANSIENT_IR)));
+      assert.equal(entries[0].bytes.toString("utf8"), TRANSIENT_IR);
+      await assert.rejects(
+        () => fs.readFile(join(fx.root, "migrations", `${stem}.ir.json`)),
+        /ENOENT/,
+        "discoverMigrations must not write a sibling .ir.json"
       );
-      // The bytes the packer stages are EXACTLY the on-disk bytes.
-      assert.deepEqual(Buffer.from(entries[0].bytes), onDisk);
     } finally {
       await fx.cleanup();
     }
   });
 
-  test("packer copies (never re-emits): tampering the committed bytes tracks the disk", async () => {
+  test("fresh recording hash tracks the CLI stdout bytes", async () => {
     const stem = "20240617123000_notes";
     const fx = await makeFixture({
       [`migrations/${stem}.ts`]: "export function up() {}\n",
-      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
+      "stub-cli.js": recorderStubBody(TRANSIENT_IR),
     });
+    const cliPath = join(fx.root, "stub-cli.js");
     try {
-      const before = (await discoverMigrations({ root: fx.root }))[0].hash;
-      // Mutate one byte of the committed artifact.
-      const tampered = COMMITTED_IR.replace('"notes"', '"NOTES"');
-      assert.notEqual(tampered, COMMITTED_IR);
-      await fs.writeFile(join(fx.root, "migrations", `${stem}.ir.json`), tampered);
-      const after = (await discoverMigrations({ root: fx.root }))[0].hash;
-      assert.notEqual(before, after, "the entry hash must track the tampered disk bytes");
+      await fs.chmod(cliPath, 0o755);
+      const before = (await discoverMigrations({ root: fx.root, cliPath }))[0].hash;
+      const tampered = TRANSIENT_IR.replace('"notes"', '"NOTES"');
+      assert.notEqual(tampered, TRANSIENT_IR);
+      await fs.writeFile(join(fx.root, "stub-cli.js"), recorderStubBody(tampered));
+      await fs.chmod(cliPath, 0o755);
+      const after = (await discoverMigrations({ root: fx.root, cliPath }))[0].hash;
+      assert.notEqual(before, after, "the entry hash must track freshly-recorded bytes");
       assert.equal(after, sha256Hex(Buffer.from(tampered)));
     } finally {
       await fx.cleanup();
@@ -117,13 +132,9 @@ describe("op.* migration discovery", () => {
       "dist/server/index.js": "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
       [`migrations/${stem}.ts`]: "export function up() {}\n",
-      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
       "generated/zeroship/schema.runtime.json": RUNTIME_DESCRIPTOR,
     });
     try {
-      const onDisk = await fs.readFile(join(fx.root, "migrations", `${stem}.ir.json`));
-      const expectHash = sha256Hex(onDisk);
-
       const res = await emitZship({
         root: fx.root,
         distDir: "dist",
@@ -139,8 +150,8 @@ describe("op.* migration discovery", () => {
       );
       assert.notEqual(
         res.manifest.runtime_descriptor?.hash,
-        expectHash,
-        "the committed migration hash must not be staged as a manifest migration entry"
+        sha256Hex(Buffer.from(TRANSIENT_IR)),
+        "migration IR bytes must not be staged as a manifest migration entry"
       );
     } finally {
       await fx.cleanup();
@@ -189,7 +200,6 @@ describe("op.* runtime schema descriptor bundling (P4a)", () => {
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
       [`migrations/${stem}.ts`]: "export function up() {}\n",
-      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
       // The committed gen-types output (default dir `generated/zeroship`).
       "generated/zeroship/schema.runtime.json": DESCRIPTOR,
     });
@@ -228,7 +238,6 @@ describe("op.* runtime schema descriptor bundling (P4a)", () => {
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
       [`migrations/${stem}.ts`]: "export function up() {}\n",
-      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
       // No generated/zeroship/schema.runtime.json on disk.
     });
     try {
@@ -265,7 +274,6 @@ describe("op.* runtime schema descriptor bundling (P4a)", () => {
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
       [`migrations/${stem}.ts`]: "export function up() {}\n",
-      [`migrations/${stem}.ir.json`]: COMMITTED_IR,
       "generated/zeroship/schema.runtime.json": descriptor,
     });
     try {
@@ -312,39 +320,13 @@ describe("op.* runtime schema descriptor bundling (P4a)", () => {
   });
 });
 
-// LOW #2 — exercise the recordViaCli CLI-shelling path: a `.ts` with NO committed
-// `.ir.json` must shell the (stub) CLI, which produces the committed artifact. Also
-// asserts (a) the LOCAL-vs-hosted arg fork and (b) a non-zero CLI exit surfaces as a
-// thrown Error carrying the stderr. The stub stands in for the real Rust
-// `zeroship-migrate-js` (kept hermetic + fast; no V8/no kernel sandbox here).
+// LOW #2 — exercise the recordViaCli CLI-shelling path: a `.ts` source must shell
+// the (stub) CLI, which prints transient canonical IR. Also asserts a non-zero CLI
+// exit surfaces as a thrown Error carrying the stderr. The stub stands in for the
+// real Rust `zeroship-migrate-js` (kept hermetic + fast; no V8/no kernel sandbox
+// here).
 describe("recordViaCli CLI-shelling (A4 record path)", () => {
   const STUB_STEM = "20240617123000_notes";
-
-  // A node stub CLI. `record <file.ts> --owner-app X` writes a sibling `.ir.json`
-  // and logs the args to `$ARGS_LOG` so the test can assert the arg fork. `build
-  // ... --recorder-url URL` writes the `.ir.json` for every `.ts` in `--dir` (the
-  // hosted-fork shape). `ZSTUB_FAIL=1` makes it exit non-zero with a stderr message.
-  const STUB_BODY = [
-    "#!/usr/bin/env node",
-    "const fs = require('node:fs');",
-    "const path = require('node:path');",
-    "const args = process.argv.slice(2);",
-    "if (process.env.ARGS_LOG) fs.writeFileSync(process.env.ARGS_LOG, JSON.stringify(args));",
-    "if (process.env.ZSTUB_FAIL === '1') { process.stderr.write('stub: synthetic record failure\\n'); process.exit(3); }",
-    "const ir = JSON.parse(process.env.ZSTUB_IR);",
-    "const irText = JSON.stringify(ir, null, 2) + '\\n';",
-    "function writeFor(tsPath) {",
-    "  const dir = path.dirname(tsPath);",
-    "  const base = path.basename(tsPath).replace(/\\.ts$/, '');",
-    "  fs.writeFileSync(path.join(dir, base + '.ir.json'), irText);",
-    "}",
-    "if (args[0] === 'record') { writeFor(args[1]); }",
-    "else if (args[0] === 'build') {",
-    "  const di = args.indexOf('--dir'); const dir = args[di + 1];",
-    "  for (const n of fs.readdirSync(dir)) if (n.endsWith('.ts')) writeFor(path.join(dir, n));",
-    "} else { process.stderr.write('stub: unknown cmd ' + args[0] + '\\n'); process.exit(2); }",
-    "",
-  ].join("\n");
 
   const STUB_IR = {
     ir_version: 1,
@@ -362,13 +344,13 @@ describe("recordViaCli CLI-shelling (A4 record path)", () => {
   ): Promise<void> {
     const fx = await makeFixture({
       [`migrations/${STUB_STEM}.ts`]: "export function up() {}\n",
-      "stub-cli.js": STUB_BODY,
+      "stub-cli.js": recorderStubBody(JSON.stringify(STUB_IR, null, 2) + "\n"),
     });
     const cliPath = join(fx.root, "stub-cli.js");
     await fs.chmod(cliPath, 0o755);
     const argsLog = join(fx.root, "args.json");
     const saved: Record<string, string | undefined> = {};
-    const env = { ZSTUB_IR: JSON.stringify(STUB_IR), ARGS_LOG: argsLog, ...extraEnv };
+    const env = { ARGS_LOG: argsLog, ...extraEnv };
     for (const [k, v] of Object.entries(env)) {
       saved[k] = process.env[k];
       process.env[k] = v;
@@ -384,14 +366,18 @@ describe("recordViaCli CLI-shelling (A4 record path)", () => {
     }
   }
 
-  test("records via the CLI when no committed .ir.json exists (LOCAL `record` fork)", async () => {
+  test("records via the CLI from a .ts-only dir (LOCAL `record` fork)", async () => {
     await withStub({}, async ({ root, cliPath, argsLog }) => {
       const entries = await discoverMigrations({ root, cliPath });
       assert.equal(entries.length, 1, "the recorded artifact is discovered + bundled");
-      const onDisk = await fs.readFile(
-        join(root, "migrations", `${STUB_STEM}.ir.json`)
+      const expected = Buffer.from(JSON.stringify(STUB_IR, null, 2) + "\n");
+      assert.equal(entries[0].hash, sha256Hex(expected));
+      assert.deepEqual(entries[0].bytes, expected);
+      await assert.rejects(
+        () => fs.readFile(join(root, "migrations", `${STUB_STEM}.ir.json`)),
+        /ENOENT/,
+        "recording must stay in memory"
       );
-      assert.equal(entries[0].hash, sha256Hex(onDisk));
       // LOCAL fork: `record <file.ts> --owner-app …` (no --recorder-url).
       const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
       assert.equal(args[0], "record", "LOCAL fork shells `record`");
@@ -400,19 +386,22 @@ describe("recordViaCli CLI-shelling (A4 record path)", () => {
     });
   });
 
-  test("hosted fork: a recorderUrl shells `build --recorder-url`", async () => {
+  test("recorderUrl is rejected by the legacy discover helper", async () => {
     await withStub({}, async ({ root, cliPath, argsLog }) => {
-      await discoverMigrations({
-        root,
-        cliPath,
-        recorderUrl: "https://recorder.example/v1",
-      });
-      const args = JSON.parse(await fs.readFile(argsLog, "utf8")) as string[];
-      assert.equal(args[0], "build", "hosted fork shells `build`");
-      const ri = args.indexOf("--recorder-url");
-      assert.ok(ri >= 0, "hosted fork passes --recorder-url");
-      assert.equal(args[ri + 1], "https://recorder.example/v1");
-      assert.ok(args.includes("--dir"), "hosted fork passes --dir");
+      await assert.rejects(
+        () =>
+          discoverMigrations({
+            root,
+            cliPath,
+            recorderUrl: "https://recorder.example/v1",
+          }),
+        /gen-types remains the supported build integration/
+      );
+      await assert.rejects(
+        () => fs.readFile(argsLog, "utf8"),
+        /ENOENT/,
+        "hosted recorderUrl should fail before shelling the stub"
+      );
     });
   });
 
@@ -443,10 +432,11 @@ describe("recordViaCli CLI-shelling (A4 record path)", () => {
   });
 });
 
-// MED-3 (faithful-e2e) — the stub tests above cover the arg-fork unit behaviour, but
-// per the faithful-e2e mandate at least ONE test must shell the ACTUALLY-BUILT Rust
+// MED-3 (faithful-e2e) — the stub tests above cover unit behaviour, but per the
+// faithful-e2e mandate at least ONE test must shell the ACTUALLY-BUILT Rust
 // `zeroship-migrate-js` binary (which drives the REAL kernel-sandboxed recorder
-// child) over a real `.ts`, asserting a committed `.ir.json` is produced + bundled.
+// child) over a real `.ts`, asserting transient IR is returned without writing a
+// sibling artifact.
 //
 // Gated on `ZEROSHIP_MIGRATE_JS_BIN` (or the cargo default-target path). When the env
 // var is set the test HARD-FAILS rather than silent-skipping (faithful-e2e rule). CI
@@ -476,7 +466,7 @@ describe("recordViaCli against the REAL zeroship-migrate-js binary (faithful e2e
     return join(repoRoot, "target", "debug", "zeroship-migrate-js");
   }
 
-  test("shells the built CLI over a real .ts → committed .ir.json produced + bundled", async () => {
+  test("shells the built CLI over a real .ts → transient IR returned, no sibling written", async () => {
     const cliPath = realCliPath();
     const explicit = !!process.env.ZEROSHIP_MIGRATE_JS_BIN;
     let cliExists = false;
@@ -517,17 +507,17 @@ describe("recordViaCli against the REAL zeroship-migrate-js binary (faithful e2e
       assert.equal(entries.length, 1, "the recorded artifact is discovered + bundled");
       assert.equal(entries[0].name, `${REAL_STEM}.ir.json`);
 
-      // The committed `.ir.json` really landed on disk and the entry hash tracks it.
+      // The canonical IR is returned in memory and no committed sibling lands on disk.
       const irPath = join(fx.root, "migrations", `${REAL_STEM}.ir.json`);
-      const onDisk = await fs.readFile(irPath);
-      assert.equal(entries[0].hash, sha256Hex(onDisk));
+      await assert.rejects(() => fs.readFile(irPath), /ENOENT/);
+      assert.equal(entries[0].hash, sha256Hex(entries[0].bytes));
       // It is a real recorded IR carrying the createTable op (not an empty stub).
-      const doc = JSON.parse(onDisk.toString("utf8")) as {
+      const doc = JSON.parse(entries[0].bytes.toString("utf8")) as {
         ops?: Array<{ op?: string; name?: string }>;
       };
       assert.ok(
         (doc.ops ?? []).some((o) => o.op === "createTable" && o.name === "real_notes"),
-        `the recorded IR must carry the createTable op; got: ${onDisk.toString("utf8")}`
+        `the recorded IR must carry the createTable op; got: ${entries[0].bytes.toString("utf8")}`
       );
     } finally {
       await fx.cleanup();

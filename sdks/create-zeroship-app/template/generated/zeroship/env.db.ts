@@ -2,7 +2,7 @@
 //
 // The typed `env.db` surface, reconstructed from the op.* migration set
 // (migration-first: the migrations are the source of truth, types are
-// generated from the fold). Re-run `gen-types` after every `build`; the
+// generated from the fold). Re-run `gen-types` after migration changes; the
 // `gen-types --check` CI gate fails if this file drifts from the migrations.
 //
 // The schema below is a reconstruction of `@zeroship/db` `t.*()` builder

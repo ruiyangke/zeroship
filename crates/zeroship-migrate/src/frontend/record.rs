@@ -1,13 +1,9 @@
-//! V8-backed `op.*` migration recording → `.ir.json` (design §2.5 / PR1 skeletal
-//! JS builder).
+//! V8-backed `op.*` migration recording into typed migration IR.
 //!
 //! This module evaluates a creator migration module (which calls the
 //! `@zeroship/migrate` `op.*` DSL inside `up()`) in zeroship-runtime's V8 sandbox
-//! and records the emitted op list into a [`MigrationIr`] — the SAME typed IR the
-//! lean engine's `.ir.json` loader deserializes. It is the JS half of the PR1
-//! anti-drift gate: a Rust test re-canonicalizes the recorded ops through
-//! [`Checksum::of_ir`](crate::Checksum::of_ir) and asserts value
-//! equality with the committed golden `.ir.json` fixture (§2.5).
+//! and records the emitted op list into a [`MigrationIr`]. Creator builds keep
+//! that IR in memory; callers that need bytes canonicalize the value directly.
 //!
 //! Like [`super::eval`] this is one of the places V8 enters the migrate family, and
 //! it reuses the runtime's existing sandbox + module loader (no second JS engine).

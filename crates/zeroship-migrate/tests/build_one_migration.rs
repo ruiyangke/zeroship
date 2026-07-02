@@ -3,8 +3,8 @@
 //!
 //! Pre-fix the CLI `record` shelled `build_migrations(&dir, …)` over the WHOLE dir
 //! and merely filtered the report to the requested file — so a sibling `.ts`
-//! lacking a committed `.ir.json` was inadvertently recorded (its `.ir.json` written
-//! to disk). build_one_migration scopes the build to the single discovered file.
+//! was inadvertently recorded. build_one_migration scopes the build to the single
+//! discovered file and keeps IR in memory.
 
 use std::fs;
 
@@ -56,12 +56,11 @@ fn record_one_file_does_not_record_siblings() {
     assert_eq!(outcome.migrations.len(), 1, "exactly one migration built");
     assert_eq!(outcome.migrations[0].stem, target);
 
-    // The requested file's committed artifact exists.
+    // No committed artifact is written for either file.
     assert!(
-        dir.path().join(format!("{target}.ir.json")).exists(),
-        "the requested migration's .ir.json must be written"
+        !dir.path().join(format!("{target}.ir.json")).exists(),
+        "the requested migration's .ir.json must not be written"
     );
-    // The SIBLING's committed artifact must NOT exist — it was never recorded.
     assert!(
         !dir.path().join(format!("{sibling}.ir.json")).exists(),
         "recording one file must NOT record the unrelated sibling"
@@ -69,7 +68,7 @@ fn record_one_file_does_not_record_siblings() {
 }
 
 #[test]
-fn record_one_file_is_idempotent_verbatim() {
+fn record_one_file_is_deterministic_across_transient_runs() {
     assert_child_built();
     let dir = tempfile::tempdir().unwrap();
     let stem = "20240617150000_idem";
@@ -83,9 +82,13 @@ fn record_one_file_is_idempotent_verbatim() {
     let second = build_one_migration(&path, APP, &via()).expect("second");
     assert_eq!(
         second.migrations[0].record_path,
-        zeroship_migrate::frontend::RecordPath::CommittedVerbatim
+        zeroship_migrate::frontend::RecordPath::Local
     );
     assert_eq!(second.migrations[0].committed_bytes, bytes);
+    assert!(
+        !dir.path().join(format!("{stem}.ir.json")).exists(),
+        "transient recording must not write a committed .ir.json"
+    );
 }
 
 #[test]

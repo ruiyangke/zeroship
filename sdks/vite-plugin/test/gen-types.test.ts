@@ -11,8 +11,8 @@
  *      migration and regenerates `env.db.ts` + `schema.runtime.json` (gated on
  *      ZEROSHIP_MIGRATE_JS_BIN / target/debug; HARD-FAILS if the env var is set but
  *      the binary is missing);
- *  (c) `--check` drift: when the committed artifacts diverge from the migrations the
- *      CLI exits non-zero and `genTypesViaCli` THROWS (the CI drift gate);
+ *  (c) `--check` drift: when the generated artifacts diverge from the migrations the
+ *      CLI exits non-zero and `genTypesViaCli` THROWS (the CI generated-artifact check);
  *  (d) a MISSING binary in DEV warns-and-noops (`{ status: "skipped" }`, no throw);
  *      with `requireBinary` (the CI gate) the same absence THROWS.
  *
@@ -51,7 +51,7 @@ async function makeFixture(
 // A node stub CLI standing in for `zeroship-migrate-js gen-types`. It logs its
 // args to `$ARGS_LOG` (so the test asserts the arg fork) and, unless `--check`,
 // writes the two artifacts into `--out`. `ZSTUB_DRIFT=1` makes `--check` exit
-// non-zero with a stderr drift message (the drift-gate path).
+// non-zero with a stderr drift message (the generated-artifact check path).
 const STUB_GENTYPES = [
   "#!/usr/bin/env node",
   "const fs = require('node:fs');",
@@ -147,7 +147,7 @@ describe("gen-types wiring (P3)", () => {
   });
 
   // (c) --check drift: a divergence exits non-zero → genTypesViaCli THROWS.
-  test("--check drift: a stale committed artifact makes genTypesViaCli throw (CI gate)", async () => {
+  test("--check drift: a stale generated artifact makes genTypesViaCli throw", async () => {
     await withStub({ ZSTUB_DRIFT: "1" }, async ({ root, cliPath }) => {
       assert.throws(
         () => genTypesViaCli({ root, cliPath, check: true, requireBinary: true }),
@@ -219,8 +219,9 @@ describe("gen-types wiring (P3)", () => {
     }
   });
 
-  // MED-1 (review fix): the prod/CI drift gate must MIRROR `recordViaCli` and the
-  // dev-server's binary resolution, both of which fall through to a BARE PATH name.
+  // MED-1 (review fix): the prod/CI generated-artifact check must MIRROR
+  // `recordViaCli` and the dev-server's binary resolution, both of which fall
+  // through to a BARE PATH name.
   // Without this, a host with the binary on `$PATH` (the natural `cargo install`
   // location) but NOT in node_modules/.bin and no env var would let `record`/`build`
   // succeed while the prod `--check` gate spuriously hard-fails "not found".
@@ -248,7 +249,7 @@ describe("gen-types wiring (P3)", () => {
   });
 
   // MED-1 end-to-end: with the binary ONLY on $PATH (not node_modules/.bin, no env
-  // var), the prod drift gate (`requireBinary:true`) must SUCCEED — proving the
+  // var), the prod generated-artifact check (`requireBinary:true`) must SUCCEED — proving the
   // bare-name fall-through resolves a $PATH-installed binary. Pre-fix this threw
   // "zeroship-migrate-js not found" (resolution returned null) — a build-breaking
   // false negative on a legitimately-configured machine.
@@ -492,25 +493,20 @@ describe("gen-types against the REAL zeroship-migrate-js binary (faithful e2e)",
 
     const fx = await makeFixture({ [`migrations/${STEM}.ts`]: REAL_TS });
     try {
-      // 1. Record the migration (`.ts` → committed `.ir.json`) via `build`.
-      const { spawnSync } = await import("node:child_process");
-      const rec = spawnSync(
-        cliPath,
-        ["build", "--dir", join(fx.root, "migrations"), "--owner-app", "app_e2e"],
-        { encoding: "utf8" }
-      );
-      assert.equal(rec.status, 0, `record failed: ${rec.stderr}`);
-      await fs.access(join(fx.root, "migrations", `${STEM}.ir.json`));
-
-      // 2. Generate types from the migration fold via the plugin helper.
+      // 1. Generate types directly from a `.ts`-only migration dir.
       const result = genTypesViaCli({
         root: fx.root,
         cliPath,
         genTypesOut: "generated/zeroship",
       });
       assert.equal(result.status, "ok");
+      await assert.rejects(
+        () => fs.access(join(fx.root, "migrations", `${STEM}.ir.json`)),
+        /ENOENT/,
+        "gen-types must not write a committed .ir.json sibling"
+      );
 
-      // 3. Both artifacts regenerated; env.db.ts is a real generated module.
+      // 2. Both artifacts regenerated; env.db.ts is a real generated module.
       const dts = await fs.readFile(
         join(fx.root, "generated/zeroship/env.db.ts"),
         "utf8"
@@ -533,7 +529,7 @@ describe("gen-types against the REAL zeroship-migrate-js binary (faithful e2e)",
         `schema.runtime.json must carry the folded collection; got ${JSON.stringify(runtime)}`
       );
 
-      // 4. --check now passes (committed == regenerated).
+      // 3. --check now passes (generated artifacts match regenerated output).
       const checkOk = genTypesViaCli({
         root: fx.root,
         cliPath,
@@ -543,10 +539,10 @@ describe("gen-types against the REAL zeroship-migrate-js binary (faithful e2e)",
       });
       assert.equal(checkOk.status, "ok");
 
-      // 5. (LOW-1 review fix) REAL drift → throw, end-to-end. Tamper the committed
+      // 4. (LOW-1 review fix) REAL drift → throw, end-to-end. Tamper the generated
       //    env.db.ts and assert the REAL CLI's `--check` exits non-zero and
-      //    `genTypesViaCli` THROWS (the production drift gate, locked by the suite
-      //    against the actual binary — not only the stub).
+      //    `genTypesViaCli` THROWS (the production generated-artifact check, locked
+      //    by the suite against the actual binary — not only the stub).
       const dtsPath = join(fx.root, "generated/zeroship/env.db.ts");
       await fs.appendFile(dtsPath, "\n// drift: a hand-edit the migrations don't produce\n");
       assert.throws(
