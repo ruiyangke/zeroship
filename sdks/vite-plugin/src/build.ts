@@ -22,35 +22,25 @@ import { genTypesViaCli } from "./migrations.js";
 
 const HERE = resolve(fileURLToPath(import.meta.url), "..");
 
-/** The migration sub-options the build pipeline accepts (the public
- *  `ZeroshipOptions.migrations` shape, forwarded verbatim). */
+/** The migration sub-options the build pipeline accepts. */
 export interface BuildMigrationsOptions {
   dir?: string;
   genTypesOut?: string;
   cliPath?: string;
-  ownerApp?: string;
-  recorderUrl?: string;
 }
 
-/**
- * Forward the FULL migration sub-options into the `.zship` packer's
- * `emitZship({ migrations })` call.
- *
- * The packer's migration discovery (`discoverMigrations`, zship.ts step 8b)
- * consumes `ownerApp`/`recorderUrl` to record a `.ts` that lacks a committed
- * `.ir.json`; the descriptor read (step 8c) uses `genTypesOut`. A partial
- * spread that drops `ownerApp`/`recorderUrl` silently breaks the recorder
- * arg-fork in production builds — so the whole set is forwarded as one object.
- */
+export interface EmitMigrationsOptions {
+  dir?: string;
+  genTypesOut?: string;
+}
+
+/** Forward only descriptor-relevant migration settings to `.zship` emission. */
 export function migrationsForEmit(
   opts: BuildMigrationsOptions | undefined,
-): BuildMigrationsOptions {
+): EmitMigrationsOptions {
   return {
     dir: opts?.dir,
     genTypesOut: opts?.genTypesOut,
-    cliPath: opts?.cliPath,
-    ownerApp: opts?.ownerApp,
-    recorderUrl: opts?.recorderUrl,
   };
 }
 
@@ -326,8 +316,6 @@ export function buildPlugin(
       dir?: string;
       genTypesOut?: string;
       cliPath?: string;
-      ownerApp?: string;
-      recorderUrl?: string;
     };
   } = {}
 ): Plugin {
@@ -722,11 +710,9 @@ export function buildPlugin(
             transformer: extras.transformer,
             net: extras.net,
           },
-          // Carry the op.* migrations + the generated runtime schema descriptor
-          // (`schema.runtime.json`) the buildStart gen-types step emitted (P4a).
-          // Forward the FULL migration sub-options (incl. ownerApp/recorderUrl,
-          // which the packer's migration discovery consumes) — a partial spread
-          // would silently break the recorder arg-fork in production builds.
+          // Carry the generated runtime schema descriptor (`schema.runtime.json`)
+          // the buildStart gen-types step emitted. Migration documents are
+          // applied through the migration service and are not packed into .zship.
           migrations: migrationsForEmit(options.migrations),
         });
       } catch (e) {

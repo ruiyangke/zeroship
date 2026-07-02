@@ -17,7 +17,6 @@ pub mod bootstrap_console;
 pub mod credit;
 pub mod cron;
 pub mod deploy;
-pub mod deploy_migrate;
 pub mod disputes;
 pub mod device_handlers;
 pub mod env_handlers;

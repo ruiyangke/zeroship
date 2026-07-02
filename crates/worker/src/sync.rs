@@ -29,29 +29,20 @@ pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<St
     }
 }
 
-/// **Migration-first cutover (P4b)** — resolve the bundled
-/// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`) for an app from its
-/// `manifest.runtime_descriptor` slot. The descriptor is a separate
-/// content-addressed blob; we read it via `BlobStore` so the runtime can
-/// expose it as `globalThis.__zsRuntimeDescriptor`.
+/// Resolve the bundled `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`)
+/// for an app from its `manifest.runtime_descriptor` slot. The descriptor is a
+/// separate content-addressed blob; we read it via `BlobStore` so the runtime
+/// can expose it as `globalThis.__zsRuntimeDescriptor`.
 ///
-/// Returns `Ok(None)` only when the manifest has no migrations and no
-/// descriptor (schema-less app). A manifest with migrations but no descriptor,
-/// a missing descriptor blob, or non-UTF-8 descriptor bytes is a hard load
-/// error; silently booting schema-less would hide a broken build/deploy.
+/// Returns `Ok(None)` when no descriptor is present (schema-less app). A missing
+/// descriptor blob or non-UTF-8 descriptor bytes is a hard load error.
 pub(crate) async fn runtime_descriptor_json(
     manifest: &Manifest,
     blob_store: &Arc<dyn BlobStore>,
     app_id: &Uuid,
 ) -> Result<Option<String>, String> {
     let Some(desc) = manifest.runtime_descriptor.as_ref() else {
-        if manifest.migrations.is_empty() {
-            return Ok(None);
-        }
-        return Err(format!(
-            "manifest has {} migration(s) but no runtime_descriptor",
-            manifest.migrations.len()
-        ));
+        return Ok(None);
     };
     let hash = desc.hash.clone();
     match blob_store.get_blob(&hash).await {
@@ -563,9 +554,7 @@ mod tests {
     use ntex::http::StatusCode;
     use ntex::web::{self, test};
     use sha2::{Digest, Sha256};
-    use zeroship_bundle::{
-        BlobStore, LocalDiskBlobStore, Manifest, MigrationFileEntry, RuntimeDescriptorEntry,
-    };
+    use zeroship_bundle::{BlobStore, LocalDiskBlobStore, Manifest, RuntimeDescriptorEntry};
     use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits, NetAllowEntry};
 
     use super::*;
@@ -702,15 +691,8 @@ mod tests {
         path
     }
 
-    fn one_migration() -> MigrationFileEntry {
-        MigrationFileEntry {
-            name: "V0001__create_notes.sql".to_string(),
-            hash: "b".repeat(64),
-        }
-    }
-
     #[test]
-    fn runtime_descriptor_absent_without_migrations_is_schema_less() {
+    fn runtime_descriptor_absent_is_schema_less() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
             return;
@@ -731,31 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn runtime_descriptor_missing_for_migrations_is_load_error() {
-        let Ok(runtime) = compio::runtime::Runtime::new() else {
-            eprintln!("skipping (cannot create compio runtime)");
-            return;
-        };
-        runtime.block_on(async {
-            let root = tmpdir("descriptor-missing-slot");
-            let blob_store: Arc<dyn BlobStore> =
-                Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
-            let app_id = Uuid::new_v4();
-            let mut manifest = Manifest::default();
-            manifest.migrations = vec![one_migration()];
-
-            let err = runtime_descriptor_json(&manifest, &blob_store, &app_id)
-                .await
-                .expect_err("migrations without descriptor must fail load");
-            assert!(
-                err.contains("migration") && err.contains("runtime_descriptor"),
-                "error should name missing descriptor for migrations, got: {err}"
-            );
-            std::fs::remove_dir_all(root).ok();
-        });
-    }
-
-    #[test]
     fn runtime_descriptor_blob_fetch_failure_is_load_error() {
         let Ok(runtime) = compio::runtime::Runtime::new() else {
             eprintln!("skipping (cannot create compio runtime)");
@@ -768,7 +725,6 @@ mod tests {
             let app_id = Uuid::new_v4();
             let descriptor_hash = "c".repeat(64);
             let mut manifest = Manifest::default();
-            manifest.migrations = vec![one_migration()];
             manifest.runtime_descriptor = Some(RuntimeDescriptorEntry {
                 hash: descriptor_hash.clone(),
             });

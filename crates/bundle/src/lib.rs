@@ -24,8 +24,8 @@ pub use limits::{
     MAX_MANIFEST_BYTES,
 };
 pub use manifest::{
-    AuthConfig, HandlerEntry, Manifest, ManifestExports, ManifestMetadata, MigrationFileEntry,
-    NetConfig, NetRequest, RuntimeDescriptorEntry, ScopeDef, WorkerCode,
+    AuthConfig, HandlerEntry, Manifest, ManifestExports, ManifestMetadata, NetConfig, NetRequest,
+    RuntimeDescriptorEntry, ScopeDef, WorkerCode,
 };
 pub use rule::{
     Action, AuthLevel, CacheCtl, Cors, HttpMethod, Match, ProcedureKind, RateLimit,

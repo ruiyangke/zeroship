@@ -8,16 +8,15 @@
 //!     │      (eval in V8 sandbox → descriptor IR → DeclarativeAuthor::diff
 //!     │       → render dbmate)                              ← REAL fn
 //!     ▼
-//!  <ts>_<slug>.sql   (versioned migration; vector(N) + bytea + /* zsenc */ +
-//!                     zsenc COMMENT + _masked sibling + __zsmask COMMENT + FK)
-//!     │  P6  zeroship_bundle: Manifest.migrations[] + content-addressed blob,
-//!     │      pack .zship (tar+zstd) → zeroship_bundle::ingest → blob store,
-//!     │      read blob back by hash → reconstruct on disk
-//!     │      (mirrors control's reconstruct_migration_files)   ← REAL fns
+//!  rendered SQL oracle (vector(N) + bytea + /* zsenc */ + zsenc COMMENT +
+//!                       _masked sibling + __zsmask COMMENT + FK)
+//!     │
+//!     │  S4 removed the bundle seam: migrations are no longer carried by .zship.
+//!     │  The migration service receives frozen .ir.json documents before deploy.
 //!     ▼
-//!  zeroship_control::deploy_migrate::apply_bundle_migrations  ← REAL fn
-//!     │      (provision schema "<app_id>" + migrator_<app_id> role,
-//!     │       load_dir → engine.plan(Confined) → engine.apply)
+//!  <ts>_<slug>.ir.json  (same evaluated descriptors → op.* IR)
+//!     │      provision schema + migrator role, discover .ir.json, apply sealed
+//!     │      confined profile — mirroring crates/migrated/src/apply.rs
 //!     ▼
 //!  live DB: schema "<app_id>" with the goodie columns + sentinels
 //!     │  P4/P5 zeroship_plugin_db: registerModel dispatch issues NO DDL,
@@ -45,19 +44,24 @@
 //! ## What is NOT driven here (documented human/CI boundary)
 //!
 //! This test drives the REAL component FUNCTIONS cross-crate. It does NOT boot
-//! the full Docker stack — i.e. it does not exercise the control-plane ntex HTTP
-//! deploy ENDPOINT (the `POST /apps/{id}/deploy` handler `run_deploy_migrations`
-//! wraps `apply_bundle_migrations` in) nor the worker runtime DISPATCH over V8.
+//! the full Docker stack — i.e. it does not exercise the migrated ntex HTTP
+//! apply endpoint nor the worker runtime DISPATCH over V8.
 //! Those wrappers are a thin AppState/HTTP layer around the functions exercised
 //! here; verifying them end-to-end requires `docker compose up` + a live gateway,
 //! which is offline-blocked in this environment. That layer is verified by
 //! `tests/e2e_platform.sh` / CI. See the report for the exact boundary.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 
 use compio_postgres::{Client, NoTls, Pool};
 use uuid::Uuid;
+use zeroship_migrate::{
+    apply_sealed, connect, descriptors_to_create_ops, discover_ir_files, migrator_role_name,
+    postgres_ir_apply_state, provision_migrator, Approval, ExecutorConfig, GuardConfig, IrAuthor,
+    MigrationEngine, MigrationIr, PolicyProfile, PostgresBackend, PostgresIrApplyOutcome,
+    SealVerifier, SqlDialect, CURRENT_IR_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // The INPUT: a creator schema.js exercising all four goodies the spec names —
@@ -101,6 +105,8 @@ export default { schema: { users, docs } };
 "#;
 
 const DEFAULT_PG_URL: &str = "postgres://postgres:test@localhost:5434/postgres";
+const TEST_POLICY_SEAL_KEY: &[u8] = b"schema-authority-e2e migrated seal key";
+const TEST_POLICY_CEILING_VERSION: u64 = 1;
 
 fn pg_url() -> String {
     std::env::var("PG_TEST_URL").unwrap_or_else(|_| DEFAULT_PG_URL.to_string())
@@ -182,6 +188,103 @@ async fn journaled_count(conn: &Client, app_id: &Uuid) -> i64 {
     rows[0].get::<_, i64>("n")
 }
 
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Minimal faithful S4 apply path, matching `crates/migrated/src/apply.rs`:
+/// provision app schema + `migrator_<app_id>`, discover frozen `.ir.json`,
+/// preflight with the confined guard, then apply through `apply_sealed`.
+async fn apply_ir_documents_like_migrated(
+    provision_dsn: &str,
+    app_id: &Uuid,
+    migrations_dir: &Path,
+) -> TestResult<PostgresIrApplyOutcome> {
+    let schema = app_id.to_string();
+    let conn = connect(provision_dsn).await?;
+    conn.batch_execute(&format!(
+        "CREATE SCHEMA IF NOT EXISTS {}",
+        quote_ident(&schema)
+    ))
+    .await?;
+
+    let role = migrator_role_name(&schema)?;
+    let exec_cfg =
+        ExecutorConfig::new(schema.clone(), schema.clone()).with_migrator_role(role);
+    provision_migrator(&conn, &exec_cfg).await?;
+    let backend = PostgresBackend::new(&conn);
+
+    let ir_files = discover_ir_files(migrations_dir)?;
+    assert_eq!(
+        ir_files.len(),
+        1,
+        "capstone submits exactly one frozen .ir.json document"
+    );
+
+    let policy = PolicyProfile::confined();
+    let guard_cfg = GuardConfig::confined(schema.clone())
+        .with_extension_allowlist(policy.capabilities.extensions.clone())
+        .with_data_security(
+            policy.data_security.require_rls,
+            policy.data_security.destructive_ops,
+        );
+    let mut state = postgres_ir_apply_state(&backend, &exec_cfg, &schema).await?;
+    let engine = MigrationEngine::new();
+    for path in &ir_files {
+        let file = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<unknown>");
+        let bytes = std::fs::read_to_string(path)?;
+        let mut author = IrAuthor::new(&schema, &schema, SqlDialect::Postgres);
+        if let Some(scope) = guard_cfg.schema_scope() {
+            author = author.with_schema_scope(scope);
+        }
+        let lowered = author.load_and_lower_guarded(
+            &bytes,
+            &schema,
+            &state.registry,
+            &state.live_schema,
+            &guard_cfg,
+        )?;
+        let migrations = lowered.migrations();
+        let plan = engine.plan(&migrations, &guard_cfg);
+        assert!(
+            plan.denied.is_empty(),
+            "confined preflight denied {file}: {:?}",
+            plan.denied
+        );
+        for table in lowered.created_tables {
+            state
+                .registry
+                .entry(table.clone())
+                .or_insert_with(|| schema.clone());
+            state.live_schema.tables.insert(table);
+        }
+    }
+
+    let sealed = zeroship_migrate::seal_effective_profile(
+        policy,
+        &schema,
+        TEST_POLICY_SEAL_KEY,
+        TEST_POLICY_CEILING_VERSION,
+    )?;
+    let verifier = SealVerifier::new(TEST_POLICY_SEAL_KEY, TEST_POLICY_CEILING_VERSION)?;
+    Ok(apply_sealed(
+        &backend,
+        sealed,
+        &verifier,
+        &schema,
+        migrations_dir,
+        &exec_cfg,
+        Approval::None,
+        "schema-authority-e2e",
+    )
+    .await?)
+}
+
 /// SAFETY: the e2e runs single-threaded (`--test-threads=1`) and is the only
 /// toucher of `ZEROSHIP_COLUMN_KEY_DEFAULT` in this binary.
 #[allow(unsafe_code)]
@@ -241,7 +344,7 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     // exact SQL the engine applies at deploy lands in the per-app schema.
     // -------------------------------------------------------------------
     let gen_dir = std::env::temp_dir().join(format!("p7-gen-{}", app_id.simple()));
-    let owner_app = format!("app_{}", app_id.simple());
+    let owner_app = schema.clone();
     let outcome = zeroship_migrate::frontend::generate_migration(
         SCHEMA_JS,
         &pg_url(),
@@ -257,11 +360,6 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
         .written
         .expect("P3 generate writes a migration for a fresh schema");
     let body = std::fs::read_to_string(&mig_path).expect("read generated migration");
-    let mig_name = mig_path
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
 
     // --- Seam-1 assertions: every goodie survives schema → generate. ---
     assert!(body.contains("-- migrate:up") && body.contains("-- migrate:down"));
@@ -332,64 +430,36 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     );
 
     // -------------------------------------------------------------------
-    // SEAM 2 (P6 bundle): pack the migration into a .zship (manifest.migrations[]
-    // + content-addressed blob), ingest into a blob store, read it back by hash,
-    // reconstruct on disk — exactly what control's reconstruct_migration_files
-    // does, but driving the REAL zeroship_bundle pack/ingest + blob store.
+    // SEAM 2 (P6 bundle) was removed by S4: migrations are decoupled from the
+    // `.zship` bundle and submitted to the migration service as frozen `.ir.json`.
+    // Build that service input from the same evaluated schema descriptors.
     // -------------------------------------------------------------------
-    let blob_hash = zeroship_bundle::sha256_hex(body.as_bytes());
-    let mut manifest = zeroship_bundle::Manifest::default();
-    manifest.metadata.built_at = "2026-06-19T00:00:00Z".into();
-    manifest.metadata.compiler = Some("p7-capstone".into());
-    manifest.migrations = vec![zeroship_bundle::MigrationFileEntry {
-        name: mig_name.clone(),
-        hash: blob_hash.clone(),
-    }];
-    manifest.validate().expect("manifest with migrations validates");
-    let manifest_json = serde_json::to_vec(&manifest).expect("serialize manifest");
-
-    // Pack a real .zship: manifest.json FIRST, then blobs/<hash> (tar → zstd).
-    let zship = build_zship(&manifest_json, &[(blob_hash.clone(), body.as_bytes().to_vec())]);
-
-    // Ingest the .zship into a content-addressed blob store (the REAL fn).
-    let store_dir = std::env::temp_dir().join(format!("p7-blobs-{}", app_id.simple()));
-    let blob_store: std::sync::Arc<dyn zeroship_bundle::BlobStore> = std::sync::Arc::new(
-        zeroship_bundle::LocalDiskBlobStore::new(store_dir.clone()).expect("blob store"),
-    );
-    let ingest = zeroship_bundle::ingest(&blob_store, &app_id, &zship)
-        .await
-        .expect("P6 ingest of the .zship");
-    // The ingested manifest carries our migration entry.
-    let ingested: zeroship_bundle::Manifest =
-        serde_json::from_str(&ingest.manifest_json).expect("reparse ingested manifest");
-    assert_eq!(ingested.migrations.len(), 1, "one migration carried");
-    assert_eq!(ingested.migrations[0].name, mig_name);
-
-    // Reconstruct the migration file from the blob store by hash (mirrors
-    // control::api::reconstruct_migration_files).
-    let deploy_dir = std::env::temp_dir().join(format!("p7-deploy-{}", app_id.simple()));
-    std::fs::create_dir_all(&deploy_dir).expect("mkdir deploy dir");
-    for entry in &ingested.migrations {
-        let bytes = blob_store
-            .get_blob(&entry.hash)
-            .await
-            .expect("blob present in store");
-        std::fs::write(deploy_dir.join(&entry.name), bytes.as_ref())
-            .expect("write reconstructed migration");
-    }
-    // Seam-2 assertion: the reconstructed bytes are byte-identical to generate's.
-    let reconstructed =
-        std::fs::read_to_string(deploy_dir.join(&mig_name)).expect("read reconstructed");
-    assert_eq!(
-        reconstructed, body,
-        "the migration survives pack → ingest → blob → reconstruct byte-for-byte"
-    );
+    let descriptors = zeroship_migrate::frontend::eval_schema_to_ir(SCHEMA_JS, &owner_app)
+        .expect("eval schema.js to descriptors for the S4 IR artifact");
+    let ir = MigrationIr {
+        ir_version: CURRENT_IR_VERSION,
+        name: "initial_schema".to_string(),
+        owner_app: owner_app.clone(),
+        ops: descriptors_to_create_ops(&descriptors)
+            .expect("descriptors produce the frozen createTable IR"),
+        flags: Default::default(),
+        depends_on: Vec::new(),
+        supersedes: Vec::new(),
+        preconditions: Vec::new(),
+        checksum: None,
+    };
+    let deploy_dir = std::env::temp_dir().join(format!("p7-migrated-{}", app_id.simple()));
+    std::fs::create_dir_all(&deploy_dir).expect("mkdir migrated input dir");
+    let ir_name = "20260701000000_initial_schema.ir.json";
+    let mut ir_body = serde_json::to_string_pretty(&ir).expect("serialize frozen IR");
+    ir_body.push('\n');
+    std::fs::write(deploy_dir.join(ir_name), ir_body).expect("write frozen IR");
 
     // -------------------------------------------------------------------
-    // SEAM 3 (P6 deploy-apply): the REAL control deploy-migrate fn provisions
-    // the per-app schema "<app_id>" + migrator_<app_id> role and applies the
-    // bundle's migration under the Confined profile, BEFORE go-live.
-    // REAL fn: zeroship_control::deploy_migrate::apply_bundle_migrations
+    // SEAM 3 (S4 apply): mirror the REAL migration service apply sequence:
+    // connect → provision schema + migrator role → discover frozen `.ir.json` →
+    // preflight Confined → apply_sealed under the confined profile, BEFORE
+    // go-live.
     //
     // The engine renders the pgvector column type as UNQUALIFIED `vector(N)`, and
     // pgvector installs that type into `public`. The Confined migrator's
@@ -397,26 +467,22 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     // writable resolution target, `public` rides at the end for USAGE-only
     // resolution of the shared extension type (see `role::provision_migrator` +
     // `db.rs::search_path_clause`; matches plugin-db's runtime). So the
-    // AS-GENERATED unqualified `vector(N)` migration applies cleanly under
-    // deploy-apply — no qualify-rewrite, no workaround.
+    // unqualified `vector(N)` migration applies cleanly under migrated apply —
+    // no qualify-rewrite, no workaround.
     //
     // (Previously this seam did NOT cohere: search_path pinned the per-app schema
     // only, so unqualified `vector` failed `type "vector" does not exist`. The
     // FIX 1 search_path widening — USAGE-only on `public` — closed that gap; the
     // confinement is unchanged: the migrator still cannot CREATE/write in
     // `public`, only resolve the extension type there.)
-    let apply = zeroship_control::deploy_migrate::apply_bundle_migrations(
-        &pg_url(),
-        &app_id,
-        &deploy_dir, // the as-generated (unqualified `vector(N)`) body
-    )
-    .await
-    .expect(
-        "P6 deploy-apply of the as-generated unqualified vector(N) migration must \
+    let apply = apply_ir_documents_like_migrated(&pg_url(), &app_id, &deploy_dir)
+        .await
+        .expect(
+            "S4 migrated apply of the frozen unqualified vector(N) IR must \
          succeed under the Confined migrator (public on search_path for USAGE-only \
          extension-type resolution)",
-    );
-    assert_eq!(apply.applied.len(), 1, "the bundle's migration applied once");
+        );
+    assert_eq!(apply.applied.len(), 1, "the frozen IR migration applied once");
     assert!(apply.skipped.is_empty());
 
     // Seam-3 assertions: the engine created the goodie schema in "<app_id>".
@@ -698,45 +764,5 @@ async fn schema_authority_capstone_end_to_end_on_real_pg() {
     // ---- cleanup (hygiene) ----
     let _ = std::fs::remove_dir_all(&gen_dir);
     let _ = std::fs::remove_dir_all(&deploy_dir);
-    let _ = std::fs::remove_dir_all(&store_dir);
     cleanup_app(&conn, &app_id).await;
 }
-
-/// Pack `(name, bytes)` blob entries + a manifest into a tar archive, then
-/// zstd-compress — the `.zship` wire format. manifest.json goes FIRST (the
-/// ingest contract requires it). Mirrors control's `build_zship` test helper.
-fn build_zship(manifest_bytes: &[u8], blobs: &[(String, Vec<u8>)]) -> Vec<u8> {
-    use std::io::Write as _;
-    let mut tar_buf: Vec<u8> = Vec::new();
-    {
-        let mut builder = tar::Builder::new(&mut tar_buf);
-        let mut header = tar::Header::new_gnu();
-        header.set_size(manifest_bytes.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder
-            .append_data(&mut header, "manifest.json", manifest_bytes)
-            .expect("append manifest");
-        for (hash, bytes) in blobs {
-            let mut h = tar::Header::new_gnu();
-            h.set_size(bytes.len() as u64);
-            h.set_mode(0o644);
-            h.set_cksum();
-            builder
-                .append_data(&mut h, format!("blobs/{hash}"), bytes.as_slice())
-                .expect("append blob");
-        }
-        builder.finish().expect("tar finish");
-    }
-    let mut compressed: Vec<u8> = Vec::new();
-    {
-        let mut enc = zstd::Encoder::new(&mut compressed, 0).expect("zstd enc");
-        enc.write_all(&tar_buf).expect("zstd write");
-        enc.finish().expect("zstd finish");
-    }
-    compressed
-}
-
-// A path-marker so a future cfg-out never trips an unused-import lint.
-#[allow(dead_code)]
-fn _path_marker(_: &Path, _: &PathBuf) {}

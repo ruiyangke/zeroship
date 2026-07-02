@@ -22,7 +22,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 zeroship-authz = { workspace = true }
-zeroship-control = { workspace = true }
+zeroship-authn = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-migrate = { workspace = true }
 

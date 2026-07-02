@@ -6776,7 +6776,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
- "zeroship-migrate",
  "zstd",
 ]
 
@@ -6929,6 +6928,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-migrated"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap",
+ "compio",
+ "compio-postgres",
+ "mimalloc",
+ "ntex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "zeroship-authn",
+ "zeroship-authz",
+ "zeroship-core",
+ "zeroship-migrate",
+]
+
+[[package]]
 name = "zeroship-plugin-db"
 version = "0.1.0"
 dependencies = [
@@ -7067,13 +7089,9 @@ dependencies = [
  "compio",
  "compio-postgres",
  "serde_json",
- "tar",
  "uuid",
- "zeroship-bundle",
- "zeroship-control",
  "zeroship-migrate",
  "zeroship-plugin-db",
- "zstd",
 ]
 
 [[package]]

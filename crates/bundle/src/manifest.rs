@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -135,40 +135,17 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<ManifestExports>,
 
-    /// Versioned DB migration files carried by the `.zship`, in **apply
-    /// order** (the order the build/`generate` step emitted them). Each
-    /// entry maps a migration filename (e.g. `V0001__create_users.sql`,
-    /// or a dbmate `<14-digit>_<desc>.sql`) to the sha256 hash of its
-    /// blob, content-addressed exactly like worker modules + assets.
-    ///
-    /// At deploy the control plane reconstructs these files on disk and
-    /// hands them to `zeroship-migrate` (Confined profile, schema
-    /// `"<app_id>"`) BEFORE the go-live commit (schema-authority §8). An
-    /// empty list (the default; `skip_serializing_if`) means the app
-    /// ships no schema — the migrate phase is a no-op.
-    ///
-    /// The *filename* is load-bearing: the migration loader derives each
-    /// migration's version + ordering from it, so it must round-trip
-    /// verbatim. The loader (not this struct) enforces the
-    /// `V<NNNN>__…`/dbmate grammar; `validate()` only enforces the blob
-    /// hash format + a path-safety check (no separators / traversal).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub migrations: Vec<MigrationFileEntry>,
-
     /// The generated **runtime schema descriptor** carried by the `.zship`,
-    /// content-addressed exactly like a migration blob (`{hash}`).
+    /// content-addressed like worker modules and assets (`{hash}`).
     ///
     /// This is the `schema.runtime.json` artifact `gen-types` emits by folding
     /// the migration set — a `Record<collection, Record<column, FieldDef>>` that
     /// formalises what the runtime's `normalizeSchema` produces. In the
-    /// migration-first cutover, the runtime reads this descriptor instead of any
-    /// schema declared on the user module, making the migration set the SOLE
-    /// source of schema truth.
+    /// migration-service cutover, the runtime reads this descriptor instead of
+    /// any schema declared on the user module. Migration documents are applied
+    /// through the migration service and are not carried by the `.zship`.
     ///
-    /// `None` (the default; `skip_serializing_if`) is valid only when the app
-    /// ships no migrations. A manifest with `migrations[]` but no descriptor is
-    /// internally inconsistent: the migration fold should have produced this
-    /// artifact, and booting schema-less would hide a broken build/deploy.
+    /// `None` (the default; `skip_serializing_if`) is valid for schema-less apps.
     ///
     /// `validate()` enforces the blob-hash format only; the descriptor's JSON
     /// shape is the producer's (`gen-types`) and consumer's (P4b runtime) contract,
@@ -180,29 +157,26 @@ pub struct Manifest {
 /// The generated runtime schema descriptor carried by a `.zship`
 /// (`manifest.runtime_descriptor`).
 ///
-/// Content-addressed exactly like [`MigrationFileEntry`]: `hash` is the sha256 of
-/// the `schema.runtime.json` blob body. There is no `name` — unlike migrations
-/// (whose filename is load-bearing for version/ordering), the descriptor is a
-/// single anonymous artifact reconstructed from its blob alone.
+/// `hash` is the sha256 of the `schema.runtime.json` blob body. The descriptor is
+/// a single anonymous artifact reconstructed from its blob alone; migration
+/// documents are applied through the migration service and are not represented
+/// in the manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeDescriptorEntry {
     /// sha256 hash (lowercase, 64 hex chars) of the `schema.runtime.json` blob.
     pub hash: String,
 }
 
-/// One migration file carried by a `.zship` (`manifest.migrations[i]`).
+/// One committed migration file produced by the migration build frontend.
 ///
-/// `name` is the migration's on-disk filename (the loader parses its
-/// `V<NNNN>__…`/dbmate grammar + derives ordering from it); `hash` is the
-/// sha256 of the file body's content-addressed blob.
+/// Migration documents are applied through the standalone migration service and
+/// are not carried in [`Manifest`]. The type remains in this crate because the
+/// frozen migration engine uses it as a shared build-artifact record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MigrationFileEntry {
-    /// Migration filename, e.g. `V0001__create_users.sql`. A bare filename
-    /// only — no path separators, no `.`/`..` traversal (enforced by
-    /// [`Manifest::validate`]).
+    /// Migration filename, e.g. `20240617123000_create_users.ir.json`.
     pub name: String,
-    /// sha256 hash (lowercase, 64 hex chars) of the migration file body's
-    /// blob.
+    /// sha256 hash (lowercase, 64 hex chars) of the migration file body.
     pub hash: String,
 }
 
@@ -224,7 +198,6 @@ impl Default for Manifest {
             net: NetConfig::default(),
             metadata: ManifestMetadata::default(),
             exports: None,
-            migrations: Vec::new(),
             runtime_descriptor: None,
         }
     }
@@ -459,7 +432,6 @@ impl Manifest {
                 built_at: "1970-01-01T00:00:00Z".to_string(),
             },
             exports: None,
-            migrations: Vec::new(),
             runtime_descriptor: None,
         }
     }
@@ -559,64 +531,9 @@ impl Manifest {
         for request in &self.net.requests {
             request.validate()?;
         }
-        // Migration entries: each blob hash must be a 64-char lowercase
-        // sha256, and each `name` must be a bare filename (no path
-        // separators / `.`/`..` traversal) so reconstructing it under a
-        // deploy tmp dir can never escape that dir. The migration-file
-        // GRAMMAR (`V<NNNN>__…`/dbmate) is the loader's job at deploy, not
-        // here — this is the wire-format + path-safety guard only.
-        // Cross-entry uniqueness: two entries that share a `name` would
-        // clobber on disk during `reconstruct_migration_files` (a truncating
-        // per-name write), silently dropping one migration's content before
-        // the loader's DuplicateVersion guard ever sees the file. Two entries
-        // that share a `hash` under different names point at the same blob —
-        // a content-addressing inconsistency the producer must not emit.
-        let mut seen_names: BTreeSet<&str> = BTreeSet::new();
-        let mut seen_hashes: BTreeSet<&str> = BTreeSet::new();
-        for entry in &self.migrations {
-            if !is_sha256_hex(&entry.hash) {
-                return Err(format!(
-                    "migrations[{name}].hash {hash:?} is not a lowercase 64-char sha256 hex",
-                    name = entry.name,
-                    hash = entry.hash
-                ));
-            }
-            if !is_safe_migration_name(&entry.name) {
-                return Err(format!(
-                    "migrations[].name {name:?} must be a bare filename \
-                     (no path separators or '.'/'..' traversal)",
-                    name = entry.name
-                ));
-            }
-            if !seen_names.insert(entry.name.as_str()) {
-                return Err(format!(
-                    "migrations[].name {name:?} is duplicated; entry names must be \
-                     unique (a collision would clobber on disk during reconstruction)",
-                    name = entry.name
-                ));
-            }
-            if !seen_hashes.insert(entry.hash.as_str()) {
-                return Err(format!(
-                    "migrations[].hash {hash:?} is duplicated across entries with \
-                     different names; each migration blob must be referenced by one name",
-                    hash = entry.hash
-                ));
-            }
-        }
-        // Runtime schema descriptor (migration-first cutover): an app that
-        // ships migrations must also ship the folded runtime descriptor. Apps
-        // with no migrations remain validly schema-less.
-        if !self.migrations.is_empty() && self.runtime_descriptor.is_none() {
-            return Err(
-                "manifest.migrations is non-empty but runtime_descriptor is missing; \
-                 apps with migrations must carry schema.runtime.json"
-                    .into(),
-            );
-        }
-        // The `schema.runtime.json` blob is content-addressed exactly like a
-        // migration body, so this layer enforces descriptor presence and hash
-        // format. The descriptor's JSON shape is checked by the runtime when it
-        // injects `__zsRuntimeDescriptor`.
+        // The `schema.runtime.json` blob is content-addressed like every other
+        // bundle blob. The descriptor's JSON shape is checked by the runtime
+        // when it injects `__zsRuntimeDescriptor`.
         if let Some(desc) = &self.runtime_descriptor {
             if !is_sha256_hex(&desc.hash) {
                 return Err(format!(
@@ -868,22 +785,8 @@ fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
 
-/// True if `name` is a safe bare migration filename: non-empty, no path
-/// separators (`/` or `\`), and not a `.`/`..` traversal component. The
-/// control plane reconstructs each migration under a deploy tmp dir using
-/// this name, so rejecting separators + traversal keeps the write confined
-/// to that dir.
-fn is_safe_migration_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
-}
-
 #[cfg(test)]
-mod migration_validation_tests {
+mod runtime_descriptor_validation_tests {
     use super::*;
 
     fn base() -> Manifest {
@@ -897,115 +800,6 @@ mod migration_validation_tests {
     }
 
     #[test]
-    fn migrations_default_empty_and_omitted_on_wire() {
-        let m = base();
-        assert!(m.migrations.is_empty());
-        let json = serde_json::to_string(&m).unwrap();
-        assert!(
-            !json.contains("migrations"),
-            "empty migrations must be omitted: {json}"
-        );
-        // Round-trips: a manifest without `migrations` deserializes fine.
-        let back: Manifest = serde_json::from_str(&json).unwrap();
-        assert!(back.migrations.is_empty());
-    }
-
-    #[test]
-    fn valid_migrations_pass_validate_and_round_trip() {
-        let mut m = base();
-        m.migrations = vec![
-            MigrationFileEntry {
-                name: "V0001__create_users.sql".into(),
-                hash: "a".repeat(64),
-            },
-            MigrationFileEntry {
-                name: "20240617123000_add_index.sql".into(),
-                hash: "b".repeat(64),
-            },
-        ];
-        m.runtime_descriptor = Some(RuntimeDescriptorEntry {
-            hash: "c".repeat(64),
-        });
-        m.validate().expect("valid migrations accepted");
-        let json = serde_json::to_string(&m).unwrap();
-        let back: Manifest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.migrations, m.migrations, "migrations round-trip in order");
-        assert_eq!(
-            back.runtime_descriptor, m.runtime_descriptor,
-            "runtime descriptor round-trips with migrations"
-        );
-    }
-
-    #[test]
-    fn rejects_bad_migration_hash() {
-        let mut m = base();
-        m.migrations = vec![MigrationFileEntry {
-            name: "V0001__x.sql".into(),
-            hash: "NOTAHASH".into(),
-        }];
-        let err = m.validate().unwrap_err();
-        assert!(err.contains("not a lowercase 64-char sha256"), "got {err}");
-    }
-
-    #[test]
-    fn rejects_path_traversal_migration_name() {
-        for bad in ["../escape.sql", "sub/dir.sql", "..", ".", "a\\b.sql", ""] {
-            let mut m = base();
-            m.migrations = vec![MigrationFileEntry {
-                name: bad.into(),
-                hash: "c".repeat(64),
-            }];
-            let err = m.validate().unwrap_err();
-            assert!(
-                err.contains("bare filename"),
-                "name {bad:?} must be rejected, got {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_duplicate_migration_name() {
-        // Two entries with the same `name` would clobber on disk during
-        // reconstruct_migration_files (a truncating per-name write), silently
-        // dropping one migration's content before the loader's DuplicateVersion
-        // guard ever sees the file. validate() must reject the manifest.
-        let mut m = base();
-        m.migrations = vec![
-            MigrationFileEntry {
-                name: "V0001__x.sql".into(),
-                hash: "a".repeat(64),
-            },
-            MigrationFileEntry {
-                name: "V0001__x.sql".into(),
-                hash: "b".repeat(64),
-            },
-        ];
-        let err = m.validate().unwrap_err();
-        assert!(err.contains("duplicated"), "duplicate name must be rejected, got {err}");
-    }
-
-    #[test]
-    fn rejects_duplicate_migration_hash() {
-        // Same blob referenced under two different names is a content-addressing
-        // inconsistency the producer must not emit.
-        let mut m = base();
-        m.migrations = vec![
-            MigrationFileEntry {
-                name: "V0001__x.sql".into(),
-                hash: "a".repeat(64),
-            },
-            MigrationFileEntry {
-                name: "V0002__y.sql".into(),
-                hash: "a".repeat(64),
-            },
-        ];
-        let err = m.validate().unwrap_err();
-        assert!(err.contains("duplicated"), "duplicate hash must be rejected, got {err}");
-    }
-
-    // ── Runtime schema descriptor slot (migration-first P4a) ─────────────────
-
-    #[test]
     fn runtime_descriptor_defaults_none_and_omitted_on_wire() {
         let m = base();
         assert!(m.runtime_descriptor.is_none());
@@ -1017,20 +811,6 @@ mod migration_validation_tests {
         // A manifest without `runtime_descriptor` deserializes to None.
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert!(back.runtime_descriptor.is_none());
-    }
-
-    #[test]
-    fn migrations_require_runtime_descriptor() {
-        let mut m = base();
-        m.migrations = vec![MigrationFileEntry {
-            name: "V0001__create_users.sql".into(),
-            hash: "a".repeat(64),
-        }];
-        let err = m.validate().unwrap_err();
-        assert!(
-            err.contains("runtime_descriptor") && err.contains("migrations"),
-            "migration-bearing manifest must require a runtime descriptor, got {err}"
-        );
     }
 
     #[test]

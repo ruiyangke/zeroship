@@ -1,5 +1,5 @@
 /**
- * PR4 deliverable A4 — migration discovery + bundling for the `.zship` packer.
+ * Migration discovery + recording helpers.
  *
  * The vite-plugin is a THIN client of the SAME PR4a kernel-sandboxed recorder the
  * platform uses. It does NOT evaluate untrusted migration `.ts` in-process: the
@@ -7,16 +7,18 @@
  * `build`/`record` subcommands). This keeps the TS↔Rust boundary clean and the
  * security-critical evaluation inside the kernel sandbox.
  *
- * Flow (per the design §5.1 build-once authority):
+ * Flow:
  *  1. Discover `migrations/*.ts` (configurable dir, default `migrations/`).
  *  2. For each `.ts` lacking a committed `<name>.ir.json`, invoke the recorder via
  *     the CLI to produce the committed artifact. If `ZEROSHIP_RECORDER_URL` (or the
  *     plugin option) is set, the CLI uses the hosted thin client with a local
  *     fallback; otherwise the LOCAL recorder records directly.
- *  3. Read each committed `<name>.ir.json` VERBATIM, content-hash it (sha256), and
- *     contribute `{ name, hash }` entries into `manifest.migrations`. The committed
- *     bytes are staged into the archive exactly like other content blobs — consumed
- *     verbatim, never re-emitted.
+ *  3. Read each committed `<name>.ir.json` VERBATIM and content-hash it (sha256).
+ *
+ * The `.zship` packer no longer carries these migration documents; deploy-time
+ * application runs through the standalone migration service. The generated
+ * `schema.runtime.json` descriptor remains the only schema artifact packed into
+ * `.zship`.
  */
 
 import { promises as fs } from "node:fs";
@@ -28,8 +30,7 @@ import { spawnSync } from "node:child_process";
 /** A 64-char lowercase sha256 hex string. */
 export type Sha256Hex = string;
 
-/** One migration file contributed to `manifest.migrations` + its committed bytes
- *  (so the packer can stage the blob — consumed verbatim, never re-emitted). */
+/** One committed migration IR artifact plus its content hash. */
 export interface MigrationBundleEntry {
   /** The committed `.ir.json` filename, e.g. `20240617123000_create_users.ir.json`. */
   name: string;
@@ -71,9 +72,8 @@ const MIGRATION_TS_RE = /^(\d{14})_([A-Za-z0-9_]+)\.ts$/;
 
 /**
  * Discover + (record if needed) + read the committed `.ir.json` artifacts under
- * `<root>/<migrationsDir>`. Returns the ordered (by 14-digit version) bundle
- * entries. An empty / missing migrations dir yields `[]` (the app ships no
- * migrations — a no-op).
+ * `<root>/<migrationsDir>`. Returns the ordered (by 14-digit version) committed
+ * IR entries. An empty / missing migrations dir yields `[]`.
  */
 export async function discoverMigrations(
   opts: DiscoverMigrationsOptions

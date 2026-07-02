@@ -6,7 +6,7 @@ use std::sync::Arc;
 use clap::Parser;
 use compio_postgres::NoTls;
 use ntex::web;
-use zeroship_control::token_handlers;
+use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_core::config::parse_bool_flag;
 use zeroship_migrated::auth::ControlPlaneAuthenticator;
 use zeroship_migrated::policy::ManagedPolicyConfig;
@@ -14,6 +14,8 @@ use zeroship_migrated::MigrationServiceState;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+const DEV_AUTH_PLATFORM_ISSUER: &str = "http://localhost:4444/oauth2";
 
 #[derive(Parser, Debug)]
 #[command(name = "zeroship-migrated")]
@@ -65,14 +67,6 @@ struct MigratedCli {
     )]
     dev_insecure: Option<bool>,
 
-    /// Hydra admin API base URL for OAuth introspection.
-    #[arg(
-        long = "hydra-admin-url",
-        env = "HYDRA_ADMIN_URL",
-        default_value = "http://localhost:4445"
-    )]
-    hydra_admin_url: String,
-
     /// Expected OAuth audience for accepted bearer tokens.
     #[arg(
         long = "oauth-audience",
@@ -80,6 +74,22 @@ struct MigratedCli {
         default_value = "control.zeroship.ai"
     )]
     oauth_audience: String,
+
+    /// Platform OP issuer for platform-issued migration-service access tokens.
+    #[arg(
+        long = "auth-platform-issuer",
+        env = "AUTH_PLATFORM_ISSUER",
+        default_value = ""
+    )]
+    auth_platform_issuer: String,
+
+    /// JWKS URL for the platform OP. Defaults to {issuer}/.well-known/jwks.json.
+    #[arg(
+        long = "auth-platform-jwks-url",
+        env = "AUTH_PLATFORM_JWKS_URL",
+        default_value = ""
+    )]
+    auth_platform_jwks_url: String,
 
     /// Directory for staged request migration files.
     #[arg(long = "tmp-dir", env = "MIGRATED_TMP_DIR")]
@@ -143,6 +153,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let auth_provider = match build_auth_provider(
+        &cli.auth_platform_issuer,
+        &cli.auth_platform_jwks_url,
+        insecure_dev,
+    ) {
+        Ok(provider) => Arc::new(provider),
+        Err(message) => {
+            eprintln!("migrated: {message}");
+            tracing::error!(
+                error = %message,
+                "migrated: refusing to start with invalid auth provider config"
+            );
+            std::process::exit(1);
+        }
+    };
+
     let policy_config = match build_policy_config(
         &cli.policy_seal_key,
         cli.policy_ceiling_version,
@@ -175,15 +201,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .detach();
 
+            let control_pg = Arc::new(control_pg);
+            let bearer_verifier = zeroship_authn::BearerVerifier::new(
+                Arc::clone(&pat_issuer),
+                Arc::clone(&control_pg),
+                Arc::clone(&auth_provider),
+                zeroship_core::auth::default_trusted_oauth_clients(),
+                cli.oauth_audience,
+            );
             let authenticator = Arc::new(ControlPlaneAuthenticator::new(
-                Arc::new(control_pg),
+                control_pg,
                 zeroship_authz::load_platform_policies()
                     .expect("migrated: bundled authz policies parse"),
-                pat_issuer,
-                Arc::new(zeroship_core::hydra::HydraIntrospector::new(
-                    &cli.hydra_admin_url,
-                )),
-                cli.oauth_audience,
+                bearer_verifier,
             ));
 
             let state = Arc::new(MigrationServiceState::new(
@@ -230,14 +260,46 @@ fn build_policy_config(
         .map_err(|err| format!("invalid migration policy seal config: {err}"))
 }
 
+fn build_auth_provider(
+    platform_issuer: &str,
+    platform_jwks_url: &str,
+    insecure_dev: bool,
+) -> Result<AuthProvider, String> {
+    let issuer = if platform_issuer.trim().is_empty() {
+        if insecure_dev {
+            tracing::warn!(
+                "migrated: --dev-insecure set; using dev platform auth issuer"
+            );
+            DEV_AUTH_PLATFORM_ISSUER.to_string()
+        } else {
+            return Err(
+                "--auth-platform-issuer / AUTH_PLATFORM_ISSUER is required for OAuth bearer \
+                 verification. Pass --dev-insecure only for local development."
+                    .to_string(),
+            );
+        }
+    } else {
+        platform_issuer.to_string()
+    };
+
+    let jwks_url = if platform_jwks_url.trim().is_empty() {
+        None
+    } else {
+        Some(platform_jwks_url.to_string())
+    };
+    let config = PlatformConfig::new(issuer, jwks_url)
+        .map_err(|err| format!("invalid platform auth provider config: {err}"))?;
+    Ok(AuthProvider::Platform(PlatformProvider::new(config)))
+}
+
 fn build_pat_issuer(
     signing_key_file: &str,
     insecure_dev: bool,
-) -> Result<token_handlers::PatIssuer, String> {
+) -> Result<zeroship_authn::PatIssuer, String> {
     if signing_key_file.is_empty() {
         if insecure_dev {
             tracing::warn!("migrated: --dev-insecure set; using dev-only PAT signing key");
-            return Ok(token_handlers::PatIssuer::dev_insecure());
+            return Ok(zeroship_authn::PatIssuer::dev_insecure());
         }
         return Err(
             "--signing-key-file / SIGNING_KEY_FILE is required for PAT verification. \
@@ -247,9 +309,9 @@ fn build_pat_issuer(
     }
 
     let signing_key =
-        token_handlers::load_signing_key_from_path(std::path::Path::new(signing_key_file))
+        zeroship_authn::load_signing_key_from_path(std::path::Path::new(signing_key_file))
             .map_err(|err| format!("failed to load PAT signing key: {err}"))?;
-    token_handlers::PatIssuer::new(&signing_key)
+    zeroship_authn::PatIssuer::new(&signing_key)
         .map_err(|err| format!("failed to initialize PAT issuer: {err}"))
 }
 
