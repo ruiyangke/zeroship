@@ -3,7 +3,7 @@
 // the golden corpus. The npm `ops.ts` and the V8-embedded `migrate_ops.js` are
 // two implementations of the same locked fluent surface; this test re-authors a
 // golden fixture's `up()` through `table()` and asserts the recorded op list
-// equals the committed golden `.ir.json`'s `ops` — proving the fluent-only
+// equals the committed golden `.golden.json`'s `ops` — proving the fluent-only
 // redesign is PURE SUGAR (the recorded IR is byte-identical to the pre-redesign
 // golden, except the C1 FK-actions delta which the FK goldens carry).
 //
@@ -27,7 +27,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = resolve(here, "../../../crates/zeroship-migrate/tests/op_fixtures");
 
 async function golden(stem: string): Promise<any> {
-  return JSON.parse(await readFile(resolve(fixturesDir, `${stem}.ir.json`), "utf8"));
+  return JSON.parse(await readFile(resolve(fixturesDir, `${stem}.golden.json`), "utf8"));
 }
 
 /** Normalize a `createTable` op for parity comparison: the committed golden is the
@@ -257,7 +257,10 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
       ifExists: true,
     });
 
-    pg.sql`SELECT set_config('zeroship.tenant_app', ${"app_demo"}, false)`;
+    pg.raw({
+      sql: "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
+      reason: "set tenant app GUC for pg vendor fixture",
+    });
   });
   const g = await golden("pg_vendor");
   assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));

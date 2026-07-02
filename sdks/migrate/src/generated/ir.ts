@@ -499,7 +499,7 @@ export type Op =
       body: string;
     }
   | { op: "dropFunction"; name: string; schema?: string | null; argTypes?: string[] | null; ifExists?: boolean | null }
-  | { op: "pgRaw"; sql: string; binds?: IrScalar[] };
+  | { op: "pgRaw"; sql: string; reason: string };
 
 /** All-`Option` overrides of the migration flags. */
 export interface IrFlagsOverride {

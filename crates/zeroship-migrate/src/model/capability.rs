@@ -83,7 +83,7 @@ pub enum VendorCapability {
     Policy,
     /// `CREATE/DROP FUNCTION` ([`VendorCapabilities::allow_function`]).
     Function,
-    /// The gated raw escape (`pg.sql`) ([`VendorCapabilities::allow_raw_sql`]).
+    /// The gated raw escape (`pgRaw`) ([`VendorCapabilities::allow_raw_sql`]).
     RawSql,
     /// The gated raw view-body SELECT escape ([`VendorCapabilities::allow_raw_view_body`]).
     RawViewBody,
@@ -150,7 +150,7 @@ pub struct VendorCapabilities {
     pub allow_policy: bool,
     /// `CREATE/DROP FUNCTION` (the raw body escape).
     pub allow_function: bool,
-    /// The gated raw-statement escape (`pg.sql`).
+    /// The gated raw-statement escape (`pgRaw`).
     pub allow_raw_sql: bool,
     /// The gated raw view-body SELECT escape.
     pub allow_raw_view_body: bool,
@@ -212,7 +212,7 @@ impl VendorCapabilities {
 
     /// The **local** preset (an in-between dev/CI posture): structural vendor DDL
     /// (extensions, schemas, grants, RLS, policies, functions) is
-    /// enabled, but ROLE management and the raw `pg.sql` escape are NOT — a local
+    /// enabled, but ROLE management and the raw `pgRaw` escape are NOT — a local
     /// dev DB does not mint roles and never needs the last-resort raw escape. This
     /// preset is not wired to a `TrustProfile` (there is no `Local` profile); it is
     /// available for a caller composing a bespoke gate.

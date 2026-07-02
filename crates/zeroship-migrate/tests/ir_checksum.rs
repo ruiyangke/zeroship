@@ -88,9 +88,10 @@ fn checksum_of_byte_stable_golden() {
 /// bump, since the JS `op.*` author must emit the same advisory hint).
 #[test]
 fn checksum_of_ir_byte_stable_golden() {
-    // A fixed, fully-populated tuple: two ops (a createTable + an insert whose
-    // row folds a typed IrScalar), non-default flags, a frozen owner, one dep,
-    // one supersedes, and no preconditions. Frozen literals only — no
+    // A fixed, fully-populated tuple: three ops (a createTable + an insert whose
+    // row folds a typed IrScalar + a pgRaw whose reason folds as audit metadata),
+    // non-default flags, a frozen owner, one dep, one supersedes, and no
+    // preconditions. Frozen literals only — no
     // generate() — so the hash is reproducible across runs.
     let flags = MigrationFlags {
         transactional: false,
@@ -125,6 +126,10 @@ fn checksum_of_ir_byte_stable_golden() {
             on_conflict: None,
             schema: None,
         },
+        Op::PgRaw {
+            sql: "SELECT set_config('zeroship.tenant_app', 'app_golden', false)".into(),
+            reason: "pin pgRaw reason in checksum golden".into(),
+        },
     ];
     let deps = [dep()];
     let sups = [sup()];
@@ -136,7 +141,7 @@ fn checksum_of_ir_byte_stable_golden() {
     // anchor) reuses this same Rust `MigrationFlags::default()` serialization, so
     // there is no separate JS serializer to bump.
     const EXPECTED: &str =
-        "574786ab59c227338430708e3793658d57ef9bfbf360e93e518e325c83119ad9";
+        "de42570b961099e8ef7395b647dca7f6a9ece61c6f41f96e576f23e86da06eab";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),
@@ -320,6 +325,36 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
         Checksum::of_ir(&CanonicalOpList(&u0), &flags, owner, &[], &[], &[]),
         Checksum::of_ir(&CanonicalOpList(&u5), &flags, owner, &[], &[], &[]),
         "an in-AST Literal threshold change must be drift"
+    );
+}
+
+#[test]
+fn checksum_of_ir_folds_pg_raw_reason() {
+    let flags = MigrationFlags::default();
+    let mk_raw = |reason: &str| {
+        vec![Op::PgRaw {
+            sql: "SELECT 1".into(),
+            reason: reason.into(),
+        }]
+    };
+    assert_ne!(
+        Checksum::of_ir(
+            &CanonicalOpList(&mk_raw("first reason")),
+            &flags,
+            "app_ir",
+            &[],
+            &[],
+            &[],
+        ),
+        Checksum::of_ir(
+            &CanonicalOpList(&mk_raw("second reason")),
+            &flags,
+            "app_ir",
+            &[],
+            &[],
+            &[],
+        ),
+        "a PgRaw reason change must be checksum drift"
     );
 }
 

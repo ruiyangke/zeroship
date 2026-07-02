@@ -97,7 +97,7 @@ pub const CODE_COLUMN_FACET_CONFLICT: &str = "COLUMN_FACET_CONFLICT";
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 /// **VENDOR (`@zeroship/migrate/pg`)** — a privileged vendor op (role/grant/RLS/
-/// policy/trigger/function/extension/schema/`pg.sql`) whose required
+/// policy/trigger/function/extension/schema/`pgRaw`) whose required
 /// [`VendorCapability`](crate::model::capability::VendorCapability) is NOT granted by the
 /// active capability set (vendor spec §3.2). The Confined creator/AI posture
 /// grants NO vendor capability, so EVERY vendor op is refused fail-closed at
@@ -105,6 +105,8 @@ pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 /// (gate 2 — the rendered SQL hits the Confined deny-list) means a future refactor
 /// that drops this gate still fails closed.
 pub const CODE_VENDOR_OP_DENIED: &str = "VENDOR_OP_DENIED";
+/// A `pgRaw` op must carry a non-empty audit reason for using the raw SQL escape.
+pub const CODE_PGRAW_REASON_REQUIRED: &str = "PGRAW_REASON_REQUIRED";
 
 /// The MAX byte length a `t.id({prefix})` prefix may carry (P2a §4). Mirrors the
 /// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
@@ -745,22 +747,15 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
-        Op::PgRaw { binds, .. } if !binds.is_empty() => Err(AuthoringError {
-            code: CODE_UNSUPPORTED.to_string(),
+        Op::PgRaw { reason, .. } if reason.trim().is_empty() => Err(AuthoringError {
+            code: CODE_PGRAW_REASON_REQUIRED.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
             ts_location: ts_location.map(str::to_string),
             dialect: target_dialect,
-            reason: format!(
-                "pgRaw carries {} bind value(s), but the current vendor/raw DDL path \
-                 executes SQL as a batch statement and does not bind parameters. \
-                 Non-empty PgRaw.binds are rejected until a parameterized PgRaw plan \
-                 step exists.",
-                binds.len()
-            ),
+            reason: "pgRaw requires a non-empty reason for auditability".to_string(),
             suggested_fix: Some(
-                "remove interpolation from pg.sql for now, or wait for the \
-                 parameterized PgRaw executor path; do not inline untrusted values"
+                "pass pg.raw({ sql, reason }) with a short explanation for why raw SQL is required"
                     .to_string(),
             ),
         }),
@@ -878,7 +873,7 @@ fn validate_vendor_op(
             (
                 format!(
                     "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
-                     roles/grants/RLS/policies/triggers/functions/extensions/schemas/pg.sql have \
+                     roles/grants/RLS/policies/triggers/functions/extensions/schemas/pgRaw have \
                      no SQLite analogue (PgOnly)",
                     cap.as_token()
                 ),
@@ -999,7 +994,7 @@ fn view_body_error(
 
 /// Validate a raw view body before it is admitted by `ViewQuery::Raw`.
 ///
-/// The raw surface is deliberately narrower than `pg.sql`: it must be exactly one
+/// The raw surface is deliberately narrow: it must be exactly one
 /// top-level `SELECT` (no DDL/DML utility statement, no semicolon-chained second
 /// statement, no `SELECT INTO`) and then it is fed through the same body
 /// reparse/string-literal/token deny-list used for function bodies.

@@ -548,7 +548,7 @@ pub enum IrLowerError {
     RenameLower(String),
     /// **VENDOR** — a vendor (`@zeroship/migrate/pg`) op was lowered against a
     /// SQLite target. Every vendor primitive (roles/grants/RLS/policies/triggers/
-    /// functions/extensions/schemas/`pg.sql`) is `dialect_scope = PgOnly` and has no
+    /// functions/extensions/schemas/`pgRaw`) is `dialect_scope = PgOnly` and has no
     /// SQLite analogue (vendor spec §4.3) — refused fail-closed at lower (the
     /// validate gate already refuses it at load on a SQLite target). Carries the op
     /// kind tag.

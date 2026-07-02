@@ -13,7 +13,8 @@ use zeroship_migrate::model::ir::{
     CURRENT_IR_VERSION,
 };
 use zeroship_migrate::model::validate::{
-    validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
+    validate_ir_scoped, Dialect, CODE_PGRAW_REASON_REQUIRED, CODE_UNSUPPORTED,
+    CODE_VENDOR_OP_DENIED,
 };
 use zeroship_migrate::SchemaScope;
 use zeroship_migrate::render::vendor::render_vendor_op;
@@ -458,14 +459,26 @@ fn create_and_drop_function_type_refs_are_validated_not_sql_fragments() {
 }
 
 #[test]
-fn pg_raw_non_empty_binds_are_rejected_until_parameterized_execution_exists() {
+fn pg_raw_empty_reason_is_rejected_at_validate() {
     let op = Op::PgRaw {
-        sql: "SELECT set_config('zeroship.tenant_app', $1, false)".into(),
-        binds: vec![IrScalar::Str("app_demo".into())],
+        sql: "SELECT 1".into(),
+        reason: "  ".into(),
     };
-    assert!(
-        render_vendor_op(&op, SCHEMA).is_err(),
-        "PgRaw binds are a false contract until PgRaw executes as a parameterized plan step"
+    let platform = SchemaScope::Allowlist(vec!["zeroship".into(), "public".into()]);
+    let err = validate_ir_scoped(&ir_with(vec![op]), Dialect::Postgres, &[], Some(&platform))
+        .expect_err("empty pgRaw reason must be rejected");
+    assert_eq!(err.code, CODE_PGRAW_REASON_REQUIRED, "got {err:?}");
+    assert_eq!(err.reason, "pgRaw requires a non-empty reason for auditability");
+}
+
+#[test]
+fn pg_raw_valid_reason_renders_verbatim_sql() {
+    assert_eq!(
+        render_up(&Op::PgRaw {
+            sql: "SELECT set_config('zeroship.tenant_app', 'app_demo', false)".into(),
+            reason: "set the tenant app GUC for tests".into(),
+        }),
+        "SELECT set_config('zeroship.tenant_app', 'app_demo', false)"
     );
 }
 
@@ -494,7 +507,7 @@ fn vendor_samples() -> Vec<Op> {
             name: "f".into(), schema: None, args: None, returns: "void".into(),
             language: FuncLanguage::Sql, replace: None, volatility: None, body: "SELECT 1".into(),
         },
-        Op::PgRaw { sql: "SELECT 1".into(), binds: vec![] },
+        Op::PgRaw { sql: "SELECT 1".into(), reason: "smoke-test raw capability".into() },
     ]
 }
 

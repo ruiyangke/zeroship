@@ -617,7 +617,7 @@ impl SqlGuard {
         })
     }
 
-    /// Backstop for the two IR raw islands (`pg.sql` and `createFunction.body`)
+    /// Backstop for the two IR raw islands (`pgRaw` and `createFunction.body`)
     /// under the Trusted operator profile. Trusted still skips project-schema
     /// confinement for general SQL files, but arbitrary SQL strings embedded inside
     /// otherwise structured IR must not bypass the deny-list for host-reaching or
@@ -3409,7 +3409,7 @@ mod tests {
         let author = platform_author(&cfg);
         let op = Op::PgRaw {
             sql: "CREATE TABLE zeroship.raw_users AS SELECT 1 AS id".into(),
-            binds: Vec::new(),
+            reason: "require_rls raw table creation regression".into(),
         };
 
         match author.lower_guarded(
@@ -4172,7 +4172,7 @@ mod tests {
         let author = platform_author(&guard_cfg);
         let op = crate::model::ir::Op::PgRaw {
             sql: "COPY zeroship.audit_events TO PROGRAM 'sh -c id'".into(),
-            binds: Vec::new(),
+            reason: "raw COPY PROGRAM denial regression".into(),
         };
 
         match author.lower_guarded(
@@ -4404,7 +4404,7 @@ mod tests {
         let author = trusted_author();
         let bad = crate::model::ir::Op::PgRaw {
             sql: "CREATE ROLE zsmig_raw_evil SUPERUSER".into(),
-            binds: Vec::new(),
+            reason: "raw SUPERUSER denial regression".into(),
         };
 
         match author.lower_guarded(
@@ -4431,7 +4431,7 @@ mod tests {
 
         let clean = crate::model::ir::Op::PgRaw {
             sql: "SELECT 1".into(),
-            binds: Vec::new(),
+            reason: "trusted raw smoke test".into(),
         };
         author
             .lower_guarded(

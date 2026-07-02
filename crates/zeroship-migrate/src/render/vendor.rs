@@ -5,7 +5,7 @@
 //! ([`quote_ident_checked`]), policy/trigger predicates rendered from the CLOSED
 //! [`Expr`](crate::model::expr::Expr) AST via the existing inline renderer
 //! ([`render_predicate_pg`]) — **never string concatenation**. The function `body`
-//! and the `pg.sql` escape are the two raw-string fields: they are embedded
+//! and the `pgRaw` escape are the two raw-string fields: they are embedded
 //! VERBATIM and the WHOLE rendered statement is then `pg_query`-parsed by the
 //! guard at the lower seam (so the body is scanned, vendor spec §3.3).
 //!
@@ -52,17 +52,6 @@ pub enum VendorError {
     EmptyList {
         /// What was empty.
         what: &'static str,
-    },
-    /// `PgRaw.binds` are recorded in the IR but are not executed as native
-    /// parameters by today's DDL/vendor path. Reject until a parameterized `PgRaw`
-    /// plan step exists.
-    #[error(
-        "vendor render: pgRaw with {count} bind value(s) is unsupported until \
-         pgRaw executes through a parameterized plan step"
-    )]
-    PgRawBindsUnsupported {
-        /// Number of supplied bind values.
-        count: usize,
     },
     /// A trigger action is not renderable on Postgres.
     #[error("vendor render: trigger action {kind} is unsupported on Postgres")]
@@ -580,13 +569,9 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             vec![VendorStatement { name: format!("drop_function_{name}"), up, down: None }]
         }
         // ── The gated raw escape ──────────────────────────────────────────────
-        Op::PgRaw { sql, binds } => {
-            if !binds.is_empty() {
-                return Err(VendorError::PgRawBindsUnsupported { count: binds.len() });
-            }
+        Op::PgRaw { sql, .. } => {
             // The verbatim SQL is embedded as-is and the WHOLE statement is
-            // `pg_query`-parsed + deny-scanned by the guard. Non-empty binds are
-            // rejected above until PgRaw has a parameterized executor path.
+            // `pg_query`-parsed + deny-scanned by the guard.
             vec![VendorStatement { name: "pg_raw".to_string(), up: sql.clone(), down: None }]
         }
         // Non-vendor ops never reach here (the lower seam routes only vendor ops).

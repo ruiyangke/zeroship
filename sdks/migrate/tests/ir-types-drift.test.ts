@@ -174,7 +174,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   createFunction: ["args", "body", "language", "name", "replace", "returns", "schema", "volatility"].sort(),
   dropFunction: ["argTypes", "ifExists", "name", "schema"].sort(),
   comment: ["comment", "target"].sort(),
-  pgRaw: ["binds", "sql"].sort(),
+  pgRaw: ["reason", "sql"].sort(),
 };
 
 test("Op variant tags match the schema", () => {

@@ -2347,19 +2347,16 @@
           ]
         },
         {
-          "description": "**VENDOR** — the gated raw-statement escape (`pg.sql\\`…\\``, vendor spec\n§2.11). Records the verbatim SQL + optional typed binds. Operator-only and\nSTILL parse-scanned by the guard deny-list at lower. Non-empty `binds` are\nrejected at validate/lower/render until PgRaw has a real parameterized\nexecutor path; values must not be inlined as SQL text.",
+          "description": "**VENDOR** — the gated raw-statement escape (vendor spec §2.11). Records\nthe verbatim SQL plus required audit metadata. Operator-only and STILL\nparse-scanned by the guard deny-list at lower.",
           "type": "object",
           "properties": {
             "sql": {
               "description": "The verbatim SQL statement (no trailing `;`).",
               "type": "string"
             },
-            "binds": {
-              "description": "Optional typed binds. Non-empty is currently unsupported and refused\nfail-closed; retained in the wire shape for the future parameterized\nPgRaw executor path.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/IrScalar"
-              }
+            "reason": {
+              "description": "Required author-supplied audit reason for using raw SQL.",
+              "type": "string"
             },
             "op": {
               "type": "string",
@@ -2369,7 +2366,8 @@
           "additionalProperties": false,
           "required": [
             "op",
-            "sql"
+            "sql",
+            "reason"
           ]
         }
       ]

@@ -2397,52 +2397,19 @@ export const pg = {
       ifExists: args.ifExists,
     }));
   },
-  /** The gated raw-statement escape as an explicit { sql, binds } call (vendor
-   *  spec section 2.11) — the object-arg twin of the pg.sql tagged template.
-   *  Binds are typed scalars; verbatim text is pg_query-scanned by the guard at
-   *  lower. Emits the canonical pgRaw wire op. */
+  /** The gated raw-statement escape as an explicit { sql, reason } call (vendor
+   *  spec section 2.11). Verbatim text is pg_query-scanned by the guard at lower.
+   *  Emits the canonical pgRaw wire op. */
   raw(args) {
     requireString(args.sql, "pg.raw({ sql })");
+    requireString(args.reason, "pg.raw({ reason })");
     return push(compact({
       op: "pgRaw",
       sql: args.sql,
-      binds: args.binds && args.binds.length > 0 ? args.binds.map(scalarBind) : undefined,
-    }));
-  },
-  /** The gated raw-statement escape (`pg.sql\`…\``, vendor spec §2.11). A tagged
-   *  template whose interpolation slots accept ONLY typed binds (never identifiers
-   *  / SQL) — the binds become positional placeholders, the verbatim text is
-   *  embedded and `pg_query`-scanned by the guard at lower. */
-  sql(strings, ...binds) {
-    // Reassemble the template into a single statement, replacing each interpolation
-    // slot with a positional placeholder ($1, $2, …) so a bind can never be string-
-    // concatenated into the statement shape.
-    let out = strings[0];
-    for (let i = 0; i < binds.length; i++) {
-      out += `$${i + 1}` + strings[i + 1];
-    }
-    return push(compact({
-      op: "pgRaw",
-      sql: out,
-      binds: binds.length > 0 ? binds.map(scalarBind) : undefined,
+      reason: args.reason,
     }));
   },
 };
-
-/** Coerce a `pg.sql` bind into the IR scalar wire form. Numbers/strings/bools pass
- *  through; everything else is rejected fail-closed (a `pg.sql` bind is a typed
- *  scalar, never an object/identifier). */
-function scalarBind(v) {
-  const t = typeof v;
-  if (t === "string" || t === "boolean") return v;
-  if (t === "number") {
-    if (!Number.isInteger(v)) {
-      throw structuredError("OP_INVALID", `pg.sql bind ${v} must be an integer scalar (use a decimal string for non-integers)`);
-    }
-    return v;
-  }
-  throw structuredError("OP_INVALID", `pg.sql bind must be a typed scalar (string/number/boolean); got ${t}`);
-}
 
 // ===========================================================================
 // (C) Determinism lint. Flag CALLS to JS nondeterminism accessors (`Date.now()` /

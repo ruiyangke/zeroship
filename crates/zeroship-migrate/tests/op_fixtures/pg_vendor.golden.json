@@ -248,10 +248,8 @@
     },
     {
       "op": "pgRaw",
-      "sql": "SELECT set_config('zeroship.tenant_app', $1, false)",
-      "binds": [
-        "app_demo"
-      ]
+      "sql": "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
+      "reason": "set tenant app GUC for pg vendor fixture"
     }
   ],
   "flags": {},
