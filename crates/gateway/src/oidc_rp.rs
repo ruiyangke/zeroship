@@ -543,28 +543,25 @@ impl OidcRp {
     /// server-to-server). The browser never takes this path — it holds a
     /// gateway-signed session cookie, verified by `session_token::Verifier`.
     ///
-    /// Validation covers: signature (against any cached JWK matching the
-    /// token's `kid`/`alg`), `iss == self.issuer`, and `exp` (with the
-    /// jsonwebtoken default 60 s leeway). **`aud` is deliberately NOT
+    /// Validation covers: `typ == at+jwt`, `alg == EdDSA`, signature
+    /// (against a cached JWK matching the token's `kid`), `iss == self.issuer`,
+    /// `exp`, and the RFC 9068 required claim set. **`aud` is deliberately NOT
     /// validated here** — an access token's `aud` is the resource-server
-    /// audience, not the OAuth client, so per-app binding is done by the
-    /// caller on the `client_id` claim (RFC 9068 §3), with an `aud`
-    /// fallback. We therefore disable jsonwebtoken's audience check and
-    /// surface `aud` in the returned claims for the caller's fallback.
+    /// audience, not the OAuth client. The caller must bind both the
+    /// `client_id` claim and the route-specific resource audience.
     ///
-    /// **This function does NOT bind the token to any client.** It verifies
-    /// only signature + `iss` + `exp` and returns the decoded claims. Per-app
-    /// binding (`client_id` claim == route client, with an `aud`-contains
-    /// fallback) is the CALLER's responsibility — it lives in the Bearer arm
-    /// because it needs the `aud` fallback, which depends on the normalized
-    /// `aud` list this function surfaces. A caller that skips the
-    /// caller-side binding check silently opens cross-app replay; that is
-    /// why no `expected_client_id` parameter is accepted here (it would
-    /// falsely imply this function enforces binding).
+    /// **This function does NOT bind the token to any client or resource.** It
+    /// verifies only token shape/signature/issuer/lifetime and returns the
+    /// decoded claims. Per-app binding (`client_id` claim == route client) and
+    /// resource binding (`aud` contains the route resource audience) are the
+    /// CALLER's responsibility. A caller that skips those caller-side checks
+    /// silently opens cross-app or cross-resource replay; that is why no
+    /// `expected_client_id` parameter is accepted here (it would falsely imply
+    /// this function enforces binding).
     ///
     /// # Errors
     ///
-    /// [`OidcRpError::VerifyIdToken`] wrapping an [`OidcError`] for any
+    /// [`OidcRpError::VerifyAccessToken`] wrapping an [`OidcError`] for any
     /// JWKS/signature/iss/exp failure. Callers translate this into a
     /// `401` (User/Admin route) or fall-through to anonymous (Anon
     /// route), per the Bearer-arm policy gate.
@@ -583,20 +580,19 @@ fn op_base_url(auth_ui_url: &str) -> String {
 /// the profile fields for the `ZeroShip-User` header.
 ///
 /// `aud` per RFC 7519 may be a string OR an array of strings; the helper
-/// normalizes both into a `Vec<String>` so the caller's `aud`-fallback
-/// binding (`aud` contains the expected `client_id`) is uniform.
+/// normalizes both into a `Vec<String>` so the caller can enforce the route's
+/// resource-server audience uniformly.
 #[derive(Debug, Clone)]
 pub struct AccessClaims {
     /// Subject — the **global** OP UUID (`usr_…`). On the raw-OP
     /// Bearer path Slice 4 projects this to a per-app `pws_`; Slice 1c
     /// uses it directly (no pairwise derivation yet).
     pub sub: String,
-    /// The OAuth `client_id` claim, when present (RFC 9068 §3 mandates
-    /// it; OP emits it). The Bearer arm's primary per-app binding.
+    /// The OAuth `client_id` claim (RFC 9068 §3 mandates it; OP emits it).
+    /// The Bearer arm's per-app authorized-party binding.
     pub client_id: Option<String>,
-    /// The token audience(s), normalized to a list. The Bearer arm's
-    /// fallback binding (when `client_id` is absent) checks whether this
-    /// list contains the expected `client_id`.
+    /// The token audience(s), normalized to a list. The Bearer arm requires this
+    /// list to contain the route's resource-server audience.
     pub aud: Vec<String>,
     /// Issued-at (UNIX seconds) — used by the revocation family marker.
     pub iat: i64,
@@ -619,22 +615,23 @@ pub struct AccessClaims {
 struct RawAccessClaims {
     sub: String,
     iss: String,
-    #[serde(default)]
     aud: serde_json::Value,
-    #[serde(default)]
-    exp: Option<i64>,
-    #[serde(default)]
+    exp: i64,
     iat: i64,
-    #[serde(default)]
-    client_id: Option<String>,
+    // RFC 9068 §2.2 requires `jti`. jsonwebtoken's `required_spec_claims` only
+    // enforces registered claims (exp/iss/aud/sub/nbf), so `jti` presence is
+    // enforced here by making it a required (non-`default`) deserialized field —
+    // a token missing `jti` fails to parse and is rejected.
+    #[allow(dead_code)]
+    jti: String,
+    client_id: String,
     #[serde(default)]
     email: Option<String>,
     #[serde(default)]
     email_verified: Option<bool>,
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
-    scope: Option<String>,
+    scope: String,
     #[serde(default)]
     auth_time: Option<i64>,
     #[serde(default)]
@@ -668,8 +665,9 @@ fn resolve_granted_scopes(
         .unwrap_or_default()
 }
 
-/// Verify a raw OP access JWT against `cache`, pinning `iss` and
-/// `exp` but NOT `aud` (see [`OidcRp::verify_access_token`] rationale).
+/// Verify a raw OP access JWT against `cache`, pinning token type, algorithm,
+/// `iss`, `exp`, and RFC 9068 required claims but NOT `aud` (see
+/// [`OidcRp::verify_access_token`] rationale).
 /// On a first verify failure (likely a rotated JWKS) the cache is
 /// force-refreshed and verification retried once — mirroring
 /// [`zeroship_core::oidc_verify::verify_id_token`].
@@ -678,47 +676,76 @@ async fn verify_access_jwt(
     token: &str,
     expected_iss: &str,
 ) -> Result<AccessClaims, OidcRpError> {
-    use jsonwebtoken::{decode, decode_header, Validation};
+    use jsonwebtoken::{decode, decode_header, Algorithm, Validation};
 
     let header = decode_header(token).map_err(|e| {
-        OidcRpError::VerifyIdToken(OidcError::DecodeHeader(e.to_string()))
+        OidcRpError::VerifyAccessToken(OidcError::DecodeHeader(e.to_string()))
     })?;
+    if header.typ.as_deref() != Some("at+jwt") {
+        return Err(OidcRpError::VerifyAccessToken(OidcError::DecodeHeader(
+            "access-token typ mismatch: expected at+jwt".into(),
+        )));
+    }
+    if header.alg != Algorithm::EdDSA {
+        return Err(OidcRpError::VerifyAccessToken(OidcError::DecodeHeader(
+            "access-token alg mismatch: expected EdDSA".into(),
+        )));
+    }
     let kid = header
         .kid
         .clone()
-        .ok_or_else(|| OidcRpError::VerifyIdToken(OidcError::DecodeHeader("no kid".into())))?;
-    let alg = header.alg;
+        .ok_or_else(|| {
+            OidcRpError::VerifyAccessToken(OidcError::DecodeHeader("no kid".into()))
+        })?;
 
-    let try_verify = |keys: Vec<zeroship_core::oidc_verify::CachedKey>| -> Result<RawAccessClaims, OidcError> {
+    let try_verify =
+        |keys: Vec<zeroship_core::oidc_verify::CachedKey>| -> Result<RawAccessClaims, OidcError> {
         let key = keys
             .iter()
-            .find(|k| k.kid == kid && k.alg == alg)
+            .find(|k| k.kid == kid && k.alg == Algorithm::EdDSA)
             .ok_or_else(|| OidcError::NoMatchingKey(kid.clone()))?;
-        let mut validation = Validation::new(alg);
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.algorithms = vec![Algorithm::EdDSA];
         validation.set_issuer(&[expected_iss]);
         // Access-token `aud` is the resource-server audience, NOT the
-        // OAuth client — so we do NOT pin it here. Per-app binding is on
-        // `client_id` (with an `aud` fallback) in the Bearer arm.
+        // OAuth client — so we do NOT pin it here. The Bearer arm enforces
+        // `client_id` and the route's resource audience after decoding.
         validation.validate_aud = false;
-        // `validate_exp` is on by default (60 s leeway).
+        validation.validate_nbf = true;
+        validation.leeway = 0;
+        validation.required_spec_claims = [
+            "exp",
+            "iss",
+            "aud",
+            "sub",
+            "iat",
+            "jti",
+            "client_id",
+            "scope",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::HashSet<_>>();
         let data: jsonwebtoken::TokenData<RawAccessClaims> =
             decode(token, &key.decoding, &validation)
                 .map_err(|e| OidcError::Verify(e.to_string()))?;
         Ok(data.claims)
     };
 
-    let raw = if let Ok(c) = try_verify(cache.keys().await.map_err(OidcRpError::VerifyIdToken)?) {
+    let raw = if let Ok(c) =
+        try_verify(cache.keys().await.map_err(OidcRpError::VerifyAccessToken)?)
+    {
         c
     } else {
         // Likely cause: JWKS rotated. Force-refresh once and retry.
-        cache.refresh().await.map_err(OidcRpError::VerifyIdToken)?;
-        try_verify(cache.keys().await.map_err(OidcRpError::VerifyIdToken)?)
-            .map_err(OidcRpError::VerifyIdToken)?
+        cache.refresh().await.map_err(OidcRpError::VerifyAccessToken)?;
+        try_verify(cache.keys().await.map_err(OidcRpError::VerifyAccessToken)?)
+            .map_err(OidcRpError::VerifyAccessToken)?
     };
 
     // Defense-in-depth iss re-check (jsonwebtoken checked it above).
     if raw.iss != expected_iss {
-        return Err(OidcRpError::VerifyIdToken(OidcError::IssuerMismatch {
+        return Err(OidcRpError::VerifyAccessToken(OidcError::IssuerMismatch {
             expected: expected_iss.into(),
             got: raw.iss,
         }));
@@ -736,13 +763,13 @@ async fn verify_access_jwt(
 
     Ok(AccessClaims {
         sub: raw.sub,
-        client_id: raw.client_id,
+        client_id: Some(raw.client_id),
         aud,
         iat: raw.iat,
         email: raw.email,
         email_verified: raw.email_verified,
         name: raw.name,
-        scope: raw.scope,
+        scope: Some(raw.scope),
         auth_time: raw.auth_time,
         amr: raw.amr,
     })
@@ -760,6 +787,8 @@ pub enum OidcRpError {
     TokenExchange(String),
     #[error("verify id_token: {0}")]
     VerifyIdToken(#[from] OidcError),
+    #[error("verify access_token: {0}")]
+    VerifyAccessToken(#[source] OidcError),
     /// The shared OP circuit breaker is open (or the bounded per-call
     /// timeout fired) — OP is browning out. Handlers surface this as
     /// `503 upstream_unavailable` rather than a generic token-exchange error,

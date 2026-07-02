@@ -1837,7 +1837,8 @@ fn oidc_callback_public_error(e: &oidc_rp::OidcRpError) -> &'static str {
         | oidc_rp::OidcRpError::StateMismatch
         | oidc_rp::OidcRpError::ClientMismatch
         | oidc_rp::OidcRpError::TokenExchange(_)
-        | oidc_rp::OidcRpError::VerifyIdToken(_) => "sign-in could not be completed",
+        | oidc_rp::OidcRpError::VerifyIdToken(_)
+        | oidc_rp::OidcRpError::VerifyAccessToken(_) => "sign-in could not be completed",
     }
 }
 
