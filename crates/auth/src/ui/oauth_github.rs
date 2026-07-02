@@ -32,8 +32,12 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::identity::eligibility;
 use crate::identity::linker::{self, LinkOutcome, LinkResume, ResolvedProfile};
-use crate::identity::oauth::github::{self, GitHubIdentity};
+use crate::identity::oauth::{
+    github::{self, GitHubIdentity},
+    UpstreamPrompt,
+};
 use crate::oidc::auth_request::AuthRequest;
+use crate::oidc::authorization_code::return_to_after_prompt_interaction;
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::store::{sessions, users};
@@ -48,6 +52,8 @@ const ACR_GITHUB: &str = "urn:zeroship:github";
 #[derive(Debug, Deserialize)]
 pub struct StartQuery {
     pub return_to: Option<String>,
+    pub prompt: Option<String>,
+    pub max_age: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,7 +79,20 @@ pub async fn start(
     query: ntex::web::types::Query<StartQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let auth_start = match github::start_authorize_url(&cfg) {
+    let query = query.into_inner();
+    let Some(raw_return_to) = query.return_to.as_deref() else {
+        return render_error(PublicErrorMessage::InvalidRequest);
+    };
+    let native_return_to = return_to::sanitize(Some(raw_return_to), return_to::SAFE_DEFAULT);
+    let Ok(auth_request) = AuthRequest::parse_return_to(&native_return_to) else {
+        return render_error(PublicErrorMessage::InvalidRequest);
+    };
+    let upstream_prompt = UpstreamPrompt::combine(
+        auth_request.upstream_prompt(),
+        UpstreamPrompt::from_oidc_prompt(query.prompt.as_deref(), query.max_age.as_deref()),
+    );
+
+    let auth_start = match github::start_authorize_url(&cfg, upstream_prompt) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "github start_authorize_url failed");
@@ -81,22 +100,14 @@ pub async fn start(
         }
     };
 
-    let stash = if let Some(raw_return_to) = query.return_to.as_deref() {
-        let native_return_to = return_to::sanitize(Some(raw_return_to), return_to::SAFE_DEFAULT);
-        if AuthRequest::parse_return_to(&native_return_to).is_err() {
-            return render_error(PublicErrorMessage::InvalidRequest);
-        }
-        OAuthStash::with_return_to(
-            auth_start.state.clone(),
-            auth_start.verifier,
-            // GitHub is OAuth 2.0 — no nonce. We carry an empty string
-            // through the stash so the shared payload shape is unchanged.
-            String::new(),
-            native_return_to,
-        )
-    } else {
-        return render_error(PublicErrorMessage::InvalidRequest);
-    };
+    let stash = OAuthStash::with_return_to(
+        auth_start.state.clone(),
+        auth_start.verifier,
+        // GitHub is OAuth 2.0 — no nonce. We carry an empty string
+        // through the stash so the shared payload shape is unchanged.
+        String::new(),
+        native_return_to,
+    );
     let cookie_value = stash.encode(cfg.stash_signing_key.as_bytes());
 
     let mut resp = HttpResponse::Found();
@@ -369,7 +380,9 @@ pub async fn callback(
     )
     .await;
 
-    let mut resp = return_to::see_other(native_return_to);
+    let native_return_to =
+        return_to_after_prompt_interaction(native_return_to, &["login", "select_account"]);
+    let mut resp = return_to::see_other(&native_return_to);
     resp.header(
         SET_COOKIE,
         session_cookie::set_cookie(&session.id, cfg.insecure_dev),

@@ -251,6 +251,24 @@ async fn idp_hint_google_redirects_native_authorize_to_provider_start() {
         relative_query_param(&loc, "return_to").as_deref(),
         Some(authorize_path.as_str())
     );
+    assert_eq!(relative_query_param(&loc, "prompt").as_deref(), Some("login"));
+    assert_eq!(relative_query_param(&loc, "max_age").as_deref(), Some("0"));
+
+    let provider_start = get(&fx, &loc, None).await;
+    assert_eq!(provider_start.status().as_u16(), 302);
+    let upstream = location(&provider_start);
+    assert!(
+        upstream.starts_with(fx.cfg.google_auth_url.as_str()),
+        "provider start should redirect to upstream google authorize, got {upstream}"
+    );
+    assert_eq!(
+        absolute_query_param(&upstream, "prompt").as_deref(),
+        Some("login")
+    );
+    assert_eq!(
+        absolute_query_param(&upstream, "max_age").as_deref(),
+        Some("0")
+    );
 
     fx.cleanup().await;
 }
