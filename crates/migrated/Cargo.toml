@@ -1,0 +1,33 @@
+[package]
+name = "zeroship-migrated"
+version = "0.1.0"
+edition = "2021"
+description = "zeroship standalone creator migration service"
+
+[[bin]]
+name = "zeroship-migrated"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+mimalloc = { workspace = true }
+ntex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+zeroship-authz = { workspace = true }
+zeroship-control = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-migrate = { workspace = true }
+
+[dev-dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+
+[lints]
+workspace = true

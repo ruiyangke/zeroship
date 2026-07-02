@@ -719,14 +719,18 @@ fn run_app(backend: Arc<dyn Backend>, app: &'static str) -> (u16, String) {
             runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
 
         match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
                     .await
                     .expect("kv e2e: fetch pending timed out")
                     .expect("kv e2e: pending delivered DispatchError");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     other => {
                         let name = match other {
                             SettledFetch::Stream { .. } => "Stream",
@@ -980,14 +984,18 @@ fn run_app_metered(
             runtime.call_fetch_handler("GET", "http://localhost/", &[], "", &env, ctx);
 
         match outcome {
-            FetchOutcome::Response { status, body, .. } => (status, body),
+            FetchOutcome::Response { status, body, .. } => {
+                (status, String::from_utf8_lossy(&body).into_owned())
+            }
             FetchOutcome::Pending { rx, cancel: _ } => {
                 let settled = compio::time::timeout(Duration::from_secs(30), rx.recv())
                     .await
                     .expect("kv metering: fetch pending timed out")
                     .expect("kv metering: pending delivered DispatchError");
                 match settled {
-                    SettledFetch::Response { status, body, .. } => (status, body),
+                    SettledFetch::Response { status, body, .. } => {
+                        (status, String::from_utf8_lossy(&body).into_owned())
+                    }
                     _ => panic!("kv metering: expected SettledFetch::Response"),
                 }
             }
