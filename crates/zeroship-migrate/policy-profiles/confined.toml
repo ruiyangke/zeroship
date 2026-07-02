@@ -1,4 +1,22 @@
 
+[system_shape]
+columns = [
+  { name = "id", type = "text", nullable = false },
+  { name = "created_at", type = "timestamp with time zone", nullable = false },
+  { name = "updated_at", type = "timestamp with time zone", nullable = false },
+  { name = "created_by", type = "text", nullable = true },
+  { name = "updated_by", type = "text", nullable = true },
+  { name = "version", type = "integer", nullable = false },
+  { name = "deleted_at", type = "timestamp with time zone", nullable = true },
+]
+indexes = [
+  { columns = ["deleted_at"] },
+  { columns = ["updated_at"] },
+  { columns = ["created_by"] },
+]
+primary_key = ["id"]
+author_primary_key = "forbid"
+
 [capabilities]
 extension = false
 schema = false

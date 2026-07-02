@@ -170,10 +170,12 @@ pub use guard::{
 };
 pub use model::policy::{SchemaScope, TrustProfile};
 pub use model::profile::{
-    DataSecurityConfig, DestructiveOps, IndexCreation, OperationalConfig, PolicyCapabilities,
-    PolicyKnobSemantics, PolicyMeet, PolicyPolarity, PolicyProfile, RoleAttribute,
-    RoleCapabilityConfig, SealError, SealVerifier, SealedPosture, SealedProfile, TableRewrite,
-    seal_effective_profile, CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
+    AuthorPrimaryKeyPolicy, DataSecurityConfig, DestructiveOps, IndexCreation,
+    InjectedSystemColumnPolicy, InjectedSystemIndexPolicy, OperationalConfig, PolicyCapabilities,
+    PolicyKnobSemantics, PolicyMeet, PolicyPolarity, PolicyProfile, PrimaryKeyAuthorPolicy,
+    RoleAttribute, RoleCapabilityConfig, SealError, SealVerifier, SealedPosture, SealedProfile,
+    TablePrimaryKeyPolicy, TableRewrite, TableSystemShapePolicy, seal_effective_profile,
+    CONFINED_PROFILE_TOML, PLATFORM_PROFILE_TOML,
 };
 // The deploy-target dialect (§2.4.1) — re-exported so the control-plane deploy
 // path can thread it into `IrAuthor::new` without depending on `zeroship-schema`.

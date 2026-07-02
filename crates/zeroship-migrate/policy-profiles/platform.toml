@@ -1,6 +1,12 @@
 
 extends = "confined"
 
+[system_shape]
+columns = []
+indexes = []
+primary_key = "author"
+author_primary_key = "allow"
+
 [capabilities]
 extension = true
 schema = true
