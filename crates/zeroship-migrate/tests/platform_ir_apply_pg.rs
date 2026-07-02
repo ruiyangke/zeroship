@@ -212,6 +212,64 @@ const CONFINED_GRANT_IR: &str = r#"{
   ]
 }
 "#;
+const PLATFORM_ATTACH_TS: &str = r#"
+import { table, t } from "@zeroship/migrate";
+import { createFunction, schema } from "@zeroship/migrate/pg";
+
+export const name = "platform_attach";
+
+export function up() {
+  schema({ name: "zeroship", ifNotExists: true });
+
+  table("platform_apps", { schema: "zeroship" }).create({
+    columns: {
+      id: t.text().notNull(),
+    },
+    primaryKey: ["id"],
+  });
+
+  table("platform_registry", { schema: "zeroship" }).create({
+    columns: {
+      app_id: t.text().notNull(),
+      route: t.text().notNull(),
+      target: t.text().notNull(),
+    },
+    primaryKey: ["app_id", "route"],
+  });
+
+  const registry = table("platform_registry", { schema: "zeroship" });
+  registry.foreignKey("platform_registry_app_fk").add({
+    columns: ["app_id"],
+    references: { table: "platform_apps", columns: ["id"] },
+  });
+  registry.index("platform_registry_target_idx").add({ columns: ["target"] });
+  registry.enableRowLevelSecurity();
+  registry.forceRowLevelSecurity();
+  registry.createPolicy({
+    name: "tenant_isolation",
+    for: "all",
+    using: (c) => c("app_id").isNotNull(),
+    withCheck: (c) => c("app_id").isNotNull(),
+  });
+  registry.comment("Platform route registry");
+
+  createFunction({
+    name: "platform_registry_touch",
+    schema: "zeroship",
+    returns: "trigger",
+    language: "plpgsql",
+    replace: true,
+    body: "BEGIN RETURN NEW; END;",
+  });
+  registry.createTrigger({
+    name: "platform_registry_touch_trg",
+    timing: "before",
+    events: ["update"],
+    forEach: "row",
+    execute: "platform_registry_touch",
+  });
+}
+"#;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_PLATFORM_IR_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -351,6 +409,129 @@ async fn table_exists(conn: &Client, schema: &str, table: &str) -> bool {
         .is_empty()
 }
 
+async fn primary_key_columns(conn: &Client, schema: &str, table: &str) -> Vec<String> {
+    conn.query(
+        "SELECT a.attname \
+         FROM pg_constraint c \
+         JOIN pg_class t ON t.oid = c.conrelid \
+         JOIN pg_namespace n ON n.oid = t.relnamespace \
+         JOIN unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true \
+         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum \
+         WHERE n.nspname = $1 AND t.relname = $2 AND c.contype = 'p' \
+         ORDER BY k.ord",
+        &[&schema, &table],
+    )
+    .await
+    .expect("query primary key columns")
+    .into_iter()
+    .map(|row| row.get::<_, String>(0))
+    .collect()
+}
+
+async fn table_columns(conn: &Client, schema: &str, table: &str) -> Vec<String> {
+    conn.query(
+        "SELECT column_name \
+         FROM information_schema.columns \
+         WHERE table_schema = $1 AND table_name = $2 \
+         ORDER BY ordinal_position",
+        &[&schema, &table],
+    )
+    .await
+    .expect("query table columns")
+    .into_iter()
+    .map(|row| row.get::<_, String>(0))
+    .collect()
+}
+
+async fn relation_rls(conn: &Client, schema: &str, table: &str) -> (bool, bool) {
+    let rows = conn
+        .query(
+            "SELECT c.relrowsecurity, c.relforcerowsecurity \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2",
+            &[&schema, &table],
+        )
+        .await
+        .expect("query relation RLS flags");
+    let row = rows.first().expect("relation exists");
+    (row.get::<_, bool>(0), row.get::<_, bool>(1))
+}
+
+async fn policy_exists(conn: &Client, schema: &str, table: &str, policy: &str) -> bool {
+    !conn
+        .query(
+            "SELECT 1 FROM pg_policies \
+             WHERE schemaname = $1 AND tablename = $2 AND policyname = $3",
+            &[&schema, &table, &policy],
+        )
+        .await
+        .expect("query pg_policies")
+        .is_empty()
+}
+
+async fn table_comment(conn: &Client, schema: &str, table: &str) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT obj_description(c.oid, 'pg_class') \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2",
+            &[&schema, &table],
+        )
+        .await
+        .expect("query table comment");
+    rows.first().and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+async fn index_exists(conn: &Client, schema: &str, table: &str, index: &str) -> bool {
+    !conn
+        .query(
+            "SELECT 1 FROM pg_indexes \
+             WHERE schemaname = $1 AND tablename = $2 AND indexname = $3",
+            &[&schema, &table, &index],
+        )
+        .await
+        .expect("query pg_indexes")
+        .is_empty()
+}
+
+async fn constraint_kind(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    constraint: &str,
+) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT c.contype::text \
+             FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3",
+            &[&schema, &table, &constraint],
+        )
+        .await
+        .expect("query pg_constraint");
+    rows.first().map(|row| row.get::<_, String>(0))
+}
+
+async fn trigger_exists(conn: &Client, schema: &str, table: &str, trigger: &str) -> bool {
+    !conn
+        .query(
+            "SELECT 1 \
+             FROM pg_trigger tr \
+             JOIN pg_class t ON t.oid = tr.tgrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = $1 AND t.relname = $2 AND tr.tgname = $3 \
+               AND NOT tr.tgisinternal",
+            &[&schema, &table, &trigger],
+        )
+        .await
+        .expect("query pg_trigger")
+        .is_empty()
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -474,6 +655,91 @@ async fn confined_ir_still_denies_role_and_grant_vendor_ops() {
     );
 
     reset(&conn, &grant_meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_attach_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_attach",
+        "20260702000000_platform_attach.ts",
+        PLATFORM_ATTACH_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with structural attachments applies");
+
+    assert!(
+        table_exists(&conn, "zeroship", "platform_registry").await,
+        "platform-exact table materialized"
+    );
+    assert_eq!(
+        table_columns(&conn, "zeroship", "platform_registry").await,
+        vec!["app_id".to_string(), "route".to_string(), "target".to_string()],
+        "platform CreateTable materializes exactly the author columns, with no confined system fields"
+    );
+    assert_eq!(
+        primary_key_columns(&conn, "zeroship", "platform_registry").await,
+        vec!["app_id".to_string(), "route".to_string()],
+        "platform CreateTable keeps the author composite primary key"
+    );
+    assert_eq!(
+        constraint_kind(
+            &conn,
+            "zeroship",
+            "platform_registry",
+            "platform_registry_app_fk",
+        )
+        .await
+        .as_deref(),
+        Some("f"),
+        "same-file FK attach materialized"
+    );
+    assert!(
+        index_exists(
+            &conn,
+            "zeroship",
+            "platform_registry",
+            "platform_registry_target_idx",
+        )
+        .await,
+        "same-file index attach materialized"
+    );
+    assert_eq!(
+        relation_rls(&conn, "zeroship", "platform_registry").await,
+        (true, true),
+        "enableRls + forceRls attached to the platform-exact table"
+    );
+    assert!(
+        policy_exists(&conn, "zeroship", "platform_registry", "tenant_isolation").await,
+        "createPolicy attached to the platform-exact table"
+    );
+    assert_eq!(
+        table_comment(&conn, "zeroship", "platform_registry").await.as_deref(),
+        Some("Platform route registry"),
+        "comment attached to the platform-exact table"
+    );
+    assert!(
+        trigger_exists(
+            &conn,
+            "zeroship",
+            "platform_registry",
+            "platform_registry_touch_trg",
+        )
+        .await,
+        "createTrigger attached to the platform-exact table"
+    );
+
+    reset(&conn, &meta).await;
     global_lock.release().await;
 }
 
