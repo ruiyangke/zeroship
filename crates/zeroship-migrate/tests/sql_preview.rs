@@ -53,6 +53,31 @@ const REPRESENTATIVE_IR: &str = r#"{
   ]
 }"#;
 
+/// Same representative set for MySQL, excluding `renameColumn`: MySQL declares
+/// rename unsupported in this phase, so preview must validate-refuse it rather
+/// than print a runtime-resolved label.
+const REPRESENTATIVE_IR_MYSQL: &str = r#"{
+  "ir_version": 1,
+  "name": "representative",
+  "ops": [
+    {"op":"createTable","name":"codes","columns":[
+      {"name":"code","type":"int","nullable":false,"unique":true},
+      {"name":"label","type":"text"}
+    ]},
+    {"op":"addColumn","table":"codes","column":"note","type":"text","nullable":true},
+    {"op":"addColumn","table":"codes","column":"flag","type":"bool","nullable":true,"existenceGuard":"ifNotExists"},
+    {"op":"createIndex","table":"codes","name":"codes_label_idx","columns":[{"kind":"column","name":"label"}]},
+    {"op":"insert","table":"codes",
+      "columns":["id","created_at","updated_at","version","code","label"],
+      "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,200,"ok"]]},
+    {"op":"update","table":"codes",
+      "set":{"label":{"node":"literal","value":"x"}},
+      "where":{"node":"binOp","op":"gt",
+        "lhs":{"node":"colRef","name":"code"},
+        "rhs":{"node":"literal","value":300}}}
+  ]
+}"#;
+
 /// MySQL-specific render proof: the portable IR pieces MySQL can render in phase 1
 /// lower to valid MySQL 8 DDL/DML without opening a database.
 const MYSQL_FEATURE_IR: &str = r#"{
@@ -92,7 +117,12 @@ fn opts() -> PreviewOpts {
 
 /// Render the representative IR for a dialect through the offline IR preview.
 fn render_representative(dialect: SqlDialect) -> String {
-    render_ir_json_sql(REPRESENTATIVE_IR, dialect, &opts())
+    let ir = if dialect == SqlDialect::Mysql {
+        REPRESENTATIVE_IR_MYSQL
+    } else {
+        REPRESENTATIVE_IR
+    };
+    render_ir_json_sql(ir, dialect, &opts())
         .expect("representative IR renders offline")
 }
 
@@ -351,7 +381,7 @@ fn render_succeeds_without_a_dsn() {
     std::env::remove_var("DATABASE_URL");
     let pg = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Postgres, &opts());
     let sqlite = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Sqlite, &opts());
-    let mysql = render_ir_json_sql(REPRESENTATIVE_IR, SqlDialect::Mysql, &opts());
+    let mysql = render_ir_json_sql(REPRESENTATIVE_IR_MYSQL, SqlDialect::Mysql, &opts());
     assert!(
         pg.is_ok() && sqlite.is_ok() && mysql.is_ok(),
         "offline render must not need a DSN"

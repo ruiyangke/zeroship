@@ -241,8 +241,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         // closed so the author resolves the contradiction explicitly. (SA-13)
         if materialized && replace {
             return Err(IrLowerError::UnsupportedOp(
-                "createView: Postgres has no CREATE OR REPLACE MATERIALIZED VIEW; \
-                 drop the view explicitly before recreating it (replace + materialized is contradictory)",
+                "validated createView replace+materialized reached lower",
             ));
         }
         let mut create = String::from("CREATE ");

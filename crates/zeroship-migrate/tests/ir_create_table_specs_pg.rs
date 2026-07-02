@@ -13,11 +13,13 @@
 //!
 //! It also pins the FAIL-CLOSED arms (HIGH-finding mandate "never a silent
 //! no-op"): a composite/per-column user PRIMARY KEY and a table-level CHECK are
-//! HARD authoring/lower errors, not silent drops.
+//! HARD validate-time authoring errors, not silent drops.
 //!
 //! Requires `:5440` (the `*_pg` suite convention); run with `--test-threads=1`.
 
 use compio_postgres::Client;
+use zeroship_migrate::model::load::IrLoadError;
+use zeroship_migrate::model::validate::{UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::{
     apply::executor::LockMode,
     provision_migrator, apply::role::deprovision_migrator, Approval, ExecutorConfig, IrAuthor, LiveSchema,
@@ -220,29 +222,29 @@ async fn create_table_user_primary_key_is_hard_error_on_pg() {
             {"kind":{"kind":"pk","columns":["a","b"]}}
         ]}
     ]}"#;
-    let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
-    let document = zeroship_migrate::model::load::load_ir_document(
+    let err = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Postgres,
         &registry(&[]),
         None,
     )
-    .expect("load gate");
-    let err = author
-        .lower_plan(&document, &LiveSchema::default())
-        .expect_err("a user composite PRIMARY KEY must FAIL CLOSED, not silently no-op");
-    let msg = format!("{err}");
+    .expect_err("a user composite PRIMARY KEY must validate-refuse, not silently no-op");
+    let IrLoadError::Validate(err) = err else {
+        panic!("expected validate error for user PRIMARY KEY, got {err:?}");
+    };
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(UnsupportedKind::Op));
     assert!(
-        msg.contains("PRIMARY KEY") || msg.to_lowercase().contains("primary key"),
-        "the error must name the unsupported PRIMARY KEY (got: {msg})"
+        err.reason.contains("primary key") || err.reason.contains("primary keys"),
+        "the error must name the unsupported PRIMARY KEY (got: {err:?})"
     );
 
     teardown(&conn, &cfg).await;
 }
 
-/// HIGH-fix fail-closed: a table-level CHECK is a deferred-Expr HARD error (like
-/// stand-alone `addConstraint(check)`), never a silent drop.
+/// HIGH-fix fail-closed: a table-level CHECK is a validate-time HARD error, never
+/// a silent drop.
 #[compio::test]
 async fn create_table_check_is_hard_error_on_pg() {
     let conn = pg().await;
@@ -259,22 +261,22 @@ async fn create_table_check_is_hard_error_on_pg() {
                 "rhs":{"node":"literal","value":0}}}}
         ]}
     ]}"#;
-    let author = IrAuthor::new(cfg.project_schema.clone(), APP, SqlDialect::Postgres);
-    let document = zeroship_migrate::model::load::load_ir_document(
+    let err = zeroship_migrate::model::load::load_ir_document(
         ir,
         APP,
         zeroship_migrate::model::validate::Dialect::Postgres,
         &registry(&[]),
         None,
     )
-    .expect("load gate");
-    let err = author
-        .lower_plan(&document, &LiveSchema::default())
-        .expect_err("a table-level CHECK must FAIL CLOSED (deferred Expr renderer), not be dropped");
-    let msg = format!("{err}");
+    .expect_err("a table-level CHECK must validate-refuse, not be dropped");
+    let IrLoadError::Validate(err) = err else {
+        panic!("expected validate error for table CHECK, got {err:?}");
+    };
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     assert!(
-        msg.to_lowercase().contains("check") || msg.to_lowercase().contains("expr"),
-        "the error must name the deferred CHECK/expr (got: {msg})"
+        err.reason.to_lowercase().contains("check"),
+        "the error must name the deferred CHECK/expr (got: {err:?})"
     );
 
     teardown(&conn, &cfg).await;

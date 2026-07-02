@@ -412,9 +412,9 @@ pub fn validate_op_scoped(
     // creator/AI posture (`Single` scope) grants nothing, so every vendor op dies
     // here; Platform/Trusted (`Allowlist`/`Unconfined`) grant the operator preset.
     validate_vendor_op(op, target_dialect, op_index, ts_location, schema_scope)?;
+    validate_op_support(op, target_dialect, op_index, ts_location)?;
     validate_sequence_options(op, target_dialect, op_index, ts_location)?;
     validate_function_type_refs(op, target_dialect, op_index, ts_location)?;
-    validate_column_alter_boundaries(op, target_dialect, op_index, ts_location)?;
 
     // Constraint-embedded expressions validate against the given table scope.
     let check_constraint =
@@ -826,6 +826,316 @@ pub fn validate_op_scoped(
     }
 }
 
+fn validate_op_support(
+    op: &crate::model::ir::Op,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{
+        IndexElement, IndexMethod, IrConstraintKind, IrDefault, Op, TriggerAction, TriggerEvent,
+        TriggerStmt,
+    };
+    use crate::model::support::{Feature, Support, SupportDecision};
+
+    fn error_from_decision(
+        decision: SupportDecision,
+        kind: UnsupportedKind,
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+    ) -> Option<AuthoringError> {
+        let SupportDecision::Unsupported { code, reason } = decision else {
+            return None;
+        };
+        let suggested_fix = match kind {
+            UnsupportedKind::Expr => {
+                "remove the expression-bearing option for now, or defer this migration until the expression/default renderer lands"
+            }
+            _ => {
+                "remove this unsupported shape, or target a dialect/op shape the current engine declares supported"
+            }
+        };
+        Some(AuthoringError {
+            code: code.to_string(),
+            kind: Some(kind),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: reason.to_string(),
+            suggested_fix: Some(suggested_fix.to_string()),
+        })
+    }
+
+    fn feature_kind(feature: Feature) -> UnsupportedKind {
+        match feature {
+            Feature::TableLevelCheck | Feature::AlterColumnUsing | Feature::SynthDefault => {
+                UnsupportedKind::Expr
+            }
+            _ => UnsupportedKind::Op,
+        }
+    }
+
+    fn op_kind(op: &Op) -> UnsupportedKind {
+        match op {
+            Op::SetColumnType { using: Some(_), .. } => UnsupportedKind::Expr,
+            Op::SetColumnDefault {
+                value: IrDefault::Fn { .. },
+                ..
+            } => UnsupportedKind::Expr,
+            Op::AddConstraint {
+                constraint,
+                ..
+            } if matches!(constraint.kind, IrConstraintKind::Check { .. }) => {
+                UnsupportedKind::Expr
+            }
+            _ => UnsupportedKind::Op,
+        }
+    }
+
+    fn check_feature(
+        support: &Support,
+        feature: Feature,
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+    ) -> Result<(), AuthoringError> {
+        let Some(feature_support) = support.features.iter().find(|decl| decl.feature == feature)
+        else {
+            return Ok(());
+        };
+        if let Some(err) = error_from_decision(
+            feature_support.decision(target_dialect),
+            feature_kind(feature),
+            target_dialect,
+            op_index,
+            ts_location,
+        ) {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    fn default_is_synth(default: Option<&IrDefault>) -> bool {
+        matches!(default, Some(IrDefault::Fn { .. }))
+    }
+
+    fn non_btree_index_method(using: Option<IndexMethod>) -> bool {
+        !matches!(using, None | Some(IndexMethod::Btree))
+    }
+
+    fn is_system_owned_pk(columns: &[String], table_columns: &[crate::model::ir::IrColumn]) -> bool {
+        columns.len() == 1
+            && columns[0] == "id"
+            && table_columns
+                .iter()
+                .any(|col| col.name == "id" && col.identity.is_some())
+    }
+
+    fn fk_features(
+        columns: &[String],
+        references_columns: &[String],
+        mut check: impl FnMut(Feature) -> Result<(), AuthoringError>,
+    ) -> Result<(), AuthoringError> {
+        if columns.is_empty() {
+            check(Feature::ForeignKeyNoLocalColumn)?;
+        } else if columns.len() != 1 {
+            check(Feature::CompositeForeignKey)?;
+        }
+        if !(references_columns.is_empty()
+            || (references_columns.len() == 1 && references_columns[0] == "id"))
+        {
+            check(Feature::NonIdForeignKey)?;
+        }
+        Ok(())
+    }
+
+    let support = op.support();
+    if let Some(err) = error_from_decision(
+        support.decision(target_dialect),
+        op_kind(op),
+        target_dialect,
+        op_index,
+        ts_location,
+    ) {
+        return Err(err);
+    }
+
+    let mut check = |feature| {
+        check_feature(&support, feature, target_dialect, op_index, ts_location)
+    };
+
+    match op {
+        Op::CreateTable {
+            columns,
+            constraints,
+            indexes,
+            ..
+        } => {
+            if columns
+                .iter()
+                .any(|col| default_is_synth(col.default.as_ref()))
+            {
+                check(Feature::SynthDefault)?;
+            }
+            for constraint in constraints {
+                match &constraint.kind {
+                    IrConstraintKind::Pk { columns: pk_columns } => {
+                        if !is_system_owned_pk(pk_columns, columns) {
+                            check(Feature::UserPrimaryKey)?;
+                        }
+                    }
+                    IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
+                    IrConstraintKind::Fk {
+                        columns,
+                        references_columns,
+                        ..
+                    } => {
+                        check(Feature::TableLevelForeignKey)?;
+                        fk_features(columns, references_columns, &mut check)?;
+                    }
+                    IrConstraintKind::Unique { .. } => check(Feature::TableLevelUnique)?,
+                    IrConstraintKind::Exclusion { .. } => check(Feature::ExclusionConstraint)?,
+                }
+            }
+            for index in indexes {
+                if index
+                    .columns
+                    .iter()
+                    .any(|element| matches!(element, IndexElement::Expr { .. }))
+                {
+                    check(Feature::ExpressionIndex)?;
+                }
+                if index.r#where.is_some() {
+                    check(Feature::PartialIndex)?;
+                }
+                if non_btree_index_method(index.using) {
+                    check(Feature::NonBtreeIndexMethod)?;
+                }
+            }
+        }
+        Op::AddColumn { default, .. } => {
+            if default_is_synth(default.as_ref()) {
+                check(Feature::SynthDefault)?;
+            }
+        }
+        Op::SetColumnType { using: Some(_), .. } => check(Feature::AlterColumnUsing)?,
+        Op::SetColumnDefault {
+            value: IrDefault::Fn { .. },
+            ..
+        } => check(Feature::SynthDefault)?,
+        Op::CreateIndex {
+            columns,
+            using,
+            r#where,
+            ..
+        } => {
+            if columns
+                .iter()
+                .any(|element| matches!(element, IndexElement::Expr { .. }))
+            {
+                check(Feature::ExpressionIndex)?;
+            }
+            if r#where.is_some() {
+                check(Feature::PartialIndex)?;
+            }
+            if non_btree_index_method(*using) {
+                check(Feature::NonBtreeIndexMethod)?;
+            }
+        }
+        Op::RenameColumn {
+            existence_guard: Some(_),
+            ..
+        } => check(Feature::RenameColumnGuard)?,
+        Op::AddConstraint { constraint, .. } => match &constraint.kind {
+            IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
+            IrConstraintKind::Fk {
+                columns,
+                references_columns,
+                ..
+            } => fk_features(columns, references_columns, &mut check)?,
+            IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
+            IrConstraintKind::Exclusion { .. } => check(Feature::ExclusionConstraint)?,
+            IrConstraintKind::Unique { .. } => {}
+        },
+        Op::Insert {
+            on_conflict: Some(_),
+            ..
+        } => check(Feature::InsertOnConflict)?,
+        Op::CreateView {
+            query,
+            replace,
+            materialized,
+            ..
+        } => {
+            if matches!(query, crate::model::ir::ViewQuery::Raw { .. }) {
+                check(Feature::RawViewBody)?;
+            }
+            if materialized.unwrap_or(false) {
+                check(Feature::MaterializedView)?;
+                if replace.unwrap_or(false) {
+                    check(Feature::CreateOrReplaceMaterializedView)?;
+                }
+            }
+        }
+        Op::DropView { materialized, .. } if materialized.unwrap_or(false) => {
+            check(Feature::MaterializedView)?;
+        }
+        Op::CreateTrigger {
+            timing,
+            events,
+            for_each,
+            action,
+            when,
+            ..
+        } => {
+            if events.len() > 1 {
+                check(Feature::TriggerMultipleEvents)?;
+            }
+            if events
+                .iter()
+                .any(|event| matches!(event, TriggerEvent::Truncate))
+            {
+                check(Feature::TriggerTruncateEvent)?;
+            }
+            if matches!(timing, crate::model::ir::TriggerTiming::InsteadOf) {
+                check(Feature::TriggerInsteadOfTiming)?;
+            }
+            if matches!(for_each, crate::model::ir::ForEach::Statement) {
+                check(Feature::TriggerStatementForEach)?;
+            }
+            if when.is_some() {
+                check(Feature::TriggerWhen)?;
+            }
+            match action {
+                TriggerAction::ExecuteFunction { .. } => check(Feature::TriggerExecuteFunction)?,
+                TriggerAction::Body { statements } => {
+                    check(Feature::TriggerBody)?;
+                    if statements.iter().any(|stmt| {
+                        matches!(
+                            stmt,
+                            TriggerStmt::Raise {
+                                level: crate::model::ir::RaiseLevel::Ignore,
+                                ..
+                            }
+                        )
+                    }) {
+                        check(Feature::TriggerRaiseIgnore)?;
+                    }
+                }
+            }
+        }
+        Op::Comment { .. } => check(Feature::Comment)?,
+        Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
+            check(Feature::Sequence)?;
+        }
+        Op::PgRaw { .. } => check(Feature::RawSql)?,
+        _ => {}
+    }
+
+    Ok(())
+}
+
 /// **VENDOR (`@zeroship/migrate/pg`)** — the capability-composition gate (vendor
 /// spec §3.2 gate 1). For every VENDOR [`Op`](crate::model::ir::Op) variant:
 ///
@@ -976,40 +1286,6 @@ fn validate_function_type_refs(
         _ => {}
     }
     Ok(())
-}
-
-fn validate_column_alter_boundaries(
-    op: &crate::model::ir::Op,
-    target_dialect: Dialect,
-    op_index: usize,
-    ts_location: Option<&str>,
-) -> Result<(), AuthoringError> {
-    let reject = |reason: &'static str, suggested_fix: &'static str| AuthoringError {
-        code: CODE_UNSUPPORTED.to_string(),
-        kind: Some(UnsupportedKind::Expr),
-        op_index,
-        ts_location: ts_location.map(str::to_string),
-        dialect: target_dialect,
-        reason: reason.to_string(),
-        suggested_fix: Some(suggested_fix.to_string()),
-    };
-
-    match op {
-        crate::model::ir::Op::SetColumnType {
-            using: Some(_), ..
-        } => Err(reject(
-            "setColumnType.using expression rendering is deferred in the current engine",
-            "omit `using` for now, or defer this type change until the expression-to-SQL renderer lands",
-        )),
-        crate::model::ir::Op::SetColumnDefault {
-            value: crate::model::ir::IrDefault::Fn { .. },
-            ..
-        } => Err(reject(
-            "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
-            "use a typed literal default for now, or set the synth default through a later renderer-enabled migration",
-        )),
-        _ => Ok(()),
-    }
 }
 
 fn view_body_error(
@@ -1898,7 +2174,7 @@ pub fn validate_op_resolved(
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
     let ts = ts_location;
-    validate_column_alter_boundaries(op, target_dialect, op_index, ts)?;
+    validate_op_support(op, target_dialect, op_index, ts)?;
     // The op's target table (for the DML / setColumnType ops we resolve).
     let resolved_scope = |table: &str| -> Option<Vec<String>> { live_columns.get(table).cloned() };
     match op {
@@ -3182,16 +3458,7 @@ mod tests {
                     IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                     IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                 ],
-                constraints: vec![IrConstraint {
-                    name: None,
-                    kind: IrConstraintKind::Check {
-                        // references `total`, which IS a column of users → ok
-                        expr: Expr::UnaryOp {
-                            op: UnaryOp::IsNotNull,
-                            operand: Box::new(Expr::col("total")),
-                        },
-                    },
-                }],
+                constraints: vec![],
                 indexes: vec![IrIndex {
                     name: None,
                     columns: vec![IndexElement::Column { name: "first".into() }],
@@ -3244,11 +3511,11 @@ mod tests {
     }
 
     #[test]
-    fn validate_ir_create_table_resolves_system_fields_in_scope() {
+    fn validate_ir_create_table_partial_index_resolves_system_fields_in_scope() {
         // MED: createTable auto-injects the seven platform system fields at
         // lower/render time. A legitimate soft-delete partial-unique index
-        // `WHERE deleted_at IS NULL` and a Check referencing `id` reference those
-        // system fields — they MUST resolve in rule (c) scope, not be rejected.
+        // `WHERE deleted_at IS NULL` references one of those fields and MUST
+        // resolve in rule (c) scope, not be rejected.
         let ir = ir_with(vec![Op::CreateTable {
             name: "users".into(),
             columns: vec![IrColumn {
@@ -3257,16 +3524,7 @@ mod tests {
                 nullable: None,
                 default: None,
                 unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
-            constraints: vec![IrConstraint {
-                name: None,
-                kind: IrConstraintKind::Check {
-                    // references `id`, a system field → must resolve
-                    expr: Expr::UnaryOp {
-                        op: UnaryOp::IsNotNull,
-                        operand: Box::new(Expr::col("id")),
-                    },
-                },
-            }],
+            constraints: vec![],
             indexes: vec![IrIndex {
                 name: None,
                 columns: vec![IndexElement::Column { name: "first".into() }],
@@ -3284,11 +3542,11 @@ mod tests {
         }]);
         assert!(
             validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
-            "a Check on `id` + partial index on `deleted_at` must resolve system fields (PG)"
+            "a partial index on `deleted_at` must resolve system fields (PG)"
         );
         assert!(
             validate_ir(&ir, Dialect::Sqlite, &[]).is_ok(),
-            "a Check on `id` + partial index on `deleted_at` must resolve system fields (SQLite)"
+            "a partial index on `deleted_at` must resolve system fields (SQLite)"
         );
     }
 

@@ -8,11 +8,12 @@
 //! type inference consumes.
 //!
 //! WHY this is RED pre-P2b: `descriptors_to_create_ops` (the descriptor→ops producer
-//! that threads idPrefix/vectorMetric/encrypted/ref + enum/min/max-as-CHECK) did not
-//! exist before P2b — the snapshot-sourced `generate_ops` could not carry those
-//! facets (`col_type_for_data_type` fail-closes on vector/encrypted; `id_prefix:
-//! None`). Without the producer, this test cannot even be written, and a naive
-//! snapshot round-trip would DROP every goodie → the maps would diverge.
+//! that threads idPrefix/vectorMetric/encrypted/ref) did not exist before P2b — the
+//! snapshot-sourced `generate_ops` could not carry those facets (`col_type_for_data_type`
+//! fail-closes on vector/encrypted; `id_prefix: None`). Without the producer, this
+//! test cannot even be written, and a naive snapshot round-trip would DROP every
+//! goodie → the maps would diverge. CHECK-borne enum/min/max facets are outside P0
+//! until the Expr->SQL renderer lands.
 //!
 //! FAITHFUL: the declarative side is the REAL V8-evaluated `@zeroship/db` schema; the
 //! generated side runs the REAL `descriptors_to_create_ops` producer + the REAL
@@ -71,7 +72,7 @@ fn keystone_authored_vs_generated_field_defs_are_byte_identical() {
 }
 
 #[test]
-fn keystone_recovers_declared_only_and_check_facets() {
+fn keystone_recovers_declared_only_and_supported_facets() {
     // A focused assertion that the carried + lifted facets actually SURVIVE the
     // chain (so the byte-identity above isn't trivially "both dropped everything").
     let descriptors = eval_schema_to_ir(KEYSTONE, "app_keystone").expect("eval keystone schema");
@@ -87,15 +88,6 @@ fn keystone_recovers_declared_only_and_check_facets() {
         Some("acct"),
         "the typed-id prefix survives author→generate→fold"
     );
-    // enum lifted from the CHECK.
-    assert_eq!(
-        users["role"].get("enum").and_then(|v| v.as_array()).map(|a| a.len()),
-        Some(3),
-        "the enum membership is lifted back from the generated CHECK"
-    );
-    // min/max lifted from the CHECK.
-    assert_eq!(users["age"].get("min").and_then(|v| v.as_f64()), Some(0.0));
-    assert_eq!(users["age"].get("max").and_then(|v| v.as_f64()), Some(120.0));
     // ref brand recovered.
     assert_eq!(
         docs["authorId"].get("refTarget").and_then(|v| v.as_str()),

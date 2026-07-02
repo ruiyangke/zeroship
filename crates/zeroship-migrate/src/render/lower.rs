@@ -427,16 +427,6 @@ pub enum IrLowerError {
         /// Why it cannot be rendered.
         reason: &'static str,
     },
-    /// A DDL op whose body carries a closed-AST [`crate::model::expr::Expr`] (a `CHECK`
-    /// constraint predicate, or an `setColumnType` `using` cast) that the
-    /// Wave-C expression→SQL renderer must materialize. The op family lowers; the
-    /// Expr-bearing variant waits on that renderer (the same wave the DML
-    /// executors wait on — there is no `Expr`→SQL path yet). Carries the slot tag.
-    #[error(
-        "IrAuthor::lower cannot yet render the closed-AST expression in {0} \
-         (the Expr→SQL renderer is the later expression wave)"
-    )]
-    ExprRenderDeferred(&'static str),
     /// A stand-alone `alterColumn*` / `addConstraint` / `dropConstraint` op on the
     /// SQLite dialect. SQLite has no native `ALTER COLUMN` / `ALTER TABLE
     /// ADD|DROP CONSTRAINT`; the differ reconciles these via the 12-step table
@@ -452,8 +442,8 @@ pub enum IrLowerError {
     SqliteRebuildOnly(&'static str),
     /// **PR10 Part B** — a guarded op (`ifNotExists` on the `addConstraint` family)
     /// whose constraint shape cannot produce a verifiable [`GuardProbe`](crate::model::probe::GuardProbe) because the
-    /// CHECK body is a deferred-render closed-AST `Expr` (handled separately by
-    /// [`ExprRenderDeferred`](Self::ExprRenderDeferred) before this is reached). This
+    /// CHECK body is a deferred-render closed-AST `Expr` (validate rejects that
+    /// authoring shape before this is reached). This
     /// variant is reserved for any future guarded shape that lowers but cannot build
     /// a probe; lowering REFUSES fail-closed rather than stamping a probe that could
     /// not verify the declared shape. Carries the op tag.
@@ -1906,11 +1896,10 @@ impl IrAuthor {
                 // setColumnType lowers on PG only; on SQLite it routes through the
                 // declarative diff rebuild seam (fail-closed here).
                 self.require_capability_for(Capability::NativeAlterColumn, "setColumnType")?;
-                // A `using` cast is a closed-AST `Expr`; rendering an `Expr` to SQL is
-                // the Wave-C expression renderer (the same wave the DML executors wait
-                // on). Until it lands, a cast-bearing type change cannot lower.
                 if using.is_some() {
-                    return Err(IrLowerError::ExprRenderDeferred("setColumnType.using"));
+                    return Err(IrLowerError::UnsupportedOp(
+                        "validated setColumnType.using reached lower",
+                    ));
                 }
                 // Build the desired `ColumnSnapshot` via the SHARED builder (a
                 // one-field descriptor) so the emitted `data_type` is byte-identical
@@ -2003,8 +1992,8 @@ impl IrAuthor {
                 // Same SQLite rebuild constraint as setColumnType.
                 self.require_capability_for(Capability::NativeAlterColumn, "setColumnDefault")?;
                 if matches!(value, IrDefault::Fn { .. }) {
-                    return Err(IrLowerError::ExprRenderDeferred(
-                        "setColumnDefault value (synth now/genRandomUuid)",
+                    return Err(IrLowerError::UnsupportedOp(
+                        "validated setColumnDefault synth default reached lower",
                     ));
                 }
                 let default_sql = render_ir_default(value, self.dialect)?;
@@ -2758,22 +2747,9 @@ impl IrAuthor {
     /// stand-alone `addConstraint(unique)` uses), so an op-authored table and the
     /// differ's equivalent re-diff clean.
     ///
-    /// **Fail-closed, never a silent no-op** (HIGH-finding mandate):
-    /// - a composite or per-column user **PRIMARY KEY** is refused — the platform
-    ///   OWNS the synthetic `id TEXT PRIMARY KEY`, so a second PK is never
-    ///   satisfiable (PG/SQLite both reject two PKs); a user PK is a hard error;
-    /// - a **CHECK** is refused with [`IrLowerError::ExprRenderDeferred`] — its
-    ///   closed-AST `expr` needs the Wave-C Expr→SQL renderer (identical to the
-    ///   stand-alone `addConstraint(check)` deferral);
-    /// - a **multi-column / non-`id`-referencing FK** is refused (the single-`id`
-    ///   FK shape is the only one `lower_create_table` / `fk_clause` render today);
-    /// - a partial-index **`where`** predicate is refused (Wave-C Expr→SQL), and a
-    ///   non-`btree` index `using` on **SQLite** is refused;
-    /// - on **SQLite**, a table-level UNIQUE/FK is refused: the SQLite CREATE renders
-    ///   from the SDK schema `Value` (descriptor-derived), which carries no
-    ///   table-level constraint, so stamping it onto the snapshot would NOT reach the
-    ///   SQLite emitter — a silent drop. (Indexes DO reach both backends — they are
-    ///   emitted from `snap.indexes` outside the dialect branch.)
+    /// Validate rejects unsupported table-level specs before lower. The checks in
+    /// this helper are defense-in-depth for direct lower callers so invalid shapes
+    /// cannot be silently dropped or misrendered if validation was bypassed.
     fn fold_create_table_specs(
         &self,
         table: &str,
@@ -2796,14 +2772,13 @@ impl IrAuthor {
                     // The platform owns the `id` PK; a user composite / per-column PK
                     // would emit a SECOND `PRIMARY KEY`, which both backends reject.
                     return Err(IrLowerError::UnsupportedOp(
-                        "createTable user PRIMARY KEY (the platform owns the `id` \
-                         primary key; a composite/per-column PK is not supported)",
+                        "validated createTable user PRIMARY KEY reached lower",
                     ));
                 }
                 IrConstraintKind::Check { .. } => {
-                    // Same blocker as stand-alone addConstraint(check): the closed-AST
-                    // predicate needs the deferred Expr→SQL renderer.
-                    return Err(IrLowerError::ExprRenderDeferred("createTable check"));
+                    return Err(IrLowerError::UnsupportedOp(
+                        "validated createTable CHECK reached lower",
+                    ));
                 }
                 IrConstraintKind::Fk {
                     columns,
@@ -2814,19 +2789,17 @@ impl IrAuthor {
                 } => {
                     if !self.dialect.supports(Capability::TableLevelForeignKey) {
                         return Err(IrLowerError::UnsupportedOp(
-                            "createTable table-level FOREIGN KEY on SQLite (the SQLite \
-                             CREATE renders from the descriptor; a table-level FK is \
-                             not threaded into the emitter)",
+                            "validated SQLite createTable table-level FOREIGN KEY reached lower",
                         ));
                     }
                     // The render path (`fk_clause`) references the target's `id`
                     // single-column, so only a single local column FK is supported.
                     let local = columns.first().ok_or(IrLowerError::UnsupportedOp(
-                        "createTable FOREIGN KEY with no local column",
+                        "validated createTable FOREIGN KEY with no local column reached lower",
                     ))?;
                     if columns.len() != 1 {
                         return Err(IrLowerError::UnsupportedOp(
-                            "createTable multi-column FOREIGN KEY (later wave)",
+                            "validated createTable multi-column FOREIGN KEY reached lower",
                         ));
                     }
                     // The reference must be the target's `id` (the only shape
@@ -2835,8 +2808,7 @@ impl IrAuthor {
                         || (references_columns.len() == 1 && references_columns[0] == "id"))
                     {
                         return Err(IrLowerError::UnsupportedOp(
-                            "createTable FOREIGN KEY referencing a non-`id` column \
-                             (later wave)",
+                            "validated createTable FOREIGN KEY referencing non-id reached lower",
                         ));
                     }
                     let fk = crate::render::declarative::ir_fk_constraint_snapshot(
@@ -2853,9 +2825,7 @@ impl IrAuthor {
                 IrConstraintKind::Unique { columns } => {
                     if !self.dialect.supports(Capability::TableLevelUnique) {
                         return Err(IrLowerError::UnsupportedOp(
-                            "createTable table-level UNIQUE on SQLite (the SQLite \
-                             CREATE renders from the descriptor; a table-level UNIQUE \
-                             is not threaded into the emitter)",
+                            "validated SQLite createTable table-level UNIQUE reached lower",
                         ));
                     }
                     let name = c.name.as_deref().map_or_else(
@@ -2903,7 +2873,7 @@ impl IrAuthor {
             let access = ix.using.map_or("btree", index_method_access);
             if !self.dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
                 return Err(IrLowerError::UnsupportedOp(
-                    "createTable non-btree index `using` requires non-btree index-method support (unsupported on SQLite/MySQL)",
+                    "validated createTable non-btree index method reached lower",
                 ));
             }
             let mut snap_idx = create_index_snapshot(
@@ -3369,13 +3339,11 @@ impl IrAuthor {
         }
     }
 
-    /// Lower a stand-alone `addConstraint` op (§6). FK / UNIQUE / PRIMARY KEY are
+    /// Lower a stand-alone `addConstraint` op (§6). FK / UNIQUE are
     /// column-list constraints that lower to `ALTER TABLE … ADD CONSTRAINT …` on
     /// Postgres, reusing the differ's render seam (so an FK is byte-identical to a
-    /// deferred FK). A `CHECK` constraint carries a closed-AST `Expr` predicate
-    /// whose SQL rendering is the later expression wave, so it lowers to
-    /// [`IrLowerError::ExprRenderDeferred`] until that renderer lands. SQLite is
-    /// rebuild-only ([`IrLowerError::SqliteRebuildOnly`]).
+    /// deferred FK). Validate rejects PRIMARY KEY, CHECK, and unsupported FK shapes
+    /// before lower. SQLite is rebuild-only ([`IrLowerError::SqliteRebuildOnly`]).
     fn lower_add_constraint(
         &self,
         decl: &DeclarativeAuthor,
@@ -3407,18 +3375,18 @@ impl IrAuthor {
                 // PR1 single-column FK (the `ref` shape references the target's
                 // `id`); a multi-column FK is a later wave.
                 let local = columns.first().ok_or(IrLowerError::UnsupportedOp(
-                    "addConstraint(fk) with no local column",
+                    "validated addConstraint(fk) with no local column reached lower",
                 ))?;
                 if columns.len() != 1 {
                     return Err(IrLowerError::UnsupportedOp(
-                        "addConstraint(fk) multi-column (later wave)",
+                        "validated addConstraint(fk) multi-column reached lower",
                     ));
                 }
                 if !(references_columns.is_empty()
                     || (references_columns.len() == 1 && references_columns[0] == "id"))
                 {
                     return Err(IrLowerError::UnsupportedOp(
-                        "addConstraint(fk) referencing a non-`id` column (later wave)",
+                        "validated addConstraint(fk) referencing non-id reached lower",
                     ));
                 }
                 // **PR10** — the FK references resolve in the SAME effective schema
@@ -3450,18 +3418,15 @@ impl IrAuthor {
                 // existing duplicates — gated (requires_approval), like SET NOT NULL.
                 decl.lower_add_constraint(table, &cname, &body, true)
             }
-            IrConstraintKind::Pk { columns } => {
-                let body = format!("PRIMARY KEY ({})", crate::render::declarative::constraintdef_cols(columns));
-                let cname =
-                    name.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string);
-                // A PK add scans + locks the whole table under ACCESS EXCLUSIVE and
-                // fails on a NULL/duplicate key — gated (requires_approval).
-                decl.lower_add_constraint(table, &cname, &body, true)
+            IrConstraintKind::Pk { .. } => {
+                return Err(IrLowerError::UnsupportedOp(
+                    "validated addConstraint user PRIMARY KEY reached lower",
+                ));
             }
             IrConstraintKind::Check { .. } => {
-                // A CHECK predicate is a closed-AST `Expr`; rendering it to SQL is
-                // the Wave-C expression renderer (no `Expr`→SQL path yet).
-                return Err(IrLowerError::ExprRenderDeferred("addConstraint(check)"));
+                return Err(IrLowerError::UnsupportedOp(
+                    "validated addConstraint(check) reached lower",
+                ));
             }
             IrConstraintKind::Exclusion { elements, .. } => {
                 let cname = name.map_or_else(
@@ -3633,7 +3598,9 @@ fn render_comment_op(
     dialect: SqlDialect,
 ) -> Result<CommentStatement, IrLowerError> {
     if !dialect.supports(Capability::CommentOn) {
-        return Err(IrLowerError::UnsupportedOp("COMMENT ON is PostgreSQL-only"));
+        return Err(IrLowerError::UnsupportedOp(
+            "validated COMMENT ON unsupported dialect reached lower",
+        ));
     }
     let Op::Comment { target, comment } = op else {
         return Err(IrLowerError::UnsupportedOp("non-comment op routed to comment renderer"));
@@ -4456,12 +4423,12 @@ pub(crate) fn create_index_snapshot(
     if dialect == SqlDialect::Mysql && columns.iter().any(|e| matches!(e, IndexElement::Expr { .. }))
     {
         return Err(IrLowerError::UnsupportedOp(
-            "createIndex expression elements are not supported on MySQL",
+            "validated createIndex expression elements on MySQL reached lower",
         ));
     }
     if predicate.is_some() && !dialect.supports(Capability::PartialIndexPredicate) {
         return Err(IrLowerError::UnsupportedOp(
-            "createIndex partial predicates require partial-index support; MySQL does not support partial indexes",
+            "validated createIndex partial predicate on unsupported dialect reached lower",
         ));
     }
     let mut plain_columns = Vec::new();
@@ -4637,14 +4604,9 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
     }
 }
 
-/// Fail-closed guard: refuse any column carrying a SYNTH default
-/// (`IrDefault::Fn`, i.e. `now()`/`genRandomUuid()`) at lower, rather than letting
-/// [`ir_default_to_value`] silently map it to `None` (no default). This closes the
-/// self-footgun the §LOW finding flagged: a user-authored synth default would
-/// otherwise be DROPPED with no error. Rendering a synth default to per-dialect SQL
-/// is the deferred Expr→SQL synth wave (the same wave DML waits on); until then an
-/// author-supplied synth default is REFUSED ([`IrLowerError::ExprRenderDeferred`]),
-/// never lost.
+/// Defense-in-depth guard: refuse any column carrying a SYNTH default if a direct
+/// lower caller bypassed validate, rather than letting [`ir_default_to_value`]
+/// silently map it to `None` (no default).
 ///
 /// The differ's own system-field path (`id`/timestamps) injects its volatile
 /// defaults through the shared builder, NOT through an `IrDefault::Fn` on a user
@@ -4655,7 +4617,9 @@ fn reject_synth_default<'a>(
 ) -> Result<(), IrLowerError> {
     for (_name, default) in cols {
         if matches!(default, Some(IrDefault::Fn { .. })) {
-            return Err(IrLowerError::ExprRenderDeferred("column default (synth now/genRandomUuid)"));
+            return Err(IrLowerError::UnsupportedOp(
+                "validated synth column default reached lower",
+            ));
         }
     }
     Ok(())
@@ -4663,12 +4627,10 @@ fn reject_synth_default<'a>(
 
 /// Map an [`IrDefault`] to the descriptor's `default` JSON value. A literal maps
 /// to its scalar. A synth `now`/`genRandomUuid` maps to `None` HERE — but it is
-/// never reached for a user-authored synth default, because [`reject_synth_default`]
-/// fails that case CLOSED at lower (the self-footgun fix): the silent `None` is
-/// reserved for the differ's system-field path, which never routes a synth through
-/// this function. So `None` here matches the differ (which never sees a synth
-/// default on an autogenerated column) WITHOUT silently dropping an author's
-/// request.
+/// never reached for a validated user-authored synth default: validate rejects it,
+/// and [`reject_synth_default`] is the defensive lower backstop. The silent `None`
+/// is reserved for the differ's system-field path, which never routes a synth
+/// through this function.
 fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
     use crate::model::ir::IrScalar;
     use serde_json::Value;
@@ -4824,10 +4786,9 @@ pub(crate) fn derived_constraint_name(table: &str, cols: &[String], suffix: &str
 /// derived the SAME way [`IrAuthor::lower_add_constraint`] derives them, so the
 /// stamped [`crate::render::existence_probe::GuardProbe::Constraint`] names the constraint the
 /// executor will see in the live `information_schema` / `pg_get_constraintdef`.
-/// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
-/// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. A CHECK constraint never
-/// reaches this helper — `lower_add_constraint` returns `ExprRenderDeferred` before
-/// the probe is built — but it is handled for totality.
+    /// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
+    /// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. Validate rejects user
+    /// PRIMARY KEY and CHECK before lower, but they are handled for totality.
 fn ir_constraint_name_and_kind(
     table: &str,
     constraint: &IrConstraint,
@@ -5920,17 +5881,13 @@ mod tests {
         }
     }
 
-    // LOW (code-critic, this fix): an author-supplied SYNTH default
-    // (`now()`/`genRandomUuid()`) on a user column must FAIL CLOSED at lower
-    // (`ExprRenderDeferred`), NOT be silently dropped to no-default. Pre-fix
-    // `ir_default_to_value` mapped `IrDefault::Fn → None`, so the lower SUCCEEDED and
-    // the column emitted with NO default — the author's request silently lost (the
-    // self-footgun this pins). RED before the fix: `lower` returns Ok with a
-    // default-less CREATE; GREEN after: `lower` returns `ExprRenderDeferred`.
+    // An author-supplied SYNTH default (`now()`/`genRandomUuid()`) on a user
+    // column is refused at validate-time, before lower can silently map it to no
+    // default.
     #[test]
-    fn synth_default_on_user_column_fails_closed_not_silently_dropped() {
+    fn synth_default_on_user_column_validates_refused_not_silently_dropped() {
         use crate::model::ir::SynthDefaultFn;
-        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
+        use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
         // createTable with a column whose default is a synth `now()`.
         let ir_create = MigrationIr {
@@ -5957,13 +5914,11 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let err = author
-            .lower(&ir_create, &LiveSchema::default())
-            .expect_err("a synth default on a user column must fail closed, not silently drop");
-        assert!(
-            matches!(err, IrLowerError::ExprRenderDeferred(slot) if slot.contains("synth")),
-            "expected ExprRenderDeferred for the synth default, got {err:?}"
-        );
+        let err = validate_ir(&ir_create, Dialect::Postgres, &[])
+            .expect_err("a synth default on a user column must validate-refuse");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("synth default"));
 
         // addColumn with a synth `genRandomUuid()` default — same fail-closed.
         let ir_add = MigrationIr {
@@ -5989,13 +5944,11 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let err = author
-            .lower(&ir_add, &LiveSchema::default())
-            .expect_err("a synth default on an addColumn must fail closed");
-        assert!(
-            matches!(err, IrLowerError::ExprRenderDeferred(slot) if slot.contains("synth")),
-            "expected ExprRenderDeferred for the addColumn synth default, got {err:?}"
-        );
+        let err = validate_ir(&ir_add, Dialect::Postgres, &[])
+            .expect_err("a synth default on an addColumn must validate-refuse");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("synth default"));
 
         // A LITERAL default still lowers fine (the guard is synth-specific, not a
         // blanket default ban).
@@ -6022,13 +5975,14 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
+        let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         author
             .lower(&ir_lit, &LiveSchema::default())
             .expect("a literal default must still lower");
     }
 
     #[test]
-    fn set_column_type_using_is_validate_and_lower_refused() {
+    fn set_column_type_using_is_validate_refused() {
         use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
         let ir = MigrationIr {
@@ -6056,13 +6010,6 @@ mod tests {
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert!(err.reason.contains("setColumnType.using"));
 
-        let lower_err = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
-            .lower(&ir, &LiveSchema::default())
-            .expect_err("direct lower keeps the defensive ExprRenderDeferred boundary");
-        assert!(
-            matches!(lower_err, IrLowerError::ExprRenderDeferred(slot) if slot == "setColumnType.using"),
-            "expected ExprRenderDeferred for setColumnType.using, got {lower_err:?}"
-        );
     }
 
     #[test]

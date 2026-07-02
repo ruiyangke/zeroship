@@ -2814,18 +2814,17 @@ impl Op {
 
     /// Static dialect support declaration for this concrete op shape.
     ///
-    /// This is intentionally not wired into validation in this slice. It mirrors
-    /// current validate/lower behavior so tests can pin the matrix before later
-    /// slices move selected refusals earlier.
+    /// This is the support matrix the authoring validator consumes for dialect
+    /// and feature refusals before lowering.
     #[must_use]
     pub fn support(&self) -> crate::model::support::Support {
         use crate::model::support::{
-            supported, unsupported, DialectSupport, RenderMode, Support, ADD_CONSTRAINT_FEATURES,
-            ALTER_COLUMN_TYPE_FEATURES, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT,
+            supported, unsupported, DialectSupport, RenderMode, Support, ADD_COLUMN_FEATURES,
+            ADD_CONSTRAINT_FEATURES, ALTER_COLUMN_TYPE_FEATURES, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT,
             CAP_MATERIALIZED_VIEW, CAP_POLICY, CAP_RAW_MATERIALIZED_VIEW, CAP_RAW_SQL, CAP_RLS,
             CAP_ROLE, CAP_SCHEMA, COMMENT_FEATURES, CREATE_INDEX_FEATURES, CREATE_TABLE_FEATURES,
             CREATE_TRIGGER_FEATURES, CREATE_VIEW_FEATURES, INSERT_FEATURES, PG_RAW_FEATURES,
-            RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES,
+            RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES, SET_COLUMN_DEFAULT_FEATURES,
         };
         use crate::model::validate::CODE_UNSUPPORTED;
 
@@ -2842,7 +2841,7 @@ impl Op {
             Op::SetTableOptions { .. } => Support::core(all_offline, &[]),
             Op::DropTable { .. } => Support::core(all_offline, &[]),
             Op::RenameTable { .. } => Support::core(all_offline, &[]),
-            Op::AddColumn { .. } => Support::core(all_offline, &[]),
+            Op::AddColumn { .. } => Support::core(all_offline, ADD_COLUMN_FEATURES),
             Op::DropColumn { .. } => Support::core(all_offline, &[]),
             Op::CreateIndex {
                 columns,
@@ -2943,7 +2942,7 @@ impl Op {
                         supported(RenderMode::Offline),
                     )
                 };
-                Support::core(dialects, &[])
+                Support::core(dialects, SET_COLUMN_DEFAULT_FEATURES)
             }
             Op::RenameColumn {
                 existence_guard, ..

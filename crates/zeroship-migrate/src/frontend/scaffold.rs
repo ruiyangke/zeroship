@@ -198,8 +198,8 @@ fn col_type_for_data_type(
 /// The default for a generated column. `generate` emits NO column defaults: the
 /// declarative differ (the platform deploy path) injects the system-field defaults
 /// (`id`/`created_at`/…) through its own shared builder, and a user-authored synth
-/// default in a `createTable` is a deferred render wave on the engine
-/// ([`IrLowerError::ExprRenderDeferred`]). Emitting a default here would make the
+/// default in a `createTable` is validate-refused until the default renderer lands.
+/// Emitting a default here would make the
 /// generated `.ir.json` un-applyable. The drift comparison is on `data_type` +
 /// `nullable` only (never `default`), so omitting defaults still re-diffs to zero.
 /// Kept as a function (returning `None`) to document the deliberate choice + keep a

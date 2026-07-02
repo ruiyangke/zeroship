@@ -2,7 +2,7 @@
 //!
 //! Mirrors `generate_all_types_parity.rs`: author an op stream covering the full
 //! portable type/facet matrix (text/int/bigInt/float/bool/json/timestamp/uuid/bytes/
-//! numeric + ref + vector + encrypted + id-with-prefix + an enum CHECK + min/max),
+//! numeric + ref + vector + encrypted + id-with-prefix),
 //! generate the `env.db.ts`, and assert the emitted file contains the expected
 //! `@zeroship/db` `t.*()` builder chain per column. The richer reverse renderer
 //! (vs `scaffold.rs::render_t_for`, which TODO-stubs goodies) is the thing under test.
@@ -14,9 +14,8 @@
 //! FAITHFUL: the op stream is folded through the REAL `fold_to_field_defs` seam and
 //! the REAL `render_artifacts` emitter — no stubs.
 
-use zeroship_migrate::model::expr::{BinaryOp, Expr};
 use zeroship_migrate::model::ir::{
-    ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar, Op, RefAction,
+    ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, Op, RefAction,
     TableRuntimeOptions, TableStrictness, VectorMetric,
 };
 use zeroship_migrate::frontend::render_artifacts;
@@ -80,34 +79,6 @@ fn all_types_ops() -> Vec<Op> {
         col("age", ColType::Int),
         col("status", ColType::Text),
     ];
-    // age >= 0 AND age <= 120  → .min(0).max(120)
-    let age_range = Expr::BinOp {
-        op: BinaryOp::And,
-        lhs: Box::new(Expr::BinOp {
-            op: BinaryOp::Ge,
-            lhs: Box::new(Expr::col("age")),
-            rhs: Box::new(Expr::lit(IrScalar::Int(0))),
-        }),
-        rhs: Box::new(Expr::BinOp {
-            op: BinaryOp::Le,
-            lhs: Box::new(Expr::col("age")),
-            rhs: Box::new(Expr::lit(IrScalar::Int(120))),
-        }),
-    };
-    // status = 'on' OR status = 'off'  → .enum("on", "off")
-    let status_enum = Expr::BinOp {
-        op: BinaryOp::Or,
-        lhs: Box::new(Expr::BinOp {
-            op: BinaryOp::Eq,
-            lhs: Box::new(Expr::col("status")),
-            rhs: Box::new(Expr::lit(IrScalar::Str("on".into()))),
-        }),
-        rhs: Box::new(Expr::BinOp {
-            op: BinaryOp::Eq,
-            lhs: Box::new(Expr::col("status")),
-            rhs: Box::new(Expr::lit(IrScalar::Str("off".into()))),
-        }),
-    };
     // The FK constraint carrying the ref POLICY (so onDelete round-trips).
     let fk = IrConstraint {
         name: Some("gadgets_owner_fkey".into()),
@@ -122,11 +93,7 @@ fn all_types_ops() -> Vec<Op> {
     vec![Op::CreateTable {
         name: "gadgets".into(),
         columns,
-        constraints: vec![
-            fk,
-            IrConstraint { name: Some("gadgets_age_range_check".into()), kind: IrConstraintKind::Check { expr: age_range } },
-            IrConstraint { name: Some("gadgets_status_enum_check".into()), kind: IrConstraintKind::Check { expr: status_enum } },
-        ],
+        constraints: vec![fk],
         indexes: Vec::new(),
         runtime_options: None,
         schema: None,
@@ -169,8 +136,8 @@ fn env_dts_golden_covers_full_type_matrix() {
         "owner: t.ref(\"users\", { onDelete: \"cascade\"",  // ref + recovered FK policy
         "secret: t.encrypted()",                      // encrypted (default mode)
         "embedding: t.vector(768, { metric: \"l2\" })", // vector + recovered metric
-        "age: t.number().min(0).max(120)",            // min/max lifted from the CHECK
-        "status: t.string().enum(\"on\", \"off\")",   // enum lifted from the CHECK
+        "age: t.number()",
+        "status: t.string()",
     ] {
         assert!(
             dts.contains(chain),
@@ -196,9 +163,8 @@ fn runtime_descriptor_is_the_wire_fielddef_map() {
     assert_eq!(fields["owner"]["onDelete"], "cascade");
     assert_eq!(fields["embedding"]["vectorDims"], 768);
     assert_eq!(fields["embedding"]["vectorMetric"], "l2");
-    assert_eq!(fields["age"]["min"], 0.0);
-    assert_eq!(fields["age"]["max"], 120.0);
-    assert_eq!(fields["status"]["enum"], serde_json::json!(["on", "off"]));
+    assert_eq!(fields["age"]["type"], "int");
+    assert_eq!(fields["status"]["type"], "string");
     assert_eq!(
         gadgets["options"],
         serde_json::json!({ "softDelete": false, "versioning": false, "strictness": "strict" })

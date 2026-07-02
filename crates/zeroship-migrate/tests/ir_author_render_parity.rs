@@ -21,6 +21,7 @@ use zeroship_migrate::model::ir::{
     ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr,
     Op,
 };
+use zeroship_migrate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
@@ -771,10 +772,6 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
 #[test]
 fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
     use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
-    let mut live = BTreeSet::new();
-    live.insert("posts".to_string());
-    live.insert("authors".to_string());
-
     let ir = MigrationIr {
         ir_version: 1,
         name: "m".into(),
@@ -801,14 +798,14 @@ fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
         checksum: None,
     };
 
-    let err = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Postgres)
-        .lower(&ir, &LiveSchema::from(&live))
-        .expect_err(
-            "standalone addConstraint(fk) must not silently render REFERENCES posts(id) \
-             when referencesColumns names a different target column",
-        );
+    let err = validate_ir(&ir, Dialect::Postgres, &[]).expect_err(
+        "standalone addConstraint(fk) must be validate-refused when referencesColumns \
+         names a non-id target column",
+    );
+    assert_eq!(err.code, CODE_UNSUPPORTED);
+    assert_eq!(err.kind, Some(UnsupportedKind::Op));
     assert!(
-        err.to_string().contains("non-`id`"),
+        err.reason.contains("non-id") || err.reason.contains("non-`id`"),
         "error should explain that only id references are supported today, got: {err}"
     );
 }
@@ -816,10 +813,10 @@ fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
 #[test]
 fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
-    // UNIQUE/PK have no stand-alone differ counterpart (the differ inlines them at
-    // CREATE / renders single-col UNIQUE as an index), so these compare the IR
-    // lower against the shared `lower_add_constraint` render seam directly — the
-    // SAME render method, byte-stable. We pin the exact emitted SQL.
+    // UNIQUE has no stand-alone differ counterpart (the differ renders single-col
+    // UNIQUE as an index), so this compares the IR lower against the shared
+    // `lower_add_constraint` render seam directly. User PK is support-refused at
+    // validate-time in Slice 5 because the platform owns the primary key.
     let mut live = BTreeSet::new();
     live.insert("widgets".to_string());
 
@@ -845,8 +842,11 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
         "stand-alone UNIQUE add renders the canonical ADD CONSTRAINT"
     );
 
-    let pk = sql_pairs(&ir_lower_one(
-        Op::AddConstraint {
+    let pk_ir = MigrationIr {
+        ir_version: 1,
+        name: "m".into(),
+        owner_app: OWNER.into(),
+        ops: vec![Op::AddConstraint {
             table: "widgets".into(),
             constraint: IrConstraint {
                 name: Some("widgets_pkey".into()),
@@ -854,17 +854,20 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
             },
             schema: None,
             existence_guard: None,
-        },
-        &live,
-        SqlDialect::Postgres,
-    ));
-    assert_eq!(
-        pk,
-        vec![(
-            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_pkey\" PRIMARY KEY (a, b)".to_string(),
-            Some("ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_pkey\"".to_string()),
-        )],
-        "stand-alone PK add renders the canonical ADD CONSTRAINT"
+        }],
+        flags: Default::default(),
+        depends_on: vec![],
+        supersedes: vec![],
+        preconditions: vec![],
+        checksum: None,
+    };
+    let pk_err = validate_ir(&pk_ir, Dialect::Postgres, &[])
+        .expect_err("stand-alone user PK add is validate-refused");
+    assert_eq!(pk_err.code, CODE_UNSUPPORTED);
+    assert_eq!(pk_err.kind, Some(UnsupportedKind::Op));
+    assert!(
+        pk_err.reason.contains("PRIMARY KEY") || pk_err.reason.contains("primary key"),
+        "PK refusal should explain platform-owned PK, got: {pk_err}"
     );
 
     let drop = sql_pairs(&ir_lower_one(

@@ -154,11 +154,6 @@ pub enum FoldError {
         /// The `to` name that already exists.
         to: String,
     },
-    /// A CHECK predicate (or other closed-AST `Expr`) whose SQL rendering is the
-    /// deferred Expr→SQL wave — parity with `IrLowerError::ExprRenderDeferred`. The
-    /// fold cannot materialize the constraint `definition`, so it fails closed
-    /// rather than fold a partial / wrong CHECK body.
-    ExprDeferred(&'static str),
     /// The shared snapshot-builder rejected the shape (unknown type token, a bad
     /// `ref` target, a malformed `id` prefix, …). Carries the builder's own error.
     Shape(DeclarativeError),
@@ -203,9 +198,6 @@ impl std::fmt::Display for FoldError {
             FoldError::DuplicateIndex(n) => write!(f, "fold: index `{n}` already exists"),
             FoldError::RenameCollision { table, to } => {
                 write!(f, "fold: rename target `{table}.{to}` already exists")
-            }
-            FoldError::ExprDeferred(what) => {
-                write!(f, "fold: {what} carries a closed-AST predicate the offline fold cannot render (deferred Expr→SQL wave)")
             }
             FoldError::Shape(e) => write!(f, "fold: shape error: {e}"),
             FoldError::Unsupported(what) => write!(f, "fold: unsupported op: {what}"),
@@ -1438,7 +1430,7 @@ fn apply_fold_named_type_column_metadata(
 /// Fail-closed parity with the lower:
 /// - a user composite / per-column PRIMARY KEY is refused (the platform owns the
 ///   synthetic `id` PK — a second PK is never satisfiable);
-/// - a CHECK is refused with [`FoldError::ExprDeferred`] (closed-AST predicate);
+/// - validate rejects CHECK before fold; this helper keeps a defensive backstop;
 /// - a multi-column / non-`id`-referencing FK is refused;
 /// - a partial-index `where` is refused (closed-AST predicate);
 /// - on **SQLite**, a table-level FOREIGN KEY, a table-level UNIQUE, and a
@@ -1474,11 +1466,11 @@ fn fold_create_table_specs(
                     continue;
                 }
                 return Err(FoldError::Unsupported(
-                    "createTable user PRIMARY KEY (the platform owns the `id` primary key)",
+                    "validated createTable user PRIMARY KEY reached fold",
                 ));
             }
             IrConstraintKind::Check { .. } => {
-                return Err(FoldError::ExprDeferred("createTable check"));
+                return Err(FoldError::Unsupported("validated createTable CHECK reached fold"));
             }
             IrConstraintKind::Fk {
                 columns,
@@ -1735,10 +1727,12 @@ fn add_constraint_snapshot(
             // would otherwise slip past the DuplicateConstraint net the derived
             // `<table>_pkey` incidentally trips).
             Err(FoldError::Unsupported(
-                "addConstraint user PRIMARY KEY (the platform owns the `id` primary key)",
+                "validated addConstraint user PRIMARY KEY reached fold",
             ))
         }
-        IrConstraintKind::Check { .. } => Err(FoldError::ExprDeferred("addConstraint(check)")),
+        IrConstraintKind::Check { .. } => {
+            Err(FoldError::Unsupported("validated addConstraint(check) reached fold"))
+        }
         IrConstraintKind::Exclusion { elements, .. } => {
             if !dialect.supports(Capability::ExclusionConstraint) {
                 return Err(FoldError::Unsupported(
@@ -2014,27 +2008,15 @@ fn recover_fk_policy(
 ///
 /// # Errors
 /// Any structural-incoherence [`FoldError`] [`fold_ops`] raises (the stream must
-/// be coherent first). The ONE exception is [`FoldError::ExprDeferred`] for a
-/// CHECK: `fold_ops` defers a CHECK because it cannot render the snapshot's SQL
-/// `definition` offline, but a CHECK is exactly what this seam LIFTS — so a
-/// CHECK-bearing-but-otherwise-coherent stream is reconstructed, not refused (a
-/// CHECK over an unrecognized shape is then left unprojected, §4(a)).
+/// be coherent first).
 pub fn fold_to_field_defs(
     ops: &[Op],
     dialect: SqlDialect,
     project_schema: &str,
 ) -> Result<BTreeMap<String, serde_json::Value>, FoldError> {
     // 1. Fail-closed coherence. `fold_ops` is the structural-coherence oracle
-    //    (add-to-missing-table, drop-absent-column, duplicate-create, …). It ALSO
-    //    refuses a CHECK with `ExprDeferred` because it cannot render the snapshot's
-    //    SQL `definition` offline — but a CHECK is exactly what THIS seam lifts, so
-    //    that single deferral is EXPECTED and tolerated here (the recovery's own
-    //    op-replay below tracks the live column set independently). Any OTHER
-    //    FoldError is a genuine incoherence and propagates.
-    match fold_ops(ops, dialect, project_schema) {
-        Ok(_) | Err(FoldError::ExprDeferred(_)) => {}
-        Err(e) => return Err(e),
-    }
+    //    (add-to-missing-table, drop-absent-column, duplicate-create, …).
+    fold_ops(ops, dialect, project_schema)?;
 
     // 2. Build a per-table FieldDescriptor map by replaying the ops' column shapes.
     //    We track FieldDescriptors (not snapshots) because the descriptor carries
@@ -2681,11 +2663,27 @@ mod tests {
     use super::*;
     use crate::model::expr::Expr;
     use crate::model::ir::{IndexElement, IrScalar, TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness};
+    use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
     const SCHEMA: &str = "proj_test";
 
     fn fold(ops: &[Op]) -> Result<SchemaSnapshot, FoldError> {
         fold_ops(ops, SqlDialect::Postgres, SCHEMA)
+    }
+
+    fn validate_ops(ops: Vec<Op>, dialect: Dialect) -> crate::model::validate::AuthoringError {
+        let ir = crate::model::ir::MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: "fold_validate".to_string(),
+            owner_app: "app_fold".to_string(),
+            ops,
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        validate_ir(&ir, dialect, &[]).unwrap_err()
     }
 
     fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
@@ -3484,20 +3482,14 @@ mod tests {
     }
 
     #[test]
-    fn add_constraint_user_pk_is_refused_fail_closed() {
-        // A standalone addConstraint(Pk) — named OR derived — must be REFUSED
-        // fail-closed (byte-for-byte parity with the createTable Pk refusal): the
-        // platform owns the synthetic `<table>_pkey` PK, so a SECOND PK is never
-        // satisfiable. PG errors `multiple primary keys for table not allowed` at
-        // apply, so a snapshot with two PKs is UNREACHABLE by introspection — a
-        // fail-OPEN the fold's contract forbids. A NAMED user PK (distinct from
-        // `<table>_pkey`) must not slip past the DuplicateConstraint net.
+    fn add_constraint_user_pk_is_validate_refused() {
         for name in [Some("my_custom_pk"), None] {
             let pk = IrConstraint {
                 name: name.map(ToString::to_string),
                 kind: IrConstraintKind::Pk { columns: vec!["a".to_string()] },
             };
-            let err = fold(&[
+            let err = validate_ops(
+                vec![
                 create("t", vec![col("a", ColType::Text, false)]),
                 Op::AddConstraint {
                     table: "t".to_string(),
@@ -3505,15 +3497,12 @@ mod tests {
                     schema: None,
                     existence_guard: None,
                 },
-            ])
-            .unwrap_err();
-            assert_eq!(
-                err,
-                FoldError::Unsupported(
-                    "addConstraint user PRIMARY KEY (the platform owns the `id` primary key)"
-                ),
-                "named={name:?} user PK must be refused, not fold to a two-PK snapshot",
+                ],
+                Dialect::Postgres,
             );
+            assert_eq!(err.code, CODE_UNSUPPORTED);
+            assert_eq!(err.kind, Some(UnsupportedKind::Op));
+            assert!(err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"));
         }
     }
 
@@ -3536,14 +3525,15 @@ mod tests {
     }
 
     #[test]
-    fn add_check_constraint_is_deferred() {
+    fn add_check_constraint_is_validate_refused() {
         let chk = IrConstraint {
             name: Some("age_pos".to_string()),
             kind: IrConstraintKind::Check {
                 expr: Expr::Literal { value: IrScalar::Bool(true) },
             },
         };
-        let err = fold(&[
+        let err = validate_ops(
+            vec![
             create("users", vec![col("age", ColType::Int, false)]),
             Op::AddConstraint {
                 table: "users".to_string(),
@@ -3551,9 +3541,12 @@ mod tests {
                 schema: None,
                 existence_guard: None,
             },
-        ])
-        .unwrap_err();
-        assert_eq!(err, FoldError::ExprDeferred("addConstraint(check)"));
+            ],
+            Dialect::Postgres,
+        );
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("CHECK") || err.reason.contains("check"));
     }
 
     #[test]
@@ -3917,10 +3910,6 @@ mod tests {
     // never emits types for a schema that can never deploy on SQLite (fail-OPEN).
     // -----------------------------------------------------------------------
 
-    fn fold_sqlite(ops: &[Op]) -> Result<SchemaSnapshot, FoldError> {
-        fold_ops(ops, SqlDialect::Sqlite, SCHEMA)
-    }
-
     fn create_with(name: &str, columns: Vec<IrColumn>, constraints: Vec<IrConstraint>, indexes: Vec<IrIndex>) -> Op {
         Op::CreateTable {
             name: name.to_string(),
@@ -3933,10 +3922,8 @@ mod tests {
         }
     }
 
-    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL FOREIGN KEY is refused on
-    /// SQLite — byte-for-byte parity with the lower (`render::lower`), which never
-    /// threads a table-level FK into the SQLite emitter. Pre-fix the fold ACCEPTED
-    /// it (fail-open: a schema the engine can never apply on SQLite).
+    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL FOREIGN KEY is refused at
+    /// validate-time on SQLite.
     #[test]
     fn create_table_level_fk_unsupported_on_sqlite() {
         let parents = create("teams", vec![col("label", ColType::Text, false)]);
@@ -3955,11 +3942,10 @@ mod tests {
             }],
             Vec::new(),
         );
-        let err = fold_sqlite(&[parents, kids]).unwrap_err();
-        assert!(
-            matches!(err, FoldError::Unsupported(m) if m.contains("FOREIGN KEY") && m.contains("SQLite")),
-            "table-level FK on SQLite must fail closed, got {err:?}"
-        );
+        let err = validate_ops(vec![parents, kids], Dialect::Sqlite);
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(err.reason.contains("foreign keys"));
         // The SAME shape FOLDS on Postgres (the parity is dialect-scoped).
         let parents = create("teams", vec![col("label", ColType::Text, false)]);
         let kids = create_with(
@@ -3980,7 +3966,8 @@ mod tests {
         assert!(fold(&[parents, kids]).is_ok(), "table-level FK folds on Postgres");
     }
 
-    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL UNIQUE is refused on SQLite.
+    /// REGRESSION (Finding #2): a createTable TABLE-LEVEL UNIQUE is refused at
+    /// validate-time on SQLite.
     #[test]
     fn create_table_level_unique_unsupported_on_sqlite() {
         let op = create_with(
@@ -3989,15 +3976,14 @@ mod tests {
             vec![unique_constraint(Some("t_handle_uq"), &["handle"])],
             Vec::new(),
         );
-        let err = fold_sqlite(&[op]).unwrap_err();
-        assert!(
-            matches!(err, FoldError::Unsupported(m) if m.contains("UNIQUE") && m.contains("SQLite")),
-            "table-level UNIQUE on SQLite must fail closed, got {err:?}"
-        );
+        let err = validate_ops(vec![op], Dialect::Sqlite);
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(err.reason.contains("unique"));
     }
 
-    /// REGRESSION (Finding #2): a createTable non-btree index `using` is refused on
-    /// SQLite.
+    /// REGRESSION (Finding #2): a createTable non-btree index `using` is refused at
+    /// validate-time on SQLite.
     #[test]
     fn create_table_non_btree_index_using_unsupported_on_sqlite() {
         let op = create_with(
@@ -4012,11 +3998,10 @@ mod tests {
                 r#where: None,
             }],
         );
-        let err = fold_sqlite(&[op]).unwrap_err();
-        assert!(
-            matches!(err, FoldError::Unsupported(m) if m.contains("non-btree") && m.contains("SQLite")),
-            "non-btree index `using` on SQLite must fail closed, got {err:?}"
-        );
+        let err = validate_ops(vec![op], Dialect::Sqlite);
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(err.reason.contains("non-btree"));
     }
 
     // -----------------------------------------------------------------------
@@ -4418,23 +4403,6 @@ mod tests {
             "an encrypted column is recovered with the (default-mode) encrypted facet: {def}");
     }
 
-    /// Build a single-column CHECK `IrConstraint` from a closed-AST predicate.
-    fn check(name: &str, expr: Expr) -> IrConstraint {
-        IrConstraint { name: Some(name.into()), kind: IrConstraintKind::Check { expr } }
-    }
-
-    fn create_with_checks(name: &str, columns: Vec<IrColumn>, checks: Vec<IrConstraint>) -> Op {
-        Op::CreateTable {
-            name: name.to_string(),
-            columns,
-            constraints: checks,
-            indexes: Vec::new(),
-            runtime_options: None,
-            schema: None,
-            existence_guard: None,
-        }
-    }
-
     #[test]
     fn recover_min_max_range_from_check() {
         // §5.3: `age >= 0 AND age <= 120` lifts to min:0, max:120 on a numeric column.
@@ -4452,16 +4420,15 @@ mod tests {
                 rhs: Box::new(Expr::lit(IrScalar::Int(120))),
             }),
         };
-        let m = defs(&[create_with_checks(
-            "people",
-            vec![col("age", ColType::Float, false)],
-            vec![check("people_age_range", range)],
-        )]);
-        let def = field_def(&m, "people", "age");
-        assert_eq!(def.get("min").and_then(serde_json::Value::as_f64), Some(0.0),
-            "the lower bound is lifted from the CHECK: {def}");
-        assert_eq!(def.get("max").and_then(serde_json::Value::as_f64), Some(120.0),
-            "the upper bound is lifted from the CHECK: {def}");
+        assert_eq!(
+            recover_check_facet(&range),
+            Some(RecoveredCheck::Range {
+                column: "age".to_string(),
+                min: Some(0.0),
+                max: Some(120.0),
+            }),
+            "the min/max recognizer must stay ready for the P1 CHECK renderer"
+        );
     }
 
     #[test]
@@ -4472,14 +4439,15 @@ mod tests {
             lhs: Box::new(Expr::col("qty")),
             rhs: Box::new(Expr::lit(IrScalar::Int(1))),
         };
-        let m = defs(&[create_with_checks(
-            "orders",
-            vec![col("qty", ColType::Float, false)],
-            vec![check("orders_qty_min", ge)],
-        )]);
-        let def = field_def(&m, "orders", "qty");
-        assert_eq!(def.get("min").and_then(serde_json::Value::as_f64), Some(1.0));
-        assert!(def.get("max").is_none(), "a lone >= lifts only the min: {def}");
+        assert_eq!(
+            recover_check_facet(&ge),
+            Some(RecoveredCheck::Range {
+                column: "qty".to_string(),
+                min: Some(1.0),
+                max: None,
+            }),
+            "a lone >= lifts only the min"
+        );
     }
 
     #[test]
@@ -4497,15 +4465,17 @@ mod tests {
             lhs: Box::new(eq("admin")),
             rhs: Box::new(eq("user")),
         };
-        let m = defs(&[create_with_checks(
-            "members",
-            vec![col("role", ColType::Text, false)],
-            vec![check("members_role_enum", chain)],
-        )]);
-        let def = field_def(&m, "members", "role");
-        let got = def.get("enum").and_then(|v| v.as_array()).expect("enum recovered");
-        let values: Vec<&str> = got.iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(values, vec!["admin", "user"], "the enum members are lifted in order: {def}");
+        assert_eq!(
+            recover_check_facet(&chain),
+            Some(RecoveredCheck::Enum {
+                column: "role".to_string(),
+                values: vec![
+                    serde_json::Value::String("admin".to_string()),
+                    serde_json::Value::String("user".to_string()),
+                ],
+            }),
+            "the enum members are lifted in order"
+        );
     }
 
     #[test]
@@ -4519,15 +4489,11 @@ mod tests {
             lhs: Box::new(Expr::FnCall { r#fn: ScalarFn::Length, args: vec![Expr::col("name")] }),
             rhs: Box::new(Expr::lit(IrScalar::Int(3))),
         };
-        let m = defs(&[create_with_checks(
-            "names",
-            vec![col("name", ColType::Text, false)],
-            vec![check("names_len_chk", weird)],
-        )]);
-        let def = field_def(&m, "names", "name");
-        assert!(def.get("min").is_none() && def.get("max").is_none() && def.get("enum").is_none(),
-            "an unrecognized CHECK projects NO facet (the column types as its base): {def}");
-        assert_eq!(def.get("type").and_then(|v| v.as_str()), Some("string"));
+        assert_eq!(
+            recover_check_facet(&weird),
+            None,
+            "an unrecognized CHECK projects NO facet"
+        );
     }
 
     #[test]

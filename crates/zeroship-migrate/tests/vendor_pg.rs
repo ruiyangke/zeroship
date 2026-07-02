@@ -230,14 +230,14 @@ fn trigger_action_and_facet_refusals_are_dialect_specific() {
         .expect_err("PG must reject closed trigger bodies instead of synthesizing functions");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Postgres);
-    assert!(err.reason.contains("triggerBody"), "got {err:?}");
+    assert!(err.reason.contains("named trigger function"), "got {err:?}");
 
     let sqlite_exec = ir_with(vec![execute_trigger_op()]);
     let err = validate_ir_scoped(&sqlite_exec, Dialect::Sqlite, &[], Some(&scope))
         .expect_err("SQLite must reject ExecuteFunction trigger actions");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Sqlite);
-    assert!(err.reason.contains("executeFunction"), "got {err:?}");
+    assert!(err.reason.contains("EXECUTE FUNCTION"), "got {err:?}");
 
     let mut truncate = body_trigger_op("append-only");
     if let Op::CreateTrigger { events, .. } = &mut truncate {
@@ -247,7 +247,7 @@ fn trigger_action_and_facet_refusals_are_dialect_specific() {
         .expect_err("SQLite must reject only the TRUNCATE facet");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Sqlite);
-    assert!(err.reason.contains("triggerEventTruncate"), "got {err:?}");
+    assert!(err.reason.contains("TRUNCATE"), "got {err:?}");
 
     let mut statement = body_trigger_op("append-only");
     if let Op::CreateTrigger { for_each, .. } = &mut statement {
@@ -257,7 +257,7 @@ fn trigger_action_and_facet_refusals_are_dialect_specific() {
         .expect_err("SQLite must reject only the FOR EACH STATEMENT facet");
     assert_eq!(err.code, CODE_UNSUPPORTED);
     assert_eq!(err.dialect, Dialect::Sqlite);
-    assert!(err.reason.contains("forEachStatement"), "got {err:?}");
+    assert!(err.reason.contains("row-level"), "got {err:?}");
 }
 
 #[test]

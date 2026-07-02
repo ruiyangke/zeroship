@@ -182,8 +182,8 @@ async fn apply_doc(
 /// field that can phantom-diff between the fold and live is a CHECK constraint's
 /// `definition` (`pg_get_constraintdef` normalizes a CHECK body, e.g. `CHECK
 /// ((age > 0))`), and `ConstraintSnapshot` has full `Eq` INCLUDING `definition`.
-/// The P1 corpus carries no stand-alone CHECK (it is `ExprDeferred` in the fold),
-/// but a per-field min/max/enum CHECK from a `createTable` would. Blank the CHECK
+/// The P1 corpus carries no stand-alone CHECK (validate rejects it today), but a
+/// per-field min/max/enum CHECK from a `createTable` would. Blank the CHECK
 /// `definition` on BOTH sides so a CHECK compares on name+kind only (the cleaner
 /// stance — `definition` is introspection-noise for CHECKs). Every other field
 /// (FK definition via the proven `fk_definition_pg`, UNIQUE/PK bodies) compares
