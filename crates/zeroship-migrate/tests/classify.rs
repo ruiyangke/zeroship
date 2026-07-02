@@ -4,7 +4,7 @@
 //! kind, additive/destructive facets, transactionality, and the set of
 //! schemas it references. The security guard (Task 4) is built on top of this.
 
-use zeroship_migrate::classify::{classify, DdlKind};
+use zeroship_migrate::classify::{classify, DataSecurityClass, DdlKind};
 
 fn one(sql: &str) -> zeroship_migrate::classify::StatementClass {
     let mut v = classify(sql).expect("should parse");
@@ -68,6 +68,43 @@ fn drop_constraint_is_destructive() {
     let c = one("ALTER TABLE products DROP CONSTRAINT chk");
     assert_eq!(c.kind, DdlKind::DropConstraint);
     assert!(c.destructive);
+    assert_eq!(c.destructive_operation, Some("DROP CONSTRAINT"));
+}
+
+#[test]
+fn expanded_destructive_set_is_classified_canonically() {
+    for (sql, operation) in [
+        ("DELETE FROM products", "DELETE"),
+        ("DROP MATERIALIZED VIEW product_rollups", "DROP MATERIALIZED VIEW"),
+        ("DROP VIEW product_view", "DROP VIEW"),
+        ("DROP SEQUENCE product_seq", "DROP SEQUENCE"),
+        ("DROP TYPE product_type", "DROP TYPE"),
+        ("DROP DOMAIN product_domain", "DROP DOMAIN"),
+        ("DROP FUNCTION product_fn()", "DROP FUNCTION"),
+        ("ALTER TABLE products ALTER COLUMN price TYPE int", "ALTER COLUMN TYPE"),
+        ("ALTER TABLE products DETACH PARTITION products_2026", "DETACH PARTITION"),
+    ] {
+        let c = one(sql);
+        assert!(c.destructive, "{sql} must be classified destructive");
+        assert_eq!(c.destructive_operation, Some(operation), "{sql}");
+    }
+}
+
+#[test]
+fn drop_index_sql_is_reversible_structure_not_data_loss() {
+    let c = one("DROP INDEX product_idx");
+    assert!(!c.additive);
+    assert!(!c.destructive, "plain SQL DROP INDEX is not data loss");
+    assert_eq!(c.destructive_operation, None);
+    assert_eq!(c.data_security, DataSecurityClass::NonDestructive);
+
+    let concurrent = one("DROP INDEX CONCURRENTLY product_idx");
+    assert!(!concurrent.destructive);
+    assert!(
+        concurrent.non_transactional,
+        "DROP INDEX CONCURRENTLY still cannot run in a transaction"
+    );
+    assert_eq!(concurrent.data_security, DataSecurityClass::NonDestructive);
 }
 
 #[test]
@@ -118,8 +155,123 @@ fn dml_and_copy_and_create_extension() {
     assert_eq!(one("INSERT INTO products(id) VALUES (1)").kind, DdlKind::Dml);
     assert_eq!(one("UPDATE products SET id = 2").kind, DdlKind::Dml);
     assert_eq!(one("DELETE FROM products").kind, DdlKind::Dml);
+    assert_eq!(
+        one(
+            "MERGE INTO products USING incoming ON products.id = incoming.id \
+             WHEN MATCHED THEN UPDATE SET id = incoming.id"
+        )
+        .kind,
+        DdlKind::Dml
+    );
     assert_eq!(one("CREATE EXTENSION pgcrypto").kind, DdlKind::CreateExtension);
     assert_eq!(one("COPY products TO '/tmp/x'").kind, DdlKind::Copy);
+}
+
+#[test]
+fn data_security_trichotomy_is_explicit() {
+    assert_eq!(
+        one("CREATE TABLE products(id int primary key)").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("ALTER TABLE products ADD COLUMN sku text").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("CREATE INDEX products_sku_idx ON products(sku)").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("INSERT INTO products(id) VALUES (1)").data_security,
+        DataSecurityClass::NonDestructive
+    );
+    assert_eq!(
+        one("DO $$ BEGIN NULL; END $$").data_security,
+        DataSecurityClass::Unknown
+    );
+}
+
+#[test]
+fn destructive_dml_holes_are_classified() {
+    for (sql, operation) in [
+        ("UPDATE products SET sku = NULL", "UPDATE"),
+        ("UPDATE products SET sku = NULL WHERE true", "UPDATE"),
+        ("UPDATE products SET sku = NULL WHERE 1=1", "UPDATE"),
+        ("DELETE FROM products WHERE 1=1", "DELETE"),
+        ("DELETE FROM products WHERE 't'", "DELETE"),
+        ("DELETE FROM products WHERE true::bool", "DELETE"),
+        ("DELETE FROM products WHERE 1<2", "DELETE"),
+        (
+            "MERGE INTO products USING incoming ON products.id = incoming.id \
+             WHEN MATCHED THEN DELETE",
+            "MERGE matched DELETE",
+        ),
+    ] {
+        let c = one(sql);
+        assert_eq!(
+            c.data_security,
+            DataSecurityClass::Destructive(operation),
+            "{sql}"
+        );
+        assert_eq!(c.destructive_operation, Some(operation), "{sql}");
+    }
+
+    assert_eq!(
+        one("DELETE FROM products WHERE id = 42").data_security,
+        DataSecurityClass::Destructive("DELETE"),
+        "row-affecting DELETE is destructive even when it has a predicate"
+    );
+}
+
+#[test]
+fn nested_destructive_ctes_are_classified_by_whole_tree_walk() {
+    for (sql, operation) in [
+        (
+            "WITH t AS (DELETE FROM products RETURNING id) SELECT 1",
+            "DELETE",
+        ),
+        (
+            "WITH t AS (UPDATE products SET sku = NULL RETURNING id) SELECT 1",
+            "UPDATE",
+        ),
+        (
+            "INSERT INTO products_archive \
+             WITH t AS (DELETE FROM products RETURNING id, sku) SELECT * FROM t",
+            "DELETE",
+        ),
+        (
+            "WITH t AS (MERGE INTO products USING incoming ON products.id = incoming.id \
+             WHEN MATCHED THEN DELETE RETURNING products.id) SELECT 1",
+            "MERGE matched DELETE",
+        ),
+    ] {
+        let c = one(sql);
+        assert_eq!(
+            c.data_security,
+            DataSecurityClass::Destructive(operation),
+            "{sql}"
+        );
+        assert_eq!(c.destructive_operation, Some(operation), "{sql}");
+    }
+}
+
+#[test]
+fn non_destructive_allowlist_survives_whole_tree_walk() {
+    for sql in [
+        "SELECT * FROM products",
+        "INSERT INTO products(id) VALUES (1)",
+        "INSERT INTO products SELECT * FROM incoming",
+        "CREATE TABLE products(id int primary key)",
+        "ALTER TABLE products ADD COLUMN sku text",
+        "CREATE INDEX products_sku_idx ON products(sku)",
+        "ALTER TABLE products ENABLE ROW LEVEL SECURITY",
+    ] {
+        assert_eq!(
+            one(sql).data_security,
+            DataSecurityClass::NonDestructive,
+            "{sql}"
+        );
+    }
 }
 
 #[test]

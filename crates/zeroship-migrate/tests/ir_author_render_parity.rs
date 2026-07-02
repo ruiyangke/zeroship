@@ -840,7 +840,7 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     assert_eq!(
         uniq,
         vec![(
-            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_slug_key\" UNIQUE (\"slug\")".to_string(),
+            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_slug_key\" UNIQUE (slug)".to_string(),
             Some("ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_slug_key\"".to_string()),
         )],
         "stand-alone UNIQUE add renders the canonical ADD CONSTRAINT"
@@ -862,7 +862,7 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
     assert_eq!(
         pk,
         vec![(
-            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_pkey\" PRIMARY KEY (\"a\", \"b\")".to_string(),
+            "ALTER TABLE \"app\".\"widgets\" ADD CONSTRAINT \"widgets_pkey\" PRIMARY KEY (a, b)".to_string(),
             Some("ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_pkey\"".to_string()),
         )],
         "stand-alone PK add renders the canonical ADD CONSTRAINT"

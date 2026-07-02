@@ -1492,13 +1492,13 @@ mod tests {
     }
 
     #[test]
-    fn flyway_db_migrations_still_load_as_current_ordered() {
+    fn flyway_db_migrations_still_load_ordered() {
         // Coexistence regression: the EXISTING platform port (`db/migrations/`,
         // the `V<NNNN>__…` Flyway set) must auto-detect as Flyway and load
-        // IDENTICALLY after the dbmate path was added — all current versioned migrations,
-        // strictly ascending. This is the pure (no-PG) peer of the PG-gated
-        // `tests/platform_port_pg.rs`, guaranteeing the dbmate work did not perturb
-        // the platform loader.
+        // IDENTICALLY after the dbmate path was added — every versioned up
+        // migration, strictly ascending. This is the pure (no-PG) peer of the
+        // PG-gated `tests/platform_port_pg.rs`, guaranteeing the dbmate work did
+        // not perturb the platform loader.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../db/migrations");
         if !dir.is_dir() {
             // The repo always ships db/migrations; skip only if a stripped checkout
@@ -1507,7 +1507,23 @@ mod tests {
             return;
         }
         let migs = load_dir_migrations(&dir).expect("the platform Flyway port still loads");
-        assert_eq!(migs.len(), 64, "all current ported V<NNNN>__ files load");
+        let expected = std::fs::read_dir(&dir)
+            .expect("read db/migrations")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry.path().is_file()
+                    && entry.file_name().to_str().is_some_and(|name| {
+                        name.starts_with('V')
+                            && name.ends_with(".sql")
+                            && !name.ends_with(".down.sql")
+                    })
+            })
+            .count();
+        assert_eq!(
+            migs.len(),
+            expected,
+            "all ported V<NNNN>__ up files load"
+        );
         // Auto-detect chose Flyway, not dbmate: none is repeatable here and the
         // versions are strictly ascending (the Flyway numeric ordering).
         for w in migs.windows(2) {

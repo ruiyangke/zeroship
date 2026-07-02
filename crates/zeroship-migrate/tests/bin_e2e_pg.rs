@@ -20,10 +20,10 @@
 //! schema inside that throwaway db. Roles are cluster-wide and idempotent
 //! (`CREATE ROLE IF NOT EXISTS` / DO-block guards) so concurrent runs don't fight.
 //!
-//! Asserts (the compose contract): exit 0; all current migrations applied; a second
-//! `migrate` is an idempotent no-op (exit 0); `status` shows all applied / 0
-//! pending; the schema materialized — namespace (`zeroship`), the service roles,
-//! the RLS policies (the inventory checks mirrored from
+//! Asserts (the compose contract): exit 0; all platform migrations applied; a
+//! second `migrate` is an idempotent no-op (exit 0); `status` shows all applied /
+//! 0 pending; the schema materialized — namespace (`zeroship`), the
+//! service roles, the RLS policies (the inventory checks mirrored from
 //! `platform_port_pg.rs`).
 
 use std::path::PathBuf;
@@ -34,7 +34,6 @@ use zeroship_migrate::test_support::acquire_global_platform_resource_lock;
 
 const ADMIN_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
-const EXPECTED_PLATFORM_MIGRATIONS: i64 = 64;
 
 /// Admin connection to the cluster's maintenance db (used to CREATE/DROP the
 /// throwaway per-test database). Honours `MIGRATE_TEST_DB` for the host/port/creds
@@ -43,22 +42,38 @@ fn admin_dsn() -> String {
     std::env::var("MIGRATE_TEST_DB").unwrap_or_else(|_| ADMIN_DSN.to_string())
 }
 
-/// The libpq-style URL the BINARY connects with, pointed at the throwaway db.
-/// (The bin takes `--database-url`; a keyword DSN works too, but the compose
-/// service uses a URL, so we mirror that.)
-fn bin_database_url(db: &str) -> String {
-    format!("postgres://postgres:zeroship@localhost:5440/{db}")
+/// A DSN for the THROWAWAY db, derived from the admin DSN by swapping the
+/// database name (so `MIGRATE_TEST_DB` host/port/creds overrides are honoured).
+fn throwaway_dsn(db: &str) -> String {
+    dsn_for_db(&admin_dsn(), db)
 }
 
-/// A keyword DSN for the THROWAWAY db, derived from the admin DSN by swapping the
-/// `dbname=` token (so `MIGRATE_TEST_DB` host/port/creds overrides are honoured).
-fn throwaway_dsn(db: &str) -> String {
-    admin_dsn()
-        .split_whitespace()
+fn dsn_for_db(dsn: &str, db: &str) -> String {
+    if let Some(url) = url_dsn_for_db(dsn, db) {
+        return url;
+    }
+
+    dsn.split_whitespace()
         .filter(|kv| !kv.starts_with("dbname="))
         .collect::<Vec<_>>()
         .join(" ")
         + &format!(" dbname={db}")
+}
+
+fn url_dsn_for_db(dsn: &str, db: &str) -> Option<String> {
+    if !(dsn.starts_with("postgres://") || dsn.starts_with("postgresql://")) {
+        return None;
+    }
+    let (base, query) = dsn.split_once('?').map_or((dsn, None), |(base, query)| {
+        (base, Some(query))
+    });
+    let slash = base.rfind('/')?;
+    let mut out = format!("{}{}", &base[..slash + 1], db);
+    if let Some(query) = query {
+        out.push('?');
+        out.push_str(query);
+    }
+    Some(out)
 }
 
 async fn connect(dsn: &str) -> Client {
@@ -88,6 +103,21 @@ fn migrations_dir() -> PathBuf {
         .join("../../db/migrations")
         .canonicalize()
         .expect("db/migrations exists at repo root")
+}
+
+fn platform_migration_count() -> usize {
+    std::fs::read_dir(migrations_dir())
+        .expect("read db/migrations")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path().is_file()
+                && entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with('V')
+                        && name.ends_with(".sql")
+                        && !name.ends_with(".down.sql")
+                })
+        })
+        .count()
 }
 
 /// A process-wide temp "sink" CWD for `run_bin`. Auto-dump (default ON) writes
@@ -214,7 +244,8 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
 
     let dir = migrations_dir();
     let dir_s = dir.to_str().expect("utf-8 migrations path").to_string();
-    let url = bin_database_url(&db);
+    let url = throwaway_dsn(&db);
+    let expected_count = platform_migration_count();
 
     // The arg vector is the EXACT compose-service surface (plus a unique
     // --meta-schema so the journal does not collide cluster-side). Defaults
@@ -246,17 +277,18 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
         "the binary `migrate` must exit 0 on a fresh DB\nstdout={stdout}\nstderr={stderr}"
     );
     assert!(
-        stdout.contains(&format!("applied {EXPECTED_PLATFORM_MIGRATIONS}")),
-        "the binary reports all current applied migrations: stdout={stdout}"
+        stdout.contains(&format!("applied {expected_count}")),
+        "the binary reports all platform migrations applied: stdout={stdout}"
     );
 
     // 2. Inventory — verified against the THROWAWAY db (connect to it directly).
     let app = connect(&throwaway_dsn(&db)).await;
 
-    // 2a. The journal records all applied migrations — the compose gate's source of truth.
+    // 2a. The journal records every applied migration — the compose gate's source
+    // of truth.
     assert_eq!(
         journal_completed_count(&app, &meta).await,
-        EXPECTED_PLATFORM_MIGRATIONS,
+        expected_count as i64,
         "the journal records all completed (applied) migrations"
     );
 
@@ -318,7 +350,7 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
     // The journal did not grow.
     assert_eq!(
         journal_completed_count(&app, &meta).await,
-        EXPECTED_PLATFORM_MIGRATIONS,
+        expected_count as i64,
         "the idempotent re-run added no journal rows"
     );
 
@@ -340,9 +372,9 @@ async fn binary_migrate_applies_whole_set_idempotently_and_materializes_schema()
         "`status` must exit 0\nstdout={stdout3}\nstderr={stderr3}"
     );
     assert!(
-        stdout3.contains(&format!("applied={EXPECTED_PLATFORM_MIGRATIONS}"))
+        stdout3.contains(&format!("applied={expected_count}"))
             && stdout3.contains("pending=0"),
-        "status shows all applied / 0 pending: stdout={stdout3}"
+        "status shows all platform migrations applied / 0 pending: stdout={stdout3}"
     );
 
     // Teardown: drop the throwaway db (this drops its schemas + journal with it).
