@@ -25,7 +25,9 @@ use zeroship_migrate::PlanStep;
 use zeroship_migrate::render::sql_preview::{
     render_ir_json_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
-use zeroship_migrate::MigrationIr;
+use zeroship_migrate::{
+    resolve_create_table_policy, MigrationIr, PolicyProfile,
+};
 use zeroship_schema::query::SqlDialect;
 
 /// The representative IR exercising every renderable op + the honest-boundary
@@ -89,25 +91,22 @@ const MYSQL_FEATURE_IR: &str = r#"{
       {"name":"name","type":"text","nullable":false},
       {"name":"name_lc","type":"string",
         "generated":{"expr":{"node":"fnCall","fn":"lower","args":[{"node":"colRef","name":"name"}]},"stored":true}}
-    ],"constraints":[
-      {"name":"teams_pkey","kind":{"kind":"pk","columns":["id"]}}
-    ]},
+    ],"primaryKey":["id"]},
     {"op":"createTable","name":"members","columns":[
       {"name":"id","type":"int","nullable":false,"identity":{"always":true}},
       {"name":"team_id","type":"int","nullable":false},
       {"name":"email","type":"text","nullable":false}
-    ],"constraints":[
-      {"name":"members_pkey","kind":{"kind":"pk","columns":["id"]}},
+    ],"primaryKey":["id"],"constraints":[
       {"name":"members_team_fk","kind":{"kind":"fk","columns":["team_id"],
         "referencesTable":"teams","referencesColumns":["id"],"onDelete":"cascade"}}
     ],"indexes":[{"name":"members_team_id_idx","columns":[{"kind":"column","name":"team_id"}]}]},
     {"op":"createView","name":"active_teams","replace":true,
       "query":{"kind":"structured","select":{"from":{"name":"teams"},
         "projection":[{"kind":"colRef","name":"id"},{"kind":"colRef","name":"name"}],
-        "where":{"node":"unaryOp","op":"isNull","operand":{"node":"colRef","name":"deleted_at"}}}}},
+        "where":{"node":"unaryOp","op":"isNotNull","operand":{"node":"colRef","name":"name"}}}}},
     {"op":"insert","table":"teams",
-      "columns":["id","created_at","updated_at","version","name"],
-      "rows":[[1,"2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"Core"]]}
+      "columns":["id","name"],
+      "rows":[[1,"Core"]]}
   ]
 }"#;
 
@@ -122,8 +121,16 @@ fn render_representative(dialect: SqlDialect) -> String {
     } else {
         REPRESENTATIVE_IR
     };
-    render_ir_json_sql(ir, dialect, &opts())
+    let ir = resolve_ir_json(ir);
+    render_ir_json_sql(&ir, dialect, &opts())
         .expect("representative IR renders offline")
+}
+
+fn resolve_ir_json(ir: &str) -> String {
+    let raw: MigrationIr = serde_json::from_str(ir).expect("preview fixture IR parses");
+    let resolved =
+        resolve_create_table_policy(&raw, &PolicyProfile::confined()).expect("preview fixture IR resolves");
+    serde_json::to_string(&resolved).expect("resolved preview fixture serializes")
 }
 
 /// Golden-compare helper: write-or-assert against a committed golden file.
@@ -190,11 +197,12 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
           "rows":[["c1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,200,"ok"]]}
       ]
     }"#;
-    let ir: MigrationIr = serde_json::from_str(ir_json).unwrap();
+    let ir_json = resolve_ir_json(ir_json);
+    let ir: MigrationIr = serde_json::from_str(&ir_json).unwrap();
     let author = IrAuthor::new("public", "app_preview", dialect);
     let steps = author.lower_steps(&ir, &LiveSchema::default()).expect("lowers offline");
 
-    let preview = render_ir_json_sql(ir_json, dialect, &opts()).expect("renders offline");
+    let preview = render_ir_json_sql(&ir_json, dialect, &opts()).expect("renders offline");
 
     for step in &steps {
         match step {
@@ -241,11 +249,11 @@ fn mysql_feature_preview_renders_mysql8_sql() {
     assert!(
         out.contains(
             "CREATE OR REPLACE VIEW `public`.`active_teams` AS SELECT `id`, `name` \
-             FROM `public`.`teams` WHERE (`deleted_at` IS NULL)"
+             FROM `public`.`teams` WHERE (`name` IS NOT NULL)"
         ),
         "{out}"
     );
-    assert!(out.contains("VALUES (?, ?, ?, ?, ?)"), "{out}");
+    assert!(out.contains("VALUES (?, ?)"), "{out}");
 }
 
 /// NO FABRICATION (the load-bearing witness) — an online `renameColumn` is labeled

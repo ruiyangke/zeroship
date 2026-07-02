@@ -50,7 +50,8 @@
 use std::collections::BTreeMap;
 
 use crate::render::declarative::{
-    build_table_snapshot, constraintdef_cols, ir_fk_constraint_snapshot, quote_ident_if_needed,
+    build_resolved_table_snapshot, build_table_snapshot, constraintdef_cols,
+    ir_fk_constraint_snapshot, push_primary_key_snapshot, quote_ident_if_needed,
     CollectionDescriptor, DeclarativeError,
 };
 use crate::model::snapshot::{
@@ -66,9 +67,9 @@ use crate::model::ir::{
 };
 use crate::render::lower::{
     create_index_snapshot, derived_constraint_name, derived_exclusion_constraint_name,
-    enum_inline_check, index_method_access, ir_column_to_field, mysql_enum_type,
-    render_domain_check, render_exclusion_constraint_body, render_ir_default, IrLowerError,
-    NamedTypeRegistry,
+    enum_inline_check, index_method_access, ir_column_to_field, ir_column_to_field_resolved_create,
+    mysql_enum_type, render_domain_check, render_exclusion_constraint_body, render_ir_default,
+    IrLowerError, NamedTypeRegistry,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -513,6 +514,7 @@ pub fn fold_ops(
             Op::CreateTable {
                 name,
                 columns,
+                primary_key,
                 constraints,
                 indexes,
                 runtime_options,
@@ -525,7 +527,10 @@ pub fn fold_ops(
                     return Err(FoldError::DuplicateView(name.clone()));
                 }
                 let desc = create_table_descriptor(name, columns, runtime_options.as_ref());
-                let mut snap = build_table_snapshot(project_schema, &desc, dialect)?;
+                let mut snap = build_resolved_table_snapshot(project_schema, &desc, dialect)?;
+                if let Some(pk) = primary_key {
+                    push_primary_key_snapshot(name, &mut snap, pk);
+                }
                 apply_fold_named_type_metadata(
                     name,
                     columns,
@@ -1225,7 +1230,7 @@ fn create_table_descriptor(
     CollectionDescriptor {
         name: name.to_string(),
         owner_app: FOLD_OWNER_APP.to_string(),
-        fields: columns.iter().map(ir_column_to_field).collect(),
+        fields: columns.iter().map(ir_column_to_field_resolved_create).collect(),
         indexes: Vec::new(),
         runtime_options: runtime_options.cloned().unwrap_or_default(),
     }
@@ -2663,7 +2668,12 @@ fn json_value_to_ir_scalar_default(v: &serde_json::Value) -> crate::model::ir::I
 mod tests {
     use super::*;
     use crate::model::expr::Expr;
-    use crate::model::ir::{IndexElement, IrScalar, TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness};
+    use crate::model::ir::{
+        IndexElement, IrScalar, MigrationIr, TableRuntimeOptions, TableRuntimeOptionsPatch,
+        TableStrictness, CURRENT_IR_VERSION,
+    };
+    use crate::model::profile::PolicyProfile;
+    use crate::model::table_shape::resolve_create_table_policy;
     use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 
     const SCHEMA: &str = "proj_test";
@@ -2703,7 +2713,7 @@ mod tests {
     }
 
     fn create(name: &str, columns: Vec<IrColumn>) -> Op {
-        Op::CreateTable {
+        let op = Op::CreateTable {
             name: name.to_string(),
             columns,
             primary_key: None,
@@ -2712,7 +2722,24 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: None,
-        }
+        };
+        let ir = MigrationIr {
+            ir_version: CURRENT_IR_VERSION,
+            name: "fold_create".to_string(),
+            owner_app: "app_fold".to_string(),
+            ops: vec![op],
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        resolve_create_table_policy(&ir, &PolicyProfile::confined())
+            .expect("test createTable resolves")
+            .ops
+            .into_iter()
+            .next()
+            .expect("resolved op")
     }
 
     /// A folded table carries the platform system columns (`id`, timestamps, …)

@@ -26,7 +26,7 @@ use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use zeroship_migrate::{
     apply_bundle_ir_sqlite, apply_bundle_ir_sqlite_catalog, Approval, ExecutorConfig, GuardConfig,
-    SqliteBackend, SqliteIrApplyError,
+    MigrationIr, PolicyProfile, SqliteBackend, SqliteIrApplyError, resolve_create_table_policy,
 };
 
 const PROJECT: &str = "prj_pr9b";
@@ -57,6 +57,10 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn write_ir(p: &Paths, file: &str, body: &str) {
+    let ir: MigrationIr = serde_json::from_str(body).expect("test IR parses");
+    let resolved =
+        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+    let body = serde_json::to_string(&resolved).expect("resolved test IR serializes");
     std::fs::write(p.migrations.join(file), body).expect("write ir file");
 }
 
@@ -149,8 +153,9 @@ async fn renamecolumn_runs_in_production_via_catalog_without_prerename_descripto
     // are deterministic and the post-rebuild assertion can compare them exactly.
     be.actor()
         .exec(
-            "INSERT INTO main.users (id, name, secret) \
-             VALUES ('u1','Ada Lovelace', X'7a73656e633a76313a0011223344aabbcc')",
+            "INSERT INTO main.users (id, created_at, updated_at, version, name, secret) \
+             VALUES ('u1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1, \
+                     'Ada Lovelace', X'7a73656e633a76313a0011223344aabbcc')",
         )
         .await
         .expect("seed user with a non-null encrypted secret blob");
@@ -313,7 +318,10 @@ async fn catalog_entry_fails_closed_when_descriptor_to_affinity_diverges_from_li
     .expect("createTable users(name TEXT) must succeed");
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     be.actor()
-        .exec("INSERT INTO main.users (id, name) VALUES ('u1','Ada')")
+        .exec(
+            "INSERT INTO main.users (id, created_at, updated_at, version, name) \
+             VALUES ('u1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'Ada')",
+        )
         .await
         .expect("seed");
 
@@ -403,7 +411,10 @@ async fn catalog_entry_fails_closed_on_same_affinity_facet_change_on_renamed_col
     .expect("createTable users(name TEXT) must succeed");
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     be.actor()
-        .exec("INSERT INTO main.users (id, name) VALUES ('u1','Ada')")
+        .exec(
+            "INSERT INTO main.users (id, created_at, updated_at, version, name) \
+             VALUES ('u1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'Ada')",
+        )
         .await
         .expect("seed");
 
@@ -477,7 +488,10 @@ async fn catalog_entry_still_fails_closed_when_from_column_absent_from_live() {
     .expect("createTable users(full_name) must succeed");
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     be.actor()
-        .exec("INSERT INTO main.users (id, full_name) VALUES ('u1','Ada')")
+        .exec(
+            "INSERT INTO main.users (id, created_at, updated_at, version, full_name) \
+             VALUES ('u1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'Ada')",
+        )
         .await
         .expect("seed");
 

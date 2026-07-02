@@ -36,7 +36,8 @@ use zeroship_migrate::{
     ExclusionElement, ExclusionMethod, ExclusionOperator, Expr, GeneratedCol, GuardConfig,
     IdentityCol, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
     IrFlagsOverride, IrIndex, IrLowerError, IrScalar, IrAuthor, LiveSchema, MigrationEngine,
-    MigrationIr, Op, RefAction, SafeI64, SequenceOwnedBy, SqliteBackend, CURRENT_IR_VERSION,
+    MigrationIr, Op, PolicyProfile, RefAction, SafeI64, SequenceOwnedBy, SqliteBackend,
+    CURRENT_IR_VERSION, resolve_create_table_policy,
 };
 use zeroship_migrate::{ExecutorConfig, SchemaScope};
 use zeroship_schema::query::SqlDialect;
@@ -130,7 +131,7 @@ fn sqlite_backend(paths: &Paths) -> SqliteBackend {
 }
 
 fn ir(name: &str, ops: Vec<Op>) -> MigrationIr {
-    MigrationIr {
+    let ir = MigrationIr {
         ir_version: CURRENT_IR_VERSION,
         name: name.to_string(),
         owner_app: OWNER.to_string(),
@@ -140,7 +141,8 @@ fn ir(name: &str, ops: Vec<Op>) -> MigrationIr {
         supersedes: Vec::new(),
         preconditions: Vec::new(),
         checksum: None,
-    }
+    };
+    resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves")
 }
 
 fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {

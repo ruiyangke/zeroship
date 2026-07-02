@@ -33,6 +33,7 @@ use crate::model::ir::Op;
 use crate::SqlDialect;
 
 use super::build::{discover_migrations, record_migration_transient, BuildError, RecordVia};
+use crate::PolicyProfile;
 
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
 /// against them).
@@ -137,12 +138,13 @@ pub fn load_dir_ops_with_recorder(
     })?;
     let mut ops = Vec::new();
     for m in &discovered {
-        let recorded = record_migration_transient(m, owner_app, via).map_err(|source| {
-            GenTypesError::Record {
-                stem: m.stem.clone(),
-                source,
-            }
-        })?;
+        let recorded =
+            record_migration_transient(m, owner_app, via, &PolicyProfile::confined()).map_err(
+                |source| GenTypesError::Record {
+                    stem: m.stem.clone(),
+                    source,
+                },
+            )?;
         ops.extend(recorded.ir.ops);
     }
     Ok(ops)

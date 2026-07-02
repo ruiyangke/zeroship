@@ -526,7 +526,7 @@ fn fixture_ir() -> MigrationIr {
                 { "name": "active", "type": "bool", "nullable": false },
                 { "name": "profile", "type": "json", "nullable": true }
             ],
-            "constraints": [{ "kind": { "kind": "pk", "columns": ["id"] } }],
+            "primaryKey": ["id"],
             "indexes": [{
                 "name": "users_email_idx",
                 "columns": [{ "kind": "column", "name": "email" }]
@@ -585,9 +585,7 @@ fn fk_roundtrip_ir() -> MigrationIr {
                     { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
                     { "name": "name", "type": "text", "nullable": false }
                 ],
-                "constraints": [
-                    { "name": "accounts_pkey", "kind": { "kind": "pk", "columns": ["id"] } }
-                ]
+                "primaryKey": ["id"]
             },
             {
                 "op": "createTable",
@@ -598,8 +596,8 @@ fn fk_roundtrip_ir() -> MigrationIr {
                     { "name": "account_id", "type": "int", "nullable": true },
                     { "name": "code", "type": "text", "nullable": false }
                 ],
+                "primaryKey": ["id"],
                 "constraints": [
-                    { "name": "orders_pkey", "kind": { "kind": "pk", "columns": ["id"] } },
                     { "name": "orders_account_fkey", "kind": {
                         "kind": "fk",
                         "columns": ["account_id"],
@@ -649,9 +647,7 @@ fn fk_default_action_ir(on_delete: Option<&str>, on_update: Option<&str>) -> Mig
                     { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
                     { "name": "name", "type": "text", "nullable": false }
                 ],
-                "constraints": [
-                    { "name": "accounts_pkey", "kind": { "kind": "pk", "columns": ["id"] } }
-                ]
+                "primaryKey": ["id"]
             },
             {
                 "op": "createTable",
@@ -662,8 +658,8 @@ fn fk_default_action_ir(on_delete: Option<&str>, on_update: Option<&str>) -> Mig
                     { "name": "account_id", "type": "int", "nullable": true },
                     { "name": "code", "type": "text", "nullable": false }
                 ],
+                "primaryKey": ["id"],
                 "constraints": [
-                    { "name": "orders_pkey", "kind": { "kind": "pk", "columns": ["id"] } },
                     { "name": "orders_account_fkey", "kind": fk_kind }
                 ]
             }
@@ -2455,12 +2451,15 @@ fn live_snapshot_roundtrips_and_redeploy_is_noop() {
             .iter()
             .map(|c| (c.name.as_str(), c.data_type.as_str(), c.nullable))
             .collect::<Vec<_>>();
-        assert!(types.contains(&("active", "boolean", false)), "types: {types:?}");
-        assert!(
-            types.contains(&("created_at", "timestamp with time zone", false)),
-            "types: {types:?}"
+        assert_eq!(
+            types,
+            vec![
+                ("active", "boolean", false),
+                ("email", "text", false),
+                ("id", "bigint", false),
+                ("profile", "jsonb", true),
+            ]
         );
-        assert!(types.contains(&("profile", "jsonb", true)), "types: {types:?}");
 
         let redeploy = apply_fixture(&backend, &cfg, &migrations).await;
         assert!(redeploy.is_noop(), "same migration set should redeploy as skip: {redeploy:?}");

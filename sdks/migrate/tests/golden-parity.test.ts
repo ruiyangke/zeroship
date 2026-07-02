@@ -1,11 +1,10 @@
 // Byte-identity oracle: the fluent `@zeroship/migrate` authoring surface records
-// the SAME ops the engine's embedded recorder (`migrate_ops.js`) committed into
-// the golden corpus. The npm `ops.ts` and the V8-embedded `migrate_ops.js` are
-// two implementations of the same locked fluent surface; this test re-authors a
-// golden fixture's `up()` through `table()` and asserts the recorded op list
-// equals the committed golden `.golden.json`'s `ops` — proving the fluent-only
-// redesign is PURE SUGAR (the recorded IR is byte-identical to the pre-redesign
-// golden, except the C1 FK-actions delta which the FK goldens carry).
+// the SAME author ops the engine's embedded recorder (`migrate_ops.js`) committed
+// before the Rust build path resolves profile-owned table shape into the golden
+// corpus. The npm `ops.ts` and the V8-embedded `migrate_ops.js` are two
+// implementations of the same locked fluent surface; this test re-authors a
+// golden fixture's `up()` through `table()` and asserts the post-policy op list
+// equals the committed golden `.golden.json`'s `ops`.
 //
 // Re-bless note: `fluent_ddl`'s `label` column was authored via the now-removed
 // `t.string()` alias (wire `string`). The spec removes that alias (canonical
@@ -60,6 +59,55 @@ function normalizeOps(ops: any[]): any[] {
   });
 }
 
+const confinedSystemColumns = [
+  { name: "id", type: "text", nullable: false },
+  { name: "created_at", type: "timestamp", nullable: false },
+  { name: "updated_at", type: "timestamp", nullable: false },
+  { name: "created_by", type: "text", nullable: true },
+  { name: "updated_by", type: "text", nullable: true },
+  { name: "version", type: "int", nullable: false },
+  { name: "deleted_at", type: "timestamp", nullable: true },
+];
+
+const confinedSystemColumnNames = new Set(confinedSystemColumns.map((c) => c.name));
+const confinedSystemIndexes = [
+  { columns: [{ kind: "column", name: "deleted_at" }] },
+  { columns: [{ kind: "column", name: "updated_at" }] },
+  { columns: [{ kind: "column", name: "created_by" }] },
+];
+
+function resolveConfinedCreateTables(ops: any[]): any[] {
+  return ops.map((op) => {
+    if (op.op !== "createTable") return op;
+
+    let foldedId = false;
+    const authorColumns = [];
+    for (const col of op.columns) {
+      if (col.name === "id" && col.type === "uuid") {
+        foldedId = true;
+        continue;
+      }
+      if (confinedSystemColumnNames.has(col.name)) {
+        throw new Error(`unexpected confined system-column collision in JS parity fixture: ${col.name}`);
+      }
+      authorColumns.push(col);
+    }
+    if (op.primaryKey !== undefined && op.primaryKey !== null) {
+      const authorPkIsFoldedId = foldedId && op.primaryKey.length === 1 && op.primaryKey[0] === "id";
+      if (!authorPkIsFoldedId) {
+        throw new Error("unexpected author primaryKey in confined JS parity fixture");
+      }
+    }
+
+    return {
+      ...op,
+      columns: [...confinedSystemColumns, ...authorColumns],
+      primaryKey: ["id"],
+      indexes: [...(op.indexes ?? []), ...confinedSystemIndexes],
+    };
+  });
+}
+
 function record(up: () => void): any[] {
   __begin();
   up();
@@ -73,7 +121,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
         id: t.id(),
         email: t.text().notNull().unique(),
         balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
-        created_at: t.timestamp().notNull().default({ fn: "now" }),
+        authored_at: t.timestamp().notNull().default({ fn: "now" }),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
@@ -91,7 +139,6 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     });
     table("memberships").create({
       columns: { account_id: t.uuid().notNull(), team: t.text().notNull() },
-      primaryKey: ["account_id", "team"],
       uniques: [{ name: "memberships_team_uq", columns: ["team"] }],
       checks: [{ name: "memberships_team_chk", expr: (c) => c("team").isNotNull() }],
       foreignKeys: [
@@ -123,7 +170,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("accounts").column("nickname").setNotNull();
   });
   const g = await golden("fluent_ddl");
-  assert.deepEqual(normalizeOps(ops), normalizeOps(g.ops));
+  assert.deepEqual(normalizeOps(resolveConfinedCreateTables(ops)), normalizeOps(g.ops));
 });
 
 test("fluent_dml fluent-recorded ops equal the committed golden", async () => {

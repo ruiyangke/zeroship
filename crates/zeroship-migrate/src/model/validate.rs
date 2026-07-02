@@ -462,16 +462,10 @@ pub fn validate_op_scoped(
 
     match op {
         Op::CreateTable { name, columns, primary_key, constraints, indexes, .. } => {
-            // A createTable is self-contained: resolve ColRefs against its own
-            // declared columns PLUS the seven platform system fields the engine
-            // auto-injects at lower/render time (`declarative::SYSTEM_FIELD_NAMES`).
-            // A legitimate Check or partial-index predicate referencing a system
-            // field — e.g. the canonical soft-delete partial-unique index
-            // `WHERE deleted_at IS NULL`, or a Check on `id`/`created_at` — must
-            // resolve, not be falsely rejected (rule (c) is enforceable here).
-            let mut cols: Vec<String> =
-                crate::model::ir::SYSTEM_FIELD_NAMES.iter().map(|s| (*s).to_string()).collect();
-            cols.extend(columns.iter().map(|c| c.name.clone()));
+            // A resolved createTable is self-contained: ColRefs resolve against
+            // the op's explicit columns. Confined record/build paths stamp the
+            // seven system fields before checksum; Platform paths do not.
+            let cols: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
             let scope = TargetScope::new(name, &cols);
             for ix in indexes {
                 for element in &ix.columns {
@@ -835,8 +829,8 @@ fn validate_op_support(
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{
-        IndexElement, IndexMethod, IrConstraintKind, IrDefault, Op, TriggerAction, TriggerEvent,
-        TriggerStmt,
+        ColType, IndexElement, IndexMethod, IrConstraintKind, IrDefault, Op, TriggerAction,
+        TriggerEvent, TriggerStmt,
     };
     use crate::model::support::{Feature, Support, SupportDecision};
 
@@ -931,7 +925,14 @@ fn validate_op_support(
             && columns[0] == "id"
             && table_columns
                 .iter()
-                .any(|col| col.name == "id" && col.identity.is_some())
+                .any(|col| {
+                    col.name == "id"
+                        && (col.identity.is_some()
+                            || (matches!(col.ty, ColType::Text)
+                                && col.nullable == Some(false)
+                                && col.default.is_none()
+                                && !col.unique.unwrap_or(false)))
+                })
     }
 
     fn fk_features(
@@ -3550,9 +3551,9 @@ mod tests {
 
     #[test]
     fn validate_ir_create_table_partial_index_resolves_system_fields_in_scope() {
-        // MED: createTable auto-injects the seven platform system fields at
-        // lower/render time. A legitimate soft-delete partial-unique index
-        // `WHERE deleted_at IS NULL` references one of those fields and MUST
+        // The profile resolver materializes the seven platform system fields
+        // before validation/lowering. A legitimate soft-delete partial-unique index
+        // `WHERE deleted_at IS NULL` references the resolved column and MUST
         // resolve in rule (c) scope, not be rejected.
         let ir = ir_with(vec![Op::CreateTable {
             name: "users".into(),
@@ -3579,6 +3580,11 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
+        let ir = crate::model::table_shape::resolve_create_table_policy(
+            &ir,
+            &crate::model::profile::PolicyProfile::confined(),
+        )
+        .expect("resolve confined table shape");
         assert!(
             validate_ir(&ir, Dialect::Postgres, &[]).is_ok(),
             "a partial index on `deleted_at` must resolve system fields (PG)"

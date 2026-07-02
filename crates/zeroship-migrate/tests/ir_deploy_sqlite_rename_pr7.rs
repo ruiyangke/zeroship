@@ -18,8 +18,8 @@ use tempfile::TempDir;
 use zeroship_migrate::apply::backend::sqlite::Mode;
 use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use zeroship_migrate::{
-    apply_bundle_ir_sqlite, Approval, ExecutorConfig, GuardConfig, MigrationBackend, SqliteBackend,
-    SqliteIrApplyError,
+    apply_bundle_ir_sqlite, Approval, ExecutorConfig, GuardConfig, MigrationBackend, MigrationIr,
+    PolicyProfile, SqliteBackend, SqliteIrApplyError, resolve_create_table_policy,
 };
 
 const PROJECT: &str = "prj_pr7";
@@ -66,6 +66,10 @@ fn descriptor(table: &str, field: &str) -> CollectionDescriptor {
 }
 
 fn write_ir(p: &Paths, file: &str, body: &str) {
+    let ir: MigrationIr = serde_json::from_str(body).expect("test IR parses");
+    let resolved =
+        resolve_create_table_policy(&ir, &PolicyProfile::confined()).expect("test IR resolves");
+    let body = serde_json::to_string(&resolved).expect("resolved test IR serializes");
     std::fs::write(p.migrations.join(file), body).expect("write ir file");
 }
 
@@ -111,7 +115,11 @@ async fn deploy_renamecolumn_completes_as_rebuild_on_real_sqlite() {
     // Seed rows BEFORE the rename — they must survive the rebuild.
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     be.actor()
-        .exec("INSERT INTO main.people (id, nickname) VALUES ('p1','ada'),('p2','grace')")
+        .exec(
+            "INSERT INTO main.people (id, created_at, updated_at, version, nickname) VALUES \
+             ('p1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'ada'), \
+             ('p2','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'grace')",
+        )
         .await
         .expect("seed");
 
@@ -213,7 +221,11 @@ async fn deploy_post_rename_descriptor_set_fails_closed_on_real_sqlite() {
 
     be.actor().set_mode(Mode::EngineJournal).await.expect("mode");
     be.actor()
-        .exec("INSERT INTO main.people (id, nickname) VALUES ('p1','ada'),('p2','grace')")
+        .exec(
+            "INSERT INTO main.people (id, created_at, updated_at, version, nickname) VALUES \
+             ('p1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'ada'), \
+             ('p2','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1,'grace')",
+        )
         .await
         .expect("seed");
 
