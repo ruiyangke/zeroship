@@ -32,6 +32,7 @@ const INITIAL_POLL_INTERVAL_SECS: i32 = 5;
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_ATTEMPTS: usize = 8;
 const OP_DEVICE_PROVIDER: &str = "op";
+const DEFAULT_DEVICE_SCOPE: &str = "openid";
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthorizationRequest {
@@ -54,6 +55,13 @@ pub struct DeviceAuthorizationResponse {
 pub enum DeviceApproval {
     Approved,
     NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NativeDeviceGrantDetails {
+    pub client_id: String,
+    pub client_name: String,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,7 +122,7 @@ async fn device_authorization_inner(
 
     let requested_scopes = match params.scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(scope) => parse_scopes(scope),
-        None => client.scopes.clone(),
+        None => vec![DEFAULT_DEVICE_SCOPE.to_string()],
     };
     if !scope_subset(&requested_scopes, &client.scopes) {
         return Err(OAuthError::invalid_scope("scope is not allowed for client"));
@@ -168,28 +176,37 @@ async fn device_authorization_inner(
 }
 
 #[allow(clippy::future_not_send)]
-pub(crate) async fn native_user_code_pending(
+pub(crate) async fn native_user_code_details(
     db: &Client,
     user_code: &str,
-) -> Result<bool, String> {
+) -> Result<Option<NativeDeviceGrantDetails>, String> {
     let user_code = normalize_user_code(user_code);
     if user_code.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let rows = db
         .query(
-            "SELECT 1 \
-             FROM zeroship.device_grants \
-             WHERE user_code = $1 \
-               AND provider = $2 \
-               AND status = 'pending' \
-               AND expires_at > NOW() \
+            "SELECT dg.client_id, dg.scope, COALESCE(oc.client_name, dg.client_id) AS client_name \
+             FROM zeroship.device_grants dg \
+             JOIN zeroship.oauth_clients oc ON oc.client_id = dg.client_id \
+             WHERE dg.user_code = $1 \
+               AND dg.provider = $2 \
+               AND dg.status = 'pending' \
+               AND dg.expires_at > NOW() \
              LIMIT 1",
             &[&user_code, &OP_DEVICE_PROVIDER],
         )
         .await
-        .map_err(|err| format!("native device grant lookup failed: {err}"))?;
-    Ok(!rows.is_empty())
+        .map_err(|err| format!("native device grant detail lookup failed: {err}"))?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let scope: String = row.get("scope");
+    Ok(Some(NativeDeviceGrantDetails {
+        client_id: row.get("client_id"),
+        client_name: row.get("client_name"),
+        scopes: parse_scopes(&scope),
+    }))
 }
 
 #[allow(clippy::future_not_send)]

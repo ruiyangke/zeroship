@@ -19,6 +19,7 @@ use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_core::auth::hash_api_key;
+use zeroship_core::wrapper_revocation;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
@@ -496,6 +497,125 @@ async fn revoke_refresh_token_kills_family_and_is_uniform() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn revoked_access_token_family_is_inactive_for_introspection_and_userinfo() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let token = issue_refresh(&fx, FULL_SCOPE).await;
+    let claims = test_issuer()
+        .verify_access_token(&token.access_token)
+        .expect("issued access token verifies");
+
+    wrapper_revocation::revoke_family(fx.db.as_ref(), &claims.client_id, &claims.sub)
+        .await
+        .expect("write access-token family revocation marker");
+
+    let introspection = introspect_request(
+        &fx,
+        &token.access_token,
+        Some("access_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("revoked access introspect response");
+    assert_eq!(introspection.status().as_u16(), 200);
+    assert_eq!(
+        introspection
+            .json::<Value>()
+            .await
+            .expect("revoked access introspection json"),
+        serde_json::json!({ "active": false }),
+        "pre-fix this was active:true because introspection ignored token_revocations"
+    );
+
+    let userinfo = userinfo_get(&fx, &token.access_token)
+        .await
+        .expect("revoked access userinfo response");
+    assert_invalid_userinfo_token(&userinfo);
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn revoke_access_token_writes_family_marker_for_introspection() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let token = issue_refresh(&fx, FULL_SCOPE).await;
+
+    let revoke = revoke_access_request(&fx, &token.access_token)
+        .await
+        .expect("access-token revoke response");
+    assert_eq!(revoke.status().as_u16(), 200);
+
+    let introspection = introspect_request(
+        &fx,
+        &token.access_token,
+        Some("access_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("revoked access introspect response");
+    assert_eq!(introspection.status().as_u16(), 200);
+    assert_eq!(
+        introspection
+            .json::<Value>()
+            .await
+            .expect("revoked access introspection json"),
+        serde_json::json!({ "active": false }),
+        "pre-fix /revoke treated access tokens as unknown refresh tokens and left them active"
+    );
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn revoke_access_token_kills_sibling_refresh_family_durably() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let token = issue_refresh(&fx, FULL_SCOPE).await;
+    let sibling_refresh = token.refresh_token.expect("sibling refresh token");
+
+    let revoke = revoke_access_request(&fx, &token.access_token)
+        .await
+        .expect("access-token revoke response");
+    assert_eq!(revoke.status().as_u16(), 200);
+
+    let introspection = introspect_request(
+        &fx,
+        &token.access_token,
+        Some("access_token"),
+        Some(basic_auth(&fx.client_id)),
+    )
+    .await
+    .expect("revoked access introspect response");
+    assert_eq!(introspection.status().as_u16(), 200);
+    assert_eq!(
+        introspection
+            .json::<Value>()
+            .await
+            .expect("revoked access introspection json"),
+        serde_json::json!({ "active": false })
+    );
+
+    let refresh = refresh_request(&fx, &sibling_refresh, None)
+        .await
+        .expect("refresh after access-token revoke response");
+    assert_eq!(
+        refresh.status().as_u16(),
+        400,
+        "access-token revoke must not be self-healing via sibling refresh token"
+    );
+    assert_error(refresh, "invalid_grant").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn introspect_active_access_token_returns_rfc7662_claims() {
     let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
         return;
@@ -943,6 +1063,15 @@ async fn seed_user_client(
     )
     .await
     .expect("seed app oauth client");
+    let pairwise_sub = test_issuer().pairwise_subject(&user_id.to_string(), SECTOR);
+    db.execute(
+        "INSERT INTO zeroship.app_user_identities \
+            (app_client_id, global_user_id, pairwise_sub) \
+         VALUES ($1, $2, $3)",
+        &[&client_id, &user_id, &pairwise_sub],
+    )
+    .await
+    .expect("seed app user identity");
     db.execute(
         "INSERT INTO zeroship.oauth_grants \
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
@@ -971,6 +1100,12 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
         .await;
     let _ = db
         .execute("DELETE FROM zeroship.oauth_grants WHERE client_id = $1", &[&client_id])
+        .await;
+    let _ = db
+        .execute(
+            "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
+            &[&client_id],
+        )
         .await;
     let _ = db
         .execute(
@@ -1102,6 +1237,38 @@ async fn revoke_request(fx: &Fixture, refresh_token: &str) -> Result<cyper::Resp
 }
 
 #[allow(clippy::future_not_send)]
+async fn revoke_access_request(
+    fx: &Fixture,
+    access_token: &str,
+) -> Result<cyper::Response, cyper::Error> {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("token", access_token)
+        .append_pair("token_type_hint", "access_token")
+        .finish();
+    cyper::Client::new()
+        .request(http::Method::POST, format!("{}/oauth2/revoke", fx.auth_base))
+        .expect("build POST /revoke access")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header("authorization", basic_auth(&fx.client_id))
+        .expect("authorization")
+        .body(body)
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
+async fn userinfo_get(fx: &Fixture, token: &str) -> Result<cyper::Response, cyper::Error> {
+    cyper::Client::new()
+        .request(http::Method::GET, format!("{}/oauth2/userinfo", fx.auth_base))
+        .expect("build GET /userinfo")
+        .header("authorization", format!("Bearer {token}"))
+        .expect("authorization")
+        .send()
+        .await
+}
+
+#[allow(clippy::future_not_send)]
 async fn introspect_request(
     fx: &Fixture,
     token: &str,
@@ -1216,6 +1383,16 @@ async fn assert_error(resp: cyper::Response, expected: &str) {
         .await
         .expect("oauth error json");
     assert_eq!(body["error"], expected);
+}
+
+fn assert_invalid_userinfo_token(resp: &cyper::Response) {
+    assert_eq!(resp.status().as_u16(), 401);
+    assert_eq!(
+        resp.headers()
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok()),
+        Some(r#"Bearer error="invalid_token""#)
+    );
 }
 
 fn assert_scope_set(actual: &Value, expected: &[&str]) {

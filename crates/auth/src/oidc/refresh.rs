@@ -648,6 +648,12 @@ async fn revoke_inner(
     };
     let client = load_client(db, &client_id).await?;
     authenticate_for_refresh(issuer, &client, &client_auth).await?;
+    if let Ok(claims) = issuer.verify_access_token(raw_token) {
+        if claims.client_id == client.client_id {
+            kill_families_for_subject(refresh_pool, &claims.client_id, &claims.sub).await?;
+        }
+        return Ok(());
+    }
     let Some((_hash, row)) = lookup_by_any_hash(db, &keys, raw_token).await? else {
         return Ok(());
     };
@@ -1108,6 +1114,133 @@ async fn kill_family(
         OAuthError::server_error("refresh family revoke unavailable")
     })?;
     tracing::info!(family_id, reason, "refresh family killed");
+    Ok(())
+}
+
+async fn kill_families_for_subject(
+    refresh_pool: &RefreshSessionPool,
+    client_id: &str,
+    sub: &str,
+) -> Result<(), OAuthError> {
+    let pool = refresh_pool
+        .checkout_pool("access-token revoke")
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "access-token revoke: dedicated database pool checkout failed");
+            OAuthError::server_error("revoke unavailable")
+        })?;
+    let mut conn = pool.get().await.map_err(|err| {
+        tracing::error!(error = %err, "access-token revoke: dedicated database session checkout failed");
+        OAuthError::server_error("revoke unavailable")
+    })?;
+    let tx = conn.transaction().await.map_err(|err| {
+        tracing::error!(error = %err, "access-token revoke: BEGIN failed on dedicated session");
+        OAuthError::server_error("revoke unavailable")
+    })?;
+    let result = async {
+        let rows = tx
+            .query(
+                "SELECT DISTINCT user_id, refresh_family_id \
+                 FROM zeroship.oauth_refresh_tokens \
+                 WHERE client_id = $1 AND sub = $2 \
+                 ORDER BY user_id, refresh_family_id",
+                &[&client_id, &sub],
+            )
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    client_id,
+                    sub,
+                    "access-token revoke: refresh family lookup failed"
+                );
+                OAuthError::server_error("revoke unavailable")
+            })?;
+
+        let mut user_ids = Vec::new();
+        let mut family_ids = Vec::new();
+        for row in rows {
+            user_ids.push(row.get::<_, Uuid>("user_id"));
+            family_ids.push(row.get::<_, String>("refresh_family_id"));
+        }
+        user_ids.sort();
+        user_ids.dedup();
+        family_ids.sort();
+        family_ids.dedup();
+
+        for user_id in user_ids {
+            lock_refresh_user_xact(&tx, user_id).await.map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    user_id = %user_id,
+                    "access-token revoke: refresh user lock failed"
+                );
+                OAuthError::server_error("revoke unavailable")
+            })?;
+        }
+        for family_id in family_ids {
+            lock_refresh_family_xact(&tx, &family_id)
+                .await
+                .map_err(|err| {
+                    tracing::error!(
+                        error = %err,
+                        family_id = %family_id,
+                        "access-token revoke: refresh family lock failed"
+                    );
+                    OAuthError::server_error("revoke unavailable")
+                })?;
+        }
+
+        kill_families_for_subject_inner(&tx, client_id, sub).await
+    }
+    .await;
+
+    match result {
+        Ok(()) => {
+            tx.commit().await.map_err(|err| {
+                tracing::error!(error = %err, "access-token revoke: COMMIT failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback) = tx.rollback().await {
+                tracing::error!(error = %rollback, "access-token revoke: ROLLBACK failed");
+            }
+            Err(err)
+        }
+    }
+}
+
+async fn kill_families_for_subject_inner(
+    db: &(impl GenericClient + ?Sized),
+    client_id: &str,
+    sub: &str,
+) -> Result<(), OAuthError> {
+    db.execute(
+        "WITH upd AS ( \
+             UPDATE zeroship.oauth_refresh_tokens \
+             SET revoked_at = NOW() \
+             WHERE client_id = $1 AND sub = $2 AND revoked_at IS NULL \
+             RETURNING 1 \
+         ) \
+         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
+         VALUES ($1, $2, NOW()) \
+         ON CONFLICT (client_id, sub) \
+           DO UPDATE SET revoked_after = EXCLUDED.revoked_after",
+        &[&client_id, &sub],
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(
+            error = %err,
+            client_id,
+            sub,
+            "access-token revoke: refresh families kill failed"
+        );
+        OAuthError::server_error("revoke unavailable")
+    })?;
+    tracing::info!(client_id, sub, "access-token refresh families killed");
     Ok(())
 }
 
