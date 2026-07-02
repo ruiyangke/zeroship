@@ -86,6 +86,11 @@ pub(super) struct TokenResponse {
     pub scope: String,
 }
 
+enum AuthorizationCodeExchange {
+    Token(TokenResponse),
+    InvalidGrantAfterCommit,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct OAuthClient {
     pub client_id: String,
@@ -323,7 +328,7 @@ async fn authorize_inner(
         if prompt.none {
             return prompt_none_error_see_other(&auth_request, issuer, "invalid_scope");
         }
-        return Err(OAuthError::invalid_scope("scope is not allowed for client"));
+        return authorization_error_see_other(&auth_request, issuer, "invalid_scope");
     }
 
     // C1: PKCE is mandatory for every client and S256 is the only method.
@@ -333,14 +338,14 @@ async fn authorize_inner(
             if prompt.none {
                 return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
             }
-            return Err(err);
+            return authorization_error_see_other(&auth_request, issuer, err.error);
         }
     };
     if !zeroship_core::pkce::is_valid_s256_challenge(code_challenge) {
         if prompt.none {
             return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
         }
-        return Err(OAuthError::invalid_request("code_challenge must be S256 base64url"));
+        return authorization_error_see_other(&auth_request, issuer, "invalid_request");
     }
     if let Err(err) = require_eq(params.code_challenge_method.as_deref(), PKCE_METHOD_S256, || {
         OAuthError::invalid_request("code_challenge_method must be S256")
@@ -348,7 +353,7 @@ async fn authorize_inner(
         if prompt.none {
             return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
         }
-        return Err(err);
+        return authorization_error_see_other(&auth_request, issuer, err.error);
     }
 
     let nonce = auth_request.nonce.clone();
@@ -356,7 +361,7 @@ async fn authorize_inner(
         if prompt.none {
             return prompt_none_error_see_other(&auth_request, issuer, "invalid_request");
         }
-        return Err(OAuthError::invalid_request("nonce is required for openid scope"));
+        return authorization_error_see_other(&auth_request, issuer, "invalid_request");
     }
 
     if prompt.none {
@@ -569,12 +574,19 @@ async fn token_inner(
             )
             .await;
             match result {
-                Ok(response) => {
+                Ok(AuthorizationCodeExchange::Token(response)) => {
                     tx.commit().await.map_err(|err| {
                         tracing::error!(error = %err, "token: COMMIT failed");
                         OAuthError::server_error("token transaction failed")
                     })?;
                     Ok(response)
+                }
+                Ok(AuthorizationCodeExchange::InvalidGrantAfterCommit) => {
+                    tx.commit().await.map_err(|err| {
+                        tracing::error!(error = %err, "token: COMMIT failed after code replay revocation");
+                        OAuthError::server_error("token transaction failed")
+                    })?;
+                    Err(OAuthError::invalid_grant("authorization code is invalid"))
                 }
                 Err(err) => {
                     if let Err(rollback) = tx.rollback().await {
@@ -609,7 +621,7 @@ async fn exchange_authorization_code(
     redirect_uri: &str,
     code: &str,
     code_verifier: &str,
-) -> Result<TokenResponse, OAuthError> {
+) -> Result<AuthorizationCodeExchange, OAuthError> {
     let code_hash = code_hash(code);
     let rows = db
         .query(
@@ -628,6 +640,17 @@ async fn exchange_authorization_code(
             OAuthError::server_error("authorization code store unavailable")
         })?;
     let Some(row) = rows.first() else {
+        match revoke_replayed_authorization_code_lineage(db, issuer, &code_hash).await {
+            Ok(true) => return Ok(AuthorizationCodeExchange::InvalidGrantAfterCommit),
+            Ok(false) => {}
+            Err(err) => {
+                tracing::error!(
+                    error = %err.description,
+                    oauth_error = %err.error,
+                    "token: authorization code replay revocation failed"
+                );
+            }
+        }
         // C14: not-found, expired, and already-consumed are intentionally one
         // indistinguishable invalid_grant class.
         return Err(OAuthError::invalid_grant("authorization code is invalid"));
@@ -792,14 +815,45 @@ async fn exchange_authorization_code(
             None
         };
 
-    Ok(TokenResponse {
+    Ok(AuthorizationCodeExchange::Token(TokenResponse {
         access_token,
         id_token,
         refresh_token,
         token_type: TOKEN_TYPE_BEARER,
         expires_in: ACCESS_TOKEN_TTL_SECS as u64,
         scope: consumed.granted_scopes.join(" "),
-    })
+    }))
+}
+
+async fn revoke_replayed_authorization_code_lineage(
+    db: &(impl GenericClient + ?Sized),
+    issuer: &Issuer,
+    code_hash: &[u8],
+) -> Result<bool, OAuthError> {
+    let rows = db
+        .query(
+            "SELECT ac.client_id, ac.user_id, \
+                    COALESCE(aoc.sector_identifier, ac.client_id) AS sector_identifier \
+             FROM zeroship.oauth_authorization_codes ac \
+             LEFT JOIN zeroship.app_oauth_clients aoc ON aoc.client_id = ac.client_id \
+             WHERE ac.code_hash = $1 \
+               AND ac.consumed_at IS NOT NULL",
+            &[&code_hash],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "token: authorization code replay lookup failed");
+            OAuthError::server_error("authorization code store unavailable")
+        })?;
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    let client_id: String = row.get("client_id");
+    let user_id: Uuid = row.get("user_id");
+    let sector_identifier: String = row.get("sector_identifier");
+    let sub = issuer.pairwise_subject(&user_id.to_string(), &sector_identifier);
+    refresh::kill_families_for_subject_in_transaction(db, &client_id, &sub).await?;
+    Ok(true)
 }
 
 async fn resolve_session(
@@ -1051,8 +1105,17 @@ fn authorization_error_redirect(
     state: Option<&str>,
     issuer: &str,
 ) -> Result<String, OAuthError> {
-    let mut url = url::Url::parse(redirect_uri)
-        .map_err(|_| OAuthError::invalid_request("redirect_uri is not a valid URL"))?;
+    authorization_error_redirect_location(redirect_uri, error, state, issuer)
+        .map_err(|_| OAuthError::invalid_request("redirect_uri is not a valid URL"))
+}
+
+pub(crate) fn authorization_error_redirect_location(
+    redirect_uri: &str,
+    error: &str,
+    state: Option<&str>,
+    issuer: &str,
+) -> Result<String, url::ParseError> {
+    let mut url = url::Url::parse(redirect_uri)?;
     {
         let mut query = url.query_pairs_mut();
         query.append_pair("error", error);
@@ -1064,7 +1127,7 @@ fn authorization_error_redirect(
     Ok(url.to_string())
 }
 
-fn prompt_none_error_see_other(
+fn authorization_error_see_other(
     auth_request: &AuthRequest,
     issuer: &Issuer,
     error: &str,
@@ -1076,6 +1139,14 @@ fn prompt_none_error_see_other(
         issuer.issuer(),
     )?;
     Ok(error_see_other(&redirect))
+}
+
+fn prompt_none_error_see_other(
+    auth_request: &AuthRequest,
+    issuer: &Issuer,
+    error: &str,
+) -> Result<HttpResponse, OAuthError> {
+    authorization_error_see_other(auth_request, issuer, error)
 }
 
 fn error_see_other(location: &str) -> HttpResponse {

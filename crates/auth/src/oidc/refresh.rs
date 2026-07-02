@@ -1138,60 +1138,7 @@ async fn kill_families_for_subject(
         OAuthError::server_error("revoke unavailable")
     })?;
     let result = async {
-        let rows = tx
-            .query(
-                "SELECT DISTINCT user_id, refresh_family_id \
-                 FROM zeroship.oauth_refresh_tokens \
-                 WHERE client_id = $1 AND sub = $2 \
-                 ORDER BY user_id, refresh_family_id",
-                &[&client_id, &sub],
-            )
-            .await
-            .map_err(|err| {
-                tracing::error!(
-                    error = %err,
-                    client_id,
-                    sub,
-                    "access-token revoke: refresh family lookup failed"
-                );
-                OAuthError::server_error("revoke unavailable")
-            })?;
-
-        let mut user_ids = Vec::new();
-        let mut family_ids = Vec::new();
-        for row in rows {
-            user_ids.push(row.get::<_, Uuid>("user_id"));
-            family_ids.push(row.get::<_, String>("refresh_family_id"));
-        }
-        user_ids.sort();
-        user_ids.dedup();
-        family_ids.sort();
-        family_ids.dedup();
-
-        for user_id in user_ids {
-            lock_refresh_user_xact(&tx, user_id).await.map_err(|err| {
-                tracing::error!(
-                    error = %err,
-                    user_id = %user_id,
-                    "access-token revoke: refresh user lock failed"
-                );
-                OAuthError::server_error("revoke unavailable")
-            })?;
-        }
-        for family_id in family_ids {
-            lock_refresh_family_xact(&tx, &family_id)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        family_id = %family_id,
-                        "access-token revoke: refresh family lock failed"
-                    );
-                    OAuthError::server_error("revoke unavailable")
-                })?;
-        }
-
-        kill_families_for_subject_inner(&tx, client_id, sub).await
+        kill_families_for_subject_in_transaction(&tx, client_id, sub).await
     }
     .await;
 
@@ -1210,6 +1157,67 @@ async fn kill_families_for_subject(
             Err(err)
         }
     }
+}
+
+pub(super) async fn kill_families_for_subject_in_transaction(
+    db: &(impl GenericClient + ?Sized),
+    client_id: &str,
+    sub: &str,
+) -> Result<(), OAuthError> {
+    let rows = db
+        .query(
+            "SELECT DISTINCT user_id, refresh_family_id \
+             FROM zeroship.oauth_refresh_tokens \
+             WHERE client_id = $1 AND sub = $2 \
+             ORDER BY user_id, refresh_family_id",
+            &[&client_id, &sub],
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                error = %err,
+                client_id,
+                sub,
+                "access-token revoke: refresh family lookup failed"
+            );
+            OAuthError::server_error("revoke unavailable")
+        })?;
+
+    let mut user_ids = Vec::new();
+    let mut family_ids = Vec::new();
+    for row in rows {
+        user_ids.push(row.get::<_, Uuid>("user_id"));
+        family_ids.push(row.get::<_, String>("refresh_family_id"));
+    }
+    user_ids.sort();
+    user_ids.dedup();
+    family_ids.sort();
+    family_ids.dedup();
+
+    for user_id in user_ids {
+        lock_refresh_user_xact(db, user_id).await.map_err(|err| {
+            tracing::error!(
+                error = %err,
+                user_id = %user_id,
+                "access-token revoke: refresh user lock failed"
+            );
+            OAuthError::server_error("revoke unavailable")
+        })?;
+    }
+    for family_id in family_ids {
+        lock_refresh_family_xact(db, &family_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    family_id = %family_id,
+                    "access-token revoke: refresh family lock failed"
+                );
+                OAuthError::server_error("revoke unavailable")
+            })?;
+    }
+
+    kill_families_for_subject_inner(db, client_id, sub).await
 }
 
 async fn kill_families_for_subject_inner(

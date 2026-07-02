@@ -223,6 +223,47 @@ async fn stale_credential_version_recheck_rejects_refresh_issuance() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn authorization_code_replay_revokes_refresh_token_issued_by_first_exchange() {
+    let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let authorize = send_authorize(&fx, FULL_SCOPE, &verifier)
+        .await
+        .expect("authorize response");
+    assert_eq!(authorize.status().as_u16(), 303);
+    let code = query_param(&location(&authorize), "code").expect("code in redirect");
+
+    let first = token_request(&fx, &code, REDIRECT_URI, &verifier)
+        .await
+        .expect("first token response");
+    assert_eq!(first.status().as_u16(), 200);
+    let first = first.json::<TokenResponse>().await.expect("first token json");
+    let refresh_token = first
+        .refresh_token
+        .expect("offline_access authorization-code exchange returns refresh token");
+
+    let replay = token_request(&fx, &code, REDIRECT_URI, &verifier)
+        .await
+        .expect("replay token response");
+    assert_eq!(replay.status().as_u16(), 400);
+    assert_error(replay, "invalid_grant").await;
+
+    let refresh_after_replay = refresh_request(&fx, &refresh_token, None)
+        .await
+        .expect("refresh after code replay response");
+    assert_eq!(
+        refresh_after_replay.status().as_u16(),
+        400,
+        "authorization-code replay must revoke refresh token issued by first exchange"
+    );
+    assert_error(refresh_after_replay, "invalid_grant").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
     let Some(fx) = Fixture::boot(&["openid", "profile", "email", "offline_access"]).await else {
         return;
