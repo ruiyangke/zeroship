@@ -9,4 +9,5 @@ pub mod precondition;
 pub mod probe;
 pub mod profile;
 pub mod snapshot;
+pub mod support;
 pub mod validate;
