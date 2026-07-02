@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::return_to;
+use crate::{identity::oauth::UpstreamPrompt, return_to};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthRequest {
@@ -53,6 +53,10 @@ impl IdpHintProvider {
             Self::Google => "/oauth/google/start",
             Self::Github => "/oauth/github/start",
         }
+    }
+
+    fn forwards_max_age(self) -> bool {
+        matches!(self, Self::Google)
     }
 }
 
@@ -133,14 +137,22 @@ impl AuthRequest {
     ) -> Option<String> {
         let provider = self.idp_hint_provider()?;
         match provider {
-            IdpHintProvider::Google if google_enabled => {
-                Some(return_to::with_return_to(provider.start_path(), &self.return_to))
-            }
-            IdpHintProvider::Github if github_enabled => {
-                Some(return_to::with_return_to(provider.start_path(), &self.return_to))
-            }
+            IdpHintProvider::Google if google_enabled => Some(with_upstream_prompt(
+                return_to::with_return_to(provider.start_path(), &self.return_to),
+                self.upstream_prompt(),
+                provider.forwards_max_age(),
+            )),
+            IdpHintProvider::Github if github_enabled => Some(with_upstream_prompt(
+                return_to::with_return_to(provider.start_path(), &self.return_to),
+                self.upstream_prompt(),
+                provider.forwards_max_age(),
+            )),
             _ => None,
         }
+    }
+
+    pub fn upstream_prompt(&self) -> Option<UpstreamPrompt> {
+        UpstreamPrompt::from_oidc_prompt(self.prompt.as_deref(), None)
     }
 
     fn idp_hint_provider(&self) -> Option<IdpHintProvider> {
@@ -150,6 +162,33 @@ impl AuthRequest {
             _ => None,
         }
     }
+}
+
+fn with_upstream_prompt(
+    location: String,
+    prompt: Option<UpstreamPrompt>,
+    include_max_age: bool,
+) -> String {
+    let Some(prompt) = prompt else {
+        return location;
+    };
+    let Ok(mut parsed) = url::Url::parse(&format!("http://zeroship.local{location}")) else {
+        return location;
+    };
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.append_pair("prompt", prompt.prompt_value());
+        if include_max_age && prompt.requests_login() {
+            query.append_pair("max_age", "0");
+        }
+    }
+
+    let mut out = parsed.path().to_string();
+    if let Some(query) = parsed.query() {
+        out.push('?');
+        out.push_str(query);
+    }
+    out
 }
 
 fn required(value: Option<&str>, err: AuthRequestError) -> Result<String, AuthRequestError> {
@@ -219,6 +258,10 @@ mod tests {
         assert_eq!(request.nonce.as_deref(), Some(" nc-1 "));
         assert_eq!(request.prompt.as_deref(), Some("login"));
         assert_eq!(request.idp_hint.as_deref(), Some("google"));
+        assert_eq!(
+            request.upstream_prompt().map(|prompt| prompt.prompt_value()),
+            Some("login")
+        );
 
         let direct = AuthRequest::from_parts(
             "/oauth2/authorize?state=a\\b",
@@ -233,6 +276,41 @@ mod tests {
         .expect("direct authorize params should not validate request target as return_to");
         assert_eq!(direct.return_to, "/oauth2/authorize?state=a\\b");
         assert_eq!(direct.state.as_deref(), Some("a\\b"));
+    }
+
+    #[test]
+    fn provider_start_location_carries_forced_prompt_upstream() {
+        let return_to = return_to(&[
+            ("client_id", "oac_123"),
+            ("redirect_uri", "https://app.zeroship.test/callback"),
+            ("scope", "openid"),
+            ("prompt", "login select_account"),
+            ("idp_hint", "google"),
+        ]);
+        let request = AuthRequest::parse_return_to(&return_to).expect("parse auth request");
+
+        let location = request
+            .provider_start_location(true, true)
+            .expect("google provider start");
+        let parsed = url::Url::parse(&format!("http://auth.test{location}")).expect("parse start");
+
+        assert_eq!(parsed.path(), "/oauth/google/start");
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(name, _)| name == "prompt")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("login select_account")
+        );
+        assert_eq!(
+            parsed
+                .query_pairs()
+                .find(|(name, _)| name == "max_age")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some("0")
+        );
     }
 
     #[test]

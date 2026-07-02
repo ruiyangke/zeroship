@@ -47,6 +47,14 @@ pub fn configure(
                 .service(oidc::metadata::openid_configuration)
                 .service(oidc::metadata::oauth_authorization_server),
         );
+        cfg.service(
+            web::resource("/.well-known/oauth-authorization-server/oauth2")
+                .route(web::get().to(oidc::metadata::oauth_authorization_server_handler)),
+        )
+        .service(
+            web::resource("/.well-known/openid-configuration/oauth2")
+                .route(web::get().to(oidc::metadata::openid_configuration_handler)),
+        );
         oidc::device_token::configure(cfg);
         cfg.service(healthz)
             .service(readyz)

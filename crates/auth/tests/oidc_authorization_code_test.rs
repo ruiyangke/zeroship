@@ -358,14 +358,12 @@ async fn pkce_negatives_missing_plain_and_wrong_verifier_are_rejected() {
     let missing = send_authorize_without_pkce(&fx, REDIRECT_URI, Some(&nonce))
         .await
         .expect("missing pkce authorize response");
-    assert_eq!(missing.status().as_u16(), 400);
-    assert_error(missing, "invalid_request").await;
+    assert_authorize_error_redirect(&missing, &fx, "invalid_request");
 
     let plain = send_authorize_with_method(&fx, REDIRECT_URI, &verifier, "plain", Some(&nonce))
         .await
         .expect("plain authorize response");
-    assert_eq!(plain.status().as_u16(), 400);
-    assert_error(plain, "invalid_request").await;
+    assert_authorize_error_redirect(&plain, &fx, "invalid_request");
 
     let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
         .await
@@ -377,6 +375,29 @@ async fn pkce_negatives_missing_plain_and_wrong_verifier_are_rejected() {
         .expect("wrong verifier token response");
     assert_eq!(token.status().as_u16(), 400);
     assert_error(token, "invalid_grant").await;
+
+    fx.cleanup().await;
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn interactive_authorize_errors_after_redirect_validation_redirect_to_rp_with_iss() {
+    let Some(fx) = Fixture::boot().await else {
+        return;
+    };
+    let verifier = pkce_verifier();
+    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+
+    let invalid_scope =
+        send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid unknown")
+            .await
+            .expect("invalid-scope authorize response");
+    assert_authorize_error_redirect(&invalid_scope, &fx, "invalid_scope");
+
+    let missing_pkce = send_authorize_without_pkce(&fx, REDIRECT_URI, Some(&nonce))
+        .await
+        .expect("missing-pkce authorize response");
+    assert_authorize_error_redirect(&missing_pkce, &fx, "invalid_request");
 
     fx.cleanup().await;
 }
@@ -753,6 +774,22 @@ async fn assert_error(resp: cyper::Response, expected: &str) {
         .await
         .expect("oauth error json");
     assert_eq!(body["error"], expected);
+}
+
+fn assert_authorize_error_redirect(resp: &cyper::Response, fx: &Fixture, expected: &str) {
+    assert_eq!(resp.status().as_u16(), 303, "authorize error must redirect to RP");
+    assert!(
+        resp.headers().get("location").is_some(),
+        "authorize error redirect must carry Location"
+    );
+    let loc = location(resp);
+    assert!(
+        loc.starts_with(&format!("{REDIRECT_URI}?")),
+        "authorize error redirect must target registered redirect_uri: {loc}"
+    );
+    assert_eq!(query_param(&loc, "error").as_deref(), Some(expected));
+    assert_eq!(query_param(&loc, "state").as_deref(), Some("state-123"));
+    assert_eq!(query_param(&loc, "iss").as_deref(), Some(fx.issuer.issuer()));
 }
 
 fn assert_identity_claims_absent(claims: &Value) {

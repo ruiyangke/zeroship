@@ -126,10 +126,12 @@ async fn google_federation_creates_new_user() {
     // 4. Start from a native OP authorize request.
     let http = cyper::Client::new();
     let mut jar = CookieJar::default();
-    let return_to = native_authorize_return_to(
+    let base_return_to = native_authorize_return_to(
         &format!("native-google-{}", Uuid::new_v4().simple()),
         "https://app.zeroship.test/callback",
     );
+    let return_to_after_prompt = format!("{base_return_to}&idp_hint=google");
+    let return_to = format!("{return_to_after_prompt}&prompt=login");
 
     // 5. GET /oauth/google/start?return_to=… → 302 to the mock's
     //    /authorize. The handler sets the stash cookie on the way out.
@@ -153,6 +155,14 @@ async fn google_federation_creates_new_user() {
     assert!(
         mock_authorize_loc.starts_with(&mock.google_auth_url()),
         "redirect target must be the mock's /authorize: got {mock_authorize_loc}"
+    );
+    assert_eq!(
+        common::extract_query_param(&mock_authorize_loc, "prompt").as_deref(),
+        Some("login")
+    );
+    assert_eq!(
+        common::extract_query_param(&mock_authorize_loc, "max_age").as_deref(),
+        Some("0")
     );
     let stash_cookie = read_set_cookie(&resp, "zsidp_google_stash")
         .expect("zsidp_google_stash on /oauth/google/start");
@@ -206,7 +216,7 @@ async fn google_federation_creates_new_user() {
         resp.text().await.ok()
     );
     let final_loc = location(&resp);
-    assert_eq!(final_loc, return_to);
+    assert_eq!(final_loc, return_to_after_prompt);
 
     // 8. Database assertions: a user row was created with the mock's
     //    email, and an identity row for (google, mock_user.subject)

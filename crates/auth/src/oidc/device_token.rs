@@ -30,8 +30,13 @@ const DEVICE_CODE_BYTES: usize = 32;
 const DEVICE_TTL_SECS: i64 = 600;
 const INITIAL_POLL_INTERVAL_SECS: i32 = 5;
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+const USER_CODE_GROUP_LEN: usize = 4;
+const USER_CODE_GROUPS: usize = 3;
+const USER_CODE_CHAR_LEN: usize = USER_CODE_GROUP_LEN * USER_CODE_GROUPS;
+const USER_CODE_FORMATTED_LEN: usize = USER_CODE_CHAR_LEN + (USER_CODE_GROUPS - 1);
 const USER_CODE_ATTEMPTS: usize = 8;
 const OP_DEVICE_PROVIDER: &str = "op";
+const DEFAULT_DEVICE_SCOPE: &str = "openid";
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthorizationRequest {
@@ -54,6 +59,13 @@ pub struct DeviceAuthorizationResponse {
 pub enum DeviceApproval {
     Approved,
     NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct NativeDeviceGrantDetails {
+    pub client_id: String,
+    pub client_name: String,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,7 +126,7 @@ async fn device_authorization_inner(
 
     let requested_scopes = match params.scope.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(scope) => parse_scopes(scope),
-        None => client.scopes.clone(),
+        None => vec![DEFAULT_DEVICE_SCOPE.to_string()],
     };
     if !scope_subset(&requested_scopes, &client.scopes) {
         return Err(OAuthError::invalid_scope("scope is not allowed for client"));
@@ -168,28 +180,37 @@ async fn device_authorization_inner(
 }
 
 #[allow(clippy::future_not_send)]
-pub(crate) async fn native_user_code_pending(
+pub(crate) async fn native_user_code_details(
     db: &Client,
     user_code: &str,
-) -> Result<bool, String> {
+) -> Result<Option<NativeDeviceGrantDetails>, String> {
     let user_code = normalize_user_code(user_code);
     if user_code.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let rows = db
         .query(
-            "SELECT 1 \
-             FROM zeroship.device_grants \
-             WHERE user_code = $1 \
-               AND provider = $2 \
-               AND status = 'pending' \
-               AND expires_at > NOW() \
+            "SELECT dg.client_id, dg.scope, COALESCE(oc.client_name, dg.client_id) AS client_name \
+             FROM zeroship.device_grants dg \
+             JOIN zeroship.oauth_clients oc ON oc.client_id = dg.client_id \
+             WHERE dg.user_code = $1 \
+               AND dg.provider = $2 \
+               AND dg.status = 'pending' \
+               AND dg.expires_at > NOW() \
              LIMIT 1",
             &[&user_code, &OP_DEVICE_PROVIDER],
         )
         .await
-        .map_err(|err| format!("native device grant lookup failed: {err}"))?;
-    Ok(!rows.is_empty())
+        .map_err(|err| format!("native device grant detail lookup failed: {err}"))?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    let scope: String = row.get("scope");
+    Ok(Some(NativeDeviceGrantDetails {
+        client_id: row.get("client_id"),
+        client_name: row.get("client_name"),
+        scopes: parse_scopes(&scope),
+    }))
 }
 
 #[allow(clippy::future_not_send)]
@@ -482,26 +503,63 @@ fn generate_device_code() -> String {
 
 fn generate_user_code() -> String {
     let mut rng = rand::thread_rng();
-    let mut code = [0_u8; 9];
-    for ch in &mut code[..4] {
-        let idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
-        *ch = USER_CODE_ALPHABET[idx];
+    let mut code = String::with_capacity(USER_CODE_FORMATTED_LEN);
+    for idx in 0..USER_CODE_CHAR_LEN {
+        if idx > 0 && idx % USER_CODE_GROUP_LEN == 0 {
+            code.push('-');
+        }
+        let alphabet_idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
+        code.push(char::from(USER_CODE_ALPHABET[alphabet_idx]));
     }
-    code[4] = b'-';
-    for ch in &mut code[5..] {
-        let idx = rng.gen_range(0..USER_CODE_ALPHABET.len());
-        *ch = USER_CODE_ALPHABET[idx];
-    }
-    String::from_utf8(code.to_vec()).expect("user code alphabet is ascii")
+    code
 }
 
 fn normalize_user_code(value: &str) -> String {
-    value
+    let chars: String = value
         .trim()
         .chars()
-        .filter(|ch| !ch.is_ascii_whitespace())
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '-')
         .map(|ch| ch.to_ascii_uppercase())
-        .collect()
+        .collect();
+
+    if chars.len() != USER_CODE_CHAR_LEN
+        || !chars
+            .as_bytes()
+            .iter()
+            .all(|ch| USER_CODE_ALPHABET.contains(ch))
+    {
+        return value
+            .trim()
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .map(|ch| ch.to_ascii_uppercase())
+            .collect();
+    }
+
+    let mut normalized = String::with_capacity(USER_CODE_FORMATTED_LEN);
+    for (idx, ch) in chars.chars().enumerate() {
+        if idx > 0 && idx % USER_CODE_GROUP_LEN == 0 {
+            normalized.push('-');
+        }
+        normalized.push(ch);
+    }
+    normalized
+}
+
+pub(crate) fn valid_user_code(value: &str) -> bool {
+    let code = normalize_user_code(value);
+    let bytes = code.as_bytes();
+    bytes.len() == USER_CODE_FORMATTED_LEN
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(idx, ch)| {
+                if (idx + 1) % (USER_CODE_GROUP_LEN + 1) == 0 {
+                    *ch == b'-'
+                } else {
+                    USER_CODE_ALPHABET.contains(ch)
+                }
+            })
 }
 
 fn sha256_hex(value: &str) -> String {

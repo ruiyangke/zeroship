@@ -14,6 +14,7 @@ use crate::oidc::refresh::{
     introspect_refresh_token, ClientAuthMethod, RefreshTokenKeys,
 };
 use crate::oidc::{AccessTokenClaims, Issuer};
+use zeroship_core::wrapper_revocation;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/introspect").route(web::post().to(introspect_post)));
@@ -73,18 +74,18 @@ async fn introspect_inner(
             if let Some(active) = introspect_refresh(db, cfg, issuer, &client, raw_token).await? {
                 Some(active)
             } else {
-                introspect_access(issuer, &client, raw_token)
+                introspect_access(db, issuer, &client, raw_token).await?
             }
         }
         Some("access_token") => {
-            if let Some(active) = introspect_access(issuer, &client, raw_token) {
+            if let Some(active) = introspect_access(db, issuer, &client, raw_token).await? {
                 Some(active)
             } else {
                 introspect_refresh(db, cfg, issuer, &client, raw_token).await?
             }
         }
         _ => {
-            if let Some(active) = introspect_access(issuer, &client, raw_token) {
+            if let Some(active) = introspect_access(db, issuer, &client, raw_token).await? {
                 Some(active)
             } else {
                 introspect_refresh(db, cfg, issuer, &client, raw_token).await?
@@ -94,12 +95,36 @@ async fn introspect_inner(
     Ok(active.unwrap_or_else(|| json!({ "active": false })))
 }
 
-fn introspect_access(issuer: &Issuer, client: &OAuthClient, raw_token: &str) -> Option<Value> {
-    let claims = issuer.verify_access_token(raw_token).ok()?;
+#[allow(clippy::future_not_send)]
+async fn introspect_access(
+    db: &Client,
+    issuer: &Issuer,
+    client: &OAuthClient,
+    raw_token: &str,
+) -> Result<Option<Value>, OAuthError> {
+    let claims = match issuer.verify_access_token(raw_token) {
+        Ok(claims) => claims,
+        Err(_) => return Ok(None),
+    };
     if claims.client_id != client.client_id {
-        return None;
+        return Ok(None);
     }
-    Some(access_response(claims))
+    let revoked =
+        wrapper_revocation::is_family_revoked_since(db, &claims.client_id, &claims.sub, claims.iat)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    client_id = %claims.client_id,
+                    sub = %claims.sub,
+                    "introspection access-token revocation lookup failed"
+                );
+                OAuthError::server_error("token revocation store unavailable")
+            })?;
+    if revoked {
+        return Ok(Some(json!({ "active": false })));
+    }
+    Ok(Some(access_response(claims)))
 }
 
 #[allow(clippy::future_not_send)]
