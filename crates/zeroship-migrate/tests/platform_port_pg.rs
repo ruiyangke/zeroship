@@ -112,9 +112,10 @@ fn platform_cfg_for_url(database_url: String, meta: &str, yes: bool) -> RunConfi
         project_id: "platform".to_string(),
         project_schema: "zeroship".to_string(),
         schemas: vec!["zeroship".to_string(), "public".to_string()],
-        // The changelog installs citext (V0001) + uuid-ossp (V0027); the guard
-        // gates `CREATE EXTENSION` against this allowlist, so both must be named.
-        extensions: vec!["citext".to_string(), "uuid-ossp".to_string()],
+        // The changelog installs only citext (V0001); uuid-ossp is deliberately
+        // NOT installed (see V0001 — every UUID default is app-side). The guard
+        // gates `CREATE EXTENSION` against this allowlist.
+        extensions: vec!["citext".to_string()],
         meta_schema: meta.to_string(),
         yes,
         statement_timeout: std::time::Duration::from_secs(120),
@@ -268,6 +269,19 @@ async fn assert_latest_platform_migration_effect(
                 present,
                 "V0063 {state} zeroship.oauth_authorization_codes"
             );
+        }
+        67 => {
+            for table in [
+                "migrated_app_policies",
+                "migrated_migrations",
+                "migrated_migration_audit",
+            ] {
+                assert_eq!(
+                    table_exists(conn, "zeroship", table).await,
+                    present,
+                    "V0067 {state} zeroship.{table}"
+                );
+            }
         }
         other => panic!("add a latest-migration effect assertion for V{other:04}"),
     }
