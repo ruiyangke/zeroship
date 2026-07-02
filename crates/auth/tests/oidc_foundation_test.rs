@@ -271,6 +271,42 @@ async fn discovery_is_served_from_oauth2_well_known_path() {
     );
 }
 
+#[ntex::test]
+async fn discovery_is_served_from_rfc8414_host_insertion_path() {
+    let cfg = Arc::new(test_config("https://auth.zeroship.test"));
+    let app = web::test::init_service(
+        web::App::new()
+            .state(cfg)
+            .configure(zeroship_auth::server::configure(false, false)),
+    )
+    .await;
+
+    let path_req = web::test::TestRequest::get()
+        .uri("/oauth2/.well-known/oauth-authorization-server")
+        .to_request();
+    let path_resp = web::test::call_service(&app, path_req).await;
+    assert_eq!(path_resp.status(), ntex::http::StatusCode::OK);
+    let path_body = web::test::read_body(path_resp).await;
+    let path_discovery: Value = serde_json::from_slice(&path_body).expect("path discovery JSON");
+
+    let host_req = web::test::TestRequest::get()
+        .uri("/.well-known/oauth-authorization-server/oauth2")
+        .to_request();
+    let host_resp = web::test::call_service(&app, host_req).await;
+    assert_eq!(host_resp.status(), ntex::http::StatusCode::OK);
+    let host_body = web::test::read_body(host_resp).await;
+    let host_discovery: Value = serde_json::from_slice(&host_body).expect("host discovery JSON");
+
+    assert_eq!(host_discovery, path_discovery);
+    let issuer = "https://auth.zeroship.test/oauth2";
+    assert_eq!(host_discovery["issuer"], issuer);
+    assert_eq!(
+        host_discovery["authorization_endpoint"],
+        format!("{issuer}/authorize")
+    );
+    assert_eq!(host_discovery["token_endpoint"], format!("{issuer}/token"));
+}
+
 #[test]
 fn id_token_has_nonce_and_correct_at_hash() {
     let issuer = test_issuer();

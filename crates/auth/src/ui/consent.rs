@@ -810,13 +810,10 @@ fn missing_relation_or_column(err: &compio_postgres::Error) -> bool {
         || text.contains("42703")
 }
 
-/// Render per-scope line items. Consults `app_scope_defs` so an app-declared
-/// scope (`read:billing`) renders with its declared label and is **recognized**
-/// — the classifier is the single authority, so the only scopes rendered
-/// `unrecognized` are genuinely `Unknown` (the consent is then rejected with
-/// `invalid_scope` by the caller, never accepted). App-declared labels take
-/// precedence over the platform `Scope::parse` label: a `read:billing` an app
-/// declared is the app's own scope, not the platform vocabulary.
+/// Render per-scope line items. Mirrors [`classify_scope`] precedence so reserved
+/// identity/platform vocabulary can never be relabeled by a colliding
+/// `app_scope_defs` row. App-declared scopes still render with declared labels
+/// when they do not collide with platform/delegated vocabulary.
 fn scope_views(
     scopes: &[String],
     app_scope_defs: &HashMap<String, ScopeDef>,
@@ -824,13 +821,7 @@ fn scope_views(
     scopes
         .iter()
         .map(|scope| {
-            if let Some(def) = app_scope_defs.get(scope) {
-                ConsentScopeView {
-                    label: def.label.clone(),
-                    description: def.description.clone(),
-                    unrecognized: false,
-                }
-            } else if let Some(label) = standard_scope_label(scope) {
+            if let Some(label) = standard_scope_label(scope) {
                 ConsentScopeView {
                     label: label.to_owned(),
                     description: None,
@@ -840,6 +831,21 @@ fn scope_views(
                 ConsentScopeView {
                     label: parsed.human_label().to_owned(),
                     description: None,
+                    unrecognized: false,
+                }
+            } else if RESERVED_DELEGATED_PREFIXES
+                .iter()
+                .any(|prefix| scope.starts_with(prefix))
+            {
+                ConsentScopeView {
+                    label: scope.clone(),
+                    description: None,
+                    unrecognized: false,
+                }
+            } else if let Some(def) = app_scope_defs.get(scope) {
+                ConsentScopeView {
+                    label: def.label.clone(),
+                    description: def.description.clone(),
                     unrecognized: false,
                 }
             } else {
@@ -997,6 +1003,24 @@ mod tests {
             ScopeDef { label: "evil".to_owned(), description: None },
         );
         assert_eq!(classify_scope("platform:admin", &defs), ScopeClass::Delegated);
+    }
+
+    #[test]
+    fn scope_view_labels_platform_scope_before_colliding_app_scope_def() {
+        let mut defs = HashMap::new();
+        defs.insert(
+            "billing:read".to_owned(),
+            ScopeDef {
+                label: "Read private app billing".to_owned(),
+                description: Some("App-supplied collision text.".to_owned()),
+            },
+        );
+
+        let scopes = scope_views(&["billing:read".to_owned()], &defs);
+
+        assert_eq!(scopes[0].label, "View billing and earnings");
+        assert_eq!(scopes[0].description, None);
+        assert!(!scopes[0].unrecognized);
     }
 
     /// The DB-free core of the authorization-inversion fix: a request made up
