@@ -370,22 +370,8 @@ fn selected_cells_match_current_validate_and_lower_behavior() {
         assert_current_cell_matches(trigger_body, dialect);
     }
 
-    let pg_raw_with_binds = ops
-        .get("pgRaw")
-        .and_then(|items| {
-            items.iter().find(|op| {
-                matches!(
-                    op,
-                    Op::PgRaw {
-                        binds,
-                        ..
-                    } if !binds.is_empty()
-                )
-            })
-        })
-        .expect("fixture corpus must include PgRaw with binds");
     for dialect in DIALECTS {
-        assert_current_cell_matches(pg_raw_with_binds, dialect);
+        assert_current_cell_matches(first(&ops, "pgRaw"), dialect);
     }
 
     let exclusion_constraint = ops

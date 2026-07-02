@@ -188,7 +188,6 @@ pub enum Feature {
     Sequence,
     RawViewBody,
     RawSql,
-    RawBinds,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,14 +525,7 @@ pub(crate) const PG_RAW_FEATURES: &[FeatureSupport] = &[
         Feature::RawSql,
         DialectSupport::postgres_only(
             RenderMode::Offline,
-            "pg.sql raw statements are PostgreSQL-only",
-        ),
-    ),
-    FeatureSupport::new(
-        Feature::RawBinds,
-        DialectSupport::unsupported_all(
-            UNSUPPORTED,
-            "PgRaw.binds are rejected until a parameterized raw executor path exists",
+            "pgRaw statements are PostgreSQL-only",
         ),
     ),
 ];

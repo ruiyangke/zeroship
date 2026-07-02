@@ -2080,7 +2080,7 @@ mod tests {
             owner_app: "app_corpus".to_string(),
             ops: vec![crate::model::ir::Op::PgRaw {
                 sql: "CREATE TABLE zeroship.raw_users AS SELECT 1 AS id".to_string(),
-                binds: Vec::new(),
+                reason: "require_rls raw table creation regression".to_string(),
             }],
             flags: Default::default(),
             depends_on: Vec::new(),

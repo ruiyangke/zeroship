@@ -18,7 +18,8 @@ test("@zeroship/migrate/pg subpath resolves through package exports", async () =
   const resolved = resolveImport("@zeroship/migrate/pg");
   assert.match(resolved, /\/dist\/pg\.js$/);
   const imported = await import("@zeroship/migrate/pg");
-  assert.equal(typeof imported.pg.sql, "function");
+  assert.equal(typeof imported.pg.raw, "function");
+  assert.equal(imported.pg.sql, undefined);
 });
 
 test("SA-8: pg.grant/revoke reject empty privilege/role arrays and a non-object target", () => {
@@ -108,8 +109,10 @@ test("pg namespace records every standalone vendor op shape", () => {
       argTypes: ["text"],
       ifExists: true,
     });
-    pg.raw({ sql: "SELECT set_config('a', $1, false)", binds: ["x"] });
-    pg.sql`SELECT ${"x"}, ${1}, ${true}`;
+    pg.raw({
+      sql: "SELECT set_config('a', 'x', false)",
+      reason: "set a test GUC in raw SQL",
+    });
   });
 
   assert.deepEqual(ops, [
@@ -184,8 +187,11 @@ test("pg namespace records every standalone vendor op shape", () => {
       argTypes: ["text"],
       ifExists: true,
     },
-    { op: "pgRaw", sql: "SELECT set_config('a', $1, false)", binds: ["x"] },
-    { op: "pgRaw", sql: "SELECT $1, $2, $3", binds: ["x", 1, true] },
+    {
+      op: "pgRaw",
+      sql: "SELECT set_config('a', 'x', false)",
+      reason: "set a test GUC in raw SQL",
+    },
   ]);
 });
 
@@ -232,9 +238,19 @@ test("table-scoped pg methods record RLS and policy op shapes", () => {
   ]);
 });
 
-test("pg.sql rejects non-integer number binds", () => {
+test("pg.raw requires reason and never records binds", () => {
   assert.throws(
-    () => record(() => { pg.sql`SELECT ${1.25}`; }),
-    (e: any) => e.code === "OP_INVALID" && /must be an integer scalar/.test(e.message),
+    () => record(() => { pg.raw({ sql: "SELECT 1" } as any); }),
+    (e: any) => e.code === "OP_INVALID" && /pg\.raw\(\{ reason \}\) must be a string/.test(e.message),
   );
+
+  const [op] = record(() => {
+    pg.raw({ sql: "SELECT 1", reason: "raw smoke test", binds: ["x"] } as any);
+  });
+  assert.deepEqual(op, { op: "pgRaw", sql: "SELECT 1", reason: "raw smoke test" });
+  assert.equal("binds" in op, false);
+});
+
+test("pg.sql is not exposed", () => {
+  assert.equal((pg as any).sql, undefined);
 });

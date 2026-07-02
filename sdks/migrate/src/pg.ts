@@ -133,11 +133,9 @@ export interface DropFunctionArgs {
   ifExists?: boolean;
 }
 
-export type PgSqlBind = string | number | boolean;
-
 export interface PgRawArgs {
   sql: string;
-  binds?: PgSqlBind[];
+  reason: string;
 }
 
 export interface PgNamespace {
@@ -156,7 +154,6 @@ export interface PgNamespace {
   createFunction(args: CreateFunctionArgs): Node;
   dropFunction(args: DropFunctionArgs): Node;
   raw(args: PgRawArgs): Node;
-  sql(strings: TemplateStringsArray, ...binds: PgSqlBind[]): Node;
 }
 
 function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
@@ -181,26 +178,6 @@ function requireString(v: unknown, what: string): asserts v is string {
 
 function record(op: Node): Node {
   return __pgPush(compact(op));
-}
-
-function scalarBind(v: PgSqlBind): PgSqlBind {
-  const t = typeof v;
-  if (t === "string" || t === "boolean") return v;
-  if (t === "number") {
-    if (!Number.isInteger(v)) {
-      throw structuredError(
-        "OP_INVALID",
-        `pg.sql bind ${v} must be an integer scalar (use a decimal string for non-integers)`,
-      );
-    }
-    return v;
-  }
-  throw structuredError("OP_INVALID", `pg.sql bind must be a typed scalar (string/number/boolean); got ${t}`);
-}
-
-function normalizeBinds(binds: PgSqlBind[] | undefined): PgSqlBind[] | undefined {
-  if (binds === undefined || binds.length === 0) return undefined;
-  return binds.map(scalarBind);
 }
 
 export const pg: PgNamespace = {
@@ -365,21 +342,11 @@ export const pg: PgNamespace = {
   },
   raw(args) {
     requireString(args.sql, "pg.raw({ sql })");
+    requireString(args.reason, "pg.raw({ reason })");
     return record({
       op: "pgRaw",
       sql: args.sql,
-      binds: normalizeBinds(args.binds),
-    });
-  },
-  sql(strings, ...binds) {
-    let out = strings[0];
-    for (let i = 0; i < binds.length; i++) {
-      out += `$${i + 1}` + strings[i + 1];
-    }
-    return record({
-      op: "pgRaw",
-      sql: out,
-      binds: normalizeBinds(binds),
+      reason: args.reason,
     });
   },
 };
