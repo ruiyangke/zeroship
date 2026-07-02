@@ -305,6 +305,26 @@ pub struct BuiltMigration {
     pub warnings: Vec<super::record::DeterminismFinding>,
 }
 
+/// One migration recorded for immediate in-memory consumption.
+///
+/// This is the Platform Model-C front-end: it reuses the exact sandboxed recorder
+/// and Rust-side owner-stamp/canonicalization path as [`build_migrations`], but it
+/// deliberately does NOT write a committed `.ir.json` artifact. Creator builds
+/// still use [`build_migrations`] so their untrusted `.ts` is frozen before deploy.
+#[derive(Debug, Clone)]
+pub struct TransientRecordedMigration {
+    /// The migration stem (`<version>_<desc>`).
+    pub stem: String,
+    /// The 14-digit filename version prefix.
+    pub version: String,
+    /// Canonical `.ir.json` bytes (pretty + trailing newline), held in memory only.
+    pub ir_json: String,
+    /// The frozen-contract-validated typed IR.
+    pub ir: MigrationIr,
+    /// Which recorder path produced this transient IR.
+    pub record_path: RecordPath,
+}
+
 /// The result of building a migrations dir.
 #[derive(Debug, Clone)]
 pub struct BuildOutcome {
@@ -606,6 +626,34 @@ fn record_one(
     let (bytes, ir) = canonicalize_ir_value(parsed, &m.stem)?;
 
     Ok((bytes, ir, path, ts_source))
+}
+
+/// Record one discovered `.ts` migration through the canonical recorder and return
+/// the canonical IR bytes in memory only.
+///
+/// Unlike [`build_migrations`], this NEVER checks for or writes a committed
+/// `<stem>.ir.json` sibling. It exists for trusted Platform migrations, whose
+/// source of truth is `.ts` and whose IR is a transient apply-time artifact.
+///
+/// # Errors
+/// See [`BuildError`].
+pub fn record_migration_transient(
+    m: &DiscoveredMigration,
+    owner_app: &str,
+    via: &RecordVia<'_>,
+) -> Result<TransientRecordedMigration, BuildError> {
+    let (bytes, ir, record_path, _ts_source) = record_one(m, owner_app, via)?;
+    let ir_json = String::from_utf8(bytes).map_err(|e| BuildError::InvalidSourceUtf8 {
+        path: m.ts_path.clone(),
+        message: e.utf8_error().to_string(),
+    })?;
+    Ok(TransientRecordedMigration {
+        stem: m.stem.clone(),
+        version: m.version.clone(),
+        ir_json,
+        ir,
+        record_path,
+    })
 }
 
 fn read_ts_source_bounded(path: &Path) -> Result<String, BuildError> {

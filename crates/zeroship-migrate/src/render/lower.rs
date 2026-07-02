@@ -28,13 +28,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::analysis::analyze::Advisory;
+use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
+use crate::model::expr::Expr;
 use crate::render::declarative::{
     build_table_snapshot, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     FieldDescriptor, LoweredUnit,
 };
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::model::expr::Expr;
-use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
 use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod, ExclusionOperator,
     ExistenceGuard, ForEach, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
@@ -704,6 +705,8 @@ pub struct GuardedFragment {
     pub op_kind: &'static str,
     /// The single rendered SQL statement (NO trailing `;`), guarded as-is.
     pub sql: String,
+    /// Structured guard/policy advisories produced while checking this fragment.
+    pub advisories: Vec<Advisory>,
 }
 
 /// A guard DENIAL attributed to the exact op that produced the denied fragment
@@ -2496,6 +2499,19 @@ impl IrAuthor {
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut named_types = NamedTypeRegistry::default();
 
+        crate::guard::check_ir_data_security_policy(guard_cfg, ir).map_err(|err| {
+            let op_kind = ir
+                .ops
+                .get(err.op_index)
+                .map(op_kind_tag)
+                .unwrap_or("unknown");
+            FragmentGuardDenied {
+                op_index: err.op_index,
+                op_kind,
+                source: err.source,
+            }
+        })?;
+
         for (op_index, op) in ir.ops.iter().enumerate() {
             let op_kind = op_kind_tag(op);
             enforce_vendor_capability_at_lower(op, guard_scope.as_ref())?;
@@ -2542,6 +2558,7 @@ impl IrAuthor {
                 // DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`)
                 // is one whole statement, never broken mid-literal.
                 for stmt in &statements {
+                    let mut advisories = Vec::new();
                     if guard_cfg.trust() == TrustProfile::Trusted {
                         match op {
                             Op::PgRaw { .. } => raw_island_guard
@@ -2550,33 +2567,52 @@ impl IrAuthor {
                                     op_index,
                                     op_kind,
                                     source,
-                                })?,
+                                })
+                                .and_then(|()| {
+                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                        op_index,
+                                        op_kind,
+                                        source,
+                                    })
+                                })
+                                .map(|outcome| advisories.extend(outcome.advisories))?,
                             Op::CreateFunction { body, .. } => raw_island_guard
                                 .check_raw_island_body_backstop(body, stmt)
                                 .map_err(|source| FragmentGuardDenied {
                                     op_index,
                                     op_kind,
                                     source,
-                                })?,
+                                })
+                                .and_then(|()| {
+                                    guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                        op_index,
+                                        op_kind,
+                                        source,
+                                    })
+                                })
+                                .map(|outcome| advisories.extend(outcome.advisories))?,
                             _ => {
-                                guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                                let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
                                     op_index,
                                     op_kind,
                                     source,
                                 })?;
+                                advisories.extend(outcome.advisories);
                             }
                         }
                     } else {
-                        guard.check(stmt).map_err(|source| FragmentGuardDenied {
+                        let outcome = guard.check(stmt).map_err(|source| FragmentGuardDenied {
                             op_index,
                             op_kind,
                             source,
                         })?;
+                        advisories.extend(outcome.advisories);
                     }
                     fragments.push(GuardedFragment {
                         op_index,
                         op_kind,
                         sql: stmt.clone(),
+                        advisories,
                     });
                 }
                 // Byte-identity invariant: the step's `up` MUST be exactly the join
@@ -3355,7 +3391,11 @@ impl IrAuthor {
                 decl.lower_add_fk(table, &fk)
             }
             IrConstraintKind::Unique { columns } => {
-                let body = format!("UNIQUE ({})", quote_cols(columns));
+                // SA-17: the imperative add must spell its column list with the SAME
+                // CONDITIONAL quoting the CREATE-TABLE / fold path uses, so an
+                // imperative- and a declarative-authored UNIQUE round-trip identically
+                // against `pg_get_constraintdef` (`UNIQUE (slug)`, not `UNIQUE ("slug")`).
+                let body = format!("UNIQUE ({})", crate::render::declarative::constraintdef_cols(columns));
                 let cname =
                     name.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string);
                 // A UNIQUE add on an existing table scans + locks and can fail on
@@ -3363,7 +3403,7 @@ impl IrAuthor {
                 decl.lower_add_constraint(table, &cname, &body, true)
             }
             IrConstraintKind::Pk { columns } => {
-                let body = format!("PRIMARY KEY ({})", quote_cols(columns));
+                let body = format!("PRIMARY KEY ({})", crate::render::declarative::constraintdef_cols(columns));
                 let cname =
                     name.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string);
                 // A PK add scans + locks the whole table under ACCESS EXCLUSIVE and
@@ -4599,19 +4639,6 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
         }),
         IrDefault::Fn { .. } => None,
     }
-}
-
-/// Quote + comma-join a constraint's column list (`"a", "b"`). Each identifier is
-/// double-quoted (embedded `"` doubled) so the column list can never alter the
-/// statement structure — the SAME quoting the declarative emitter uses.
-///
-/// **Migration-first P1**: `pub(crate)` so the offline [`crate::fold`] spells a
-/// UNIQUE/PK constraint body byte-identically to the lower (`UNIQUE (cols)`).
-pub(crate) fn quote_cols(cols: &[String]) -> String {
-    cols.iter()
-        .map(|c| crate::render::dml::escape_quote_ident(c))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Render an exclusion constraint body (`EXCLUDE USING …`) from the closed IR.

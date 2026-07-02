@@ -7,8 +7,11 @@
 //! guard (`crate::guard`) is built on top of this.
 
 use pg_query::protobuf::node::Node as NodeEnum;
-use pg_query::protobuf::{self, AlterTableType, ObjectType};
+use pg_query::protobuf::{self, AlterTableType, CmdType, MergeMatchKind, ObjectType};
 use pg_query::NodeRef;
+use serde_json::Value;
+
+use crate::analysis::tree_walk::first_matching_node;
 
 /// Error parsing SQL for classification.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -51,6 +54,36 @@ pub enum DdlKind {
     Other(String),
 }
 
+/// Data-security classification for `data_security.destructive_ops`.
+///
+/// This is deliberately a trichotomy, not `Option<destructive_label>`:
+/// - [`Self::NonDestructive`] means the classifier positively recognizes the
+///   statement as non-data-lossy.
+/// - [`Self::Destructive`] is a known destructive/data-lossy operation.
+/// - [`Self::Unknown`] is neither. `forbid` must deny this class fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataSecurityClass {
+    /// Positively recognized as non-data-lossy. Other guard layers may still
+    /// deny it for privilege, confinement, RCE, or policy reasons.
+    NonDestructive,
+    /// Known destructive/data-lossy operation, with its canonical label.
+    Destructive(&'static str),
+    /// Not positively classified. This is denied under `destructive_ops=forbid`
+    /// and warned under `destructive_ops=warn`.
+    Unknown,
+}
+
+impl DataSecurityClass {
+    /// Canonical destructive operation label, when this class is destructive.
+    #[must_use]
+    pub const fn destructive_operation(self) -> Option<&'static str> {
+        match self {
+            Self::Destructive(operation) => Some(operation),
+            Self::NonDestructive | Self::Unknown => None,
+        }
+    }
+}
+
 /// One classified statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementClass {
@@ -61,6 +94,12 @@ pub struct StatementClass {
     /// Loses data (DROP/TRUNCATE/lossy type change). The guard *flags* this;
     /// it does not deny it (the gate, built later, decides).
     pub destructive: bool,
+    /// Canonical destructive operation label when [`Self::destructive`] is true.
+    /// The data-security guard consumes this exact classifier output so the
+    /// policy gate cannot drift into a narrower hand-rolled SQL allowlist.
+    pub destructive_operation: Option<&'static str>,
+    /// Definite trichotomy used by `data_security.destructive_ops`.
+    pub data_security: DataSecurityClass,
     /// Cannot run inside a transaction block (CONCURRENTLY, ALTER TYPE ADD
     /// VALUE, VACUUM) — needs the two-phase apply path.
     pub non_transactional: bool,
@@ -70,6 +109,15 @@ pub struct StatementClass {
     pub referenced_schemas: Vec<String>,
     /// The raw SQL text of this statement (best-effort: the deparsed form).
     pub raw: String,
+}
+
+/// One `DROP INDEX` target extracted from a raw SQL statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropIndexTarget {
+    /// Explicit schema qualifier, when the SQL used `DROP INDEX schema.name`.
+    pub schema: Option<String>,
+    /// Bare index name.
+    pub name: String,
 }
 
 /// Classify every statement in `sql`, one [`StatementClass`] per statement,
@@ -88,6 +136,93 @@ pub fn classify(sql: &str) -> Result<Vec<StatementClass>, ParseError> {
         out.push(classify_node(node, raw));
     }
     Ok(out)
+}
+
+/// Extract top-level `DROP INDEX` targets from raw SQL using the same real
+/// PostgreSQL parse tree the guard consumes.
+///
+/// SQL text cannot say whether an index is unique; callers with a live database
+/// can use these names to resolve `pg_index.indisunique` at apply/review time.
+///
+/// # Errors
+/// [`ParseError::Syntax`] if `libpg_query` cannot parse the input.
+pub fn drop_index_targets(sql: &str) -> Result<Vec<DropIndexTarget>, ParseError> {
+    let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
+    let mut out = Vec::new();
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(NodeEnum::DropStmt(drop)) =
+            raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref())
+        else {
+            continue;
+        };
+        if drop.remove_type != ObjectType::ObjectIndex as i32 {
+            continue;
+        }
+        for obj in &drop.objects {
+            let Some(parts) = qualified_name_parts(obj.node.as_ref()) else {
+                continue;
+            };
+            let Some(name) = parts.last().cloned() else {
+                continue;
+            };
+            let schema = (parts.len() >= 2).then(|| parts[0].clone());
+            out.push(DropIndexTarget { schema, name });
+        }
+    }
+    Ok(out)
+}
+
+/// Whether raw `.sql` must use the deploy-time DROP-INDEX approval gate.
+///
+/// This is deliberately narrower than [`classify`] and is used only by the
+/// control-plane raw `.sql` deploy gate. A raw migration requires approval when
+/// it contains a top-level `DROP INDEX`, or when it contains an opaque execution
+/// carrier (`DO`, `CREATE FUNCTION`/`CREATE PROCEDURE`, trigger function
+/// references). Bodies and dynamic SQL are not inspected here: their presence is
+/// the reviewed surface because they can issue `DROP INDEX` in text the parser
+/// cannot prove safe.
+///
+/// # Errors
+/// [`ParseError::Syntax`] if `libpg_query` cannot parse the input.
+pub fn raw_sql_requires_index_drop_approval(sql: &str) -> Result<bool, ParseError> {
+    let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
+    for raw_stmt in &parsed.protobuf.stmts {
+        let Some(node) = raw_stmt.stmt.as_ref().and_then(|s| s.node.as_ref()) else {
+            continue;
+        };
+        if is_top_level_drop_index(node) || has_opaque_execution_carrier(node) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn is_top_level_drop_index(node: &NodeEnum) -> bool {
+    matches!(node, NodeEnum::DropStmt(drop) if drop.remove_type == ObjectType::ObjectIndex as i32)
+}
+
+fn has_opaque_execution_carrier(node: &NodeEnum) -> bool {
+    node_is_opaque_execution_carrier(node)
+        || node
+            .nodes()
+            .into_iter()
+            .any(|(node, _depth, _ctx, _field)| node_ref_is_opaque_execution_carrier(node))
+}
+
+fn node_is_opaque_execution_carrier(node: &NodeEnum) -> bool {
+    match node {
+        NodeEnum::DoStmt(_) | NodeEnum::CreateFunctionStmt(_) => true,
+        NodeEnum::CreateTrigStmt(trigger) => !trigger.funcname.is_empty(),
+        _ => false,
+    }
+}
+
+fn node_ref_is_opaque_execution_carrier(node: NodeRef<'_>) -> bool {
+    match node {
+        NodeRef::DoStmt(_) | NodeRef::CreateFunctionStmt(_) => true,
+        NodeRef::CreateTrigStmt(trigger) => !trigger.funcname.is_empty(),
+        _ => false,
+    }
 }
 
 /// Slice the original source for a single statement using `libpg_query`'s
@@ -114,11 +249,9 @@ fn classify_node(node: &NodeEnum, raw: String) -> StatementClass {
             | DdlKind::CreateFunction
             | DdlKind::CreateTrigger
     );
-    let destructive = matches!(
-        kind,
-        DdlKind::DropTable | DdlKind::DropColumn | DdlKind::DropConstraint
-    ) || is_truncate(node)
-        || is_lossy_alter_type(node);
+    let data_security = data_security_class(node);
+    let destructive_operation = data_security.destructive_operation();
+    let destructive = destructive_operation.is_some();
     let non_transactional = matches!(kind, DdlKind::CreateIndexConcurrently)
         || is_concurrent_drop_index(node)
         || is_alter_type_add_value(node)
@@ -128,6 +261,8 @@ fn classify_node(node: &NodeEnum, raw: String) -> StatementClass {
         kind,
         additive,
         destructive,
+        destructive_operation,
+        data_security,
         non_transactional,
         referenced_schemas: collect_schemas(node),
         raw,
@@ -175,6 +310,7 @@ fn kind_of(node: &NodeEnum) -> DdlKind {
         NodeEnum::InsertStmt(_)
         | NodeEnum::UpdateStmt(_)
         | NodeEnum::DeleteStmt(_)
+        | NodeEnum::MergeStmt(_)
         | NodeEnum::TruncateStmt(_) => DdlKind::Dml,
         other => DdlKind::Other(node_variant_name(other)),
     }
@@ -207,24 +343,271 @@ fn alter_table_kind(at: &protobuf::AlterTableStmt) -> DdlKind {
     DdlKind::Other("AlterTableStmt".to_string())
 }
 
-/// True if any `ALTER TABLE` subcommand is a lossy `ALTER COLUMN … TYPE`.
-/// Conservatively treats *every* type change as potentially lossy (the
-/// engine cannot prove a widening is lossless without column metadata).
-fn is_lossy_alter_type(node: &NodeEnum) -> bool {
-    if let NodeEnum::AlterTableStmt(at) = node {
-        return at.cmds.iter().any(|cmd| {
-            matches!(
-                cmd.node.as_ref(),
-                Some(NodeEnum::AlterTableCmd(c))
-                    if c.subtype == AlterTableType::AtAlterColumnType as i32
-            )
-        });
-    }
-    false
+/// The canonical destructive/data-lossy statement classifier.
+///
+/// Security policy (`data_security.destructive_ops`) intentionally consumes this
+/// classifier output instead of maintaining a second SQL-shape list in the guard.
+/// Keep every data-lossy shape here so plan flags, approval, warnings, and
+/// forbid-mode denials stay in lockstep.
+#[must_use]
+pub fn destructive_operation(node: &NodeEnum) -> Option<&'static str> {
+    data_security_class(node).destructive_operation()
 }
 
-const fn is_truncate(node: &NodeEnum) -> bool {
-    matches!(node, NodeEnum::TruncateStmt(_))
+/// Trichotomy used by `data_security.destructive_ops`.
+///
+/// `forbid` must allow only [`DataSecurityClass::NonDestructive`]. The positive
+/// allowlist here is intentionally explicit; every statement shape in neither
+/// the destructive set nor this allowlist is [`DataSecurityClass::Unknown`].
+#[must_use]
+pub fn data_security_class(node: &NodeEnum) -> DataSecurityClass {
+    if let Some(operation) = destructive_operation_inner(node) {
+        return DataSecurityClass::Destructive(operation);
+    }
+    let Ok(json) = serde_json::to_value(node) else {
+        return DataSecurityClass::Unknown;
+    };
+    if let Some(operation) = first_destructive_tree_node(&json) {
+        return DataSecurityClass::Destructive(operation);
+    }
+    if has_tree_disqualifier(&json) {
+        return DataSecurityClass::Unknown;
+    }
+    if is_non_destructive_statement(node) {
+        return DataSecurityClass::NonDestructive;
+    }
+    DataSecurityClass::Unknown
+}
+
+fn destructive_operation_inner(node: &NodeEnum) -> Option<&'static str> {
+    match node {
+        NodeEnum::TruncateStmt(_) => Some("TRUNCATE"),
+        NodeEnum::DropOwnedStmt(_) => Some("DROP OWNED"),
+        NodeEnum::DropStmt(drop) => destructive_drop_operation(drop.remove_type),
+        NodeEnum::UpdateStmt(update) => destructive_update_operation(update),
+        NodeEnum::DeleteStmt(delete) => destructive_delete_operation(delete),
+        NodeEnum::MergeStmt(merge) if merge_has_matched_delete(merge) => {
+            Some("MERGE matched DELETE")
+        }
+        NodeEnum::AlterTableStmt(at) => destructive_alter_table_operation(at),
+        _ => None,
+    }
+}
+
+fn first_destructive_tree_node(v: &Value) -> Option<&'static str> {
+    first_matching_node(v, &|key, body| match key {
+        "UpdateStmt" => Some("UPDATE"),
+        "DeleteStmt" => Some("DELETE"),
+        "TruncateStmt" => Some("TRUNCATE"),
+        "DropOwnedStmt" => Some("DROP OWNED"),
+        "DropStmt" => destructive_drop_json_operation(body),
+        "MergeWhenClause" if merge_when_clause_json_is_matched_delete(body) => {
+            Some("MERGE matched DELETE")
+        }
+        "AlterTableCmd" => destructive_alter_table_cmd_json_operation(body),
+        _ => None,
+    })
+}
+
+fn has_tree_disqualifier(v: &Value) -> bool {
+    first_matching_node(v, &|key, body| match key {
+        // A non-delete MERGE is still row-affecting DML, but it is not a
+        // known data-loss shape. Do not vouch for it as NonDestructive.
+        "MergeStmt" => Some(()),
+        "AlterTableStmt" if !alter_table_json_is_non_destructive(body) => Some(()),
+        _ => None,
+    })
+    .is_some()
+}
+
+fn is_non_destructive_statement(node: &NodeEnum) -> bool {
+    match node {
+        NodeEnum::CreateStmt(_)
+        | NodeEnum::IndexStmt(_)
+        | NodeEnum::RenameStmt(_)
+        | NodeEnum::CommentStmt(_)
+        | NodeEnum::ViewStmt(_)
+        | NodeEnum::CreateTableAsStmt(_)
+        | NodeEnum::RefreshMatViewStmt(_)
+        | NodeEnum::CreateEnumStmt(_)
+        | NodeEnum::CompositeTypeStmt(_)
+        | NodeEnum::CreateRangeStmt(_)
+        | NodeEnum::AlterEnumStmt(_)
+        | NodeEnum::AlterTypeStmt(_)
+        | NodeEnum::CreateDomainStmt(_)
+        | NodeEnum::AlterDomainStmt(_)
+        | NodeEnum::CreateSeqStmt(_)
+        | NodeEnum::AlterSeqStmt(_)
+        | NodeEnum::CreateExtensionStmt(_)
+        | NodeEnum::CreateFunctionStmt(_)
+        | NodeEnum::AlterFunctionStmt(_)
+        | NodeEnum::CreateTrigStmt(_)
+        | NodeEnum::CreateRoleStmt(_)
+        | NodeEnum::AlterRoleStmt(_)
+        | NodeEnum::AlterRoleSetStmt(_)
+        | NodeEnum::DropRoleStmt(_)
+        | NodeEnum::GrantStmt(_)
+        | NodeEnum::GrantRoleStmt(_)
+        | NodeEnum::AlterDefaultPrivilegesStmt(_)
+        | NodeEnum::CreateSchemaStmt(_)
+        | NodeEnum::CreatePolicyStmt(_)
+        | NodeEnum::CopyStmt(_)
+        | NodeEnum::VariableSetStmt(_)
+        | NodeEnum::TransactionStmt(_)
+        | NodeEnum::SelectStmt(_)
+        | NodeEnum::InsertStmt(_)
+        | NodeEnum::VacuumStmt(_)
+        | NodeEnum::ClusterStmt(_)
+        | NodeEnum::ReindexStmt(_) => true,
+        // SQL text cannot tell whether a dropped index is unique. Treat the
+        // index drop itself as reversible structure; declarative/IR authors gate
+        // UNIQUE index drops from live index metadata via MigrationFlags.
+        NodeEnum::DropStmt(drop) if drop.remove_type == ObjectType::ObjectIndex as i32 => true,
+        NodeEnum::AlterTableStmt(at) => alter_table_is_non_destructive(at),
+        _ => false,
+    }
+}
+
+fn alter_table_is_non_destructive(at: &protobuf::AlterTableStmt) -> bool {
+    at.cmds.iter().all(|cmd| {
+        let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
+            return false;
+        };
+        alter_table_subtype_is_non_destructive(c.subtype)
+    })
+}
+
+fn destructive_update_operation(_update: &protobuf::UpdateStmt) -> Option<&'static str> {
+    Some("UPDATE")
+}
+
+fn destructive_delete_operation(_delete: &protobuf::DeleteStmt) -> Option<&'static str> {
+    Some("DELETE")
+}
+
+fn merge_has_matched_delete(merge: &protobuf::MergeStmt) -> bool {
+    merge.merge_when_clauses.iter().any(|clause| {
+        matches!(
+            clause.node.as_ref(),
+            Some(NodeEnum::MergeWhenClause(c))
+                if c.match_kind == MergeMatchKind::MergeWhenMatched as i32
+                    && c.command_type == CmdType::CmdDelete as i32
+        )
+    })
+}
+
+fn destructive_drop_operation(remove_type: i32) -> Option<&'static str> {
+    match ObjectType::try_from(remove_type).ok()? {
+        ObjectType::ObjectTable => Some("DROP TABLE"),
+        ObjectType::ObjectColumn => Some("DROP COLUMN"),
+        ObjectType::ObjectSchema => Some("DROP SCHEMA"),
+        ObjectType::ObjectView => Some("DROP VIEW"),
+        ObjectType::ObjectMatview => Some("DROP MATERIALIZED VIEW"),
+        ObjectType::ObjectSequence => Some("DROP SEQUENCE"),
+        ObjectType::ObjectType => Some("DROP TYPE"),
+        ObjectType::ObjectDomain => Some("DROP DOMAIN"),
+        ObjectType::ObjectFunction | ObjectType::ObjectProcedure | ObjectType::ObjectRoutine => {
+            Some("DROP FUNCTION")
+        }
+        ObjectType::ObjectTabconstraint | ObjectType::ObjectDomconstraint => {
+            Some("DROP CONSTRAINT")
+        }
+        _ => None,
+    }
+}
+
+fn destructive_drop_json_operation(body: &Value) -> Option<&'static str> {
+    json_i32_field(body, "remove_type").and_then(destructive_drop_operation)
+}
+
+fn destructive_alter_table_operation(at: &protobuf::AlterTableStmt) -> Option<&'static str> {
+    at.cmds.iter().find_map(|cmd| {
+        let Some(NodeEnum::AlterTableCmd(c)) = cmd.node.as_ref() else {
+            return None;
+        };
+        destructive_alter_table_subtype_operation(c.subtype)
+    })
+}
+
+fn destructive_alter_table_cmd_json_operation(body: &Value) -> Option<&'static str> {
+    json_i32_field(body, "subtype").and_then(destructive_alter_table_subtype_operation)
+}
+
+fn destructive_alter_table_subtype_operation(subtype: i32) -> Option<&'static str> {
+    if subtype == AlterTableType::AtDropColumn as i32 {
+        Some("DROP COLUMN")
+    } else if subtype == AlterTableType::AtDropConstraint as i32 {
+        Some("DROP CONSTRAINT")
+    } else if subtype == AlterTableType::AtAlterColumnType as i32 {
+        Some("ALTER COLUMN TYPE")
+    } else if subtype == AlterTableType::AtDetachPartition as i32
+        || subtype == AlterTableType::AtDetachPartitionFinalize as i32
+    {
+        Some("DETACH PARTITION")
+    } else {
+        None
+    }
+}
+
+fn alter_table_json_is_non_destructive(body: &Value) -> bool {
+    let Some(cmds) = body.get("cmds").and_then(Value::as_array) else {
+        return false;
+    };
+    cmds.iter().all(|cmd| {
+        variant_body(cmd, "AlterTableCmd")
+            .and_then(|body| json_i32_field(body, "subtype"))
+            .is_some_and(alter_table_subtype_is_non_destructive)
+    })
+}
+
+fn alter_table_subtype_is_non_destructive(subtype: i32) -> bool {
+    [
+        AlterTableType::AtAddColumn,
+        AlterTableType::AtColumnDefault,
+        AlterTableType::AtCookedColumnDefault,
+        AlterTableType::AtDropNotNull,
+        AlterTableType::AtSetNotNull,
+        AlterTableType::AtSetStatistics,
+        AlterTableType::AtSetOptions,
+        AlterTableType::AtResetOptions,
+        AlterTableType::AtSetStorage,
+        AlterTableType::AtSetCompression,
+        AlterTableType::AtAddIndex,
+        AlterTableType::AtAddConstraint,
+        AlterTableType::AtAlterConstraint,
+        AlterTableType::AtValidateConstraint,
+        AlterTableType::AtAddIndexConstraint,
+        AlterTableType::AtSetRelOptions,
+        AlterTableType::AtResetRelOptions,
+        AlterTableType::AtSetIdentity,
+        AlterTableType::AtDropIdentity,
+        AlterTableType::AtAddIdentity,
+        AlterTableType::AtAttachPartition,
+        AlterTableType::AtEnableRowSecurity,
+        AlterTableType::AtForceRowSecurity,
+        AlterTableType::AtNoForceRowSecurity,
+        AlterTableType::AtDisableRowSecurity,
+    ]
+    .iter()
+    .any(|allowed| subtype == *allowed as i32)
+}
+
+fn merge_when_clause_json_is_matched_delete(body: &Value) -> bool {
+    json_i32_field(body, "match_kind") == Some(MergeMatchKind::MergeWhenMatched as i32)
+        && json_i32_field(body, "command_type") == Some(CmdType::CmdDelete as i32)
+}
+
+fn json_i32_field(body: &Value, field: &str) -> Option<i32> {
+    body.get(field)
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok())
+}
+
+fn variant_body<'a>(node: &'a Value, key: &str) -> Option<&'a Value> {
+    let object = node.as_object()?;
+    object
+        .get(key)
+        .or_else(|| object.get("node").and_then(|inner| inner.get(key)))
 }
 
 /// `DROP INDEX CONCURRENTLY` also cannot run in a transaction.
@@ -313,6 +696,21 @@ fn push_unique(seen: &mut Vec<String>, s: String) {
 fn string_value(node: Option<&NodeEnum>) -> Option<String> {
     match node {
         Some(NodeEnum::String(s)) => Some(s.sval.clone()),
+        _ => None,
+    }
+}
+
+fn qualified_name_parts(node: Option<&NodeEnum>) -> Option<Vec<String>> {
+    match node {
+        Some(NodeEnum::List(list)) => {
+            let parts: Vec<String> = list
+                .items
+                .iter()
+                .filter_map(|i| string_value(i.node.as_ref()))
+                .collect();
+            (!parts.is_empty()).then_some(parts)
+        }
+        Some(NodeEnum::String(s)) if !s.sval.is_empty() => Some(vec![s.sval.clone()]),
         _ => None,
     }
 }

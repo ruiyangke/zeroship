@@ -17,6 +17,8 @@
 //!
 //! No DB cluster required — SQLite is a local file under a per-test temp dir.
 
+#![cfg(feature = "standalone-cli")]
+
 use std::path::PathBuf;
 use std::process::Command;
 

@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "zeroship's versioned DB migration engine — native Postgres fast path plus V8-backed JS authoring front-end"
 
+[features]
+default = []
+# Raw standalone apply/runner surface for user-owned databases. Server/control
+# crates must not enable this feature; workspace resolver = "3" keeps dev/test
+# feature use from leaking into normal embedder binaries.
+standalone-cli = []
+
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
 # security guard sees exactly what Postgres would execute. A deny-list must
@@ -13,6 +20,7 @@ description = "zeroship's versioned DB migration engine — native Postgres fast
 # Nix C toolchain (cc/clang present).
 pg_query = "6"
 sha2 = { workspace = true }
+hmac = { workspace = true }
 hex = { workspace = true }
 # JSON Schema derive for the `op.*` IR types (MigrationIr + the closed Op enum).
 # Emits `op-ir.schema.json` (the discriminated union the JS builder targets) via
@@ -108,6 +116,7 @@ landlock = { workspace = true }
 [[bin]]
 name = "zeroship-migrate"
 path = "src/bin/zeroship-migrate.rs"
+required-features = ["standalone-cli"]
 
 # The JS authoring CLI remains named `zeroship-migrate-js` so Vite/plugin and
 # PATH-based call sites keep resolving the same executable.

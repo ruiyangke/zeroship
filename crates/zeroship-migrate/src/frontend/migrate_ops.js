@@ -288,6 +288,9 @@ function requireSequenceBounds(min, max, what) {
  *  here so `t.vector(n, { metric })` rejects an out-of-set metric with a friendly
  *  client-side OP_INVALID (LOW-1); the engine's closed enum stays authoritative. */
 const VECTOR_METRICS = ["cosine", "l2", "innerProduct"];
+// The closed set of integer types a sequence may be declared `AS` (PG renders
+// only `integer` / `bigint`; everything else fails late at lower as UnsupportedOp).
+const SEQUENCE_AS_TYPES = ["int", "bigInt"];
 
 /** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the Rust
  *  `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
@@ -931,12 +934,19 @@ function stringArray(values, what) {
 
 function recordCreateEnum(name, values, args = {}) {
   requireString(name, "pgEnum(name, values)");
+  const enumValues = stringArray(values, "pgEnum(name, values)");
+  if (enumValues.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "pgEnum(name, values): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
+    );
+  }
   pushOrDeferUp(
     compact({
       op: "createEnum",
       name,
       schema: args.schema,
-      values: stringArray(values, "pgEnum(name, values)"),
+      values: enumValues,
     }),
   );
 }
@@ -994,12 +1004,19 @@ function recordCreateSequence(name, args = {}) {
   const minValue = requireNullableSafeI64(args.minValue, "sequence.create({ minValue })");
   const maxValue = requireNullableSafeI64(args.maxValue, "sequence.create({ maxValue })");
   requireSequenceBounds(minValue, maxValue, "sequence.create(args)");
+  const asType = args.as === undefined ? undefined : colTypeOf(args.as);
+  if (asType !== undefined && !SEQUENCE_AS_TYPES.includes(asType)) {
+    throw structuredError(
+      "OP_INVALID",
+      `sequence.create({ as }): as must be one of ${SEQUENCE_AS_TYPES.join(" | ")}; got ${JSON.stringify(asType)}`,
+    );
+  }
   pushOrDeferUp(
     compact({
       op: "createSequence",
       name,
       schema: args.schema,
-      as: args.as === undefined ? undefined : colTypeOf(args.as),
+      as: asType,
       increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
       start: requireSafeI64(args.start, "sequence.create({ start })"),
       minValue,
@@ -1055,7 +1072,7 @@ function recordComment(target, text) {
     compact({
       op: "comment",
       target: commentTargetToIr(target),
-      comment: text,
+      comment: text === null ? undefined : text,
     }),
   );
 }
@@ -2112,6 +2129,12 @@ export function table(name, opts = {}) {
     },
     createPolicy(args) {
       requireString(args.name, ".createPolicy({ name })");
+      if (Array.isArray(args.to) && args.to.length === 0) {
+        throw structuredError("OP_INVALID", ".createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+      }
+      if (args.using === undefined) {
+        throw structuredError("OP_INVALID", ".createPolicy({ using }): using is required (the renderer always emits USING)");
+      }
       push(compact({
         op: "createPolicy",
         name: args.name,
@@ -2282,6 +2305,15 @@ export const pg = {
     return push(compact({ op: "dropOwnedBy", roles: args.roles }));
   },
   grant(args) {
+    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+      throw structuredError("OP_INVALID", "pg.grant({ privileges }): privileges must be a non-empty array");
+    }
+    if (args.on === null || typeof args.on !== "object") {
+      throw structuredError("OP_INVALID", "pg.grant({ on }): on must be a target object");
+    }
+    if (!Array.isArray(args.to) || args.to.length === 0) {
+      throw structuredError("OP_INVALID", "pg.grant({ to }): to must be a non-empty array");
+    }
     return push(compact({
       op: "grant",
       privileges: args.privileges,
@@ -2291,11 +2323,51 @@ export const pg = {
     }));
   },
   revoke(args) {
+    if (!Array.isArray(args.privileges) || args.privileges.length === 0) {
+      throw structuredError("OP_INVALID", "pg.revoke({ privileges }): privileges must be a non-empty array");
+    }
+    if (args.on === null || typeof args.on !== "object") {
+      throw structuredError("OP_INVALID", "pg.revoke({ on }): on must be a target object");
+    }
+    if (!Array.isArray(args.from) || args.from.length === 0) {
+      throw structuredError("OP_INVALID", "pg.revoke({ from }): from must be a non-empty array");
+    }
     return push(compact({
       op: "revoke",
       privileges: args.privileges,
       on: args.on,
       from: args.from,
+    }));
+  },
+  createPolicy(args) {
+    requireString(args.name, "pg.createPolicy({ name })");
+    requireString(args.table, "pg.createPolicy({ table })");
+    if (Array.isArray(args.to) && args.to.length === 0) {
+      throw structuredError("OP_INVALID", "pg.createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+    }
+    if (args.using === undefined) {
+      throw structuredError("OP_INVALID", "pg.createPolicy({ using }): using is required (the renderer always emits USING)");
+    }
+    return push(compact({
+      op: "createPolicy",
+      name: args.name,
+      table: args.table,
+      schema: args.schema,
+      forCmd: args.for || "all",
+      to: args.to,
+      using: resolveExpr(args.using),
+      withCheck: resolveExpr(args.withCheck),
+    }));
+  },
+  dropPolicy(args) {
+    requireString(args.name, "pg.dropPolicy({ name })");
+    requireString(args.table, "pg.dropPolicy({ table })");
+    return push(compact({
+      op: "dropPolicy",
+      name: args.name,
+      table: args.table,
+      schema: args.schema,
+      ifExists: args.ifExists,
     }));
   },
   createFunction(args) {
@@ -2323,6 +2395,18 @@ export const pg = {
       schema: args.schema,
       argTypes: args.argTypes,
       ifExists: args.ifExists,
+    }));
+  },
+  /** The gated raw-statement escape as an explicit { sql, binds } call (vendor
+   *  spec section 2.11) — the object-arg twin of the pg.sql tagged template.
+   *  Binds are typed scalars; verbatim text is pg_query-scanned by the guard at
+   *  lower. Emits the canonical pgRaw wire op. */
+  raw(args) {
+    requireString(args.sql, "pg.raw({ sql })");
+    return push(compact({
+      op: "pgRaw",
+      sql: args.sql,
+      binds: args.binds && args.binds.length > 0 ? args.binds.map(scalarBind) : undefined,
     }));
   },
   /** The gated raw-statement escape (`pg.sql\`…\``, vendor spec §2.11). A tagged

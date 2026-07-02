@@ -52,8 +52,9 @@ pub mod scaffold;
 
 pub use build::{
     assert_packed_hash_matches_committed, build_migrations, build_one_migration,
-    discover_migrations, recheck_not_yet_applied, BuildError, BuildOutcome, BuiltMigration,
-    DiscoveredMigration, RecordPath, RecordVia, RecorderClient,
+    discover_migrations, recheck_not_yet_applied, record_migration_transient, BuildError,
+    BuildOutcome, BuiltMigration, DiscoveredMigration, RecordPath, RecordVia, RecorderClient,
+    TransientRecordedMigration,
 };
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use gen_types::{

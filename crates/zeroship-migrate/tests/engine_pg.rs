@@ -322,7 +322,8 @@ async fn raw_sql_complex_up_gated_then_applied_e2e() {
         .expect("base table applies");
 
     // Step 2 (AI-authored, fed via RawSqlAuthor): a multi-statement expand step —
-    // add a nullable column then backfill it. Non-destructive ⇒ no approval.
+    // add a nullable column then backfill it. The UPDATE is row-mutating DML, so
+    // M4's whole-tree DML classifier gates it even though the DDL half is additive.
     let complex = raw(&cfg)
         .wrap(
             "expand_email",
@@ -337,12 +338,23 @@ async fn raw_sql_complex_up_gated_then_applied_e2e() {
     let version = complex.version.as_str().to_string();
     let plan = engine.plan(&[complex], &guard_cfg(&cfg));
     assert!(plan.is_appliable());
-    assert!(!plan.requires_approval, "additive expand needs no approval");
+    assert!(plan.destructive, "raw UPDATE backfill is destructive DML");
+    assert!(plan.requires_approval, "raw UPDATE backfill requires approval");
 
-    engine
+    let err = engine
         .apply(&plan, Approval::None, &PostgresBackend::new(&conn), &cfg, "app_test")
         .await
-        .expect("complex up applies");
+        .expect_err("raw UPDATE backfill must be refused without approval");
+    assert!(matches!(err, EngineError::ApprovalRequired), "got {err:?}");
+    assert!(
+        !column_exists(&conn, &cfg.project_schema, "accounts", "email").await,
+        "unapproved gated plan must apply nothing"
+    );
+
+    engine
+        .apply(&plan, Approval::Approved, &PostgresBackend::new(&conn), &cfg, "app_test")
+        .await
+        .expect("approved complex up applies");
 
     assert!(column_exists(&conn, &cfg.project_schema, "accounts", "email").await);
     assert!(journaled(&conn, &cfg, &version).await);
