@@ -83,7 +83,7 @@ function isUnderMigrationsDir(file: string, migrationsAbs: string): boolean {
  * thrown (a bad migration must not crash the dev server). The graceful
  * binary-absence path (warn-once + no-op) lives in `genTypesViaCli`.
  *
- * Dev always WRITES (no `--check` drift gate; that is a CI/build concern).
+ * Dev always WRITES (no `--check`; that is a CI/build generated-artifact concern).
  */
 function readGeneratedRuntimeDescriptor(
   root: string,

@@ -495,13 +495,13 @@ export function buildPlugin(
 
     /**
      * Migration-first gen-types. Before the bundle is walked, fold the
-     * committed `.ir.json` migration set into the typed `env.db` surface
+     * committed `.ts` migration set into the typed `env.db` surface
      * (`env.db.ts` + `schema.runtime.json`) by shelling the EXISTING
      * `zeroship-migrate-js gen-types` subcommand.
      *
-     * In production (`viteMode === "production"`) we run `--check`: a DRIFT
-     * GATE that hard-fails the build when the committed artifacts no longer
-     * track the migrations (someone changed a migration without regenerating).
+     * In production (`viteMode === "production"`) we run `--check`: a generated
+     * artifact check that hard-fails the build when `env.db.ts` or
+     * `schema.runtime.json` no longer track the migrations.
      * In a non-production build we REGENERATE (write) so a local
      * `vite build --mode development` refreshes the committed types.
      *
@@ -525,9 +525,9 @@ export function buildPlugin(
           migrationsDir: migrationsRel,
           genTypesOut: options.migrations?.genTypesOut,
           cliPath: options.migrations?.cliPath,
-          // Production: drift gate. Non-production: regenerate (write).
+          // Production: generated-artifact check. Non-production: regenerate (write).
           check: isProd,
-          // The drift gate must not silently pass if the binary is missing.
+          // The production check must not silently pass if the binary is missing.
           requireBinary: isProd,
         });
         if (result.status === "skipped") {

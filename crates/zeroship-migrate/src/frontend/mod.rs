@@ -24,8 +24,8 @@
 //!   → `Vec<CollectionDescriptor>`.
 //! - [`build::build_migrations`] / [`build::build_one_migration`] — the PR4 build
 //!   path: record each `.ts` via the KERNEL-SANDBOXED recorder child
-//!   ([`recorder_service::spawn_sandboxed_record`]) → committed `.ir.json`. This is
-//!   the ONLY surface that evaluates untrusted migration `.ts`.
+//!   ([`recorder_service::spawn_sandboxed_record`]) into transient in-memory IR.
+//!   This is the ONLY surface that evaluates untrusted migration `.ts`.
 //! - [`generate::generate_migration`] — the PLATFORM schema-authority generate path:
 //!   eval → IR → diff against the live DB → render a deployable `.sql` migration
 //!   (covers the full goodie surface — vector/postgis/FK/CHECK — that the portable
@@ -51,10 +51,9 @@ pub mod sandbox;
 pub mod scaffold;
 
 pub use build::{
-    assert_packed_hash_matches_committed, build_migrations, build_one_migration,
-    discover_migrations, recheck_not_yet_applied, record_migration_transient, BuildError,
-    BuildOutcome, BuiltMigration, DiscoveredMigration, RecordPath, RecordVia, RecorderClient,
-    TransientRecordedMigration,
+    build_migrations, build_one_migration, discover_migrations, record_migration_transient,
+    BuildError, BuildOutcome, BuiltMigration, DiscoveredMigration, RecordPath, RecordVia,
+    RecorderClient, TransientRecordedMigration,
 };
 pub use eval::{eval_schema_to_ir, EvalError};
 pub use gen_types::{

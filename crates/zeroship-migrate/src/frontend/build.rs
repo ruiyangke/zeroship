@@ -1,41 +1,31 @@
 //! PR4 — the build/dev execution step: discover `migrations/*.ts` → record each
-//! via the PR4a kernel-sandboxed recorder → write the committed `.ir.json`
-//! artifact → contribute the bundle entries. **No kernel-sandbox work of its own**
-//! (that is PR4a): this module WIRES the recorder ([`spawn_sandboxed_record`] for
-//! local; an injectable [`RecorderClient`] for hosted) into CLI / vite-plugin
-//! ergonomics.
+//! via the PR4a kernel-sandboxed recorder → contribute transient in-memory IR bytes.
+//! **No kernel-sandbox work of its own** (that is PR4a): this module WIRES the
+//! recorder ([`spawn_sandboxed_record`] for local; an injectable [`RecorderClient`]
+//! for hosted) into CLI / vite-plugin ergonomics.
 //!
-//! ## The build-once authority (§5.1)
+//! ## Source authority
 //!
-//! A migration `.ts` is recorded EXACTLY ONCE — at build time, by the recorder.
-//! The resulting `.ir.json` is the committed, build-once artifact: every later
-//! consumer (the packer, the deploy gate, the CI checksum gate) reads the
-//! committed bytes VERBATIM and NEVER re-evaluates the untrusted `.ts`. So:
-//!
-//! - [`build_migrations`] records a `.ts` only when it has NO committed sibling
-//!   `<name>.ir.json`; a `.ts` WITH a committed `.ir.json` is read verbatim.
-//! - The bundle [`MigrationFileEntry`]'s `hash` is the sha256 of the COMMITTED
-//!   on-disk bytes — never of a re-emitted serialization. The packer COPIES.
-//! - [`assert_packed_hash_matches_committed`] is the CI invariant: if anyone ever
-//!   makes the packer re-emit instead of copy, the hash diverges and CI fails.
+//! A creator migration `.ts` is the committed source of truth. Build/gen-types
+//! record it fresh in the sandbox and hold the canonical `.ir.json` bytes in memory
+//! for the caller; no physical sibling `.ir.json` is read or written.
 //!
 //! ## The two record paths (§8.9.2)
 //!
 //! - LOCAL (single-tenant / self-host): record under the userland-budget floor
 //!   ([`SandboxPosture::Local`]) via the real sandboxed child.
 //! - HOSTED (multi-tenant): ship the `.ts` to the recorder service through an
-//!   injectable [`RecorderClient`]; commit the returned `.ir.json`. When the
+//!   injectable [`RecorderClient`]; use the returned IR in memory. When the
 //!   hosted client returns a RETRYABLE structured error (recorder-unreachable /
 //!   503-class), the build FALLS BACK to LOCAL recording — NOT a build failure. A
 //!   NON-retryable authoring reject (422/403) IS surfaced as a build error.
 //!
 //! ## The canonical checksum anchor (§8.9.1 / B1)
 //!
-//! The committed bytes are anchored on the TYPED-VALUE checksum
-//! ([`Checksum::of_ir`]) — invariant under JCS-byte differences between conformant
-//! serializers. Either record path yields the same typed-value checksum.
+//! The transient bytes are anchored on the TYPED-VALUE checksum ([`Checksum::of_ir`])
+//! — invariant under JCS-byte differences between conformant serializers. Either
+//! record path yields the same typed-value checksum.
 
-use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -64,7 +54,10 @@ pub struct DiscoveredMigration {
 }
 
 impl DiscoveredMigration {
-    /// The committed sibling `.ir.json` path (`<stem>.ir.json`).
+    /// The former physical sibling `.ir.json` path (`<stem>.ir.json`).
+    ///
+    /// Creator builds no longer read or write this path; it remains as a helper for
+    /// legacy tests/tools that need to name the logical IR filename.
     #[must_use]
     pub fn ir_json_path(&self) -> PathBuf {
         self.ts_path
@@ -115,22 +108,6 @@ pub enum BuildError {
         /// The human-facing message.
         message: String,
     },
-    /// Writing the committed `.ir.json` artifact failed.
-    #[error("write {path}: {source}")]
-    Write {
-        /// The path that failed.
-        path: PathBuf,
-        /// The underlying io error.
-        source: std::io::Error,
-    },
-    /// Reading a committed `.ir.json` artifact failed.
-    #[error("read committed {path}: {source}")]
-    ReadCommitted {
-        /// The path that failed.
-        path: PathBuf,
-        /// The underlying io error.
-        source: std::io::Error,
-    },
     /// Reading a migration `.ts` source failed before recording.
     #[error("read source {path}: {source}")]
     ReadSource {
@@ -159,9 +136,9 @@ pub enum BuildError {
         /// The UTF-8 error.
         message: String,
     },
-    /// A committed `.ir.json` could not be re-parsed to a [`MigrationIr`] for the
-    /// canonical-checksum fold (the on-disk artifact is corrupt / out of contract).
-    #[error("committed {stem}.ir.json is not a valid IR document: {message}")]
+    /// A recorded IR value could not be re-parsed to a [`MigrationIr`] for the
+    /// canonical-checksum fold.
+    #[error("recorded {stem}.ir.json is not a valid IR document: {message}")]
     CorruptArtifact {
         /// The migration stem.
         stem: String,
@@ -189,35 +166,6 @@ pub enum BuildError {
         field: &'static str,
         /// The offending value (debug-rendered).
         detail: String,
-    },
-    /// The CI re-record gate (B2) found a divergence between the committed
-    /// `.ir.json`'s typed-value checksum and the freshly re-recorded `.ts`'s.
-    #[error(
-        "CI checksum gate: {stem}.ts re-records to checksum {recorded} but the committed \
-         {stem}.ir.json carries {committed} — the committed artifact diverges from its source"
-    )]
-    ChecksumMismatch {
-        /// The migration stem.
-        stem: String,
-        /// The committed artifact's typed-value checksum.
-        committed: String,
-        /// The freshly re-recorded typed-value checksum.
-        recorded: String,
-    },
-    /// The packed-hash invariant (A2) was violated: a `MigrationFileEntry.hash`
-    /// does not equal the sha256 of the committed `.ir.json` bytes on disk (the
-    /// packer re-emitted instead of copying).
-    #[error(
-        "packed-hash invariant: {stem}.ir.json entry hash {entry_hash} != sha256 of the \
-         on-disk committed bytes {disk_hash} (the packer must copy, never re-record)"
-    )]
-    PackedHashMismatch {
-        /// The migration stem.
-        stem: String,
-        /// The `MigrationFileEntry.hash` value.
-        entry_hash: String,
-        /// The sha256 of the on-disk bytes.
-        disk_hash: String,
     },
 }
 
@@ -271,12 +219,10 @@ pub trait RecorderClient {
     ) -> Result<String, StructuredError>;
 }
 
-/// Which path actually produced a file's `.ir.json` in a build (telemetry +
-/// test assertion).
+/// Which path actually produced a migration's transient IR in a build (telemetry
+/// + test assertion).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordPath {
-    /// Read the already-committed `.ir.json` verbatim (NOT re-recorded).
-    CommittedVerbatim,
     /// Recorded fresh via the LOCAL sandboxed child.
     Local,
     /// Recorded fresh via the HOSTED thin client.
@@ -285,21 +231,21 @@ pub enum RecordPath {
     HostedFellBackToLocal,
 }
 
-/// One built migration: the committed bytes the packer consumes VERBATIM, the
-/// bundle entry (`hash` = sha256 of exactly those bytes), and how it was produced.
+/// One built migration: canonical transient bytes, the logical bundle entry
+/// (`hash` = sha256 of exactly those bytes), and how it was produced.
 #[derive(Debug, Clone)]
 pub struct BuiltMigration {
     /// The migration stem (`<version>_<desc>`).
     pub stem: String,
-    /// The committed `.ir.json` filename (`<stem>.ir.json`).
+    /// The logical `.ir.json` filename (`<stem>.ir.json`).
     pub filename: String,
-    /// The committed `.ir.json` bytes — exactly what the packer stages + hashes.
+    /// The canonical `.ir.json` bytes, held in memory only.
     pub committed_bytes: Vec<u8>,
     /// The bundle entry: `name = filename`, `hash = sha256(committed_bytes)`.
     pub entry: MigrationFileEntry,
-    /// The typed-value checksum (`Checksum::of_ir`) of the committed IR.
+    /// The typed-value checksum (`Checksum::of_ir`) of the transient IR.
     pub checksum: String,
-    /// How this file's `.ir.json` was produced.
+    /// How this file's transient IR was produced.
     pub record_path: RecordPath,
     /// Advisory determinism warnings surfaced from the source regex lint.
     pub warnings: Vec<super::record::DeterminismFinding>,
@@ -308,9 +254,10 @@ pub struct BuiltMigration {
 /// One migration recorded for immediate in-memory consumption.
 ///
 /// This is the Platform Model-C front-end: it reuses the exact sandboxed recorder
-/// and Rust-side owner-stamp/canonicalization path as [`build_migrations`], but it
-/// deliberately does NOT write a committed `.ir.json` artifact. Creator builds
-/// still use [`build_migrations`] so their untrusted `.ts` is frozen before deploy.
+/// and Rust-side owner-stamp/canonicalization path as [`build_migrations`], and it
+/// deliberately does NOT write a committed `.ir.json` artifact. Creator builds use
+/// the same transient path: the committed `.ts` is recorded fresh for each
+/// build/gen-types invocation.
 #[derive(Debug, Clone)]
 pub struct TransientRecordedMigration {
     /// The migration stem (`<version>_<desc>`).
@@ -412,19 +359,6 @@ fn suggest_stem(stem: &str) -> String {
     }
 }
 
-/// Fold the typed-value checksum (`Checksum::of_ir`) over a committed `.ir.json`
-/// bytes. The committed shape is the BARE [`MigrationIr`] document (what
-/// [`super::record::record_migration_to_json_unsandboxed`] writes), not the recorder
-/// envelope — parse it directly.
-fn checksum_of_committed(bytes: &[u8], stem: &str) -> Result<String, BuildError> {
-    let ir: MigrationIr =
-        serde_json::from_slice(bytes).map_err(|e| BuildError::CorruptArtifact {
-            stem: stem.to_string(),
-            message: e.to_string(),
-        })?;
-    typed_checksum(&ir, stem)
-}
-
 /// The single authoritative typed-value checksum fold (the §2.5 anchor): op list +
 /// default flags + owner + preconditions, dialect-neutral. Identical to the
 /// `op_round_trip` gate + `recorder_http::checksum_of_ir_envelope`.
@@ -510,7 +444,7 @@ fn canonicalize_ir_value(
             stem: stem.to_string(),
             message: format!("recorded IR violates the frozen contract: {e}"),
         })?;
-    // Canonical committed bytes: pretty + trailing newline (== record_migration_to_json_unsandboxed).
+    // Canonical transient bytes: pretty + trailing newline.
     let mut s =
         serde_json::to_string_pretty(&ir).map_err(|e| BuildError::CorruptArtifact {
             stem: stem.to_string(),
@@ -727,15 +661,8 @@ fn warn_on_confined_rejected_raw_sql(stem: &str, ir: &MigrationIr) {
     }
 }
 
-/// Build a migrations dir (deliverable A1): discover `*.ts`, record each one
-/// LACKING a committed `<name>.ir.json` via `via` (writing the committed artifact),
-/// read each one WITH a committed `.ir.json` VERBATIM, and produce the bundle
-/// entries (`hash` = sha256 of the committed bytes the packer consumes verbatim).
-///
-/// The committed `.ir.json` is BUILD-ONCE authority (§5.1): a `.ts` that already
-/// has a committed sibling is NEVER re-evaluated here — only its committed bytes
-/// are read. A freshly recorded `.ts` HAS its `.ir.json` written to disk so the
-/// next build sees it as committed.
+/// Build a migrations dir: discover `*.ts`, record each one via `via`, and produce
+/// logical bundle entries over canonical bytes held in memory only.
 ///
 /// # Errors
 /// See [`BuildError`].
@@ -751,11 +678,11 @@ pub fn build_migrations(
 /// Build EXACTLY ONE migration `.ts` by path (the CLI `record <file.ts>` surface):
 /// discover the file's dir, select only the requested stem, and build that single
 /// migration. Unlike [`build_migrations`] (a whole-dir operation), this never
-/// records an unrelated in-progress sibling `.ts` that happens to lack a committed
-/// `.ir.json` — `record half_finished.ts` touches only `half_finished`.
+/// records an unrelated in-progress sibling `.ts` — `record half_finished.ts`
+/// touches only `half_finished`.
 ///
-/// Build-once authority still holds: if the requested file already has a committed
-/// `.ir.json`, it is read verbatim (no re-record), so re-running is idempotent.
+/// The selected source is always recorded fresh and surfaced as in-memory canonical
+/// IR bytes.
 ///
 /// # Errors
 /// [`BuildError::InvalidName`] if `file` is not a `<14-digit>_<desc>.ts` migration,
@@ -790,8 +717,8 @@ pub fn build_one_migration(
 }
 
 /// The shared per-migration build loop behind [`build_migrations`] (whole dir) and
-/// [`build_one_migration`] (a single discovered file) — identical build-once
-/// semantics over whatever set of [`DiscoveredMigration`]s the caller selected.
+/// [`build_one_migration`] (a single discovered file). Each selected `.ts` is
+/// recorded fresh through the sandbox and surfaced in memory only.
 fn build_discovered(
     discovered: &[DiscoveredMigration],
     owner_app: &str,
@@ -799,28 +726,12 @@ fn build_discovered(
 ) -> Result<BuildOutcome, BuildError> {
     let mut out = Vec::with_capacity(discovered.len());
     for m in discovered {
-        let ir_path = m.ir_json_path();
-        let (committed_bytes, checksum, record_path, warnings) = if ir_path.exists() {
-            // §5.1: read the committed artifact VERBATIM. Do NOT re-evaluate the .ts.
-            let bytes = std::fs::read(&ir_path).map_err(|source| BuildError::ReadCommitted {
-                path: ir_path.clone(),
-                source,
-            })?;
-            let checksum = checksum_of_committed(&bytes, &m.stem)?;
-            (bytes, checksum, RecordPath::CommittedVerbatim, Vec::new())
-        } else {
-            // Record fresh once, then write the committed artifact. The regex
-            // source lint is advisory only and must never gate the build.
-            let (bytes, ir, path, ts_source) = record_one(m, owner_app, via)?;
-            let checksum = typed_checksum(&ir, &m.stem)?;
-            let warnings = warn_on_advisory_determinism_lint(&m.stem, &ts_source);
-            warn_on_confined_rejected_raw_sql(&m.stem, &ir);
-            std::fs::write(&ir_path, &bytes).map_err(|source| BuildError::Write {
-                path: ir_path.clone(),
-                source,
-            })?;
-            (bytes, checksum, path, warnings)
-        };
+        // Record fresh every time. The regex source lint is advisory only and must
+        // never gate the build.
+        let (committed_bytes, ir, record_path, ts_source) = record_one(m, owner_app, via)?;
+        let checksum = typed_checksum(&ir, &m.stem)?;
+        let warnings = warn_on_advisory_determinism_lint(&m.stem, &ts_source);
+        warn_on_confined_rejected_raw_sql(&m.stem, &ir);
 
         let filename = format!("{}.ir.json", m.stem);
         let hash = zeroship_bundle::sha256_hex(&committed_bytes);
@@ -838,129 +749,6 @@ fn build_discovered(
         });
     }
     Ok(BuildOutcome { migrations: out })
-}
-
-/// CI invariant (deliverable A2): for every committed `.ir.json` in `dir`, assert
-/// the bundle entry's `hash` (as the REAL packer surface emits it) equals an
-/// INDEPENDENTLY-computed sha256 of the on-disk committed bytes — the packer COPIES
-/// the committed bytes verbatim, it NEVER re-emits a serialization.
-///
-/// The entry is NOT hand-built here (that would be tautological — comparing a value
-/// to itself). It is produced by [`build_discovered`] over the already-committed
-/// files, which is the SAME code path the bundle packer uses: it reads the committed
-/// `.ir.json` VERBATIM and stamps `entry.hash = sha256(committed_bytes)`. The
-/// comparison is against a sha256 of the on-disk bytes read by a SEPARATE
-/// `std::fs::read`. A packer that re-emitted from the `.ts` (or otherwise produced
-/// different bytes than what is on disk) would yield an `entry.hash` that diverges
-/// from the on-disk sha256 → [`BuildError::PackedHashMismatch`].
-///
-/// Only files that ALREADY have a committed `.ir.json` are checked (the
-/// build-once / verbatim path), so the recorder is never invoked — `via` is supplied
-/// only to satisfy [`build_discovered`]'s signature and is never used for these
-/// files. A not-yet-built `.ts` (no committed `.ir.json`) is skipped here; the build
-/// step records it.
-///
-/// # Errors
-/// [`BuildError::PackedHashMismatch`] if any entry hash diverges from the on-disk
-/// sha256; io / parse errors otherwise.
-pub fn assert_packed_hash_matches_committed(
-    dir: &Path,
-    owner_app: &str,
-    via: &RecordVia<'_>,
-) -> Result<(), BuildError> {
-    let discovered = discover_migrations(dir)?;
-    // Only the already-committed files (verbatim path — no recording).
-    let committed: Vec<DiscoveredMigration> = discovered
-        .into_iter()
-        .filter(|m| m.ir_json_path().exists())
-        .collect();
-    if committed.is_empty() {
-        return Ok(());
-    }
-    // Run the REAL packer surface: build_discovered reads each committed `.ir.json`
-    // verbatim and stamps the bundle entry (`hash = sha256(committed_bytes)`).
-    let outcome = build_discovered(&committed, owner_app, via)?;
-    for built in &outcome.migrations {
-        let ir_path = dir.join(&built.filename);
-        // Independently re-read the on-disk bytes and hash them ourselves.
-        let disk_bytes = std::fs::read(&ir_path).map_err(|source| BuildError::ReadCommitted {
-            path: ir_path.clone(),
-            source,
-        })?;
-        // Compare the PACKER-derived entry against the independently-hashed disk
-        // bytes. A re-emit packer (different bytes than on disk) trips this.
-        assert_entry_tracks_disk(&built.stem, &built.entry, &disk_bytes)?;
-    }
-    Ok(())
-}
-
-/// The pure packed-hash comparison behind [`assert_packed_hash_matches_committed`]:
-/// a bundle `entry.hash` must equal the sha256 of the on-disk committed `bytes`. A
-/// packer that re-emitted (produced bytes other than what is on disk) yields an
-/// `entry.hash` that diverges → [`BuildError::PackedHashMismatch`]. Extracted so a
-/// test can feed a deliberately re-emitted (divergent-byte) entry and confirm the
-/// guard trips — proving the check is meaningful, not tautological.
-///
-/// # Errors
-/// [`BuildError::PackedHashMismatch`] on divergence.
-fn assert_entry_tracks_disk(
-    stem: &str,
-    entry: &MigrationFileEntry,
-    disk_bytes: &[u8],
-) -> Result<(), BuildError> {
-    let disk_hash = zeroship_bundle::sha256_hex(disk_bytes);
-    if entry.hash != disk_hash {
-        return Err(BuildError::PackedHashMismatch {
-            stem: stem.to_string(),
-            entry_hash: entry.hash.clone(),
-            disk_hash,
-        });
-    }
-    Ok(())
-}
-
-/// The CI re-record checksum gate (deliverable B2 / §8.9.1): for each NOT-YET-APPLIED
-/// `.ir.json` in `dir` (no journal row — `applied_versions` carries the applied set),
-/// RE-RECORD its sibling `.ts` through the canonical recorder (`via`) and assert the
-/// re-recorded typed-value checksum equals the committed blob's typed-value checksum.
-/// A divergence fails the gate (the committed artifact drifted from its source, or
-/// was tampered). Raw-byte equality is a non-blocking canary; the BLOCKING anchor is
-/// the typed-value checksum.
-///
-/// # Errors
-/// [`BuildError::ChecksumMismatch`] on a divergence; record / io / parse errors.
-pub fn recheck_not_yet_applied(
-    dir: &Path,
-    applied_versions: &BTreeSet<String>,
-    owner_app: &str,
-    via: &RecordVia<'_>,
-) -> Result<(), BuildError> {
-    let discovered = discover_migrations(dir)?;
-    for m in &discovered {
-        if applied_versions.contains(&m.version) {
-            continue; // already applied — frozen, not re-checked
-        }
-        let ir_path = m.ir_json_path();
-        if !ir_path.exists() {
-            continue; // not yet built; nothing committed to compare
-        }
-        let committed = std::fs::read(&ir_path).map_err(|source| BuildError::ReadCommitted {
-            path: ir_path.clone(),
-            source,
-        })?;
-        let committed_checksum = checksum_of_committed(&committed, &m.stem)?;
-        // RE-RECORD the .ts through the canonical recorder.
-        let (_bytes, ir, _path, _src) = record_one(m, owner_app, via)?;
-        let recorded_checksum = typed_checksum(&ir, &m.stem)?;
-        if recorded_checksum != committed_checksum {
-            return Err(BuildError::ChecksumMismatch {
-                stem: m.stem.clone(),
-                committed: committed_checksum,
-                recorded: recorded_checksum,
-            });
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -981,40 +769,6 @@ mod tests {
         assert_eq!(parse_stem("20240617123000_"), None);
         // no underscore separator — rejected.
         assert_eq!(parse_stem("20240617123000create"), None);
-    }
-
-    #[test]
-    fn packed_hash_guard_is_meaningful_not_tautological() {
-        // The committed on-disk bytes (pretty + trailing newline — the canonical
-        // verbatim shape).
-        let disk_bytes = b"{\n  \"ir_version\": 1\n}\n".to_vec();
-
-        // VERBATIM-COPY packer: entry hash == sha256 of EXACTLY the on-disk bytes.
-        let copy_entry = MigrationFileEntry {
-            name: "20240617123000_x.ir.json".to_string(),
-            hash: zeroship_bundle::sha256_hex(&disk_bytes),
-        };
-        assert_entry_tracks_disk("20240617123000_x", &copy_entry, &disk_bytes)
-            .expect("verbatim-copy entry must track the on-disk bytes (PASS)");
-
-        // RE-EMIT packer: re-serialized the SAME logical IR to DIFFERENT bytes
-        // (compact, no trailing newline) — what a regression that re-emits instead
-        // of copying would produce. Its hash diverges from the on-disk bytes.
-        let reemit_bytes = b"{\"ir_version\":1}".to_vec();
-        assert_ne!(
-            disk_bytes, reemit_bytes,
-            "the re-emit must differ from the committed on-disk bytes"
-        );
-        let reemit_entry = MigrationFileEntry {
-            name: "20240617123000_x.ir.json".to_string(),
-            hash: zeroship_bundle::sha256_hex(&reemit_bytes),
-        };
-        let err = assert_entry_tracks_disk("20240617123000_x", &reemit_entry, &disk_bytes)
-            .expect_err("a re-emitted entry whose bytes differ from disk must TRIP");
-        assert!(
-            matches!(err, BuildError::PackedHashMismatch { .. }),
-            "must be PackedHashMismatch; got: {err}"
-        );
     }
 
     #[test]

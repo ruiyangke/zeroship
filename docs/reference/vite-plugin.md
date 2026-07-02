@@ -33,14 +33,14 @@ export default defineConfig({
 
 ## Migration-first type generation (`gen-types`)
 
-The plugin shells the **existing** `zeroship-migrate-js gen-types --dir <migrations> --out <outDir> [--check]` subcommand to fold the migration set into the typed `env.db` surface — two artifacts, `env.db.ts` (a generated `@zeroship/db` `t.*()` schema module) and `schema.runtime.json` (the `RuntimeSchemaDescriptor`). The plugin never re-implements type generation; it is a thin client of the same CLI it already shells for `record`/`build`.
+The plugin shells the **existing** `zeroship-migrate-js gen-types --dir <migrations> --out <outDir> [--check]` subcommand to record `migrations/*.ts` through the sandboxed recorder, fold the transient IR in memory, and emit the typed `env.db` surface — two artifacts, `env.db.ts` (a generated `@zeroship/db` `t.*()` schema module) and `schema.runtime.json` (the `RuntimeSchemaDescriptor`). The plugin never re-implements type generation; it is a thin client of the CLI.
 
 When it runs:
 
 - **Dev** — the plugin regenerates the artifacts **on dev-server boot** (`configureServer`, so a migration changed while the server was down is picked up immediately) and **on any change under the migrations dir** (`hotUpdate`). It is fire-and-forget: a malformed migration **logs** an error and never crashes the dev server. The migrations dir is added to the Vite watcher so changes are observed even though app code does not import the `.ts` sources.
-- **Build** — `buildStart` runs gen-types once. In a **production** build it runs `--check` (a **drift gate**: a committed artifact that no longer tracks the migrations fails the build, exit non-zero). A non-production `vite build --mode development` **regenerates** (writes) instead.
+- **Build** — `buildStart` runs gen-types once. In a **production** build it runs `--check` (a generated-artifact check: `env.db.ts` or `schema.runtime.json` that no longer tracks the migrations fails the build, exit non-zero). A non-production `vite build --mode development` **regenerates** (writes) instead.
 
-Binary resolution mirrors the dev-runtime convention and the `record`/`build` recorder: an explicit `migrations.cliPath`, else `ZEROSHIP_MIGRATE_JS_BIN`, else `<root>/node_modules/.bin/zeroship-migrate-js`. If the binary is **absent in dev**, the step warns once and no-ops — the committed `env.db.ts` stays valid. For the production `--check` drift gate it then falls through to the bare `zeroship-migrate-js` **PATH** name (exactly as the recorder does), so a `cargo install`-style binary on `$PATH` resolves; a genuinely-missing binary surfaces a real spawn `ENOENT` and hard-fails the gate (a misconfigured CI must not silently pass).
+Binary resolution mirrors the dev-runtime convention: an explicit `migrations.cliPath`, else `ZEROSHIP_MIGRATE_JS_BIN`, else `<root>/node_modules/.bin/zeroship-migrate-js`. If the binary is **absent in dev**, the step warns once and no-ops — the generated `env.db.ts` stays valid. For the production `--check` gate it then falls through to the bare `zeroship-migrate-js` **PATH** name, so a `cargo install`-style binary on `$PATH` resolves; a genuinely-missing binary surfaces a real spawn `ENOENT` and hard-fails the gate (a misconfigured CI must not silently pass).
 
 ### Type activation
 
