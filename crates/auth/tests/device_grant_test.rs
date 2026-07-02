@@ -129,10 +129,20 @@ async fn request_device_authorization(
     client_id: &str,
     scope: &str,
 ) -> DeviceAuthorizationResponse {
-    let device_body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("client_id", client_id)
-        .append_pair("scope", scope)
-        .finish();
+    request_device_authorization_with_scope(http, auth_base, client_id, Some(scope)).await
+}
+
+async fn request_device_authorization_with_scope(
+    http: &cyper::Client,
+    auth_base: &str,
+    client_id: &str,
+    scope: Option<&str>,
+) -> DeviceAuthorizationResponse {
+    let mut form = url::form_urlencoded::Serializer::new(String::new());
+    form.append_pair("client_id", client_id);
+    if let Some(scope) = scope {
+        form.append_pair("scope", scope);
+    }
     let resp = http
         .request(
             http::Method::POST,
@@ -141,7 +151,7 @@ async fn request_device_authorization(
         .expect("build OP device authorization")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
-        .body(device_body)
+        .body(form.finish())
         .send()
         .await
         .expect("send OP device authorization");
@@ -163,8 +173,13 @@ async fn request_device_authorization(
 /// form body.
 #[allow(clippy::future_not_send)]
 async fn fetch_csrf_token(http: &cyper::Client, auth_base: &str) -> String {
+    fetch_device_page(http, auth_base, "/device").await.0
+}
+
+#[allow(clippy::future_not_send)]
+async fn fetch_device_page(http: &cyper::Client, auth_base: &str, path: &str) -> (String, String) {
     let resp = http
-        .request(http::Method::GET, format!("{auth_base}/device"))
+        .request(http::Method::GET, format!("{auth_base}{path}"))
         .expect("build GET /device for csrf")
         .send()
         .await
@@ -176,11 +191,14 @@ async fn fetch_csrf_token(http: &cyper::Client, auth_base: &str) -> String {
         .unwrap_or("")
         .to_string();
     // `zsidp_csrf=<token>; Path=/; SameSite=Strict; Max-Age=3600`
-    raw.split(';')
+    let csrf = raw
+        .split(';')
         .next()
         .and_then(|kv| kv.trim().strip_prefix("zsidp_csrf="))
         .map(str::to_string)
-        .unwrap_or_else(|| panic!("GET /device must set a zsidp_csrf cookie; got: {raw:?}"))
+        .unwrap_or_else(|| panic!("GET /device must set a zsidp_csrf cookie; got: {raw:?}"));
+    let body = resp.text().await.expect("GET /device body");
+    (csrf, body)
 }
 
 #[ntex::test]
@@ -274,6 +292,168 @@ async fn device_route_renders_and_rejects_bad_input() {
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
+async fn device_authorization_omitted_scope_defaults_to_openid_only() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_scope] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-scope-{}", Uuid::new_v4().simple());
+    insert_native_device_client(
+        &pg,
+        &client_id,
+        "native device scope test",
+        &["openid", "email", "profile", "apps:read"],
+    )
+    .await;
+
+    let authz =
+        request_device_authorization_with_scope(&http, &auth_base, &client_id, None).await;
+    let device_code_hash = sha256_hex(&authz.device_code);
+    let row = pg
+        .query_one(
+            "SELECT scope FROM zeroship.device_grants WHERE device_code_hash = $1",
+            &[&device_code_hash],
+        )
+        .await
+        .expect("stored device grant scope");
+    assert_eq!(
+        row.get::<_, String>("scope"),
+        "openid",
+        "pre-fix omitted scope copied the client's full allowlist into the grant"
+    );
+
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.device_grants WHERE device_code_hash = $1",
+            &[&device_code_hash],
+        )
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
+    drop(srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
+    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
+        eprintln!("[device_grant_confirm] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
+        return;
+    };
+    let http = cyper::Client::new();
+    let client_id = format!("zeroship-cli-confirm-{}", Uuid::new_v4().simple());
+    let client_name = "zeroship CLI confirm test";
+    insert_native_device_client(&pg, &client_id, client_name, &["openid", "apps:read"]).await;
+    let authz =
+        request_device_authorization(&http, &auth_base, &client_id, "openid apps:read").await;
+
+    let (csrf_token, page) =
+        fetch_device_page(&http, &auth_base, &format!("/device?user_code={}", authz.user_code))
+            .await;
+    assert!(page.contains(client_name), "{page}");
+    assert!(page.contains(&client_id), "{page}");
+    assert!(page.contains("Verify your identity"), "{page}");
+    assert!(page.contains("apps:read"), "{page}");
+    assert!(page.contains(r#"name="confirm" value="authorize""#), "{page}");
+
+    let email = format!("device-confirm-{client_id}@zeroship.test");
+    let user = users::create(&pg, &email, "Device Confirm User", None)
+        .await
+        .expect("create device confirm user");
+    let session = session_store::create(
+        &pg,
+        &session_store::CreateSession {
+            user_id: user.id,
+            auth_method: "password",
+            amr: vec!["pwd".into()],
+            acr: None,
+            expected_credential_version: Some(user.credential_version),
+            idle_minutes: session_cookie::IDLE_MINUTES,
+            absolute_hours: session_cookie::ABSOLUTE_HOURS,
+        },
+    )
+    .await
+    .expect("create local auth session");
+
+    let no_confirm = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("user_code", &authz.user_code)
+        .append_pair("csrf", &csrf_token)
+        .finish();
+    let resp = http
+        .request(http::Method::POST, format!("{auth_base}/device"))
+        .expect("build no-confirm POST /device")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header(
+            "cookie",
+            format!(
+                "{}; zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id, true)
+            ),
+        )
+        .expect("cookie")
+        .body(no_confirm)
+        .send()
+        .await
+        .expect("send no-confirm POST /device");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.expect("no-confirm body");
+    assert!(body.contains(client_name), "{body}");
+
+    let rows = pg
+        .query_one(
+            "SELECT status FROM zeroship.device_grants WHERE user_code = $1",
+            &[&authz.user_code],
+        )
+        .await
+        .expect("device grant still pending");
+    assert_eq!(
+        rows.get::<_, String>("status"),
+        "pending",
+        "pre-fix a code-only POST approved immediately without an explicit confirmation"
+    );
+
+    let confirm = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
+        .append_pair("csrf", &csrf_token)
+        .finish();
+    let resp = http
+        .request(http::Method::POST, format!("{auth_base}/device"))
+        .expect("build confirm POST /device")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header(
+            "cookie",
+            format!(
+                "{}; zsidp_csrf={csrf_token}",
+                session_cookie::set_cookie(&session.id, true)
+            ),
+        )
+        .expect("cookie")
+        .body(confirm)
+        .send()
+        .await
+        .expect("send confirm POST /device");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(resp.text().await.expect("confirm body").contains("Device approved"));
+
+    let _ = pg
+        .execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
+        .await;
+    let _ = pg
+        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
+        .await;
+    drop(srv);
+}
+
+#[ntex::test]
+#[allow(clippy::future_not_send)]
 async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     let Some((srv, auth_base, pg, issuer)) = boot_native().await else {
         eprintln!("[device_grant_native] skip (need AUTH_DB_URL or CONTROL_TEST_DB)");
@@ -357,6 +537,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
     let csrf_token = fetch_csrf_token(&http, &auth_base).await;
     let approve_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &csrf_token)
         .finish();
     let approve = http
@@ -493,6 +674,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     let anon_csrf = fetch_csrf_token(&http, &auth_base).await;
     let post_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &anon_csrf)
         .finish();
     let resp = http
@@ -533,6 +715,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
     let csrf_token = fetch_csrf_token(&http, &auth_base).await;
     let post_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &csrf_token)
         .finish();
     let resp = http
@@ -684,6 +867,7 @@ async fn device_post_requires_csrf_token() {
     let csrf_token = fetch_csrf_token(&http, &auth_base).await;
     let csrf_body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("user_code", &authz.user_code)
+        .append_pair("confirm", "authorize")
         .append_pair("csrf", &csrf_token)
         .finish();
     let resp = http

@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::oidc::claims::{scope_gated_identity_claims, ScopeGatedIdentityClaims};
 use crate::oidc::Issuer;
 use crate::store::users;
+use zeroship_core::wrapper_revocation;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -84,6 +85,26 @@ async fn userinfo_inner(
     let claims = issuer
         .verify_access_token(token)
         .map_err(|_| UserInfoError::InvalidToken)?;
+    let revoked =
+        wrapper_revocation::is_family_revoked_since(db, &claims.client_id, &claims.sub, claims.iat)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    client_id = %claims.client_id,
+                    sub = %claims.sub,
+                    "userinfo: access-token revocation lookup failed"
+                );
+                UserInfoError::Server
+            })?;
+    if revoked {
+        tracing::debug!(
+            client_id = %claims.client_id,
+            sub = %claims.sub,
+            "userinfo: access-token family is revoked"
+        );
+        return Err(UserInfoError::InvalidToken);
+    }
 
     // OIDC Core §5.3: the access token MUST have been issued with the `openid`
     // scope. Without this gate a plain resource token (e.g. one minted for an

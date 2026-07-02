@@ -18,13 +18,16 @@ use crate::identity::eligibility;
 use crate::oidc::device_token::{self, DeviceApproval};
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
-use crate::ui::{DevicePage, SupabaseDevicePage};
+use crate::ui::{DevicePage, DeviceScopeView, SupabaseDevicePage};
+use zeroship_authz::Scope;
 
 const MAX_USER_CODE_BYTES: usize = 32;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceForm {
     pub user_code: String,
+    #[serde(default)]
+    pub confirm: Option<String>,
     /// Double-submit CSRF token mirrored from the `__Host-zsidp_csrf` cookie.
     /// The device-confirmation POST binds an OAuth device challenge to the
     /// signed-in user — an identity-conferring state change — so it MUST carry
@@ -43,12 +46,47 @@ pub struct DeviceQuery {
 pub async fn get(
     query: ntex::web::types::Query<DeviceQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
+    db: ntex::web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     if cfg.auth_provider() == AuthProviderKind::Supabase {
         let user_code = query.user_code.as_deref().unwrap_or("").trim();
         return render_supabase_form(cfg.as_ref(), user_code, None, StatusCode::OK);
     }
-    render_form("", None, StatusCode::OK, cfg.insecure_dev)
+    let user_code = query.user_code.as_deref().unwrap_or("").trim();
+    if user_code.is_empty() {
+        return render_form("", None, StatusCode::OK, cfg.insecure_dev, None);
+    }
+    if !valid_user_code(user_code) {
+        return render_form(
+            user_code,
+            Some("invalid or expired code"),
+            StatusCode::BAD_REQUEST,
+            cfg.insecure_dev,
+            None,
+        );
+    }
+    match device_token::native_user_code_details(db.as_ref(), user_code).await {
+        Ok(Some(details)) => {
+            render_form(user_code, None, StatusCode::OK, cfg.insecure_dev, Some(&details))
+        }
+        Ok(None) => render_form(
+            user_code,
+            Some("invalid or expired code"),
+            StatusCode::BAD_REQUEST,
+            cfg.insecure_dev,
+            None,
+        ),
+        Err(e) => {
+            tracing::error!(error = %e, "native device user-code detail lookup failed");
+            render_form(
+                user_code,
+                Some("invalid or expired code"),
+                StatusCode::BAD_REQUEST,
+                cfg.insecure_dev,
+                None,
+            )
+        }
+    }
 }
 
 /// `/device` POST — approve a native OP device grant. Anonymous browsers are
@@ -88,6 +126,7 @@ pub async fn post(
             Some("invalid request"),
             StatusCode::FORBIDDEN,
             insecure_dev,
+            None,
         );
     }
 
@@ -98,6 +137,7 @@ pub async fn post(
             Some("enter the code shown on your device"),
             StatusCode::BAD_REQUEST,
             insecure_dev,
+            None,
         );
     }
     if !valid_user_code(user_code) {
@@ -106,20 +146,31 @@ pub async fn post(
             Some("invalid or expired code"),
             StatusCode::BAD_REQUEST,
             insecure_dev,
+            None,
         );
     }
 
-    let native_pending = match device_token::native_user_code_pending(db.as_ref(), user_code).await {
-        Ok(pending) => pending,
+    let pending = match device_token::native_user_code_details(db.as_ref(), user_code).await {
+        Ok(details) => details,
         Err(e) => {
-            tracing::error!(error = %e, "native device user-code lookup failed");
+            tracing::error!(error = %e, "native device user-code detail lookup failed");
             return render_form(
                 user_code,
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
                 insecure_dev,
+                None,
             );
         }
+    };
+    let Some(pending) = pending else {
+        return render_form(
+            user_code,
+            Some("invalid or expired code"),
+            StatusCode::BAD_REQUEST,
+            insecure_dev,
+            None,
+        );
     };
 
     let Some(session) = current_session(&req, cfg.as_ref(), db.as_ref()).await else {
@@ -134,6 +185,7 @@ pub async fn post(
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
                 insecure_dev,
+                Some(&pending),
             );
         }
         return render_form(
@@ -141,15 +193,17 @@ pub async fn post(
             Some("account temporarily locked"),
             StatusCode::FORBIDDEN,
             insecure_dev,
+            Some(&pending),
         );
     }
 
-    if !native_pending {
+    if form.confirm.as_deref() != Some("authorize") {
         return render_form(
             user_code,
-            Some("invalid or expired code"),
-            StatusCode::BAD_REQUEST,
+            None,
+            StatusCode::OK,
             insecure_dev,
+            Some(&pending),
         );
     }
 
@@ -171,6 +225,7 @@ pub async fn post(
             Some("invalid or expired code"),
             StatusCode::BAD_REQUEST,
             insecure_dev,
+            None,
         ),
         Err(e) => {
             tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
@@ -179,6 +234,7 @@ pub async fn post(
                 Some("invalid or expired code"),
                 StatusCode::BAD_REQUEST,
                 insecure_dev,
+                None,
             )
         }
     }
@@ -251,12 +307,22 @@ fn render_form(
     error: Option<&str>,
     status: StatusCode,
     insecure_dev: bool,
+    details: Option<&device_token::NativeDeviceGrantDetails>,
 ) -> HttpResponse {
     let csrf_token = csrf::generate_token();
+    let scopes = details
+        .map(|details| device_scope_views(&details.scopes))
+        .unwrap_or_default();
     let page = DevicePage {
         user_code,
         error,
         csrf: &csrf_token,
+        confirm: details.is_some(),
+        client_id: details.map(|details| details.client_id.as_str()).unwrap_or(""),
+        client_name: details
+            .map(|details| details.client_name.as_str())
+            .unwrap_or(""),
+        scopes: &scopes,
     };
     let body = page
         .render()
@@ -265,6 +331,29 @@ fn render_form(
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token, insecure_dev));
     resp.body(body)
+}
+
+fn device_scope_views(scopes: &[String]) -> Vec<DeviceScopeView> {
+    scopes
+        .iter()
+        .map(|scope| DeviceScopeView {
+            scope: scope.clone(),
+            label: standard_scope_label(scope)
+                .map(str::to_string)
+                .or_else(|| Scope::parse(scope).ok().map(|scope| scope.human_label().to_string()))
+                .unwrap_or_else(|| scope.clone()),
+        })
+        .collect()
+}
+
+fn standard_scope_label(scope: &str) -> Option<&'static str> {
+    Some(match scope {
+        "openid" => "Verify your identity",
+        "email" => "See your email address",
+        "profile" => "See your name and profile picture",
+        "offline_access" => "Stay signed in to this app even when you're not using it",
+        _ => return None,
+    })
 }
 
 fn render_device_approved() -> HttpResponse {
@@ -388,52 +477,6 @@ fn valid_user_code(user_code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
-    use ntex::http::HeaderMap;
-    use ntex::web;
-    use ntex::web::test;
-    use zeroship_core::config::AuthSection;
-
-    fn native_cfg() -> Arc<AuthConfig> {
-        let mut cfg = AuthConfig::parse_from(["zeroship-auth", "--db-url", "postgres://test"]);
-        cfg.try_resolve(AuthSection::default())
-            .expect("resolve native test config");
-        Arc::new(cfg)
-    }
-
-    fn supabase_cfg() -> Arc<AuthConfig> {
-        let mut cfg = AuthConfig::parse_from([
-            "zeroship-auth",
-            "--db-url",
-            "postgres://test",
-            "--auth-provider",
-            "supabase",
-            "--supabase-url",
-            "https://project.supabase.test",
-            "--supabase-anon-key",
-            "anon-test-key",
-            "--control-url",
-            "https://control.zeroship.test",
-        ]);
-        cfg.try_resolve(AuthSection::default())
-            .expect("resolve supabase test config");
-        Arc::new(cfg)
-    }
-
-    async fn get_device_body(cfg: Arc<AuthConfig>, uri: &str) -> (StatusCode, HeaderMap, String) {
-        let app = test::init_service(
-            web::App::new()
-                .state(cfg)
-                .service(web::resource("/device").route(web::get().to(get))),
-        )
-        .await;
-        let resp = test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
-        let status = resp.status();
-        let headers = resp.headers().clone();
-        let body = String::from_utf8(test::read_body(resp).await.to_vec())
-            .expect("device response body is utf8");
-        (status, headers, body)
-    }
 
     #[test]
     fn device_user_code_is_bounded() {
@@ -443,33 +486,25 @@ mod tests {
         assert!(!valid_user_code(&"A".repeat(33)));
     }
 
-    #[ntex::test]
-    async fn supabase_device_get_renders_gotrue_approval_page_with_csrf() {
-        let (status, headers, body) =
-            get_device_body(supabase_cfg(), "/device?user_code=BCDF-GHJK").await;
-
-        assert_eq!(status, StatusCode::OK);
-        let set_cookie = headers
-            .get(SET_COOKIE)
-            .and_then(|value| value.to_str().ok())
-            .expect("supabase /device sets csrf cookie");
-        assert!(
-            set_cookie.starts_with("__Host-zsidp_csrf="),
-            "prod csrf cookie must use __Host- prefix: {set_cookie}"
-        );
-        let csrf_token = set_cookie
-            .split(';')
-            .next()
-            .and_then(|kv| kv.strip_prefix("__Host-zsidp_csrf="))
-            .expect("csrf cookie token");
-
+    #[test]
+    fn supabase_device_template_renders_gotrue_approval_page() {
+        let supabase_auth_url = "https://project.supabase.test/auth/v1";
+        let control_approve_url = "https://control.zeroship.test/api/device/approve";
+        let body = SupabaseDevicePage {
+            user_code: "BCDF-GHJK",
+            error: None,
+            csrf: "csrf-token",
+            script_nonce: "script-nonce",
+            supabase_auth_url_json: &json_for_script(supabase_auth_url),
+            supabase_anon_key_json: &json_for_script("anon-test-key"),
+            control_approve_url_json: &json_for_script(control_approve_url),
+        }
+        .render()
+        .expect("render supabase device template");
         assert!(body.contains("Authorize device"), "{body}");
         assert!(body.contains(r#"name="user_code" value="BCDF-GHJK""#), "{body}");
         assert!(body.contains(r#"name="csrf""#), "{body}");
-        assert!(
-            body.contains(&format!(r#"value="{csrf_token}""#)),
-            "hidden csrf field must echo the csrf cookie token: {body}"
-        );
+        assert!(body.contains(r#"value="csrf-token""#), "{body}");
         assert!(body.contains("https://project.supabase.test/auth/v1"), "{body}");
         assert!(
             body.contains("https://control.zeroship.test/api/device/approve"),
@@ -481,11 +516,8 @@ mod tests {
             "Supabase render must not reference native device verification: {body}"
         );
 
-        let csp = headers
-            .get("content-security-policy")
-            .and_then(|value| value.to_str().ok())
-            .expect("supabase /device sets nonce CSP");
-        assert!(csp.contains("script-src 'self' 'nonce-"), "{csp}");
+        let csp = supabase_device_csp("script-nonce", supabase_auth_url, control_approve_url);
+        assert!(csp.contains("script-src 'self' 'nonce-script-nonce'"), "{csp}");
         assert!(
             csp.contains(
                 "connect-src 'self' https://project.supabase.test https://control.zeroship.test"
@@ -494,12 +526,20 @@ mod tests {
         );
     }
 
-    #[ntex::test]
-    async fn native_device_get_keeps_existing_page_shape() {
-        let (status, _headers, body) =
-            get_device_body(native_cfg(), "/device?user_code=BCDF-GHJK").await;
-
-        assert_eq!(status, StatusCode::OK);
+    #[test]
+    fn native_device_entry_template_keeps_code_form_shape() {
+        let scopes = Vec::new();
+        let body = DevicePage {
+            user_code: "",
+            error: None,
+            csrf: "csrf-token",
+            confirm: false,
+            client_id: "",
+            client_name: "",
+            scopes: &scopes,
+        }
+        .render()
+        .expect("render native device entry template");
         assert!(
             body.contains("Enter the code shown on your device"),
             "{body}"
@@ -512,5 +552,30 @@ mod tests {
         assert!(!body.contains("supabaseAuthUrl"), "{body}");
         assert!(!body.contains("/api/device/approve"), "{body}");
         assert!(!body.contains(r#"name="email""#), "{body}");
+    }
+
+    #[test]
+    fn native_device_confirmation_template_shows_client_and_scopes() {
+        let scopes = vec![DeviceScopeView {
+            scope: "apps:read".to_string(),
+            label: "Read app metadata".to_string(),
+        }];
+        let body = DevicePage {
+            user_code: "BCDF-GHJK",
+            error: None,
+            csrf: "csrf-token",
+            confirm: true,
+            client_id: "oac_test",
+            client_name: "Test Device App",
+            scopes: &scopes,
+        }
+        .render()
+        .expect("render native device confirmation template");
+        assert!(body.contains("Authorize Test Device App"), "{body}");
+        assert!(body.contains("oac_test"), "{body}");
+        assert!(body.contains("Read app metadata"), "{body}");
+        assert!(body.contains("apps:read"), "{body}");
+        assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");
+        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK""#), "{body}");
     }
 }
