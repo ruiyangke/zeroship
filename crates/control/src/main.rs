@@ -7,11 +7,11 @@ use std::sync::Arc;
 use clap::Parser;
 use ntex::web;
 use zeroship_core::auth_provider::{
-    AuthProvider, DualIssuerProvider, HydraProvider, LegacyAuthProvider, PlatformConfig,
-    PlatformProvider, SupabaseConfig, SupabaseProvider,
+    AuthProvider, DualIssuerProvider, LegacyAuthProvider, PlatformConfig, PlatformProvider,
+    SupabaseConfig, SupabaseProvider,
 };
 use zeroship_core::config::{
-    bootstrap_or_exit, env_is_truthy, is_loopback_url, parse_bool_flag, resolve_overlay_string,
+    bootstrap_or_exit, env_is_truthy, parse_bool_flag, resolve_overlay_string,
     validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
 };
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
@@ -24,8 +24,7 @@ use zeroship_control::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const DEV_HYDRA_PUBLIC_URL: &str = "http://localhost:4444";
-const DEV_HYDRA_ADMIN_URL: &str = "http://localhost:4445";
+const DEV_AUTH_PLATFORM_ISSUER: &str = "http://localhost:4444/oauth2";
 
 /// zeroship control-plane startup configuration.
 #[derive(Parser)]
@@ -321,12 +320,8 @@ struct ControlCli {
     #[command(flatten)]
     obs: zeroship_core::observability::ObservabilityFlags,
 
-    /// Hydra admin API base URL.
-    #[arg(long = "hydra-admin-url", env = "HYDRA_ADMIN_URL")]
-    hydra_admin_url: Option<String>,
-
     /// Platform auth provider backend.
-    #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", default_value = "hydra")]
+    #[arg(long = "auth-provider", env = "ZEROSHIP_AUTH_PROVIDER", default_value = "platform")]
     auth_provider: String,
 
     /// Supabase Auth / GoTrue base URL used when `--auth-provider=supabase`.
@@ -389,22 +384,6 @@ struct ControlCli {
         default_value = ""
     )]
     auth_platform_jwks_url: String,
-
-    /// Allow a non-loopback Hydra **admin** API URL. The admin API is
-    /// privileged; outside `--dev-insecure` a remote admin URL is refused
-    /// unless this is set.
-    #[arg(
-        long = "allow-remote-hydra-admin",
-        env = "ALLOW_REMOTE_HYDRA_ADMIN",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = parse_bool_flag
-    )]
-    allow_remote_hydra_admin: Option<bool>,
-
-    /// Hydra public issuer/base URL used by the console OIDC RP.
-    #[arg(long = "hydra-public-url", env = "HYDRA_PUBLIC_URL")]
-    hydra_public_url: Option<String>,
 
     /// HMAC key for short-lived OIDC stash cookies.
     #[arg(
@@ -504,7 +483,6 @@ impl std::fmt::Debug for ControlCli {
             .field("check_config", &self.check_config)
             .field("check_config_format", &self.check_config_format)
             .field("obs", &self.obs)
-            .field("hydra_admin_url", &self.hydra_admin_url)
             .field("auth_provider", &self.auth_provider)
             .field("supabase_url", &self.supabase_url)
             .field("supabase_anon_key", &"<redacted>")
@@ -514,8 +492,6 @@ impl std::fmt::Debug for ControlCli {
             .field("supabase_jwt_issuer", &self.supabase_jwt_issuer)
             .field("auth_platform_issuer", &self.auth_platform_issuer)
             .field("auth_platform_jwks_url", &self.auth_platform_jwks_url)
-            .field("allow_remote_hydra_admin", &self.allow_remote_hydra_admin)
-            .field("hydra_public_url", &self.hydra_public_url)
             .field("stash_signing_key", &"<redacted>")
             .field("pairwise_salt", &"<redacted>")
             .field("pairwise_salt_file", &self.pairwise_salt_file)
@@ -570,16 +546,16 @@ fn build_billing_mailer(cli: &ControlCli) -> Result<Arc<dyn zeroship_mailer::Mai
 
 fn build_control_auth_provider(
     auth_provider: &str,
-    hydra_admin_url: &str,
-    hydra_issuer: &str,
     supabase: ControlSupabaseAuthConfig,
     platform: ControlPlatformAuthConfig,
 ) -> Result<Arc<AuthProvider>, String> {
-    let legacy = match control_auth_provider_kind(auth_provider)? {
-        "hydra" => LegacyAuthProvider::Hydra(HydraProvider::new_with_issuer(
-            zeroship_core::hydra::HydraIntrospector::new(hydra_admin_url),
-            hydra_issuer,
-        )),
+    match control_auth_provider_kind(auth_provider)? {
+        "platform" => {
+            let platform_config = platform_config_required(platform)?;
+            Ok(Arc::new(AuthProvider::Platform(PlatformProvider::new(
+                platform_config,
+            ))))
+        }
         "supabase" => {
             if supabase.anon_key.trim().is_empty() {
                 return Err("SUPABASE_ANON_KEY is required for ZEROSHIP_AUTH_PROVIDER=supabase"
@@ -594,27 +570,26 @@ fn build_control_auth_provider(
                 supabase.jwt_issuer,
             )
             .map_err(|err| format!("supabase auth provider config: {err}"))?;
-            LegacyAuthProvider::Supabase(SupabaseProvider::new(config))
+            let legacy = LegacyAuthProvider::Supabase(SupabaseProvider::new(config));
+            let Some(platform_config) = platform_config(platform)? else {
+                return Ok(Arc::new(AuthProvider::from(legacy)));
+            };
+            Ok(Arc::new(AuthProvider::DualIssuer(DualIssuerProvider::new(
+                PlatformProvider::new(platform_config),
+                legacy,
+            ))))
         }
-        other => return Err(format!("unsupported auth provider kind: {other}")),
-    };
-
-    let Some(platform_config) = platform_config(platform)? else {
-        return Ok(Arc::new(AuthProvider::from(legacy)));
-    };
-    Ok(Arc::new(AuthProvider::DualIssuer(DualIssuerProvider::new(
-        PlatformProvider::new(platform_config),
-        legacy,
-    ))))
+        other => Err(format!("unsupported auth provider kind: {other}")),
+    }
 }
 
 fn control_auth_provider_kind(auth_provider: &str) -> Result<&'static str, String> {
     let normalized = auth_provider.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "" | "hydra" => Ok("hydra"),
+        "" | "platform" => Ok("platform"),
         "supabase" => Ok("supabase"),
         other => Err(format!(
-            "unknown ZEROSHIP_AUTH_PROVIDER value {other:?}; expected hydra|supabase"
+            "unknown ZEROSHIP_AUTH_PROVIDER value {other:?}; expected platform|supabase"
         )),
     }
 }
@@ -653,6 +628,14 @@ fn platform_config(
     )
     .map(Some)
     .map_err(|err| format!("platform auth provider config: {err}"))
+}
+
+fn platform_config_required(
+    platform: ControlPlatformAuthConfig<'_>,
+) -> Result<PlatformConfig, String> {
+    platform_config(platform)?.ok_or_else(|| {
+        "AUTH_PLATFORM_ISSUER is required for ZEROSHIP_AUTH_PROVIDER=platform".to_string()
+    })
 }
 
 fn empty_string_as_none(value: &str) -> Option<String> {
@@ -721,19 +704,8 @@ fn main() -> std::io::Result<()> {
     // `ZEROSHIP_DEV_INSECURE=1`.
     let insecure_dev = cli.dev_insecure.unwrap_or(false);
     let trust_proxy = cli.trust_proxy.unwrap_or(false);
-    let allow_remote_hydra_admin = cli.allow_remote_hydra_admin.unwrap_or(false);
     let bootstrap_console = cli.bootstrap_console();
 
-    let hydra_admin_url = resolve_overlay_string(
-        cli.hydra_admin_url,
-        file.auth.hydra_admin_url.clone(),
-        insecure_dev.then_some(DEV_HYDRA_ADMIN_URL),
-    );
-    let hydra_public_url = resolve_overlay_string(
-        cli.hydra_public_url,
-        file.auth.hydra_public_url.clone(),
-        insecure_dev.then_some(DEV_HYDRA_PUBLIC_URL),
-    );
     let auth_provider_name = cli.auth_provider.clone();
     let auth_provider_kind = match control_auth_provider_kind(&auth_provider_name) {
         Ok(kind) => kind,
@@ -756,7 +728,7 @@ fn main() -> std::io::Result<()> {
             Some(cli.auth_platform_issuer.clone())
         },
         file.auth.platform_issuer.clone(),
-        None,
+        insecure_dev.then_some(DEV_AUTH_PLATFORM_ISSUER),
     );
     let auth_platform_jwks_url = resolve_overlay_string(
         if cli.auth_platform_jwks_url.is_empty() {
@@ -772,28 +744,6 @@ fn main() -> std::io::Result<()> {
         trusted_oauth_clients = trusted_oauth_clients.len(),
         "control: trusted OAuth client set resolved"
     );
-
-    // S8: control consumes the privileged Hydra ADMIN API. A non-loopback admin
-    // URL is refused unless explicitly opted in via --allow-remote-hydra-admin —
-    // literal loopback only (no DNS), closing the rebind/TOCTOU window. Dev mode
-    // does NOT bypass this (matching auth): allowing a privileged remote admin
-    // endpoint is its own deliberate opt-in, separate from --dev-insecure.
-    if auth_provider_kind == "hydra"
-        && !hydra_admin_url.is_empty()
-        && !allow_remote_hydra_admin
-        && !is_loopback_url(&hydra_admin_url)
-    {
-        eprintln!(
-            "control: refusing to start; HYDRA_ADMIN_URL ({hydra_admin_url}) is not a loopback \
-             address. The Hydra admin API is privileged — pass --allow-remote-hydra-admin \
-             (or ALLOW_REMOTE_HYDRA_ADMIN=1) to use a remote admin endpoint."
-        );
-        tracing::error!(
-            hydra_admin_url = %hydra_admin_url,
-            "control: refusing to start with non-loopback Hydra admin URL"
-        );
-        std::process::exit(1);
-    }
 
     let port = cli.port;
     let bind_host = cli.bind;
@@ -1107,46 +1057,22 @@ fn main() -> std::io::Result<()> {
 
     // Control plane resource-server prerequisites. The console is now a
     // gateway-fronted regular app authenticated via `@zeroship/auth` (BFF) —
-    // control has NO OIDC RP of its own anymore. It still needs: the stash
-    // signing key (shared OIDC stash MAC) and the hydra public/admin URLs
-    // (OAuth bearer introspection + issuer). The `AuthzGuard` bearer path +
+    // control has NO OIDC RP of its own anymore. The `AuthzGuard` bearer path +
     // audit run on the SINGLE `--db` connection (there is no separate auth DB
-    // any more). Refuses to boot unless these are configured (`--dev-insecure`
-    // permits localhost defaults only).
-    if !insecure_dev && auth_provider_kind == "hydra" {
+    // any more). Platform mode requires the native OP issuer (`--dev-insecure`
+    // permits the localhost default).
+    if !insecure_dev && auth_provider_kind == "platform" {
         let mut missing = Vec::new();
-        if hydra_public_url.is_empty() {
-            missing.push("--hydra-public-url / HYDRA_PUBLIC_URL");
-        }
-        if stash_signing_key.is_empty() {
-            missing.push("--stash-signing-key / STASH_SIGNING_KEY");
-        }
-        if hydra_admin_url.is_empty() {
-            missing.push("--hydra-admin-url / HYDRA_ADMIN_URL");
+        if auth_platform_issuer.is_empty() {
+            missing.push("--auth-platform-issuer / AUTH_PLATFORM_ISSUER");
         }
         if !missing.is_empty() {
             tracing::error!(
                 missing = %missing.join(", "),
-                "control: refusing to start; the resource-server auth path and OAuth introspection require these flags. \
+                "control: refusing to start; the resource-server auth path requires these flags. \
                  Pass --dev-insecure to run with localhost defaults."
             );
             std::process::exit(1);
-        }
-
-        // D5: control adopts the shared stash-key strength check (gateway
-        // already had it). Empty is reported by the missing-secrets block
-        // above; this additionally rejects a present-but-weak key (<32
-        // bytes), which also catches the dev sentinel (27 bytes) in prod.
-        // Skipped for a secret REFERENCE under --check-config (the local is
-        // then the raw ref string, which would wrongly fail the length check);
-        // it runs on the resolved value at real boot.
-        if !cli.check_config || !zeroship_core::config::is_secret_ref(&stash_signing_key) {
-            if let Err(message) =
-                zeroship_core::config::validate_stash_key(&stash_signing_key, insecure_dev)
-            {
-                tracing::error!(error = %message, "control: refusing to start with weak STASH_SIGNING_KEY");
-                std::process::exit(1);
-            }
         }
     }
 
@@ -1168,7 +1094,6 @@ fn main() -> std::io::Result<()> {
             "config_source",
             CheckValue::Plain(boot.overlay.source.to_string()),
         );
-        report.field("hydra_admin_url", CheckValue::Plain(hydra_admin_url.clone()));
         report.field(
             "auth_provider",
             CheckValue::Plain(auth_provider_kind.to_string()),
@@ -1210,10 +1135,6 @@ fn main() -> std::io::Result<()> {
         report.field(
             "auth_platform_jwks_url",
             CheckValue::Plain(platform_jwks_report),
-        );
-        report.field(
-            "hydra_public_url",
-            CheckValue::Plain(hydra_public_url.clone()),
         );
         report.field(
             "trusted_oauth_clients_count",
@@ -1366,8 +1287,6 @@ fn main() -> std::io::Result<()> {
     // `AuthzGuard` after local PAT verification fails.
     let auth_provider = match build_control_auth_provider(
         &auth_provider_name,
-        &hydra_admin_url,
-        &hydra_public_url,
         ControlSupabaseAuthConfig {
             url: &supabase_url,
             anon_key: &supabase_anon_key,
@@ -1442,7 +1361,6 @@ fn main() -> std::io::Result<()> {
             console_host: console_host.clone(),
             console_zship,
             scheme: console_scheme.to_string(),
-            hydra_admin_url: hydra_admin_url.clone(),
         };
         // The seed's per-app OAuth client upsert (`ensure_app_client`) needs an
         // owned, MUTABLE control-schema connection (it runs a transaction). Open
@@ -1593,7 +1511,6 @@ fn main() -> std::io::Result<()> {
         trust_proxy,
         deploy_tmp_dir,
         control_pg,
-        hydra_admin_url,
         app_base_domain,
         trusted_oauth_clients,
         expected_oauth_audience,
@@ -1616,8 +1533,8 @@ fn main() -> std::io::Result<()> {
     //     `zeroship.app_audit` + `zeroship.authz_decisions` tables (peer of the
     //     auth `audit_events` sweep; shares the `zeroship.audit_retention` GUC).
     //   - orphaned_app_reaper: purges apps left owner-less by the ISS-12
-    //     account-erase reaper (DB row + blobs + Hydra client), excluding the
-    //     `system = true` platform console.
+    //     account-erase reaper (DB row + blobs), excluding the `system = true`
+    //     platform console.
     // Both hold an `Arc<AppState>` clone (cheap) and open fresh per-tick
     // connections.
     zeroship_control::cron::spawn_all(
@@ -1886,23 +1803,22 @@ mod tests {
     }
 
     #[test]
-    fn auth_provider_selector_defaults_to_hydra_and_accepts_supabase() {
+    fn auth_provider_selector_defaults_to_platform_and_accepts_supabase() {
         let cli = ControlCli::try_parse_from(["zeroship-control"]).expect("parse defaults");
-        assert_eq!(cli.auth_provider, "hydra");
-        assert_eq!(control_auth_provider_kind(&cli.auth_provider), Ok("hydra"));
-        assert_eq!(control_auth_provider_kind(""), Ok("hydra"));
+        assert_eq!(cli.auth_provider, "platform");
+        assert_eq!(control_auth_provider_kind(&cli.auth_provider), Ok("platform"));
+        assert_eq!(control_auth_provider_kind(""), Ok("platform"));
+        assert_eq!(control_auth_provider_kind("platform"), Ok("platform"));
         assert_eq!(control_auth_provider_kind("supabase"), Ok("supabase"));
 
         let err = control_auth_provider_kind("bogus").unwrap_err();
-        assert!(err.contains("hydra|supabase"), "unexpected error: {err}");
+        assert!(err.contains("platform|supabase"), "unexpected error: {err}");
     }
 
     #[test]
     fn supabase_auth_provider_requires_anon_key_and_pinned_mode() {
         let err = build_control_auth_provider(
             "supabase",
-            "",
-            "https://hydra.zeroship.test",
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "",
@@ -1921,8 +1837,6 @@ mod tests {
 
         let err = build_control_auth_provider(
             "supabase",
-            "",
-            "https://hydra.zeroship.test",
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1944,8 +1858,6 @@ mod tests {
 
         let provider = build_control_auth_provider(
             "supabase",
-            "",
-            "https://hydra.zeroship.test",
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1964,8 +1876,6 @@ mod tests {
 
         let provider = build_control_auth_provider(
             "supabase",
-            "",
-            "https://hydra.zeroship.test",
             ControlSupabaseAuthConfig {
                 url: "https://project.supabase.co",
                 anon_key: "anon",
@@ -1985,6 +1895,45 @@ mod tests {
             "https://project.supabase.co/auth/v1",
             "dual issuer reports the legacy issuer for Supabase device-flow helpers"
         );
+    }
+
+    #[test]
+    fn platform_auth_provider_requires_issuer_and_uses_default_jwks_url() {
+        let err = build_control_auth_provider(
+            "platform",
+            ControlSupabaseAuthConfig {
+                url: "",
+                anon_key: "",
+                service_role_key: "",
+                jwt_secret: "",
+                jwks_url: "",
+                jwt_issuer: "",
+            },
+            ControlPlatformAuthConfig {
+                issuer: "",
+                jwks_url: "",
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("AUTH_PLATFORM_ISSUER"), "unexpected error: {err}");
+
+        let provider = build_control_auth_provider(
+            "platform",
+            ControlSupabaseAuthConfig {
+                url: "",
+                anon_key: "",
+                service_role_key: "",
+                jwt_secret: "",
+                jwks_url: "",
+                jwt_issuer: "",
+            },
+            ControlPlatformAuthConfig {
+                issuer: "https://auth.zeroship.test/oauth2",
+                jwks_url: "",
+            },
+        )
+        .expect("valid platform provider");
+        assert_eq!(provider.issuer(), "https://auth.zeroship.test/oauth2");
     }
 
     #[test]
@@ -2054,24 +2003,6 @@ mod tests {
         assert!(require_unless_dev("WORKER_KEY / --worker-key", "", true).is_ok());
         // Present: allowed even outside dev.
         assert!(require_unless_dev("WORKER_KEY / --worker-key", "k", false).is_ok());
-    }
-
-    // S8: a non-loopback Hydra admin URL is rejected outside dev unless
-    // --allow-remote-hydra-admin is set. This mirrors the guard in `main`.
-    fn hydra_admin_guard_rejects(hydra_admin_url: &str, allow_remote: bool) -> bool {
-        !hydra_admin_url.is_empty() && !allow_remote && !is_loopback_url(hydra_admin_url)
-    }
-
-    #[test]
-    fn non_loopback_hydra_admin_rejected_without_opt_in() {
-        // Remote admin URL, no opt-in -> rejected. Dev mode does NOT bypass this:
-        // allowing a privileged remote admin endpoint is its own explicit opt-in.
-        assert!(hydra_admin_guard_rejects("http://hydra:4445", false));
-        // Loopback admin URL -> allowed.
-        assert!(!hydra_admin_guard_rejects("http://127.0.0.1:4445", false));
-        assert!(!hydra_admin_guard_rejects("http://localhost:4445", false));
-        // Remote admin URL with explicit --allow-remote-hydra-admin -> allowed.
-        assert!(!hydra_admin_guard_rejects("http://hydra:4445", true));
     }
 
     // M4: resolve_trusted_oauth_clients distinguishes absent / present.

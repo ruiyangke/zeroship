@@ -3,14 +3,12 @@
 #![allow(clippy::future_not_send)]
 
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use compio_postgres::{connect, NoTls};
 use ntex::http::StatusCode;
-use ntex::web::{self, test, HttpRequest, HttpResponse};
+use ntex::web::{self, test};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{policy_hash, Action, Effect, Policy, Resource, Statement};
@@ -41,7 +39,6 @@ fn tmpdir(label: &str) -> PathBuf {
 
 struct Fixture {
     state: Arc<AppState>,
-    hydra: MockHydra,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
 }
@@ -51,7 +48,6 @@ impl Fixture {
     /// `control_pg`, and every handler share that one database — there is no
     /// separate auth DB any more (the former `--auth-db` was config-only).
     async fn new(db_url: &str, label: &str) -> Self {
-        let hydra = MockHydra::start();
         let (control_pg_client, control_pg_conn) =
             connect(db_url, NoTls).await.expect("control-pg connect");
         compio::runtime::spawn(async move {
@@ -87,14 +83,13 @@ impl Fixture {
             trust_proxy: false,
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg: Arc::new(control_pg_client),
-            hydra_admin_url: hydra.base.clone(),
             app_base_domain: "zeroship.localhost".to_string(),
             trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
             expected_oauth_audience: "control.zeroship.ai".to_string(),
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
-            auth_provider: zeroship_control::hydra_auth_provider("http://127.0.0.1:9"),
+            auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string())),
             logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
             // A real, non-zero pairwise salt so the disconnect-app cascade
             // writes a `token_revocations` marker under a `pws_` the test can
@@ -116,7 +111,6 @@ impl Fixture {
 
         Self {
             state,
-            hydra,
             blob_root,
             deploy_tmp_dir,
         }
@@ -151,100 +145,6 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.blob_root);
         let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
     }
-}
-
-#[derive(Clone, Debug)]
-struct RecordedHydraRequest {
-    method: String,
-    path: String,
-}
-
-#[derive(Default)]
-struct MockHydraState {
-    requests: Vec<RecordedHydraRequest>,
-}
-
-struct MockHydra {
-    base: String,
-    state: Arc<Mutex<MockHydraState>>,
-    shutdown: Option<mpsc::Sender<()>>,
-    thread: Option<thread::JoinHandle<()>>,
-}
-
-impl MockHydra {
-    fn start() -> Self {
-        let state = Arc::new(Mutex::new(MockHydraState::default()));
-        let factory_state = state.clone();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::channel();
-        let thread = thread::spawn(move || {
-            ntex::rt::System::build()
-                .name("mock-hydra-oauth-grants")
-                .testing()
-                .build(ntex::rt::DefaultRuntime)
-                .block_on(async move {
-                    let server = web::test::server(move || {
-                        let state = factory_state.clone();
-                        async move {
-                            web::App::new().state(state).service(
-                                web::resource("/admin/oauth2/auth/sessions/consent")
-                                    .route(web::delete().to(mock_revoke_consent)),
-                            )
-                        }
-                    })
-                    .await;
-                    let addr = server.addr();
-                    started_tx.send(addr).expect("send mock hydra addr");
-                    let _ = shutdown_rx.recv();
-                    drop(server);
-                });
-        });
-        let addr = started_rx.recv().expect("mock hydra starts");
-        Self {
-            base: format!("http://{addr}"),
-            state,
-            shutdown: Some(shutdown_tx),
-            thread: Some(thread),
-        }
-    }
-
-    fn requests(&self) -> Vec<RecordedHydraRequest> {
-        self.state.lock().expect("mock hydra state").requests.clone()
-    }
-}
-
-impl Drop for MockHydra {
-    fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-async fn mock_revoke_consent(
-    req: HttpRequest,
-    state: web::types::State<Arc<Mutex<MockHydraState>>>,
-) -> HttpResponse {
-    let path = if req.query_string().is_empty() {
-        "/admin/oauth2/auth/sessions/consent".to_string()
-    } else {
-        format!(
-            "/admin/oauth2/auth/sessions/consent?{}",
-            req.query_string()
-        )
-    };
-    state
-        .lock()
-        .expect("mock hydra state")
-        .requests
-        .push(RecordedHydraRequest {
-            method: "DELETE".to_string(),
-            path,
-        });
-    HttpResponse::NoContent().finish()
 }
 
 struct AccountPat {
@@ -633,15 +533,15 @@ async fn revoke_removes_grant_row() {
 }
 
 #[compio::test]
-async fn revoke_revokes_hydra_tokens_for_user_client_pair() {
+async fn revoke_removes_native_grant_for_user_client_pair() {
     let Some(db_url) = db_url() else {
         eprintln!("[oauth_grants_handlers_test] AUTH_DB_URL not set - skipping");
         return;
     };
-    let fx = Fixture::new(&db_url, "revoke-hydra").await;
-    let pat = account_pat(&fx.state, "revoke-hydra").await;
+    let fx = Fixture::new(&db_url, "revoke-native").await;
+    let pat = account_pat(&fx.state, "revoke-native").await;
     let app = init_control!(fx);
-    let client_id = format!("oauth-grant-hydra-{}", Uuid::new_v4().simple());
+    let client_id = format!("oauth-grant-native-{}", Uuid::new_v4().simple());
     insert_client(&fx.state, &client_id, pat.user_id).await;
     insert_grant(&fx.state, pat.user_id, &client_id, &["apps:read"]).await;
 
@@ -652,16 +552,11 @@ async fn revoke_revokes_hydra_tokens_for_user_client_pair() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    let requests = fx.hydra.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].method, "DELETE");
-    assert!(
-        requests[0]
-            .path
-            .starts_with("/admin/oauth2/auth/sessions/consent?")
+    assert_eq!(count_grant(&fx.state, pat.user_id, &client_id).await, 0);
+    assert_eq!(
+        audit_event_count(&fx.state, pat.user_id, "oauth_grant_revoke", &client_id).await,
+        1
     );
-    assert!(requests[0].path.contains(&format!("subject={}", pat.user_id)));
-    assert!(requests[0].path.contains(&format!("client={client_id}")));
 
     fx.cleanup_clients(&[client_id]).await;
     pat.cleanup(&fx.state).await;
@@ -685,7 +580,6 @@ async fn revoke_returns_404_when_no_grant() {
     let resp = test::call_service(&app, req).await;
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert!(fx.hydra.requests().is_empty());
 
     pat.cleanup(&fx.state).await;
 }
@@ -712,7 +606,6 @@ async fn revoke_does_not_affect_other_users() {
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert_eq!(count_grant(&fx.state, owner.user_id, &client_id).await, 1);
-    assert!(fx.hydra.requests().is_empty());
 
     fx.cleanup_clients(&[client_id]).await;
     revoker.cleanup(&fx.state).await;

@@ -1,30 +1,16 @@
-//! Live-infra integration test for the per-app OAuth client lifecycle
-//! (auth-sdk Slice 1d). FAITHFUL path: it provisions a real per-app public
-//! PKCE client against a live Hydra admin API, asserts the client shape via
-//! that same API, asserts the control-plane DB rows, and asserts
-//! `Registry::get_routes` LEFT-JOINs `control.app_oauth_clients` to surface
-//! `RouteEntry.oauth_client_id` / `sector_identifier`.
-//!
-//! REQUIRES the docker-compose stack (Hydra admin + a migrated Postgres):
-//!   - `CONTROL_TEST_DB` or `PG_TEST_URL` — DSN of a Postgres migrated by
-//!     `zeroship-migrate migrate --dir db/migrations --profile platform`
-//!     (incl. V0005__control_app_oauth_clients).
-//!   - `HYDRA_ADMIN_URL` — Hydra admin API base (e.g. http://127.0.0.1:4445).
-//! Skips (prints why, returns) when either is absent. The pure
-//! reconciliation/derivation logic is covered by the crate's `app_oauth_client`
-//! unit tests, which run without any infra.
+//! Live-Postgres integration tests for the per-app native OAuth client
+//! lifecycle. These tests exercise the authoritative `zeroship.oauth_clients`
+//! + `zeroship.app_oauth_clients` store, scope registry, route exposure, and
+//! delete cascade without any remote OAuth-admin dependency.
 
 use std::sync::Arc;
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
-use zeroship_auth::hydra_client::HydraAdmin;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore, ScopeDef};
-use zeroship_control::app_oauth_client::{
-    self, client_id_for_app, redirect_uris_for_hosts,
-};
+use zeroship_control::app_oauth_client::{self, client_id_for_app, redirect_uris_for_hosts};
 use zeroship_control::{
-    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+    api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
 fn db_url() -> Option<String> {
@@ -42,37 +28,66 @@ async fn pg(db_url: &str) -> Client {
     client
 }
 
-/// Full faithful lifecycle: create app → ensure_app_client → assert Hydra +
-/// DB + get_routes → reconcile (add host) → delete.
-#[compio::test]
-async fn provision_asserts_hydra_db_and_routes() {
-    let (Some(url), Ok(hydra_url)) = (db_url(), std::env::var("HYDRA_ADMIN_URL")) else {
-        eprintln!(
-            "[app_oauth_client_test] CONTROL_TEST_DB/PG_TEST_URL or HYDRA_ADMIN_URL not set - skipping"
-        );
-        return;
-    };
-
-    let registry = Registry::new(&url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
-    let raw = pg(&url).await;
-    let mut conn = pg(&url).await; // owned, mutable — for the transactional upsert
-    let hydra = HydraAdmin::new(hydra_url.clone());
-
-    // create_app binds an owner membership (FK → zeroship.users); seed one.
+async fn seed_owner(pg: &Client, label: &str) -> Uuid {
     let owner_id = Uuid::new_v4();
-    raw.execute(
+    pg.execute(
         "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
         &[
             &owner_id,
-            &format!("oac-owner-{owner_id}@zeroship.test"),
-            &"oac-owner",
+            &format!("{label}-{owner_id}@zeroship.test"),
+            &label,
         ],
     )
     .await
     .expect("seed owner user");
+    owner_id
+}
 
-    // 1. Create a uniquely-named app so reruns don't collide.
+async fn count_oauth_client(pg: &Client, client_id: &str) -> i64 {
+    pg.query(
+        "SELECT COUNT(*)::BIGINT AS n FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&client_id],
+    )
+    .await
+    .expect("count oauth client")[0]
+        .get("n")
+}
+
+async fn redirect_uris(pg: &Client, client_id: &str) -> Vec<String> {
+    pg.query(
+        "SELECT redirect_uris FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&client_id],
+    )
+    .await
+    .expect("select redirect_uris")[0]
+        .get("redirect_uris")
+}
+
+async fn scopes(pg: &Client, client_id: &str) -> Vec<String> {
+    pg.query(
+        "SELECT scopes FROM zeroship.oauth_clients WHERE client_id = $1",
+        &[&client_id],
+    )
+    .await
+    .expect("select scopes")[0]
+        .get("scopes")
+}
+
+#[compio::test]
+async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
+    let Some(url) = db_url() else {
+        eprintln!("[app_oauth_client_test] CONTROL_TEST_DB/PG_TEST_URL not set - skipping");
+        return;
+    };
+
+    let registry = Registry::new(&url).await.expect("registry");
+    zeroship_control::bootstrap_console::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
+    let raw = pg(&url).await;
+    let mut conn = pg(&url).await;
+
+    let owner_id = seed_owner(&raw, "oac-owner").await;
     let app_name = format!("zs-1d-{}", Uuid::new_v4().simple());
     let app = registry
         .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
@@ -82,75 +97,62 @@ async fn provision_asserts_hydra_db_and_routes() {
     let expected_client_id = client_id_for_app(&app_id);
     let scheme = "http";
     let apex = format!("{app_name}.zeroship.localhost");
-
-    // Best-effort cleanup of any Hydra residue from a prior aborted run.
-    let _ = hydra.delete_client(&expected_client_id).await;
-
-    // 2. Provision WITH a declared scope (Slice 3) so we can assert the O8
-    //    mirror: the Hydra allowlist + control.app_scope_defs both gain it.
     let declared = vec![ScopeDef {
         id: "read:billing".to_string(),
         label: "View billing".to_string(),
         description: Some("See invoices and plan.".to_string()),
     }];
+
     let client_id = app_oauth_client::ensure_app_client(
         &mut conn,
-        &hydra,
         &app_id,
         &app_name,
         scheme,
         &[apex.clone()],
         &declared,
-        false, // creator app — never first-party
+        false,
     )
     .await
     .expect("ensure_app_client");
     assert_eq!(client_id, expected_client_id);
 
-    // 3. Assert the Hydra client shape via the admin API (FAITHFUL).
-    let hydra_client = hydra
-        .get_client(&client_id)
-        .await
-        .expect("get_client")
-        .expect("client exists in hydra");
-    assert_eq!(hydra_client.token_endpoint_auth_method, "none", "public PKCE");
-    assert_eq!(hydra_client.subject_type, "public");
-    assert!(hydra_client.grant_types.iter().any(|g| g == "authorization_code"));
-    assert!(hydra_client.grant_types.iter().any(|g| g == "refresh_token"));
-    assert!(hydra_client.response_types.iter().any(|r| r == "code"));
-    assert!(hydra_client.scope.contains("openid"));
-    assert!(hydra_client.scope.contains("offline_access"));
-    // Slice 3 O8 mirror: the declared scope is appended to the Hydra allowlist.
-    assert!(
-        hydra_client.scope.contains("read:billing"),
-        "declared scope missing from Hydra allowlist: {:?}",
-        hydra_client.scope
-    );
-    assert!(!hydra_client.skip_consent, "per-app clients never skip consent");
-    assert_eq!(
-        hydra_client.backchannel_logout_uri.as_deref(),
-        Some(format!("http://{apex}/oidc/backchannel-logout").as_str()),
-        "per-app BCL identity"
-    );
     let want_uris = redirect_uris_for_hosts(scheme, &[apex.clone()]).unwrap();
-    for uri in &want_uris {
-        assert!(
-            hydra_client.redirect_uris.contains(uri),
-            "hydra redirect_uris missing {uri}"
-        );
-    }
-
-    // 4. Assert the control-plane DB rows.
     let oc = raw
         .query(
-            "SELECT skip_consent, hydra_client_id FROM zeroship.oauth_clients WHERE client_id = $1",
+            "SELECT skip_consent, token_endpoint_auth_method, brokered, \
+                    client_secret_hash, backchannel_logout_uri, redirect_uris, scopes, \
+                    refresh_allowed \
+             FROM zeroship.oauth_clients WHERE client_id = $1",
             &[&client_id],
         )
         .await
         .expect("query oauth_clients");
     assert_eq!(oc.len(), 1, "oauth_clients row written");
     assert!(!oc[0].get::<_, bool>("skip_consent"));
-    assert_eq!(oc[0].get::<_, String>("hydra_client_id"), client_id);
+    assert_eq!(
+        oc[0].get::<_, String>("token_endpoint_auth_method"),
+        "client_secret_basic"
+    );
+    assert!(oc[0].get::<_, bool>("brokered"));
+    assert!(oc[0].get::<_, bool>("refresh_allowed"));
+    assert!(
+        oc[0]
+            .get::<_, Option<String>>("client_secret_hash")
+            .is_some_and(|hash| !hash.is_empty()),
+        "control generated and stored a broker client_secret_hash"
+    );
+    assert_eq!(
+        oc[0].get::<_, Option<String>>("backchannel_logout_uri").as_deref(),
+        Some(format!("http://{apex}/oidc/backchannel-logout").as_str())
+    );
+    assert_eq!(oc[0].get::<_, Vec<String>>("redirect_uris"), want_uris);
+    assert!(
+        oc[0]
+            .get::<_, Vec<String>>("scopes")
+            .iter()
+            .any(|scope| scope == "read:billing"),
+        "oauth_clients.scopes mirror includes declared scope"
+    );
 
     let ext = raw
         .query(
@@ -166,7 +168,6 @@ async fn provision_asserts_hydra_db_and_routes() {
         format!("http://{apex}")
     );
 
-    // Slice 3: control.app_scope_defs holds the declared scope (same txn).
     let defs = raw
         .query(
             "SELECT scope_id, label, description FROM zeroship.app_scope_defs WHERE app_id = $1",
@@ -182,22 +183,6 @@ async fn provision_asserts_hydra_db_and_routes() {
         Some("See invoices and plan.")
     );
 
-    // The oauth_clients.scopes mirror equals the Hydra allowlist (baseline +
-    // declared), so the two sources of truth never drift.
-    let mirror = raw
-        .query(
-            "SELECT scopes FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await
-        .expect("query oauth_clients scopes");
-    let mirrored: Vec<String> = mirror[0].get("scopes");
-    assert!(
-        mirrored.iter().any(|s| s == "read:billing"),
-        "oauth_clients.scopes mirror missing declared scope: {mirrored:?}"
-    );
-
-    // 5. get_routes LEFT JOIN surfaces the OAuth fields on the RouteEntry.
     let routes = registry.get_routes().await.expect("get_routes");
     let entry = routes.get(&app_id).expect("route entry for app");
     assert_eq!(entry.oauth_client_id.as_deref(), Some(client_id.as_str()));
@@ -206,28 +191,27 @@ async fn provision_asserts_hydra_db_and_routes() {
         Some(format!("http://{apex}").as_str())
     );
 
-    // 6. Idempotent re-provision, same host + same declared scope → no drift.
     app_oauth_client::ensure_app_client(
-        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &declared, false,
+        &mut conn,
+        &app_id,
+        &app_name,
+        scheme,
+        &[apex.clone()],
+        &declared,
+        false,
     )
     .await
     .expect("re-ensure is idempotent");
-    let after = hydra
-        .get_client(&client_id)
-        .await
-        .expect("get")
-        .expect("present");
-    assert_eq!(
-        after.redirect_uris.len(),
-        want_uris.len(),
-        "no redirect_uri drift on idempotent re-run"
-    );
+    assert_eq!(redirect_uris(&raw, &client_id).await.len(), want_uris.len());
 
-    // 6b. Re-deploy DROPPING the declared scope → app_scope_defs row removed and
-    //     the Hydra allowlist reverts to baseline (registry tracks the manifest
-    //     exactly, delete-then-insert in one txn).
     app_oauth_client::ensure_app_client(
-        &mut conn, &hydra, &app_id, &app_name, scheme, &[apex.clone()], &[], false,
+        &mut conn,
+        &app_id,
+        &app_name,
+        scheme,
+        &[apex.clone()],
+        &[],
+        false,
     )
     .await
     .expect("re-ensure with no scopes");
@@ -239,22 +223,17 @@ async fn provision_asserts_hydra_db_and_routes() {
         .await
         .expect("query app_scope_defs after drop");
     assert!(defs_after.is_empty(), "dropped scope removed from registry");
-    let reverted = hydra
-        .get_client(&client_id)
-        .await
-        .expect("get")
-        .expect("present");
     assert!(
-        !reverted.scope.contains("read:billing"),
-        "Hydra allowlist still carries the dropped scope: {:?}",
-        reverted.scope
+        !scopes(&raw, &client_id)
+            .await
+            .iter()
+            .any(|scope| scope == "read:billing"),
+        "oauth_clients.scopes mirror dropped the removed declared scope"
     );
 
-    // 7. Reconcile: add a custom domain → diff-then-PUT extends redirect_uris.
     let custom = "custom.example.test".to_string();
-    let did_put = app_oauth_client::sync_app_redirect_uris(
+    let changed = app_oauth_client::sync_app_redirect_uris(
         &mut conn,
-        &hydra,
         &app_id,
         &app_name,
         scheme,
@@ -262,22 +241,13 @@ async fn provision_asserts_hydra_db_and_routes() {
     )
     .await
     .expect("sync redirect uris");
-    assert!(did_put, "adding a host must PUT");
-    let extended = hydra
-        .get_client(&client_id)
-        .await
-        .expect("get")
-        .expect("present");
-    assert_eq!(extended.redirect_uris.len(), 4, "2 hosts × 2 paths");
-    assert!(extended
-        .redirect_uris
-        .iter()
-        .any(|u| u.contains(&custom)));
+    assert!(changed, "adding a host must update the native redirect mirror");
+    let extended = redirect_uris(&raw, &client_id).await;
+    assert_eq!(extended.len(), 4, "2 hosts x 2 paths");
+    assert!(extended.iter().any(|uri| uri.contains(&custom)));
 
-    // 8. A no-op sync (same host set) must NOT PUT.
     let noop = app_oauth_client::sync_app_redirect_uris(
         &mut conn,
-        &hydra,
         &app_id,
         &app_name,
         scheme,
@@ -285,29 +255,33 @@ async fn provision_asserts_hydra_db_and_routes() {
     )
     .await
     .expect("noop sync");
-    assert!(!noop, "no-op deploy makes no Hydra PUT");
+    assert!(!noop, "no-op deploy makes no native redirect update");
 
-    // 9. Cleanup: delete the Hydra client + app row (DB rows cascade).
-    app_oauth_client::delete_app_client(&hydra, &app_id)
-        .await
-        .expect("delete hydra client");
-    assert!(
-        hydra.get_client(&client_id).await.expect("get").is_none(),
-        "hydra client deleted"
-    );
+    app_oauth_client::ensure_app_client(
+        &mut conn,
+        &app_id,
+        &app_name,
+        scheme,
+        &[apex.clone()],
+        &[],
+        false,
+    )
+    .await
+    .expect("apex-only re-ensure preserves custom redirect URIs");
+    let preserved = redirect_uris(&raw, &client_id).await;
+    assert_eq!(preserved.len(), 4, "ensure_app_client merges existing URIs");
+    assert!(preserved.iter().any(|uri| uri.contains(&custom)));
+
     registry.delete_app(&app_id).await.expect("delete app");
 }
 
-/// Build a minimal real `AppState` pointed at the live PG + Hydra so the
-/// PRODUCTION entry points (`provision_app_oauth_client` /
-/// `delete_app_oauth_client`) and their apex-host derivation are exercised
-/// end-to-end — not just the lower-level `ensure_app_client`. `insecure_dev =
-/// true` so `app_scheme()` yields `http` (matching the dev compose stack).
-async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str) -> Arc<AppState> {
+async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
     let blob_root = std::env::temp_dir().join(format!("oac-blob-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&blob_root).expect("mkdir blob root");
     let registry = Registry::new(db_url).await.expect("registry");
-    zeroship_control::bootstrap_console::seed_plans(&registry).await.expect("seed built-in plans");
+    zeroship_control::bootstrap_console::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
     let env_store =
         EnvStore::new(registry.clone(), "test-master-key-deadbeefcafebabe", false).expect("env");
     let stripe_store = StripeStore::new(registry.clone());
@@ -333,13 +307,15 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
         trust_proxy: false,
         deploy_tmp_dir: blob_root.clone(),
         control_pg,
-        hydra_admin_url: hydra_admin_url.to_string(),
         app_base_domain: app_base_domain.to_string(),
         trusted_oauth_clients: zeroship_control::default_trusted_oauth_clients(),
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies().expect("authz policies"),
         pat_issuer: Arc::new(zeroship_authn::PatIssuer::dev_insecure()),
-        auth_provider: zeroship_control::hydra_auth_provider("http://127.0.0.1:9"),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some("http://127.0.0.1:9/oauth2/.well-known/jwks.json".to_string()),
+        ),
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         metering_provider: zeroship_control::metering::provider::build_provider(
             &zeroship_control::metering::provider::MeteringProviderConfig::native(),
@@ -349,109 +325,69 @@ async fn build_state(db_url: &str, hydra_admin_url: &str, app_base_domain: &str)
             &zeroship_control::tax::TaxProviderConfig::native(),
         )
         .expect("native tax provider builds"),
-        notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        notifier: Arc::new(zeroship_control::notify::RecordingNotifier::new()),
         pairwise_salt: [0u8; 32],
-        projected_charge_cache: std::sync::Arc::new(
+        projected_charge_cache: Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
         ),
     })
 }
 
-/// Drives the PRODUCTION entry points end-to-end: `provision_app_oauth_client`
-/// (create path) → assert the derived apex host matches the gateway's subdomain
-/// scheme (`{name}.{app_base_domain}`) → `delete_app_oauth_client` removes the
-/// Hydra client. Regression for the two MAJOR findings:
-///   - the delete path now issues the Hydra DELETE (no orphaned client), and
-///   - the apex-host derivation in `provision_app_oauth_client` is the one the
-///     gateway resolves, not just the lower-level `ensure_app_client`.
 #[compio::test]
-async fn appstate_provision_then_delete_end_to_end() {
-    let (Some(url), Ok(hydra_url)) = (db_url(), std::env::var("HYDRA_ADMIN_URL")) else {
-        eprintln!(
-            "[app_oauth_client_test] CONTROL_TEST_DB/PG_TEST_URL or HYDRA_ADMIN_URL not set - skipping"
-        );
+async fn appstate_provision_then_purge_deletes_native_oauth_rows() {
+    let Some(url) = db_url() else {
+        eprintln!("[app_oauth_client_test] CONTROL_TEST_DB/PG_TEST_URL not set - skipping");
         return;
     };
 
     let app_base_domain = "zeroship.localhost";
-    let state = build_state(&url, &hydra_url, app_base_domain).await;
-    let hydra = HydraAdmin::new(hydra_url.clone());
-
-    // create_app binds an owner membership (FK → zeroship.users); seed one.
-    let owner_id = Uuid::new_v4();
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
-            &[
-                &owner_id,
-                &format!("oac-owner-{owner_id}@zeroship.test"),
-                &"oac-owner",
-            ],
-        )
-        .await
-        .expect("seed owner user");
+    let state = build_state(&url, app_base_domain).await;
+    let owner_id = seed_owner(&state.control_pg, "oac-state-owner").await;
 
     let app_name = format!("zs-1d-state-{}", Uuid::new_v4().simple());
     let app = state
         .registry
-        .create_app(&app_name, &zeroship_control::bootstrap_console::free_plan_id(), &owner_id)
+        .create_app(
+            &app_name,
+            &zeroship_control::bootstrap_console::free_plan_id(),
+            &owner_id,
+        )
         .await
         .expect("create app");
     let app_id = app.id;
-    let expected_client_id = client_id_for_app(&app_id);
-    // The host the gateway's subdomain extractor resolves for this app.
-    let expected_apex = format!("{app_name}.{app_base_domain}");
-
-    // Clean any residue, then provision through the PRODUCTION wrapper.
-    let _ = hydra.delete_client(&expected_client_id).await;
     let client_id = state
         .provision_app_oauth_client(&app_id, &app_name, &[])
         .await
         .expect("provision via AppState");
-    assert_eq!(client_id, expected_client_id);
+    assert_eq!(client_id, client_id_for_app(&app_id));
 
-    // The derived apex host (sector + redirect_uris) matches the gateway host.
-    let hydra_client = hydra
-        .get_client(&client_id)
-        .await
-        .expect("get_client")
-        .expect("client exists");
+    let expected_apex = format!("{app_name}.{app_base_domain}");
+    let uris = redirect_uris(&state.control_pg, &client_id).await;
     assert!(
-        hydra_client
-            .redirect_uris
-            .iter()
-            .any(|u| u == &format!("http://{expected_apex}/__zeroship/auth/callback")),
-        "apex host derived by provision_app_oauth_client must match the gateway host {expected_apex}: {:?}",
-        hydra_client.redirect_uris
+        uris.iter()
+            .any(|uri| uri == &format!("http://{expected_apex}/__zeroship/auth/callback")),
+        "apex host derived by provision_app_oauth_client must match gateway host {expected_apex}: {uris:?}"
     );
-    let ext = state
-        .registry
-        .get_routes()
-        .await
-        .expect("get_routes");
-    let entry = ext.get(&app_id).expect("route entry");
+    let routes = state.registry.get_routes().await.expect("get_routes");
+    let entry = routes.get(&app_id).expect("route entry");
     assert_eq!(
         entry.sector_identifier.as_deref(),
         Some(format!("http://{expected_apex}").as_str())
     );
+    assert_eq!(count_oauth_client(&state.control_pg, &client_id).await, 1);
 
-    // PRODUCTION delete path: AppState::delete_app_oauth_client must remove the
-    // Hydra client (the M1 orphan-leak regression).
-    state
-        .delete_app_oauth_client(&app_id)
+    assert!(api::purge_app(&state, &app_id)
         .await
-        .expect("delete via AppState");
-    assert!(
-        hydra.get_client(&client_id).await.expect("get").is_none(),
-        "AppState::delete_app_oauth_client left the Hydra client live (orphan leak)"
-    );
-
-    // Idempotent: a second delete (already-gone client → Hydra 404) is a no-op.
-    state
-        .delete_app_oauth_client(&app_id)
+        .expect("purge app"));
+    assert_eq!(count_oauth_client(&state.control_pg, &client_id).await, 0);
+    let ext_count: i64 = state
+        .control_pg
+        .query(
+            "SELECT COUNT(*)::BIGINT AS n FROM zeroship.app_oauth_clients WHERE app_id = $1",
+            &[&app_id],
+        )
         .await
-        .expect("second delete is a no-op");
-
-    state.registry.delete_app(&app_id).await.expect("delete app");
+        .expect("count app_oauth_clients")[0]
+        .get("n");
+    assert_eq!(ext_count, 0, "app_oauth_clients row cascaded with app delete");
 }

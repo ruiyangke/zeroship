@@ -178,7 +178,7 @@ pub async fn create_app(
             // Slice 1d (§1.1): provision the per-app public PKCE OAuth client
             // BEFORE the app is routable, so the route-sync push that makes the
             // host live already carries Some(oauth_client_id) — no cold-start
-            // 503. Best-effort relative to the create response: a Hydra/DB
+            // 503. Best-effort relative to the create response: a DB
             // hiccup here is logged + metered, and the next deploy re-provisions
             // (ensure_app_client is idempotent). The app still exists.
             // No manifest exists at create, so no declared scopes yet — the
@@ -315,10 +315,6 @@ pub enum PurgeError {
 ///      `oauth_clients` row in one txn; the real FK chain tears down every
 ///      dependent row in the `zeroship` schema). Returns `false` if the row was
 ///      already gone.
-///   3. Per-app Hydra OAuth client delete — best-effort + idempotent (Hydra is a
-///      separate source of truth, not reachable by a DB FK). Ordered AFTER the
-///      DB delete so a Hydra outage can never strand a live app with no client;
-///      a failure here is logged, not fatal (the route is already dead).
 ///
 /// Returns `Ok(true)` if a DB row was deleted, `Ok(false)` if it was already
 /// gone. There is ONE deletion path; two callers (the `delete_app` HTTP handler
@@ -341,16 +337,6 @@ pub async fn purge_app(state: &AppState, app_id: &Uuid) -> Result<bool, PurgeErr
         .await
         .map_err(PurgeError::Registry)?;
 
-    if deleted {
-        // 3. Per-app Hydra OAuth client delete — best-effort + idempotent.
-        if let Err(e) = state.delete_app_oauth_client(app_id).await {
-            tracing::error!(
-                app_id = %app_id,
-                error = %e,
-                "control: per-app OAuth client delete failed on app purge (Hydra client leaked — GC later)"
-            );
-        }
-    }
     Ok(deleted)
 }
 
@@ -522,9 +508,8 @@ pub async fn deploy(
             // published, the client (and its control.app_oauth_clients row that
             // get_routes LEFT-JOINs into oauth_client_id) already exists — so a
             // route-sync pull can never observe a live route with
-            // oauth_client_id=None. Reconcile is diff-then-PUT (a no-op deploy
-            // makes no Hydra call) and idempotent. Best-effort relative to the
-            // deploy response: a Hydra hiccup is logged and the next deploy
+            // oauth_client_id=None. Reconcile is idempotent. Best-effort
+            // relative to the deploy response: a DB hiccup is logged and the next deploy
             // re-provisions; the deploy 200 does NOT imply provisioning
             // succeeded (the SDK relies on retryable-503 client_not_provisioned
             // handling for that rare window).
@@ -575,8 +560,8 @@ pub async fn deploy(
             // Slice 1d (§1.1): re-provision the per-app OAuth client BEFORE the
             // manifest commit so the route-sync invariant holds. Scopes are
             // already validated above, so `ensure_app_client`'s internal
-            // `validate_app_scopes` cannot reject; any error here is a Hydra/DB
-            // hiccup and stays best-effort relative to the deploy response.
+            // `validate_app_scopes` cannot reject; any error here is a DB hiccup
+            // and stays best-effort relative to the deploy response.
             match state.registry.get_app(&uid).await {
                 Ok(Some(app)) => {
                     if let Err(e) = state

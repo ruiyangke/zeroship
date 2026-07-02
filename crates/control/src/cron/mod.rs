@@ -10,8 +10,8 @@
 //!     `auth::cron::audit_retention` (which sweeps `zeroship.audit_events`);
 //!     shares the same `zeroship.audit_retention` GUC.
 //!   - [`orphaned_app_reaper`] — purges apps left owner-less by the ISS-12
-//!     account-erase reaper (auth), tearing down their DB rows + blobs + Hydra
-//!     client. Excludes `system = true` apps (the platform console). See ISS-12b.
+//!     account-erase reaper (auth), tearing down their DB rows + blobs. Excludes
+//!     `system = true` apps (the platform console). See ISS-12b.
 
 pub mod audit_retention;
 pub mod billing_notify;
@@ -41,7 +41,7 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     .detach();
 
     // Orphaned-app reaper — needs the full `AppState` (registry + blob VFS +
-    // per-app Hydra client) to run the shared `api::purge_app` teardown.
+    // native per-app OAuth rows) to run the shared `api::purge_app` teardown.
     let reaper_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         orphaned_app_reaper::run(reaper_state, orphaned_app_reaper::DEFAULT_CHECK_SECS).await;
