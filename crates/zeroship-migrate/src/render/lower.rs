@@ -4618,6 +4618,7 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Bool => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
         ColType::Timestamp => ("date".into(), None),
+        ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
         ColType::Bytea => ("bytes".into(), None),
         ColType::Ref { references } => ("ref".into(), Some(references.clone())),
@@ -4846,9 +4847,11 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             }
             Expr::PgArrayMembership { expr, .. }
             | Expr::PgRegexMatch { expr, .. }
-            | Expr::PgColumnSize { expr } => {
+            | Expr::PgColumnSize { expr }
+            | Expr::Extract { expr, .. } => {
                 collect_col_refs(expr, out);
             }
+            Expr::PgIntervalLiteral { .. } => {}
         }
     }
 
