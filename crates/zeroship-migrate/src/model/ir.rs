@@ -2969,8 +2969,8 @@ impl Op {
             }
             Op::AddConstraint { constraint, .. } => {
                 let dialects = match &constraint.kind {
-                    IrConstraintKind::Check { .. } => all_unsupported(
-                        "addConstraint(check) expression rendering is deferred in the current engine",
+                    IrConstraintKind::Check { .. } => pg_only(
+                        "addConstraint(check) expression rendering is PostgreSQL-only in the current engine",
                     ),
                     IrConstraintKind::Pk { .. } => all_unsupported(
                         "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
