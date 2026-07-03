@@ -1569,6 +1569,7 @@ pub(crate) fn build_table_snapshot(
         d,
         dialect,
         SnapshotResolvedShape::confined(&d.name),
+        SnapshotColumnOrder::NameSorted,
     )
 }
 
@@ -1582,7 +1583,27 @@ pub(crate) fn build_resolved_table_snapshot(
     d: &CollectionDescriptor,
     dialect: SqlDialect,
 ) -> Result<TableSnapshot, DeclarativeError> {
-    build_table_snapshot_impl(project_schema, d, dialect, SnapshotResolvedShape::empty())
+    let column_order = if carries_confined_system_column_prefix(d) {
+        SnapshotColumnOrder::NameSorted
+    } else {
+        SnapshotColumnOrder::PreserveDeclared
+    };
+    build_table_snapshot_impl(
+        project_schema,
+        d,
+        dialect,
+        SnapshotResolvedShape::empty(),
+        column_order,
+    )
+}
+
+fn carries_confined_system_column_prefix(d: &CollectionDescriptor) -> bool {
+    let shape = crate::model::profile::PolicyProfile::confined().system_shape;
+    d.fields.len() >= shape.columns.len()
+        && d.fields
+            .iter()
+            .zip(shape.columns.iter())
+            .all(|(field, system)| field.name == system.name)
 }
 
 #[derive(Debug, Clone)]
@@ -1590,6 +1611,12 @@ struct SnapshotResolvedShape {
     columns: Vec<ColumnSnapshot>,
     indexes: Vec<IndexSnapshot>,
     primary_key: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotColumnOrder {
+    NameSorted,
+    PreserveDeclared,
 }
 
 impl SnapshotResolvedShape {
@@ -1626,6 +1653,7 @@ fn build_table_snapshot_impl(
     d: &CollectionDescriptor,
     dialect: SqlDialect,
     resolved_shape: SnapshotResolvedShape,
+    column_order: SnapshotColumnOrder,
 ) -> Result<TableSnapshot, DeclarativeError> {
     let folds_system_id = resolved_shape.has_column("id");
     let mut columns = resolved_shape.columns;
@@ -1877,8 +1905,12 @@ fn build_table_snapshot_impl(
         SqlDialect::Mysql => {}
     }
 
-    // Deterministic ordering (snapshot_schema sorts everything by name).
-    columns.sort_by(|a, b| a.name.cmp(&b.name));
+    // The declarative desired-snapshot path remains name-sorted to match
+    // snapshot_schema. Resolved createTable IR is already explicit table shape,
+    // so its column Vec order is the byte contract for CREATE TABLE rendering.
+    if matches!(column_order, SnapshotColumnOrder::NameSorted) {
+        columns.sort_by(|a, b| a.name.cmp(&b.name));
+    }
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
     constraints.sort_by(|a, b| a.name.cmp(&b.name));
 
