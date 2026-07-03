@@ -2097,9 +2097,10 @@ fn recover_enum_chain(expr: &crate::model::expr::Expr) -> Option<(String, Vec<se
 
 /// FK policy recovered from a single-column `IrConstraintKind::Fk` constraint, to
 /// lift onto the matching `ref` column's descriptor (§2a "recover from the applied
-/// FK constraint"). `on_delete`/`on_update` are the camelCase SDK tokens; the
-/// `deferrable` bit is not carried on the Fk constraint, so it is reconstructed as
-/// the op.* applied default (`true`) at lift time.
+/// FK constraint"). `on_delete`/`on_update` are the camelCase SDK tokens. The
+/// `deferrable` bit is not carried on the Fk constraint; omitted means the
+/// SQL/Postgres default (`NOT DEFERRABLE`), so the folded descriptor leaves it
+/// unset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecoveredFk {
     /// The single referencing column the policy attaches to.
@@ -2346,16 +2347,13 @@ pub fn fold_to_field_defs(
             }
         }
         // Lift the recovered FK policy onto the ref column. `on_delete`/`on_update`
-        // come from the Fk constraint; `deferrable` is recovered as the op.* applied
-        // default (the lower always emits `DEFERRABLE INITIALLY DEFERRED`, so a
-        // folded FK is deferrable-by-construction — `declarative.rs` `f.deferrable
-        // .unwrap_or(true)`), matching the SDK `t.ref()` default.
+        // come from the Fk constraint; `deferrable` stays unset because the FK IR
+        // has no explicit deferrable bit and omitted means the SQL/Postgres default.
         for fk in fks.remove(&table).unwrap_or_default() {
             if let Some(f) = cols.get_mut(&fk.column) {
                 if f.ty == "ref" {
                     f.on_delete = fk.on_delete;
                     f.on_update = fk.on_update;
-                    f.deferrable = Some(true);
                 }
             }
         }

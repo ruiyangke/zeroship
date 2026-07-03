@@ -398,7 +398,6 @@ fn mysql_foreign_key_definition(
         definition.push_str(" ON DELETE ");
         definition.push_str(referential.on_delete);
     }
-    definition.push_str(" DEFERRABLE INITIALLY DEFERRED");
     Ok(definition)
 }
 
@@ -631,7 +630,7 @@ mod tests {
         assert_eq!(
             fk.definition,
             "FOREIGN KEY (parent_id) REFERENCES app.parents(id) ON UPDATE CASCADE \
-             ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED"
+             ON DELETE SET NULL"
         );
     }
 
@@ -696,7 +695,7 @@ mod tests {
             .expect("FK constraint");
         assert_eq!(
             fk.definition,
-            "FOREIGN KEY (parent_id) REFERENCES app.parents(id) DEFERRABLE INITIALLY DEFERRED"
+            "FOREIGN KEY (parent_id) REFERENCES app.parents(id)"
         );
     }
 }
