@@ -773,6 +773,13 @@ impl NamedTypeRegistry {
         })
     }
 
+    pub(crate) fn enum_schema_or<'a>(&'a self, name: &str, default_schema: &'a str) -> &'a str {
+        self.enums
+            .get(name)
+            .map(|def| def.schema.as_str())
+            .unwrap_or(default_schema)
+    }
+
     pub(crate) fn create_domain(
         &mut self,
         name: &str,
@@ -808,6 +815,13 @@ impl NamedTypeRegistry {
             kind: "domain",
             name: name.to_string(),
         })
+    }
+
+    pub(crate) fn domain_schema_or<'a>(&'a self, name: &str, default_schema: &'a str) -> &'a str {
+        self.domains
+            .get(name)
+            .map(|def| def.schema.as_str())
+            .unwrap_or(default_schema)
     }
 }
 
@@ -1645,7 +1659,7 @@ impl IrAuthor {
                 }
                 apply_author_type_overrides_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 apply_synth_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;
-                self.apply_named_type_metadata(name, columns, &mut snap, named_types)?;
+                self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
                 // **#174 createTable parity** — keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
                 // injects `<col>_masked` from the descriptor's `mask` facet (including
@@ -1738,6 +1752,7 @@ impl IrAuthor {
                     identity: *identity,
                 };
                 self.apply_named_type_column_metadata(
+                    &eff_schema,
                     table,
                     &source_col,
                     &mut col,
@@ -1938,6 +1953,7 @@ impl IrAuthor {
                                 identity: None,
                             };
                             self.apply_named_type_column_metadata(
+                                &eff_schema,
                                 table,
                                 &source_col,
                                 &mut col,
@@ -2990,6 +3006,7 @@ impl IrAuthor {
 
     fn apply_named_type_metadata(
         &self,
+        default_schema: &str,
         table: &str,
         columns: &[IrColumn],
         snap: &mut TableSnapshot,
@@ -3002,13 +3019,14 @@ impl IrAuthor {
             let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
                 return Err(IrLowerError::UnsupportedOp("named type column folded away"));
             };
-            self.apply_named_type_column_metadata(table, source, col, named_types)?;
+            self.apply_named_type_column_metadata(default_schema, table, source, col, named_types)?;
         }
         Ok(())
     }
 
     fn apply_named_type_column_metadata(
         &self,
+        default_schema: &str,
         table: &str,
         source: &IrColumn,
         col: &mut ColumnSnapshot,
@@ -3016,13 +3034,14 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         match &source.ty {
             ColType::Enum { name } => {
-                let def = named_types.enum_def(name)?;
                 match self.dialect {
                     SqlDialect::Postgres => {
-                        col.data_type = pg_type_data_type(&def.schema, name);
-                        col.ddl_type_override = Some(pg_type_qname(&def.schema, name)?);
+                        let schema = named_types.enum_schema_or(name, default_schema);
+                        col.data_type = pg_type_data_type(schema, name);
+                        col.ddl_type_override = Some(pg_type_qname(schema, name)?);
                     }
                     SqlDialect::Sqlite => {
+                        let def = named_types.enum_def(name)?;
                         col.data_type = "text".to_string();
                         col.inline_checks.push(enum_inline_check(
                             &source.name,
@@ -3031,6 +3050,7 @@ impl IrAuthor {
                         )?);
                     }
                     SqlDialect::Mysql => {
+                        let def = named_types.enum_def(name)?;
                         let ty = mysql_enum_type(&def.values);
                         col.data_type = ty.clone();
                         col.ddl_type_override = Some(ty);
@@ -3038,6 +3058,12 @@ impl IrAuthor {
                 }
             }
             ColType::Domain { name } => {
+                if matches!(self.dialect, SqlDialect::Postgres) {
+                    let schema = named_types.domain_schema_or(name, default_schema);
+                    col.data_type = pg_type_data_type(schema, name);
+                    col.ddl_type_override = Some(pg_type_qname(schema, name)?);
+                    return Ok(());
+                }
                 let def = named_types.domain_def(name)?;
                 if matches!(def.as_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     return Err(IrLowerError::NamedTypeUnsupported {

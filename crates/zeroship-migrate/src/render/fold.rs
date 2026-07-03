@@ -1444,12 +1444,13 @@ fn apply_fold_named_type_column_metadata(
 ) -> Result<(), FoldError> {
     match &source.ty {
         ColType::Enum { name } => {
-            let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
             match dialect {
                 SqlDialect::Postgres => {
-                    col.data_type = pg_type_data_type(&def.schema, name);
+                    let schema = named_types.enum_schema_or(name, project_schema);
+                    col.data_type = pg_type_data_type(schema, name);
                 }
                 SqlDialect::Sqlite => {
+                    let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
                     col.data_type = "text".to_string();
                     col.inline_checks.push(
                         enum_inline_check(&source.name, &def.values, dialect)
@@ -1457,6 +1458,7 @@ fn apply_fold_named_type_column_metadata(
                     );
                 }
                 SqlDialect::Mysql => {
+                    let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
                     let ty = mysql_enum_type(&def.values);
                     col.data_type = ty.clone();
                     col.ddl_type_override = Some(ty);
@@ -1464,6 +1466,11 @@ fn apply_fold_named_type_column_metadata(
             }
         }
         ColType::Domain { name } => {
+            if matches!(dialect, SqlDialect::Postgres) {
+                let schema = named_types.domain_schema_or(name, project_schema);
+                col.data_type = pg_type_data_type(schema, name);
+                return Ok(());
+            }
             let def = named_types.domain_def(name).map_err(fold_named_type_error)?;
             if matches!(def.as_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                 return Err(FoldError::NamedTypeUnsupported {

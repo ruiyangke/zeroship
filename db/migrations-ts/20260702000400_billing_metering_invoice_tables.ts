@@ -1,4 +1,4 @@
-import { and, membership, or, table, t } from "@zeroship/migrate";
+import { and, membership, notMembership, or, table, t } from "@zeroship/migrate";
 import { raw } from "@zeroship/migrate/pg";
 
 export const name = "billing_metering_invoice_tables";
@@ -16,18 +16,14 @@ export function up() {
   table("app_spend_state", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
-      state: t.text().notNull().default("allow"),
+      state: t.domain("spend_state").notNull().default("allow"),
       spend_cents: t.bigInt().notNull().default(0),
       eval_limit_cents: t.bigInt().notNull().default(0),
-      period: t.text().notNull(),
+      period: t.domain("billing_period").notNull(),
       evaluated_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["app_id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.spend_state
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_state ALTER COLUMN state TYPE zeroship.spend_state USING state::zeroship.spend_state", reason: "column app_spend_state.state uses PostgreSQL type zeroship.spend_state, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_period
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_state ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column app_spend_state.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
   table("app_spend_state", { schema: "zeroship" }).addCheck("app_spend_state_eval_limit_cents_check", (c) => c("eval_limit_cents").ge(0));
   table("app_spend_state", { schema: "zeroship" }).addCheck("app_spend_state_spend_cents_check", (c) => c("spend_cents").ge(0));
   table("billing_customer_refs", { schema: "zeroship" }).create({
@@ -45,7 +41,7 @@ export function up() {
       invoice_id: t.text().notNull(),
       amount_cents: t.bigInt().notNull(),
       currency: t.char(3).notNull().default("usd"),
-      status: t.text().notNull().default("open"),
+      status: t.domain("dispute_status").notNull().default("open"),
       reason: t.text(),
       evidence_due_at: t.timestamp(),
       provider_dispute_id: t.text().notNull(),
@@ -54,8 +50,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.dispute_status
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ALTER COLUMN status TYPE zeroship.dispute_status USING status::zeroship.dispute_status", reason: "column billing_disputes.status uses PostgreSQL type zeroship.dispute_status, which is not in the current closed column lexicon/lowerer use-site set" });
   table("billing_disputes", { schema: "zeroship" }).addCheck("billing_disputes_amount_cents_check", (c) => c("amount_cents").gt(0));
   table("billing_disputes", { schema: "zeroship" }).addCheck("billing_disputes_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("billing_line_provider_refs", { schema: "zeroship" }).create({
@@ -74,7 +68,7 @@ export function up() {
   table("billing_metrics", { schema: "zeroship" }).create({
     columns: {
       metric: t.text().notNull(),
-      kind: t.text().notNull(),
+      kind: t.domain("metric_kind").notNull(),
       unit: t.text().notNull(),
       archived: t.boolean().notNull().default(false),
       last_seen_at: t.timestamp(),
@@ -83,23 +77,17 @@ export function up() {
     },
     primaryKey: ["metric"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.metric_kind
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_metrics ALTER COLUMN kind TYPE zeroship.metric_kind USING kind::zeroship.metric_kind", reason: "column billing_metrics.kind uses PostgreSQL type zeroship.metric_kind, which is not in the current closed column lexicon/lowerer use-site set" });
   table("billing_notifications", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
-      kind: t.text().notNull(),
+      kind: t.domain("billing_notification_kind").notNull(),
       transition_id: t.text().notNull(),
-      status: t.text().notNull().default("pending"),
+      status: t.domain("notification_status").notNull().default("pending"),
       claimed_at: t.timestamp().notNull().default({ fn: "now" }),
       sent_at: t.timestamp(),
     },
     primaryKey: ["creator_id", "kind", "transition_id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_notification_kind
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_notifications ALTER COLUMN kind TYPE zeroship.billing_notification_kind USING kind::zeroship.billing_notification_kind", reason: "column billing_notifications.kind uses PostgreSQL type zeroship.billing_notification_kind, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.notification_status
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_notifications ALTER COLUMN status TYPE zeroship.notification_status USING status::zeroship.notification_status", reason: "column billing_notifications.status uses PostgreSQL type zeroship.notification_status, which is not in the current closed column lexicon/lowerer use-site set" });
   table("billing_provider_refs", { schema: "zeroship" }).create({
     columns: {
       invoice_id: t.text().notNull(),
@@ -113,8 +101,8 @@ export function up() {
   table("billing_reconciliation_findings", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
-      kind: t.text().notNull(),
-      severity: t.text().notNull().default("medium"),
+      kind: t.domain("reconciliation_finding_kind").notNull(),
+      severity: t.domain("reconciliation_finding_severity").notNull().default("medium"),
       entity_id: t.text().notNull(),
       our_value: t.json(),
       stripe_value: t.json(),
@@ -124,10 +112,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.reconciliation_finding_kind
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_reconciliation_findings ALTER COLUMN kind TYPE zeroship.reconciliation_finding_kind USING kind::zeroship.reconciliation_finding_kind", reason: "column billing_reconciliation_findings.kind uses PostgreSQL type zeroship.reconciliation_finding_kind, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.reconciliation_finding_severity
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_reconciliation_findings ALTER COLUMN severity TYPE zeroship.reconciliation_finding_severity USING severity::zeroship.reconciliation_finding_severity", reason: "column billing_reconciliation_findings.severity uses PostgreSQL type zeroship.reconciliation_finding_severity, which is not in the current closed column lexicon/lowerer use-site set" });
   table("connect_checkout_failures", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -157,7 +141,7 @@ export function up() {
   table("creator_billing_status", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
-      state: t.text().notNull().default("active"),
+      state: t.domain("account_state").notNull().default("active"),
       past_due_since: t.timestamp(),
       suspended_at: t.timestamp(),
       last_payment_failure_at: t.timestamp(),
@@ -168,23 +152,17 @@ export function up() {
     },
     primaryKey: ["creator_id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.account_state
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_billing_status ALTER COLUMN state TYPE zeroship.account_state USING state::zeroship.account_state", reason: "column creator_billing_status.state uses PostgreSQL type zeroship.account_state, which is not in the current closed column lexicon/lowerer use-site set" });
   table("creator_billing_status_history", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
       creator_id: t.uuid().notNull(),
-      from_state: t.text().notNull(),
-      to_state: t.text().notNull(),
+      from_state: t.domain("account_state").notNull(),
+      to_state: t.domain("account_state").notNull(),
       reason: t.text(),
       at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.account_state
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_billing_status_history ALTER COLUMN from_state TYPE zeroship.account_state USING from_state::zeroship.account_state", reason: "column creator_billing_status_history.from_state uses PostgreSQL type zeroship.account_state, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.account_state
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_billing_status_history ALTER COLUMN to_state TYPE zeroship.account_state USING to_state::zeroship.account_state", reason: "column creator_billing_status_history.to_state uses PostgreSQL type zeroship.account_state, which is not in the current closed column lexicon/lowerer use-site set" });
   table("creator_fee_policy", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
@@ -206,7 +184,7 @@ export function up() {
     columns: {
       id: t.text().notNull(),
       creator_id: t.uuid().notNull(),
-      kind: t.text().notNull(),
+      kind: t.domain("credit_entry_kind").notNull(),
       amount_cents: t.bigInt().notNull(),
       currency: t.char(3).notNull().default("usd"),
       applied_invoice_id: t.text(),
@@ -219,14 +197,10 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.credit_entry_kind
-  raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ALTER COLUMN kind TYPE zeroship.credit_entry_kind USING kind::zeroship.credit_entry_kind", reason: "column credit_ledger.kind uses PostgreSQL type zeroship.credit_entry_kind, which is not in the current closed column lexicon/lowerer use-site set" });
   table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_amount_cents_check", (c) => c("amount_cents").ne(0));
   table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
-  // TODO(dsl-v2): CHECK constraint credit_ledger.credit_ledger_grant_ref needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ADD CONSTRAINT credit_ledger_grant_ref CHECK (((((kind)::text = ANY (ARRAY['consumed'::text, 'void_reversal'::text, 'refund_clawback'::text])) AND (consumed_from_grant_id IS NOT NULL)) OR (((kind)::text <> ALL (ARRAY['consumed'::text, 'void_reversal'::text, 'refund_clawback'::text])) AND (consumed_from_grant_id IS NULL))))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint credit_ledger.credit_ledger_kind_sign needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ADD CONSTRAINT credit_ledger_kind_sign CHECK (((((kind)::text = ANY (ARRAY['consumed'::text, 'refund_clawback'::text])) AND (amount_cents < 0)) OR (((kind)::text <> ALL (ARRAY['consumed'::text, 'refund_clawback'::text])) AND (amount_cents > 0))))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_grant_ref", (c) => or(and(membership(c("kind").cast("text"), ["consumed", "void_reversal", "refund_clawback"]), c("consumed_from_grant_id").isNotNull()), and(notMembership(c("kind").cast("text"), ["consumed", "void_reversal", "refund_clawback"]), c("consumed_from_grant_id").isNull())));
+  table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_kind_sign", (c) => or(and(membership(c("kind").cast("text"), ["consumed", "refund_clawback"]), c("amount_cents").lt(0)), and(notMembership(c("kind").cast("text"), ["consumed", "refund_clawback"]), c("amount_cents").gt(0))));
   table("invoice_lines", { schema: "zeroship" }).create({
     columns: {
       invoice_id: t.text().notNull(),
@@ -254,22 +228,20 @@ export function up() {
       invoice_id: t.text().notNull(),
       amount_cents: t.bigInt().notNull(),
       currency: t.char(3).notNull().default("usd"),
-      kind: t.text().notNull(),
+      kind: t.domain("invoice_payment_kind").notNull(),
       provider_ref: t.text(),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.invoice_payment_kind
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ALTER COLUMN kind TYPE zeroship.invoice_payment_kind USING kind::zeroship.invoice_payment_kind", reason: "column invoice_payments.kind uses PostgreSQL type zeroship.invoice_payment_kind, which is not in the current closed column lexicon/lowerer use-site set" });
   table("invoice_payments", { schema: "zeroship" }).addCheck("invoice_payments_amount_cents_check", (c) => c("amount_cents").ne(0));
   table("invoice_payments", { schema: "zeroship" }).addCheck("invoice_payments_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("invoices", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
       creator_id: t.uuid().notNull(),
-      period: t.text().notNull(),
-      status: t.text().notNull().default("draft"),
+      period: t.domain("billing_period").notNull(),
+      status: t.domain("invoice_status").notNull().default("draft"),
       currency: t.char(3).notNull().default("usd"),
       subtotal_cents: t.bigInt().notNull().default(0),
       credit_cents: t.bigInt().notNull().default(0),
@@ -282,10 +254,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_period
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column invoices.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.invoice_status
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN status TYPE zeroship.invoice_status USING status::zeroship.invoice_status", reason: "column invoices.status uses PostgreSQL type zeroship.invoice_status, which is not in the current closed column lexicon/lowerer use-site set" });
   table("invoices", { schema: "zeroship" }).addCheck("invoice_total_balances", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")).add(c("tax_cents"))));
   table("invoices", { schema: "zeroship" }).addCheck("invoices_credit_cents_check", (c) => c("credit_cents").ge(0));
   table("invoices", { schema: "zeroship" }).addCheck("invoices_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
@@ -295,7 +263,7 @@ export function up() {
   table("metering_exports", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
-      period: t.text().notNull(),
+      period: t.domain("billing_period").notNull(),
       exported_units: t.bigInt().notNull().default(0),
       consecutive_failures: t.integer().notNull().default(0),
       last_error: t.text(),
@@ -304,8 +272,6 @@ export function up() {
     },
     primaryKey: ["creator_id", "period"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_period
-  raw({ sql: "ALTER TABLE ONLY zeroship.metering_exports ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column metering_exports.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
   table("metering_exports", { schema: "zeroship" }).addCheck("metering_exports_consecutive_failures_check", (c) => c("consecutive_failures").ge(0));
   table("metering_exports", { schema: "zeroship" }).addCheck("metering_exports_exported_units_check", (c) => c("exported_units").ge(0));
   table("metric_weights", { schema: "zeroship" }).create({
@@ -356,7 +322,7 @@ export function up() {
     columns: {
       id: t.text().notNull(),
       app_id: t.uuid().notNull(),
-      period: t.text().notNull(),
+      period: t.domain("billing_period").notNull(),
       from_plan_id: t.text(),
       to_plan_id: t.text().notNull(),
       effective_at: t.timestamp().notNull().default({ fn: "now" }),
@@ -365,8 +331,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_period
-  raw({ sql: "ALTER TABLE ONLY zeroship.plan_change_events ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column plan_change_events.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.plan_change_events ALTER COLUMN usage_at_change SET DEFAULT '{}'::jsonb", reason: "column plan_change_events.usage_at_change requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("plans", { schema: "zeroship" }).create({
@@ -420,21 +384,17 @@ export function up() {
       subtotal_cents: t.bigInt().notNull(),
       tax_cents: t.bigInt().notNull().default(0),
       currency: t.char(3).notNull().default("usd"),
-      destination: t.text().notNull(),
+      destination: t.domain("refund_destination").notNull(),
       reason: t.text(),
       idempotency_key: t.text().notNull(),
       request_fingerprint: t.text().notNull(),
-      status: t.text().notNull().default("pending"),
+      status: t.domain("refund_status").notNull().default("pending"),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
       issued_at: t.timestamp(),
       failed_at: t.timestamp(),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.refund_destination
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ALTER COLUMN destination TYPE zeroship.refund_destination USING destination::zeroship.refund_destination", reason: "column refunds.destination uses PostgreSQL type zeroship.refund_destination, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.refund_status
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ALTER COLUMN status TYPE zeroship.refund_status USING status::zeroship.refund_status", reason: "column refunds.status uses PostgreSQL type zeroship.refund_status, which is not in the current closed column lexicon/lowerer use-site set" });
   table("refunds", { schema: "zeroship" }).addCheck("refund_amount_split", (c) => c("amount_cents").eq(c("subtotal_cents").add(c("tax_cents"))));
   table("refunds", { schema: "zeroship" }).addCheck("refunds_amount_cents_check", (c) => c("amount_cents").gt(0));
   table("refunds", { schema: "zeroship" }).addCheck("refunds_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
@@ -444,21 +404,15 @@ export function up() {
     columns: {
       id: t.text().notNull(),
       app_id: t.uuid().notNull(),
-      period: t.text().notNull(),
-      from_state: t.text().notNull(),
-      to_state: t.text().notNull(),
+      period: t.domain("billing_period").notNull(),
+      from_state: t.domain("spend_state").notNull(),
+      to_state: t.domain("spend_state").notNull(),
       spend_cents: t.bigInt().notNull(),
       limit_cents: t.bigInt(),
       at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_period
-  raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column spend_state_history.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.spend_state
-  raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history ALTER COLUMN from_state TYPE zeroship.spend_state USING from_state::zeroship.spend_state", reason: "column spend_state_history.from_state uses PostgreSQL type zeroship.spend_state, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for zeroship.spend_state
-  raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history ALTER COLUMN to_state TYPE zeroship.spend_state USING to_state::zeroship.spend_state", reason: "column spend_state_history.to_state uses PostgreSQL type zeroship.spend_state, which is not in the current closed column lexicon/lowerer use-site set" });
   table("spend_state_history", { schema: "zeroship" }).addCheck("spend_state_history_limit_cents_check", (c) => or(c("limit_cents").isNull(), c("limit_cents").ge(0)));
   table("spend_state_history", { schema: "zeroship" }).addCheck("spend_state_history_spend_cents_check", (c) => c("spend_cents").ge(0));
   table("stripe_events_seen", { schema: "zeroship" }).create({
@@ -472,27 +426,23 @@ export function up() {
   table("usage_aggregates", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
-      period: t.text().notNull(),
+      period: t.domain("billing_period").notNull(),
       metric: t.text().notNull(),
       total: t.bigInt().notNull().default(0),
       updated_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["app_id", "period", "metric"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_period
-  raw({ sql: "ALTER TABLE ONLY zeroship.usage_aggregates ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column usage_aggregates.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
   table("usage_aggregates", { schema: "zeroship" }).addCheck("usage_aggregates_total_check", (c) => c("total").ge(0));
   table("usage_reports_seen", { schema: "zeroship" }).create({
     columns: {
       worker_id: t.text().notNull(),
       sequence: t.bigInt().notNull(),
-      period: t.text(),
+      period: t.domain("billing_period"),
       seen_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["worker_id", "sequence"],
   });
-  // TODO(dsl-v2): add structural column type support for zeroship.billing_period
-  raw({ sql: "ALTER TABLE ONLY zeroship.usage_reports_seen ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column usage_reports_seen.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
 }
 
 export function down() {
