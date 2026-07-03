@@ -21,6 +21,8 @@
 export {
   // table DDL/DML entry — the reusable fluent TableHandle
   table,
+  partition,
+  dropPartition,
   // cross-dialect view authoring entry — emits the closed SelectAst by default
   view,
   enumType,
@@ -33,6 +35,9 @@ export {
   notMembership,
   lit,
   interval,
+  p,
+  minValue,
+  maxValue,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -99,6 +104,21 @@ export type {
   DropViewArgs,
   ViewQueryBuilder,
   IndexMethod,
+  IndexStorageParams,
+  IndexStorageParamsArg,
+  PartitionSpec,
+  PartitionBounds,
+  PartitionBoundValue,
+  PartitionBuilder,
+  PartitionBoundInput,
+  PartitionBoundSentinel,
+  PartitionHandle,
+  PartitionOfHandle,
+  PartitionOptions,
+  CreatePartitionOptions,
+  PartitionForValuesArgs,
+  DropPartitionArgs,
+  DetachPartitionArgs,
   ExclusionMethod,
   ExclusionOperator,
   RefAction,

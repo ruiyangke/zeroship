@@ -843,6 +843,9 @@ pub fn validate_op_scoped(
             ts_location,
         ),
         Op::DropTable { .. }
+        | Op::CreatePartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. }
         | Op::RenameTable { .. }
         | Op::DropColumn { .. }
         | Op::SetColumnNotNull { .. }
@@ -1084,6 +1087,10 @@ fn validate_op_support(
         !matches!(using, None | Some(IndexMethod::Btree))
     }
 
+    fn with_storage_params(with: &Option<crate::model::ir::IndexStorageParams>) -> bool {
+        with.as_ref().is_some_and(|params| !params.is_empty())
+    }
+
     fn fk_features(
         columns: &[String],
         references_columns: &[String],
@@ -1120,10 +1127,14 @@ fn validate_op_support(
     match op {
         Op::CreateTable {
             columns,
+            partition_by,
             constraints,
             indexes,
             ..
         } => {
+            if partition_by.is_some() {
+                check(Feature::PartitionDdl)?;
+            }
             if columns
                 .iter()
                 .any(|col| default_is_synth(col.default.as_ref()))
@@ -1157,10 +1168,22 @@ fn validate_op_support(
                 if index.r#where.is_some() {
                     check(Feature::PartialIndex)?;
                 }
+                if !index.include.is_empty() {
+                    check(Feature::IndexInclude)?;
+                }
+                if with_storage_params(&index.with) {
+                    check(Feature::IndexStorageParams)?;
+                }
+                if index.only.unwrap_or(false) {
+                    check(Feature::IndexOnly)?;
+                }
                 if non_btree_index_method(index.using) {
                     check(Feature::NonBtreeIndexMethod)?;
                 }
             }
+        }
+        Op::CreatePartition { .. } | Op::DetachPartition { .. } | Op::DropPartition { .. } => {
+            check(Feature::PartitionDdl)?;
         }
         Op::AddColumn { default, .. } => {
             if default_is_synth(default.as_ref()) {
@@ -1176,6 +1199,9 @@ fn validate_op_support(
             columns,
             using,
             r#where,
+            include,
+            with,
+            only,
             ..
         } => {
             if columns
@@ -1186,6 +1212,15 @@ fn validate_op_support(
             }
             if r#where.is_some() {
                 check(Feature::PartialIndex)?;
+            }
+            if !include.is_empty() {
+                check(Feature::IndexInclude)?;
+            }
+            if with_storage_params(with) {
+                check(Feature::IndexStorageParams)?;
+            }
+            if only.unwrap_or(false) {
+                check(Feature::IndexOnly)?;
             }
             if non_btree_index_method(*using) {
                 check(Feature::NonBtreeIndexMethod)?;
@@ -3623,7 +3658,10 @@ mod tests {
                 },
             }],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -3863,7 +3901,10 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfExists),
         }]);
@@ -3901,7 +3942,10 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
@@ -4129,8 +4173,14 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("first")),
                     }),
+                include: Vec::new(),
+                with: None,
+                only: None,
                 }],
-                runtime_options: Default::default(),
+
+            partition_by: None,
+
+            runtime_options: Default::default(),
                 schema: None,
                 existence_guard: None,
             },
@@ -4200,8 +4250,14 @@ mod tests {
                     op: UnaryOp::IsNull,
                     operand: Box::new(Expr::col("deleted_at")),
                 }),
+            include: Vec::new(),
+            with: None,
+            only: None,
             }],
-            runtime_options: Default::default(),
+
+        partition_by: None,
+
+        runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
         }]);
@@ -4243,7 +4299,10 @@ mod tests {
                 },
             }],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -4275,7 +4334,10 @@ mod tests {
                 },
             }],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -4321,7 +4383,11 @@ mod tests {
             unique: None,
             using: None,
             r#where: Some(split(", ", 1)),
-            concurrently: None,
+
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -4450,7 +4516,10 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -4518,7 +4587,10 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);
@@ -4546,7 +4618,10 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }]);

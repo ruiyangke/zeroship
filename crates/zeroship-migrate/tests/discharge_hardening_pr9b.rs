@@ -127,7 +127,10 @@ fn live_with_column(table: &str, column: &str, data_type: &str) -> LiveSchema {
         indexes: vec![],
         constraints: vec![],
         runtime_options: Default::default(),
-            comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     let mut live = LiveSchema::default();

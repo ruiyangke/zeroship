@@ -127,7 +127,7 @@ const UNKNOWN_OWNER: &str = "<unregistered>";
 #[must_use]
 pub(crate) fn op_created_table(op: &Op) -> Option<&str> {
     match op {
-        Op::CreateTable { name, .. } => Some(name),
+        Op::CreateTable { name, .. } | Op::CreatePartition { name, .. } => Some(name),
         _ => None,
     }
 }
@@ -150,10 +150,12 @@ pub(crate) fn op_created_table(op: &Op) -> Option<&str> {
 fn op_target_table(op: &Op) -> Option<&str> {
     match op {
         Op::CreateTable { name, .. } => Some(name),
+        Op::CreatePartition { of, .. } | Op::DetachPartition { parent: of, .. } => Some(of),
         Op::SetTableOptions { table, .. } => Some(table),
         // The ownership gate checks the EXISTING (old) table — a rename of a table
         // the deploying app does not own is refused on the source name.
         Op::DropTable { table, .. }
+        | Op::DropPartition { name: table, .. }
         | Op::RenameTable { table, .. }
         | Op::AddColumn { table, .. }
         | Op::DropColumn { table, .. }
@@ -476,6 +478,7 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
+            partition_by: None,
             runtime_options: None,
             schema: None,
             existence_guard: None,

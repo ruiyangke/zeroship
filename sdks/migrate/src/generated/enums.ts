@@ -111,7 +111,7 @@ export type IndexSortOrder = "asc" | "desc";
  * the SQLite FTS5 virtual-table path (per-dialect lowering is Wave C's job).
  * Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
  */
-export type IndexMethod = "btree" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
+export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
 
 /**
  * A comparison operator for a [`Precondition::RowCount`] assertion.

@@ -162,7 +162,10 @@ async fn add_column_ifnotexists_absent_runs() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -208,7 +211,10 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -266,7 +272,10 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -329,7 +338,10 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -390,7 +402,10 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -448,7 +463,10 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -465,7 +483,10 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -495,7 +516,10 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -555,7 +579,10 @@ async fn create_table_ifnotexists_reruns_idempotent_with_timestamp_and_text_colu
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
@@ -630,7 +657,10 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
@@ -697,7 +727,10 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {
@@ -774,7 +807,10 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }) {

@@ -162,6 +162,9 @@ pub enum SupportTier {
 pub enum Feature {
     UserPrimaryKey,
     PartialIndex,
+    IndexInclude,
+    IndexStorageParams,
+    IndexOnly,
     ExpressionIndex,
     NonBtreeIndexMethod,
     TableLevelForeignKey,
@@ -190,6 +193,7 @@ pub enum Feature {
     Sequence,
     RawViewBody,
     RawSql,
+    PartitionDdl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +343,26 @@ const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::postgres_on
     "exclusion constraints are PostgreSQL-only in the current engine",
 );
 
+const PG_ONLY_PARTITION_DDL: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "partitioned table DDL is PostgreSQL-only",
+);
+
+const PG_ONLY_INDEX_INCLUDE: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "index INCLUDE columns are PostgreSQL-only",
+);
+
+const PG_ONLY_INDEX_STORAGE_PARAMS: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "index WITH storage parameters are PostgreSQL-only",
+);
+
+const PG_ONLY_INDEX_ONLY: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "CREATE INDEX ON ONLY is PostgreSQL-only",
+);
+
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
     FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
@@ -391,6 +415,9 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
             ),
         ),
     ),
+    FeatureSupport::new(Feature::IndexInclude, PG_ONLY_INDEX_INCLUDE),
+    FeatureSupport::new(Feature::IndexStorageParams, PG_ONLY_INDEX_STORAGE_PARAMS),
+    FeatureSupport::new(Feature::IndexOnly, PG_ONLY_INDEX_ONLY),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
         DialectSupport::postgres_only(
@@ -426,6 +453,9 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
             ),
         ),
     ),
+    FeatureSupport::new(Feature::IndexInclude, PG_ONLY_INDEX_INCLUDE),
+    FeatureSupport::new(Feature::IndexStorageParams, PG_ONLY_INDEX_STORAGE_PARAMS),
+    FeatureSupport::new(Feature::IndexOnly, PG_ONLY_INDEX_ONLY),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
         DialectSupport::postgres_only(
@@ -434,6 +464,9 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
         ),
     ),
 ];
+
+pub(crate) const PARTITION_FEATURES: &[FeatureSupport] =
+    &[FeatureSupport::new(Feature::PartitionDdl, PG_ONLY_PARTITION_DDL)];
 
 pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::AlterColumnUsing,

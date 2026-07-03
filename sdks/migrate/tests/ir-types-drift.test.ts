@@ -53,7 +53,8 @@ function opFieldsByTag(def: any, tagField: string): Record<string, string[]> {
 const TS = {
   // Op variant tags (the `del()` fn records `"delete"`).
   Op: [
-    "createTable", "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
+    "createTable", "createPartition", "detachPartition", "dropPartition",
+    "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "setColumnType", "setColumnNotNull", "dropColumnNotNull",
     "setColumnDefault", "dropColumnDefault", "renameColumn", "addConstraint",
     "setTableOptions", "dropConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
@@ -97,7 +98,10 @@ const TS = {
   PgArrayMembershipOp: ["eq", "ne"].sort(),
   ExtractField: ["day"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
-  IndexMethod: ["btree", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
+  IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
+  PartitionSpec: ["hash", "list", "range"].sort(),
+  PartitionBounds: ["default", "hash", "list", "range"].sort(),
+  PartitionBoundValue: ["int", "maxValue", "minValue", "string"].sort(),
   ExclusionMethod: ["gist", "spgist", "btree"].sort(),
   ExclusionOperator: ["&&", "=", "<>", "<", ">", "<=", ">="].sort(),
   // **PR10** — the closed existence-guard token set (`ir.ts` `ExistenceGuard`).
@@ -128,14 +132,17 @@ const TS = {
 // schema gains/loses a field on any op, THIS fails — forcing `ir.ts` to be
 // regenerated in lockstep. Sorted; the `op` discriminant is excluded.
 const TS_OP_FIELDS: Record<string, string[]> = {
-  createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "primaryKey", "runtimeOptions", "schema"].sort(),
+  createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "partitionBy", "primaryKey", "runtimeOptions", "schema"].sort(),
+  createPartition: ["bounds", "existenceGuard", "name", "of", "schema"].sort(),
+  detachPartition: ["concurrently", "name", "parent", "schema"].sort(),
+  dropPartition: ["cascade", "existenceGuard", "name", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // #173/#174 + generated/identity — addColumn carries the column facets that are
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
   addColumn: ["column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
-  createIndex: ["columns", "concurrently", "existenceGuard", "name", "schema", "table", "unique", "using", "where"].sort(),
+  createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),
   setColumnType: ["column", "existenceGuard", "schema", "table", "toType", "using"].sort(),
   setColumnNotNull: ["column", "existenceGuard", "schema", "table"].sort(),
@@ -221,6 +228,12 @@ test("vendor grant target tags match the schema", () => {
 test("index element and comment target tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.IndexElement, "kind"), TS.IndexElement);
   assert.deepEqual(variantTags(schema.$defs.CommentTarget, "kind"), TS.CommentTarget);
+});
+
+test("partition type tags match the schema", () => {
+  assert.deepEqual(variantTags(schema.$defs.PartitionSpec, "kind"), TS.PartitionSpec);
+  assert.deepEqual(variantTags(schema.$defs.PartitionBounds, "kind"), TS.PartitionBounds);
+  assert.deepEqual(variantTags(schema.$defs.PartitionBoundValue, "kind"), TS.PartitionBoundValue);
 });
 
 // **#180** — the migration flags-override FIELD set. `IrFlagsOverride` in `ir.ts`
@@ -331,6 +344,7 @@ test("legacy guardable Op variants do not carry the removed native ifExists fiel
   for (const [tag, fields] of Object.entries(schemaFields)) {
     if (![
       "dropTable",
+      "dropPartition",
       "renameTable",
       "dropColumn",
       "dropIndex",

@@ -215,7 +215,7 @@ pub use model::migration::{
 };
 pub use model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, GeneratedColumnSnapshot,
-    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, RoleSnapshot,
+    IndexElementSnapshot, IndexSnapshot, NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot,
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
     TableSnapshot, ViewSnapshot,
 };
@@ -226,9 +226,10 @@ pub use model::snapshot::{
 pub use model::ir::{
     CanonicalOpList, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
     ExclusionMethod, ExclusionOperator, GeneratedCol, IdentityCol, IndexElement, IndexMethod,
-    IndexSortOrder, IrBatch, IrClassification, IrColumn, IrConstraint, IrConstraintKind,
-    IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar, IrValue, IrVersionError,
-    MigrationIr, Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SynthDefaultFn,
+    IndexSortOrder, IndexStorageParams, IrBatch, IrClassification, IrColumn, IrConstraint,
+    IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar,
+    IrValue, IrVersionError, MigrationIr, Op, PartitionBoundValue, PartitionBounds,
+    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SynthDefaultFn,
     TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
     CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };

@@ -179,7 +179,10 @@ fn live_members() -> LiveSchema {
         indexes: vec![],
         constraints: vec![],
         runtime_options: Default::default(),
-            comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     let mut live = LiveSchema::default();
