@@ -1,4 +1,4 @@
-import { table, t } from "@zeroship/migrate";
+import { interval, membership, or, table, t } from "@zeroship/migrate";
 import { raw, sequence } from "@zeroship/migrate/pg";
 
 export const name = "auth_oauth_tables";
@@ -75,8 +75,7 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN matched_policies SET DEFAULT '{}'::text[]", reason: "column authz_decisions.matched_policies requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
   // TODO(dsl-v2): add structural column type support for inet
   raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN request_ip TYPE inet USING request_ip::inet", reason: "column authz_decisions.request_ip uses PostgreSQL type inet, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint authz_decisions.authz_decisions_decision_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ADD CONSTRAINT authz_decisions_decision_check CHECK ((decision = ANY (ARRAY['allow'::text, 'deny'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("authz_decisions", { schema: "zeroship" }).addCheck("authz_decisions_decision_check", (c) => membership(c("decision"), ["allow", "deny"]));
   table("cron_state", { schema: "zeroship" }).create({
     columns: {
       key: t.text().notNull(),
@@ -104,10 +103,8 @@ export function up() {
     },
     primaryKey: ["device_code_hash"],
   });
-  // TODO(dsl-v2): CHECK constraint device_grants.device_grants_poll_interval_secs_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.device_grants ADD CONSTRAINT device_grants_poll_interval_secs_check CHECK ((poll_interval_secs > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint device_grants.device_grants_status_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.device_grants ADD CONSTRAINT device_grants_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'denied'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("device_grants", { schema: "zeroship" }).addCheck("device_grants_poll_interval_secs_check", (c) => c("poll_interval_secs").gt(0));
+  table("device_grants", { schema: "zeroship" }).addCheck("device_grants_status_check", (c) => membership(c("status"), ["pending", "approved", "denied"]));
   table("dpop_jti", { schema: "zeroship" }).create({
     columns: {
       jti: t.text().notNull(),
@@ -278,10 +275,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.oauth_authorization_codes ALTER COLUMN requested_scopes TYPE text[] USING requested_scopes::text[]", reason: "column oauth_authorization_codes.requested_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for text[]
   raw({ sql: "ALTER TABLE ONLY zeroship.oauth_authorization_codes ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column oauth_authorization_codes.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint oauth_authorization_codes.oauth_authorization_codes_max_ttl needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_authorization_codes ADD CONSTRAINT oauth_authorization_codes_max_ttl CHECK ((expires_at <= (created_at + '00:01:00'::interval)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint oauth_authorization_codes.oauth_authorization_codes_pkce_method_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_authorization_codes ADD CONSTRAINT oauth_authorization_codes_pkce_method_check CHECK ((pkce_method = 'S256'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("oauth_authorization_codes", { schema: "zeroship" }).addCheck("oauth_authorization_codes_max_ttl", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00"))));
+  table("oauth_authorization_codes", { schema: "zeroship" }).addCheck("oauth_authorization_codes_pkce_method_check", (c) => c("pkce_method").eq("S256"));
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {
       client_id: t.text().notNull(),
@@ -305,10 +300,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.oauth_clients ALTER COLUMN redirect_uris TYPE text[] USING redirect_uris::text[]", reason: "column oauth_clients.redirect_uris uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for text[]
   raw({ sql: "ALTER TABLE ONLY zeroship.oauth_clients ALTER COLUMN scopes TYPE text[] USING scopes::text[]", reason: "column oauth_clients.scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint oauth_clients.oauth_clients_brokered_requires_secret_basic needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_clients ADD CONSTRAINT oauth_clients_brokered_requires_secret_basic CHECK (((brokered = false) OR (token_endpoint_auth_method = 'client_secret_basic'::text)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint oauth_clients.oauth_clients_token_endpoint_auth_method_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_clients ADD CONSTRAINT oauth_clients_token_endpoint_auth_method_check CHECK ((token_endpoint_auth_method = ANY (ARRAY['none'::text, 'client_secret_basic'::text, 'client_secret_post'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("oauth_clients", { schema: "zeroship" }).addCheck("oauth_clients_brokered_requires_secret_basic", (c) => or(c("brokered").eq(false), c("token_endpoint_auth_method").eq("client_secret_basic")));
+  table("oauth_clients", { schema: "zeroship" }).addCheck("oauth_clients_token_endpoint_auth_method_check", (c) => membership(c("token_endpoint_auth_method"), ["none", "client_secret_basic", "client_secret_post"]));
   table("oauth_grants", { schema: "zeroship" }).create({
     columns: {
       user_id: t.uuid().notNull(),
@@ -351,8 +344,7 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column oauth_refresh_tokens.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for text[]
   raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens ALTER COLUMN family_granted_scopes TYPE text[] USING family_granted_scopes::text[]", reason: "column oauth_refresh_tokens.family_granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint oauth_refresh_tokens.oauth_refresh_tokens_idle_le_ceiling needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens ADD CONSTRAINT oauth_refresh_tokens_idle_le_ceiling CHECK ((expires_at <= family_absolute_expires_at))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("oauth_refresh_tokens", { schema: "zeroship" }).addCheck("oauth_refresh_tokens_idle_le_ceiling", (c) => c("expires_at").le(c("family_absolute_expires_at")));
   table("oidc_session_clients", { schema: "zeroship" }).create({
     columns: {
       idp_session_id: t.uuid().notNull(),
@@ -395,10 +387,8 @@ export function up() {
     },
     primaryKey: ["kid"],
   });
-  // TODO(dsl-v2): CHECK constraint signing_keys.signing_keys_alg_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.signing_keys ADD CONSTRAINT signing_keys_alg_check CHECK ((alg = 'EdDSA'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint signing_keys.signing_keys_status_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.signing_keys ADD CONSTRAINT signing_keys_status_check CHECK ((status = ANY (ARRAY['active'::text, 'next'::text, 'retiring'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("signing_keys", { schema: "zeroship" }).addCheck("signing_keys_alg_check", (c) => c("alg").eq("EdDSA"));
+  table("signing_keys", { schema: "zeroship" }).addCheck("signing_keys_status_check", (c) => membership(c("status"), ["active", "next", "retiring"]));
   table("token_revocations", { schema: "zeroship" }).create({
     columns: {
       client_id: t.text().notNull(),

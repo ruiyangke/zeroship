@@ -1,4 +1,4 @@
-import { table, t } from "@zeroship/migrate";
+import { and, membership, table, t } from "@zeroship/migrate";
 import { raw } from "@zeroship/migrate/pg";
 
 export const name = "control_tables";
@@ -39,8 +39,7 @@ export function up() {
     },
     primaryKey: ["app_id", "user_id"],
   });
-  // TODO(dsl-v2): CHECK constraint app_members.app_members_role_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_members ADD CONSTRAINT app_members_role_check CHECK ((role = ANY (ARRAY['owner'::text, 'editor'::text, 'viewer'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("app_members", { schema: "zeroship" }).addCheck("app_members_role_check", (c) => membership(c("role"), ["owner", "editor", "viewer"]));
   table("app_net_grants", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -52,8 +51,7 @@ export function up() {
     },
     primaryKey: ["app_id", "host", "port"],
   });
-  // TODO(dsl-v2): CHECK constraint app_net_grants.app_net_grants_port_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_net_grants ADD CONSTRAINT app_net_grants_port_check CHECK (((port >= 1) AND (port <= 65535)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("app_net_grants", { schema: "zeroship" }).addCheck("app_net_grants_port_check", (c) => and(c("port").ge(1), c("port").le(65535)));
   table("app_oauth_clients", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -162,10 +160,8 @@ export function up() {
     },
     primaryKey: ["app_id", "version"],
   });
-  // TODO(dsl-v2): CHECK constraint migrated_app_policies.migrated_app_policies_ceiling_version_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_app_policies ADD CONSTRAINT migrated_app_policies_ceiling_version_check CHECK ((ceiling_version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint migrated_app_policies.migrated_app_policies_version_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_app_policies ADD CONSTRAINT migrated_app_policies_version_check CHECK ((version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("migrated_app_policies", { schema: "zeroship" }).addCheck("migrated_app_policies_ceiling_version_check", (c) => c("ceiling_version").gt(0));
+  table("migrated_app_policies", { schema: "zeroship" }).addCheck("migrated_app_policies_version_check", (c) => c("version").gt(0));
   table("migrated_migration_audit", { schema: "zeroship" }).create({
     columns: {
       audit_id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
@@ -188,10 +184,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ALTER COLUMN migration_versions SET DEFAULT '[]'::jsonb", reason: "column migrated_migration_audit.migration_versions requires exact default '[]'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ALTER COLUMN detail SET DEFAULT '{}'::jsonb", reason: "column migrated_migration_audit.detail requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint migrated_migration_audit.migrated_migration_audit_action_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ADD CONSTRAINT migrated_migration_audit_action_check CHECK ((action = ANY (ARRAY['submit'::text, 'reject_pending'::text, 'approve'::text, 'apply'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint migrated_migration_audit.migrated_migration_audit_ceiling_version_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ADD CONSTRAINT migrated_migration_audit_ceiling_version_check CHECK ((ceiling_version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("migrated_migration_audit", { schema: "zeroship" }).addCheck("migrated_migration_audit_action_check", (c) => membership(c("action"), ["submit", "reject_pending", "approve", "apply"]));
+  table("migrated_migration_audit", { schema: "zeroship" }).addCheck("migrated_migration_audit_ceiling_version_check", (c) => c("ceiling_version").gt(0));
   table("migrated_migrations", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -213,10 +207,8 @@ export function up() {
   });
   // TODO(dsl-v2): json array default is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migrations ALTER COLUMN gated_versions SET DEFAULT '[]'::jsonb", reason: "column migrated_migrations.gated_versions requires exact default '[]'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint migrated_migrations.migrated_migrations_ceiling_version_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migrations ADD CONSTRAINT migrated_migrations_ceiling_version_check CHECK ((ceiling_version > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint migrated_migrations.migrated_migrations_status_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migrations ADD CONSTRAINT migrated_migrations_status_check CHECK ((status = ANY (ARRAY['submitted'::text, 'pending_approval'::text, 'approved'::text, 'applied'::text, 'failed'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("migrated_migrations", { schema: "zeroship" }).addCheck("migrated_migrations_ceiling_version_check", (c) => c("ceiling_version").gt(0));
+  table("migrated_migrations", { schema: "zeroship" }).addCheck("migrated_migrations_status_check", (c) => membership(c("status"), ["submitted", "pending_approval", "approved", "applied", "failed"]));
   table("net_policy_catalog", { schema: "zeroship" }).create({
     columns: {
       key: t.text().notNull(),
@@ -242,18 +234,12 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_currency_shape needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_currency_shape CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_fee_lte_gross needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_fee_lte_gross CHECK ((platform_fee <= gross_amount))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_fee_nonnegative needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_fee_nonnegative CHECK ((platform_fee >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_gross_nonnegative needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_gross_nonnegative CHECK ((gross_amount >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_net_matches_amounts needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_net_matches_amounts CHECK ((net_amount = (gross_amount - platform_fee)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint payouts.control_payouts_net_nonnegative needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payouts ADD CONSTRAINT control_payouts_net_nonnegative CHECK ((net_amount >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("payouts", { schema: "zeroship" }).addCheck("control_payouts_currency_shape", (c) => c("currency").matches("^[a-z]{3}$"));
+  table("payouts", { schema: "zeroship" }).addCheck("control_payouts_fee_lte_gross", (c) => c("platform_fee").le(c("gross_amount")));
+  table("payouts", { schema: "zeroship" }).addCheck("control_payouts_fee_nonnegative", (c) => c("platform_fee").ge(0));
+  table("payouts", { schema: "zeroship" }).addCheck("control_payouts_gross_nonnegative", (c) => c("gross_amount").ge(0));
+  table("payouts", { schema: "zeroship" }).addCheck("control_payouts_net_matches_amounts", (c) => c("net_amount").eq(c("gross_amount").sub(c("platform_fee"))));
+  table("payouts", { schema: "zeroship" }).addCheck("control_payouts_net_nonnegative", (c) => c("net_amount").ge(0));
   table("permission_tokens", { schema: "zeroship" }).create({
     columns: {
       id: t.uuid().notNull(),
@@ -270,8 +256,7 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): CHECK constraint permission_tokens.permission_tokens_kind_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.permission_tokens ADD CONSTRAINT permission_tokens_kind_check CHECK ((kind = ANY (ARRAY['pat'::text, 'oauth_grant'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("permission_tokens", { schema: "zeroship" }).addCheck("permission_tokens_kind_check", (c) => membership(c("kind"), ["pat", "oauth_grant"]));
   table("platform_admin_roles", { schema: "zeroship" }).create({
     columns: {
       user_id: t.uuid().notNull(),
@@ -281,8 +266,7 @@ export function up() {
     },
     primaryKey: ["user_id"],
   });
-  // TODO(dsl-v2): CHECK constraint platform_admin_roles.platform_admin_roles_role_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.platform_admin_roles ADD CONSTRAINT platform_admin_roles_role_check CHECK ((role = ANY (ARRAY['admin'::text, 'support'::text, 'billing'::text, 'readonly'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("platform_admin_roles", { schema: "zeroship" }).addCheck("platform_admin_roles_role_check", (c) => membership(c("role"), ["admin", "support", "billing", "readonly"]));
   table("platform_policies", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
