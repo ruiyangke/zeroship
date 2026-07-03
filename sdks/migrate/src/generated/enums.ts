@@ -88,6 +88,14 @@ export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uui
 export type PgArrayMembershipOp = "eq" | "ne";
 
 /**
+ * CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
+ *
+ * P1 admits only the platform `day` marker. Add more fields only with a concrete
+ * golden needing them and matching renderer/validation coverage.
+ */
+export type ExtractField = "day";
+
+/**
  * The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design
  * line 648). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
  * so a hand-crafted `.ir.json` cannot smuggle an arbitrary / injection-shaped

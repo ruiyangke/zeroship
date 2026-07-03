@@ -74,7 +74,9 @@ use std::collections::BTreeMap;
 use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
-use crate::model::expr::{BinaryOp, Expr, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp};
+use crate::model::expr::{
+    BinaryOp, Expr, ExtractField, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
+};
 use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
 
@@ -422,6 +424,72 @@ fn render_pg_regex_match(
     ))
 }
 
+fn render_extract_field(field: ExtractField) -> &'static str {
+    match field {
+        ExtractField::Day => "day",
+    }
+}
+
+fn render_extract(field: ExtractField, expr: &str, dialect: SqlDialect) -> Result<String, DmlError> {
+    if !matches!(dialect, SqlDialect::Postgres) {
+        return Err(DmlError::UnrenderableExpr(
+            "EXTRACT is PostgreSQL-only in the P1 expression DSL".to_string(),
+        ));
+    }
+    Ok(format!("EXTRACT({} FROM {expr})", render_extract_field(field)))
+}
+
+fn render_pg_interval_literal(value: &str, dialect: SqlDialect) -> Result<String, DmlError> {
+    if !matches!(dialect, SqlDialect::Postgres) {
+        return Err(DmlError::UnrenderableExpr(
+            "PG interval literal is PostgreSQL-only".to_string(),
+        ));
+    }
+    if !is_safe_pg_interval_literal(value) {
+        return Err(DmlError::UnrenderableExpr(format!(
+            "PG interval literal {value:?} is outside the strict P1 interval grammar"
+        )));
+    }
+    Ok(format!("{}::interval", sql_string_literal(value)))
+}
+
+fn is_safe_pg_interval_literal(value: &str) -> bool {
+    if value.is_empty() || value.len() > 32 || value.contains('\0') {
+        return false;
+    }
+    let Some((hours, rest)) = value.split_once(':') else {
+        return false;
+    };
+    if hours.is_empty() || hours.len() > 6 || !hours.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let Some((minutes, seconds)) = rest.split_once(':') else {
+        return false;
+    };
+    if minutes.len() != 2
+        || !minutes.bytes().all(|b| b.is_ascii_digit())
+        || minutes.parse::<u8>().map_or(true, |m| m > 59)
+    {
+        return false;
+    }
+    let (seconds_whole, fraction) = match seconds.split_once('.') {
+        Some((whole, frac)) => (whole, Some(frac)),
+        None => (seconds, None),
+    };
+    if seconds_whole.len() != 2
+        || !seconds_whole.bytes().all(|b| b.is_ascii_digit())
+        || seconds_whole.parse::<u8>().map_or(true, |s| s > 59)
+    {
+        return false;
+    }
+    if let Some(frac) = fraction {
+        if frac.is_empty() || frac.len() > 6 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
 /// The SQL spelling of a binary operator (§3.3.1 method↔node table). `Concat` is
 /// `||` — the one place PG/SQLite NULL semantics agree.
 fn binary_op_sql(op: BinaryOp) -> &'static str {
@@ -643,6 +711,11 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let e = render_expr_bound(expr, ctx)?;
             format!("pg_column_size({e})")
         }
+        Expr::Extract { field, expr } => {
+            let e = render_expr_bound(expr, ctx)?;
+            render_extract(*field, &e, ctx.dialect)?
+        }
+        Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, ctx.dialect)?,
     })
 }
 
@@ -805,6 +878,11 @@ where
             }
             format!("pg_column_size({})", render_expr_inline_with_col(expr, dialect, col_ref)?)
         }
+        Expr::Extract { field, expr } => {
+            let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
+            render_extract(*field, &e, dialect)?
+        }
+        Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, dialect)?,
     })
 }
 

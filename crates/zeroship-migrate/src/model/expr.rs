@@ -11,7 +11,8 @@
 //! The variants are exactly:
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
-//! Cast | PgArrayMembership | PgRegexMatch | PgColumnSize`.
+//! Cast | PgArrayMembership | PgRegexMatch | PgColumnSize | Extract |
+//! PgIntervalLiteral`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -173,6 +174,17 @@ pub enum PgArrayMembershipOp {
     Ne,
 }
 
+/// CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
+///
+/// P1 admits only the platform `day` marker. Add more fields only with a concrete
+/// golden needing them and matching renderer/validation coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtractField {
+    /// Day-of-month field.
+    Day,
+}
+
 /// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,
 /// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO `flatten`
 /// — same discipline as [`Op`](crate::model::ir::Op), so schemars derives a clean
@@ -270,6 +282,19 @@ pub enum Expr {
     PgColumnSize {
         /// The expression whose on-disk size Postgres should measure.
         expr: Box<Expr>,
+    },
+    /// **PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.
+    Extract {
+        /// Closed EXTRACT field.
+        field: ExtractField,
+        /// Source expression.
+        expr: Box<Expr>,
+    },
+    /// **PG-ONLY** interval literal rendered as `'<safe>'::interval`.
+    PgIntervalLiteral {
+        /// A strictly-validated interval literal. P1 admits only time-like
+        /// `HH:MM:SS[.ffffff]` values such as `00:01:00`.
+        value: String,
     },
 }
 

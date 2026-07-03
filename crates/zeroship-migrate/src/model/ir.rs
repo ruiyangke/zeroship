@@ -465,6 +465,8 @@ pub enum ColType {
     Json,
     /// Timestamp (with time zone on PG).
     Timestamp,
+    /// Narrow SQL `date`, admitted only as a PostgreSQL domain base type.
+    Date,
     /// UUID.
     Uuid,
     /// Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).
