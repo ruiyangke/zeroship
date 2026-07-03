@@ -484,7 +484,7 @@ pub fn validate_op_scoped(
     let check_index_element =
         |element: &IndexElement, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
             match element {
-                IndexElement::Column { name } => {
+                IndexElement::Column { name, .. } => {
                     let col = crate::model::expr::Expr::ColRef { name: name.clone() };
                     validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
                 }
@@ -4100,7 +4100,10 @@ mod tests {
                 constraints: vec![],
                 indexes: vec![IrIndex {
                     name: None,
-                    columns: vec![IndexElement::Column { name: "first".into() }],
+                    columns: vec![IndexElement::Column {
+                        name: "first".into(),
+                        order: None,
+                    }],
                     unique: None,
                     using: None,
                     r#where: Some(Expr::UnaryOp {
@@ -4167,7 +4170,10 @@ mod tests {
             constraints: vec![],
             indexes: vec![IrIndex {
                 name: None,
-                columns: vec![IndexElement::Column { name: "first".into() }],
+                columns: vec![IndexElement::Column {
+                    name: "first".into(),
+                    order: None,
+                }],
                 unique: Some(true),
                 using: None,
                 // the canonical soft-delete partial-unique predicate
@@ -4288,7 +4294,10 @@ mod tests {
         // must now reach it. An out-of-envelope splitPart there must reject.
         let ir = ir_with(vec![Op::CreateIndex {
             table: "users".into(),
-            columns: vec![IndexElement::Column { name: "a".into() }],
+            columns: vec![IndexElement::Column {
+                name: "a".into(),
+                order: None,
+            }],
             name: None,
             unique: None,
             using: None,

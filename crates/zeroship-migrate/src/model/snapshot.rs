@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    ColType, IdentityCol, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
+    ColType, IdentityCol, IndexSortOrder, SafeI64, SafeU64, SequenceOwnedBy,
+    TableRuntimeOptions,
 };
 
 /// One column of a table, as introspected from `information_schema.columns`.
@@ -141,7 +142,12 @@ impl std::hash::Hash for ColumnSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IndexElementSnapshot {
     /// Plain column key.
-    Column(String),
+    Column {
+        /// Column name.
+        name: String,
+        /// Optional per-column sort order. `None` is canonical ASC/default.
+        order: Option<IndexSortOrder>,
+    },
     /// Expression key.
     Expr(String),
 }
@@ -150,7 +156,23 @@ impl IndexElementSnapshot {
     /// Plain column key.
     #[must_use]
     pub fn column(name: impl Into<String>) -> Self {
-        Self::Column(name.into())
+        Self::Column {
+            name: name.into(),
+            order: None,
+        }
+    }
+
+    /// Plain column key with explicit sort order. ASC canonicalizes to the
+    /// default/absent representation; only DESC is preserved.
+    #[must_use]
+    pub fn column_ordered(name: impl Into<String>, order: IndexSortOrder) -> Self {
+        match order {
+            IndexSortOrder::Asc => Self::column(name),
+            IndexSortOrder::Desc => Self::Column {
+                name: name.into(),
+                order: Some(IndexSortOrder::Desc),
+            },
+        }
     }
 
     /// Expression key.
@@ -208,12 +230,28 @@ pub(crate) fn index_elements_canonically_eq(
 ) -> bool {
     left.len() == right.len()
         && left.iter().zip(right).all(|(a, b)| match (a, b) {
-            (IndexElementSnapshot::Column(a), IndexElementSnapshot::Column(b)) => a == b,
+            (
+                IndexElementSnapshot::Column {
+                    name: a,
+                    order: order_a,
+                },
+                IndexElementSnapshot::Column {
+                    name: b,
+                    order: order_b,
+                },
+            ) => a == b && canonical_index_sort_order(*order_a) == canonical_index_sort_order(*order_b),
             (IndexElementSnapshot::Expr(a), IndexElementSnapshot::Expr(b)) => {
                 canonical_index_sql_text(a) == canonical_index_sql_text(b)
             }
             _ => false,
         })
+}
+
+pub(crate) fn canonical_index_sort_order(order: Option<IndexSortOrder>) -> Option<IndexSortOrder> {
+    match order {
+        Some(IndexSortOrder::Desc) => Some(IndexSortOrder::Desc),
+        Some(IndexSortOrder::Asc) | None => None,
+    }
 }
 
 pub(crate) fn index_predicates_canonically_eq(left: Option<&str>, right: Option<&str>) -> bool {
@@ -276,9 +314,10 @@ impl std::hash::Hash for IndexSnapshot {
         self.columns.hash(state);
         for element in &self.elements {
             match element {
-                IndexElementSnapshot::Column(name) => {
+                IndexElementSnapshot::Column { name, order } => {
                     0_u8.hash(state);
                     name.hash(state);
+                    canonical_index_sort_order(*order).hash(state);
                 }
                 IndexElementSnapshot::Expr(expr) => {
                     1_u8.hash(state);
@@ -300,7 +339,7 @@ impl IndexSnapshot {
         Self {
             name: name.into(),
             unique,
-            elements: columns.iter().cloned().map(IndexElementSnapshot::Column).collect(),
+            elements: columns.iter().cloned().map(IndexElementSnapshot::column).collect(),
             columns,
             access_method: "btree".to_string(),
             predicate: None,

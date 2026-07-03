@@ -225,8 +225,8 @@ pub use model::snapshot::{
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use model::ir::{
     CanonicalOpList, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
-    ExclusionMethod, ExclusionOperator, GeneratedCol, IdentityCol, IndexElement,
-    IndexMethod, IrBatch, IrClassification, IrColumn, IrConstraint, IrConstraintKind,
+    ExclusionMethod, ExclusionOperator, GeneratedCol, IdentityCol, IndexElement, IndexMethod,
+    IndexSortOrder, IrBatch, IrClassification, IrColumn, IrConstraint, IrConstraintKind,
     IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar, IrValue, IrVersionError,
     MigrationIr, Op, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SynthDefaultFn,
     TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness, VectorMetric,

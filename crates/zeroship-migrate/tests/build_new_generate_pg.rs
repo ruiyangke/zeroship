@@ -278,7 +278,11 @@ async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
         gen.ir.ops.iter().any(|o| matches!(
             o,
             Op::CreateIndex { columns, .. }
-                if columns == &vec![IndexElement::Column { name: "email".to_string() }]
+                if columns
+                    == &vec![IndexElement::Column {
+                        name: "email".to_string(),
+                        order: None,
+                    }]
         )),
         "the unique-field index must be synthesized as a createIndex op; ops: {:?}",
         gen.ir.ops

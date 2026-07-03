@@ -315,7 +315,10 @@ fn fold_tracks_and_clears_table_and_column_comments() {
 }
 
 fn idx_col(name: &str) -> IndexElement {
-    IndexElement::Column { name: name.to_string() }
+    IndexElement::Column {
+        name: name.to_string(),
+        order: None,
+    }
 }
 
 fn lower_email_expr() -> Expr {

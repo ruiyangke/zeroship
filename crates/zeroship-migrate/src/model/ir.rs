@@ -905,12 +905,28 @@ pub enum IndexElement {
     Column {
         /// Column name.
         name: String,
+        /// Optional per-column sort order. `None` is the SQL default (`ASC`) and
+        /// serializes identically to the pre-order wire shape.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<IndexSortOrder>,
     },
     /// A closed expression key.
     Expr {
         /// Expression AST.
         expr: Expr,
     },
+}
+
+/// CLOSED per-column index sort-order set. Omitted means the SQL default
+/// (`ASC`); renderers spell only `DESC` so default ASC stays byte-identical to
+/// the pre-order SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum IndexSortOrder {
+    /// Ascending order (the SQL default).
+    Asc,
+    /// Descending order.
+    Desc,
 }
 
 /// CLOSED exclusion access-method set. PostgreSQL supports more methods, but the
