@@ -906,6 +906,15 @@ export function membership(expr, values) {
   });
 }
 
+export function notMembership(expr, values) {
+  return chain({
+    node: "pgArrayMembership",
+    expr: exprArg(expr),
+    op: "ne",
+    elems: textLiteralArray(values, "notMembership(values)"),
+  });
+}
+
 export function lit(value) {
   return chain({ node: "literal", value: toIrScalar(value) });
 }

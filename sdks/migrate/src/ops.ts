@@ -981,6 +981,15 @@ export function membership(expr: unknown, values: readonly string[]): ExprChainT
   });
 }
 
+export function notMembership(expr: unknown, values: readonly string[]): ExprChainType {
+  return chain({
+    node: "pgArrayMembership",
+    expr: exprArg(expr),
+    op: "ne",
+    elems: textLiteralArray(values, "notMembership(values)"),
+  });
+}
+
 export function lit(value: ScalarValue): ExprChainType {
   return chain({ node: "literal", value: toIrScalar(value) });
 }
