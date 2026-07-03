@@ -421,6 +421,12 @@ export function up() {
     "expr_amount_nonnegative",
     (c) => c("amount_cents").ge(0),
   );
+
+  // Partial index whose predicate is a notMembership (<> ALL) — mirrors the
+  // platform wake_jobs partial indexes.
+  table("expr_surface", { schema: "zeroship" })
+    .index("expr_status_partial_idx")
+    .add({ columns: ["status"], where: (c) => notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]) });
 }
 "#;
 
@@ -728,6 +734,21 @@ async fn constraint_definition(
     rows.first().map(|row| row.get::<_, String>(0))
 }
 
+async fn index_definition(conn: &Client, schema: &str, index: &str) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT pg_get_indexdef(i.indexrelid) \
+             FROM pg_index i \
+             JOIN pg_class ic ON ic.oid = i.indexrelid \
+             JOIN pg_namespace n ON n.oid = ic.relnamespace \
+             WHERE n.nspname = $1 AND ic.relname = $2",
+            &[&schema, &index],
+        )
+        .await
+        .expect("query pg_get_indexdef");
+    rows.first().map(|row| row.get::<_, String>(0))
+}
+
 async fn trigger_exists(conn: &Client, schema: &str, table: &str, trigger: &str) -> bool {
     !conn
         .query(
@@ -1030,6 +1051,16 @@ async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
             "{constraint} should round-trip through pg_get_constraintdef"
         );
     }
+
+    assert_eq!(
+        index_definition(&conn, "zeroship", "expr_status_partial_idx")
+            .await
+            .as_deref(),
+        Some(
+            "CREATE INDEX expr_status_partial_idx ON zeroship.expr_surface USING btree (status) WHERE (status <> ALL (ARRAY['snapshotted'::text, 'snapshotted_suspect'::text]))"
+        ),
+        "notMembership partial-index predicate round-trips through pg_get_indexdef"
+    );
 
     reset(&conn, &meta).await;
     global_lock.release().await;

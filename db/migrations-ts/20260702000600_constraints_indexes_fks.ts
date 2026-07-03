@@ -1,4 +1,4 @@
-import { table } from "@zeroship/migrate";
+import { notMembership, table } from "@zeroship/migrate";
 import { raw } from "@zeroship/migrate/pg";
 
 export const name = "constraints_indexes_fks";
@@ -204,13 +204,10 @@ export function up() {
   raw({ sql: "CREATE INDEX sandboxes_status_lessee_idx ON zeroship.sandboxes USING btree (status, lessee_updated_at) WHERE (status = ANY (ARRAY['snapshotting'::text, 'restoring'::text, 'restoring_cold'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
   table("signing_keys", { schema: "zeroship" }).index("signing_keys_status_idx").add({ columns: ["status"] });
   table("usage_aggregates", { schema: "zeroship" }).index("usage_aggregates_period_idx").add({ columns: ["period", "app_id"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX wake_jobs_lessee_idx ON zeroship.wake_jobs USING btree (lessee_updated_at) WHERE (state <> ALL (ARRAY['ok'::text, 'failed'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("wake_jobs", { schema: "zeroship" }).index("wake_jobs_lessee_idx").add({ columns: ["lessee_updated_at"], where: (c) => notMembership(c("state"), ["ok", "failed"]) });
   table("wake_jobs", { schema: "zeroship" }).index("wake_jobs_sandbox_idx").add({ columns: ["sandbox_id"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE UNIQUE INDEX wake_jobs_sandbox_pending_uniq ON zeroship.wake_jobs USING btree (sandbox_id) WHERE (state <> ALL (ARRAY['ok'::text, 'failed'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX wake_jobs_state_idx ON zeroship.wake_jobs USING btree (state) WHERE (state <> ALL (ARRAY['ok'::text, 'failed'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("wake_jobs", { schema: "zeroship" }).index("wake_jobs_sandbox_pending_uniq").add({ columns: ["sandbox_id"], unique: true, where: (c) => notMembership(c("state"), ["ok", "failed"]) });
+  table("wake_jobs", { schema: "zeroship" }).index("wake_jobs_state_idx").add({ columns: ["state"], where: (c) => notMembership(c("state"), ["ok", "failed"]) });
   table("wake_jobs", { schema: "zeroship" }).index("wake_jobs_updated_at_idx").add({ columns: ["updated_at"] });
   table("app_env_expose", { schema: "zeroship" }).foreignKey("app_env_expose_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   table("app_members", { schema: "zeroship" }).foreignKey("app_members_added_by_fkey").add({ columns: ["added_by"], references: { table: "users", columns: ["id"] } });
