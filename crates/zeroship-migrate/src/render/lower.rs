@@ -2743,7 +2743,7 @@ impl IrAuthor {
     /// extra index to appear in the live catalog.
     ///
     /// Each spec is built byte-identically to its stand-alone-op equivalent (a
-    /// table-level FK reuses [`crate::render::declarative::ir_fk_constraint_snapshot`], a
+    /// table-level FK reuses [`crate::render::declarative::ir_fk_constraint_snapshot_for_columns`], a
     /// UNIQUE reuses the `UNIQUE (cols)` body + `<table>_<cols>_key` derived name a
     /// stand-alone `addConstraint(unique)` uses), so an op-authored table and the
     /// differ's equivalent re-diff clean.
@@ -2797,30 +2797,17 @@ impl IrAuthor {
                             "validated SQLite createTable table-level FOREIGN KEY reached lower",
                         ));
                     }
-                    // The render path (`fk_clause`) references the target's `id`
-                    // single-column, so only a single local column FK is supported.
-                    let local = columns.first().ok_or(IrLowerError::UnsupportedOp(
+                    if columns.is_empty() {
+                        return Err(IrLowerError::UnsupportedOp(
                         "validated createTable FOREIGN KEY with no local column reached lower",
-                    ))?;
-                    if columns.len() != 1 {
-                        return Err(IrLowerError::UnsupportedOp(
-                            "validated createTable multi-column FOREIGN KEY reached lower",
                         ));
                     }
-                    // The reference must be the target's `id` (the only shape
-                    // `fk_clause` renders); anything else is refused, not dropped.
-                    if !(references_columns.is_empty()
-                        || (references_columns.len() == 1 && references_columns[0] == "id"))
-                    {
-                        return Err(IrLowerError::UnsupportedOp(
-                            "validated createTable FOREIGN KEY referencing non-id reached lower",
-                        ));
-                    }
-                    let fk = crate::render::declarative::ir_fk_constraint_snapshot(
+                    let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
                         eff_schema,
                         c.name.as_deref(),
-                        local,
+                        columns,
                         references_table,
+                        references_columns,
                         on_delete.map(RefAction::as_token),
                         on_update.map(RefAction::as_token),
                         self.dialect,
@@ -3379,21 +3366,9 @@ impl IrAuthor {
                 on_delete,
                 on_update,
             } => {
-                // PR1 single-column FK (the `ref` shape references the target's
-                // `id`); a multi-column FK is a later wave.
-                let local = columns.first().ok_or(IrLowerError::UnsupportedOp(
-                    "validated addConstraint(fk) with no local column reached lower",
-                ))?;
-                if columns.len() != 1 {
+                if columns.is_empty() {
                     return Err(IrLowerError::UnsupportedOp(
-                        "validated addConstraint(fk) multi-column reached lower",
-                    ));
-                }
-                if !(references_columns.is_empty()
-                    || (references_columns.len() == 1 && references_columns[0] == "id"))
-                {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "validated addConstraint(fk) referencing non-id reached lower",
+                        "validated addConstraint(fk) with no local column reached lower",
                     ));
                 }
                 // **PR10** — the FK references resolve in the SAME effective schema
@@ -3402,11 +3377,12 @@ impl IrAuthor {
                 // **C1** — thread the referential actions into the snapshot so the
                 // imperative `addConstraint(fk)` path renders `ON DELETE …` /
                 // `ON UPDATE …` (parity with the declarative `ref` path).
-                let fk = crate::render::declarative::ir_fk_constraint_snapshot(
+                let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
                     eff_schema,
                     name,
-                    local,
+                    columns,
                     references_table,
+                    references_columns,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
                     self.dialect,
@@ -4930,16 +4906,14 @@ fn ir_constraint_name_and_kind(
 ) -> (String, String) {
     let explicit = constraint.name.as_deref();
     match &constraint.kind {
-        IrConstraintKind::Fk { columns, references_table, .. } => {
+        IrConstraintKind::Fk { columns, references_table, references_columns, .. } => {
             // Reuse the shared FK snapshot so the name derivation is byte-identical
-            // to `lower_add_constraint`'s `ir_fk_constraint_snapshot` call (the
-            // single-column FK names off the local column as `<col>_fkey`).
-            let local = columns.first().map_or("", String::as_str);
+            // to `lower_add_constraint`'s `ir_fk_constraint_snapshot_for_columns` call.
             // Name derivation is independent of the referential actions (it keys on
             // the local column / explicit name), so `None, None` keeps the derived
             // `<col>_fkey` byte-identical to the lowered FK's name.
-            let snap = crate::render::declarative::ir_fk_constraint_snapshot(
-                "", explicit, local, references_table, None, None, dialect,
+            let snap = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+                "", explicit, columns, references_table, references_columns, None, None, dialect,
             );
             (snap.name, "FOREIGN KEY".to_string())
         }

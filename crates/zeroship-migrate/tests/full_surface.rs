@@ -98,7 +98,7 @@ fn addforeignkey_field_order_independent() {
     let src_a = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("orders").foreignKey("orders_customer_fk").add({
+            table("orders").addForeignKey("orders_customer_fk", {
                 columns: ["customer_id"],
                 references: { table: "customers", columns: ["id"] },
             });
@@ -126,6 +126,36 @@ fn addforeignkey_field_order_independent() {
     assert_eq!(kind.get("kind").unwrap(), "fk");
     assert_eq!(kind.get("referencesTable").unwrap(), "customers");
     assert_eq!(kind.get("referencesColumns").unwrap(), &serde_json::json!(["id"]));
+}
+
+#[test]
+fn addforeignkey_records_composite_non_id_fk() {
+    let src = r#"
+        import { table } from "@zeroship/migrate";
+        export default { name: "n", up() {
+            table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+                columns: ["invoice_id", "app_id", "segment_no"],
+                references: {
+                    schema: "zeroship",
+                    table: "invoice_lines",
+                    columns: ["invoice_id", "app_id", "segment_no"],
+                },
+                onDelete: "cascade",
+            });
+        }};
+    "#;
+    let ir = record(src, "fk_composite");
+    let op = &ops(&ir)[0];
+    let kind = op.get("constraint").unwrap().get("kind").unwrap();
+    assert_eq!(op.get("schema").unwrap(), "zeroship");
+    assert_eq!(kind.get("kind").unwrap(), "fk");
+    assert_eq!(kind.get("columns").unwrap(), &serde_json::json!(["invoice_id", "app_id", "segment_no"]));
+    assert_eq!(kind.get("referencesTable").unwrap(), "invoice_lines");
+    assert_eq!(
+        kind.get("referencesColumns").unwrap(),
+        &serde_json::json!(["invoice_id", "app_id", "segment_no"])
+    );
+    assert!(kind.get("schema").is_none(), "reference schema is not part of the frozen FK kind");
 }
 
 /// A migration that omits `name` records the host-supplied filename-derived label

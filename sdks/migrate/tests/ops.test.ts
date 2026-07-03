@@ -206,6 +206,28 @@ test(".foreignKey().add() field order is irrelevant (named fields, not positiona
   assert.equal(a[0].constraint.kind.referencesTable, "customers");
 });
 
+test(".addForeignKey() records composite/non-id references without serializing reference schema", () => {
+  const ops = record(() =>
+    table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+      columns: ["invoice_id", "app_id", "segment_no"],
+      references: {
+        schema: "zeroship",
+        table: "invoice_lines",
+        columns: ["invoice_id", "app_id", "segment_no"],
+      },
+      onDelete: "cascade",
+    }),
+  );
+
+  assert.deepEqual(ops[0].constraint.kind, {
+    kind: "fk",
+    columns: ["invoice_id", "app_id", "segment_no"],
+    referencesTable: "invoice_lines",
+    referencesColumns: ["invoice_id", "app_id", "segment_no"],
+    onDelete: "cascade",
+  });
+});
+
 test("C1 — .foreignKey().add({ onDelete }) emits onDelete/onUpdate; absent ⇒ omitted", () => {
   const withAction = record(() =>
     table("orders").foreignKey("fk").add({
