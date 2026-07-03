@@ -131,21 +131,28 @@ describe("t type builder", () => {
     assert.equal(def.refTarget, "users");
   });
 
-  test("t.ref defaults to onDelete=restrict and onUpdate=restrict", () => {
+  test("t.ref omits default action policies", () => {
     const def = t.ref("users").toFieldDef();
-    assert.equal(def.onDelete, "restrict");
-    assert.equal(def.onUpdate, "restrict");
+    assert.equal("onDelete" in def, false);
+    assert.equal("onUpdate" in def, false);
   });
 
-  test("t.ref defaults to deferrable=true", () => {
+  test("t.ref omits default deferrable policy", () => {
     const def = t.ref("users").toFieldDef();
-    assert.equal(def.deferrable, true);
+    assert.equal("deferrable" in def, false);
   });
 
   test("t.ref accepts onDelete override", () => {
     const def = t.ref("users", { onDelete: "cascade" }).toFieldDef();
     assert.equal(def.onDelete, "cascade");
+    assert.equal("onUpdate" in def, false);
+    assert.equal("deferrable" in def, false);
+  });
+
+  test("t.ref accepts explicit onUpdate restrict and deferrable=true", () => {
+    const def = t.ref("users", { onUpdate: "restrict", deferrable: true }).toFieldDef();
     assert.equal(def.onUpdate, "restrict");
+    assert.equal(def.deferrable, true);
   });
 
   test("t.ref accepts deferrable=false override", () => {

@@ -747,15 +747,13 @@ export type FieldDefaultValue = string | number | boolean | Date | null | PlainO
 /**
  * Foreign-key action policy for `t.ref()` (proposal B2).
  *
- * - `restrict`  — refuse to delete the parent row if any child references it.
- *                 This is the **default** per proposal R1 (`docs/proposals/zeroship-db.md`
- *                 around line 762): silent cascading deletes are catastrophic
- *                 data-loss, so opt-in cascade is the safer default.
+ * - `restrict`  — refuse to delete/update the parent row immediately if any
+ *                 child references it.
  * - `cascade`   — child rows are deleted/updated along with the parent.
  * - `set null`  — child reference column is nulled when parent is deleted.
  *                 Only valid when the column is nullable.
- * - `no action` — like `restrict` but check is deferrable (Postgres default
- *                 inside DEFERRABLE constraints).
+ * - `no action` — SQL/Postgres default; checks at statement end, or at
+ *                 constraint time when paired with an explicit deferrable FK.
  */
 export type FkAction = "restrict" | "cascade" | "set null" | "no action";
 
@@ -763,15 +761,15 @@ export type FkAction = "restrict" | "cascade" | "set null" | "no action";
  * Options accepted by `t.ref()` to control FK behaviour at the DB layer.
  */
 export interface RefOptions {
-  /** ON DELETE policy. Default: "restrict". */
+  /** ON DELETE policy. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
-  /** ON UPDATE policy. Default: "restrict". */
+  /** ON UPDATE policy. Omitted means SQL/Postgres `NO ACTION`. */
   onUpdate?: FkAction;
   /**
    * Emit `DEFERRABLE INITIALLY DEFERRED` for this FK so the constraint
    * check is queued until COMMIT (lets circular refs be inserted in any
-   * order within one tx). Default: `true` — flips per proposal B2's
-   * "Deferred-constraint cost" caveat which currently keeps it on.
+   * order within one tx). Omitted means the SQL/Postgres default:
+   * `NOT DEFERRABLE`.
    */
   deferrable?: boolean;
 }
@@ -813,13 +811,13 @@ export interface FieldDef {
   pattern?: RegExp;
   /** Target table name for `t.ref()`. Present iff `type === "ref"`. */
   refTarget?: string;
-  /** ON DELETE policy for `t.ref()`. Default at DDL emit time: "restrict". */
+  /** ON DELETE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
-  /** ON UPDATE policy for `t.ref()`. Default at DDL emit time: "restrict". */
+  /** ON UPDATE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
   onUpdate?: FkAction;
   /**
-   * Whether the FK is emitted DEFERRABLE INITIALLY DEFERRED. Default at
-   * DDL emit time: true (see RefOptions.deferrable).
+   * Whether the FK is emitted DEFERRABLE INITIALLY DEFERRED. Omitted
+   * means SQL/Postgres `NOT DEFERRABLE`.
    */
   deferrable?: boolean;
   /**
@@ -1411,15 +1409,16 @@ export const t = {
    * level produces `TypeBuilder<Id<T>>` so consumers get a brand-typed
    * `Id<"users">` rather than a bare `number`. At the DB level it
    * materialises a `FOREIGN KEY (<column>) REFERENCES "<schema>"."<table>"(id)`
-   * constraint with the default `ON DELETE RESTRICT` policy (proposal R1).
+   * constraint. When action policy is omitted, Postgres defaults to
+   * `NO ACTION` and the renderer omits the clause.
    *
    * `opts.onDelete` / `opts.onUpdate` override the policy, e.g.:
    * ```ts
    * { authorId: t.ref("users", { onDelete: "cascade" }) }
    * ```
    *
-   * `opts.deferrable` (default true) emits `DEFERRABLE INITIALLY DEFERRED`
-   * so circular references can be inserted in any order within one tx.
+   * `opts.deferrable: true` emits `DEFERRABLE INITIALLY DEFERRED` so
+   * circular references can be inserted in any order within one tx.
    */
   ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>> {
     if (typeof table !== "string" || table.length === 0) {
@@ -1431,9 +1430,9 @@ export const t = {
     return new TypeBuilder<Id<T>>({
       type: "ref",
       refTarget: table,
-      onDelete: opts?.onDelete ?? "restrict",
-      onUpdate: opts?.onUpdate ?? "restrict",
-      deferrable: opts?.deferrable ?? true,
+      ...(opts?.onDelete !== undefined ? { onDelete: opts.onDelete } : {}),
+      ...(opts?.onUpdate !== undefined ? { onUpdate: opts.onUpdate } : {}),
+      ...(opts?.deferrable !== undefined ? { deferrable: opts.deferrable } : {}),
     });
   },
   /**
