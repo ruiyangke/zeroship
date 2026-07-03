@@ -43,10 +43,13 @@ use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnSnapshot,
     ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
-    NamedTypeSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    NamedTypeSnapshot, PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
     SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use crate::model::ir::{IndexSortOrder, SafeI64, SafeU64, SequenceOwnedBy};
+use crate::model::ir::{
+    IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec,
+    SafeI64, SafeU64, SequenceOwnedBy,
+};
 
 // ---------------------------------------------------------------------------
 // B1 — checksum / tamper / orphan drift
@@ -358,21 +361,275 @@ fn is_internal_column_comment_sentinel(comment: &str) -> bool {
     comment.starts_with("__zsmask:") || comment.starts_with("zsenc:")
 }
 
+fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let trimmed = s.trim_start();
+    trimmed
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &trimmed[prefix.len()..])
+}
+
+fn take_parenthesized(s: &str) -> Option<(&str, &str)> {
+    let trimmed = s.trim_start();
+    if !trimmed.starts_with('(') {
+        return None;
+    }
+
+    let mut chars = trimmed.char_indices().peekable();
+    let (_, first) = chars.next()?;
+    debug_assert_eq!(first, '(');
+
+    let mut depth = 1_u32;
+    let mut in_quote = false;
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '\'' if in_quote => {
+                if matches!(chars.peek(), Some((_, '\''))) {
+                    chars.next();
+                } else {
+                    in_quote = false;
+                }
+            }
+            '\'' => in_quote = true,
+            '(' if !in_quote => depth += 1,
+            ')' if !in_quote => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&trimmed[1..idx], &trimmed[idx + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_pg_value_list(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0_usize;
+    let mut in_quote = false;
+    let mut chars = s.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '\'' if in_quote => {
+                if matches!(chars.peek(), Some((_, '\''))) {
+                    chars.next();
+                } else {
+                    in_quote = false;
+                }
+            }
+            '\'' => in_quote = true,
+            ',' if !in_quote => {
+                let value = s[start..idx].trim();
+                if !value.is_empty() {
+                    out.push(value.to_string());
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let value = s[start..].trim();
+    if !value.is_empty() {
+        out.push(value.to_string());
+    }
+    out
+}
+
+fn parse_pg_quoted_string(s: &str) -> Option<(String, &str)> {
+    let trimmed = s.trim_start();
+    if !trimmed.starts_with('\'') {
+        return None;
+    }
+
+    let mut value = String::new();
+    let mut chars = trimmed.char_indices().peekable();
+    chars.next();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\'' {
+            if matches!(chars.peek(), Some((_, '\''))) {
+                chars.next();
+                value.push('\'');
+            } else {
+                return Some((value, &trimmed[idx + 1..]));
+            }
+        } else {
+            value.push(ch);
+        }
+    }
+    None
+}
+
+fn parse_partition_bound_value_pg(raw: &str) -> Result<PartitionBoundValue, String> {
+    let value = raw.trim();
+    if value.eq_ignore_ascii_case("MINVALUE") {
+        return Ok(PartitionBoundValue::MinValue);
+    }
+    if value.eq_ignore_ascii_case("MAXVALUE") {
+        return Ok(PartitionBoundValue::MaxValue);
+    }
+    if let Some((quoted, trailing)) = parse_pg_quoted_string(value) {
+        let trailing = trailing.trim();
+        if trailing.is_empty() || trailing.starts_with("::") {
+            return Ok(PartitionBoundValue::String { value: quoted });
+        }
+        return Err(format!("unsupported partition bound literal `{raw}`"));
+    }
+    if let Ok(n) = value.parse::<i64>() {
+        return Ok(PartitionBoundValue::Int {
+            value: SafeI64::new(n)?,
+        });
+    }
+    Ok(PartitionBoundValue::String {
+        value: value.to_string(),
+    })
+}
+
+fn parse_partition_bound_values_pg(raw: &str) -> Result<Vec<PartitionBoundValue>, String> {
+    split_pg_value_list(raw)
+        .iter()
+        .map(|value| parse_partition_bound_value_pg(value))
+        .collect()
+}
+
+fn parse_partition_bounds_pg(raw: &str) -> Result<PartitionBounds, String> {
+    let s = raw.trim();
+    if s.eq_ignore_ascii_case("DEFAULT") {
+        return Ok(PartitionBounds::Default);
+    }
+
+    let rest = strip_prefix_ci(s, "FOR VALUES")
+        .ok_or_else(|| format!("unsupported partition bounds `{raw}`"))?;
+    if let Some(after_from) = strip_prefix_ci(rest, "FROM") {
+        let (from_raw, after_from_values) = take_parenthesized(after_from)
+            .ok_or_else(|| format!("invalid RANGE partition lower bound `{raw}`"))?;
+        let after_to = strip_prefix_ci(after_from_values, "TO")
+            .ok_or_else(|| format!("missing RANGE partition upper bound `{raw}`"))?;
+        let (to_raw, trailing) = take_parenthesized(after_to)
+            .ok_or_else(|| format!("invalid RANGE partition upper bound `{raw}`"))?;
+        if !trailing.trim().is_empty() {
+            return Err(format!("unsupported trailing RANGE partition text `{raw}`"));
+        }
+        return Ok(PartitionBounds::Range {
+            from: parse_partition_bound_values_pg(from_raw)?,
+            to: parse_partition_bound_values_pg(to_raw)?,
+        });
+    }
+
+    if let Some(after_in) = strip_prefix_ci(rest, "IN") {
+        let (values_raw, trailing) = take_parenthesized(after_in)
+            .ok_or_else(|| format!("invalid LIST partition bounds `{raw}`"))?;
+        if !trailing.trim().is_empty() {
+            return Err(format!("unsupported trailing LIST partition text `{raw}`"));
+        }
+        return Ok(PartitionBounds::List {
+            values: parse_partition_bound_values_pg(values_raw)?,
+        });
+    }
+
+    if let Some(after_with) = strip_prefix_ci(rest, "WITH") {
+        let (params_raw, trailing) = take_parenthesized(after_with)
+            .ok_or_else(|| format!("invalid HASH partition bounds `{raw}`"))?;
+        if !trailing.trim().is_empty() {
+            return Err(format!("unsupported trailing HASH partition text `{raw}`"));
+        }
+        let mut modulus = None;
+        let mut remainder = None;
+        for token in split_pg_value_list(params_raw) {
+            let normalized = token.replace('=', " ");
+            let parts = normalized.split_whitespace().collect::<Vec<_>>();
+            if parts.len() != 2 {
+                return Err(format!("invalid HASH partition parameter `{token}`"));
+            }
+            if parts[0].eq_ignore_ascii_case("MODULUS") {
+                modulus = Some(
+                    parts[1]
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid HASH partition modulus `{token}`"))?,
+                );
+            } else if parts[0].eq_ignore_ascii_case("REMAINDER") {
+                remainder = Some(
+                    parts[1]
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid HASH partition remainder `{token}`"))?,
+                );
+            }
+        }
+        return Ok(PartitionBounds::Hash {
+            modulus: modulus.ok_or_else(|| format!("missing HASH partition modulus `{raw}`"))?,
+            remainder: remainder
+                .ok_or_else(|| format!("missing HASH partition remainder `{raw}`"))?,
+        });
+    }
+
+    Err(format!("unsupported partition bounds `{raw}`"))
+}
+
+fn parse_index_storage_params_pg(
+    reloptions: Option<Vec<String>>,
+) -> Result<Option<IndexStorageParams>, DriftError> {
+    let mut params = IndexStorageParams::default();
+    for option in reloptions.unwrap_or_default() {
+        let Some((key, value)) = option.split_once('=') else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("pages_per_range") {
+            params.pages_per_range = Some(value.parse::<u32>().map_err(|_| {
+                DriftError::Snapshot(format!("invalid index pages_per_range reloption `{option}`"))
+            })?);
+        } else if key.eq_ignore_ascii_case("fillfactor") {
+            params.fillfactor = Some(value.parse::<u32>().map_err(|_| {
+                DriftError::Snapshot(format!("invalid index fillfactor reloption `{option}`"))
+            })?);
+        }
+    }
+    Ok((!params.is_empty()).then_some(params))
+}
+
 pub async fn snapshot_schema(
     conn: &Client,
     project_schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    let mut partitions: BTreeMap<String, PartitionSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
     let mut named_types: BTreeMap<String, NamedTypeSnapshot> = BTreeMap::new();
 
+    let partition_rows = conn
+        .query(
+            "SELECT child.relname AS partition_name, parent.relname AS parent_name, \
+                    pg_get_expr(child.relpartbound, child.oid, true) AS bounds \
+             FROM pg_class child \
+             JOIN pg_namespace n ON n.oid = child.relnamespace \
+             JOIN pg_inherits inh ON inh.inhrelid = child.oid \
+             JOIN pg_class parent ON parent.oid = inh.inhparent \
+             JOIN pg_namespace pn ON pn.oid = parent.relnamespace \
+             WHERE n.nspname = $1 AND pn.nspname = $1 AND child.relispartition = true \
+               AND child.relkind IN ('r', 'p') \
+             ORDER BY child.relname",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &partition_rows {
+        let bounds_text: String = r.get("bounds");
+        partitions.insert(
+            r.get("partition_name"),
+            PartitionSnapshot {
+                of: r.get("parent_name"),
+                bounds: parse_partition_bounds_pg(&bounds_text).map_err(DriftError::Snapshot)?,
+            },
+        );
+    }
+
     // Base tables in the schema. `table_schema` is BOUND ($1), never interpolated.
+    // Child partitions are modeled separately in `SchemaSnapshot::partitions`;
+    // their columns/indexes/constraints are inherited/propagated catalog effects.
     let table_rows = conn
         .query(
             "SELECT c.relname AS table_name, obj_description(c.oid, 'pg_class') AS comment \
              FROM pg_class c \
              JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') \
+             WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relispartition = false \
              ORDER BY c.relname",
             &[&project_schema],
         )
@@ -390,6 +647,39 @@ pub async fn snapshot_schema(
             // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.
             stored_create_sql: None,
         });
+    }
+
+    let partitioned_table_rows = conn
+        .query(
+            "SELECT c.relname AS table_name, p.partstrat, \
+                    COALESCE( \
+                      array_agg(a.attname ORDER BY k.ord) FILTER (WHERE a.attname IS NOT NULL), \
+                      ARRAY[]::text[] \
+                    ) AS columns \
+             FROM pg_partitioned_table p \
+             JOIN pg_class c ON c.oid = p.partrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN unnest(p.partattrs) WITH ORDINALITY AS k(attnum, ord) ON true \
+             LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum \
+             WHERE n.nspname = $1 \
+             GROUP BY c.relname, p.partstrat \
+             ORDER BY c.relname",
+            &[&project_schema],
+        )
+        .await?;
+    for r in &partitioned_table_rows {
+        let table: String = r.get("table_name");
+        let Some(t) = tables.get_mut(&table) else {
+            continue;
+        };
+        let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
+        let partstrat: i8 = r.get("partstrat");
+        t.partition_by = match u8::try_from(partstrat).ok().map(char::from) {
+            Some('r') => Some(PartitionSpec::Range { columns }),
+            Some('l') => Some(PartitionSpec::List { columns }),
+            Some('h') => Some(PartitionSpec::Hash { columns }),
+            _ => None,
+        };
     }
 
     // Plain and materialized views in the schema. Definitions are carried as
@@ -556,7 +846,15 @@ pub async fn snapshot_schema(
                       JOIN pg_attribute att \
                         ON att.attrelid = x.indrelid AND att.attnum = k.attnum \
                       WHERE k.ord <= x.indnkeyatts AND k.attnum <> 0 \
-                    ) AS columns \
+                    ) AS columns, \
+                    ( \
+                      SELECT array_agg(att.attname ORDER BY k.ord) \
+                      FROM unnest(x.indkey) WITH ORDINALITY AS k(attnum, ord) \
+                      JOIN pg_attribute att \
+                        ON att.attrelid = x.indrelid AND att.attnum = k.attnum \
+                      WHERE k.ord > x.indnkeyatts AND k.attnum <> 0 \
+                    ) AS include, \
+                    ic.reloptions AS reloptions \
              FROM pg_index x \
              JOIN pg_class c ON c.oid = x.indrelid \
              JOIN pg_class ic ON ic.oid = x.indexrelid \
@@ -577,6 +875,8 @@ pub async fn snapshot_schema(
             // `array_agg` over an empty/all-expression key set is SQL NULL → an
             // empty column list (a wholly-expression index has no plain columns).
             let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
+            let include: Vec<String> = r.try_get("include").unwrap_or_default();
+            let reloptions: Option<Vec<String>> = r.try_get("reloptions").ok().flatten();
             let element_tokens: Vec<String> = r.try_get("elements").unwrap_or_default();
             let elements = if element_tokens.is_empty() {
                 columns.iter().cloned().map(IndexElementSnapshot::column).collect()
@@ -601,8 +901,8 @@ pub async fn snapshot_schema(
                 columns,
                 access_method: r.get("access_method"),
                 predicate: r.try_get("index_pred").ok().flatten(),
-                include: Vec::new(),
-                with: None,
+                include,
+                with: parse_index_storage_params_pg(reloptions)?,
                 only: false,
                 // Emission-only; never recovered from the catalog.
                 opclass: None,
@@ -801,7 +1101,7 @@ pub async fn snapshot_schema(
         roles,
         schemas,
         extensions,
-        partitions: Default::default(),
+        partitions,
     })
 }
 
@@ -846,6 +1146,39 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
     for name in actual.tables.keys() {
         if !expected.tables.contains_key(name) {
             unexpected.push(name.clone());
+        }
+    }
+    for name in expected.partitions.keys() {
+        if !actual.partitions.contains_key(name) {
+            missing.push(format!("partition {name}"));
+        }
+    }
+    for name in actual.partitions.keys() {
+        if !expected.partitions.contains_key(name) {
+            unexpected.push(format!("partition {name}"));
+        }
+    }
+    for (name, exp_partition) in &expected.partitions {
+        let Some(act_partition) = actual.partitions.get(name) else {
+            continue;
+        };
+        if exp_partition.of != act_partition.of {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("partition {name}"),
+                field: "of".to_string(),
+                expected: exp_partition.of.clone(),
+                actual: act_partition.of.clone(),
+            });
+        }
+        if exp_partition.bounds != act_partition.bounds {
+            altered.push(AlteredObject {
+                table: name.clone(),
+                object: format!("partition {name}"),
+                field: "bounds".to_string(),
+                expected: format!("{:?}", exp_partition.bounds),
+                actual: format!("{:?}", act_partition.bounds),
+            });
         }
     }
     for name in expected.views.keys() {
@@ -1229,8 +1562,26 @@ fn diff_attrs(
             .collect::<Vec<_>>()
             .join(",")
     };
+    let format_index_storage_params = |params: Option<&IndexStorageParams>| {
+        let Some(params) = params else {
+            return String::new();
+        };
+        let mut entries = Vec::new();
+        if let Some(pages_per_range) = params.pages_per_range {
+            entries.push(format!("pages_per_range={pages_per_range}"));
+        }
+        if let Some(fillfactor) = params.fillfactor {
+            entries.push(format!("fillfactor={fillfactor}"));
+        }
+        entries.join(",")
+    };
 
-    push("table", "comment", exp_t.comment.as_deref().unwrap_or(""), act_t.comment.as_deref().unwrap_or(""));
+    push(
+        "table",
+        "comment",
+        exp_t.comment.as_deref().unwrap_or(""),
+        act_t.comment.as_deref().unwrap_or(""),
+    );
 
     // Columns: data_type + nullable + catalog comment.
     let act_cols: BTreeMap<&str, &ColumnSnapshot> =
@@ -1283,8 +1634,10 @@ fn diff_attrs(
             if !ei.access_method.is_empty() {
                 push(&obj, "access_method", &ei.access_method, &ai.access_method);
             }
-            if !index_predicates_canonically_eq(ei.predicate.as_deref(), ai.predicate.as_deref())
-            {
+            if !index_predicates_canonically_eq(
+                ei.predicate.as_deref(),
+                ai.predicate.as_deref(),
+            ) {
                 push(
                     &obj,
                     "predicate",
@@ -1292,6 +1645,14 @@ fn diff_attrs(
                     ai.predicate.as_deref().unwrap_or(""),
                 );
             }
+            push(&obj, "include", &ei.include.join(","), &ai.include.join(","));
+            push(
+                &obj,
+                "with",
+                &format_index_storage_params(ei.with.as_ref()),
+                &format_index_storage_params(ai.with.as_ref()),
+            );
+            push(&obj, "only", &ei.only.to_string(), &ai.only.to_string());
             push(
                 &obj,
                 "comment",
