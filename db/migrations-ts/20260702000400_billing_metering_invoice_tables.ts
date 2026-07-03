@@ -1,4 +1,4 @@
-import { table, t } from "@zeroship/migrate";
+import { and, membership, or, table, t } from "@zeroship/migrate";
 import { raw } from "@zeroship/migrate/pg";
 
 export const name = "billing_metering_invoice_tables";
@@ -12,8 +12,7 @@ export function up() {
     },
     primaryKey: ["app_id"],
   });
-  // TODO(dsl-v2): CHECK constraint app_spend_limit.app_spend_limit_spend_limit_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_limit ADD CONSTRAINT app_spend_limit_spend_limit_cents_check CHECK (((spend_limit_cents IS NULL) OR (spend_limit_cents >= 0)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("app_spend_limit", { schema: "zeroship" }).addCheck("app_spend_limit_spend_limit_cents_check", (c) => or(c("spend_limit_cents").isNull(), c("spend_limit_cents").ge(0)));
   table("app_spend_state", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -29,10 +28,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_state ALTER COLUMN state TYPE zeroship.spend_state USING state::zeroship.spend_state", reason: "column app_spend_state.state uses PostgreSQL type zeroship.spend_state, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for zeroship.billing_period
   raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_state ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column app_spend_state.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint app_spend_state.app_spend_state_eval_limit_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_state ADD CONSTRAINT app_spend_state_eval_limit_cents_check CHECK ((eval_limit_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint app_spend_state.app_spend_state_spend_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_spend_state ADD CONSTRAINT app_spend_state_spend_cents_check CHECK ((spend_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("app_spend_state", { schema: "zeroship" }).addCheck("app_spend_state_eval_limit_cents_check", (c) => c("eval_limit_cents").ge(0));
+  table("app_spend_state", { schema: "zeroship" }).addCheck("app_spend_state_spend_cents_check", (c) => c("spend_cents").ge(0));
   table("billing_customer_refs", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
@@ -63,10 +60,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column billing_disputes.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   // TODO(dsl-v2): add structural column type support for zeroship.dispute_status
   raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ALTER COLUMN status TYPE zeroship.dispute_status USING status::zeroship.dispute_status", reason: "column billing_disputes.status uses PostgreSQL type zeroship.dispute_status, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint billing_disputes.billing_disputes_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ADD CONSTRAINT billing_disputes_amount_cents_check CHECK ((amount_cents > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint billing_disputes.billing_disputes_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ADD CONSTRAINT billing_disputes_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("billing_disputes", { schema: "zeroship" }).addCheck("billing_disputes_amount_cents_check", (c) => c("amount_cents").gt(0));
+  table("billing_disputes", { schema: "zeroship" }).addCheck("billing_disputes_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("billing_line_provider_refs", { schema: "zeroship" }).create({
     columns: {
       invoice_id: t.text().notNull(),
@@ -81,8 +76,7 @@ export function up() {
   });
   // TODO(dsl-v2): add structural column type support for smallint
   raw({ sql: "ALTER TABLE ONLY zeroship.billing_line_provider_refs ALTER COLUMN segment_no TYPE smallint USING segment_no::smallint", reason: "column billing_line_provider_refs.segment_no uses PostgreSQL type smallint, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint billing_line_provider_refs.billing_line_provider_refs_segment_no_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_line_provider_refs ADD CONSTRAINT billing_line_provider_refs_segment_no_check CHECK ((segment_no >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("billing_line_provider_refs", { schema: "zeroship" }).addCheck("billing_line_provider_refs_segment_no_check", (c) => c("segment_no").ge(0));
   table("billing_metrics", { schema: "zeroship" }).create({
     columns: {
       metric: t.text().notNull(),
@@ -159,10 +153,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.connect_checkout_failures ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column connect_checkout_failures.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.connect_checkout_failures ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column connect_checkout_failures.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint connect_checkout_failures.connect_checkout_failures_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.connect_checkout_failures ADD CONSTRAINT connect_checkout_failures_amount_cents_check CHECK ((amount_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint connect_checkout_failures.connect_checkout_failures_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.connect_checkout_failures ADD CONSTRAINT connect_checkout_failures_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("connect_checkout_failures", { schema: "zeroship" }).addCheck("connect_checkout_failures_amount_cents_check", (c) => c("amount_cents").ge(0));
+  table("connect_checkout_failures", { schema: "zeroship" }).addCheck("connect_checkout_failures_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("creator_billing", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
@@ -215,16 +207,11 @@ export function up() {
     },
     primaryKey: ["creator_id"],
   });
-  // TODO(dsl-v2): CHECK constraint creator_fee_policy.creator_fee_policy_cap_nonneg needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_fee_policy ADD CONSTRAINT creator_fee_policy_cap_nonneg CHECK (((cap_cents IS NULL) OR (cap_cents >= 0)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint creator_fee_policy.creator_fee_policy_floor_le_cap needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_fee_policy ADD CONSTRAINT creator_fee_policy_floor_le_cap CHECK (((floor_cents IS NULL) OR (cap_cents IS NULL) OR (floor_cents <= cap_cents)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint creator_fee_policy.creator_fee_policy_floor_nonneg needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_fee_policy ADD CONSTRAINT creator_fee_policy_floor_nonneg CHECK (((floor_cents IS NULL) OR (floor_cents >= 0)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint creator_fee_policy.creator_fee_policy_kind_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_fee_policy ADD CONSTRAINT creator_fee_policy_kind_check CHECK ((kind = ANY (ARRAY['fixed'::text, 'percent'::text])))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint creator_fee_policy.creator_fee_policy_shape needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.creator_fee_policy ADD CONSTRAINT creator_fee_policy_shape CHECK ((((kind = 'fixed'::text) AND (amount_cents IS NOT NULL) AND (amount_cents >= 0)) OR ((kind = 'percent'::text) AND (percent_bps IS NOT NULL) AND ((percent_bps >= 0) AND (percent_bps <= 10000)))))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("creator_fee_policy", { schema: "zeroship" }).addCheck("creator_fee_policy_cap_nonneg", (c) => or(c("cap_cents").isNull(), c("cap_cents").ge(0)));
+  table("creator_fee_policy", { schema: "zeroship" }).addCheck("creator_fee_policy_floor_le_cap", (c) => or(c("floor_cents").isNull(), c("cap_cents").isNull(), c("floor_cents").le(c("cap_cents"))));
+  table("creator_fee_policy", { schema: "zeroship" }).addCheck("creator_fee_policy_floor_nonneg", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0)));
+  table("creator_fee_policy", { schema: "zeroship" }).addCheck("creator_fee_policy_kind_check", (c) => membership(c("kind"), ["fixed", "percent"]));
+  table("creator_fee_policy", { schema: "zeroship" }).addCheck("creator_fee_policy_shape", (c) => or(and(c("kind").eq("fixed"), c("amount_cents").isNotNull(), c("amount_cents").ge(0)), and(c("kind").eq("percent"), c("percent_bps").isNotNull(), and(c("percent_bps").ge(0), c("percent_bps").le(10000)))));
   table("credit_ledger", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -248,10 +235,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column credit_ledger.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column credit_ledger.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint credit_ledger.credit_ledger_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ADD CONSTRAINT credit_ledger_amount_cents_check CHECK ((amount_cents <> 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint credit_ledger.credit_ledger_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ADD CONSTRAINT credit_ledger_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_amount_cents_check", (c) => c("amount_cents").ne(0));
+  table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   // TODO(dsl-v2): CHECK constraint credit_ledger.credit_ledger_grant_ref needs the Expr->SQL renderer
   raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ADD CONSTRAINT credit_ledger_grant_ref CHECK (((((kind)::text = ANY (ARRAY['consumed'::text, 'void_reversal'::text, 'refund_clawback'::text])) AND (consumed_from_grant_id IS NOT NULL)) OR (((kind)::text <> ALL (ARRAY['consumed'::text, 'void_reversal'::text, 'refund_clawback'::text])) AND (consumed_from_grant_id IS NULL))))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
   // TODO(dsl-v2): CHECK constraint credit_ledger.credit_ledger_kind_sign needs the Expr->SQL renderer
@@ -274,16 +259,11 @@ export function up() {
   });
   // TODO(dsl-v2): add structural column type support for smallint
   raw({ sql: "ALTER TABLE ONLY zeroship.invoice_lines ALTER COLUMN segment_no TYPE smallint USING segment_no::smallint", reason: "column invoice_lines.segment_no uses PostgreSQL type smallint, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint invoice_lines.invoice_lines_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_lines ADD CONSTRAINT invoice_lines_amount_cents_check CHECK ((amount_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoice_lines.invoice_lines_base_fee_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_lines ADD CONSTRAINT invoice_lines_base_fee_cents_check CHECK ((base_fee_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoice_lines.invoice_lines_fx_pico_cents_per_unit_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_lines ADD CONSTRAINT invoice_lines_fx_pico_cents_per_unit_check CHECK ((fx_pico_cents_per_unit >= 1000))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoice_lines.invoice_lines_included_units_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_lines ADD CONSTRAINT invoice_lines_included_units_check CHECK ((included_units >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoice_lines.invoice_lines_segment_no_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_lines ADD CONSTRAINT invoice_lines_segment_no_check CHECK ((segment_no >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_amount_cents_check", (c) => c("amount_cents").ge(0));
+  table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_base_fee_cents_check", (c) => c("base_fee_cents").ge(0));
+  table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_fx_pico_cents_per_unit_check", (c) => c("fx_pico_cents_per_unit").ge(1000));
+  table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_included_units_check", (c) => c("included_units").ge(0));
+  table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_segment_no_check", (c) => c("segment_no").ge(0));
   table("invoice_payments", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -302,10 +282,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column invoice_payments.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   // TODO(dsl-v2): add structural column type support for zeroship.invoice_payment_kind
   raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ALTER COLUMN kind TYPE zeroship.invoice_payment_kind USING kind::zeroship.invoice_payment_kind", reason: "column invoice_payments.kind uses PostgreSQL type zeroship.invoice_payment_kind, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint invoice_payments.invoice_payments_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ADD CONSTRAINT invoice_payments_amount_cents_check CHECK ((amount_cents <> 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoice_payments.invoice_payments_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ADD CONSTRAINT invoice_payments_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("invoice_payments", { schema: "zeroship" }).addCheck("invoice_payments_amount_cents_check", (c) => c("amount_cents").ne(0));
+  table("invoice_payments", { schema: "zeroship" }).addCheck("invoice_payments_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("invoices", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -332,18 +310,12 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column invoices.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column invoices.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint invoices.invoice_total_balances needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ADD CONSTRAINT invoice_total_balances CHECK ((total_cents = ((subtotal_cents - credit_cents) + tax_cents)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoices.invoices_credit_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ADD CONSTRAINT invoices_credit_cents_check CHECK ((credit_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoices.invoices_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ADD CONSTRAINT invoices_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoices.invoices_subtotal_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ADD CONSTRAINT invoices_subtotal_cents_check CHECK ((subtotal_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoices.invoices_tax_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ADD CONSTRAINT invoices_tax_cents_check CHECK ((tax_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint invoices.invoices_total_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ADD CONSTRAINT invoices_total_cents_check CHECK ((total_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("invoices", { schema: "zeroship" }).addCheck("invoice_total_balances", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")).add(c("tax_cents"))));
+  table("invoices", { schema: "zeroship" }).addCheck("invoices_credit_cents_check", (c) => c("credit_cents").ge(0));
+  table("invoices", { schema: "zeroship" }).addCheck("invoices_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
+  table("invoices", { schema: "zeroship" }).addCheck("invoices_subtotal_cents_check", (c) => c("subtotal_cents").ge(0));
+  table("invoices", { schema: "zeroship" }).addCheck("invoices_tax_cents_check", (c) => c("tax_cents").ge(0));
+  table("invoices", { schema: "zeroship" }).addCheck("invoices_total_cents_check", (c) => c("total_cents").ge(0));
   table("metering_exports", { schema: "zeroship" }).create({
     columns: {
       creator_id: t.uuid().notNull(),
@@ -358,10 +330,8 @@ export function up() {
   });
   // TODO(dsl-v2): add structural column type support for zeroship.billing_period
   raw({ sql: "ALTER TABLE ONLY zeroship.metering_exports ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column metering_exports.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint metering_exports.metering_exports_consecutive_failures_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.metering_exports ADD CONSTRAINT metering_exports_consecutive_failures_check CHECK ((consecutive_failures >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint metering_exports.metering_exports_exported_units_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.metering_exports ADD CONSTRAINT metering_exports_exported_units_check CHECK ((exported_units >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("metering_exports", { schema: "zeroship" }).addCheck("metering_exports_consecutive_failures_check", (c) => c("consecutive_failures").ge(0));
+  table("metering_exports", { schema: "zeroship" }).addCheck("metering_exports_exported_units_check", (c) => c("exported_units").ge(0));
   table("metric_weights", { schema: "zeroship" }).create({
     columns: {
       metric: t.text().notNull(),
@@ -371,10 +341,8 @@ export function up() {
     },
     primaryKey: ["metric"],
   });
-  // TODO(dsl-v2): CHECK constraint metric_weights.metric_weights_per_units_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.metric_weights ADD CONSTRAINT metric_weights_per_units_check CHECK ((per_units > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint metric_weights.metric_weights_units_per_op_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.metric_weights ADD CONSTRAINT metric_weights_units_per_op_check CHECK ((units_per_op >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("metric_weights", { schema: "zeroship" }).addCheck("metric_weights_per_units_check", (c) => c("per_units").gt(0));
+  table("metric_weights", { schema: "zeroship" }).addCheck("metric_weights_units_per_op_check", (c) => c("units_per_op").ge(0));
   table("payout_failures", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -394,10 +362,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.payout_failures ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column payout_failures.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.payout_failures ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column payout_failures.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint payout_failures.payout_failures_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payout_failures ADD CONSTRAINT payout_failures_amount_cents_check CHECK ((amount_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint payout_failures.payout_failures_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.payout_failures ADD CONSTRAINT payout_failures_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("payout_failures", { schema: "zeroship" }).addCheck("payout_failures_amount_cents_check", (c) => c("amount_cents").ge(0));
+  table("payout_failures", { schema: "zeroship" }).addCheck("payout_failures_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("pending_disputes", { schema: "zeroship" }).create({
     columns: {
       provider_dispute_id: t.text().notNull(),
@@ -415,12 +381,9 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.pending_disputes ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column pending_disputes.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.pending_disputes ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column pending_disputes.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint pending_disputes.pending_disputes_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.pending_disputes ADD CONSTRAINT pending_disputes_amount_cents_check CHECK ((amount_cents > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint pending_disputes.pending_disputes_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.pending_disputes ADD CONSTRAINT pending_disputes_check CHECK (((payment_intent IS NOT NULL) OR (charge IS NOT NULL)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint pending_disputes.pending_disputes_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.pending_disputes ADD CONSTRAINT pending_disputes_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("pending_disputes", { schema: "zeroship" }).addCheck("pending_disputes_amount_cents_check", (c) => c("amount_cents").gt(0));
+  table("pending_disputes", { schema: "zeroship" }).addCheck("pending_disputes_check", (c) => or(c("payment_intent").isNotNull(), c("charge").isNotNull()));
+  table("pending_disputes", { schema: "zeroship" }).addCheck("pending_disputes_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("plan_change_events", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -457,14 +420,10 @@ export function up() {
   });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.plans ALTER COLUMN net_policy_limits_json SET DEFAULT '{\"max_sockets\": 4, \"egress_ceiling_bytes\": 10485760}'::jsonb", reason: "column plans.net_policy_limits_json requires exact default '{\"max_sockets\": 4, \"egress_ceiling_bytes\": 10485760}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): CHECK constraint plans.plans_base_fee_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.plans ADD CONSTRAINT plans_base_fee_cents_check CHECK ((base_fee_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint plans.plans_fx_pico_cents_per_unit_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.plans ADD CONSTRAINT plans_fx_pico_cents_per_unit_check CHECK (((fx_pico_cents_per_unit IS NULL) OR (fx_pico_cents_per_unit >= 1000)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint plans.plans_included_units_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.plans ADD CONSTRAINT plans_included_units_check CHECK ((included_units >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint plans.plans_spend_limit_default_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.plans ADD CONSTRAINT plans_spend_limit_default_cents_check CHECK ((spend_limit_default_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("plans", { schema: "zeroship" }).addCheck("plans_base_fee_cents_check", (c) => c("base_fee_cents").ge(0));
+  table("plans", { schema: "zeroship" }).addCheck("plans_fx_pico_cents_per_unit_check", (c) => or(c("fx_pico_cents_per_unit").isNull(), c("fx_pico_cents_per_unit").ge(1000)));
+  table("plans", { schema: "zeroship" }).addCheck("plans_included_units_check", (c) => c("included_units").ge(0));
+  table("plans", { schema: "zeroship" }).addCheck("plans_spend_limit_default_cents_check", (c) => c("spend_limit_default_cents").ge(0));
   table("pricing_config", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull().default("global"),
@@ -473,10 +432,8 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): CHECK constraint pricing_config.pricing_config_fx_pico_cents_per_unit_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.pricing_config ADD CONSTRAINT pricing_config_fx_pico_cents_per_unit_check CHECK ((fx_pico_cents_per_unit >= 1000))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint pricing_config.pricing_config_id_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.pricing_config ADD CONSTRAINT pricing_config_id_check CHECK ((id = 'global'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("pricing_config", { schema: "zeroship" }).addCheck("pricing_config_fx_pico_cents_per_unit_check", (c) => c("fx_pico_cents_per_unit").ge(1000));
+  table("pricing_config", { schema: "zeroship" }).addCheck("pricing_config_id_check", (c) => c("id").eq("global"));
   table("refund_provider_refs", { schema: "zeroship" }).create({
     columns: {
       refund_id: t.text().notNull(),
@@ -514,16 +471,11 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.refunds ALTER COLUMN destination TYPE zeroship.refund_destination USING destination::zeroship.refund_destination", reason: "column refunds.destination uses PostgreSQL type zeroship.refund_destination, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for zeroship.refund_status
   raw({ sql: "ALTER TABLE ONLY zeroship.refunds ALTER COLUMN status TYPE zeroship.refund_status USING status::zeroship.refund_status", reason: "column refunds.status uses PostgreSQL type zeroship.refund_status, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint refunds.refund_amount_split needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ADD CONSTRAINT refund_amount_split CHECK ((amount_cents = (subtotal_cents + tax_cents)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint refunds.refunds_amount_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ADD CONSTRAINT refunds_amount_cents_check CHECK ((amount_cents > 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint refunds.refunds_currency_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ADD CONSTRAINT refunds_currency_check CHECK ((currency ~ '^[a-z]{3}$'::text))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint refunds.refunds_subtotal_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ADD CONSTRAINT refunds_subtotal_cents_check CHECK ((subtotal_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint refunds.refunds_tax_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ADD CONSTRAINT refunds_tax_cents_check CHECK ((tax_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("refunds", { schema: "zeroship" }).addCheck("refund_amount_split", (c) => c("amount_cents").eq(c("subtotal_cents").add(c("tax_cents"))));
+  table("refunds", { schema: "zeroship" }).addCheck("refunds_amount_cents_check", (c) => c("amount_cents").gt(0));
+  table("refunds", { schema: "zeroship" }).addCheck("refunds_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
+  table("refunds", { schema: "zeroship" }).addCheck("refunds_subtotal_cents_check", (c) => c("subtotal_cents").ge(0));
+  table("refunds", { schema: "zeroship" }).addCheck("refunds_tax_cents_check", (c) => c("tax_cents").ge(0));
   table("spend_state_history", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -543,10 +495,8 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history ALTER COLUMN from_state TYPE zeroship.spend_state USING from_state::zeroship.spend_state", reason: "column spend_state_history.from_state uses PostgreSQL type zeroship.spend_state, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for zeroship.spend_state
   raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history ALTER COLUMN to_state TYPE zeroship.spend_state USING to_state::zeroship.spend_state", reason: "column spend_state_history.to_state uses PostgreSQL type zeroship.spend_state, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint spend_state_history.spend_state_history_limit_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history ADD CONSTRAINT spend_state_history_limit_cents_check CHECK (((limit_cents IS NULL) OR (limit_cents >= 0)))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
-  // TODO(dsl-v2): CHECK constraint spend_state_history.spend_state_history_spend_cents_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.spend_state_history ADD CONSTRAINT spend_state_history_spend_cents_check CHECK ((spend_cents >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("spend_state_history", { schema: "zeroship" }).addCheck("spend_state_history_limit_cents_check", (c) => or(c("limit_cents").isNull(), c("limit_cents").ge(0)));
+  table("spend_state_history", { schema: "zeroship" }).addCheck("spend_state_history_spend_cents_check", (c) => c("spend_cents").ge(0));
   table("stripe_events_seen", { schema: "zeroship" }).create({
     columns: {
       event_id: t.text().notNull(),
@@ -567,8 +517,7 @@ export function up() {
   });
   // TODO(dsl-v2): add structural column type support for zeroship.billing_period
   raw({ sql: "ALTER TABLE ONLY zeroship.usage_aggregates ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column usage_aggregates.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): CHECK constraint usage_aggregates.usage_aggregates_total_check needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.usage_aggregates ADD CONSTRAINT usage_aggregates_total_check CHECK ((total >= 0))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("usage_aggregates", { schema: "zeroship" }).addCheck("usage_aggregates_total_check", (c) => c("total").ge(0));
   table("usage_reports_seen", { schema: "zeroship" }).create({
     columns: {
       worker_id: t.text().notNull(),
