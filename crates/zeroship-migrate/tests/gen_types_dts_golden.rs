@@ -1,8 +1,8 @@
 //! **Migration-first P2b §6(a) — the `.d.ts` golden over the FULL type matrix.**
 //!
 //! Mirrors `generate_all_types_parity.rs`: author an op stream covering the full
-//! portable type/facet matrix (text/int/bigInt/float/bool/json/timestamp/uuid/bytes/
-//! numeric + ref + vector + encrypted + id-with-prefix),
+//! portable type/facet matrix (text/int/smallInt/bigInt/float/real/bool/json/
+//! timestamp/uuid/inet/bytes/numeric + ref + vector + encrypted + id-with-prefix),
 //! generate the `env.db.ts`, and assert the emitted file contains the expected
 //! `@zeroship/db` `t.*()` builder chain per column. The richer reverse renderer
 //! (vs `scaffold.rs::render_t_for`, which TODO-stubs goodies) is the thing under test.
@@ -66,11 +66,14 @@ fn all_types_ops() -> Vec<Op> {
         id,
         col("c_text", ColType::Text),
         col("c_int", ColType::Int),
+        col("c_smallint", ColType::SmallInt),
         col("c_bigint", ColType::BigInt),
         col("c_float", ColType::Float),
+        col("c_real", ColType::Real),
         col("c_bool", ColType::Bool),
         col("c_json", ColType::Json),
         col("c_ts", ColType::Timestamp),
+        col("c_inet", ColType::Inet),
         col("c_bytes", ColType::Bytea),
         col("c_num", ColType::Decimal { precision: 38, scale: 9 }),
         col("owner", ColType::Ref { references: "users".into() }),
@@ -127,11 +130,14 @@ fn env_dts_golden_covers_full_type_matrix() {
         "id: t.id(\"gdt\")",                          // typed-id + prefix
         "c_text: t.string()",
         "c_int: t.number()",                          // op.* int → SDK numeric builder
+        "c_smallint: t.number()",
         "c_bigint: t.number()",
         "c_float: t.number()",
+        "c_real: t.number()",
         "c_bool: t.boolean()",
         "c_json: t.json()",
         "c_ts: t.timestamp()",
+        "c_inet: t.string()",
         "c_bytes: t.bytes()",
         "c_num: t.number()",
         "owner: t.ref(\"users\", { onDelete: \"cascade\"",  // ref + recovered FK policy

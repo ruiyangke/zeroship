@@ -53,8 +53,11 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
     columns: {
       id: t.id({ prefix: "doc" }),
       seq: t.bigInt().identity({ always: true }),
+      shard: t.smallInt(),
       qty: t.int(),
       unit_cents: t.int(),
+      ratio: t.real(),
+      source_ip: t.inet(),
       total_cents: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents"))),
       virtual_total: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents")), { virtual: true }),
       embedding: t.vector(1536, { metric: "cosine" }),
@@ -92,6 +95,9 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 
   // t.vector(n, { metric }) → vectorMetric (closed token)
   assert.equal(byName("embedding").vectorMetric, "cosine");
+  assert.equal(byName("shard").type, "smallInt");
+  assert.equal(byName("ratio").type, "real");
+  assert.equal(byName("source_ip").type, "inet");
 
   // standalone .mask({ kind, classification }) → mask:{kind,classification}
   assert.deepEqual(byName("ssn").mask, { kind: "last4", classification: "pci" });

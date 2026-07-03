@@ -182,7 +182,7 @@ export function up() {
       snapshot_sha256: t.bytes(),
       snapshot_aead_dek_id: t.text(),
       snapshot_backing_versions: t.json(),
-      snapshot_vm_index: t.integer(),
+      snapshot_vm_index: t.smallInt(),
       lessee_updated_at: t.timestamp(),
       last_running_worker_id: t.text(),
       idle_snapshot_opted_in: t.boolean().notNull().default(false),
@@ -194,8 +194,6 @@ export function up() {
   });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.sandboxes ALTER COLUMN metadata SET DEFAULT '{}'::jsonb", reason: "column sandboxes.metadata requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): add structural column type support for smallint
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandboxes ALTER COLUMN snapshot_vm_index TYPE smallint USING snapshot_vm_index::smallint", reason: "column sandboxes.snapshot_vm_index uses PostgreSQL type smallint, which is not in the current closed column lexicon/lowerer use-site set" });
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_backend_check", (c) => membership(c("backend"), ["docker", "k8s", "nomad-ch"]));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_generation_check", (c) => c("generation").ge(0));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_key_fp_check", (c) => c("key_fp").matches("^[0-9a-f]{32}$"));

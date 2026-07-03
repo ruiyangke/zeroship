@@ -574,10 +574,13 @@ fn render_builder_chain(def: &Value) -> String {
             "string" => "t.string()".to_string(),
             // The op.* `int`/`number` (+ the differ's numeric collapse) both map to
             // the SDK numeric builder `t.number()` (the SDK `t` has no `integer`).
-            "int" | "integer" | "bigInt" | "number" | "float" => "t.number()".to_string(),
+            "int" | "integer" | "smallInt" | "bigInt" | "number" | "float" | "real" => {
+                "t.number()".to_string()
+            }
             "boolean" => "t.boolean()".to_string(),
             "json" | "object" | "array" => "t.json()".to_string(),
             "date" | "timestamp" => "t.timestamp()".to_string(),
+            "inet" => "t.string()".to_string(),
             "bytes" => "t.bytes()".to_string(),
             "geoPoint" => "t.geoPoint()".to_string(),
             "calendarDate" => "t.calendarDate()".to_string(),

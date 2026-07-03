@@ -455,10 +455,14 @@ pub enum ColType {
     Text,
     /// 32-bit signed integer.
     Int,
+    /// 16-bit signed integer.
+    SmallInt,
     /// 64-bit signed integer.
     BigInt,
     /// Double-precision float.
     Float,
+    /// Single-precision float.
+    Real,
     /// Boolean.
     Bool,
     /// JSON document (`JSONB` on PG).
@@ -469,6 +473,8 @@ pub enum ColType {
     Date,
     /// UUID.
     Uuid,
+    /// IP network/address (`inet` on PG).
+    Inet,
     /// Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).
     Bytea,
     /// Foreign-key reference to another table (the referenced table name).

@@ -70,12 +70,10 @@ export function up() {
       ref_kind: t.text().notNull(),
       external_id: t.text().notNull(),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
-      segment_no: t.integer().notNull().default(0),
+      segment_no: t.smallInt().notNull().default(0),
     },
     primaryKey: ["invoice_id", "app_id", "segment_no", "provider", "ref_kind"],
   });
-  // TODO(dsl-v2): add structural column type support for smallint
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_line_provider_refs ALTER COLUMN segment_no TYPE smallint USING segment_no::smallint", reason: "column billing_line_provider_refs.segment_no uses PostgreSQL type smallint, which is not in the current closed column lexicon/lowerer use-site set" });
   table("billing_line_provider_refs", { schema: "zeroship" }).addCheck("billing_line_provider_refs_segment_no_check", (c) => c("segment_no").ge(0));
   table("billing_metrics", { schema: "zeroship" }).create({
     columns: {
@@ -252,13 +250,11 @@ export function up() {
       usage_snapshot: t.json().notNull(),
       weights_snapshot: t.json().notNull(),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
-      segment_no: t.integer().notNull().default(0),
+      segment_no: t.smallInt().notNull().default(0),
       plan_id: t.text().notNull(),
     },
     primaryKey: ["invoice_id", "app_id", "segment_no"],
   });
-  // TODO(dsl-v2): add structural column type support for smallint
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_lines ALTER COLUMN segment_no TYPE smallint USING segment_no::smallint", reason: "column invoice_lines.segment_no uses PostgreSQL type smallint, which is not in the current closed column lexicon/lowerer use-site set" });
   table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_amount_cents_check", (c) => c("amount_cents").ge(0));
   table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_base_fee_cents_check", (c) => c("base_fee_cents").ge(0));
   table("invoice_lines", { schema: "zeroship" }).addCheck("invoice_lines_fx_pico_cents_per_unit_check", (c) => c("fx_pico_cents_per_unit").ge(1000));

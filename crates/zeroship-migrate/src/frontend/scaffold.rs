@@ -177,9 +177,12 @@ fn col_type_for_data_type(
     let dt = col.data_type.trim().to_ascii_lowercase();
     let ty = match dt.as_str() {
         "text" | "character varying" | "varchar" => ColType::Text,
+        "inet" => ColType::Inet,
+        "smallint" | "int2" => ColType::SmallInt,
         "integer" | "int4" | "int" => ColType::Int,
         "bigint" | "int8" => ColType::BigInt,
-        "double precision" | "real" | "float8" => ColType::Float,
+        "double precision" | "float8" => ColType::Float,
+        "real" | "float4" => ColType::Real,
         "boolean" | "bool" => ColType::Bool,
         "jsonb" | "json" => ColType::Json,
         "timestamp with time zone" | "timestamptz" | "timestamp" => ColType::Timestamp,
@@ -715,9 +718,12 @@ fn render_col(c: &IrColumn) -> String {
 fn render_t_for(ty: &ColType) -> String {
     match ty {
         ColType::Text | ColType::String => "t.text()".into(),
+        ColType::Inet => "t.inet()".into(),
+        ColType::SmallInt => "t.smallInt()".into(),
         ColType::Int => "t.integer()".into(),
         ColType::BigInt => "t.bigInt()".into(),
         ColType::Float => "t.float()".into(),
+        ColType::Real => "t.real()".into(),
         ColType::Bool => "t.boolean()".into(),
         ColType::Json => "t.json()".into(),
         ColType::Timestamp => "t.timestamp()".into(),

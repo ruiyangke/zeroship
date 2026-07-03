@@ -3687,9 +3687,12 @@ fn render_sequence_optional_bound(
 
 fn render_sequence_as_type(as_type: &ColType) -> Result<&'static str, IrLowerError> {
     match as_type {
+        ColType::SmallInt => Ok("smallint"),
         ColType::Int => Ok("integer"),
         ColType::BigInt => Ok("bigint"),
-        _ => Err(IrLowerError::UnsupportedOp("sequence AS type must be int or bigInt")),
+        _ => Err(IrLowerError::UnsupportedOp(
+            "sequence AS type must be smallInt, int, or bigInt",
+        )),
     }
 }
 
@@ -4572,7 +4575,12 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 /// to what `t.encrypted()` stamps for the same inner type.
 fn encrypted_wraps_token(of: &ColType) -> &'static str {
     match of {
-        ColType::Int | ColType::BigInt | ColType::Float | ColType::Decimal { .. } => "number",
+        ColType::SmallInt
+        | ColType::Int
+        | ColType::BigInt
+        | ColType::Float
+        | ColType::Real
+        | ColType::Decimal { .. } => "number",
         ColType::Bytea => "bytes",
         _ => "string",
     }
@@ -4586,13 +4594,16 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::String => ("string".into(), None),
         ColType::Text => ("string".into(), None),
         ColType::Int => ("int".into(), None),
+        ColType::SmallInt => ("smallInt".into(), None),
         ColType::BigInt => ("bigInt".into(), None),
         ColType::Float => ("number".into(), None),
+        ColType::Real => ("real".into(), None),
         ColType::Bool => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
         ColType::Timestamp => ("date".into(), None),
         ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
+        ColType::Inet => ("inet".into(), None),
         ColType::Bytea => ("bytes".into(), None),
         ColType::Ref { references } => ("ref".into(), Some(references.clone())),
         ColType::Vector { .. } => ("vector".into(), None),
@@ -5392,6 +5403,12 @@ mod tests {
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(5) }),
                     unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                TIrColumn {
+                    name: "shard".into(),
+                    ty: ColType::SmallInt,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal { value: IrScalar::Int(0) }),
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
                 // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
                 // rejects a fractional/oversized JSON number), and `as_f64` would
                 // corrupt it; the verbatim string keeps it exact.
@@ -5411,6 +5428,22 @@ mod tests {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
                     unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                TIrColumn {
+                    name: "ratio_real".into(),
+                    ty: ColType::Real,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Decimal("0.25".into()),
+                    }),
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                TIrColumn {
+                    name: "addr".into(),
+                    ty: ColType::Inet,
+                    nullable: Some(false),
+                    default: Some(IrDefault::Literal {
+                        value: IrScalar::Str("192.0.2.1".into()),
+                    }),
+                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
             ],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
@@ -5422,6 +5455,11 @@ mod tests {
             create.up
         );
         assert!(
+            create.up.contains("DEFAULT 0"),
+            "a smallint column's DEFAULT must render; up = {:?}",
+            create.up
+        );
+        assert!(
             create.up.contains("DEFAULT 9007199254740993"),
             "a >2^53 bigint DEFAULT (decimal-string carrier) must render exactly; up = {:?}",
             create.up
@@ -5429,6 +5467,16 @@ mod tests {
         assert!(
             create.up.contains("DEFAULT 0.5"),
             "a decimal column's DEFAULT (numeric-string carrier) must render; up = {:?}",
+            create.up
+        );
+        assert!(
+            create.up.contains("DEFAULT 0.25"),
+            "a real column's DEFAULT (numeric-string carrier) must render; up = {:?}",
+            create.up
+        );
+        assert!(
+            create.up.contains("DEFAULT '192.0.2.1'"),
+            "an inet column's string DEFAULT must render; up = {:?}",
             create.up
         );
     }

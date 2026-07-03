@@ -43,15 +43,13 @@ export function up() {
       actor_user_id: t.uuid(),
       client_id: t.text(),
       request_id: t.text(),
-      ip: t.text(),
+      ip: t.inet(),
       user_agent: t.text(),
       auth_method: t.text(),
       detail: t.json(),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for inet
-  raw({ sql: "ALTER TABLE ONLY zeroship.audit_events ALTER COLUMN ip TYPE inet USING ip::inet", reason: "column audit_events.ip uses PostgreSQL type inet, which is not in the current closed column lexicon/lowerer use-site set" });
   sequence("audit_events_id_seq").alter({ schema: "zeroship", ownedBy: { table: "audit_events", column: "id" } });
   table("authz_decisions", { schema: "zeroship" }).create({
     columns: {
@@ -64,7 +62,7 @@ export function up() {
       resource_id: t.text(),
       decision: t.text().notNull(),
       matched_policies: t.text().notNull(),
-      request_ip: t.text(),
+      request_ip: t.inet(),
       request_id: t.text(),
     },
     primaryKey: ["id"],
@@ -73,8 +71,6 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN matched_policies TYPE text[] USING matched_policies::text[]", reason: "column authz_decisions.matched_policies uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN matched_policies SET DEFAULT '{}'::text[]", reason: "column authz_decisions.matched_policies requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): add structural column type support for inet
-  raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN request_ip TYPE inet USING request_ip::inet", reason: "column authz_decisions.request_ip uses PostgreSQL type inet, which is not in the current closed column lexicon/lowerer use-site set" });
   table("authz_decisions", { schema: "zeroship" }).addCheck("authz_decisions_decision_check", (c) => membership(c("decision"), ["allow", "deny"]));
   table("cron_state", { schema: "zeroship" }).create({
     columns: {
@@ -221,7 +217,7 @@ export function up() {
       code: t.text().notNull(),
       email: t.text().notNull(),
       login_challenge: t.text().notNull(),
-      attempts: t.integer().notNull().default(0),
+      attempts: t.smallInt().notNull().default(0),
       expires_at: t.timestamp().notNull(),
       consumed_pending_at: t.timestamp(),
       consumed_at: t.timestamp(),
@@ -230,15 +226,13 @@ export function up() {
   });
   // TODO(dsl-v2): add structural column type support for public.citext
   raw({ sql: "ALTER TABLE ONLY zeroship.magic_completions ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column magic_completions.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for smallint
-  raw({ sql: "ALTER TABLE ONLY zeroship.magic_completions ALTER COLUMN attempts TYPE smallint USING attempts::smallint", reason: "column magic_completions.attempts uses PostgreSQL type smallint, which is not in the current closed column lexicon/lowerer use-site set" });
   table("magic_links", { schema: "zeroship" }).create({
     columns: {
       token_hash: t.bytes().notNull(),
       email: t.text().notNull(),
       csrf_nonce: t.text().notNull(),
       purpose: t.text().notNull(),
-      request_ip: t.text(),
+      request_ip: t.inet(),
       request_ua: t.text(),
       issued_at: t.timestamp().notNull().default({ fn: "now" }),
       expires_at: t.timestamp().notNull(),
@@ -250,8 +244,6 @@ export function up() {
   });
   // TODO(dsl-v2): add structural column type support for public.citext
   raw({ sql: "ALTER TABLE ONLY zeroship.magic_links ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column magic_links.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for inet
-  raw({ sql: "ALTER TABLE ONLY zeroship.magic_links ALTER COLUMN request_ip TYPE inet USING request_ip::inet", reason: "column magic_links.request_ip uses PostgreSQL type inet, which is not in the current closed column lexicon/lowerer use-site set" });
   table("oauth_authorization_codes", { schema: "zeroship" }).create({
     columns: {
       code_hash: t.bytes().notNull(),
@@ -318,7 +310,7 @@ export function up() {
   table("oauth_refresh_tokens", { schema: "zeroship" }).create({
     columns: {
       token_hash: t.bytes().notNull(),
-      hash_key_version: t.integer().notNull(),
+      hash_key_version: t.smallInt().notNull(),
       refresh_family_id: t.text().notNull(),
       replaced_by_token_hash: t.bytes(),
       client_id: t.text().notNull(),
@@ -338,8 +330,6 @@ export function up() {
     },
     primaryKey: ["token_hash"],
   });
-  // TODO(dsl-v2): add structural column type support for smallint
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens ALTER COLUMN hash_key_version TYPE smallint USING hash_key_version::smallint", reason: "column oauth_refresh_tokens.hash_key_version uses PostgreSQL type smallint, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for text[]
   raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column oauth_refresh_tokens.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for text[]
@@ -367,13 +357,11 @@ export function up() {
   table("rate_limits", { schema: "zeroship" }).create({
     columns: {
       bucket_key: t.text().notNull(),
-      tokens: t.float().notNull(),
+      tokens: t.real().notNull(),
       updated_at: t.timestamp().notNull(),
     },
     primaryKey: ["bucket_key"],
   });
-  // TODO(dsl-v2): add structural column type support for real
-  raw({ sql: "ALTER TABLE ONLY zeroship.rate_limits ALTER COLUMN tokens TYPE real USING tokens::real", reason: "column rate_limits.tokens uses PostgreSQL type real, which is not in the current closed column lexicon/lowerer use-site set" });
   table("signing_keys", { schema: "zeroship" }).create({
     columns: {
       kid: t.text().notNull(),

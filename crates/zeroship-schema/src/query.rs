@@ -366,6 +366,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         match zs_type {
             Some("string") => "TEXT".to_string(),
             Some("number") => "REAL".to_string(),
+            Some("real") => "REAL".to_string(),
             Some("boolean") => "INTEGER".to_string(),
             Some("date") => "TEXT".to_string(),
             Some("calendarDate") => "TEXT".to_string(),
@@ -381,6 +382,8 @@ impl SchemaRenderer for SqliteSchemaRenderer {
             Some("bigint") | Some("int8") | Some("integer") | Some("int") | Some("int4") => {
                 "INTEGER".to_string()
             }
+            Some("smallInt") => "INTEGER".to_string(),
+            Some("inet") => "TEXT".to_string(),
             _ => "TEXT".to_string(),
         }
     }
@@ -496,6 +499,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
                 }
             }
             Some("number") => "DOUBLE".to_string(),
+            Some("real") => "FLOAT".to_string(),
             Some("boolean") => "TINYINT(1)".to_string(),
             Some("date") => "DATETIME(6)".to_string(),
             Some("calendarDate") => "DATE".to_string(),
@@ -509,6 +513,8 @@ impl SchemaRenderer for MysqlSchemaRenderer {
             },
             Some("bigInt") | Some("bigint") | Some("int8") => "BIGINT".to_string(),
             Some("integer") | Some("int") | Some("int4") => "INT".to_string(),
+            Some("smallInt") => "SMALLINT".to_string(),
+            Some("inet") => "VARCHAR(43)".to_string(),
             _ => "VARCHAR(191)".to_string(),
         }
     }
@@ -2634,6 +2640,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // `t.bigInteger()` exists for callers who need exact 64-bit
         // ints.
         Some("number") => "DOUBLE PRECISION",
+        Some("real") => "REAL",
         // M1 — `int`/`integer` are first-class integer tokens (the SQLite arm of
         // `def_to_column_type_for_dialect` already maps them to `INTEGER`; the dev
         // `registerModel` JSON declares `{ type: "int" }`). Before this arm the PG
@@ -2648,6 +2655,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // (`bigint`/`int4`/`int8`) are deliberately NOT accepted — they are not DSL
         // tokens and stay on the TEXT fallback so they remain typo-rejected.
         Some("int") | Some("integer") => "INTEGER",
+        Some("smallInt") => "SMALLINT",
         Some("bigInt") => "BIGINT",
         Some("boolean") => "BOOLEAN",
         Some("date") => "TIMESTAMPTZ",
@@ -2666,6 +2674,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // `id TEXT PRIMARY KEY` PR 2 introduced. See doc-comment on
         // [`def_to_pg_type`] for the back-compat rationale.
         Some("ref") => "TEXT",
+        Some("inet") => "INET",
         // C2 — a top-level `t.union(...)` is flattened to discrete
         // columns by the SDK before it reaches the DDL emitter, so this
         // path should never fire for the discriminator column itself
@@ -2706,13 +2715,16 @@ pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
         // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
         // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
         // live SQLite `text` token itself.
-        "text" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz" | "date" => {
+        "text" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz" | "date"
+        | "inet" => {
             "text"
         }
         // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
         "double precision" | "float8" | "real" => "real",
         // INTEGER affinity: PG `boolean`/`integer` (and `bigint`), and live `integer`.
-        "boolean" | "integer" | "bigint" | "int8" | "int4" | "int" => "integer",
+        "boolean" | "integer" | "bigint" | "smallint" | "int8" | "int4" | "int2" | "int" => {
+            "integer"
+        }
         // NUMERIC affinity: PG `numeric` (a numeric `t.literal()`), and live `numeric`.
         "numeric" | "decimal" => "numeric",
         // BLOB affinity: PG `bytea` (encrypted / `t.bytes()`), and live `blob`.
@@ -2734,6 +2746,9 @@ pub fn mysql_canonical_type(data_type: &str) -> String {
     if no_width.starts_with("enum(") {
         return no_width;
     }
+    if no_width == "varchar(43)" || no_width == "inet" {
+        return "inet".to_string();
+    }
     if no_width.starts_with("varchar(") || no_width.ends_with("text") || no_width == "char" {
         return "text".to_string();
     }
@@ -2749,15 +2764,18 @@ pub fn mysql_canonical_type(data_type: &str) -> String {
     if no_width.starts_with("decimal") || no_width == "numeric" {
         return "decimal".to_string();
     }
-    if no_width.starts_with("double")
-        || matches!(no_width.as_str(), "double precision" | "float" | "real")
+    if no_width.starts_with("double") || matches!(no_width.as_str(), "double precision" | "float8")
     {
         return "double".to_string();
+    }
+    if matches!(no_width.as_str(), "float" | "real" | "float4") {
+        return "real".to_string();
     }
     if no_width.starts_with("tinyint(1)") || no_width == "boolean" {
         return "boolean".to_string();
     }
     match no_width.as_str() {
+        "smallint" | "int2" => "smallint".to_string(),
         "int" | "integer" | "int4" => "int".to_string(),
         "bigint" | "int8" => "bigint".to_string(),
         "json" | "jsonb" => "json".to_string(),

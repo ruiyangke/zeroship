@@ -2153,16 +2153,23 @@ fn validate_column_facets(
         ));
     }
 
-    if col.identity.is_some() && !matches!(col.ty, crate::model::ir::ColType::Int | crate::model::ir::ColType::BigInt)
+    if col.identity.is_some()
+        && !matches!(
+            col.ty,
+            crate::model::ir::ColType::SmallInt
+                | crate::model::ir::ColType::Int
+                | crate::model::ir::ColType::BigInt
+        )
     {
         return Err(unsupported(
             UnsupportedKind::Identity,
             format!(
                 "column {:?} declares identity on a non-integer type; identity is only \
-                 supported on int/bigInt columns",
+                 supported on smallInt/int/bigInt columns",
                 col.name
             ),
-            "declare the column as `t.integer().identity(...)` or `t.bigInt().identity(...)`"
+            "declare the column as `t.smallInt().identity(...)`, `t.integer().identity(...)`, \
+             or `t.bigInt().identity(...)`"
                 .to_string(),
         ));
     }

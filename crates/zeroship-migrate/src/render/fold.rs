@@ -2502,12 +2502,15 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
         Some(match token {
             "string" => ColType::Text,
             "int" | "integer" => ColType::Int,
+            "smallInt" => ColType::SmallInt,
             "bigInt" => ColType::BigInt,
             "number" | "float" => ColType::Float,
+            "real" => ColType::Real,
             "boolean" => ColType::Bool,
             "json" | "object" | "array" => ColType::Json,
             "date" | "timestamp" => ColType::Timestamp,
             "bytes" => ColType::Bytea,
+            "inet" => ColType::Inet,
             "geoPoint" => ColType::GeoPoint,
             _ => return None,
         })

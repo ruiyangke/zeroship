@@ -13,14 +13,12 @@ export function up() {
       actor_token_id: t.uuid(),
       action: t.text().notNull(),
       resource: t.text(),
-      source_ip: t.text(),
+      source_ip: t.inet(),
       detail: t.json(),
       occurred_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for inet
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_audit ALTER COLUMN source_ip TYPE inet USING source_ip::inet", reason: "column app_audit.source_ip uses PostgreSQL type inet, which is not in the current closed column lexicon/lowerer use-site set" });
   table("app_env_expose", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),

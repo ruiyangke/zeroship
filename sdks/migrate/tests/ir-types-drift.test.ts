@@ -72,8 +72,8 @@ const TS = {
   // ColType string tokens (the object-variant arms — ref/vector/decimal/encrypted
   // — are not `const` and are checked structurally by the round-trip, not here).
   ColTypeStrings: [
-    "string", "text", "int", "bigInt", "float", "bool", "json", "timestamp",
-    "date", "uuid", "bytea", "geoPoint",
+    "string", "text", "int", "smallInt", "bigInt", "float", "real", "bool",
+    "json", "timestamp", "date", "uuid", "inet", "bytea", "geoPoint",
   ].sort(),
   // IrConstraintKind tags.
   IrConstraintKind: ["pk", "fk", "unique", "check", "exclusion"].sort(),
