@@ -293,6 +293,9 @@ export function up() {
       id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
       occurred_at: t.timestamp().notNull().default({ fn: "now" }),
       kind: t.text().notNull(),
+      payload: t.json().notNull(),
+      items: t.json().notNull(),
+      settings: t.json().notNull().default("seed"),
     },
     primaryKey: ["id"],
   });
@@ -773,8 +776,36 @@ async fn platform_author_synth_defaults_render_and_apply_on_live_pg() {
         Some("now()"),
         "author timestamp synth default rendered as DEFAULT now()"
     );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_events", "payload")
+            .await
+            .as_deref(),
+        None,
+        "platform-exact json column with no explicit default must have NULL column_default"
+    );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_events", "items")
+            .await
+            .as_deref(),
+        None,
+        "second platform-exact json column with no explicit default must have NULL column_default"
+    );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_events", "settings")
+            .await
+            .as_deref(),
+        Some("'{}'::jsonb"),
+        "platform-exact json column with an explicit default still renders a DEFAULT \
+         clause — proving the confined gate suppresses ONLY the synthesized \
+         default-default (emitted when f.default is None), never an author-declared \
+         one. NOTE: the author scalar value collapses to '{{}}'::jsonb — an explicit \
+         json/object/array default currently normalizes to '{{}}'/'[]'::jsonb across \
+         the whole stack (mirrors zeroship-schema json_object_default installSchema \
+         parity); end-to-end explicit json default VALUES are a separate systemic gap"
+    );
     conn.batch_execute(
-        "INSERT INTO zeroship.platform_events (kind) VALUES ('boot'); \
+        "INSERT INTO zeroship.platform_events (kind, payload, items) \
+         VALUES ('boot', '{}'::jsonb, '[]'::jsonb); \
          SELECT id, occurred_at FROM zeroship.platform_events WHERE kind = 'boot';",
     )
     .await

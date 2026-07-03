@@ -1168,9 +1168,10 @@ fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
 /// Mirrors plugin-db's `def_to_constraints_for_dialect` default arm
 /// (`query.rs:2125-2165`): an explicit `default` renders per the field's
 /// primitive type (string single-quoted, number/boolean bare, json/object →
-/// `'{}'::jsonb`, array → `'[]'::jsonb`); AND, even with NO explicit default,
-/// json/object default to `'{}'::jsonb` and array to `'[]'::jsonb` (plugin-db's
-/// "default defaults"). Emission-only — not drift-compared.
+/// `'{}'::jsonb`, array → `'[]'::jsonb`). For confined SDK-collection tables,
+/// json/object with no explicit default synthesize `'{}'::jsonb` and array
+/// synthesizes `'[]'::jsonb` (plugin-db's "default defaults"). Emission-only —
+/// not drift-compared.
 /// Render a numeric column DEFAULT to its SQL literal, precision-preserving.
 ///
 /// A default reaches us as one of three carriers and each must render without
@@ -1193,7 +1194,7 @@ fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn field_default_expr(f: &FieldDescriptor) -> Option<String> {
+fn field_default_expr(f: &FieldDescriptor, synth_json_defaults: bool) -> Option<String> {
     if let Some(default) = &f.default {
         return match f.ty.as_str() {
             "string" => default.as_str().map(sql_str),
@@ -1208,7 +1209,10 @@ fn field_default_expr(f: &FieldDescriptor) -> Option<String> {
             _ => None,
         };
     }
-    // "Default defaults" for the JSON-backed types (matches plugin-db's else arm).
+    if !synth_json_defaults {
+        return None;
+    }
+    // Confined "default defaults" for JSON-backed types (matches plugin-db's else arm).
     match f.ty.as_str() {
         "json" | "object" => Some("'{}'::jsonb".into()),
         "array" => Some("'[]'::jsonb".into()),
@@ -1237,6 +1241,7 @@ fn generated_column_snapshot(
 fn column_snapshot_for_field(
     f: &FieldDescriptor,
     dialect: SqlDialect,
+    synth_json_defaults: bool,
 ) -> Result<ColumnSnapshot, DeclarativeError> {
     let data_type = field_data_type(f)?;
     let sdk_def = field_to_sdk_def(f);
@@ -1247,7 +1252,7 @@ fn column_snapshot_for_field(
         name: f.name.clone(),
         data_type,
         nullable: !f.required,
-        default: field_default_expr(f),
+        default: field_default_expr(f, synth_json_defaults),
         generated: f
             .generated
             .as_ref()
@@ -1570,6 +1575,7 @@ pub(crate) fn build_table_snapshot(
         dialect,
         SnapshotResolvedShape::confined(&d.name),
         SnapshotColumnOrder::NameSorted,
+        true,
     )
 }
 
@@ -1583,7 +1589,8 @@ pub(crate) fn build_resolved_table_snapshot(
     d: &CollectionDescriptor,
     dialect: SqlDialect,
 ) -> Result<TableSnapshot, DeclarativeError> {
-    let column_order = if carries_confined_system_column_prefix(d) {
+    let carries_confined_system_columns = carries_confined_system_column_prefix(d);
+    let column_order = if carries_confined_system_columns {
         SnapshotColumnOrder::NameSorted
     } else {
         SnapshotColumnOrder::PreserveDeclared
@@ -1594,6 +1601,7 @@ pub(crate) fn build_resolved_table_snapshot(
         dialect,
         SnapshotResolvedShape::empty(),
         column_order,
+        carries_confined_system_columns,
     )
 }
 
@@ -1654,6 +1662,7 @@ fn build_table_snapshot_impl(
     dialect: SqlDialect,
     resolved_shape: SnapshotResolvedShape,
     column_order: SnapshotColumnOrder,
+    synth_json_defaults: bool,
 ) -> Result<TableSnapshot, DeclarativeError> {
     let folds_system_id = resolved_shape.has_column("id");
     let mut columns = resolved_shape.columns;
@@ -1731,7 +1740,7 @@ fn build_table_snapshot_impl(
                         f.ty
                     )));
                 }
-                let replacement = column_snapshot_for_field(f, dialect)?;
+                let replacement = column_snapshot_for_field(f, dialect, synth_json_defaults)?;
                 if let Some(existing) = columns.iter_mut().find(|c| c.name == "id") {
                     *existing = replacement;
                 }
@@ -1744,7 +1753,7 @@ fn build_table_snapshot_impl(
                 f.ty
             )));
         }
-        columns.push(column_snapshot_for_field(f, dialect)?);
+        columns.push(column_snapshot_for_field(f, dialect, synth_json_defaults)?);
         // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) gets a
         // hidden `<col>_masked TEXT` sibling column at CREATE time (resolved by
         // the SHARED kernel's `mask_sibling_column_for_field`). The sibling is a
@@ -6251,7 +6260,10 @@ mod snapshot_builder_refactor_safety_tests {
     //! It freezes the `{:#?}` of a RICH table snapshot (system fields + a unique
     //! field + a ref/FK + an encrypted+masked column + an FTS field + a named
     //! index) on BOTH dialects.
-    use super::{build_table_snapshot, CollectionDescriptor, FieldDescriptor, IndexDescriptor};
+    use super::{
+        build_resolved_table_snapshot, build_table_snapshot, CollectionDescriptor,
+        DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
+    };
     use zeroship_schema::query::SqlDialect;
 
     fn rich_descriptor() -> CollectionDescriptor {
@@ -6430,6 +6442,150 @@ mod snapshot_builder_refactor_safety_tests {
             .expect("a clean t.id() folds cleanly");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
         assert_eq!(id_cols, 1, "exactly one (system) id column — the field folds, not duplicates");
+    }
+
+    fn field(name: &str, ty: &str) -> FieldDescriptor {
+        FieldDescriptor {
+            name: name.into(),
+            ty: ty.into(),
+            ..Default::default()
+        }
+    }
+
+    fn system_prefix_fields() -> Vec<FieldDescriptor> {
+        crate::model::profile::PolicyProfile::confined()
+            .system_shape
+            .columns
+            .into_iter()
+            .map(|column| {
+                let ty = match column.data_type.as_str() {
+                    "text" => "string",
+                    "timestamp with time zone" => "date",
+                    "integer" => "int",
+                    other => panic!("unexpected confined system column type {other}"),
+                };
+                FieldDescriptor {
+                    name: column.name,
+                    ty: ty.into(),
+                    required: !column.nullable,
+                    ..Default::default()
+                }
+            })
+            .collect()
+    }
+
+    fn resolved_descriptor(name: &str, fields: Vec<FieldDescriptor>) -> CollectionDescriptor {
+        CollectionDescriptor {
+            name: name.into(),
+            owner_app: "platform".into(),
+            fields,
+            indexes: vec![],
+            runtime_options: Default::default(),
+        }
+    }
+
+    /// Platform-exact resolved createTable is not an SDK collection table, so the
+    /// JSON-backed implicit defaults must stay absent. This pins both the public
+    /// `json` token and the internal/legacy `array` token at the shared renderer seam.
+    #[test]
+    fn platform_exact_json_and_array_without_defaults_render_no_default_clause() {
+        let d = resolved_descriptor(
+            "platform_events",
+            vec![
+                FieldDescriptor {
+                    required: true,
+                    ..field("payload", "json")
+                },
+                FieldDescriptor {
+                    required: true,
+                    ..field("items", "array")
+                },
+            ],
+        );
+        let snap = build_resolved_table_snapshot("zeroship", &d, SqlDialect::Postgres)
+            .expect("platform-exact JSON-backed table snapshot builds");
+        assert_eq!(
+            snap.columns
+                .iter()
+                .find(|c| c.name == "payload")
+                .and_then(|c| c.default.as_deref()),
+            None
+        );
+        assert_eq!(
+            snap.columns
+                .iter()
+                .find(|c| c.name == "items")
+                .and_then(|c| c.default.as_deref()),
+            None
+        );
+
+        let sql =
+            DeclarativeAuthor::new("zeroship", "platform").render_create_table(&d.name, &snap, &[]);
+        assert!(
+            !sql.contains("\"payload\" jsonb NOT NULL DEFAULT"),
+            "platform-exact json column without explicit default must not render DEFAULT:\n{sql}"
+        );
+        assert!(
+            !sql.contains("\"items\" jsonb NOT NULL DEFAULT"),
+            "platform-exact array column without explicit default must not render DEFAULT:\n{sql}"
+        );
+    }
+
+    /// A resolved table carrying the confined system-column prefix is the
+    /// SDK-collection shape, so plugin-db's JSON default synthesis remains intact.
+    #[test]
+    fn confined_resolved_json_without_default_still_synthesizes_default() {
+        let mut fields = system_prefix_fields();
+        fields.push(field("payload", "json"));
+        let d = resolved_descriptor("events", fields);
+        let snap = build_resolved_table_snapshot("app", &d, SqlDialect::Postgres)
+            .expect("confined-resolved JSON table snapshot builds");
+        assert_eq!(
+            snap.columns
+                .iter()
+                .find(|c| c.name == "payload")
+                .and_then(|c| c.default.as_deref()),
+            Some("'{}'::jsonb"),
+            "confined-resolved json columns keep plugin-db default synthesis"
+        );
+
+        let sql =
+            DeclarativeAuthor::new("app", "app_test").render_create_table(&d.name, &snap, &[]);
+        assert!(
+            sql.contains("\"payload\" jsonb DEFAULT '{}'::jsonb"),
+            "confined-resolved json column must still render DEFAULT '{{}}'::jsonb:\n{sql}"
+        );
+    }
+
+    /// Explicit JSON defaults are handled before the gated fallback, so platform
+    /// tables with an explicit default still carry the current explicit-default bytes.
+    #[test]
+    fn platform_exact_explicit_json_default_still_renders() {
+        let d = resolved_descriptor(
+            "platform_events",
+            vec![FieldDescriptor {
+                required: true,
+                default: Some(serde_json::json!({})),
+                ..field("settings", "json")
+            }],
+        );
+        let snap = build_resolved_table_snapshot("zeroship", &d, SqlDialect::Postgres)
+            .expect("platform-exact explicit JSON default snapshot builds");
+        assert_eq!(
+            snap.columns
+                .iter()
+                .find(|c| c.name == "settings")
+                .and_then(|c| c.default.as_deref()),
+            Some("'{}'::jsonb"),
+            "explicit-default arm must remain unchanged"
+        );
+
+        let sql =
+            DeclarativeAuthor::new("zeroship", "platform").render_create_table(&d.name, &snap, &[]);
+        assert!(
+            sql.contains("\"settings\" jsonb NOT NULL DEFAULT '{}'::jsonb"),
+            "platform-exact explicit json default must still render:\n{sql}"
+        );
     }
 }
 
