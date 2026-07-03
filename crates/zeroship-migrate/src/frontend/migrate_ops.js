@@ -851,6 +851,12 @@ class ExprChain {
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
+  matches(pattern) {
+    return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
+  }
+  columnSize() {
+    return chain({ node: "pgColumnSize", expr: this.__node });
+  }
 
   // ── cast ──
   /** `.cast("integer" | "text" | "real" | "boolean" | "blob")` — the closed
@@ -858,6 +864,54 @@ class ExprChain {
   cast(target) {
     return chain({ node: "cast", operand: this.__node, target });
   }
+}
+
+function foldExprs(op, exprs, what) {
+  if (!Array.isArray(exprs) || exprs.length === 0) {
+    throw structuredError("OP_INVALID", `${what} requires at least one expression`);
+  }
+  let acc = exprArg(exprs[0]);
+  for (const expr of exprs.slice(1)) {
+    acc = { node: "binOp", op, lhs: acc, rhs: exprArg(expr) };
+  }
+  return chain(acc);
+}
+
+export function check(name, expr) {
+  requireString(name, "check(name, expr)");
+  if (typeof expr !== "function") {
+    throw structuredError("OP_INVALID", "check(name, expr): expr must be a (c) => Expr callback");
+  }
+  return { name, expr };
+}
+
+export function and(...exprs) {
+  return foldExprs("and", exprs, "and(...)");
+}
+
+export function or(...exprs) {
+  return foldExprs("or", exprs, "or(...)");
+}
+
+export function not(expr) {
+  return chain({ node: "unaryOp", op: "not", operand: exprArg(expr) });
+}
+
+export function membership(expr, values) {
+  return chain({
+    node: "pgArrayMembership",
+    expr: exprArg(expr),
+    op: "eq",
+    elems: textLiteralArray(values, "membership(values)"),
+  });
+}
+
+export function lit(value) {
+  return chain({ node: "literal", value: toIrScalar(value) });
+}
+
+export function interval(value) {
+  return chain({ node: "pgIntervalLiteral", value: pgIntervalLiteral(value) });
 }
 
 /** Build the single fluent handle `c`: a column-accessor function carrying the
@@ -2155,6 +2209,11 @@ export function table(name, opts = {}) {
           return handle;
         },
       };
+    },
+    addCheck(ckName, expr, args = {}) {
+      requireString(ckName, ".addCheck(name, expr)");
+      recordAddCheck(name, ckName, { expr, ifNotExists: args.ifNotExists, schema: pickSchema(args, dflt) });
+      return handle;
     },
     exclusion(exName) {
       requireString(exName, ".exclusion(name)");

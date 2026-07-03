@@ -21,7 +21,15 @@ import {
   fromDb,
   t,
   table,
+  check,
+  and,
+  or,
+  not,
+  membership,
+  lit,
+  interval,
   type ColumnDef,
+  type CheckDef,
   type DbFieldType,
 } from "../../src/index.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
@@ -158,6 +166,43 @@ export function badExprShapes(): void {
   table("users").update({
     // @ts-expect-error — `coalesce` lives only on c.fn now (§7 dedup), not the chain.
     set: { name: (c) => c("name").coalesce("x") },
+  });
+
+  table("users").create({
+    columns: { name: t.text() },
+    checks: [
+      // @ts-expect-error — `check(name, expr)` requires an Expr callback.
+      check("bad_check", "name <> ''"),
+    ],
+  });
+}
+
+export function checkExpressionSurfaceTypechecks(): void {
+  const pkceCheck: CheckDef = check("pkce_method_check", (c) => c("pkce_method").eq("S256"));
+  table("oauth_authorization_codes").create({
+    columns: {
+      pkce_method: t.text().notNull(),
+      user_id: t.text().notNull(),
+      kind: t.text().notNull(),
+      data: t.json().notNull(),
+      floor_cents: t.integer(),
+      created_at: t.timestamp().notNull(),
+      expires_at: t.timestamp().notNull(),
+      active: t.boolean().notNull(),
+      visible: t.boolean().notNull(),
+    },
+    checks: [
+      pkceCheck,
+      check("max_ttl", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
+      check("user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
+      check("kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
+      check("data_size", (c) => c("data").columnSize().lt(262144)),
+      check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(lit(0)))),
+      check("visible_when_active", (c) => and(c("active"), not(c("visible").isNull()))),
+    ],
+  });
+  table("oauth_authorization_codes").addCheck("active_is_bool", (c) => c("active").isNotNull(), {
+    ifNotExists: true,
   });
 }
 

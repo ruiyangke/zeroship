@@ -30,6 +30,7 @@
 
 import type {
   BackfillArgs,
+  CheckDef,
   CheckRef,
   ColType,
   ColumnDef as ColumnDefType,
@@ -929,9 +930,63 @@ class ExprChainImpl implements ExprChainType {
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
+  matches(pattern: string) {
+    return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
+  }
+  columnSize() {
+    return chain({ node: "pgColumnSize", expr: this.__node });
+  }
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
     return chain({ node: "cast", operand: this.__node, target });
   }
+}
+
+function foldExprs(op: "and" | "or", exprs: readonly unknown[], what: string): ExprChainImpl {
+  if (!Array.isArray(exprs) || exprs.length === 0) {
+    throw structuredError("OP_INVALID", `${what} requires at least one expression`);
+  }
+  let acc = exprArg(exprs[0]);
+  for (const expr of exprs.slice(1)) {
+    acc = { node: "binOp", op, lhs: acc, rhs: exprArg(expr) };
+  }
+  return chain(acc);
+}
+
+export function check(name: string, expr: ExprFn): CheckDef {
+  requireString(name, "check(name, expr)");
+  if (typeof expr !== "function") {
+    throw structuredError("OP_INVALID", "check(name, expr): expr must be a (c) => Expr callback");
+  }
+  return { name, expr };
+}
+
+export function and(...exprs: unknown[]): ExprChainType {
+  return foldExprs("and", exprs, "and(...)");
+}
+
+export function or(...exprs: unknown[]): ExprChainType {
+  return foldExprs("or", exprs, "or(...)");
+}
+
+export function not(expr: unknown): ExprChainType {
+  return chain({ node: "unaryOp", op: "not", operand: exprArg(expr) });
+}
+
+export function membership(expr: unknown, values: readonly string[]): ExprChainType {
+  return chain({
+    node: "pgArrayMembership",
+    expr: exprArg(expr),
+    op: "eq",
+    elems: textLiteralArray(values, "membership(values)"),
+  });
+}
+
+export function lit(value: ScalarValue): ExprChainType {
+  return chain({ node: "literal", value: toIrScalar(value) });
+}
+
+export function interval(value: string): ExprChainType {
+  return chain({ node: "pgIntervalLiteral", value: pgIntervalLiteral(value) });
 }
 
 const fn: FnNamespace = {
@@ -2331,6 +2386,11 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
           return handle;
         },
       };
+    },
+    addCheck(ckName, expr, args = {}) {
+      requireString(ckName, ".addCheck(name, expr)");
+      recordAddCheck(name, ckName, { expr, ifNotExists: args.ifNotExists, schema: pickSchema(args, dflt) });
+      return handle;
     },
     exclusion(exName): ExclusionRef {
       requireString(exName, ".exclusion(name)");

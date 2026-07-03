@@ -373,6 +373,9 @@ export interface ExprChain {
   isNotNull(): ExprChain;
   isTrue(): ExprChain;
   isFalse(): ExprChain;
+  // PG-only value nodes used by the platform CHECK corpus.
+  matches(pattern: string): ExprChain;
+  columnSize(): ExprChain;
   // cast (the closed portable target set only)
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
 }
@@ -434,6 +437,12 @@ export interface ExprBuilder {
 /** An expression position — a `(c) => Expr` callback (the all-strings fluent
  *  form). NEVER a raw string (property A). */
 export type ExprFn = (c: ExprBuilder) => ExprChain;
+
+/** A named table-level CHECK constraint authored inside `table().create({ checks })`. */
+export interface CheckDef {
+  name: string;
+  expr: ExprFn;
+}
 
 // ── Shared op-arg fragments (§3) ──
 
@@ -701,10 +710,9 @@ export interface SetTableOptionsArgs {
  *  - `foreignKeys` are single-local-column, referencing the target's `id` (the
  *    only shape the renderer emits today); a multi-column / non-`id` FK is a HARD
  *    error (later wave).
- *  - `checks` are HARD deferred errors: the closed-AST expression needs the Wave-C
- *    `Expr`→SQL renderer (same deferral as stand-alone `.check(name).add({expr})`
- *    / `addConstraint(check)`). Partial-index `where` renders on PostgreSQL and
- *    SQLite; MySQL refuses it fail-closed because MySQL has no partial indexes.
+ *  - `checks` lower from the closed `Expr` AST through the engine renderer.
+ *    Partial-index `where` renders on PostgreSQL and SQLite; MySQL refuses it
+ *    fail-closed because MySQL has no partial indexes.
  *  - `primaryKey` (composite) and a column's `.primaryKey()` are represented in
  *    the recorded IR. Current confined/platform policy still decides later whether
  *    an authored PK is accepted, rejected, or replaced by the system shape.
@@ -723,10 +731,7 @@ export interface CreateTableArgs {
    *  null requests no PK, and a string array records an explicit/composite PK. */
   primaryKey?: string[] | null;
   uniques?: Array<{ name: string; columns: string[] }>;
-  /** DEFERRED at apply — the CHECK predicate is a closed-AST `expr` awaiting the
-   *  Wave-C `Expr`→SQL renderer; a table-level check is a HARD lower error today
-   *  (mirrors stand-alone `.check().add()`), never a silent drop. */
-  checks?: Array<{ name: string; expr: ExprFn }>;
+  checks?: CheckDef[];
   foreignKeys?: Array<{
     name: string;
     columns: string[];
@@ -858,6 +863,7 @@ export interface TableHandle {
   foreignKey(name: string): ForeignKeyRef;
   unique(name: string): UniqueRef;
   check(name: string): CheckRef;
+  addCheck(name: string, expr: ExprFn, args?: { ifNotExists?: boolean; schema?: string }): TableHandle;
   exclusion(name: string): ExclusionRef;
   constraint(name: string): ConstraintRef;
   index(name: string): IndexRef;

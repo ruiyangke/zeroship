@@ -7,7 +7,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { t, table, comment, lintDeterminism, enumType } from "../src/index.js";
+import {
+  t,
+  table,
+  comment,
+  lintDeterminism,
+  enumType,
+  check,
+  and,
+  or,
+  not,
+  membership,
+  lit,
+  interval,
+} from "../src/index.js";
 import { domain, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
@@ -22,6 +35,9 @@ function record(up: () => void): any[] {
 test("@zeroship/migrate core exports enumType and omits pg-only/old names", async () => {
   const imported = await import("@zeroship/migrate");
   assert.equal(typeof imported.enumType, "function");
+  assert.equal(typeof imported.check, "function");
+  assert.equal(typeof imported.membership, "function");
+  assert.equal(typeof imported.interval, "function");
   assert.equal((imported as any).pgEnum, undefined);
   assert.equal((imported as any).pgDomain, undefined);
   assert.equal((imported as any).domain, undefined);
@@ -429,6 +445,129 @@ test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
     op: "le",
     lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
     rhs: { node: "literal", value: 8192 },
+  });
+});
+
+test("check helper and expression helpers build the frozen Expr IR nodes", () => {
+  const ops = record(() => {
+    table("expr_checks").create({
+      columns: {
+        pkce_method: t.text().notNull(),
+        user_id: t.text().notNull(),
+        kind: t.text().notNull(),
+        data: t.json().notNull(),
+        subtotal_cents: t.integer().notNull(),
+        credit_cents: t.integer().notNull(),
+        total_cents: t.integer().notNull(),
+        floor_cents: t.integer(),
+        created_at: t.timestamp().notNull(),
+        expires_at: t.timestamp().notNull(),
+        enabled: t.boolean().notNull(),
+        visible: t.boolean().notNull(),
+      },
+      checks: [
+        check("pkce_method_check", (c) => c("pkce_method").eq("S256")),
+        check("user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
+        check("kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
+        check("data_size", (c) => c("data").columnSize().lt(262144)),
+        check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
+        check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
+        check("enabled_and_visible", (c) => and(c("enabled"), c("visible"))),
+        check("expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
+        check("not_archived", (c) => not(c("kind").eq(lit("archived")))),
+      ],
+    });
+    table("expr_checks").addCheck("score_nonnegative", (c) => c("total_cents").ge(0));
+  });
+
+  const checks = ops[0].constraints.map((c: any) => c.kind.expr);
+  assert.deepEqual(checks[0], {
+    node: "binOp",
+    op: "eq",
+    lhs: { node: "colRef", name: "pkce_method" },
+    rhs: { node: "literal", value: "S256" },
+  });
+  assert.deepEqual(checks[1], {
+    node: "pgRegexMatch",
+    expr: { node: "colRef", name: "user_id" },
+    pattern: "^usr_[0-9A-Za-z]{20,40}$",
+  });
+  assert.deepEqual(checks[2], {
+    node: "pgArrayMembership",
+    expr: { node: "colRef", name: "kind" },
+    op: "eq",
+    elems: ["a", "b", "c"],
+  });
+  assert.deepEqual(checks[3], {
+    node: "binOp",
+    op: "lt",
+    lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
+    rhs: { node: "literal", value: 262144 },
+  });
+  assert.deepEqual(checks[4], {
+    node: "binOp",
+    op: "eq",
+    lhs: { node: "colRef", name: "total_cents" },
+    rhs: {
+      node: "binOp",
+      op: "sub",
+      lhs: { node: "colRef", name: "subtotal_cents" },
+      rhs: { node: "colRef", name: "credit_cents" },
+    },
+  });
+  assert.deepEqual(checks[5], {
+    node: "binOp",
+    op: "or",
+    lhs: { node: "unaryOp", op: "isNull", operand: { node: "colRef", name: "floor_cents" } },
+    rhs: {
+      node: "binOp",
+      op: "ge",
+      lhs: { node: "colRef", name: "floor_cents" },
+      rhs: { node: "literal", value: 0 },
+    },
+  });
+  assert.deepEqual(checks[6], {
+    node: "binOp",
+    op: "and",
+    lhs: { node: "colRef", name: "enabled" },
+    rhs: { node: "colRef", name: "visible" },
+  });
+  assert.deepEqual(checks[7], {
+    node: "binOp",
+    op: "le",
+    lhs: { node: "colRef", name: "expires_at" },
+    rhs: {
+      node: "binOp",
+      op: "add",
+      lhs: { node: "colRef", name: "created_at" },
+      rhs: { node: "pgIntervalLiteral", value: "00:01:00" },
+    },
+  });
+  assert.deepEqual(checks[8], {
+    node: "unaryOp",
+    op: "not",
+    operand: {
+      node: "binOp",
+      op: "eq",
+      lhs: { node: "colRef", name: "kind" },
+      rhs: { node: "literal", value: "archived" },
+    },
+  });
+  assert.deepEqual(ops[1], {
+    op: "addConstraint",
+    table: "expr_checks",
+    constraint: {
+      name: "score_nonnegative",
+      kind: {
+        kind: "check",
+        expr: {
+          node: "binOp",
+          op: "ge",
+          lhs: { node: "colRef", name: "total_cents" },
+          rhs: { node: "literal", value: 0 },
+        },
+      },
+    },
   });
 });
 

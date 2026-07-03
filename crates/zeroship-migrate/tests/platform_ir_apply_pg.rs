@@ -301,6 +301,57 @@ export function up() {
   });
 }
 "#;
+const PLATFORM_EXPR_SURFACE_TS: &str = r#"
+import {
+  table,
+  t,
+  check,
+  and,
+  or,
+  membership,
+  interval,
+} from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate/pg";
+
+export const name = "platform_expr_surface";
+
+export function up() {
+  schema({ name: "zeroship", ifNotExists: true });
+
+  table("expr_surface", { schema: "zeroship" }).create({
+    columns: {
+      pkce_method: t.text().notNull(),
+      amount_cents: t.integer().notNull(),
+      user_id: t.text().notNull(),
+      kind: t.text().notNull(),
+      data: t.json().notNull(),
+      subtotal_cents: t.integer().notNull(),
+      credit_cents: t.integer().notNull(),
+      total_cents: t.integer().notNull(),
+      floor_cents: t.integer(),
+      created_at: t.timestamp().notNull(),
+      expires_at: t.timestamp().notNull(),
+      active: t.boolean().notNull(),
+      visible: t.boolean().notNull(),
+    },
+    checks: [
+      check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
+      check("expr_user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
+      check("expr_kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
+      check("expr_data_size", (c) => c("data").columnSize().lt(262144)),
+      check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
+      check("expr_floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
+      check("expr_active_visible", (c) => and(c("active"), c("visible"))),
+      check("expr_expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
+    ],
+  });
+
+  table("expr_surface", { schema: "zeroship" }).addCheck(
+    "expr_amount_nonnegative",
+    (c) => c("amount_cents").ge(0),
+  );
+}
+"#;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_PLATFORM_IR_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -586,6 +637,26 @@ async fn constraint_kind(
     rows.first().map(|row| row.get::<_, String>(0))
 }
 
+async fn constraint_definition(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    constraint: &str,
+) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT pg_get_constraintdef(c.oid) \
+             FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3",
+            &[&schema, &table, &constraint],
+        )
+        .await
+        .expect("query pg_get_constraintdef");
+    rows.first().map(|row| row.get::<_, String>(0))
+}
+
 async fn trigger_exists(conn: &Client, schema: &str, table: &str, trigger: &str) -> bool {
     !conn
         .query(
@@ -810,6 +881,76 @@ async fn platform_author_synth_defaults_render_and_apply_on_live_pg() {
     )
     .await
     .expect("insert using both synth defaults");
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_expr_surface_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_expr_surface",
+        "20260703000000_platform_expr_surface.ts",
+        PLATFORM_EXPR_SURFACE_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with check expression surface applies");
+
+    let expected = [
+        (
+            "expr_pkce_method_check",
+            "CHECK ((pkce_method = 'S256'::text))",
+        ),
+        (
+            "expr_amount_nonnegative",
+            "CHECK ((amount_cents >= 0))",
+        ),
+        (
+            "expr_user_id_fmt",
+            "CHECK ((user_id ~ '^usr_[0-9A-Za-z]{20,40}$'::text))",
+        ),
+        (
+            "expr_kind_ok",
+            "CHECK ((kind = ANY (ARRAY['a'::text, 'b'::text, 'c'::text])))",
+        ),
+        (
+            "expr_data_size",
+            "CHECK ((pg_column_size(data) < 262144))",
+        ),
+        (
+            "expr_total_matches",
+            "CHECK ((total_cents = (subtotal_cents - credit_cents)))",
+        ),
+        (
+            "expr_floor_nonneg_or_null",
+            "CHECK (((floor_cents IS NULL) OR (floor_cents >= 0)))",
+        ),
+        ("expr_active_visible", "CHECK ((active AND visible))"),
+        (
+            "expr_expires_window",
+            "CHECK ((expires_at <= (created_at + '00:01:00'::interval)))",
+        ),
+    ];
+
+    for (constraint, definition) in expected {
+        assert_eq!(
+            constraint_definition(&conn, "zeroship", "expr_surface", constraint)
+                .await
+                .as_deref(),
+            Some(definition),
+            "{constraint} should round-trip through pg_get_constraintdef"
+        );
+    }
 
     reset(&conn, &meta).await;
     global_lock.release().await;
