@@ -256,6 +256,12 @@ impl SchemaRenderer for PostgresSchemaRenderer {
             return "geography(POINT, 4326)".to_string();
         }
 
+        if zs_type == Some("char") {
+            if let Some(len) = char_len(def) {
+                return format!("character({len})");
+            }
+        }
+
         def_to_pg_type(def).to_string()
     }
 
@@ -365,6 +371,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
         match zs_type {
             Some("string") => "TEXT".to_string(),
+            Some("char") => "TEXT".to_string(),
             Some("number") => "REAL".to_string(),
             Some("real") => "REAL".to_string(),
             Some("boolean") => "INTEGER".to_string(),
@@ -498,6 +505,10 @@ impl SchemaRenderer for MysqlSchemaRenderer {
                     None => "VARCHAR(191)".to_string(),
                 }
             }
+            Some("char") => match char_len(def) {
+                Some(len) => format!("CHAR({len})"),
+                None => "CHAR(1)".to_string(),
+            },
             Some("number") => "DOUBLE".to_string(),
             Some("real") => "FLOAT".to_string(),
             Some("boolean") => "TINYINT(1)".to_string(),
@@ -2465,6 +2476,22 @@ pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDiale
     renderer(dialect).column_type(def)
 }
 
+fn char_len(def: &serde_json::Value) -> Option<u64> {
+    def.get("charLen")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|len| *len > 0)
+}
+
+fn parse_character_type_len(data_type: &str) -> Option<u64> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("character(")
+        .or_else(|| lower.strip_prefix("char("))
+        .or_else(|| lower.strip_prefix("bpchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u64>().ok().filter(|len| *len > 0)
+}
+
 /// C2 — emit per-variant CHECK constraints for a flat-expanded
 /// discriminated union (proposal §C2). The discriminator field carries
 /// the per-variant shape map; for each variant we emit a clause like
@@ -2625,6 +2652,7 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
     match def.get("type").and_then(|t| t.as_str()) {
         Some("string") => "TEXT",
+        Some("char") => "TEXT",
         // **P4 PR 2** — `t.vector(dims)` maps to pgvector's `vector(N)`.
         // Returning the bare `"vector"` token would lose the dims, so
         // this arm is unused; column DDL composes the dims back in via
@@ -2716,7 +2744,7 @@ pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
         // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
         // live SQLite `text` token itself.
         "text" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz" | "date"
-        | "inet" => {
+        | "inet" | "character" | "char" | "bpchar" => {
             "text"
         }
         // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
@@ -2748,6 +2776,9 @@ pub fn mysql_canonical_type(data_type: &str) -> String {
     }
     if no_width == "varchar(43)" || no_width == "inet" {
         return "inet".to_string();
+    }
+    if let Some(len) = parse_character_type_len(&no_width) {
+        return format!("character({len})");
     }
     if no_width.starts_with("varchar(") || no_width.ends_with("text") || no_width == "char" {
         return "text".to_string();

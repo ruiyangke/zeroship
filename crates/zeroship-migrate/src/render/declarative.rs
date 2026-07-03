@@ -286,6 +286,9 @@ fn mysql_ddl_type(data_type: &str) -> String {
     if lower.starts_with("vector(") {
         return "BLOB".to_string();
     }
+    if let Some(len) = char_len_from_data_type(&lower) {
+        return format!("CHAR({len})");
+    }
     match lower.as_str() {
         "text" => "VARCHAR(191)".to_string(),
         "double precision" | "float8" => "DOUBLE".to_string(),
@@ -523,6 +526,10 @@ pub struct FieldDescriptor {
     /// `vector(N)` (pgvector). Mirrors `vectorDims` on the wire `FieldDef`.
     #[serde(rename = "vectorDims", default)]
     pub vector_dims: Option<i64>,
+    /// `t.char(len)` — fixed-length character type. Mirrors `charLen` on the
+    /// intermediate SDK-shaped `FieldDef` the shared renderer consumes.
+    #[serde(rename = "charLen", default)]
+    pub char_len: Option<i64>,
     /// `t.vector(_, { metric })` — distance metric (`cosine` | `l2` |
     /// `innerProduct`), drives the ivfflat opclass. Mirrors `vectorMetric`.
     #[serde(rename = "vectorMetric", default)]
@@ -719,6 +726,9 @@ pub fn dsl_to_pg_data_type(dsl_type: &str) -> Result<String, DeclarativeError> {
 fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     let mut def = serde_json::Map::new();
     def.insert("type".into(), serde_json::Value::String(f.ty.clone()));
+    if let Some(len) = f.char_len {
+        def.insert("charLen".into(), serde_json::Value::from(len));
+    }
     if let Some(d) = f.vector_dims {
         def.insert("vectorDims".into(), serde_json::Value::from(d));
     }
@@ -1219,7 +1229,7 @@ fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
 fn field_default_expr(f: &FieldDescriptor, synth_json_defaults: bool) -> Option<String> {
     if let Some(default) = &f.default {
         return match f.ty.as_str() {
-            "string" | "inet" => default.as_str().map(sql_str),
+            "string" | "char" | "inet" => default.as_str().map(sql_str),
             // `int` (`t.integer()`/`t.bigInt()`) and `number` (`t.float()`/
             // `t.numeric()`) share one precision-preserving renderer — without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
@@ -6094,6 +6104,16 @@ pub(crate) fn ddl_type(data_type: &str) -> &str {
         "double precision" => "double precision",
         other => other,
     }
+}
+
+pub(crate) fn char_len_from_data_type(data_type: &str) -> Option<u32> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("character(")
+        .or_else(|| lower.strip_prefix("char("))
+        .or_else(|| lower.strip_prefix("bpchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u32>().ok().filter(|len| *len > 0)
 }
 
 /// Validate a bare SQL identifier at the author boundary: non-empty, starts with

@@ -2237,6 +2237,18 @@ fn validate_col_type_position(
         }
     }
 
+    if matches!(ty, ColType::Char { len: 0 }) {
+        return Err(AuthoringError {
+            code: CODE_UNSUPPORTED.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!("{position} uses `char(0)`; fixed-length char requires a positive length"),
+            suggested_fix: Some("use `t.char(1)` or larger".to_string()),
+        });
+    }
+
     if !contains_date(ty) {
         return Ok(());
     }
