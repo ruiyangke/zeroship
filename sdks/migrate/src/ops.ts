@@ -675,6 +675,12 @@ export const t: TypeLexicon = {
   text: () => new ColumnDefImpl("text"),
   numeric: (precision = 38, scale = 9) =>
     new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
+  char: (n) => {
+    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
+      throw structuredError("OP_INVALID", `t.char(n): n must be a positive integer, got ${n}`);
+    }
+    return new ColumnDefImpl({ char: { len: n } } as ColType);
+  },
   timestamp: () => new ColumnDefImpl("timestamp"),
   date: () => new ColumnDefImpl("date" as ColType),
   uuid: () => new ColumnDefImpl("uuid"),

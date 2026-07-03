@@ -44,7 +44,7 @@ export function up() {
       id: t.text().notNull(),
       invoice_id: t.text().notNull(),
       amount_cents: t.bigInt().notNull(),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       status: t.text().notNull().default("open"),
       reason: t.text(),
       evidence_due_at: t.timestamp(),
@@ -54,10 +54,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column billing_disputes.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column billing_disputes.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   // TODO(dsl-v2): add structural column type support for zeroship.dispute_status
   raw({ sql: "ALTER TABLE ONLY zeroship.billing_disputes ALTER COLUMN status TYPE zeroship.dispute_status USING status::zeroship.dispute_status", reason: "column billing_disputes.status uses PostgreSQL type zeroship.dispute_status, which is not in the current closed column lexicon/lowerer use-site set" });
   table("billing_disputes", { schema: "zeroship" }).addCheck("billing_disputes_amount_cents_check", (c) => c("amount_cents").gt(0));
@@ -139,7 +135,7 @@ export function up() {
       provider_payment_intent_id: t.text().notNull(),
       stripe_account_id: t.text().notNull(),
       amount_cents: t.bigInt().notNull(),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       failure_code: t.text(),
       failure_message: t.text(),
       occurred_at: t.timestamp().notNull(),
@@ -147,10 +143,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.connect_checkout_failures ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column connect_checkout_failures.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.connect_checkout_failures ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column connect_checkout_failures.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   table("connect_checkout_failures", { schema: "zeroship" }).addCheck("connect_checkout_failures_amount_cents_check", (c) => c("amount_cents").ge(0));
   table("connect_checkout_failures", { schema: "zeroship" }).addCheck("connect_checkout_failures_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("creator_billing", { schema: "zeroship" }).create({
@@ -216,7 +208,7 @@ export function up() {
       creator_id: t.uuid().notNull(),
       kind: t.text().notNull(),
       amount_cents: t.bigInt().notNull(),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       applied_invoice_id: t.text(),
       consumed_from_grant_id: t.text(),
       expires_at: t.timestamp(),
@@ -229,10 +221,6 @@ export function up() {
   });
   // TODO(dsl-v2): add structural column type support for zeroship.credit_entry_kind
   raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ALTER COLUMN kind TYPE zeroship.credit_entry_kind USING kind::zeroship.credit_entry_kind", reason: "column credit_ledger.kind uses PostgreSQL type zeroship.credit_entry_kind, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column credit_ledger.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.credit_ledger ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column credit_ledger.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_amount_cents_check", (c) => c("amount_cents").ne(0));
   table("credit_ledger", { schema: "zeroship" }).addCheck("credit_ledger_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   // TODO(dsl-v2): CHECK constraint credit_ledger.credit_ledger_grant_ref needs the Expr->SQL renderer
@@ -265,17 +253,13 @@ export function up() {
       id: t.text().notNull(),
       invoice_id: t.text().notNull(),
       amount_cents: t.bigInt().notNull(),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       kind: t.text().notNull(),
       provider_ref: t.text(),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column invoice_payments.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column invoice_payments.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   // TODO(dsl-v2): add structural column type support for zeroship.invoice_payment_kind
   raw({ sql: "ALTER TABLE ONLY zeroship.invoice_payments ALTER COLUMN kind TYPE zeroship.invoice_payment_kind USING kind::zeroship.invoice_payment_kind", reason: "column invoice_payments.kind uses PostgreSQL type zeroship.invoice_payment_kind, which is not in the current closed column lexicon/lowerer use-site set" });
   table("invoice_payments", { schema: "zeroship" }).addCheck("invoice_payments_amount_cents_check", (c) => c("amount_cents").ne(0));
@@ -286,7 +270,7 @@ export function up() {
       creator_id: t.uuid().notNull(),
       period: t.text().notNull(),
       status: t.text().notNull().default("draft"),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       subtotal_cents: t.bigInt().notNull().default(0),
       credit_cents: t.bigInt().notNull().default(0),
       tax_cents: t.bigInt().notNull().default(0),
@@ -302,10 +286,6 @@ export function up() {
   raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN period TYPE zeroship.billing_period USING period::zeroship.billing_period", reason: "column invoices.period uses PostgreSQL type zeroship.billing_period, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for zeroship.invoice_status
   raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN status TYPE zeroship.invoice_status USING status::zeroship.invoice_status", reason: "column invoices.status uses PostgreSQL type zeroship.invoice_status, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column invoices.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column invoices.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   table("invoices", { schema: "zeroship" }).addCheck("invoice_total_balances", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")).add(c("tax_cents"))));
   table("invoices", { schema: "zeroship" }).addCheck("invoices_credit_cents_check", (c) => c("credit_cents").ge(0));
   table("invoices", { schema: "zeroship" }).addCheck("invoices_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
@@ -346,7 +326,7 @@ export function up() {
       provider_payout_id: t.text().notNull(),
       stripe_account_id: t.text().notNull(),
       amount_cents: t.bigInt().notNull(),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       failure_code: t.text(),
       failure_message: t.text(),
       occurred_at: t.timestamp().notNull(),
@@ -354,10 +334,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.payout_failures ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column payout_failures.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.payout_failures ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column payout_failures.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   table("payout_failures", { schema: "zeroship" }).addCheck("payout_failures_amount_cents_check", (c) => c("amount_cents").ge(0));
   table("payout_failures", { schema: "zeroship" }).addCheck("payout_failures_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
   table("pending_disputes", { schema: "zeroship" }).create({
@@ -366,17 +342,13 @@ export function up() {
       payment_intent: t.text(),
       charge: t.text(),
       amount_cents: t.bigInt().notNull(),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       reason: t.text(),
       evidence_due_at: t.timestamp(),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["provider_dispute_id"],
   });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.pending_disputes ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column pending_disputes.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.pending_disputes ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column pending_disputes.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   table("pending_disputes", { schema: "zeroship" }).addCheck("pending_disputes_amount_cents_check", (c) => c("amount_cents").gt(0));
   table("pending_disputes", { schema: "zeroship" }).addCheck("pending_disputes_check", (c) => or(c("payment_intent").isNotNull(), c("charge").isNotNull()));
   table("pending_disputes", { schema: "zeroship" }).addCheck("pending_disputes_currency_check", (c) => c("currency").matches("^[a-z]{3}$"));
@@ -447,7 +419,7 @@ export function up() {
       amount_cents: t.bigInt().notNull(),
       subtotal_cents: t.bigInt().notNull(),
       tax_cents: t.bigInt().notNull().default(0),
-      currency: t.text().notNull(),
+      currency: t.char(3).notNull().default("usd"),
       destination: t.text().notNull(),
       reason: t.text(),
       idempotency_key: t.text().notNull(),
@@ -459,10 +431,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for character(3)
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ALTER COLUMN currency TYPE character(3) USING currency::character(3)", reason: "column refunds.currency uses PostgreSQL type character(3), which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.refunds ALTER COLUMN currency SET DEFAULT 'usd'::bpchar", reason: "column refunds.currency requires exact default 'usd'::bpchar, which the current structural default surface/lowerer cannot emit for this table" });
   // TODO(dsl-v2): add structural column type support for zeroship.refund_destination
   raw({ sql: "ALTER TABLE ONLY zeroship.refunds ALTER COLUMN destination TYPE zeroship.refund_destination USING destination::zeroship.refund_destination", reason: "column refunds.destination uses PostgreSQL type zeroship.refund_destination, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add structural column type support for zeroship.refund_status

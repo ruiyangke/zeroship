@@ -115,6 +115,7 @@ export type ColType =
   | "inet"
   | "bytea"
   | "geoPoint"
+  | { char: { len: number } }
   | { ref: { references: string } }
   | { vector: { vector: number } }
   | { decimal: { precision: number; scale: number } }

@@ -4525,6 +4525,10 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         ColType::Vector { vector } => Some(i64::from(*vector)),
         _ => None,
     };
+    let char_len = match &c.ty {
+        ColType::Char { len } => Some(i64::from(*len)),
+        _ => None,
+    };
     // **Migration-first P2a (§2b)** — thread the two DECLARED-ONLY, uncatalogable
     // facets the runtime/gen-types lose under P5 if the IR doesn't carry them:
     //   - `id_prefix` (`t.id({prefix})`) → the descriptor's `id_prefix` so the
@@ -4550,6 +4554,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         // — closing both the gen-types type gap and the runtime masking gap.
         mask: c.mask.map(IrMask::to_sdk_json).or(encrypted_mask),
         vector_dims,
+        char_len,
         vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
         id_prefix: c.id_prefix.clone(),
         generated: c.generated.clone(),
@@ -4605,6 +4610,7 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Uuid => ("string".into(), None),
         ColType::Inet => ("inet".into(), None),
         ColType::Bytea => ("bytes".into(), None),
+        ColType::Char { .. } => ("char".into(), None),
         ColType::Ref { references } => ("ref".into(), Some(references.clone())),
         ColType::Vector { .. } => ("vector".into(), None),
         ColType::GeoPoint => ("geoPoint".into(), None),
