@@ -489,11 +489,6 @@ async fn column_udt_name(
     rows.first().map(|row| row.get::<_, String>(0))
 }
 
-fn sorted_columns(mut cols: Vec<String>) -> Vec<String> {
-    cols.sort();
-    cols
-}
-
 async fn column_default_expr(
     conn: &Client,
     schema: &str,
@@ -814,20 +809,20 @@ async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg(
         "platform-exact table materialized"
     );
     assert_eq!(
-        sorted_columns(table_columns(&conn, "zeroship", "platform_apps").await),
-        vec!["created_at".to_string(), "id".to_string()],
-        "platform CreateTable materializes exactly the author columns on the FK target"
+        table_columns(&conn, "zeroship", "platform_apps").await,
+        vec!["id".to_string(), "created_at".to_string()],
+        "platform CreateTable preserves the author column order on the FK target"
     );
     assert_eq!(
-        sorted_columns(table_columns(&conn, "zeroship", "platform_registry").await),
+        table_columns(&conn, "zeroship", "platform_registry").await,
         vec![
             "app_id".to_string(),
-            "created_at".to_string(),
             "route".to_string(),
-            "status".to_string(),
             "target".to_string(),
+            "status".to_string(),
+            "created_at".to_string(),
         ],
-        "platform CreateTable materializes exactly the author columns, with no confined system fields"
+        "platform CreateTable preserves the author column order, with no confined system fields"
     );
     assert_eq!(
         column_udt_name(&conn, "zeroship", "platform_apps", "id")

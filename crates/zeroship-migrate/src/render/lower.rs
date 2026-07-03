@@ -6789,6 +6789,45 @@ mod tests {
     }
 
     #[test]
+    fn platform_exact_create_table_preserves_author_column_order_pg() {
+        let bytes = r#"{"ir_version":1,"name":"platform_column_order","ops":[
+            {"op":"createTable","name":"platform_column_order","schema":"zeroship","columns":[
+                {"name":"zeta","type":"text","nullable":false},
+                {"name":"alpha","type":"text","nullable":false},
+                {"name":"middle","type":"text","nullable":false}
+            ],"primaryKey":null,"constraints":[],"indexes":[]}
+        ]}"#;
+        let guard = platform_guard();
+        let profile = platform_profile();
+        let out = platform_author("platform", &guard)
+            .load_and_lower_guarded(
+                bytes,
+                "platform",
+                &registry(&[]),
+                &LiveSchema::default(),
+                &guard,
+                Some(&profile),
+            )
+            .expect("platform exact createTable lowers");
+        let migrations = out.migrations();
+        let create = migrations
+            .iter()
+            .find(|m| m.up.contains("CREATE TABLE"))
+            .expect("create table migration");
+        let expected = concat!(
+            "CREATE TABLE \"zeroship\".\"platform_column_order\" (",
+            "\"zeta\" text NOT NULL, ",
+            "\"alpha\" text NOT NULL, ",
+            "\"middle\" text NOT NULL)"
+        );
+        assert!(
+            create.up.contains(expected),
+            "platform exact createTable must render author column order:\n{}",
+            create.up
+        );
+    }
+
+    #[test]
     fn load_and_lower_guarded_cross_file_attach_uses_created_table_registry_update() {
         let create = r#"{"ir_version":1,"name":"platform_create","ops":[
             {"op":"createTable","name":"platform_registry","schema":"zeroship","columns":[
