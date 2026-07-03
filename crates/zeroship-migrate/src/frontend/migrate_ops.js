@@ -589,6 +589,7 @@ export const t = {
     return col;
   },
   text: () => new ColumnDef("text"),
+  textArray: () => new ColumnDef("textArray"),
   /** Fixed-precision decimal. Defaults to (38, 9). */
   numeric: (precision = 38, scale = 9) => new ColumnDef({ decimal: { precision, scale } }),
   /** Fixed-length character string. */

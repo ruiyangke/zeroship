@@ -380,6 +380,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
             Some("json") | Some("object") | Some("array") | Some("union") => {
                 "TEXT".to_string()
             }
+            Some("textArray") => "TEXT".to_string(),
             Some("ref") => "TEXT".to_string(),
             Some("literal") => match def.get("literalValue") {
                 Some(serde_json::Value::Number(_)) => "NUMERIC".to_string(),
@@ -515,6 +516,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
             Some("date") => "DATETIME(6)".to_string(),
             Some("calendarDate") => "DATE".to_string(),
             Some("json") | Some("object") | Some("array") | Some("union") => "JSON".to_string(),
+            Some("textArray") => "JSON".to_string(),
             Some("ref") => "VARCHAR(191)".to_string(),
             Some("bytes") => "LONGBLOB".to_string(),
             Some("literal") => match def.get("literalValue") {
@@ -2698,6 +2700,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // expressible but expensive at write time, see proposal D2).
         Some("object") => "JSONB",
         Some("array") => "JSONB",
+        Some("textArray") => "text[]",
         // **P7 PR 3** — cascades to TEXT so FK column type matches the
         // `id TEXT PRIMARY KEY` PR 2 introduced. See doc-comment on
         // [`def_to_pg_type`] for the back-compat rationale.
@@ -2743,8 +2746,8 @@ pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
         // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
         // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
         // live SQLite `text` token itself.
-        "text" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz" | "date"
-        | "inet" | "character" | "char" | "bpchar" => {
+        "text" | "text[]" | "jsonb" | "json" | "timestamp with time zone" | "timestamptz"
+        | "date" | "inet" | "character" | "char" | "bpchar" => {
             "text"
         }
         // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
@@ -2809,7 +2812,7 @@ pub fn mysql_canonical_type(data_type: &str) -> String {
         "smallint" | "int2" => "smallint".to_string(),
         "int" | "integer" | "int4" => "int".to_string(),
         "bigint" | "int8" => "bigint".to_string(),
-        "json" | "jsonb" => "json".to_string(),
+        "json" | "jsonb" | "text[]" => "json".to_string(),
         "date" => "date".to_string(),
         "point" | "point srid 4326" | "geography(point, 4326)" | "geography(POINT, 4326)" => {
             "point".to_string()

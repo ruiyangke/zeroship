@@ -4609,6 +4609,7 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
         ColType::Inet => ("inet".into(), None),
+        ColType::TextArray => ("textArray".into(), None),
         ColType::Bytea => ("bytes".into(), None),
         ColType::Char { .. } => ("char".into(), None),
         ColType::Ref { references } => ("ref".into(), Some(references.clone())),

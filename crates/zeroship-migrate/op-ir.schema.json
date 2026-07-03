@@ -2673,6 +2673,11 @@
           "const": "inet"
         },
         {
+          "description": "Text array (`text[]` on PG; JSON-encoded on non-PG backends).",
+          "type": "string",
+          "const": "textArray"
+        },
+        {
           "description": "Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).",
           "type": "string",
           "const": "bytea"

@@ -2,7 +2,7 @@
 //! portable column types. The existing parity e2e proves re-diff-to-zero + recorded-
 //! `.ts` checksum == direct IR checksum only for text/int/unique; this extends the
 //! checksum-parity leg to a multi-type schema covering
-//! smallInt/bigInt/float/real/boolean/json/timestamp/uuid/inet/bytes/numeric — so
+//! smallInt/bigInt/float/real/boolean/json/timestamp/uuid/inet/textArray/bytes/numeric — so
 //! a `render_t_for` name regression on ANY of those types trips the parity
 //! assertion.
 //!
@@ -70,7 +70,7 @@ fn col(name: &str, data_type: &str) -> ColumnSnapshot {
 
 /// A desired snapshot whose column `data_type`s hit EVERY portable `ColType` branch
 /// of `col_type_for_data_type` → `render_t_for`:
-/// text/int/smallInt/bigInt/float/real/boolean/json/timestamp/uuid/inet/bytes/numeric.
+/// text/int/smallInt/bigInt/float/real/boolean/json/timestamp/uuid/inet/textArray/bytes/numeric.
 fn all_types_desired() -> DesiredSchema {
     let mut cols = vec![
         col("c_text", "text"),
@@ -84,6 +84,7 @@ fn all_types_desired() -> DesiredSchema {
         col("c_ts", "timestamp with time zone"),
         col("c_uuid", "uuid"),
         col("c_inet", "inet"),
+        col("c_text_array", "text[]"),
         col("c_bytes", "bytea"),
         col("c_num", "numeric"),
     ];
@@ -139,6 +140,7 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
         ColType::Timestamp,
         ColType::Uuid,
         ColType::Inet,
+        ColType::TextArray,
         ColType::Bytea,
         ColType::Decimal { precision: 38, scale: 9 },
     ] {
@@ -162,6 +164,7 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
         "t.timestamp()",
         "t.uuid()",
         "t.inet()",
+        "t.textArray()",
         "t.bytes()",
         "t.numeric(38, 9)",
     ] {
