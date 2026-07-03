@@ -34,6 +34,7 @@ import type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
+  PgArrayMembershipOp,
   Privilege,
   RaiseLevel,
   RefAction,
@@ -63,6 +64,7 @@ export type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
+  PgArrayMembershipOp,
   Privilege,
   RaiseLevel,
   RefAction,
@@ -157,7 +159,10 @@ export type Expr =
   | { node: "case"; branches: CaseBranch[]; else?: Expr | null }
   | { node: "fnCall"; fn: ScalarFn; args: Expr[] }
   | { node: "fnSynth"; fn: SynthFn; args: Expr[] }
-  | { node: "cast"; operand: Expr; target: CastTarget };
+  | { node: "cast"; operand: Expr; target: CastTarget }
+  | { node: "pgArrayMembership"; expr: Expr; op: PgArrayMembershipOp; elems: string[] }
+  | { node: "pgRegexMatch"; expr: Expr; pattern: string }
+  | { node: "pgColumnSize"; expr: Expr };
 
 /** A DML cell in an insert row or `onConflict.doUpdate`: either a typed scalar
  *  literal or a closed expression AST such as `fnSynth(now)`. */

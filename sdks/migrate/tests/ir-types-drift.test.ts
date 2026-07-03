@@ -65,7 +65,10 @@ const TS = {
     "dropFunction", "comment", "pgRaw",
   ].sort(),
   // Expr node tags.
-  Expr: ["colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast"].sort(),
+  Expr: [
+    "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
+    "pgArrayMembership", "pgRegexMatch", "pgColumnSize",
+  ].sort(),
   // ColType string tokens (the object-variant arms — ref/vector/decimal/encrypted
   // — are not `const` and are checked structurally by the round-trip, not here).
   ColTypeStrings: [
@@ -91,6 +94,7 @@ const TS = {
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
   SynthDefaultFn: ["now", "genRandomUuid"].sort(),
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
+  PgArrayMembershipOp: ["eq", "ne"].sort(),
   IndexMethod: ["btree", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
   ExclusionMethod: ["gist", "spgist", "btree"].sort(),
   ExclusionOperator: ["&&", "=", "<>", "<", ">", "<=", ">="].sort(),
@@ -263,6 +267,7 @@ test("closed string-enum tokens match the schema", () => {
     "SynthFn",
     "SynthDefaultFn",
     "CastTarget",
+    "PgArrayMembershipOp",
     "IndexMethod",
     "ExclusionMethod",
     "ExclusionOperator",

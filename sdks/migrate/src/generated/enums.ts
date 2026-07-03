@@ -81,6 +81,13 @@ export type SynthDefaultFn = "now" | "genRandomUuid";
 export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uuid";
 
 /**
+ * **PG-ONLY** membership operator over a literal text array. The closed variants
+ * intentionally encode the two Postgres idioms the platform's dumped CHECK/domain
+ * predicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.
+ */
+export type PgArrayMembershipOp = "eq" | "ne";
+
+/**
  * The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design
  * line 648). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
  * so a hand-crafted `.ir.json` cannot smuggle an arbitrary / injection-shaped
