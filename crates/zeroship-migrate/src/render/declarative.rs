@@ -288,7 +288,8 @@ fn mysql_ddl_type(data_type: &str) -> String {
     }
     match lower.as_str() {
         "text" => "VARCHAR(191)".to_string(),
-        "double precision" | "real" | "float8" => "DOUBLE".to_string(),
+        "double precision" | "float8" => "DOUBLE".to_string(),
+        "real" | "float4" => "FLOAT".to_string(),
         "boolean" => "TINYINT(1)".to_string(),
         "timestamp with time zone" | "timestamptz" => "DATETIME(6)".to_string(),
         "date" => "DATE".to_string(),
@@ -296,7 +297,9 @@ fn mysql_ddl_type(data_type: &str) -> String {
         "bytea" | "blob" => "LONGBLOB".to_string(),
         "numeric" | "decimal" => "DECIMAL(65, 30)".to_string(),
         "integer" | "int" | "int4" => "INT".to_string(),
+        "smallint" | "int2" => "SMALLINT".to_string(),
         "bigint" | "int8" => "BIGINT".to_string(),
+        "inet" => "VARCHAR(43)".to_string(),
         "geography(point, 4326)" | "geography(POINT, 4326)" => "POINT SRID 4326".to_string(),
         other => other.to_string(),
     }
@@ -304,7 +307,7 @@ fn mysql_ddl_type(data_type: &str) -> String {
 
 fn sqlite_ddl_type(data_type: &str) -> &'static str {
     match data_type.to_ascii_lowercase().as_str() {
-        "integer" | "int" | "int4" | "bigint" | "int8" => "INTEGER",
+        "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" => "INTEGER",
         "real" | "double precision" | "numeric" => "REAL",
         "bytea" | "blob" | "geography(point, 4326)" => "BLOB",
         "boolean" => "INTEGER",
@@ -1034,6 +1037,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
     match ddl.to_ascii_uppercase().as_str() {
         "TEXT" => "text".into(),
         "DOUBLE PRECISION" => "double precision".into(),
+        "REAL" => "real".into(),
         "BOOLEAN" => "boolean".into(),
         "TIMESTAMPTZ" => "timestamp with time zone".into(),
         "DATE" => "date".into(),
@@ -1041,7 +1045,9 @@ fn ddl_to_information_schema(ddl: &str) -> String {
         "BYTEA" => "bytea".into(),
         "NUMERIC" => "numeric".into(),
         "INTEGER" => "integer".into(),
+        "SMALLINT" => "smallint".into(),
         "BIGINT" => "bigint".into(),
+        "INET" => "inet".into(),
         // Parameterised / extension types (vector(N), geography(POINT,4326)) keep
         // their DDL spelling — see the doc note.
         _ => ddl.to_string(),
@@ -1213,12 +1219,12 @@ fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
 fn field_default_expr(f: &FieldDescriptor, synth_json_defaults: bool) -> Option<String> {
     if let Some(default) = &f.default {
         return match f.ty.as_str() {
-            "string" => default.as_str().map(sql_str),
+            "string" | "inet" => default.as_str().map(sql_str),
             // `int` (`t.integer()`/`t.bigInt()`) and `number` (`t.float()`/
             // `t.numeric()`) share one precision-preserving renderer — without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
             // decimal/bigint carried as a numeric string dropped from BOTH.
-            "int" | "bigInt" | "number" => numeric_default_literal(default),
+            "int" | "smallInt" | "bigInt" | "number" | "real" => numeric_default_literal(default),
             "boolean" => default.as_bool().map(|b| b.to_string()),
             "json" | "object" => Some("'{}'::jsonb".into()),
             "array" => Some("'[]'::jsonb".into()),
@@ -2488,7 +2494,8 @@ pub enum DeclarativeError {
     #[error(
         "unsupported field type '{ty}' (not mapped in v1; vector/geoPoint/encrypted \
          are out of v1 scope). Supported: string, number, boolean, date, calendarDate, \
-         json, object, array, union, ref, bytes, actor, id"
+         json, object, array, union, ref, bytes, actor, id, int, smallInt, bigInt, \
+         float, real, inet"
     )]
     UnsupportedType {
         /// The unrecognised / out-of-scope DSL type token.

@@ -708,10 +708,13 @@ export const t: TypeLexicon = {
     return col;
   },
   geoPoint: () => new ColumnDefImpl("geoPoint"),
+  smallInt: () => new ColumnDefImpl("smallInt"),
   integer: () => new ColumnDefImpl("int"),
   int: () => new ColumnDefImpl("int"),
   bigInt: () => new ColumnDefImpl("bigInt"),
+  real: () => new ColumnDefImpl("real"),
   float: () => new ColumnDefImpl("float"),
+  inet: () => new ColumnDefImpl("inet"),
   enum: (name) => {
     const n = typeof name === "string" ? name : name.name;
     requireString(n, "t.enum(name)");

@@ -201,11 +201,17 @@ export interface TypeLexicon {
    *  metric instead of defaulting — a declared-only hint introspection can't recover. */
   vector(n: number, opts?: VectorOptions): ColumnDef;
   geoPoint(): ColumnDef;
+  /** 16-bit signed integer. */
+  smallInt(): ColumnDef;
   /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */
   integer(): ColumnDef;
   int(): ColumnDef;
   bigInt(): ColumnDef;
+  /** Single-precision float. */
+  real(): ColumnDef;
   float(): ColumnDef;
+  /** IP network/address (`inet` on Postgres). */
+  inet(): ColumnDef;
   /** A named enum reference declared with `enumType(name).create({ values })`. */
   enum(name: string | EnumHandle): ColumnDef;
   /** A named domain reference declared with `domain(name).create(...)` from `@zeroship/migrate/pg`. */
