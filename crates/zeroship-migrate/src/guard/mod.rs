@@ -1788,7 +1788,7 @@ pub(crate) fn check_ir_data_security_policy(
     let mut tables: BTreeMap<(String, String), RlsTableState> = BTreeMap::new();
     for (op_index, op) in ir.ops.iter().enumerate() {
         match op {
-            Op::CreateTable { name, schema, .. } => {
+            Op::CreateTable { name, schema, .. } | Op::CreatePartition { name, schema, .. } => {
                 let key = table_key_for_policy(cfg, schema, name);
                 tables.insert(
                     key,
@@ -1839,7 +1839,7 @@ pub(crate) fn check_ir_data_security_policy(
                     },
                 });
             }
-            Op::DropTable { table, schema, .. } => {
+            Op::DropTable { table, schema, .. } | Op::DropPartition { name: table, schema, .. } => {
                 let key = table_key_for_policy(cfg, schema, table);
                 tables
                     .entry(key)
@@ -1856,6 +1856,7 @@ pub(crate) fn check_ir_data_security_policy(
                         table: table.clone(),
                     });
             }
+            Op::DetachPartition { .. } => {}
             Op::RenameTable { table, to, schema, .. } => {
                 let from = table_key_for_policy(cfg, schema, table);
                 let to_key = table_key_for_policy(cfg, schema, to);
@@ -3114,7 +3115,10 @@ mod tests {
             primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }

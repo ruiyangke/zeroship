@@ -45,7 +45,9 @@ use crate::model::snapshot::{
     IndexElementSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
 use crate::IndexSortOrder;
-use crate::model::ir::TableRuntimeOptions;
+use crate::model::ir::{
+    IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec, TableRuntimeOptions,
+};
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
@@ -371,6 +373,100 @@ fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn render_ident_list_pg(cols: &[String]) -> String {
+    cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
+}
+
+fn render_partition_spec_pg(spec: &PartitionSpec) -> String {
+    let (kind, columns) = match spec {
+        PartitionSpec::Range { columns } => ("RANGE", columns),
+        PartitionSpec::List { columns } => ("LIST", columns),
+        PartitionSpec::Hash { columns } => ("HASH", columns),
+    };
+    format!(" PARTITION BY {kind} ({})", render_ident_list_pg(columns))
+}
+
+fn normalize_timestamptz_bound_literal(value: &str) -> String {
+    let mut out = value.to_string();
+    if out.len() >= 20
+        && out.as_bytes().get(4) == Some(&b'-')
+        && out.as_bytes().get(7) == Some(&b'-')
+        && out.as_bytes().get(10).is_some_and(|b| *b == b'T' || *b == b' ')
+    {
+        out = out.replace('T', " ");
+        if let Some(stripped) = out.strip_suffix('Z') {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix("+00:00") {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix(".000+00") {
+            out = format!("{stripped}+00");
+        }
+    }
+    out
+}
+
+fn render_partition_bound_value_pg(value: &PartitionBoundValue) -> String {
+    match value {
+        PartitionBoundValue::String { value } => {
+            let normalized = normalize_timestamptz_bound_literal(value);
+            format!("'{}'", normalized.replace('\'', "''"))
+        }
+        PartitionBoundValue::Int { value } => value.get().to_string(),
+        PartitionBoundValue::MinValue => "MINVALUE".to_string(),
+        PartitionBoundValue::MaxValue => "MAXVALUE".to_string(),
+    }
+}
+
+fn render_partition_bound_values_pg(values: &[PartitionBoundValue]) -> String {
+    values
+        .iter()
+        .map(render_partition_bound_value_pg)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_partition_bounds_pg(bounds: &PartitionBounds) -> String {
+    match bounds {
+        PartitionBounds::Range { from, to } => format!(
+            "FOR VALUES FROM ({}) TO ({})",
+            render_partition_bound_values_pg(from),
+            render_partition_bound_values_pg(to),
+        ),
+        PartitionBounds::List { values } => {
+            format!("FOR VALUES IN ({})", render_partition_bound_values_pg(values))
+        }
+        PartitionBounds::Hash { modulus, remainder } => {
+            format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})")
+        }
+        PartitionBounds::Default => "DEFAULT".to_string(),
+    }
+}
+
+fn render_index_include_pg(include: &[String]) -> String {
+    if include.is_empty() {
+        String::new()
+    } else {
+        format!(" INCLUDE ({})", render_ident_list_pg(include))
+    }
+}
+
+fn render_index_storage_params_pg(params: &IndexStorageParams) -> String {
+    let mut entries = Vec::new();
+    if let Some(pages_per_range) = params.pages_per_range {
+        entries.push(format!("pages_per_range='{pages_per_range}'"));
+    }
+    if let Some(fillfactor) = params.fillfactor {
+        entries.push(format!("fillfactor='{fillfactor}'"));
+    }
+    if entries.is_empty() {
+        String::new()
+    } else {
+        format!(" WITH ({})", entries.join(", "))
+    }
 }
 
 fn render_index_elements_sqlite(idx: &IndexSnapshot) -> String {
@@ -1712,6 +1808,7 @@ fn build_table_snapshot_impl(
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: d.runtime_options.clone(),
+            partition_by: None,
             comment: None,
             stored_create_sql: None,
         };
@@ -1965,6 +2062,7 @@ fn build_table_snapshot_impl(
         indexes,
         constraints,
         runtime_options: d.runtime_options.clone(),
+        partition_by: None,
         comment: None,
         stored_create_sql: None,
     })
@@ -2177,6 +2275,9 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         elements: vec![IndexElementSnapshot::column(f.name.clone())],
         access_method: "ivfflat".to_string(),
         predicate: None,
+        include: Vec::new(),
+        with: None,
+        only: false,
         opclass: Some(vector_opclass(f.vector_metric.as_deref()).to_string()),
         comment: None,
     })
@@ -2203,6 +2304,9 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
         elements: vec![IndexElementSnapshot::column(f.name.clone())],
         access_method: "gist".to_string(),
         predicate: None,
+        include: Vec::new(),
+        with: None,
+        only: false,
         opclass: None,
         comment: None,
     })
@@ -2285,6 +2389,9 @@ fn fts_objects_pg(
         elements: vec![IndexElementSnapshot::column(fts_column_name())],
         access_method: "gin".to_string(),
         predicate: None,
+        include: Vec::new(),
+        with: None,
+        only: false,
         opclass: None,
         comment: None,
     };
@@ -2336,6 +2443,9 @@ fn fts_index_snapshot_sqlite(
         columns: cols,
         access_method: SQLITE_FTS5_ACCESS_METHOD.to_string(),
         predicate: None,
+        include: Vec::new(),
+        with: None,
+        only: false,
         opclass: None,
         comment: None,
     })
@@ -4664,10 +4774,16 @@ impl DeclarativeAuthor {
                 parts.push(format!("CONSTRAINT {} {}", quote_ident(&c.name), c.definition));
             }
         }
+        let partition = t
+            .partition_by
+            .as_ref()
+            .map(render_partition_spec_pg)
+            .unwrap_or_default();
         let create = format!(
-            "CREATE TABLE {} ({})",
+            "CREATE TABLE {} ({}){}",
             self.qualified(table),
-            parts.join(", ")
+            parts.join(", "),
+            partition,
         );
         let mut statements: Vec<String> = vec![create];
         // **P4 HALF A** — append `COMMENT ON COLUMN … '<sentinel>'` for every
@@ -5132,6 +5248,62 @@ impl DeclarativeAuthor {
         )
     }
 
+    fn render_create_partition(
+        &self,
+        name: &str,
+        of: &str,
+        bounds: &PartitionBounds,
+    ) -> Migration {
+        let up = format!(
+            "CREATE TABLE {} PARTITION OF {} {}",
+            self.qualified(name),
+            self.qualified(of),
+            render_partition_bounds_pg(bounds),
+        );
+        let down = Some(format!("DROP TABLE {}", self.qualified(name)));
+        self.make(
+            &format!("create_partition_{name}"),
+            up,
+            down,
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
+    fn render_detach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        concurrently: bool,
+    ) -> Migration {
+        let concurrently = if concurrently { " CONCURRENTLY" } else { "" };
+        let up = format!(
+            "ALTER TABLE {} DETACH PARTITION {}{}",
+            self.qualified(parent),
+            self.qualified(name),
+            concurrently,
+        );
+        self.make(
+            &format!("detach_partition_{parent}_{name}"),
+            up,
+            None,
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
+    fn render_drop_partition(&self, name: &str, cascade: bool) -> Migration {
+        let cascade = if cascade { " CASCADE" } else { "" };
+        let up = format!("DROP TABLE {}{}", self.qualified(name), cascade);
+        self.make(
+            &format!("drop_partition_{name}"),
+            up,
+            None,
+            destructive_flags(),
+            Vec::new(),
+        )
+    }
+
     /// Render an `ALTER TABLE <old> RENAME TO <new>`.
     ///
     /// A whole-table rename is a FAST catalog-metadata operation (it is NOT the
@@ -5397,6 +5569,25 @@ impl DeclarativeAuthor {
     /// Each is a single statement.
     pub(crate) fn lower_drop_table(&self, table: &str) -> LoweredUnit {
         single_stmt(self.render_drop_table(table))
+    }
+    pub(crate) fn lower_create_partition(
+        &self,
+        name: &str,
+        of: &str,
+        bounds: &PartitionBounds,
+    ) -> LoweredUnit {
+        single_stmt(self.render_create_partition(name, of, bounds))
+    }
+    pub(crate) fn lower_detach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        concurrently: bool,
+    ) -> LoweredUnit {
+        single_stmt(self.render_detach_partition(parent, name, concurrently))
+    }
+    pub(crate) fn lower_drop_partition(&self, name: &str, cascade: bool) -> LoweredUnit {
+        single_stmt(self.render_drop_partition(name, cascade))
     }
     pub(crate) fn lower_rename_table(&self, table: &str, to: &str) -> LoweredUnit {
         single_stmt(self.render_rename_table(table, to))
@@ -5697,17 +5888,21 @@ impl DdlEmitter for PgEmitter {
             .map(|oc| format!(" {oc}"))
             .unwrap_or_default();
         let col_list = render_index_elements_pg(idx, &opclass_suffix);
-        // ivfflat takes a `WITH (lists = N)` storage parameter.
-        let with_clause = if idx.access_method == "ivfflat" {
-            " WITH (lists = 100)"
+        let include_clause = render_index_include_pg(&idx.include);
+        let with_clause = if let Some(params) = &idx.with {
+            render_index_storage_params_pg(params)
+        } else if idx.access_method == "ivfflat" {
+            " WITH (lists = 100)".to_string()
         } else {
-            ""
+            String::new()
         };
+        let only = if idx.only { "ONLY " } else { "" };
         (
             format!(
-                "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({col_list}){}{}",
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {only}{}{using} ({col_list}){}{}{}",
                 quote_ident(&idx.name),
                 self.qualified(table),
+                include_clause,
                 with_clause,
                 idx.predicate
                     .as_deref()

@@ -242,7 +242,10 @@ fn common_ops() -> Vec<Op> {
             primary_key: None,
             constraints: vec![pk_id()],
             indexes: Vec::new(),
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             existence_guard: None,
         },
         Op::CreateTable {
@@ -279,8 +282,14 @@ fn common_ops() -> Vec<Op> {
                 unique: Some(false),
                 using: None,
                 r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
             }],
-            runtime_options: Default::default(),
+
+        partition_by: None,
+
+        runtime_options: Default::default(),
             existence_guard: None,
         },
         Op::CreateView {
@@ -673,7 +682,10 @@ fn table_check_constraints_are_pg_only_until_non_pg_renderers_land() {
         primary_key: None,
         constraints: vec![check_constraint.clone()],
         indexes: Vec::new(),
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             existence_guard: None,
     };
     let add_check_op = Op::AddConstraint {
@@ -728,7 +740,10 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
                 },
             }],
         indexes: Vec::new(),
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             existence_guard: None,
     };
     let fk_err = validate_ir(&ir("sqlite_fk_gap", vec![fk_op]), Dialect::Sqlite, &[])
@@ -749,7 +764,10 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
                 },
             }],
         indexes: Vec::new(),
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             existence_guard: None,
     };
     let unique_err = validate_ir(&ir("sqlite_unique_gap", vec![unique_op]), Dialect::Sqlite, &[])

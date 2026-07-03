@@ -272,7 +272,10 @@ async fn add_column_ifnotexists_absent_runs() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     })).await.expect("create base table");
@@ -378,7 +381,10 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     })).await.expect("create base table via migrator");
@@ -393,7 +399,10 @@ async fn create_table_ifnotexists_present_extra_column_fails_closed() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -415,7 +424,10 @@ async fn create_table_ifnotexists_present_matching_is_noop() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     })).await.expect("create base table");
@@ -426,7 +438,10 @@ async fn create_table_ifnotexists_present_matching_is_noop() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -467,7 +482,10 @@ async fn create_table_ifnotexists_fresh_creates_all_secondary_indexes_and_reruns
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
@@ -553,7 +571,11 @@ async fn create_index_ifnotexists_present_unique_flip_fails_closed() {
         unique: Some(true),
         using: None,
         r#where: None,
-        concurrently: None,
+
+    include: Vec::new(),
+    with: None,
+    only: None,
+    concurrently: None,
         schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -583,7 +605,10 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }))
@@ -614,7 +639,11 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
         unique: Some(false),
         using: None,
         r#where: None,
-        concurrently: Some(true),
+
+    include: Vec::new(),
+    with: None,
+    only: None,
+    concurrently: Some(true),
         schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     });
@@ -750,7 +779,10 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }))
@@ -770,7 +802,10 @@ async fn create_table_ifnotexists_deferred_fk_reruns_idempotent() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
     };
@@ -814,7 +849,10 @@ async fn drop_column_ifexists_present_runs_absent_noops() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     })).await.expect("create base table via migrator");
@@ -875,7 +913,10 @@ async fn drop_view_ifexists_present_runs_absent_noops() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     })).await.expect("create base table via migrator");

@@ -23,21 +23,66 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { __begin as pubBegin, __drain as pubDrain, t as pubT, table as pubTable } from "../src/ops.js";
+import {
+  __begin as pubBegin,
+  __drain as pubDrain,
+  dropPartition as pubDropPartition,
+  maxValue as pubMaxValue,
+  minValue as pubMinValue,
+  p as pubP,
+  partition as pubPartition,
+  t as pubT,
+  table as pubTable,
+} from "../src/ops.js";
 // The authoritative engine recorder twin (the file the Rust runtime include_str!s
 // into V8). Importing it directly makes this an oracle against the real engine
 // recording, not a self-referential restatement of the public surface.
 import {
   __begin as engBegin,
   __drain as engDrain,
+  dropPartition as engDropPartition,
+  maxValue as engMaxValue,
+  minValue as engMinValue,
+  p as engP,
+  partition as engPartition,
   t as engT,
   table as engTable,
 } from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
 
-type Rec = { begin: () => void; drain: () => any[]; t: any; table: any };
+type Rec = {
+  begin: () => void;
+  drain: () => any[];
+  t: any;
+  table: any;
+  p: any;
+  partition: any;
+  dropPartition: any;
+  minValue: any;
+  maxValue: any;
+};
 
-const PUBLIC: Rec = { begin: pubBegin, drain: pubDrain, t: pubT, table: pubTable };
-const ENGINE: Rec = { begin: engBegin, drain: engDrain, t: engT, table: engTable };
+const PUBLIC: Rec = {
+  begin: pubBegin,
+  drain: pubDrain,
+  t: pubT,
+  table: pubTable,
+  p: pubP,
+  partition: pubPartition,
+  dropPartition: pubDropPartition,
+  minValue: pubMinValue,
+  maxValue: pubMaxValue,
+};
+const ENGINE: Rec = {
+  begin: engBegin,
+  drain: engDrain,
+  t: engT,
+  table: engTable,
+  p: engP,
+  partition: engPartition,
+  dropPartition: engDropPartition,
+  minValue: engMinValue,
+  maxValue: engMaxValue,
+};
 
 /** Author a facet-bearing migration against the given recorder + lexicon, return
  *  the recorded op list. The SAME author body runs against both impls. */
@@ -130,6 +175,46 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   assert.equal(addGenerated.generated.stored, true);
   const addIdentity = ops.find((o: any) => o.op === "addColumn" && o.column === "added_seq");
   assert.deepEqual(addIdentity.identity, { always: false });
+});
+
+function authorPartitionWith({
+  begin,
+  drain,
+  t,
+  table,
+  p,
+  partition,
+  dropPartition,
+  minValue,
+  maxValue,
+}: Rec): any[] {
+  begin();
+  table("events").create({
+    columns: {
+      ts: t.timestamp(),
+      tenant_id: t.text(),
+    },
+    partitionBy: p.range(["ts"]),
+  });
+  partition("events_2026_05", { schema: "app" }).of("events").forValues({
+    from: [minValue, "2026-05-01T00:00:00Z"],
+    to: ["2026-06-01T00:00:00Z", maxValue],
+  }, { ifNotExists: true });
+  partition("events_default").of("events").asDefault();
+  table("events")
+    .index("events_ts_brin_idx")
+    .using("brin")
+    .include(["tenant_id"])
+    .with({ pagesPerRange: 32 })
+    .only()
+    .add({ columns: ["ts"] });
+  table("events", { schema: "app" }).detachPartition("events_2026_05", { concurrently: true });
+  dropPartition("events_2026_05", { schema: "app", ifExists: true, cascade: true });
+  return drain();
+}
+
+test("partition DSL records byte-identically to the engine recorder", () => {
+  assert.deepEqual(authorPartitionWith(PUBLIC), authorPartitionWith(ENGINE));
 });
 
 test("an out-of-set mask kind/classification/metric is a structured OP_INVALID (runtime guard)", () => {

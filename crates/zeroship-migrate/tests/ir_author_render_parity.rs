@@ -37,6 +37,7 @@ fn empty_table_snapshot() -> TableSnapshot {
         indexes: vec![],
         constraints: vec![],
         runtime_options: Default::default(),
+        partition_by: None,
         comment: None,
         stored_create_sql: None,
     }
@@ -163,7 +164,10 @@ fn create_table_render_is_byte_identical_pg() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -229,7 +233,10 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -287,7 +294,10 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -363,7 +373,10 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_pg() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -483,7 +496,11 @@ fn create_index_render_is_byte_identical_pg() {
         unique: None,
         using: None,
         r#where: None,
-        concurrently: None,
+
+    include: Vec::new(),
+    with: None,
+    only: None,
+    concurrently: None,
         schema: None,
         existence_guard: None,
     }];
@@ -1043,7 +1060,10 @@ fn create_table_render_is_byte_identical_sqlite() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -1123,7 +1143,10 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -1173,7 +1196,10 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -1242,7 +1268,10 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     }];
@@ -1358,7 +1387,11 @@ fn create_index_render_is_byte_identical_sqlite() {
         unique: None,
         using: None,
         r#where: None,
-        concurrently: None,
+
+    include: Vec::new(),
+    with: None,
+    only: None,
+    concurrently: None,
         schema: None,
         existence_guard: None,
     }];

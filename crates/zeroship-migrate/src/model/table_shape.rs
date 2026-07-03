@@ -159,6 +159,9 @@ fn resolve_create_table(
         unique: None,
         using: None,
         r#where: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
     }));
 
     Ok(())
@@ -332,6 +335,7 @@ mod tests {
                 primary_key,
                 constraints: vec![],
                 indexes: vec![],
+                partition_by: None,
                 runtime_options: None,
                 schema: None,
                 existence_guard: None,

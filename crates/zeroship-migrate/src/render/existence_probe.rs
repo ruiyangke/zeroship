@@ -700,6 +700,7 @@ mod tests {
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: Default::default(),
+            partition_by: None,
             comment: None,
             stored_create_sql: None,
         }

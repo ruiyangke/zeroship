@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use zeroship_migrate::model::capability::VendorCapability;
-use zeroship_migrate::model::ir::{IrConstraintKind, Op, TriggerAction, ViewQuery};
+use zeroship_migrate::model::ir::{
+    IndexElement, IndexMethod, IndexStorageParams, IrConstraintKind, Op, PartitionBounds,
+    TriggerAction, ViewQuery,
+};
 use zeroship_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
 use zeroship_migrate::model::validate::validate_ir_scoped;
 use zeroship_migrate::{
@@ -14,6 +17,9 @@ const DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::Sqlite, Dialect::Mys
 
 const EXPECTED_OPS: &[&str] = &[
     "createTable",
+    "createPartition",
+    "detachPartition",
+    "dropPartition",
     "dropTable",
     "renameTable",
     "addColumn",
@@ -235,8 +241,8 @@ fn support_declarations_cover_every_op_and_dialect() {
     let expected: BTreeSet<String> = EXPECTED_OPS.iter().map(|s| (*s).to_string()).collect();
     assert_eq!(
         expected.len(),
-        51,
-        "matrix must mirror the closed 51-op v1 discriminant set"
+        54,
+        "matrix must mirror the closed 54-op v1 discriminant set"
     );
     assert_eq!(
         schema_op_tags(),
@@ -305,6 +311,117 @@ fn support_declarations_cover_every_op_and_dialect() {
                     "{tag}: vendor-tier ops must be non-PG unsupported"
                 );
             }
+        }
+    }
+}
+
+fn idx_col(name: &str) -> IndexElement {
+    IndexElement::Column {
+        name: name.into(),
+        order: None,
+    }
+}
+
+fn partition_feature_ops() -> Vec<Op> {
+    vec![
+        Op::CreatePartition {
+            name: "events_default".into(),
+            of: "events".into(),
+            bounds: PartitionBounds::Default,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::DetachPartition {
+            parent: "events".into(),
+            name: "events_default".into(),
+            schema: None,
+            concurrently: None,
+        },
+        Op::DropPartition {
+            name: "events_default".into(),
+            schema: None,
+            existence_guard: None,
+            cascade: None,
+        },
+        Op::CreateIndex {
+            table: "events".into(),
+            columns: vec![idx_col("created_at")],
+            name: Some("events_created_at_brin".into()),
+            unique: None,
+            using: Some(IndexMethod::Brin),
+            r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateIndex {
+            table: "events".into(),
+            columns: vec![idx_col("created_at")],
+            name: Some("events_created_at_include".into()),
+            unique: None,
+            using: None,
+            r#where: None,
+            include: vec!["kind".into()],
+            with: None,
+            only: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateIndex {
+            table: "events".into(),
+            columns: vec![idx_col("created_at")],
+            name: Some("events_created_at_with".into()),
+            unique: None,
+            using: Some(IndexMethod::Brin),
+            r#where: None,
+            include: Vec::new(),
+            with: Some(IndexStorageParams {
+                pages_per_range: Some(16),
+                fillfactor: None,
+            }),
+            only: None,
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreateIndex {
+            table: "events".into(),
+            columns: vec![idx_col("created_at")],
+            name: Some("events_created_at_only".into()),
+            unique: None,
+            using: None,
+            r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: Some(true),
+            concurrently: None,
+            schema: None,
+            existence_guard: None,
+        },
+    ]
+}
+
+#[test]
+fn partition_ops_and_partition_index_features_are_pg_only() {
+    for op in partition_feature_ops() {
+        let tag = op_tag(&op);
+        let support = op.support();
+        for dialect in DIALECTS {
+            let decision_supported = support.decision(dialect).is_supported();
+            let validates = validate_current(&op, dialect);
+            assert_eq!(
+                validates, decision_supported,
+                "{tag} {dialect:?}: support decision and validate() must agree"
+            );
+            assert_eq!(
+                decision_supported,
+                matches!(dialect, Dialect::Postgres),
+                "{tag} {dialect:?}: partition DSL slice is PostgreSQL-only"
+            );
         }
     }
 }

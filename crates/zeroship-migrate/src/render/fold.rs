@@ -57,7 +57,7 @@ use crate::render::declarative::{
 use crate::model::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, sequence_default_start_value,
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, IndexSnapshot, NamedTypeSnapshot,
-    RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
+    PartitionSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot,
     SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use crate::render::renderer::{Capability, DialectSupports};
@@ -396,6 +396,7 @@ pub fn fold_ops(
     project_schema: &str,
 ) -> Result<SchemaSnapshot, FoldError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
+    let mut partitions: BTreeMap<String, PartitionSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
     let mut sequences: BTreeMap<String, SequenceSnapshot> = BTreeMap::new();
     let mut named_types = NamedTypeRegistry::default();
@@ -517,6 +518,7 @@ pub fn fold_ops(
                 primary_key,
                 constraints,
                 indexes,
+                partition_by,
                 runtime_options,
                 ..
             } => {
@@ -526,8 +528,12 @@ pub fn fold_ops(
                 if views.contains_key(name) {
                     return Err(FoldError::DuplicateView(name.clone()));
                 }
+                if partitions.contains_key(name) {
+                    return Err(FoldError::DuplicateTable(name.clone()));
+                }
                 let desc = create_table_descriptor(name, columns, runtime_options.as_ref());
                 let mut snap = build_resolved_table_snapshot(project_schema, &desc, dialect)?;
+                snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
                     push_primary_key_snapshot(name, &mut snap, pk);
                 }
@@ -550,6 +556,55 @@ pub fn fold_ops(
                     dialect,
                 )?;
                 tables.insert(name.clone(), snap);
+            }
+            Op::CreatePartition {
+                name,
+                of,
+                bounds,
+                ..
+            } => {
+                let parent = tables
+                    .get(of)
+                    .ok_or_else(|| FoldError::MissingTable(of.clone()))?;
+                if parent.partition_by.is_none() {
+                    return Err(FoldError::Unsupported(
+                        "createPartition parent table is not partitioned",
+                    ));
+                }
+                if tables.contains_key(name) || partitions.contains_key(name) {
+                    return Err(FoldError::DuplicateTable(name.clone()));
+                }
+                partitions.insert(
+                    name.clone(),
+                    PartitionSnapshot {
+                        of: of.clone(),
+                        bounds: bounds.clone(),
+                    },
+                );
+            }
+            Op::DetachPartition { parent, name, .. } => {
+                let parent_snap = tables
+                    .get(parent)
+                    .ok_or_else(|| FoldError::MissingTable(parent.clone()))?;
+                if parent_snap.partition_by.is_none() {
+                    return Err(FoldError::Unsupported(
+                        "detachPartition parent table is not partitioned",
+                    ));
+                }
+                let partition = partitions
+                    .get(name)
+                    .ok_or_else(|| FoldError::MissingTable(name.clone()))?;
+                if &partition.of != parent {
+                    return Err(FoldError::Unsupported(
+                        "detachPartition child belongs to a different parent",
+                    ));
+                }
+                partitions.remove(name);
+            }
+            Op::DropPartition { name, .. } => {
+                if partitions.remove(name).is_none() {
+                    return Err(FoldError::MissingTable(name.clone()));
+                }
             }
             Op::SetTableOptions { table, options, .. } => {
                 let snap = table_mut(&mut tables, table)?;
@@ -578,6 +633,7 @@ pub fn fold_ops(
                 if tables.remove(table).is_none() {
                     return Err(FoldError::MissingTable(table.clone()));
                 }
+                partitions.retain(|_, partition| &partition.of != table);
             }
             Op::RenameTable { table, to, .. } => {
                 // A whole-table rename moves the snapshot WHOLESALE from the old key
@@ -976,7 +1032,18 @@ pub fn fold_ops(
                     snap.indexes.retain(|i| &i.name != name);
                 }
             }
-            Op::CreateIndex { table, columns, name, unique, using, r#where, .. } => {
+            Op::CreateIndex {
+                table,
+                columns,
+                name,
+                unique,
+                using,
+                r#where,
+                include,
+                with,
+                only,
+                ..
+            } => {
                 let idx = create_index_snapshot(
                     table,
                     columns,
@@ -984,6 +1051,9 @@ pub fn fold_ops(
                     *unique,
                     *using,
                     r#where.as_ref(),
+                    include,
+                    with.as_ref(),
+                    *only,
                     dialect,
                 )
                 .map_err(fold_lower_error)?;
@@ -1122,8 +1192,9 @@ pub fn fold_ops(
     }
 
     Ok(SchemaSnapshot {
-        tables,
-        views,
+                tables,
+                partitions,
+                views,
         named_types: named_type_snapshots,
         sequences,
         roles,
@@ -1691,6 +1762,9 @@ fn fold_create_table_specs(
             ix.unique,
             ix.using,
             ix.r#where.as_ref(),
+            &ix.include,
+            ix.with.as_ref(),
+            ix.only,
             dialect,
         )
         .map_err(fold_lower_error)?;
@@ -2763,6 +2837,7 @@ pub fn descriptors_to_create_ops(
             primary_key: None,
             constraints,
             indexes: Vec::new(),
+            partition_by: None,
             runtime_options: Some(d.runtime_options.clone()),
             schema: None,
             existence_guard: None,
@@ -2980,6 +3055,7 @@ mod tests {
             primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
+            partition_by: None,
             runtime_options: None,
             schema: None,
             existence_guard: None,
@@ -3918,6 +3994,9 @@ mod tests {
             unique: Some(unique),
             using: None,
             r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
             concurrently: None,
             schema: None,
             existence_guard: None,
@@ -4049,7 +4128,11 @@ mod tests {
                 unique: None,
                 using: None,
                 r#where: None,
+                include: Vec::new(),
+                with: None,
+                only: None,
             }],
+            partition_by: None,
             runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
@@ -4073,6 +4156,7 @@ mod tests {
                 primary_key: None,
                 constraints: Vec::new(),
                 indexes: Vec::new(),
+                partition_by: None,
                 runtime_options: Some(TableRuntimeOptions {
                     soft_delete: true,
                     versioning: true,
@@ -4097,6 +4181,9 @@ mod tests {
                 unique: Some(false),
                 using: None,
                 r#where: None,
+                include: Vec::new(),
+                with: None,
+                only: None,
                 concurrently: None,
                 schema: None,
                 existence_guard: None,
@@ -4153,6 +4240,7 @@ mod tests {
             primary_key: None,
             constraints: vec![pk],
             indexes: Vec::new(),
+            partition_by: None,
             runtime_options: None,
             schema: None,
             existence_guard: None,
@@ -4263,7 +4351,10 @@ mod tests {
             primary_key: None,
             constraints,
             indexes,
-            runtime_options: Default::default(),
+
+        partition_by: None,
+
+        runtime_options: Default::default(),
             schema: None,
             existence_guard: None,
         }
@@ -4346,6 +4437,9 @@ mod tests {
                 unique: None,
                 using: Some(crate::model::ir::IndexMethod::Gin),
                 r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
             }],
         );
         let err = validate_ops(vec![op], Dialect::Sqlite);

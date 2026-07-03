@@ -1096,6 +1096,121 @@ function stringArray(values, what) {
   return [...values];
 }
 
+const PARTITION_BOUND_SENTINEL = "__zeroshipPartitionBound";
+
+export const minValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "minValue" });
+export const maxValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "maxValue" });
+
+function partitionSpec(kind, columns, what) {
+  return { kind, columns: stringArray(columns, what) };
+}
+
+export const p = Object.freeze({
+  range(columns) {
+    return partitionSpec("range", columns, "p.range(columns)");
+  },
+  list(columns) {
+    return partitionSpec("list", columns, "p.list(columns)");
+  },
+  hash(columns) {
+    return partitionSpec("hash", columns, "p.hash(columns)");
+  },
+});
+
+function partitionSpecToIr(spec, what) {
+  if (spec === undefined) return undefined;
+  if (!spec || typeof spec !== "object") {
+    throw structuredError("OP_INVALID", `${what} must be built with p.range/list/hash`);
+  }
+  if (spec.kind !== "range" && spec.kind !== "list" && spec.kind !== "hash") {
+    throw structuredError("OP_INVALID", `${what}.kind must be "range", "list", or "hash"`);
+  }
+  return partitionSpec(spec.kind, spec.columns, `${what}.columns`);
+}
+
+function requireU32(v, what) {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0 || v > 0xffffffff) {
+    throw structuredError("OP_INVALID", `${what} must be a u32 integer; got ${v}`);
+  }
+  return v;
+}
+
+function partitionBoundValueToIr(value, what) {
+  if (value === minValue) return { kind: "minValue" };
+  if (value === maxValue) return { kind: "maxValue" };
+  if (typeof value === "string") return { kind: "string", value };
+  if (typeof value === "number" && Number.isSafeInteger(value)) {
+    return { kind: "int", value };
+  }
+  throw structuredError(
+    "OP_INVALID",
+    `${what} must be a string, JS safe integer, minValue, or maxValue`,
+  );
+}
+
+function partitionBoundListToIr(values, what) {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be an array`);
+  }
+  return values.map((value, i) => partitionBoundValueToIr(value, `${what}[${i}]`));
+}
+
+function partitionBoundsFromForValues(args) {
+  if (!args || typeof args !== "object") {
+    throw structuredError(
+      "OP_INVALID",
+      "partition(name).of(parent).forValues(args) needs a bounds object",
+    );
+  }
+  const hasRange = args.from !== undefined || args.to !== undefined;
+  const hasList = args.in !== undefined;
+  const hasHash = args.modulus !== undefined || args.remainder !== undefined;
+  const variantCount = (hasRange ? 1 : 0) + (hasList ? 1 : 0) + (hasHash ? 1 : 0);
+  if (variantCount !== 1) {
+    throw structuredError(
+      "OP_INVALID",
+      "partition bounds must be exactly one of { from, to }, { in }, or { modulus, remainder }",
+    );
+  }
+  if (hasRange) {
+    return {
+      kind: "range",
+      from: partitionBoundListToIr(args.from, "partition bounds.from"),
+      to: partitionBoundListToIr(args.to, "partition bounds.to"),
+    };
+  }
+  if (hasList) {
+    return {
+      kind: "list",
+      values: partitionBoundListToIr(args.in, "partition bounds.in"),
+    };
+  }
+  return {
+    kind: "hash",
+    modulus: requireU32(args.modulus, "partition bounds.modulus"),
+    remainder: requireU32(args.remainder, "partition bounds.remainder"),
+  };
+}
+
+function indexIncludeToIr(include) {
+  if (include === undefined) return undefined;
+  const cols = stringArray(include, "index include");
+  return cols.length === 0 ? undefined : cols;
+}
+
+function indexWithToIr(params) {
+  if (params === undefined) return undefined;
+  if (!params || typeof params !== "object") {
+    throw structuredError("OP_INVALID", "index with(...) must be an object");
+  }
+  const withParams = compact({
+    pagesPerRange: requireU32(params.pagesPerRange, "index with.pagesPerRange"),
+    fillfactor: requireU32(params.fillfactor, "index with.fillfactor"),
+  });
+  return Object.keys(withParams).length === 0 ? undefined : withParams;
+}
+
 function recordCreateEnum(name, args) {
   requireString(name, "enumType(name)");
   if (!args || typeof args !== "object") {
@@ -1331,6 +1446,9 @@ function recordCreateTable(name, args) {
         unique: idx.unique,
         using: idx.using,
         where: resolveExpr(idx.where),
+        include: indexIncludeToIr(idx.include),
+        with: indexWithToIr(idx.with),
+        only: requireOptionalBoolean(idx.only, "index only"),
       }),
     );
   }
@@ -1343,9 +1461,47 @@ function recordCreateTable(name, args) {
       primaryKey,
       constraints: constraints.length ? constraints : undefined,
       indexes: indexes.length ? indexes : undefined,
+      partitionBy: partitionSpecToIr(args.partitionBy, "create({ partitionBy })"),
       runtimeOptions: runtimeOptionsFromCreateArgs(args),
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    }),
+  );
+}
+
+function recordCreatePartition(name, parent, bounds, args) {
+  push(
+    compact({
+      op: "createPartition",
+      name,
+      of: parent,
+      bounds,
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    }),
+  );
+}
+
+function recordDetachPartition(parent, name, args) {
+  push(
+    compact({
+      op: "detachPartition",
+      parent,
+      name,
+      schema: args.schema,
+      concurrently: args.concurrently,
+    }),
+  );
+}
+
+function recordDropPartition(name, args) {
+  push(
+    compact({
+      op: "dropPartition",
+      name,
+      schema: args.schema,
+      existenceGuard: ifExistsGuard(args.ifExists),
+      cascade: args.cascade,
     }),
   );
 }
@@ -1684,6 +1840,9 @@ function recordCreateIndex(table, name, args) {
       unique: args.unique,
       using: args.using,
       where: resolveExpr(args.where),
+      include: indexIncludeToIr(args.include),
+      with: indexWithToIr(args.with),
+      only: requireOptionalBoolean(args.only, "index only"),
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
@@ -2114,6 +2273,40 @@ export function comment(target, text) {
   recordComment(target, text);
 }
 
+export function partition(name, opts = {}) {
+  requireString(name, "partition(name, …)");
+  const dflt = opts.schema;
+
+  return {
+    of(parent) {
+      requireString(parent, "partition(name).of(parent)");
+      return {
+        forValues(bounds, args = {}) {
+          recordCreatePartition(name, parent, partitionBoundsFromForValues(bounds), {
+            ifNotExists: args.ifNotExists,
+            schema: pickSchema(args, dflt),
+          });
+        },
+        asDefault(args = {}) {
+          recordCreatePartition(name, parent, { kind: "default" }, {
+            ifNotExists: args.ifNotExists,
+            schema: pickSchema(args, dflt),
+          });
+        },
+      };
+    },
+  };
+}
+
+export function dropPartition(name, args = {}) {
+  requireString(name, "dropPartition(name)");
+  recordDropPartition(name, {
+    ifExists: args.ifExists,
+    cascade: args.cascade,
+    schema: args.schema,
+  });
+}
+
 export function table(name, opts = {}) {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
@@ -2158,6 +2351,14 @@ export function table(name, opts = {}) {
     },
     comment(text, args = {}) {
       recordComment({ kind: "table", name, schema: pickSchema(args, dflt) }, text);
+      return handle;
+    },
+    detachPartition(partitionName, args = {}) {
+      requireString(partitionName, ".detachPartition(name)");
+      recordDetachPartition(name, partitionName, {
+        concurrently: args.concurrently,
+        schema: pickSchema(args, dflt),
+      });
       return handle;
     },
 
@@ -2296,10 +2497,27 @@ export function table(name, opts = {}) {
     index(idxName) {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
-      return {
+      const indexDraft = {};
+      const indexRef = {
+        using(method) {
+          indexDraft.using = method;
+          return indexRef;
+        },
+        include(columns) {
+          indexDraft.include = columns;
+          return indexRef;
+        },
+        with(params) {
+          indexDraft.with = params;
+          return indexRef;
+        },
+        only(enabled = true) {
+          indexDraft.only = enabled;
+          return indexRef;
+        },
         add(args) {
           terminateSelector(id);
-          recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });
+          recordCreateIndex(name, idxName, { ...indexDraft, ...args, schema: pickSchema(args, dflt) });
           return handle;
         },
         drop(args = {}) {
@@ -2318,6 +2536,7 @@ export function table(name, opts = {}) {
           return handle;
         },
       };
+      return indexRef;
     },
 
     // §3.5 — table data (no existence guard; schema rides on args)

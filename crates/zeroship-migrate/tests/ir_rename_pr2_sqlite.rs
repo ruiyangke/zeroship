@@ -147,7 +147,10 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
-                runtime_options: None,
+
+            partition_by: None,
+
+            runtime_options: None,
             schema: None,
                 existence_guard: None,
             }],
@@ -323,7 +326,10 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
-                runtime_options: None,
+
+            partition_by: None,
+
+            runtime_options: None,
             schema: None,
                 existence_guard: None,
             }],
@@ -500,7 +506,10 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
             indexes: vec![],
             constraints: vec![],
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );

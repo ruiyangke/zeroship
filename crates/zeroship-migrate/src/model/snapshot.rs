@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    ColType, IdentityCol, IndexSortOrder, SafeI64, SafeU64, SequenceOwnedBy,
-    TableRuntimeOptions,
+    ColType, IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec,
+    SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
 };
 
 /// One column of a table, as introspected from `information_schema.columns`.
@@ -284,6 +284,12 @@ pub struct IndexSnapshot {
     pub access_method: String,
     /// Partial-index predicate text, when present.
     pub predicate: Option<String>,
+    /// Non-key covering columns (`INCLUDE (...)`).
+    pub include: Vec<String>,
+    /// Typed storage parameters (`WITH (...)`).
+    pub with: Option<IndexStorageParams>,
+    /// PostgreSQL `ON ONLY` for partitioned parents.
+    pub only: bool,
     /// **Emission-only** per-column operator class for an `ivfflat`/`hnsw` ANN
     /// index (`vector_cosine_ops`, `vector_l2_ops`, `vector_ip_ops`). `None` for
     /// every plain / GIN / GiST index. NOT a drift attribute.
@@ -303,6 +309,9 @@ impl PartialEq for IndexSnapshot {
                 self.predicate.as_deref(),
                 other.predicate.as_deref(),
             )
+            && self.include == other.include
+            && self.with == other.with
+            && self.only == other.only
             && self.comment == other.comment
     }
 }
@@ -327,6 +336,9 @@ impl std::hash::Hash for IndexSnapshot {
         }
         self.access_method.hash(state);
         self.predicate.as_deref().map(canonical_index_sql_text).hash(state);
+        self.include.hash(state);
+        self.with.hash(state);
+        self.only.hash(state);
         self.comment.hash(state);
     }
 }
@@ -343,6 +355,9 @@ impl IndexSnapshot {
             columns,
             access_method: "btree".to_string(),
             predicate: None,
+            include: Vec::new(),
+            with: None,
+            only: false,
             opclass: None,
             comment: None,
         }
@@ -382,6 +397,8 @@ pub struct TableSnapshot {
     /// structural drift equality because live catalog introspection cannot recover
     /// them; the offline fold/gen-types path is their authority.
     pub runtime_options: TableRuntimeOptions,
+    /// Partitioning strategy for a partitioned table parent.
+    pub partition_by: Option<PartitionSpec>,
     /// User-authored catalog comment on this table.
     pub comment: Option<String>,
     /// **Introspection-only** verbatim `CREATE TABLE` text (`SQLite`
@@ -395,6 +412,7 @@ impl PartialEq for TableSnapshot {
         self.columns == other.columns
             && self.indexes == other.indexes
             && self.constraints == other.constraints
+            && self.partition_by == other.partition_by
             && self.comment == other.comment
     }
 }
@@ -648,11 +666,22 @@ pub struct ExtensionSnapshot {
     pub schema: Option<String>,
 }
 
+/// A deterministic snapshot of one child partition relation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionSnapshot {
+    /// Parent partitioned table.
+    pub of: String,
+    /// Partition bounds.
+    pub bounds: PartitionBounds,
+}
+
 /// A deterministic snapshot of a project schema's structure.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchemaSnapshot {
     /// Tables in the schema, keyed + ordered by name.
     pub tables: BTreeMap<String, TableSnapshot>,
+    /// Child partitions in the schema, keyed + ordered by child relation name.
+    pub partitions: BTreeMap<String, PartitionSnapshot>,
     /// Views in the schema, keyed + ordered by name.
     pub views: BTreeMap<String, ViewSnapshot>,
     /// Named enum/domain types in the schema, keyed + ordered by name.

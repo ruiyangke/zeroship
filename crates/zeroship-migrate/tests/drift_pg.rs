@@ -512,7 +512,10 @@ async fn diff_reports_missing_table_when_expected_has_an_extra() {
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -584,7 +587,10 @@ async fn diff_reports_missing_and_unexpected_columns_within_a_shared_table() {
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -702,7 +708,10 @@ async fn diff_reports_altered_column_data_type() {
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -753,7 +762,10 @@ async fn diff_reports_altered_column_nullability() {
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -808,12 +820,18 @@ async fn diff_reports_altered_index_uniqueness() {
                 // second altered field; isolates the `unique` flip.
                 access_method: "btree".into(),
                 predicate: None,
+                include: Vec::new(),
+                with: None,
+                only: false,
                 opclass: None,
                 comment: None,
             }],
             constraints: Vec::new(),
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -879,7 +897,10 @@ async fn diff_reports_altered_check_constraint_definition() {
                 comment: None,
             }],
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -950,7 +971,10 @@ async fn exclusion_constraint_reintrospection_does_not_false_drift_or_tamper() {
                 comment: None,
             }],
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -1017,7 +1041,10 @@ async fn t12_out_of_band_gin_index_surfaces_as_unexpected() {
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -1075,12 +1102,18 @@ async fn t12_btree_to_ivfflat_access_method_flip_is_reported() {
                 elements: vec![IndexElementSnapshot::column("embedding")],
                 access_method: "ivfflat".into(),
                 predicate: None,
+                include: Vec::new(),
+                with: None,
+                only: false,
                 opclass: Some("vector_cosine_ops".into()),
                 comment: None,
             }],
             constraints: Vec::new(),
             runtime_options: Default::default(),
-            comment: None,
+
+        partition_by: None,
+
+        comment: None,
             stored_create_sql: None,
         },
     );
@@ -1168,7 +1201,10 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
             primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         },
@@ -1179,7 +1215,11 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
             unique: None,
             using: None,
             r#where: Some(active_true_expr()),
-            concurrently: None,
+
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
             schema: None,
             existence_guard: None,
         },
@@ -1195,7 +1235,11 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
             unique: None,
             using: None,
             r#where: Some(active_true_expr()),
-            concurrently: None,
+
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
             schema: None,
             existence_guard: None,
         },
@@ -1359,7 +1403,10 @@ async fn top_level_comment_metadata_reintrospects_and_drifts() {
             primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         },
@@ -1485,7 +1532,10 @@ async fn sequence_options_round_trip_and_out_of_band_option_drift_is_reported() 
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         },

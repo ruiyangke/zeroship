@@ -38,6 +38,7 @@ pub fn rowsets_to_schema_snapshot(
                 indexes: Vec::new(),
                 constraints: Vec::new(),
                 runtime_options: Default::default(),
+                partition_by: None,
                 comment: optional_nonempty_str(row, &["TABLE_COMMENT", "table_comment"]),
                 stored_create_sql: None,
             },
@@ -106,6 +107,9 @@ pub fn rowsets_to_schema_snapshot(
             elements,
             access_method,
             predicate: None,
+            include: Vec::new(),
+            with: None,
+            only: false,
             opclass: None,
             comment,
         });
@@ -179,6 +183,7 @@ pub fn rowsets_to_schema_snapshot(
         roles: BTreeMap::new(),
         schemas: BTreeMap::new(),
         extensions: BTreeMap::new(),
+        partitions: BTreeMap::new(),
     })
 }
 

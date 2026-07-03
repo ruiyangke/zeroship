@@ -119,7 +119,10 @@ fn checksum_of_ir_byte_stable_golden() {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         },
@@ -297,7 +300,10 @@ fn checksum_of_ir_includes_table_check_expr() {
                 },
             }],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -490,7 +496,11 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
         unique: Some(true),
         using: None,
         r#where: None,
-        concurrently: Some(true),
+
+    include: Vec::new(),
+    with: None,
+    only: None,
+    concurrently: Some(true),
         schema: None,
         existence_guard: None,
     }];
@@ -603,7 +613,10 @@ fn checksum_of_ir_jcs_is_key_sorted_stable() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
             schema: None,
         existence_guard: None,
     };

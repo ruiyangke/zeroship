@@ -338,7 +338,11 @@ fn postgres_and_sqlite_render_partial_index_where() {
         unique: None,
         using: None,
         r#where: Some(active_true_expr()),
-        concurrently: None,
+
+    include: Vec::new(),
+    with: None,
+    only: None,
+    concurrently: None,
         schema: None,
         existence_guard: None,
     };
@@ -366,7 +370,11 @@ fn postgres_and_sqlite_render_expression_index_elements() {
         unique: None,
         using: None,
         r#where: Some(active_true_expr()),
-        concurrently: None,
+
+    include: Vec::new(),
+    with: None,
+    only: None,
+    concurrently: None,
         schema: None,
         existence_guard: None,
     };
@@ -395,7 +403,11 @@ fn mysql_fail_closes_on_expression_index_elements() {
                 unique: None,
                 using: None,
                 r#where: None,
-                concurrently: None,
+
+            include: Vec::new(),
+            with: None,
+            only: None,
+            concurrently: None,
                 schema: None,
                 existence_guard: None,
             }]),
@@ -418,7 +430,11 @@ fn mysql_fail_closes_on_partial_index_predicate() {
                 unique: None,
                 using: None,
                 r#where: Some(active_true_expr()),
-                concurrently: None,
+
+            include: Vec::new(),
+            with: None,
+            only: None,
+            concurrently: None,
                 schema: None,
                 existence_guard: None,
             }]),

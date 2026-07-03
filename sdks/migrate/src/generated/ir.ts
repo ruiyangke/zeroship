@@ -276,13 +276,41 @@ export interface SequenceOwnedBy {
 }
 
 /** An index definition inside a `createTable` op. */
+export interface IndexStorageParams {
+  pagesPerRange?: number | null;
+  fillfactor?: number | null;
+}
+
 export interface IrIndex {
   name?: string | null;
   columns: IndexElement[];
   unique?: boolean | null;
   using?: IndexMethod | null;
   where?: Expr | null;
+  include?: string[];
+  with?: IndexStorageParams | null;
+  only?: boolean | null;
 }
+
+/** Partitioning strategy for a partitioned table parent. */
+export type PartitionSpec =
+  | { kind: "range"; columns: string[] }
+  | { kind: "list"; columns: string[] }
+  | { kind: "hash"; columns: string[] };
+
+/** Closed partition-bound literal. Never raw SQL. */
+export type PartitionBoundValue =
+  | { kind: "string"; value: string }
+  | { kind: "int"; value: SafeI64 }
+  | { kind: "minValue" }
+  | { kind: "maxValue" };
+
+/** Partition bounds for `CREATE TABLE child PARTITION OF parent`. */
+export type PartitionBounds =
+  | { kind: "range"; from: PartitionBoundValue[]; to: PartitionBoundValue[] }
+  | { kind: "list"; values: PartitionBoundValue[] }
+  | { kind: "hash"; modulus: number; remainder: number }
+  | { kind: "default" };
 
 /** Complete collection-level runtime options stamped on `createTable`. */
 export interface TableRuntimeOptions {
@@ -394,7 +422,10 @@ export type GrantTarget =
  *  `dropView` is GONE (the intentional wire break) — the guard is now the uniform
  *  `existenceGuard?` token. */
 export type Op =
-  | { op: "createTable"; name: string; columns: IrColumn[]; primaryKey: string[] | null; constraints?: IrConstraint[]; indexes?: IrIndex[]; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "createTable"; name: string; columns: IrColumn[]; primaryKey: string[] | null; constraints?: IrConstraint[]; indexes?: IrIndex[]; partitionBy?: PartitionSpec | null; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "createPartition"; name: string; of: string; bounds: PartitionBounds; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "detachPartition"; parent: string; name: string; schema?: string | null; concurrently?: boolean | null }
+  | { op: "dropPartition"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
@@ -408,6 +439,9 @@ export type Op =
       using?: IndexMethod | null;
       where?: Expr | null;
       concurrently?: boolean | null;
+      include?: string[];
+      with?: IndexStorageParams | null;
+      only?: boolean | null;
       schema?: string | null;
       existenceGuard?: ExistenceGuard | null;
     }

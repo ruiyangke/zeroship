@@ -40,10 +40,11 @@ use crate::render::declarative::{
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod, ExclusionOperator,
-    ExistenceGuard, ForEach, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
-    IrIndex, IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir, OrderItem, RaiseLevel,
-    RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
-    TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
+    ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn, IrConstraint,
+    IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir,
+    OrderItem, PartitionBounds, RaiseLevel, RefAction, SafeI64, SelectAst, SelectItem,
+    SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerStmt,
+    VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
@@ -1649,11 +1650,13 @@ impl IrAuthor {
                 primary_key,
                 constraints,
                 indexes,
+                partition_by,
                 runtime_options,
                 ..
             } => {
                 let desc = self.create_table_descriptor(name, columns, runtime_options.as_ref());
                 let mut snap = build_resolved_table_snapshot(&eff_schema, &desc, self.dialect)?;
+                snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
                     push_primary_key_snapshot(name, &mut snap, pk);
                 }
@@ -1781,7 +1784,18 @@ impl IrAuthor {
                 }
                 units
             }
-            Op::CreateIndex { table, columns, name, unique, using, r#where, .. } => {
+            Op::CreateIndex {
+                table,
+                columns,
+                name,
+                unique,
+                using,
+                r#where,
+                include,
+                with,
+                only,
+                ..
+            } => {
                 let idx = create_index_snapshot(
                     table,
                     columns,
@@ -1789,6 +1803,9 @@ impl IrAuthor {
                     *unique,
                     *using,
                     r#where.as_ref(),
+                    include,
+                    with.as_ref(),
+                    *only,
                     self.dialect,
                 )?;
                 // **PR10 Part B** — createIndex ifNotExists: verify (unique, columns)
@@ -1803,6 +1820,60 @@ impl IrAuthor {
                     });
                 }
                 vec![decl.lower_create_index(table, &idx)]
+            }
+            Op::CreatePartition {
+                name,
+                of,
+                bounds,
+                ..
+            } => {
+                if !matches!(self.dialect, SqlDialect::Postgres) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "createPartition is PostgreSQL-only",
+                    ));
+                }
+                if let Some(g) = guard {
+                    probe = Some(crate::model::probe::GuardProbe::Table {
+                        schema: eff_schema.clone(),
+                        table: name.clone(),
+                        direction: g.into(),
+                        expect_columns: Vec::new(),
+                    });
+                }
+                vec![decl.lower_create_partition(name, of, bounds)]
+            }
+            Op::DetachPartition {
+                parent,
+                name,
+                concurrently,
+                ..
+            } => {
+                if !matches!(self.dialect, SqlDialect::Postgres) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "detachPartition is PostgreSQL-only",
+                    ));
+                }
+                vec![decl.lower_detach_partition(
+                    parent,
+                    name,
+                    concurrently.unwrap_or(false),
+                )]
+            }
+            Op::DropPartition { name, cascade, .. } => {
+                if !matches!(self.dialect, SqlDialect::Postgres) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "dropPartition is PostgreSQL-only",
+                    ));
+                }
+                if let Some(g) = guard {
+                    probe = Some(crate::model::probe::GuardProbe::Table {
+                        schema: eff_schema.clone(),
+                        table: name.clone(),
+                        direction: g.into(),
+                        expect_columns: Vec::new(),
+                    });
+                }
+                vec![decl.lower_drop_partition(name, cascade.unwrap_or(false))]
             }
             Op::DropTable { table, .. } => {
                 // **PR10 Part B** — dropTable ifExists: presence-only (empty columns).
@@ -2891,6 +2962,9 @@ impl IrAuthor {
                 ix.unique,
                 ix.using,
                 ix.r#where.as_ref(),
+                &ix.include,
+                ix.with.as_ref(),
+                ix.only,
                 self.dialect,
             )?;
             snap_idx.access_method = access.to_string();
@@ -3282,6 +3356,7 @@ impl IrAuthor {
                     indexes: Vec::new(),
                     constraints: Vec::new(),
                     runtime_options: Default::default(),
+                    partition_by: None,
                     comment: None,
                     stored_create_sql: None,
                 };
@@ -4372,6 +4447,9 @@ fn dml_id_from_seed(tag: &str, seed: &[u8]) -> crate::model::migration::Migratio
 pub const fn op_kind_tag(op: &Op) -> &'static str {
     match op {
         Op::CreateTable { .. } => "createTable",
+        Op::CreatePartition { .. } => "createPartition",
+        Op::DetachPartition { .. } => "detachPartition",
+        Op::DropPartition { .. } => "dropPartition",
         Op::SetTableOptions { .. } => "setTableOptions",
         Op::AddColumn { .. } => "addColumn",
         Op::CreateIndex { .. } => "createIndex",
@@ -4439,6 +4517,9 @@ pub(crate) fn create_index_snapshot(
     unique: Option<bool>,
     using: Option<IndexMethod>,
     predicate: Option<&Expr>,
+    include: &[String],
+    with: Option<&IndexStorageParams>,
+    only: Option<bool>,
     dialect: SqlDialect,
 ) -> Result<IndexSnapshot, IrLowerError> {
     if dialect == SqlDialect::Mysql && columns.iter().any(|e| matches!(e, IndexElement::Expr { .. }))
@@ -4487,6 +4568,9 @@ pub(crate) fn create_index_snapshot(
     if let Some(m) = using {
         idx.access_method = index_method_access(m).to_string();
     }
+    idx.include = include.to_vec();
+    idx.with = with.cloned();
+    idx.only = only.unwrap_or(false);
     Ok(idx)
 }
 
@@ -4993,6 +5077,7 @@ fn ir_constraint_name_and_kind(
 pub(crate) fn index_method_access(m: IndexMethod) -> &'static str {
     match m {
         IndexMethod::Btree => "btree",
+        IndexMethod::Brin => "brin",
         IndexMethod::Gin => "gin",
         IndexMethod::Gist => "gist",
         IndexMethod::Ivfflat => "ivfflat",
@@ -5068,7 +5153,10 @@ mod tests {
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
-                runtime_options: None,
+
+            partition_by: None,
+
+            runtime_options: None,
             schema: None,
                 existence_guard: None,
             }],
@@ -5281,7 +5369,10 @@ mod tests {
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
-                runtime_options: None,
+
+            partition_by: None,
+
+            runtime_options: None,
                 schema: None,
                 existence_guard: None,
             }],
@@ -6290,7 +6381,10 @@ mod tests {
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
-                runtime_options: None,
+
+            partition_by: None,
+
+            runtime_options: None,
             schema: None,
                 existence_guard: None,
             }],

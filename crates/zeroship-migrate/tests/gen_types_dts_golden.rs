@@ -100,7 +100,10 @@ fn all_types_ops() -> Vec<Op> {
         primary_key: None,
         constraints: vec![fk],
         indexes: Vec::new(),
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
         schema: None,
         existence_guard: None,
     }]
@@ -194,7 +197,10 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
             primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
-            runtime_options: Some(TableRuntimeOptions {
+
+        partition_by: None,
+
+        runtime_options: Some(TableRuntimeOptions {
                 soft_delete: true,
                 versioning: true,
                 strictness: TableStrictness::Lenient,
@@ -218,7 +224,11 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
             unique: Some(false),
             using: None,
             r#where: None,
-            concurrently: None,
+
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
             schema: None,
             existence_guard: None,
         },
@@ -292,7 +302,10 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
             primary_key: None,
             constraints: Vec::new(),
             indexes: Vec::new(),
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         },
@@ -312,7 +325,11 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
             unique: Some(false),
             using: None,
             r#where: None,
-            concurrently: None,
+
+        include: Vec::new(),
+        with: None,
+        only: None,
+        concurrently: None,
             schema: None,
             existence_guard: None,
         },

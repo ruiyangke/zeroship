@@ -10,6 +10,11 @@ import { test } from "node:test";
 import {
   t,
   table,
+  p,
+  partition,
+  dropPartition,
+  minValue,
+  maxValue,
   comment,
   lintDeterminism,
   enumType,
@@ -718,6 +723,170 @@ test("index column order records DESC and omits ASC/default order", () => {
       ),
     (e: any) => e.code === "OP_INVALID" && /order must be "asc" or "desc"/.test(e.message),
   );
+});
+
+test("partitionBy records range/list/hash specs on createTable", () => {
+  const ops = record(() => {
+    table("events_range").create({
+      columns: { ts: t.timestamp() },
+      partitionBy: p.range(["ts"]),
+    });
+    table("events_list").create({
+      columns: { region: t.text() },
+      partitionBy: p.list(["region"]),
+    });
+    table("events_hash").create({
+      columns: { tenant_id: t.text() },
+      partitionBy: p.hash(["tenant_id"]),
+    });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createTable",
+      name: "events_range",
+      columns: [{ name: "ts", type: "timestamp" }],
+      partitionBy: { kind: "range", columns: ["ts"] },
+    },
+    {
+      op: "createTable",
+      name: "events_list",
+      columns: [{ name: "region", type: "text" }],
+      partitionBy: { kind: "list", columns: ["region"] },
+    },
+    {
+      op: "createTable",
+      name: "events_hash",
+      columns: [{ name: "tenant_id", type: "text" }],
+      partitionBy: { kind: "hash", columns: ["tenant_id"] },
+    },
+  ]);
+});
+
+test("partition() records range and default createPartition ops", () => {
+  const ops = record(() => {
+    partition("events_2026_05", { schema: "app" }).of("events").forValues({
+      from: [minValue, "2026-05-01T00:00:00Z", 1],
+      to: ["2026-06-01T00:00:00Z", maxValue, 31],
+    }, { ifNotExists: true });
+    partition("events_default").of("events").asDefault();
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createPartition",
+      name: "events_2026_05",
+      of: "events",
+      bounds: {
+        kind: "range",
+        from: [
+          { kind: "minValue" },
+          { kind: "string", value: "2026-05-01T00:00:00Z" },
+          { kind: "int", value: 1 },
+        ],
+        to: [
+          { kind: "string", value: "2026-06-01T00:00:00Z" },
+          { kind: "maxValue" },
+          { kind: "int", value: 31 },
+        ],
+      },
+      schema: "app",
+      existenceGuard: "ifNotExists",
+    },
+    {
+      op: "createPartition",
+      name: "events_default",
+      of: "events",
+      bounds: { kind: "default" },
+    },
+  ]);
+});
+
+test("partition() records list and hash createPartition ops", () => {
+  const ops = record(() => {
+    partition("orders_us").of("orders").forValues({ in: ["US", 840] });
+    partition("orders_h1").of("orders").forValues({ modulus: 4, remainder: 1 });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "createPartition",
+      name: "orders_us",
+      of: "orders",
+      bounds: {
+        kind: "list",
+        values: [
+          { kind: "string", value: "US" },
+          { kind: "int", value: 840 },
+        ],
+      },
+    },
+    {
+      op: "createPartition",
+      name: "orders_h1",
+      of: "orders",
+      bounds: { kind: "hash", modulus: 4, remainder: 1 },
+    },
+  ]);
+});
+
+test("table().detachPartition records parent-subject detachPartition", () => {
+  const ops = record(() =>
+    table("events", { schema: "app" }).detachPartition("events_2026_05", {
+      concurrently: true,
+    }),
+  );
+
+  assert.deepEqual(ops, [
+    {
+      op: "detachPartition",
+      parent: "events",
+      name: "events_2026_05",
+      schema: "app",
+      concurrently: true,
+    },
+  ]);
+});
+
+test("dropPartition records child-subject dropPartition", () => {
+  const ops = record(() =>
+    dropPartition("events_2026_05", { schema: "app", ifExists: true, cascade: true }),
+  );
+
+  assert.deepEqual(ops, [
+    {
+      op: "dropPartition",
+      name: "events_2026_05",
+      schema: "app",
+      existenceGuard: "ifExists",
+      cascade: true,
+    },
+  ]);
+});
+
+test("index builder records include/with/brin/only", () => {
+  const ops = record(() =>
+    table("events")
+      .index("events_ts_brin_idx")
+      .using("brin")
+      .include(["tenant_id"])
+      .with({ pagesPerRange: 32 })
+      .only()
+      .add({ columns: ["ts"] }),
+  );
+
+  assert.deepEqual(ops, [
+    {
+      op: "createIndex",
+      table: "events",
+      columns: [{ kind: "column", name: "ts" }],
+      name: "events_ts_brin_idx",
+      using: "brin",
+      include: ["tenant_id"],
+      with: { pagesPerRange: 32 },
+      only: true,
+    },
+  ]);
 });
 
 test("comment records closed COMMENT ON targets through handles and top-level API", () => {

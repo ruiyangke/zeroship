@@ -344,7 +344,10 @@ async fn generate_emits_machine_readable_backfill_todo() {
         indexes: vec![],
         constraints: vec![],
         runtime_options: Default::default(),
-            comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     desired_tbl.columns.sort_by(|a, b| a.name.cmp(&b.name));
@@ -366,7 +369,10 @@ async fn generate_emits_machine_readable_backfill_todo() {
         indexes: vec![],
         constraints: vec![],
         runtime_options: Default::default(),
-            comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     live_tbl.columns.sort_by(|a, b| a.name.cmp(&b.name));

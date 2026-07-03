@@ -20,6 +20,7 @@ import type {
   ExclusionOperator,
   IndexElement,
   IndexSortOrder,
+  IndexStorageParams,
   IrBatch,
   IrScalar,
   Join,
@@ -27,6 +28,9 @@ import type {
   MaskKind,
   OrderDir,
   OrderItem,
+  PartitionBoundValue,
+  PartitionBounds,
+  PartitionSpec,
   PolicyCmd,
   RaiseLevel,
   SelectAst,
@@ -48,6 +52,7 @@ export type {
   ExclusionOperator,
   IndexElement,
   IndexSortOrder,
+  IndexStorageParams,
   IrBatch,
   IrScalar,
   Join,
@@ -55,6 +60,9 @@ export type {
   MaskKind,
   OrderDir,
   OrderItem,
+  PartitionBoundValue,
+  PartitionBounds,
+  PartitionSpec,
   Classification,
   RaiseLevel,
   SelectAst,
@@ -462,7 +470,55 @@ export interface CheckDef {
  *  `FkAction` — these ARE rendered now (C1). */
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
-export type IndexMethod = "btree" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
+export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
+
+export interface PartitionBoundSentinel {
+  readonly __zeroshipPartitionBound: "minValue" | "maxValue";
+}
+
+export type PartitionBoundInput = string | number | PartitionBoundSentinel;
+
+export interface PartitionBuilder {
+  range(columns: readonly string[]): PartitionSpec;
+  list(columns: readonly string[]): PartitionSpec;
+  hash(columns: readonly string[]): PartitionSpec;
+}
+
+export interface PartitionOptions {
+  schema?: string;
+}
+
+export interface CreatePartitionOptions {
+  schema?: string;
+  ifNotExists?: boolean;
+}
+
+export type PartitionForValuesArgs =
+  | { from: readonly PartitionBoundInput[]; to: readonly PartitionBoundInput[] }
+  | { in: readonly PartitionBoundInput[] }
+  | { modulus: number; remainder: number };
+
+export interface PartitionOfHandle {
+  forValues(bounds: PartitionForValuesArgs, args?: CreatePartitionOptions): void;
+  asDefault(args?: CreatePartitionOptions): void;
+}
+
+export interface PartitionHandle {
+  of(parent: string): PartitionOfHandle;
+}
+
+export interface DropPartitionArgs {
+  schema?: string;
+  ifExists?: boolean;
+  cascade?: boolean;
+}
+
+export interface DetachPartitionArgs {
+  schema?: string;
+  concurrently?: boolean;
+}
+
+export type IndexStorageParamsArg = IndexStorageParams;
 
 /** A named foreign-key reference (the `references` half of a FK add / a
  *  `create.foreignKeys[]` entry). */
@@ -770,7 +826,11 @@ export interface CreateTableArgs {
     /** Partial-index predicate. Renders on PostgreSQL and SQLite; MySQL refuses
      *  it fail-closed because MySQL has no partial indexes. */
     where?: ExprFn;
+    include?: readonly string[];
+    with?: IndexStorageParamsArg;
+    only?: boolean;
   }>;
+  partitionBy?: PartitionSpec;
   ifNotExists?: boolean;
   /** Overrides the handle default schema. */
   schema?: string;
@@ -832,11 +892,18 @@ export interface ConstraintRef {
 
 /** The `.index(name)` selector sub-handle (§3.4). */
 export interface IndexRef {
+  using(method: IndexMethod): IndexRef;
+  include(columns: readonly string[]): IndexRef;
+  with(params: IndexStorageParamsArg): IndexRef;
+  only(enabled?: boolean): IndexRef;
   add(args: {
     columns: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
     where?: ExprFn;
+    include?: readonly string[];
+    with?: IndexStorageParamsArg;
+    only?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   }): TableHandle;
@@ -879,6 +946,7 @@ export interface TableHandle {
   withVersioning(enabled?: boolean, args?: { schema?: string }): TableHandle;
   strictness(level: TableStrictness, args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
+  detachPartition(name: string, args?: DetachPartitionArgs): TableHandle;
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects
   column(name: string): ColumnRef;

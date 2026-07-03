@@ -66,7 +66,10 @@ fn generate_synthesizes_plain_user_index() {
         ],
         constraints: vec![],
         runtime_options: Default::default(),
-            comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -137,7 +140,10 @@ fn generate_fails_closed_on_user_constraint() {
             },
         ],
         runtime_options: Default::default(),
-        comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -169,7 +175,10 @@ fn generate_fails_closed_on_non_btree_index() {
         ],
         constraints: vec![],
         runtime_options: Default::default(),
-            comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);
@@ -201,7 +210,10 @@ fn generate_plain_table_still_works() {
             comment: None,
         }],
         runtime_options: Default::default(),
-        comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     let desired = desired_from(table, t);

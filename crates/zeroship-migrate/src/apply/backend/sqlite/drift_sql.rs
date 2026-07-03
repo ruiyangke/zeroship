@@ -195,6 +195,9 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                         columns,
                         access_method: "fts5".to_string(),
                         predicate: None,
+                        include: Vec::new(),
+                        with: None,
+                        only: false,
                         opclass: None,
                         comment: None,
                     },
@@ -217,6 +220,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                 indexes: Vec::new(),
                 constraints: Vec::new(),
                 runtime_options: Default::default(),
+                partition_by: None,
                 comment: None,
                 // H1 — carry the verbatim CREATE text so the DROP-COLUMN rebuild
                 // router can detect CHECK / generated / partial-index references the
@@ -494,6 +498,9 @@ async fn introspect_indexes_and_unique(
             // vtables, not indexes, and surface as tables; see the divergences doc.
             access_method: "btree".to_string(),
             predicate: index.predicate,
+            include: Vec::new(),
+            with: None,
+            only: false,
             opclass: None,
             comment: None,
         });
