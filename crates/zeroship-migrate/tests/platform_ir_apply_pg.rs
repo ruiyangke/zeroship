@@ -388,6 +388,10 @@ export function up() {
       expires_at: t.timestamp().notNull(),
       active: t.boolean().notNull(),
       visible: t.boolean().notNull(),
+      status: t.text().notNull(),
+      snapshot_artifact_path: t.text(),
+      snapshot_sha256: t.text(),
+      snapshot_ch_version: t.text(),
     },
     checks: [
       check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
@@ -399,6 +403,17 @@ export function up() {
       check("expr_floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
       check("expr_active_visible", (c) => and(c("active"), c("visible"))),
       check("expr_expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
+      // Mirrors the platform sandboxes_snapshot_artifact_consistency marker:
+      // a <> ALL negated-membership OR'd with a 3-way IS NOT NULL AND chain.
+      check("expr_snapshot_consistency", (c) =>
+        or(
+          notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]),
+          and(
+            c("snapshot_artifact_path").isNotNull(),
+            c("snapshot_sha256").isNotNull(),
+            c("snapshot_ch_version").isNotNull(),
+          ),
+        )),
     ],
   });
 
@@ -999,6 +1014,10 @@ async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
         (
             "expr_expires_window",
             "CHECK ((expires_at <= (created_at + '00:01:00'::interval)))",
+        ),
+        (
+            "expr_snapshot_consistency",
+            "CHECK (((status <> ALL (ARRAY['snapshotted'::text, 'snapshotted_suspect'::text])) OR ((snapshot_artifact_path IS NOT NULL) AND (snapshot_sha256 IS NOT NULL) AND (snapshot_ch_version IS NOT NULL))))",
         ),
     ];
 

@@ -1,4 +1,4 @@
-import { and, membership, or, table, t } from "@zeroship/migrate";
+import { and, membership, notMembership, or, table, t } from "@zeroship/migrate";
 import { raw } from "@zeroship/migrate/pg";
 
 export const name = "sandbox_tables";
@@ -201,8 +201,15 @@ export function up() {
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_key_fp_check", (c) => c("key_fp").matches("^[0-9a-f]{32}$"));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_project_id_check", (c) => c("project_id").matches("^prj_[0-9A-Za-z]{20,40}$"));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  // TODO(dsl-v2): CHECK constraint sandboxes.sandboxes_snapshot_artifact_consistency needs the Expr->SQL renderer
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandboxes ADD CONSTRAINT sandboxes_snapshot_artifact_consistency CHECK (((status <> ALL (ARRAY['snapshotted'::text, 'snapshotted_suspect'::text])) OR ((snapshot_artifact_path IS NOT NULL) AND (snapshot_sha256 IS NOT NULL) AND (snapshot_ch_version IS NOT NULL))))", reason: "CHECK constraints with SQL predicates remain raw until the structural expression renderer covers this predicate" });
+  table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_snapshot_artifact_consistency", (c) =>
+    or(
+      notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]),
+      and(
+        c("snapshot_artifact_path").isNotNull(),
+        c("snapshot_sha256").isNotNull(),
+        c("snapshot_ch_version").isNotNull(),
+      ),
+    ));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_status_check", (c) => membership(c("status"), ["starting", "running", "stopping", "stopped", "lost", "recreating", "orphan", "unreachable", "snapshotting", "snapshotted", "snapshotting_aborted", "snapshotted_suspect", "restoring", "restoring_cold"]));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
   table("shares", { schema: "zeroship" }).create({
