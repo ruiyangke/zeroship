@@ -177,6 +177,7 @@ fn col_type_for_data_type(
     let dt = col.data_type.trim().to_ascii_lowercase();
     let ty = match dt.as_str() {
         "text" | "character varying" | "varchar" => ColType::Text,
+        "text[]" | "array" => ColType::TextArray,
         "inet" => ColType::Inet,
         "smallint" | "int2" => ColType::SmallInt,
         "integer" | "int4" | "int" => ColType::Int,
@@ -718,6 +719,7 @@ fn render_col(c: &IrColumn) -> String {
 fn render_t_for(ty: &ColType) -> String {
     match ty {
         ColType::Text | ColType::String => "t.text()".into(),
+        ColType::TextArray => "t.textArray()".into(),
         ColType::Inet => "t.inet()".into(),
         ColType::SmallInt => "t.smallInt()".into(),
         ColType::Int => "t.integer()".into(),

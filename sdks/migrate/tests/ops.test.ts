@@ -85,6 +85,15 @@ test("t.text() is nullable-by-default; .notNull() opts in", () => {
   assert.equal(cols[1].nullable, false, "t.text().notNull() records nullable:false");
 });
 
+test("t.textArray() records the textArray column type", () => {
+  const ops = record(() => {
+    table("u").create({ columns: { scopes: t.textArray().notNull() } });
+  });
+  const col = ops[0].columns[0];
+  assert.equal(col.type, "textArray");
+  assert.equal(col.nullable, false);
+});
+
 test("t.id() records a uuid PK + genRandomUuid default + top-level primaryKey", () => {
   const ops = record(() => {
     table("u").create({ columns: { id: t.id() } });

@@ -2,7 +2,7 @@
 //!
 //! Mirrors `generate_all_types_parity.rs`: author an op stream covering the full
 //! portable type/facet matrix (text/int/smallInt/bigInt/float/real/bool/json/
-//! timestamp/uuid/inet/bytes/numeric + ref + vector + encrypted + id-with-prefix),
+//! timestamp/uuid/inet/textArray/bytes/numeric + ref + vector + encrypted + id-with-prefix),
 //! generate the `env.db.ts`, and assert the emitted file contains the expected
 //! `@zeroship/db` `t.*()` builder chain per column. The richer reverse renderer
 //! (vs `scaffold.rs::render_t_for`, which TODO-stubs goodies) is the thing under test.
@@ -74,6 +74,7 @@ fn all_types_ops() -> Vec<Op> {
         col("c_json", ColType::Json),
         col("c_ts", ColType::Timestamp),
         col("c_inet", ColType::Inet),
+        col("c_text_array", ColType::TextArray),
         col("c_bytes", ColType::Bytea),
         col("c_num", ColType::Decimal { precision: 38, scale: 9 }),
         col("owner", ColType::Ref { references: "users".into() }),
@@ -138,6 +139,7 @@ fn env_dts_golden_covers_full_type_matrix() {
         "c_json: t.json()",
         "c_ts: t.timestamp()",
         "c_inet: t.string()",
+        "c_text_array: t.array(t.string())",
         "c_bytes: t.bytes()",
         "c_num: t.number()",
         "owner: t.ref(\"users\", { onDelete: \"cascade\"",  // ref + recovered FK policy

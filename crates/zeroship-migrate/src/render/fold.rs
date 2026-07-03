@@ -2511,6 +2511,7 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             "date" | "timestamp" => ColType::Timestamp,
             "bytes" => ColType::Bytea,
             "inet" => ColType::Inet,
+            "textArray" => ColType::TextArray,
             "char" => ColType::Char {
                 len: u32::try_from(f.char_len?).ok().filter(|len| *len > 0)?,
             },

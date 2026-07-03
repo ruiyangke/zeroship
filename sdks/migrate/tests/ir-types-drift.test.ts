@@ -73,7 +73,7 @@ const TS = {
   // — are not `const` and are checked structurally by the round-trip, not here).
   ColTypeStrings: [
     "string", "text", "int", "smallInt", "bigInt", "float", "real", "bool",
-    "json", "timestamp", "date", "uuid", "inet", "bytea", "geoPoint",
+    "json", "timestamp", "date", "uuid", "inet", "textArray", "bytea", "geoPoint",
   ].sort(),
   // IrConstraintKind tags.
   IrConstraintKind: ["pk", "fk", "unique", "check", "exclusion"].sort(),
