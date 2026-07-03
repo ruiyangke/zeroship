@@ -390,6 +390,66 @@ test("the (c) => Expr builder constructs the closed AST", () => {
   assert.equal(ops[0].where.op, "and");
 });
 
+test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
+  const ops = record(() =>
+    table("t").create({
+      columns: {
+        status: t.text().notNull(),
+        name: t.text().notNull(),
+        data: t.json().notNull(),
+      },
+      checks: [
+        { name: "status_any", expr: (c) => c.pg.eqAnyArray(c("status"), ["a", "b"]) },
+        { name: "status_ne_all", expr: (c) => c.pg.neAllArray(c("status"), ["x"]) },
+        { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
+        { name: "data_size", expr: (c) => c.pg.columnSize(c("data")).le(8192) },
+      ],
+    }),
+  );
+  const checks = ops[0].constraints.map((c: any) => c.kind.expr);
+  assert.deepEqual(checks[0], {
+    node: "pgArrayMembership",
+    expr: { node: "colRef", name: "status" },
+    op: "eq",
+    elems: ["a", "b"],
+  });
+  assert.deepEqual(checks[1], {
+    node: "pgArrayMembership",
+    expr: { node: "colRef", name: "status" },
+    op: "ne",
+    elems: ["x"],
+  });
+  assert.deepEqual(checks[2], {
+    node: "pgRegexMatch",
+    expr: { node: "colRef", name: "name" },
+    pattern: "^[a-z]+$",
+  });
+  assert.deepEqual(checks[3], {
+    node: "binOp",
+    op: "le",
+    lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
+    rhs: { node: "literal", value: 8192 },
+  });
+});
+
+test("c.pg rejects malformed text arrays and regex patterns", () => {
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c.pg.eqAnyArray(c("x"), []) } })),
+    (e: any) => e.code === "OP_INVALID" && /non-empty string\[\]/.test(e.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").update({ set: { x: (c) => c.pg.neAllArray(c("x"), ["ok", 7 as any]) } }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /must be a string/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c.pg.regex(c("x"), "") } })),
+    (e: any) => e.code === "OP_INVALID" && /pattern must be non-empty/.test(e.message),
+  );
+});
+
 test("index columns normalize to closed column/expression elements", () => {
   const ops = record(() =>
     table("users").index("users_email_lower_idx").add({

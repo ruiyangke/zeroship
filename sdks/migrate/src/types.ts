@@ -402,12 +402,27 @@ export interface FnNamespace {
   genRandomUuid(): ExprChain;
 }
 
+/** PostgreSQL-only expression nodes. These methods intentionally live under
+ *  `c.pg.*` so the portable chain surface stays dialect-neutral; the Rust
+ *  validator rejects these nodes on SQLite/MySQL. */
+export interface PgExprNamespace {
+  /** Renders `<expr> = ANY (ARRAY['...'::text, ...])` on PostgreSQL. */
+  eqAnyArray(expr: unknown, elems: readonly string[]): ExprChain;
+  /** Renders `<expr> <> ALL (ARRAY['...'::text, ...])` on PostgreSQL. */
+  neAllArray(expr: unknown, elems: readonly string[]): ExprChain;
+  /** Renders `<expr> ~ '<pattern>'::text` on PostgreSQL. */
+  regex(expr: unknown, pattern: string): ExprChain;
+  /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
+  columnSize(expr: unknown): ExprChain;
+}
+
 /** The single injected builder handle: a column-accessor function `c("name")`
  *  (or `c.col("name")`) carrying the `c.fn.*` namespace. */
 export interface ExprBuilder {
   (name: string): ExprChain;
   col(name: string): ExprChain;
   fn: FnNamespace;
+  pg: PgExprNamespace;
 }
 
 /** An expression position — a `(c) => Expr` callback (the all-strings fluent

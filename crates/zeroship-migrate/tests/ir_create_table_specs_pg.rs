@@ -553,3 +553,120 @@ async fn table_level_checks_render_and_apply_on_pg() {
 
     teardown(&conn, &cfg).await;
 }
+
+/// Slice B: PG-only expression nodes for text-array membership, regex, and
+/// pg_column_size render in the platform pg_dump idiom and apply as live CHECKs.
+#[compio::test]
+async fn pg_only_expr_nodes_render_and_apply_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
+
+    let ir = r#"{"ir_version":1,"name":"pg_expr_checks","ops":[
+        {"op":"createTable","name":"pg_expr_checks","columns":[
+            {"name":"status","type":"text","nullable":false},
+            {"name":"name","type":"text","nullable":false},
+            {"name":"data","type":"json","nullable":false}
+        ],
+        "constraints":[
+            {"name":"status_any_check","kind":{"kind":"check","expr":{
+                "node":"pgArrayMembership",
+                "expr":{"node":"colRef","name":"status"},
+                "op":"eq",
+                "elems":["a","b"]}}},
+            {"name":"status_ne_all_check","kind":{"kind":"check","expr":{
+                "node":"pgArrayMembership",
+                "expr":{"node":"colRef","name":"status"},
+                "op":"ne",
+                "elems":["x"]}}},
+            {"name":"name_regex_check","kind":{"kind":"check","expr":{
+                "node":"pgRegexMatch",
+                "expr":{"node":"colRef","name":"name"},
+                "pattern":"^[a-z]+$"}}},
+            {"name":"data_size_check","kind":{"kind":"check","expr":{
+                "node":"binOp","op":"le",
+                "lhs":{"node":"pgColumnSize","expr":{"node":"colRef","name":"data"}},
+                "rhs":{"node":"literal","value":8192}}}}
+        ]}
+    ]}"#;
+    let plan = author_and_apply(&conn, &cfg, ir, &registry(&[]), Approval::Approved).await;
+    let rendered = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            zeroship_migrate::PlanStep::Ddl(m) => Some(m.up.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        r#"CONSTRAINT "status_any_check" CHECK (("status" = ANY (ARRAY['a'::text, 'b'::text])))"#,
+        r#"CONSTRAINT "status_ne_all_check" CHECK (("status" <> ALL (ARRAY['x'::text])))"#,
+        r#"CONSTRAINT "name_regex_check" CHECK (("name" ~ '^[a-z]+$'::text))"#,
+        r#"CONSTRAINT "data_size_check" CHECK ((pg_column_size("data") <= 8192))"#,
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "missing rendered PG-only CHECK `{expected}` in:\n{rendered}"
+        );
+    }
+
+    for (name, expected) in [
+        (
+            "status_any_check",
+            "CHECK ((status = ANY (ARRAY['a'::text, 'b'::text])))",
+        ),
+        (
+            "status_ne_all_check",
+            "CHECK ((status <> ALL (ARRAY['x'::text])))",
+        ),
+    ] {
+        assert_eq!(
+            constraint_kind(&conn, &schema, "pg_expr_checks", name).await.as_deref(),
+            Some("c"),
+            "{name} should be a live CHECK constraint"
+        );
+        assert_eq!(
+            constraint_definition(&conn, &schema, "pg_expr_checks", name)
+                .await
+                .as_deref(),
+            Some(expected),
+            "{name} should have the canonical live CHECK definition"
+        );
+    }
+    for (name, expected) in [
+        ("name_regex_check", "CHECK ((name ~ '^[a-z]+$'::text))"),
+        (
+            "data_size_check",
+            "CHECK ((pg_column_size(data) <= 8192))",
+        ),
+    ] {
+        assert_eq!(
+            constraint_kind(&conn, &schema, "pg_expr_checks", name).await.as_deref(),
+            Some("c"),
+            "{name} should be a live CHECK constraint"
+        );
+        assert_eq!(
+            constraint_definition(&conn, &schema, "pg_expr_checks", name)
+                .await
+                .as_deref(),
+            Some(expected),
+            "{name} should have the canonical live CHECK definition"
+        );
+    }
+
+    assert!(
+        conn.batch_execute(&format!(
+            "INSERT INTO \"{}\".\"pg_expr_checks\" \
+             (id, created_at, updated_at, version, status, name, data) \
+             VALUES ('ok', now(), now(), 1, 'a', 'abc', '{{}}'::jsonb)",
+            schema
+        ))
+        .await
+        .is_ok(),
+        "valid rows should satisfy every PG-only CHECK"
+    );
+
+    teardown(&conn, &cfg).await;
+}

@@ -11,7 +11,7 @@
 //! The variants are exactly:
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
-//! Cast`.
+//! Cast | PgArrayMembership | PgRegexMatch | PgColumnSize`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -161,6 +161,18 @@ pub enum CastTarget {
     Uuid,
 }
 
+/// **PG-ONLY** membership operator over a literal text array. The closed variants
+/// intentionally encode the two Postgres idioms the platform's dumped CHECK/domain
+/// predicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum PgArrayMembershipOp {
+    /// `<expr> = ANY (ARRAY[...])`
+    Eq,
+    /// `<expr> <> ALL (ARRAY[...])`
+    Ne,
+}
+
 /// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,
 /// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO `flatten`
 /// — same discipline as [`Op`](crate::model::ir::Op), so schemars derives a clean
@@ -232,6 +244,32 @@ pub enum Expr {
         operand: Box<Expr>,
         /// The portable target type.
         target: CastTarget,
+    },
+    /// **PG-ONLY** text-array membership rendered exactly as
+    /// `(<expr> = ANY (ARRAY['a'::text, ...]))` or
+    /// `(<expr> <> ALL (ARRAY['a'::text, ...]))`.
+    PgArrayMembership {
+        /// The expression tested against the literal text array.
+        expr: Box<Expr>,
+        /// Which membership idiom to render.
+        op: PgArrayMembershipOp,
+        /// Text array elements. Rendered as safe string literals with an explicit
+        /// `::text` cast on every element to match pg_dump's CHECK/domain shape.
+        elems: Vec<String>,
+    },
+    /// **PG-ONLY** regex match rendered exactly as
+    /// `(<expr> ~ '<pattern>'::text)`.
+    PgRegexMatch {
+        /// The value expression to match.
+        expr: Box<Expr>,
+        /// The regex pattern. It is always rendered as a SQL string literal; never
+        /// concatenated as free-form SQL.
+        pattern: String,
+    },
+    /// **PG-ONLY** scalar expression `pg_column_size(<expr>)`.
+    PgColumnSize {
+        /// The expression whose on-disk size Postgres should measure.
+        expr: Box<Expr>,
     },
 }
 

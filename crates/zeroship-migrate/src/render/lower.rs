@@ -4844,6 +4844,11 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                     collect_col_refs(arg, out);
                 }
             }
+            Expr::PgArrayMembership { expr, .. }
+            | Expr::PgRegexMatch { expr, .. }
+            | Expr::PgColumnSize { expr } => {
+                collect_col_refs(expr, out);
+            }
         }
     }
 
