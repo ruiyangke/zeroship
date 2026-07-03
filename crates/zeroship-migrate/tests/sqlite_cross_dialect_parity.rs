@@ -16,10 +16,10 @@
 //! SQLite Body triggers are created and introspected on SQLite, while the same
 //! Body trigger fails closed on Postgres (`triggerBody`). PostgreSQL-only
 //! sequence/exclusion constructs fail closed on SQLite. Table-level CHECK
-//! constraints are also pinned as a current op.* gap: they validate-refuse until
-//! the shared CHECK expression renderer lands. SQLite table-level FK/UNIQUE
-//! constraints validate-refuse until the SQLite CREATE emitter threads those
-//! table constraints into its descriptor path.
+//! constraints are pinned as PostgreSQL-only in Slice A: they validate on PG but
+//! still validate-refuse on SQLite/MySQL until those CHECK renderers land.
+//! SQLite table-level FK/UNIQUE constraints validate-refuse until the SQLite
+//! CREATE emitter threads those table constraints into its descriptor path.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -649,33 +649,59 @@ fn sqlite_pg_only_facets_fail_closed() {
     ));
 }
 
-fn table_check_constraints_fail_closed_until_expr_renderer_lands() {
+fn table_check_constraints_are_pg_only_until_non_pg_renderers_land() {
+    let check_constraint = IrConstraint {
+        name: Some("check_probe_qty_positive".to_string()),
+        kind: IrConstraintKind::Check {
+            expr: Expr::BinOp {
+                op: BinaryOp::Ge,
+                lhs: Box::new(Expr::col("qty")),
+                rhs: Box::new(Expr::lit(IrScalar::Int(1))),
+            },
+        },
+    };
     let check_op = Op::CreateTable {
         name: "check_probe".to_string(),
         schema: None,
         columns: vec![col("qty", ColType::Int, false)],
         primary_key: None,
-        constraints: vec![IrConstraint {
-            name: Some("check_probe_qty_positive".to_string()),
-            kind: IrConstraintKind::Check {
-                expr: Expr::BinOp {
-                    op: BinaryOp::Ge,
-                    lhs: Box::new(Expr::col("qty")),
-                    rhs: Box::new(Expr::lit(IrScalar::Int(1))),
-                },
-            },
-        }],
+        constraints: vec![check_constraint.clone()],
         indexes: Vec::new(),
         runtime_options: None,
             existence_guard: None,
     };
+    let add_check_op = Op::AddConstraint {
+        table: "check_probe".to_string(),
+        schema: None,
+        constraint: check_constraint,
+        existence_guard: None,
+    };
 
-    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+    validate_ir(&ir("table_check_pg", vec![check_op.clone()]), Dialect::Postgres, &[])
+        .expect("PG table CHECK constraints validate after Slice A");
+    validate_ir(
+        &ir("add_table_check_pg", vec![add_check_op.clone()]),
+        Dialect::Postgres,
+        &[],
+    )
+    .expect("PG addConstraint(check) validates after Slice A");
+
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
         let err = validate_ir(&ir("table_check_gap", vec![check_op.clone()]), dialect, &[])
-            .expect_err("table CHECK constraints are currently validate-refused");
+            .expect_err("non-PG table CHECK constraints are still validate-refused");
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert!(err.reason.contains("CHECK"));
+
+        let err = validate_ir(
+            &ir("add_table_check_gap", vec![add_check_op.clone()]),
+            dialect,
+            &[],
+        )
+        .expect_err("non-PG addConstraint(check) is still validate-refused");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("CHECK") || err.reason.contains("check"));
     }
 }
 
@@ -730,7 +756,7 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
 #[compio::test]
 async fn op_ir_common_schema_is_equivalent_on_postgres_and_sqlite() {
     sqlite_pg_only_facets_fail_closed();
-    table_check_constraints_fail_closed_until_expr_renderer_lands();
+    table_check_constraints_are_pg_only_until_non_pg_renderers_land();
     sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them();
 
     let pg_body_err = IrAuthor::new(PG_SCHEMA, OWNER, SqlDialect::Postgres)

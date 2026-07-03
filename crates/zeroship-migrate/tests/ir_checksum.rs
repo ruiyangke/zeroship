@@ -11,9 +11,12 @@
 //! pure refactor — proving the `fold_common` lift is byte-preserving.
 
 use zeroship_migrate::{
-    Checksum, ChecksumInput, MigrationFlags, MigrationId, OnlinePhase,
+    BinaryOp, Checksum, ChecksumInput, Expr, MigrationFlags, MigrationId, OnlinePhase,
 };
-use zeroship_migrate::model::ir::{CanonicalOpList, IndexElement, IrColumn, IrScalar, Op};
+use zeroship_migrate::model::ir::{
+    CanonicalOpList, ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar,
+    Op,
+};
 
 // ---------------------------------------------------------------------------
 // Fixed, deterministic ids — `MigrationId` parses any well-formed `mig_…` id,
@@ -263,6 +266,63 @@ fn checksum_of_ir_deterministic_and_sensitive() {
         &[],
     );
     assert_ne!(c1, c_with_dep, "fold_common tail must still fold depends_on");
+}
+
+#[test]
+fn checksum_of_ir_includes_table_check_expr() {
+    fn check_op(rhs: i64) -> Op {
+        Op::CreateTable {
+            name: "checked".into(),
+            columns: vec![IrColumn {
+                name: "a".into(),
+                ty: ColType::Int,
+                nullable: Some(false),
+                default: None,
+                unique: None,
+                id_prefix: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+            primary_key: None,
+            constraints: vec![IrConstraint {
+                name: Some("checked_a_nonnegative".into()),
+                kind: IrConstraintKind::Check {
+                    expr: Expr::BinOp {
+                        op: BinaryOp::Ge,
+                        lhs: Box::new(Expr::col("a")),
+                        rhs: Box::new(Expr::lit(IrScalar::Int(rhs))),
+                    },
+                },
+            }],
+            indexes: vec![],
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    let flags = MigrationFlags::default();
+    let owner = "app_check";
+    let ops = vec![check_op(0)];
+    let c1 = Checksum::of_ir(&CanonicalOpList(&ops), &flags, owner, &[], &[], &[]);
+    let c1b = Checksum::of_ir(&CanonicalOpList(&ops), &flags, owner, &[], &[], &[]);
+    assert_eq!(c1, c1b, "CHECK-bearing IR checksum must be deterministic");
+
+    let changed_ops = vec![check_op(1)];
+    let changed = Checksum::of_ir(
+        &CanonicalOpList(&changed_ops),
+        &flags,
+        owner,
+        &[],
+        &[],
+        &[],
+    );
+    assert_ne!(
+        c1, changed,
+        "changing only a table-level CHECK expression must change Checksum::of_ir"
+    );
 }
 
 /// Changing a typed `IrScalar` inside an `Insert` row changes `of_ir` (the JCS

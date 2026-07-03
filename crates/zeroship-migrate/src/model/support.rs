@@ -291,9 +291,9 @@ const UNSUPPORTED_ALL_PRIMARY_KEY: DialectSupport = DialectSupport::unsupported_
     "standalone/table-level primary key constraints are deferred; createTable.primaryKey is validated by the active table-shape policy",
 );
 
-const UNSUPPORTED_ALL_CHECK_EXPR: DialectSupport = DialectSupport::unsupported_all(
-    UNSUPPORTED,
-    "CHECK expression rendering is deferred in the current engine",
+const PG_ONLY_TABLE_LEVEL_CHECK: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "table-level CHECK expression rendering is PostgreSQL-only in the current engine",
 );
 
 const UNSUPPORTED_ALL_SYNTH_DEFAULT: DialectSupport = DialectSupport::unsupported_all(
@@ -335,7 +335,7 @@ const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::postgres_on
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
     FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT),
-    FeatureSupport::new(Feature::TableLevelCheck, UNSUPPORTED_ALL_CHECK_EXPR),
+    FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
         Feature::TableLevelForeignKey,
         DialectSupport::new(
@@ -449,7 +449,7 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
     FeatureSupport::new(Feature::CompositeForeignKey, UNSUPPORTED_ALL_COMPOSITE_FK),
     FeatureSupport::new(Feature::NonIdForeignKey, UNSUPPORTED_ALL_NON_ID_FK),
-    FeatureSupport::new(Feature::TableLevelCheck, UNSUPPORTED_ALL_CHECK_EXPR),
+    FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
         Feature::ExclusionConstraint,
         DialectSupport::postgres_only(
