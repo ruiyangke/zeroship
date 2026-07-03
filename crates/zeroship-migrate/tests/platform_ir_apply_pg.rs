@@ -459,6 +459,30 @@ export function up() {
   });
 }
 "#;
+const PLATFORM_DOMAIN_COLUMN_TS: &str = r#"
+import { membership, table, t } from "@zeroship/migrate";
+import { domain, schema } from "@zeroship/migrate/pg";
+
+export const name = "platform_domain_column";
+
+export function up() {
+  schema({ name: "zeroship", ifNotExists: true });
+
+  domain("myd").create({
+    schema: "zeroship",
+    as: t.text(),
+    check: (c) => membership(c("VALUE"), ["a", "b"]),
+  });
+
+  table("domain_surface", { schema: "zeroship" }).create({
+    columns: {
+      id: t.text().notNull(),
+      state: t.domain("myd").notNull(),
+    },
+    primaryKey: ["id"],
+  });
+}
+"#;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_PLATFORM_IR_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -667,6 +691,72 @@ async fn column_information_schema_type(
         .expect("query column information_schema type");
     rows.first()
         .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+}
+
+async fn column_domain_information_schema(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<(Option<String>, Option<String>, String)> {
+    let rows = conn
+        .query(
+            "SELECT domain_name, domain_schema, udt_name \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            &[&schema, &table, &column],
+        )
+        .await
+        .expect("query column domain information_schema type");
+    rows.first().map(|row| {
+        (
+            row.get::<_, Option<String>>(0),
+            row.get::<_, Option<String>>(1),
+            row.get::<_, String>(2),
+        )
+    })
+}
+
+async fn column_catalog_type_name(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<(String, String)> {
+    let rows = conn
+        .query(
+            "SELECT tn.nspname, ty.typname \
+             FROM pg_attribute a \
+             JOIN pg_class t ON t.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_type ty ON ty.oid = a.atttypid \
+             JOIN pg_namespace tn ON tn.oid = ty.typnamespace \
+             WHERE n.nspname = $1 AND t.relname = $2 AND a.attname = $3",
+            &[&schema, &table, &column],
+        )
+        .await
+        .expect("query column catalog type");
+    rows.first()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+}
+
+async fn domain_constraint_definition(
+    conn: &Client,
+    schema: &str,
+    domain: &str,
+) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT pg_get_constraintdef(c.oid) \
+             FROM pg_type ty \
+             JOIN pg_namespace n ON n.oid = ty.typnamespace \
+             JOIN pg_constraint c ON c.contypid = ty.oid \
+             WHERE n.nspname = $1 AND ty.typname = $2 AND c.contype = 'c'",
+            &[&schema, &domain],
+        )
+        .await
+        .expect("query domain pg_get_constraintdef");
+    rows.first().map(|row| row.get::<_, String>(0))
 }
 
 async fn column_character_maximum_length(
@@ -1219,6 +1309,60 @@ async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
             .as_deref(),
         Some("'usd'::bpchar"),
         "t.char(3).default(\"usd\") round-trips through pg_get_expr as bpchar"
+    );
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_domain_column_round_trips_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_domain_column_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_domain_column",
+        "20260703000000_platform_domain_column.ts",
+        PLATFORM_DOMAIN_COLUMN_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with t.domain() column applies");
+
+    let domain_def = domain_constraint_definition(&conn, "zeroship", "myd")
+        .await
+        .expect("domain check constraint exists");
+    assert!(
+        domain_def.contains("VALUE = ANY (ARRAY['a'::text, 'b'::text])"),
+        "domain myd must carry its membership CHECK, got: {domain_def}"
+    );
+
+    assert_eq!(
+        column_domain_information_schema(&conn, "zeroship", "domain_surface", "state")
+            .await
+            .as_ref()
+            .map(|(domain_name, domain_schema, udt_name)| (
+                domain_name.as_deref(),
+                domain_schema.as_deref(),
+                udt_name.as_str()
+            )),
+        Some((Some("myd"), Some("zeroship"), "text")),
+        "information_schema must expose t.domain(\"myd\") through domain_name/domain_schema; \
+         Postgres reports the underlying base type in udt_name for domain columns"
+    );
+    assert_eq!(
+        column_catalog_type_name(&conn, "zeroship", "domain_surface", "state")
+            .await
+            .as_ref()
+            .map(|(type_schema, type_name)| (type_schema.as_str(), type_name.as_str())),
+        Some(("zeroship", "myd")),
+        "pg_catalog must show the column's physical type as zeroship.myd"
     );
 
     reset(&conn, &meta).await;
