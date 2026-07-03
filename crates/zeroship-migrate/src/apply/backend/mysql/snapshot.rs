@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 
 use super::transport::RowSet;
 use crate::apply::drift::DriftError;
+use crate::model::ir::IndexSortOrder;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
     SchemaSnapshot, TableSnapshot, ViewSnapshot,
@@ -82,9 +83,17 @@ pub fn rowsets_to_schema_snapshot(
             .to_ascii_lowercase();
         let comment = optional_nonempty_str(first, &["INDEX_COMMENT", "index_comment"]);
         let mut columns = Vec::new();
+        let mut elements = Vec::new();
         for row in group {
             if let Some(column) = optional_nonempty_str(&row, &["COLUMN_NAME", "column_name"]) {
+                let element = match optional_str(&row, &["COLLATION", "collation"]) {
+                    Some(collation) if collation.eq_ignore_ascii_case("D") => {
+                        IndexElementSnapshot::column_ordered(column.clone(), IndexSortOrder::Desc)
+                    }
+                    _ => IndexElementSnapshot::column(column.clone()),
+                };
                 columns.push(column);
+                elements.push(element);
             }
         }
         if mysql_fk_backing_index(&table, &name, &columns, &key_columns, &referential_constraints) {
@@ -94,7 +103,7 @@ pub fn rowsets_to_schema_snapshot(
             name,
             unique,
             columns: columns.clone(),
-            elements: columns.into_iter().map(IndexElementSnapshot::column).collect(),
+            elements,
             access_method,
             predicate: None,
             opclass: None,

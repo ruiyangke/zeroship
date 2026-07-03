@@ -43,7 +43,10 @@ fn empty_table_snapshot() -> TableSnapshot {
 }
 
 fn idx_col(name: &str) -> IndexElement {
-    IndexElement::Column { name: name.to_string() }
+    IndexElement::Column {
+        name: name.to_string(),
+        order: None,
+    }
 }
 
 const SCHEMA: &str = "app";

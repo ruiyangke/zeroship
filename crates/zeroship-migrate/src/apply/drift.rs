@@ -40,13 +40,13 @@ use crate::apply::journal::{self, AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::{
-    index_elements_canonically_eq, index_predicates_canonically_eq,
+    canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnSnapshot,
     ConstraintSnapshot, ExtensionSnapshot, IndexElementSnapshot, IndexSnapshot,
     NamedTypeSnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
     SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use crate::model::ir::{SafeI64, SafeU64, SequenceOwnedBy};
+use crate::model::ir::{IndexSortOrder, SafeI64, SafeU64, SequenceOwnedBy};
 
 // ---------------------------------------------------------------------------
 // B1 — checksum / tamper / orphan drift
@@ -527,6 +527,7 @@ pub async fn snapshot_schema(
                       SELECT array_agg( \
                         CASE \
                           WHEN k.attnum = 0 THEN 'expr:' || pg_get_indexdef(x.indexrelid, k.ord::int, true) \
+                          WHEN ((x.indoption[(k.ord - 1)::int])::int & 1) = 1 THEN 'col_desc:' || att.attname \
                           ELSE 'col:' || att.attname \
                         END \
                         ORDER BY k.ord \
@@ -571,8 +572,11 @@ pub async fn snapshot_schema(
                     .into_iter()
                     .filter_map(|token| {
                         token
-                            .strip_prefix("col:")
-                            .map(IndexElementSnapshot::column)
+                            .strip_prefix("col_desc:")
+                            .map(|name| {
+                                IndexElementSnapshot::column_ordered(name, IndexSortOrder::Desc)
+                            })
+                            .or_else(|| token.strip_prefix("col:").map(IndexElementSnapshot::column))
                             .or_else(|| token.strip_prefix("expr:").map(IndexElementSnapshot::expr))
                     })
                     .collect()
@@ -1197,7 +1201,12 @@ fn diff_attrs(
         elements
             .iter()
             .map(|element| match element {
-                IndexElementSnapshot::Column(name) => format!("col:{name}"),
+                IndexElementSnapshot::Column { name, order } => {
+                    match canonical_index_sort_order(*order) {
+                        Some(IndexSortOrder::Desc) => format!("col:{name} desc"),
+                        Some(IndexSortOrder::Asc) | None => format!("col:{name}"),
+                    }
+                }
                 IndexElementSnapshot::Expr(expr) => format!("expr:{expr}"),
             })
             .collect::<Vec<_>>()

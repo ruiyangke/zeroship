@@ -39,6 +39,7 @@
 use std::collections::BTreeMap;
 
 use crate::apply::drift::DriftError;
+use crate::model::ir::IndexSortOrder;
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, SchemaSnapshot,
     TableSnapshot, ViewSnapshot,
@@ -524,12 +525,31 @@ fn parse_sqlite_index_element(part: &str) -> Option<IndexElementSnapshot> {
     if part.is_empty() {
         return None;
     }
+    let (part, order) = split_sqlite_index_sort_order(part);
     if let Some(inner) = strip_single_outer_parens(part) {
         return Some(IndexElementSnapshot::expr(inner.trim().to_string()));
     }
-    parse_sqlite_quoted_ident(part)
-        .map(IndexElementSnapshot::column)
-        .or_else(|| Some(IndexElementSnapshot::column(part.to_string())))
+    let name = parse_sqlite_quoted_ident(part).unwrap_or_else(|| part.to_string());
+    Some(match order {
+        Some(order) => IndexElementSnapshot::column_ordered(name, order),
+        None => IndexElementSnapshot::column(name),
+    })
+}
+
+fn split_sqlite_index_sort_order(part: &str) -> (&str, Option<IndexSortOrder>) {
+    let trimmed = part.trim_end();
+    let Some(idx) = trimmed.rfind(char::is_whitespace) else {
+        return (trimmed, None);
+    };
+    let (head, tail) = trimmed.split_at(idx);
+    let dir = tail.trim();
+    if dir.eq_ignore_ascii_case("desc") {
+        (head.trim_end(), Some(IndexSortOrder::Desc))
+    } else if dir.eq_ignore_ascii_case("asc") {
+        (head.trim_end(), Some(IndexSortOrder::Asc))
+    } else {
+        (trimmed, None)
+    }
 }
 
 fn parse_sqlite_quoted_ident(s: &str) -> Option<String> {

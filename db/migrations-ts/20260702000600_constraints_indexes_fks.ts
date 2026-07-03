@@ -43,15 +43,13 @@ export function up() {
   table("token_revocations", { schema: "zeroship" }).index("auth_token_revocations_revoked_after_idx").add({ columns: ["revoked_after"] });
   table("totp_backup_codes", { schema: "zeroship" }).index("auth_totp_backup_codes_user_idx").add({ columns: ["user_id"] });
   table("users", { schema: "zeroship" }).index("auth_users_deletion_due_idx").add({ columns: ["deletion_scheduled_for"], where: (c) => and(c("deletion_scheduled_for").isNotNull(), c("anonymized_at").isNull()) });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX authz_decisions_occurred_idx ON zeroship.authz_decisions USING btree (occurred_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("authz_decisions", { schema: "zeroship" }).index("authz_decisions_occurred_idx").add({ columns: [{ kind: "column", name: "occurred_at", order: "desc" }] });
   table("authz_decisions", { schema: "zeroship" }).index("authz_decisions_user_idx").add({ columns: ["actor_user_id"], where: (c) => c("actor_user_id").isNotNull() });
   table("billing_disputes", { schema: "zeroship" }).index("billing_disputes_invoice_idx").add({ columns: ["invoice_id"] });
   table("billing_metrics", { schema: "zeroship" }).index("billing_metrics_owner_app_idx").add({ columns: ["owner_app"], where: (c) => c("owner_app").isNotNull() });
   table("billing_reconciliation_findings", { schema: "zeroship" }).index("billing_reconciliation_findings_kind_idx").add({ columns: ["kind", "detected_at"] });
   table("billing_reconciliation_findings", { schema: "zeroship" }).index("billing_reconciliation_findings_open_idx").add({ columns: ["detected_at"], where: (c) => c("resolved_at").isNull() });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX connect_checkout_failures_creator_idx ON zeroship.connect_checkout_failures USING btree (creator_id, created_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("connect_checkout_failures", { schema: "zeroship" }).index("connect_checkout_failures_creator_idx").add({ columns: ["creator_id", { kind: "column", name: "created_at", order: "desc" }] });
   table("credit_ledger", { schema: "zeroship" }).index("credit_ledger_creator_created_idx").add({ columns: ["creator_id", "created_at"] });
   table("credit_ledger", { schema: "zeroship" }).index("credit_ledger_idempotency_key_idx").add({ columns: ["idempotency_key"], unique: true, where: (c) => c("idempotency_key").isNotNull() });
   table("credit_ledger", { schema: "zeroship" }).index("credit_ledger_refund_clawback_note_idx").add({ columns: ["note"], unique: true, where: (c) => c("kind").cast("text").eq("refund_clawback") });
@@ -60,22 +58,17 @@ export function up() {
   table("device_grants", { schema: "zeroship" }).index("device_grants_expires_at_idx").add({ columns: ["expires_at"] });
   table("device_grants", { schema: "zeroship" }).index("device_grants_provider_pending_user_code_idx").add({ columns: ["provider", "user_code"], where: (c) => c("status").eq("pending") });
   table("identity_links", { schema: "zeroship" }).index("identity_links_principal_id_idx").add({ columns: ["principal_id"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_app_audit_app_at ON zeroship.app_audit USING btree (app_id, occurred_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_app_audit_creator_at ON zeroship.app_audit USING btree (creator_id, occurred_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("app_audit", { schema: "zeroship" }).index("idx_app_audit_app_at").add({ columns: ["app_id", { kind: "column", name: "occurred_at", order: "desc" }] });
+  table("app_audit", { schema: "zeroship" }).index("idx_app_audit_creator_at").add({ columns: ["creator_id", { kind: "column", name: "occurred_at", order: "desc" }] });
   table("billing_notifications", { schema: "zeroship" }).index("idx_billing_notifications_pending").add({ columns: ["claimed_at"], where: (c) => c("status").cast("text").eq("pending") });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_creator_account_history_creator ON zeroship.creator_account_history USING btree (creator_id, linked_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("creator_account_history", { schema: "zeroship" }).index("idx_creator_account_history_creator").add({ columns: ["creator_id", { kind: "column", name: "linked_at", order: "desc" }] });
   table("creator_account_history", { schema: "zeroship" }).index("idx_creator_account_history_one_open").add({ columns: ["creator_id"], unique: true, where: (c) => c("unlinked_at").isNull() });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_creator_billing_status_history_creator_at ON zeroship.creator_billing_status_history USING btree (creator_id, at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("creator_billing_status_history", { schema: "zeroship" }).index("idx_creator_billing_status_history_creator_at").add({ columns: ["creator_id", { kind: "column", name: "at", order: "desc" }] });
   table("creator_billing_status", { schema: "zeroship" }).index("idx_creator_billing_status_past_due").add({ columns: ["past_due_since"], where: (c) => c("state").cast("text").eq("past_due") });
   table("deleted_sandboxes", { schema: "zeroship" }).index("idx_deleted_sandboxes_deleted_at").add({ columns: ["deleted_at"] });
   table("hosts", { schema: "zeroship" }).index("idx_hosts_region_status").add({ columns: ["region", "status"] });
   table("hosts", { schema: "zeroship" }).index("idx_hosts_status_heartbeat").add({ columns: ["status", "last_heartbeat"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_payouts_creator_time ON zeroship.payouts USING btree (creator_id, occurred_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("payouts", { schema: "zeroship" }).index("idx_payouts_creator_time").add({ columns: ["creator_id", { kind: "column", name: "occurred_at", order: "desc" }] });
   // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
   raw({ sql: "CREATE INDEX idx_sandbox_events_metering ON ONLY zeroship.sandbox_events USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
   // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
@@ -92,22 +85,18 @@ export function up() {
   table("shares", { schema: "zeroship" }).index("idx_shares_expires_at").add({ columns: ["expires_at"], where: (c) => and(c("deleted_at").isNull(), c("revoked_at").isNull()) });
   table("shares", { schema: "zeroship" }).index("idx_shares_iss_issued_at").add({ columns: ["iss", "issued_at"], where: (c) => and(c("deleted_at").isNull(), c("iss").isNotNull()) });
   table("shares", { schema: "zeroship" }).index("idx_shares_sandbox_id_port").add({ columns: ["sandbox_id", "port"], where: (c) => c("deleted_at").isNull() });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_spend_state_history_app_at ON zeroship.spend_state_history USING btree (app_id, at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("spend_state_history", { schema: "zeroship" }).index("idx_spend_state_history_app_at").add({ columns: ["app_id", { kind: "column", name: "at", order: "desc" }] });
   table("spend_state_history", { schema: "zeroship" }).index("idx_spend_state_history_period").add({ columns: ["period"] });
   table("invoice_payments", { schema: "zeroship" }).index("invoice_payments_charge_provider_ref_key").add({ columns: ["invoice_id", "provider_ref"], unique: true, where: (c) => c("kind").cast("text").eq("charge") });
   table("invoice_payments", { schema: "zeroship" }).index("invoice_payments_dispute_provider_ref_key").add({ columns: ["invoice_id", "provider_ref", "kind"], unique: true, where: (c) => membership(c("kind").cast("text"), ["dispute_debit", "dispute_reversal"]) });
   table("invoice_payments", { schema: "zeroship" }).index("invoice_payments_invoice_idx").add({ columns: ["invoice_id"] });
   table("invoices", { schema: "zeroship" }).index("invoices_active_period_claim").add({ columns: ["creator_id", "period"], unique: true, where: (c) => c("status").cast("text").ne("void") });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX migrated_app_policies_app_submitted_idx ON zeroship.migrated_app_policies USING btree (app_id, submitted_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("migrated_app_policies", { schema: "zeroship" }).index("migrated_app_policies_app_submitted_idx").add({ columns: ["app_id", { kind: "column", name: "submitted_at", order: "desc" }] });
   table("migrated_migration_audit", { schema: "zeroship" }).index("migrated_migration_audit_app_idx").add({ columns: ["app_id", "migration_id", "created_at"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX migrated_migrations_app_status_idx ON zeroship.migrated_migrations USING btree (app_id, status, submitted_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("migrated_migrations", { schema: "zeroship" }).index("migrated_migrations_app_status_idx").add({ columns: ["app_id", "status", { kind: "column", name: "submitted_at", order: "desc" }] });
   table("oauth_authorization_codes", { schema: "zeroship" }).index("oauth_authorization_codes_expires_at_idx").add({ columns: ["expires_at"] });
   table("oauth_grants", { schema: "zeroship" }).index("oauth_grants_client_idx").add({ columns: ["client_id"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX oauth_grants_user_granted_idx ON zeroship.oauth_grants USING btree (user_id, granted_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("oauth_grants", { schema: "zeroship" }).index("oauth_grants_user_granted_idx").add({ columns: ["user_id", { kind: "column", name: "granted_at", order: "desc" }] });
   table("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_expires_at_idx").add({ columns: ["expires_at"] });
   table("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_family_idx").add({ columns: ["refresh_family_id", "client_id", "user_id"] });
   table("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_idem_reap_idx").add({ columns: ["idem_expires_at"], where: (c) => c("idem_response_enc").isNotNull() });
@@ -115,8 +104,7 @@ export function up() {
   table("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_user_idx").add({ columns: ["user_id"] });
   table("oidc_session_clients", { schema: "zeroship" }).index("oidc_session_clients_client_idx").add({ columns: ["client_id"] });
   table("oidc_session_clients", { schema: "zeroship" }).index("oidc_session_clients_user_idx").add({ columns: ["user_id", "idp_session_id"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX payout_failures_creator_idx ON zeroship.payout_failures USING btree (creator_id, created_at DESC)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("payout_failures", { schema: "zeroship" }).index("payout_failures_creator_idx").add({ columns: ["creator_id", { kind: "column", name: "created_at", order: "desc" }] });
   table("pending_disputes", { schema: "zeroship" }).index("pending_disputes_charge_idx").add({ columns: ["charge"], where: (c) => c("charge").isNotNull() });
   table("pending_disputes", { schema: "zeroship" }).index("pending_disputes_payment_intent_idx").add({ columns: ["payment_intent"], where: (c) => c("payment_intent").isNotNull() });
   table("permission_tokens", { schema: "zeroship" }).index("permission_tokens_owner_active_idx").add({ columns: ["owner_id"], where: (c) => c("revoked_at").isNull() });

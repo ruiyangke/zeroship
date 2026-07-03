@@ -96,6 +96,13 @@ export type PgArrayMembershipOp = "eq" | "ne";
 export type ExtractField = "day";
 
 /**
+ * CLOSED per-column index sort-order set. Omitted means the SQL default
+ * (`ASC`); renderers spell only `DESC` so default ASC stays byte-identical to
+ * the pre-order SQL.
+ */
+export type IndexSortOrder = "asc" | "desc";
+
+/**
  * The CLOSED index-method lexicon (§3.3.1 `createIndex` `using` union, design
  * line 648). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
  * so a hand-crafted `.ir.json` cannot smuggle an arbitrary / injection-shaped

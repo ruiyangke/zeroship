@@ -427,6 +427,14 @@ export function up() {
   table("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
     .add({ columns: ["status"], where: (c) => notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]) });
+
+  table("expr_surface", { schema: "zeroship" })
+    .index("expr_created_desc_idx")
+    .add({ columns: [{ kind: "column", name: "created_at", order: "desc" }] });
+
+  table("expr_surface", { schema: "zeroship" })
+    .index("expr_user_created_desc_idx")
+    .add({ columns: ["user_id", { kind: "column", name: "created_at", order: "desc" }] });
 }
 "#;
 
@@ -1060,6 +1068,24 @@ async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
             "CREATE INDEX expr_status_partial_idx ON zeroship.expr_surface USING btree (status) WHERE (status <> ALL (ARRAY['snapshotted'::text, 'snapshotted_suspect'::text]))"
         ),
         "notMembership partial-index predicate round-trips through pg_get_indexdef"
+    );
+    assert_eq!(
+        index_definition(&conn, "zeroship", "expr_created_desc_idx")
+            .await
+            .as_deref(),
+        Some(
+            "CREATE INDEX expr_created_desc_idx ON zeroship.expr_surface USING btree (created_at DESC)"
+        ),
+        "single-column DESC index round-trips through pg_get_indexdef"
+    );
+    assert_eq!(
+        index_definition(&conn, "zeroship", "expr_user_created_desc_idx")
+            .await
+            .as_deref(),
+        Some(
+            "CREATE INDEX expr_user_created_desc_idx ON zeroship.expr_surface USING btree (user_id, created_at DESC)"
+        ),
+        "mixed ASC/DESC composite index round-trips through pg_get_indexdef"
     );
 
     reset(&conn, &meta).await;

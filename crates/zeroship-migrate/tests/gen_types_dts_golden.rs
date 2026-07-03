@@ -197,8 +197,14 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
         Op::CreateIndex {
             table: "posts".into(),
             columns: vec![
-                IndexElement::Column { name: "author_id".into() },
-                IndexElement::Column { name: "status".into() },
+                IndexElement::Column {
+                    name: "author_id".into(),
+                    order: None,
+                },
+                IndexElement::Column {
+                    name: "status".into(),
+                    order: None,
+                },
             ],
             name: Some("posts_author_status_idx".into()),
             unique: Some(false),
@@ -285,8 +291,14 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
         Op::CreateIndex {
             table: table.clone(),
             columns: vec![
-                IndexElement::Column { name: owner.clone() },
-                IndexElement::Column { name: status.clone() },
+                IndexElement::Column {
+                    name: owner.clone(),
+                    order: None,
+                },
+                IndexElement::Column {
+                    name: status.clone(),
+                    order: None,
+                },
             ],
             name: None,
             unique: Some(false),

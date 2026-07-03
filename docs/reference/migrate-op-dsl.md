@@ -435,6 +435,9 @@ table("orders").constraint("orders_total_nonneg").drop({ ifExists: true }); // k
 ```ts
 const members = table("members");
 members.index("members_email_idx").add({ columns: ["email"], unique: true, using: "btree" });
+members.index("members_created_idx").add({
+  columns: ["org_id", { kind: "column", name: "created_at", order: "desc" }],
+});
 members.index("members_email_idx").drop({ unique: true });
 ```
 

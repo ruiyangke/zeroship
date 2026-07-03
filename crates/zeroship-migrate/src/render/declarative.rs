@@ -41,9 +41,10 @@ use serde::Deserialize;
 
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot,
-    IndexSnapshot, SchemaSnapshot, TableSnapshot,
+    canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
+    IndexElementSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use crate::IndexSortOrder;
 use crate::model::ir::TableRuntimeOptions;
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
@@ -354,7 +355,11 @@ fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column(c) => format!("{}{opclass_suffix}", quote_ident(c)),
+            IndexElementSnapshot::Column { name, order } => format!(
+                "{}{opclass_suffix}{}",
+                quote_ident(name),
+                render_index_order_suffix(*order)
+            ),
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
         })
         .collect::<Vec<_>>()
@@ -373,7 +378,9 @@ fn render_index_elements_sqlite(idx: &IndexSnapshot) -> String {
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column(c) => quote_ident(c),
+            IndexElementSnapshot::Column { name, order } => {
+                format!("{}{}", quote_ident(name), render_index_order_suffix(*order))
+            }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
         })
         .collect::<Vec<_>>()
@@ -392,11 +399,20 @@ fn render_index_elements_mysql(idx: &IndexSnapshot) -> String {
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column(c) => mysql_quote_ident(c),
+            IndexElementSnapshot::Column { name, order } => {
+                format!("{}{}", mysql_quote_ident(name), render_index_order_suffix(*order))
+            }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn render_index_order_suffix(order: Option<IndexSortOrder>) -> &'static str {
+    match canonical_index_sort_order(order) {
+        Some(IndexSortOrder::Desc) => " DESC",
+        Some(IndexSortOrder::Asc) | None => "",
+    }
 }
 
 /// A lowered migration paired with its STRUCTURAL per-statement list — the exact

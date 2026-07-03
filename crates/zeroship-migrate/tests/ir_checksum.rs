@@ -482,7 +482,10 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     let owner = "app_portable";
     let ops = vec![Op::CreateIndex {
         table: "users".into(),
-        columns: vec![IndexElement::Column { name: "email".into() }],
+        columns: vec![IndexElement::Column {
+            name: "email".into(),
+            order: None,
+        }],
         name: None,
         unique: Some(true),
         using: None,

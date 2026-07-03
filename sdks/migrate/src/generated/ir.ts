@@ -30,6 +30,7 @@ import type {
   FuncLanguage,
   FuncVolatility,
   IndexMethod,
+  IndexSortOrder,
   JoinKind,
   OnUnmet,
   OnlinePhase,
@@ -61,6 +62,7 @@ export type {
   FuncLanguage,
   FuncVolatility,
   IndexMethod,
+  IndexSortOrder,
   JoinKind,
   OnUnmet,
   OnlinePhase,
@@ -235,7 +237,7 @@ export type ColumnOrExpr =
 
 /** Index target: a column name or a closed expression AST. */
 export type IndexElement =
-  | { kind: "column"; name: string }
+  | { kind: "column"; name: string; order?: IndexSortOrder | null }
   | { kind: "expr"; expr: Expr };
 
 /** One `(target WITH operator)` element in an exclusion constraint. */

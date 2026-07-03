@@ -4428,9 +4428,12 @@ pub(crate) fn create_index_snapshot(
     let mut name_parts = Vec::with_capacity(columns.len());
     for element in columns {
         match element {
-            IndexElement::Column { name } => {
+            IndexElement::Column { name, order } => {
                 plain_columns.push(name.clone());
-                elements.push(IndexElementSnapshot::column(name.clone()));
+                elements.push(match order {
+                    Some(order) => IndexElementSnapshot::column_ordered(name.clone(), *order),
+                    None => IndexElementSnapshot::column(name.clone()),
+                });
                 name_parts.push(name.clone());
             }
             IndexElement::Expr { expr } => {

@@ -4065,6 +4065,17 @@
               "description": "Column name.",
               "type": "string"
             },
+            "order": {
+              "description": "Optional per-column sort order. `None` is the SQL default (`ASC`) and\nserializes identically to the pre-order wire shape.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IndexSortOrder"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "kind": {
               "type": "string",
               "const": "column"
@@ -4094,6 +4105,21 @@
             "kind",
             "expr"
           ]
+        }
+      ]
+    },
+    "IndexSortOrder": {
+      "description": "CLOSED per-column index sort-order set. Omitted means the SQL default\n(`ASC`); renderers spell only `DESC` so default ASC stays byte-identical to\nthe pre-order SQL.",
+      "oneOf": [
+        {
+          "description": "Ascending order (the SQL default).",
+          "type": "string",
+          "const": "asc"
+        },
+        {
+          "description": "Descending order.",
+          "type": "string",
+          "const": "desc"
         }
       ]
     },

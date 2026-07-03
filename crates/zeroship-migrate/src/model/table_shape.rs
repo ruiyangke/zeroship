@@ -151,7 +151,10 @@ fn resolve_create_table(
         columns: idx
             .columns
             .iter()
-            .map(|name| IndexElement::Column { name: name.clone() })
+            .map(|name| IndexElement::Column {
+                name: name.clone(),
+                order: None,
+            })
             .collect(),
         unique: None,
         using: None,
@@ -280,7 +283,7 @@ pub(crate) fn resolved_create_table_matches_profile(
             .columns
             .iter()
             .map(|c| match c {
-                IndexElement::Column { name } => Some(name.as_str()),
+                IndexElement::Column { name, .. } => Some(name.as_str()),
                 IndexElement::Expr { .. } => None,
             })
             .collect::<Option<Vec<_>>>();
@@ -391,7 +394,7 @@ mod tests {
                 idx.columns
                     .iter()
                     .map(|c| match c {
-                        IndexElement::Column { name } => name.as_str(),
+                        IndexElement::Column { name, .. } => name.as_str(),
                         IndexElement::Expr { .. } => "<expr>",
                     })
                     .collect::<Vec<_>>()

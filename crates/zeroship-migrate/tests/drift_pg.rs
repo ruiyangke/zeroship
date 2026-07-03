@@ -162,7 +162,10 @@ fn lower_ir_migrations(schema: &str, name: &str, ops: &[Op]) -> Vec<Migration> {
 }
 
 fn idx_col(name: &str) -> IndexElement {
-    IndexElement::Column { name: name.to_string() }
+    IndexElement::Column {
+        name: name.to_string(),
+        order: None,
+    }
 }
 
 fn lower_email_expr() -> Expr {

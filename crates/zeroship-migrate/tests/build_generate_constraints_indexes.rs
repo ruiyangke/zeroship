@@ -94,7 +94,13 @@ fn generate_synthesizes_plain_user_index() {
     );
     let (idx_table, idx_cols, idx_name) = &create_indexes[0];
     assert_eq!(idx_table, "members");
-    assert_eq!(idx_cols, &vec![IndexElement::Column { name: "email".to_string() }]);
+    assert_eq!(
+        idx_cols,
+        &vec![IndexElement::Column {
+            name: "email".to_string(),
+            order: None,
+        }]
+    );
     assert_eq!(idx_name.as_deref(), Some("members_email_idx"));
     // The emitted .ts mirrors the synthesized index via the fluent surface:
     // `table("members").index("members_email_idx").add({ columns: ["email"] })`.

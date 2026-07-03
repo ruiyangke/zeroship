@@ -1606,7 +1606,10 @@ function indexElementToIr(element) {
   if (element && typeof element === "object" && "kind" in element) {
     if (element.kind === "column") {
       requireString(element.name, "index column element name");
-      return { kind: "column", name: element.name };
+      const order = indexColumnOrderToIr(element.order);
+      return order === "desc"
+        ? { kind: "column", name: element.name, order }
+        : { kind: "column", name: element.name };
     }
     if (element.kind === "expr") {
       const expr = resolveExpr(element.expr);
@@ -1621,6 +1624,16 @@ function indexElementToIr(element) {
     throw structuredError("OP_INVALID", "index element must be a column name or expression");
   }
   return { kind: "expr", expr };
+}
+
+function indexColumnOrderToIr(order) {
+  if (order === undefined || order === "asc") {
+    return undefined;
+  }
+  if (order === "desc") {
+    return "desc";
+  }
+  throw structuredError("OP_INVALID", "index column order must be \"asc\" or \"desc\"");
 }
 
 function recordAddExclusion(table, name, args) {
