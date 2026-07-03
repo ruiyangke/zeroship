@@ -591,6 +591,13 @@ export const t = {
   text: () => new ColumnDef("text"),
   /** Fixed-precision decimal. Defaults to (38, 9). */
   numeric: (precision = 38, scale = 9) => new ColumnDef({ decimal: { precision, scale } }),
+  /** Fixed-length character string. */
+  char: (n) => {
+    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
+      throw structuredError("OP_INVALID", `t.char(n): n must be a positive integer, got ${n}`);
+    }
+    return new ColumnDef({ char: { len: n } });
+  },
   timestamp: () => new ColumnDef("timestamp"),
   date: () => new ColumnDef("date"),
   uuid: () => new ColumnDef("uuid"),

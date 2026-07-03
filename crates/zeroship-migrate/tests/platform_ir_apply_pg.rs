@@ -452,6 +452,7 @@ export function up() {
       shard: t.smallInt().notNull(),
       ratio: t.real().notNull(),
       source_ip: t.inet(),
+      currency: t.char(3).notNull().default("usd"),
     },
     primaryKey: ["id"],
   });
@@ -646,6 +647,24 @@ async fn column_udt_name(
         .await
         .expect("query column type");
     rows.first().map(|row| row.get::<_, String>(0))
+}
+
+async fn column_character_maximum_length(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<i32> {
+    let rows = conn
+        .query(
+            "SELECT character_maximum_length \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            &[&schema, &table, &column],
+        )
+        .await
+        .expect("query column character length");
+    rows.first().and_then(|row| row.get::<_, Option<i32>>(0))
 }
 
 async fn column_default_expr(
@@ -1152,6 +1171,26 @@ async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
             .as_deref(),
         Some("inet"),
         "t.inet() renders as Postgres inet"
+    );
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_scalar_types", "currency")
+            .await
+            .as_deref(),
+        Some("bpchar"),
+        "t.char(3) renders as Postgres bpchar"
+    );
+    assert_eq!(
+        column_character_maximum_length(&conn, "zeroship", "platform_scalar_types", "currency")
+            .await,
+        Some(3),
+        "t.char(3) preserves character_maximum_length=3"
+    );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_scalar_types", "currency")
+            .await
+            .as_deref(),
+        Some("'usd'::bpchar"),
+        "t.char(3).default(\"usd\") round-trips through pg_get_expr as bpchar"
     );
 
     reset(&conn, &meta).await;

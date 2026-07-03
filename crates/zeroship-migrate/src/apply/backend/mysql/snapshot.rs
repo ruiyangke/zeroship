@@ -201,6 +201,9 @@ pub(crate) fn mysql_canonical_type(raw: &str) -> String {
     if lower.starts_with("enum(") {
         return lower;
     }
+    if let Some(len) = parse_character_type_len(&lower) {
+        return format!("character({len})");
+    }
     match lower.as_str() {
         "tinyint(1)" | "bool" | "boolean" => "boolean".to_string(),
         "json" => "jsonb".to_string(),
@@ -219,6 +222,15 @@ pub(crate) fn mysql_canonical_type(raw: &str) -> String {
         "bigint" => "bigint".to_string(),
         _ => strip_integer_display_width(&lower).unwrap_or(lower),
     }
+}
+
+fn parse_character_type_len(lower: &str) -> Option<u32> {
+    let inner = lower
+        .strip_prefix("character(")
+        .or_else(|| lower.strip_prefix("char("))
+        .or_else(|| lower.strip_prefix("bpchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u32>().ok().filter(|len| *len > 0)
 }
 
 fn strip_integer_display_width(lower: &str) -> Option<String> {
@@ -479,6 +491,7 @@ mod tests {
         assert_eq!(mysql_canonical_type("JSON"), "jsonb");
         assert_eq!(mysql_canonical_type("datetime(6)"), "timestamp with time zone");
         assert_eq!(mysql_canonical_type("varchar(191)"), "text");
+        assert_eq!(mysql_canonical_type("CHAR(3)"), "character(3)");
     }
 
     #[test]

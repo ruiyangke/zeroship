@@ -477,6 +477,11 @@ pub enum ColType {
     Inet,
     /// Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).
     Bytea,
+    /// Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).
+    Char {
+        /// Fixed length in characters.
+        len: u32,
+    },
     /// Foreign-key reference to another table (the referenced table name).
     Ref {
         /// The referenced table.

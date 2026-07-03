@@ -69,7 +69,7 @@ const TS = {
     "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
     "pgArrayMembership", "pgRegexMatch", "pgColumnSize", "extract", "pgIntervalLiteral",
   ].sort(),
-  // ColType string tokens (the object-variant arms — ref/vector/decimal/encrypted
+  // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted
   // — are not `const` and are checked structurally by the round-trip, not here).
   ColTypeStrings: [
     "string", "text", "int", "smallInt", "bigInt", "float", "real", "bool",

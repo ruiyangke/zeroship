@@ -458,6 +458,7 @@ pub async fn snapshot_schema(
     let col_rows = conn
         .query(
             "SELECT c.table_name, c.column_name, c.data_type, c.is_nullable, \
+                    c.character_maximum_length, \
                     format_type(a.atttypid, a.atttypmod) AS format_type, \
                     col_description(rel.oid, a.attnum) AS comment \
              FROM information_schema.columns c \
@@ -479,6 +480,11 @@ pub async fn snapshot_schema(
             // it round-trips against the desired snapshot.
             let data_type = if data_type.eq_ignore_ascii_case("USER-DEFINED") {
                 canonical_extension_type(&r.get::<_, String>("format_type"))
+            } else if data_type.eq_ignore_ascii_case("character") {
+                match r.try_get::<_, Option<i32>>("character_maximum_length").ok().flatten() {
+                    Some(len) if len > 0 => format!("character({len})"),
+                    _ => data_type,
+                }
             } else {
                 data_type
             };

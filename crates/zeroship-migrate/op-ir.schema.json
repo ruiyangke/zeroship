@@ -2678,6 +2678,30 @@
           "const": "bytea"
         },
         {
+          "description": "Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).",
+          "type": "object",
+          "properties": {
+            "char": {
+              "type": "object",
+              "properties": {
+                "len": {
+                  "description": "Fixed length in characters.",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "len"
+              ]
+            }
+          },
+          "required": [
+            "char"
+          ],
+          "additionalProperties": false
+        },
+        {
           "description": "Foreign-key reference to another table (the referenced table name).",
           "type": "object",
           "properties": {

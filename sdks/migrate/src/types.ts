@@ -186,6 +186,8 @@ export interface TypeLexicon {
   text(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
   numeric(precision?: number, scale?: number): ColumnDef;
+  /** Fixed-length character string (`character(n)` / `CHAR(n)`). */
+  char(n: number): ColumnDef;
   timestamp(): ColumnDef;
   /** Narrow SQL DATE token. Validates only as a PostgreSQL domain base type. */
   date(): ColumnDef;
