@@ -496,7 +496,13 @@ fn dml_comment(op: &Op, binds: &[BindValue]) -> String {
 /// The `"schema"."table"."column"`-ish subject for a label, best-effort from the op.
 fn op_subject(op: &Op) -> String {
     match op {
-        Op::CreateTable { name, .. } | Op::DropTable { table: name, .. } => quote_dotted(&[name]),
+        Op::CreateTable { name, .. }
+        | Op::CreatePartition { name, .. }
+        | Op::DropPartition { name, .. }
+        | Op::DropTable { table: name, .. } => quote_dotted(&[name]),
+        Op::DetachPartition { parent, name, .. } => {
+            format!("{} → {}", quote_dotted(&[parent]), quote_dotted(&[name]))
+        }
         Op::SetTableOptions { table, .. } => quote_dotted(&[table]),
         Op::AddColumn { table, column, .. }
         | Op::DropColumn { table, column, .. }

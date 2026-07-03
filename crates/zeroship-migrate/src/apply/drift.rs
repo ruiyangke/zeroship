@@ -384,6 +384,7 @@ pub async fn snapshot_schema(
             indexes: Vec::new(),
             constraints: Vec::new(),
             runtime_options: Default::default(),
+            partition_by: None,
             comment: r.try_get("comment").ok().flatten(),
             // PG recovers CHECK / generated / partial-index references from the
             // structured buckets (pg_get_constraintdef / pg_get_expr); no raw text.
@@ -600,6 +601,9 @@ pub async fn snapshot_schema(
                 columns,
                 access_method: r.get("access_method"),
                 predicate: r.try_get("index_pred").ok().flatten(),
+                include: Vec::new(),
+                with: None,
+                only: false,
                 // Emission-only; never recovered from the catalog.
                 opclass: None,
                 comment: r.try_get("comment").ok().flatten(),
@@ -797,6 +801,7 @@ pub async fn snapshot_schema(
         roles,
         schemas,
         extensions,
+        partitions: Default::default(),
     })
 }
 

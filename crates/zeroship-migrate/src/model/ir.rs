@@ -1091,6 +1091,8 @@ pub struct SequenceOwnedBy {
 pub enum IndexMethod {
     /// B-tree (the default).
     Btree,
+    /// PG BRIN.
+    Brin,
     /// PG GIN.
     Gin,
     /// PG GiST.
@@ -1101,6 +1103,26 @@ pub enum IndexMethod {
     Hnsw,
     /// Full-text search (PG GIN-over-tsvector / SQLite FTS5 virtual table).
     Fts5,
+}
+
+/// Typed PostgreSQL index storage parameters. Closed set: never raw SQL.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IndexStorageParams {
+    /// BRIN pages-per-range storage parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages_per_range: Option<u32>,
+    /// Generic index fillfactor storage parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fillfactor: Option<u32>,
+}
+
+impl IndexStorageParams {
+    /// True when no storage parameter would render.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pages_per_range.is_none() && self.fillfactor.is_none()
+    }
 }
 
 /// An index definition inside a `createTable` op.
@@ -1121,6 +1143,83 @@ pub struct IrIndex {
     /// Partial-index predicate (a closed-AST node, never raw SQL).
     #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
     pub r#where: Option<Expr>,
+    /// Non-key covering columns (`INCLUDE (...)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Typed storage parameters (`WITH (...)`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub with: Option<IndexStorageParams>,
+    /// PostgreSQL `ON ONLY` for partitioned parents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<bool>,
+}
+
+/// Partitioning strategy for a partitioned table parent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum PartitionSpec {
+    /// `PARTITION BY RANGE (...)`.
+    Range {
+        /// Partition key columns.
+        columns: Vec<String>,
+    },
+    /// `PARTITION BY LIST (...)`.
+    List {
+        /// Partition key columns.
+        columns: Vec<String>,
+    },
+    /// `PARTITION BY HASH (...)`.
+    Hash {
+        /// Partition key columns.
+        columns: Vec<String>,
+    },
+}
+
+/// Closed partition-bound literal. Never raw SQL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum PartitionBoundValue {
+    /// String/timestamptz literal. Rendered as a quoted SQL string.
+    String {
+        /// Literal value.
+        value: String,
+    },
+    /// JS-safe signed integer literal.
+    Int {
+        /// Literal value.
+        value: SafeI64,
+    },
+    /// PostgreSQL `MINVALUE`.
+    MinValue,
+    /// PostgreSQL `MAXVALUE`.
+    MaxValue,
+}
+
+/// Partition bounds for `CREATE TABLE child PARTITION OF parent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
+pub enum PartitionBounds {
+    /// `FOR VALUES FROM (...) TO (...)`.
+    Range {
+        /// Lower bound values.
+        from: Vec<PartitionBoundValue>,
+        /// Upper bound values.
+        to: Vec<PartitionBoundValue>,
+    },
+    /// `FOR VALUES IN (...)`.
+    List {
+        /// List bound values.
+        values: Vec<PartitionBoundValue>,
+    },
+    /// `FOR VALUES WITH (MODULUS m, REMAINDER r)`.
+    Hash {
+        /// Hash modulus.
+        modulus: u32,
+        /// Hash remainder.
+        remainder: u32,
+    },
+    /// `DEFAULT`.
+    Default,
 }
 
 /// CLOSED target shape for `COMMENT ON`. Only object identifiers and a comment
@@ -1960,6 +2059,9 @@ pub enum Op {
         /// Indexes created with the table.
         #[serde(default)]
         indexes: Vec<IrIndex>,
+        /// Partitioning strategy for a partitioned table parent.
+        #[serde(rename = "partitionBy", default, skip_serializing_if = "Option::is_none")]
+        partition_by: Option<PartitionSpec>,
         /// Collection-level runtime options (`softDelete`, `versioning`,
         /// `strictness`) that are not recoverable from physical columns.
         #[serde(rename = "runtimeOptions", default, skip_serializing_if = "Option::is_none")]
@@ -1972,6 +2074,48 @@ pub enum Op {
         /// synthesized via a catalog probe; never a native `IF NOT EXISTS`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
+    },
+    /// `CREATE TABLE <name> PARTITION OF <parent> FOR VALUES ...`.
+    CreatePartition {
+        /// Partition table name.
+        name: String,
+        /// Parent partitioned table.
+        of: String,
+        /// Partition bounds.
+        bounds: PartitionBounds,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifNotExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
+    /// `ALTER TABLE <parent> DETACH PARTITION <name> [CONCURRENTLY]`.
+    DetachPartition {
+        /// Parent partitioned table.
+        parent: String,
+        /// Partition table name.
+        name: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// `CONCURRENTLY`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        concurrently: Option<bool>,
+    },
+    /// `DROP TABLE <partition> [CASCADE]`.
+    DropPartition {
+        /// Partition table name.
+        name: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+        /// `CASCADE`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cascade: Option<bool>,
     },
     /// Metadata-only collection runtime option change. This participates in the
     /// canonical IR/fold but lowers to no SQL; it exists so later migrations can
@@ -2106,6 +2250,15 @@ pub enum Op {
         /// `CONCURRENTLY`.
         #[serde(skip_serializing_if = "Option::is_none")]
         concurrently: Option<bool>,
+        /// Non-key covering columns (`INCLUDE (...)`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        include: Vec<String>,
+        /// Typed storage parameters (`WITH (...)`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with: Option<IndexStorageParams>,
+        /// PostgreSQL `ON ONLY` for partitioned parents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        only: Option<bool>,
         /// **PR10** — the schema qualifier (§2.7).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
@@ -2858,8 +3011,9 @@ impl Op {
             ADD_CONSTRAINT_FEATURES, ALTER_COLUMN_TYPE_FEATURES, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT,
             CAP_MATERIALIZED_VIEW, CAP_POLICY, CAP_RAW_MATERIALIZED_VIEW, CAP_RAW_SQL, CAP_RLS,
             CAP_ROLE, CAP_SCHEMA, COMMENT_FEATURES, CREATE_INDEX_FEATURES, CREATE_TABLE_FEATURES,
-            CREATE_TRIGGER_FEATURES, CREATE_VIEW_FEATURES, INSERT_FEATURES, PG_RAW_FEATURES,
-            RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES, SET_COLUMN_DEFAULT_FEATURES,
+            CREATE_TRIGGER_FEATURES, CREATE_VIEW_FEATURES, INSERT_FEATURES, PARTITION_FEATURES,
+            PG_RAW_FEATURES, RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES,
+            SET_COLUMN_DEFAULT_FEATURES,
         };
         use crate::model::validate::CODE_UNSUPPORTED;
 
@@ -2870,9 +3024,39 @@ impl Op {
         let pg_only = |reason: &'static str| {
             DialectSupport::postgres_only(RenderMode::Offline, reason)
         };
+        let index_uses_pg_only_feature = |include: &[String],
+                                          with: &Option<IndexStorageParams>,
+                                          only: Option<bool>| {
+            !include.is_empty()
+                || with.as_ref().is_some_and(|params| !params.is_empty())
+                || only.unwrap_or(false)
+        };
 
         match self {
-            Op::CreateTable { .. } => Support::core(all_offline, CREATE_TABLE_FEATURES),
+            Op::CreateTable {
+                partition_by,
+                indexes,
+                ..
+            } => {
+                let has_pg_only_index_feature = indexes.iter().any(|index| {
+                    matches!(index.using, Some(IndexMethod::Brin))
+                        || index_uses_pg_only_feature(&index.include, &index.with, index.only)
+                });
+                let dialects = if partition_by.is_some() {
+                    pg_only("partitioned tables are PostgreSQL-only")
+                } else if has_pg_only_index_feature {
+                    pg_only("createTable BRIN/INCLUDE/WITH/ONLY index features are PostgreSQL-only")
+                } else {
+                    all_offline
+                };
+                Support::core(dialects, CREATE_TABLE_FEATURES)
+            }
+            Op::CreatePartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. } => Support::core(
+                pg_only("partition lifecycle operations are PostgreSQL-only"),
+                PARTITION_FEATURES,
+            ),
             Op::SetTableOptions { .. } => Support::core(all_offline, &[]),
             Op::DropTable { .. } => Support::core(all_offline, &[]),
             Op::RenameTable { .. } => Support::core(all_offline, &[]),
@@ -2882,21 +3066,26 @@ impl Op {
                 columns,
                 using,
                 r#where,
+                include,
+                with,
+                only,
                 ..
             } => {
                 let sqlite = if matches!(
                     using,
                     Some(
-                        IndexMethod::Gin
+                        IndexMethod::Brin
+                            | IndexMethod::Gin
                             | IndexMethod::Gist
                             | IndexMethod::Ivfflat
                             | IndexMethod::Hnsw
                             | IndexMethod::Fts5
                     )
-                ) {
+                ) || index_uses_pg_only_feature(include, with, *only)
+                {
                     unsupported(
                         CODE_UNSUPPORTED,
-                        "createIndex non-btree methods are unsupported on SQLite",
+                        "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on SQLite",
                     )
                 } else {
                     supported(RenderMode::Offline)
@@ -2917,16 +3106,18 @@ impl Op {
                 } else if matches!(
                     using,
                     Some(
-                        IndexMethod::Gin
+                        IndexMethod::Brin
+                            | IndexMethod::Gin
                             | IndexMethod::Gist
                             | IndexMethod::Ivfflat
                             | IndexMethod::Hnsw
                             | IndexMethod::Fts5
                     )
-                ) {
+                ) || index_uses_pg_only_feature(include, with, *only)
+                {
                     unsupported(
                         CODE_UNSUPPORTED,
-                        "createIndex non-btree methods are unsupported on MySQL",
+                        "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on MySQL",
                     )
                 } else {
                     supported(RenderMode::Offline)
@@ -3259,6 +3450,9 @@ impl Op {
         match self {
             // Portable core — no capability required.
             Op::CreateTable { .. }
+            | Op::CreatePartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. }
             | Op::SetTableOptions { .. }
             | Op::DropTable { .. }
             | Op::RenameTable { .. }
@@ -3346,6 +3540,9 @@ impl Op {
     pub fn touched_table(&self) -> Option<&str> {
         match self {
             Op::CreateTable { name, .. } => Some(name.as_str()),
+            Op::CreatePartition { name, .. }
+            | Op::DetachPartition { name, .. }
+            | Op::DropPartition { name, .. } => Some(name.as_str()),
             Op::SetTableOptions { table, .. } => Some(table.as_str()),
             // A table rename TOUCHES the existing (OLD) table — the interlock
             // gates the table the op operates ON, which is the source name.
@@ -3415,6 +3612,9 @@ impl Op {
     pub fn schema(&self) -> Option<&str> {
         match self {
             Op::CreateTable { schema, .. }
+            | Op::CreatePartition { schema, .. }
+            | Op::DetachPartition { schema, .. }
+            | Op::DropPartition { schema, .. }
             | Op::SetTableOptions { schema, .. }
             | Op::DropTable { schema, .. }
             | Op::RenameTable { schema, .. }
@@ -3483,6 +3683,8 @@ impl Op {
     pub fn existence_guard(&self) -> Option<ExistenceGuard> {
         match self {
             Op::CreateTable { existence_guard, .. }
+            | Op::CreatePartition { existence_guard, .. }
+            | Op::DropPartition { existence_guard, .. }
             | Op::DropTable { existence_guard, .. }
             | Op::RenameTable { existence_guard, .. }
             | Op::AddColumn { existence_guard, .. }
@@ -3501,7 +3703,8 @@ impl Op {
             | Op::DropEnum { existence_guard, .. }
             | Op::DropDomain { existence_guard, .. }
             | Op::DropSequence { existence_guard, .. } => *existence_guard,
-            Op::SetTableOptions { .. }
+            Op::DetachPartition { .. }
+            | Op::SetTableOptions { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
@@ -3548,10 +3751,12 @@ impl Op {
     pub fn legal_existence_guard(&self) -> Option<ExistenceGuard> {
         match self {
             Op::CreateTable { .. }
+            | Op::CreatePartition { .. }
             | Op::AddColumn { .. }
             | Op::CreateIndex { .. }
             | Op::AddConstraint { .. } => Some(ExistenceGuard::IfNotExists),
             Op::DropTable { .. }
+            | Op::DropPartition { .. }
             | Op::RenameTable { .. }
             | Op::DropColumn { .. }
             | Op::DropIndex { .. }
@@ -3566,7 +3771,8 @@ impl Op {
             | Op::DropEnum { .. }
             | Op::DropDomain { .. }
             | Op::DropSequence { .. } => Some(ExistenceGuard::IfExists),
-            Op::SetTableOptions { .. }
+            Op::DetachPartition { .. }
+            | Op::SetTableOptions { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
@@ -4422,7 +4628,10 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -4566,7 +4775,10 @@ mod tests {
             primary_key: None,
             constraints: vec![],
             indexes: vec![],
-            runtime_options: None,
+
+        partition_by: None,
+
+        runtime_options: None,
             schema: None,
             existence_guard: Some(ExistenceGuard::IfNotExists),
         };

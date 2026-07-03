@@ -193,7 +193,10 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
         primary_key: Some(vec!["account_id".into(), "team".into()]),
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
         schema: None,
         existence_guard: None,
     };
@@ -217,7 +220,10 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
-        runtime_options: None,
+
+    partition_by: None,
+
+    runtime_options: None,
         schema: None,
         existence_guard: None,
     };
@@ -764,13 +770,16 @@ fn create_index_omits_all_absent_optionals() {
         unique: None,
         using: None,
         r#where: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
         concurrently: None,
         schema: None,
         existence_guard: None,
     };
     let v = serde_json::to_value(&op).unwrap();
     let obj = v.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where", "concurrently"] {
+    for absent in ["name", "unique", "using", "where", "include", "with", "only", "concurrently"] {
         assert!(
             !obj.contains_key(absent),
             "absent `{absent}` must be OMITTED, not null: {v}"
@@ -804,10 +813,13 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         unique: None,
         using: None,
         r#where: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
     };
     let iv = serde_json::to_value(&ix).unwrap();
     let iobj = iv.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where"] {
+    for absent in ["name", "unique", "using", "where", "include", "with", "only"] {
         assert!(!iobj.contains_key(absent), "IrIndex absent `{absent}` must be omitted: {iv}");
     }
     // IrConstraint.name absent.
@@ -820,6 +832,105 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         !conv.as_object().unwrap().contains_key("name"),
         "IrConstraint absent `name` must be omitted: {conv}"
     );
+}
+
+#[test]
+fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
+    use zeroship_migrate::model::ir::{
+        ColType, IrColumn, PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
+    };
+
+    let parent = Op::CreateTable {
+        name: "events".into(),
+        columns: vec![IrColumn {
+            name: "created_at".into(),
+            ty: ColType::Timestamp,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: Some(PartitionSpec::Range {
+            columns: vec!["created_at".into()],
+        }),
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let value = serde_json::to_value(&parent).unwrap();
+    assert!(value.get("partitionBy").is_some(), "partition key must be camelCase: {value}");
+    assert!(value.get("partition_by").is_none(), "snake_case partition key must not serialize: {value}");
+    let back: Op = serde_json::from_value(value).unwrap();
+    assert_eq!(parent, back);
+
+    let old_shape = Op::CreateTable {
+        name: "plain".into(),
+        columns: vec![],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    let old_json = serde_json::to_string(&old_shape).unwrap();
+    assert!(
+        !old_json.contains("partitionBy"),
+        "absent partition_by must contribute zero bytes: {old_json}"
+    );
+
+    let create_partition = Op::CreatePartition {
+        name: "events_2026_05".into(),
+        of: "events".into(),
+        bounds: PartitionBounds::Range {
+            from: vec![
+                PartitionBoundValue::String {
+                    value: "2026-05-01T00:00:00Z".into(),
+                },
+                PartitionBoundValue::MinValue,
+            ],
+            to: vec![
+                PartitionBoundValue::String {
+                    value: "2026-06-01T00:00:00Z".into(),
+                },
+                PartitionBoundValue::Int {
+                    value: SafeI64::new(42).unwrap(),
+                },
+            ],
+        },
+        schema: None,
+        existence_guard: None,
+    };
+    let detach = Op::DetachPartition {
+        parent: "events".into(),
+        name: "events_2026_05".into(),
+        schema: None,
+        concurrently: Some(true),
+    };
+    let drop = Op::DropPartition {
+        name: "events_2026_05".into(),
+        schema: None,
+        existence_guard: None,
+        cascade: Some(true),
+    };
+
+    for op in [create_partition, detach, drop] {
+        let json = serde_json::to_string(&op).unwrap();
+        let back: Op = serde_json::from_str(&json).unwrap();
+        assert_eq!(op, back, "new partition op must round-trip: {json}");
+        assert!(
+            !json.contains("rawSql"),
+            "partition bounds stay closed literals, never raw SQL: {json}"
+        );
+    }
 }
 
 #[test]

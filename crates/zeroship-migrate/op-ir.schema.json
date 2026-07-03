@@ -115,6 +115,17 @@
               },
               "default": []
             },
+            "partitionBy": {
+              "description": "Partitioning strategy for a partitioned table parent.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PartitionSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "runtimeOptions": {
               "description": "Collection-level runtime options (`softDelete`, `versioning`,\n`strictness`) that are not recoverable from physical columns.",
               "anyOf": [
@@ -154,6 +165,135 @@
             "op",
             "name",
             "columns"
+          ]
+        },
+        {
+          "description": "`CREATE TABLE <name> PARTITION OF <parent> FOR VALUES ...`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Partition table name.",
+              "type": "string"
+            },
+            "of": {
+              "description": "Parent partitioned table.",
+              "type": "string"
+            },
+            "bounds": {
+              "description": "Partition bounds.",
+              "$ref": "#/$defs/PartitionBounds"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifNotExists` legal here).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "createPartition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name",
+            "of",
+            "bounds"
+          ]
+        },
+        {
+          "description": "`ALTER TABLE <parent> DETACH PARTITION <name> [CONCURRENTLY]`.",
+          "type": "object",
+          "properties": {
+            "parent": {
+              "description": "Parent partitioned table.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Partition table name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "concurrently": {
+              "description": "`CONCURRENTLY`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "detachPartition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "parent",
+            "name"
+          ]
+        },
+        {
+          "description": "`DROP TABLE <partition> [CASCADE]`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "Partition table name.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cascade": {
+              "description": "`CASCADE`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "dropPartition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "name"
           ]
         },
         {
@@ -477,6 +617,31 @@
             },
             "concurrently": {
               "description": "`CONCURRENTLY`.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "include": {
+              "description": "Non-key covering columns (`INCLUDE (...)`).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "with": {
+              "description": "Typed storage parameters (`WITH (...)`).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/IndexStorageParams"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "only": {
+              "description": "PostgreSQL `ON ONLY` for partitioned parents.",
               "type": [
                 "boolean",
                 "null"
@@ -4091,6 +4256,31 @@
               "type": "null"
             }
           ]
+        },
+        "include": {
+          "description": "Non-key covering columns (`INCLUDE (...)`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "with": {
+          "description": "Typed storage parameters (`WITH (...)`).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IndexStorageParams"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "only": {
+          "description": "PostgreSQL `ON ONLY` for partitioned parents.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -4176,6 +4366,11 @@
           "const": "btree"
         },
         {
+          "description": "PG BRIN.",
+          "type": "string",
+          "const": "brin"
+        },
+        {
           "description": "PG GIN.",
           "type": "string",
           "const": "gin"
@@ -4199,6 +4394,102 @@
           "description": "Full-text search (PG GIN-over-tsvector / SQLite FTS5 virtual table).",
           "type": "string",
           "const": "fts5"
+        }
+      ]
+    },
+    "IndexStorageParams": {
+      "description": "Typed PostgreSQL index storage parameters. Closed set: never raw SQL.",
+      "type": "object",
+      "properties": {
+        "pagesPerRange": {
+          "description": "BRIN pages-per-range storage parameter.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "fillfactor": {
+          "description": "Generic index fillfactor storage parameter.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PartitionSpec": {
+      "description": "Partitioning strategy for a partitioned table parent.",
+      "oneOf": [
+        {
+          "description": "`PARTITION BY RANGE (...)`.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "Partition key columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "range"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "`PARTITION BY LIST (...)`.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "Partition key columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
+        },
+        {
+          "description": "`PARTITION BY HASH (...)`.",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "description": "Partition key columns.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "hash"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "columns"
+          ]
         }
       ]
     },
@@ -4260,6 +4551,182 @@
           "const": "ifExists"
         }
       ]
+    },
+    "PartitionBounds": {
+      "description": "Partition bounds for `CREATE TABLE child PARTITION OF parent`.",
+      "oneOf": [
+        {
+          "description": "`FOR VALUES FROM (...) TO (...)`.",
+          "type": "object",
+          "properties": {
+            "from": {
+              "description": "Lower bound values.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PartitionBoundValue"
+              }
+            },
+            "to": {
+              "description": "Upper bound values.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PartitionBoundValue"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "range"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "from",
+            "to"
+          ]
+        },
+        {
+          "description": "`FOR VALUES IN (...)`.",
+          "type": "object",
+          "properties": {
+            "values": {
+              "description": "List bound values.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/PartitionBoundValue"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "values"
+          ]
+        },
+        {
+          "description": "`FOR VALUES WITH (MODULUS m, REMAINDER r)`.",
+          "type": "object",
+          "properties": {
+            "modulus": {
+              "description": "Hash modulus.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "remainder": {
+              "description": "Hash remainder.",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "hash"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "modulus",
+            "remainder"
+          ]
+        },
+        {
+          "description": "`DEFAULT`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "default"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PartitionBoundValue": {
+      "description": "Closed partition-bound literal. Never raw SQL.",
+      "oneOf": [
+        {
+          "description": "String/timestamptz literal. Rendered as a quoted SQL string.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "description": "Literal value.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "JS-safe signed integer literal.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "description": "Literal value.",
+              "$ref": "#/$defs/SafeI64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "int"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "description": "PostgreSQL `MINVALUE`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "minValue"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "PostgreSQL `MAXVALUE`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "maxValue"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "SafeI64": {
+      "type": "integer",
+      "format": "int64",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
     },
     "TableRuntimeOptionsPatch": {
       "description": "Patch form for `setTableOptions`: absent fields mean \"leave unchanged\".",
@@ -4902,12 +5369,6 @@
           "const": "desc"
         }
       ]
-    },
-    "SafeI64": {
-      "type": "integer",
-      "format": "int64",
-      "minimum": -9007199254740991,
-      "maximum": 9007199254740991
     },
     "SequenceOwnedBy": {
       "description": "Optional sequence ownership target (`OWNED BY table.column`).",

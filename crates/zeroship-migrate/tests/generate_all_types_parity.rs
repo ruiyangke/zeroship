@@ -94,7 +94,10 @@ fn all_types_desired() -> DesiredSchema {
         indexes: vec![],
         constraints: vec![],
         runtime_options: Default::default(),
-            comment: None,
+
+    partition_by: None,
+
+    comment: None,
         stored_create_sql: None,
     };
     let mut snap = SchemaSnapshot::default();
