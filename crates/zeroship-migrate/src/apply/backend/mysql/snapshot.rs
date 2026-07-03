@@ -208,10 +208,13 @@ pub(crate) fn mysql_canonical_type(raw: &str) -> String {
             "timestamp with time zone".to_string()
         }
         "date" => "date".to_string(),
-        "double" | "float" => "double precision".to_string(),
+        "double" => "double precision".to_string(),
+        "float" | "real" | "float4" => "real".to_string(),
         "decimal" | "decimal(65,30)" | "decimal(65, 30)" => "numeric".to_string(),
         "blob" | "longblob" | "binary" | "varbinary" => "bytea".to_string(),
+        "varchar(43)" | "inet" => "inet".to_string(),
         "longtext" | "mediumtext" | "text" | "varchar(191)" => "text".to_string(),
+        "smallint" | "int2" => "smallint".to_string(),
         "int" | "integer" => "integer".to_string(),
         "bigint" => "bigint".to_string(),
         _ => strip_integer_display_width(&lower).unwrap_or(lower),

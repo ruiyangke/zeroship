@@ -2623,6 +2623,11 @@
           "const": "int"
         },
         {
+          "description": "16-bit signed integer.",
+          "type": "string",
+          "const": "smallInt"
+        },
+        {
           "description": "64-bit signed integer.",
           "type": "string",
           "const": "bigInt"
@@ -2631,6 +2636,11 @@
           "description": "Double-precision float.",
           "type": "string",
           "const": "float"
+        },
+        {
+          "description": "Single-precision float.",
+          "type": "string",
+          "const": "real"
         },
         {
           "description": "Boolean.",
@@ -2656,6 +2666,11 @@
           "description": "UUID.",
           "type": "string",
           "const": "uuid"
+        },
+        {
+          "description": "IP network/address (`inet` on PG).",
+          "type": "string",
+          "const": "inet"
         },
         {
           "description": "Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).",

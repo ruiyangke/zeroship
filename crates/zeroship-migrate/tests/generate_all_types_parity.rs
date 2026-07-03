@@ -2,8 +2,9 @@
 //! portable column types. The existing parity e2e proves re-diff-to-zero + recorded-
 //! `.ts` checksum == direct IR checksum only for text/int/unique; this extends the
 //! checksum-parity leg to a multi-type schema covering
-//! bigInt/float/boolean/json/timestamp/uuid/bytes/numeric — so a `render_t_for`
-//! name regression on ANY of those types trips the parity assertion.
+//! smallInt/bigInt/float/real/boolean/json/timestamp/uuid/inet/bytes/numeric — so
+//! a `render_t_for` name regression on ANY of those types trips the parity
+//! assertion.
 //!
 //! WHY checksum-parity (not re-diff) is the right gate for the wide-type matrix:
 //! `render_t_for` (the emitted `.ts` type chain) is the SAME render whether the
@@ -69,17 +70,20 @@ fn col(name: &str, data_type: &str) -> ColumnSnapshot {
 
 /// A desired snapshot whose column `data_type`s hit EVERY portable `ColType` branch
 /// of `col_type_for_data_type` → `render_t_for`:
-/// text/int/bigInt/float/boolean/json/timestamp/uuid/bytes/numeric.
+/// text/int/smallInt/bigInt/float/real/boolean/json/timestamp/uuid/inet/bytes/numeric.
 fn all_types_desired() -> DesiredSchema {
     let mut cols = vec![
         col("c_text", "text"),
         col("c_int", "integer"),
+        col("c_smallint", "smallint"),
         col("c_bigint", "bigint"),
         col("c_float", "double precision"),
+        col("c_real", "real"),
         col("c_bool", "boolean"),
         col("c_json", "jsonb"),
         col("c_ts", "timestamp with time zone"),
         col("c_uuid", "uuid"),
+        col("c_inet", "inet"),
         col("c_bytes", "bytea"),
         col("c_num", "numeric"),
     ];
@@ -126,12 +130,15 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
     for expect in [
         ColType::Text,
         ColType::Int,
+        ColType::SmallInt,
         ColType::BigInt,
         ColType::Float,
+        ColType::Real,
         ColType::Bool,
         ColType::Json,
         ColType::Timestamp,
         ColType::Uuid,
+        ColType::Inet,
         ColType::Bytea,
         ColType::Decimal { precision: 38, scale: 9 },
     ] {
@@ -146,12 +153,15 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
     for chain in [
         "t.text()",
         "t.integer()",
+        "t.smallInt()",
         "t.bigInt()",
         "t.float()",
+        "t.real()",
         "t.boolean()",
         "t.json()",
         "t.timestamp()",
         "t.uuid()",
+        "t.inet()",
         "t.bytes()",
         "t.numeric(38, 9)",
     ] {

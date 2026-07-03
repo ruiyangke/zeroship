@@ -437,6 +437,26 @@ export function up() {
     .add({ columns: ["user_id", { kind: "column", name: "created_at", order: "desc" }] });
 }
 "#;
+const PLATFORM_SCALAR_TYPES_TS: &str = r#"
+import { table, t } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate/pg";
+
+export const name = "platform_scalar_types";
+
+export function up() {
+  schema({ name: "zeroship", ifNotExists: true });
+
+  table("platform_scalar_types", { schema: "zeroship" }).create({
+    columns: {
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      shard: t.smallInt().notNull(),
+      ratio: t.real().notNull(),
+      source_ip: t.inet(),
+    },
+    primaryKey: ["id"],
+  });
+}
+"#;
 
 fn dsn() -> String {
     std::env::var("MIGRATE_PLATFORM_IR_TEST_DB").unwrap_or_else(|_| DEFAULT_DSN.to_string())
@@ -1086,6 +1106,52 @@ async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
             "CREATE INDEX expr_user_created_desc_idx ON zeroship.expr_surface USING btree (user_id, created_at DESC)"
         ),
         "mixed ASC/DESC composite index round-trips through pg_get_indexdef"
+    );
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_scalar_types_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_scalar_types",
+        "20260703000000_platform_scalar_types.ts",
+        PLATFORM_SCALAR_TYPES_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with scalar column lexicon applies");
+
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_scalar_types", "shard")
+            .await
+            .as_deref(),
+        Some("int2"),
+        "t.smallInt() renders as Postgres smallint/int2"
+    );
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_scalar_types", "ratio")
+            .await
+            .as_deref(),
+        Some("float4"),
+        "t.real() renders as Postgres real/float4"
+    );
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_scalar_types", "source_ip")
+            .await
+            .as_deref(),
+        Some("inet"),
+        "t.inet() renders as Postgres inet"
     );
 
     reset(&conn, &meta).await;

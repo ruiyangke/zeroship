@@ -633,11 +633,14 @@ export const t = {
     return col;
   },
   geoPoint: () => new ColumnDef("geoPoint"),
+  smallInt: () => new ColumnDef("smallInt"),
   /** 32-bit signed integer. */
   integer: () => new ColumnDef("int"),
   int: () => new ColumnDef("int"),
   bigInt: () => new ColumnDef("bigInt"),
+  real: () => new ColumnDef("real"),
   float: () => new ColumnDef("float"),
+  inet: () => new ColumnDef("inet"),
   enum: (name) => {
     const n = typeof name === "string" ? name : name.name;
     requireString(n, "t.enum(name)");

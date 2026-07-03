@@ -455,8 +455,9 @@ impl SequenceDataTypeSnapshot {
     pub(crate) fn from_sequence_col_type(as_type: Option<&ColType>) -> Result<Self, &'static str> {
         match as_type {
             None | Some(ColType::BigInt) => Ok(Self::BigInt),
+            Some(ColType::SmallInt) => Ok(Self::SmallInt),
             Some(ColType::Int) => Ok(Self::Int),
-            Some(_) => Err("sequence AS type must be int or bigInt"),
+            Some(_) => Err("sequence AS type must be smallInt, int, or bigInt"),
         }
     }
 
