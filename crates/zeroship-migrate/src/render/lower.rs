@@ -23,8 +23,9 @@
 //! The one thing `IrAuthor` owns is mapping the IR op vocabulary
 //! ([`Op`]/[`IrColumn`]/[`ColType`]/[`IrDefault`]) onto the descriptor shape the
 //! shared builder consumes ([`FieldDescriptor`]). This is a pure structural
-//! translation — it carries NO default/sentinel rendering (that stays in the
-//! shared builder), so the §6.5 single-source guarantee holds.
+//! translation. Literal defaults and sentinels still stay in the shared builder;
+//! the closed synth default pair (`now`/`genRandomUuid`) is overlaid after the
+//! descriptor bridge because descriptors cannot carry apply-time functions.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1637,19 +1638,13 @@ impl IrAuthor {
                 runtime_options,
                 ..
             } => {
-                // A column carrying a SYNTH default (`now()`/`genRandomUuid()`) must
-                // FAIL CLOSED, not silently lower with NO default. `ir_default_to_value`
-                // maps `IrDefault::Fn → None` — correct for the system-field path the
-                // differ owns (it never emits a volatile synth on a user column), but a
-                // user-authored synth default would be SILENTLY DROPPED. Rendering a
-                // synth default is the deferred Expr→SQL synth wave; until it lands, an
-                // author-supplied synth default is refused here rather than lost.
-                reject_synth_default(columns.iter().map(|c| (c.name.as_str(), c.default.as_ref())))?;
                 let desc = self.create_table_descriptor(name, columns, runtime_options.as_ref());
                 let mut snap = build_resolved_table_snapshot(&eff_schema, &desc, self.dialect)?;
                 if let Some(pk) = primary_key {
                     push_primary_key_snapshot(name, &mut snap, pk);
                 }
+                apply_author_type_overrides_to_snapshot(name, columns, &mut snap, self.dialect)?;
+                apply_synth_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 self.apply_named_type_metadata(name, columns, &mut snap, named_types)?;
                 // **#174 createTable parity** — keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
@@ -1713,9 +1708,6 @@ impl IrAuthor {
                 identity,
                 ..
             } => {
-                // Fail-closed on a synth default (see the createTable arm): a
-                // user-authored `now()`/`genRandomUuid()` must NOT be silently dropped.
-                reject_synth_default(std::iter::once((column.as_str(), default.as_ref())))?;
                 // **#173 / #174** — thread the carried facets (vector metric / standalone
                 // mask) so a vector ADD COLUMN renders the metric opclass and a masked ADD
                 // COLUMN emits the `__zsmask` sentinel. The sibling `<col>_masked` is a
@@ -2997,12 +2989,14 @@ impl IrAuthor {
         };
         let snap = build_table_snapshot(&self.project_schema, &desc, self.dialect)?;
         let sibling_name = format!("{column}_masked");
-        let main = snap
+        let mut main = snap
             .columns
             .iter()
             .find(|c| c.name == column)
             .cloned()
             .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))?;
+        apply_author_type_override_to_column(table, column, ty, &mut main, self.dialect)?;
+        apply_synth_default_to_column(table, column, default, &mut main, self.dialect)?;
         let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
         Ok((main, sibling))
     }
@@ -4637,33 +4631,87 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
     }
 }
 
-/// Defense-in-depth guard: refuse any column carrying a SYNTH default if a direct
-/// lower caller bypassed validate, rather than letting [`ir_default_to_value`]
-/// silently map it to `None` (no default).
-///
-/// The differ's own system-field path (`id`/timestamps) injects its volatile
-/// defaults through the shared builder, NOT through an `IrDefault::Fn` on a user
-/// column, so this guard never trips on a legitimate createTable — only on an
-/// explicit author-supplied synth default the renderer cannot yet materialize.
-fn reject_synth_default<'a>(
-    cols: impl Iterator<Item = (&'a str, Option<&'a IrDefault>)>,
+fn apply_author_type_overrides_to_snapshot(
+    table: &str,
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    for (_name, default) in cols {
-        if matches!(default, Some(IrDefault::Fn { .. })) {
-            return Err(IrLowerError::UnsupportedOp(
-                "validated synth column default reached lower",
-            ));
+    for source in columns {
+        if author_data_type_override(&source.ty, dialect).is_none() {
+            continue;
         }
+        let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
+            return Err(IrLowerError::UnsupportedOp("author type column folded away"));
+        };
+        apply_author_type_override_to_column(table, &source.name, &source.ty, col, dialect)?;
     }
     Ok(())
 }
 
+fn apply_author_type_override_to_column(
+    _table: &str,
+    column: &str,
+    ty: &ColType,
+    col: &mut ColumnSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), IrLowerError> {
+    let Some(data_type) = author_data_type_override(ty, dialect) else {
+        return Ok(());
+    };
+    if col.name != column {
+        return Err(IrLowerError::UnsupportedOp("author type column folded away"));
+    }
+    col.data_type = data_type.to_string();
+    Ok(())
+}
+
+fn author_data_type_override(ty: &ColType, dialect: SqlDialect) -> Option<&'static str> {
+    match (dialect, ty) {
+        (SqlDialect::Postgres, ColType::Uuid) => Some("uuid"),
+        _ => None,
+    }
+}
+
+fn apply_synth_defaults_to_snapshot(
+    table: &str,
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), IrLowerError> {
+    for source in columns {
+        let Some(IrDefault::Fn { .. }) = source.default.as_ref() else {
+            continue;
+        };
+        let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
+            return Err(IrLowerError::UnsupportedOp("createTable synth default column folded away"));
+        };
+        apply_synth_default_to_column(table, &source.name, source.default.as_ref(), col, dialect)?;
+    }
+    Ok(())
+}
+
+fn apply_synth_default_to_column(
+    _table: &str,
+    column: &str,
+    default: Option<&IrDefault>,
+    col: &mut ColumnSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), IrLowerError> {
+    let Some(default @ IrDefault::Fn { .. }) = default else {
+        return Ok(());
+    };
+    if col.name != column {
+        return Err(IrLowerError::UnsupportedOp("synth default column folded away"));
+    }
+    col.default = Some(render_ir_default(default, dialect)?);
+    Ok(())
+}
+
 /// Map an [`IrDefault`] to the descriptor's `default` JSON value. A literal maps
-/// to its scalar. A synth `now`/`genRandomUuid` maps to `None` HERE — but it is
-/// never reached for a validated user-authored synth default: validate rejects it,
-/// and [`reject_synth_default`] is the defensive lower backstop. The silent `None`
-/// is reserved for the differ's system-field path, which never routes a synth
-/// through this function.
+/// to its scalar. A synth `now`/`genRandomUuid` maps to `None` here because the
+/// descriptor bridge cannot carry function defaults; CreateTable/AddColumn overlay
+/// the rendered synth default onto the returned snapshot before emitting DDL.
 fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
     use crate::model::ir::IrScalar;
     use serde_json::Value;
@@ -6161,13 +6209,12 @@ mod tests {
         }
     }
 
-    // An author-supplied SYNTH default (`now()`/`genRandomUuid()`) on a user
-    // column is refused at validate-time, before lower can silently map it to no
-    // default.
+    // The closed author-supplied SYNTH defaults (`now()`/`genRandomUuid()`) render
+    // on PG instead of being silently mapped away by the descriptor bridge.
     #[test]
-    fn synth_default_on_user_column_validates_refused_not_silently_dropped() {
+    fn synth_default_on_user_column_renders_on_pg_not_silently_dropped() {
         use crate::model::ir::SynthDefaultFn;
-        use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+        use crate::model::validate::{validate_ir, Dialect};
 
         // createTable with a column whose default is a synth `now()`.
         let ir_create = MigrationIr {
@@ -6195,11 +6242,16 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let err = validate_ir_platform(&ir_create, Dialect::Postgres)
-            .expect_err("a synth default on a user column must validate-refuse");
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert!(err.reason.contains("synth default"));
+        validate_ir_platform(&ir_create, Dialect::Postgres)
+            .expect("a createTable synth default on a user column validates on PG");
+        let create_migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&ir_create, &LiveSchema::default())
+            .expect("a createTable synth default lowers on PG");
+        assert!(
+            create_migrations[0].up.contains("DEFAULT now()"),
+            "createTable synth now() default must render, got {}",
+            create_migrations[0].up
+        );
 
         // addColumn with a synth `genRandomUuid()` default — same fail-closed.
         let ir_add = MigrationIr {
@@ -6225,11 +6277,16 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let err = validate_ir(&ir_add, Dialect::Postgres, &[])
-            .expect_err("a synth default on an addColumn must validate-refuse");
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert!(err.reason.contains("synth default"));
+        validate_ir(&ir_add, Dialect::Postgres, &[])
+            .expect("an addColumn synth default validates on PG");
+        let add_migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&ir_add, &LiveSchema::default())
+            .expect("an addColumn synth default lowers on PG");
+        assert!(
+            add_migrations[0].up.contains("DEFAULT gen_random_uuid()"),
+            "addColumn synth genRandomUuid default must render, got {}",
+            add_migrations[0].up
+        );
 
         // A LITERAL default still lowers fine (the guard is synth-specific, not a
         // blanket default ban).

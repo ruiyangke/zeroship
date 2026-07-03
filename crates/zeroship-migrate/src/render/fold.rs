@@ -531,6 +531,8 @@ pub fn fold_ops(
                 if let Some(pk) = primary_key {
                     push_primary_key_snapshot(name, &mut snap, pk);
                 }
+                apply_fold_author_type_overrides_to_snapshot(name, columns, &mut snap, dialect)?;
+                apply_fold_synth_defaults_to_snapshot(name, columns, &mut snap, dialect)?;
                 apply_fold_named_type_metadata(
                     name,
                     columns,
@@ -1288,14 +1290,115 @@ fn add_column_snapshot(
     };
     let snap = build_table_snapshot(project_schema, &desc, dialect)?;
     let sibling_name = format!("{column}_masked");
-    let main = snap
+    let mut main = snap
         .columns
         .iter()
         .find(|c| c.name == column)
         .cloned()
         .ok_or(FoldError::Unsupported("addColumn (column folded away)"))?;
+    apply_fold_author_type_override_to_column(table, column, ty, &mut main, dialect)?;
+    apply_fold_synth_default_to_column(table, column, default, &mut main, dialect)?;
     let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
     Ok((main, sibling))
+}
+
+fn apply_fold_author_type_overrides_to_snapshot(
+    table: &str,
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    for source in columns {
+        if fold_author_data_type_override(&source.ty, dialect).is_none() {
+            continue;
+        }
+        let col = snap
+            .columns
+            .iter_mut()
+            .find(|c| c.name == source.name)
+            .ok_or_else(|| FoldError::MissingColumn {
+                table: table.to_string(),
+                column: source.name.clone(),
+            })?;
+        apply_fold_author_type_override_to_column(table, &source.name, &source.ty, col, dialect)?;
+    }
+    Ok(())
+}
+
+fn apply_fold_author_type_override_to_column(
+    table: &str,
+    column: &str,
+    ty: &ColType,
+    col: &mut ColumnSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    let Some(data_type) = fold_author_data_type_override(ty, dialect) else {
+        return Ok(());
+    };
+    if col.name != column {
+        return Err(FoldError::MissingColumn {
+            table: table.to_string(),
+            column: column.to_string(),
+        });
+    }
+    col.data_type = data_type.to_string();
+    Ok(())
+}
+
+fn fold_author_data_type_override(ty: &ColType, dialect: SqlDialect) -> Option<&'static str> {
+    match (dialect, ty) {
+        (SqlDialect::Postgres, ColType::Uuid) => Some("uuid"),
+        _ => None,
+    }
+}
+
+fn apply_fold_synth_defaults_to_snapshot(
+    table: &str,
+    columns: &[IrColumn],
+    snap: &mut TableSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    for source in columns {
+        let Some(IrDefault::Fn { .. }) = source.default.as_ref() else {
+            continue;
+        };
+        let col = snap
+            .columns
+            .iter_mut()
+            .find(|c| c.name == source.name)
+            .ok_or_else(|| FoldError::MissingColumn {
+                table: table.to_string(),
+                column: source.name.clone(),
+            })?;
+        apply_fold_synth_default_to_column(
+            table,
+            &source.name,
+            source.default.as_ref(),
+            col,
+            dialect,
+        )?;
+    }
+    Ok(())
+}
+
+fn apply_fold_synth_default_to_column(
+    table: &str,
+    column: &str,
+    default: Option<&IrDefault>,
+    col: &mut ColumnSnapshot,
+    dialect: SqlDialect,
+) -> Result<(), FoldError> {
+    let Some(default @ IrDefault::Fn { .. }) = default else {
+        return Ok(());
+    };
+    if col.name != column {
+        return Err(FoldError::MissingColumn {
+            table: table.to_string(),
+            column: column.to_string(),
+        });
+    }
+    col.default = Some(render_ir_default(default, dialect).map_err(fold_named_type_error)?);
+    Ok(())
 }
 
 fn apply_fold_named_type_metadata(
