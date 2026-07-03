@@ -457,7 +457,7 @@ pub async fn snapshot_schema(
     // (see [`canonical_extension_type`]). T13.
     let col_rows = conn
         .query(
-            "SELECT c.table_name, c.column_name, c.data_type, c.is_nullable, \
+            "SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable, \
                     c.character_maximum_length, \
                     format_type(a.atttypid, a.atttypmod) AS format_type, \
                     col_description(rel.oid, a.attnum) AS comment \
@@ -475,11 +475,17 @@ pub async fn snapshot_schema(
         if let Some(t) = tables.get_mut(&table) {
             let nullable: String = r.get("is_nullable");
             let data_type: String = r.get("data_type");
+            let udt_name: String = r.get("udt_name");
+            let format_type: String = r.get("format_type");
             // For a `USER-DEFINED` (extension) type, recover the precise spelling
             // from `format_type` and canonicalise it to the engine's DDL form so
             // it round-trips against the desired snapshot.
             let data_type = if data_type.eq_ignore_ascii_case("USER-DEFINED") {
-                canonical_extension_type(&r.get::<_, String>("format_type"))
+                canonical_extension_type(&format_type)
+            } else if data_type.eq_ignore_ascii_case("ARRAY")
+                && (udt_name == "_text" || format_type.eq_ignore_ascii_case("text[]"))
+            {
+                "text[]".to_string()
             } else if data_type.eq_ignore_ascii_case("character") {
                 match r.try_get::<_, Option<i32>>("character_maximum_length").ok().flatten() {
                     Some(len) if len > 0 => format!("character({len})"),

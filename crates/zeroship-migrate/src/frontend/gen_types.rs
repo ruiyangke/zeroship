@@ -579,6 +579,7 @@ fn render_builder_chain(def: &Value) -> String {
             }
             "boolean" => "t.boolean()".to_string(),
             "json" | "object" | "array" => "t.json()".to_string(),
+            "textArray" => "t.array(t.string())".to_string(),
             "date" | "timestamp" => "t.timestamp()".to_string(),
             "inet" => "t.string()".to_string(),
             "bytes" => "t.bytes()".to_string(),

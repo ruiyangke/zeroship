@@ -452,6 +452,7 @@ export function up() {
       shard: t.smallInt().notNull(),
       ratio: t.real().notNull(),
       source_ip: t.inet(),
+      scopes: t.textArray().notNull(),
       currency: t.char(3).notNull().default("usd"),
     },
     primaryKey: ["id"],
@@ -647,6 +648,25 @@ async fn column_udt_name(
         .await
         .expect("query column type");
     rows.first().map(|row| row.get::<_, String>(0))
+}
+
+async fn column_information_schema_type(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<(String, String)> {
+    let rows = conn
+        .query(
+            "SELECT data_type, udt_name \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            &[&schema, &table, &column],
+        )
+        .await
+        .expect("query column information_schema type");
+    rows.first()
+        .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
 }
 
 async fn column_character_maximum_length(
@@ -1171,6 +1191,14 @@ async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
             .as_deref(),
         Some("inet"),
         "t.inet() renders as Postgres inet"
+    );
+    assert_eq!(
+        column_information_schema_type(&conn, "zeroship", "platform_scalar_types", "scopes")
+            .await
+            .as_ref()
+            .map(|(data_type, udt_name)| (data_type.as_str(), udt_name.as_str())),
+        Some(("ARRAY", "_text")),
+        "t.textArray() renders as Postgres text[] (information_schema ARRAY/_text)"
     );
     assert_eq!(
         column_udt_name(&conn, "zeroship", "platform_scalar_types", "currency")

@@ -297,6 +297,7 @@ fn mysql_ddl_type(data_type: &str) -> String {
         "timestamp with time zone" | "timestamptz" => "DATETIME(6)".to_string(),
         "date" => "DATE".to_string(),
         "jsonb" | "json" => "JSON".to_string(),
+        "text[]" => "JSON".to_string(),
         "bytea" | "blob" => "LONGBLOB".to_string(),
         "numeric" | "decimal" => "DECIMAL(65, 30)".to_string(),
         "integer" | "int" | "int4" => "INT".to_string(),
@@ -1058,6 +1059,7 @@ fn ddl_to_information_schema(ddl: &str) -> String {
         "SMALLINT" => "smallint".into(),
         "BIGINT" => "bigint".into(),
         "INET" => "inet".into(),
+        "TEXT[]" => "text[]".into(),
         // Parameterised / extension types (vector(N), geography(POINT,4326)) keep
         // their DDL spelling — see the doc note.
         _ => ddl.to_string(),

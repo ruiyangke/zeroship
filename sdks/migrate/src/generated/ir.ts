@@ -113,6 +113,7 @@ export type ColType =
   | "date"
   | "uuid"
   | "inet"
+  | "textArray"
   | "bytea"
   | "geoPoint"
   | { char: { len: number } }

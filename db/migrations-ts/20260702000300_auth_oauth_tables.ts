@@ -12,15 +12,13 @@ export function up() {
       global_user_id: t.uuid().notNull(),
       refresh_token_enc: t.bytes().notNull(),
       refresh_family_id: t.text().notNull(),
-      granted_scopes: t.text().notNull(),
+      granted_scopes: t.textArray().notNull(),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_session_anchors ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column app_session_anchors.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.app_session_anchors ALTER COLUMN granted_scopes SET DEFAULT '{}'::text[]", reason: "column app_session_anchors.granted_scopes requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
   table("app_user_identities", { schema: "zeroship" }).create({
@@ -61,14 +59,12 @@ export function up() {
       resource_type: t.text().notNull(),
       resource_id: t.text(),
       decision: t.text().notNull(),
-      matched_policies: t.text().notNull(),
+      matched_policies: t.textArray().notNull(),
       request_ip: t.inet(),
       request_id: t.text(),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN matched_policies TYPE text[] USING matched_policies::text[]", reason: "column authz_decisions.matched_policies uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN matched_policies SET DEFAULT '{}'::text[]", reason: "column authz_decisions.matched_policies requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
   table("authz_decisions", { schema: "zeroship" }).addCheck("authz_decisions_decision_check", (c) => membership(c("decision"), ["allow", "deny"]));
@@ -159,21 +155,17 @@ export function up() {
       idle_expires_at: t.timestamp().notNull(),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
-      granted_scopes: t.text().notNull(),
+      granted_scopes: t.textArray().notNull(),
       auth_time: t.timestamp(),
-      amr: t.text().notNull(),
+      amr: t.textArray().notNull(),
       sid: t.text(),
     },
     primaryKey: ["id"],
   });
   // TODO(dsl-v2): add structural column type support for public.citext
   raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column gateway_sessions.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column gateway_sessions.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN granted_scopes SET DEFAULT '{}'::text[]", reason: "column gateway_sessions.granted_scopes requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN amr TYPE text[] USING amr::text[]", reason: "column gateway_sessions.amr uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
   raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN amr SET DEFAULT '{}'::text[]", reason: "column gateway_sessions.amr requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
   table("identity_links", { schema: "zeroship" }).create({
@@ -191,7 +183,7 @@ export function up() {
       id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
       user_id: t.uuid().notNull(),
       auth_method: t.text().notNull(),
-      amr: t.text().notNull(),
+      amr: t.textArray().notNull(),
       acr: t.text(),
       auth_time: t.timestamp().notNull().default({ fn: "now" }),
       credential_version: t.bigInt().notNull().default(0),
@@ -201,8 +193,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.idp_sessions ALTER COLUMN amr TYPE text[] USING amr::text[]", reason: "column idp_sessions.amr uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   table("jwk_key_state", { schema: "zeroship" }).create({
     columns: {
       set_name: t.text().notNull(),
@@ -251,8 +241,8 @@ export function up() {
       redirect_uri: t.text().notNull(),
       pkce_challenge: t.text().notNull(),
       pkce_method: t.text().notNull(),
-      requested_scopes: t.text().notNull(),
-      granted_scopes: t.text().notNull(),
+      requested_scopes: t.textArray().notNull(),
+      granted_scopes: t.textArray().notNull(),
       nonce: t.text(),
       user_id: t.uuid().notNull(),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
@@ -263,10 +253,6 @@ export function up() {
     },
     primaryKey: ["code_hash"],
   });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_authorization_codes ALTER COLUMN requested_scopes TYPE text[] USING requested_scopes::text[]", reason: "column oauth_authorization_codes.requested_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_authorization_codes ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column oauth_authorization_codes.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   table("oauth_authorization_codes", { schema: "zeroship" }).addCheck("oauth_authorization_codes_max_ttl", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00"))));
   table("oauth_authorization_codes", { schema: "zeroship" }).addCheck("oauth_authorization_codes_pkce_method_check", (c) => c("pkce_method").eq("S256"));
   table("oauth_clients", { schema: "zeroship" }).create({
@@ -275,8 +261,8 @@ export function up() {
       client_name: t.text().notNull(),
       client_uri: t.text(),
       logo_uri: t.text(),
-      redirect_uris: t.text().notNull(),
-      scopes: t.text().notNull(),
+      redirect_uris: t.textArray().notNull(),
+      scopes: t.textArray().notNull(),
       skip_consent: t.boolean().notNull().default(false),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
       created_by: t.uuid(),
@@ -288,25 +274,19 @@ export function up() {
     },
     primaryKey: ["client_id"],
   });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_clients ALTER COLUMN redirect_uris TYPE text[] USING redirect_uris::text[]", reason: "column oauth_clients.redirect_uris uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_clients ALTER COLUMN scopes TYPE text[] USING scopes::text[]", reason: "column oauth_clients.scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   table("oauth_clients", { schema: "zeroship" }).addCheck("oauth_clients_brokered_requires_secret_basic", (c) => or(c("brokered").eq(false), c("token_endpoint_auth_method").eq("client_secret_basic")));
   table("oauth_clients", { schema: "zeroship" }).addCheck("oauth_clients_token_endpoint_auth_method_check", (c) => membership(c("token_endpoint_auth_method"), ["none", "client_secret_basic", "client_secret_post"]));
   table("oauth_grants", { schema: "zeroship" }).create({
     columns: {
       user_id: t.uuid().notNull(),
       client_id: t.text().notNull(),
-      granted_scopes: t.text().notNull(),
+      granted_scopes: t.textArray().notNull(),
       granted_at: t.timestamp().notNull().default({ fn: "now" }),
       updated_at: t.timestamp().notNull().default({ fn: "now" }),
       last_used_at: t.timestamp(),
     },
     primaryKey: ["user_id", "client_id"],
   });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_grants ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column oauth_grants.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   table("oauth_refresh_tokens", { schema: "zeroship" }).create({
     columns: {
       token_hash: t.bytes().notNull(),
@@ -316,8 +296,8 @@ export function up() {
       client_id: t.text().notNull(),
       user_id: t.uuid().notNull(),
       sub: t.text().notNull(),
-      granted_scopes: t.text().notNull(),
-      family_granted_scopes: t.text().notNull(),
+      granted_scopes: t.textArray().notNull(),
+      family_granted_scopes: t.textArray().notNull(),
       issued_at: t.timestamp().notNull().default({ fn: "now" }),
       expires_at: t.timestamp().notNull(),
       family_absolute_expires_at: t.timestamp().notNull(),
@@ -330,10 +310,6 @@ export function up() {
     },
     primaryKey: ["token_hash"],
   });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens ALTER COLUMN granted_scopes TYPE text[] USING granted_scopes::text[]", reason: "column oauth_refresh_tokens.granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): add structural column type support for text[]
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens ALTER COLUMN family_granted_scopes TYPE text[] USING family_granted_scopes::text[]", reason: "column oauth_refresh_tokens.family_granted_scopes uses PostgreSQL type text[], which is not in the current closed column lexicon/lowerer use-site set" });
   table("oauth_refresh_tokens", { schema: "zeroship" }).addCheck("oauth_refresh_tokens_idle_le_ceiling", (c) => c("expires_at").le(c("family_absolute_expires_at")));
   table("oidc_session_clients", { schema: "zeroship" }).create({
     columns: {

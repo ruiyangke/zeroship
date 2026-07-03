@@ -673,6 +673,7 @@ export const t: TypeLexicon = {
     return col;
   },
   text: () => new ColumnDefImpl("text"),
+  textArray: () => new ColumnDefImpl("textArray"),
   numeric: (precision = 38, scale = 9) =>
     new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
   char: (n) => {

@@ -475,6 +475,8 @@ pub enum ColType {
     Uuid,
     /// IP network/address (`inet` on PG).
     Inet,
+    /// Text array (`text[]` on PG; JSON-encoded on non-PG backends).
+    TextArray,
     /// Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).
     Bytea,
     /// Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).

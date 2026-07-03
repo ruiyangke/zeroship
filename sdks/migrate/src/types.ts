@@ -184,6 +184,8 @@ export interface TypeLexicon {
    *  `create()` — an added column is never the system PK). */
   id(opts?: IdOptions): ColumnDef;
   text(): ColumnDef;
+  /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
+  textArray(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
   numeric(precision?: number, scale?: number): ColumnDef;
   /** Fixed-length character string (`character(n)` / `CHAR(n)`). */
