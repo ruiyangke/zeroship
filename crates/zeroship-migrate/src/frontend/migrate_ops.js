@@ -750,6 +750,40 @@ function exprArg(x) {
   return { node: "literal", value: toIrScalar(x) };
 }
 
+function textLiteralArray(values, what) {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be a string[]`);
+  }
+  if (values.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string[]`);
+  }
+  return values.map((v, i) => {
+    if (typeof v !== "string") {
+      throw structuredError("OP_INVALID", `${what}[${i}] must be a string; got ${typeof v}`);
+    }
+    if (v.length === 0) {
+      throw structuredError("OP_INVALID", `${what}[${i}] must be non-empty`);
+    }
+    if (v.includes("\0")) {
+      throw structuredError("OP_INVALID", `${what}[${i}] must not contain a NUL byte`);
+    }
+    return v;
+  });
+}
+
+function pgRegexPattern(pattern) {
+  if (typeof pattern !== "string") {
+    throw structuredError("OP_INVALID", `c.pg.regex(pattern): pattern must be a string; got ${typeof pattern}`);
+  }
+  if (pattern.length === 0) {
+    throw structuredError("OP_INVALID", "c.pg.regex(pattern): pattern must be non-empty");
+  }
+  if (pattern.includes("\0")) {
+    throw structuredError("OP_INVALID", "c.pg.regex(pattern): pattern must not contain a NUL byte");
+  }
+  return pattern;
+}
+
 class ExprChain {
   constructor(node) {
     this.__node = node;
@@ -808,6 +842,7 @@ function makeBuilder() {
   };
   c.col = c;
   c.fn = cFn; // the scalar-function namespace (§3.6)
+  c.pg = cPg;
   return c;
 }
 
@@ -907,6 +942,27 @@ export const cFn = {
    *  symbols (`Date.now`, `Math.random`, `crypto.randomUUID`). */
   now: () => chain({ node: "fnSynth", fn: "now", args: [] }),
   genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
+};
+
+export const cPg = {
+  eqAnyArray: (expr, elems) => chain({
+    node: "pgArrayMembership",
+    expr: exprArg(expr),
+    op: "eq",
+    elems: textLiteralArray(elems, "c.pg.eqAnyArray(elems)"),
+  }),
+  neAllArray: (expr, elems) => chain({
+    node: "pgArrayMembership",
+    expr: exprArg(expr),
+    op: "ne",
+    elems: textLiteralArray(elems, "c.pg.neAllArray(elems)"),
+  }),
+  regex: (expr, pattern) => chain({
+    node: "pgRegexMatch",
+    expr: exprArg(expr),
+    pattern: pgRegexPattern(pattern),
+  }),
+  columnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
 };
 
 // ===========================================================================

@@ -3257,6 +3257,81 @@
             "operand",
             "target"
           ]
+        },
+        {
+          "description": "**PG-ONLY** text-array membership rendered exactly as\n`(<expr> = ANY (ARRAY['a'::text, ...]))` or\n`(<expr> <> ALL (ARRAY['a'::text, ...]))`.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The expression tested against the literal text array.",
+              "$ref": "#/$defs/Expr"
+            },
+            "op": {
+              "description": "Which membership idiom to render.",
+              "$ref": "#/$defs/PgArrayMembershipOp"
+            },
+            "elems": {
+              "description": "Text array elements. Rendered as safe string literals with an explicit\n`::text` cast on every element to match pg_dump's CHECK/domain shape.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "node": {
+              "type": "string",
+              "const": "pgArrayMembership"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "expr",
+            "op",
+            "elems"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** regex match rendered exactly as\n`(<expr> ~ '<pattern>'::text)`.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The value expression to match.",
+              "$ref": "#/$defs/Expr"
+            },
+            "pattern": {
+              "description": "The regex pattern. It is always rendered as a SQL string literal; never\nconcatenated as free-form SQL.",
+              "type": "string"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgRegexMatch"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "expr",
+            "pattern"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** scalar expression `pg_column_size(<expr>)`.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The expression whose on-disk size Postgres should measure.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgColumnSize"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "expr"
+          ]
         }
       ]
     },
@@ -3486,6 +3561,21 @@
           "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — the 0025 tenant-isolation\npolicy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
           "type": "string",
           "const": "uuid"
+        }
+      ]
+    },
+    "PgArrayMembershipOp": {
+      "description": "**PG-ONLY** membership operator over a literal text array. The closed variants\nintentionally encode the two Postgres idioms the platform's dumped CHECK/domain\npredicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.",
+      "oneOf": [
+        {
+          "description": "`<expr> = ANY (ARRAY[...])`",
+          "type": "string",
+          "const": "eq"
+        },
+        {
+          "description": "`<expr> <> ALL (ARRAY[...])`",
+          "type": "string",
+          "const": "ne"
         }
       ]
     },

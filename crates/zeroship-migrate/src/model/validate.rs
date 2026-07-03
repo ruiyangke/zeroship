@@ -42,7 +42,7 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
-use crate::model::expr::{CaseBranch, Expr, SynthFn};
+use crate::model::expr::{CaseBranch, Expr, PgArrayMembershipOp, SynthFn};
 use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
@@ -2467,6 +2467,14 @@ impl Ctx<'_> {
             // Cast target is portable by the closed CastTarget enum (rule d);
             // recurse into the operand.
             Expr::Cast { operand, .. } => self.walk_depth(operand, d),
+            Expr::PgArrayMembership { expr, op, elems } => {
+                self.check_pg_array_membership(expr, *op, elems, d)
+            }
+            Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
+            Expr::PgColumnSize { expr } => {
+                self.check_pg_only_expr("pg_column_size")?;
+                self.walk_depth(expr, d)
+            }
         }
     }
 
@@ -2675,6 +2683,88 @@ impl Ctx<'_> {
         )
     }
 
+    /// A Tier-PG expression node. These are not portable-envelope misses: they are
+    /// PostgreSQL-only value nodes, so SQLite/MySQL validation refuses them as
+    /// `UNSUPPORTED { kind:"expr" }` before rendering.
+    fn check_pg_only_expr(&self, name: &'static str) -> Result<(), AuthoringError> {
+        if self.target_dialect == Dialect::Postgres {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_UNSUPPORTED,
+            Some(UnsupportedKind::Expr),
+            self.target_dialect,
+            format!(
+                "{name} is a PostgreSQL-only expression node and has no \
+                 SQLite/MySQL renderer"
+            ),
+            Some(
+                "use this node only in a PostgreSQL-targeted migration, or rewrite \
+                 the predicate using portable expression nodes"
+                    .to_string(),
+            ),
+        ))
+    }
+
+    fn check_pg_text_literal(&self, value: &str, what: &str) -> Result<(), AuthoringError> {
+        if value.is_empty() {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                format!("{what} must be a non-empty text literal"),
+                Some(format!("pass a non-empty string literal for {what}")),
+            ));
+        }
+        if value.contains('\0') {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                format!("{what} must not contain a NUL byte"),
+                Some(format!("remove the NUL byte from {what}")),
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_pg_array_membership(
+        &self,
+        expr: &Expr,
+        _op: PgArrayMembershipOp,
+        elems: &[String],
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        self.check_pg_only_expr("PG ARRAY membership")?;
+        self.walk_depth(expr, depth)?;
+        if elems.is_empty() {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                "PG ARRAY membership requires at least one text element; empty \
+                 ARRAY[] has no inferred element type"
+                    .to_string(),
+                Some("pass one or more string literals in the membership array".to_string()),
+            ));
+        }
+        for elem in elems {
+            self.check_pg_text_literal(elem, "PG ARRAY membership element")?;
+        }
+        Ok(())
+    }
+
+    fn check_pg_regex_match(
+        &self,
+        expr: &Expr,
+        pattern: &str,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        self.check_pg_only_expr("PG regex match")?;
+        self.walk_depth(expr, depth)?;
+        self.check_pg_text_literal(pattern, "PG regex pattern")
+    }
+
     fn check_split_part(&self, args: &[Expr]) -> Result<(), AuthoringError> {
         // Shape: splitPart(col, delim, n) — exactly three args. The WRONG ARITY is
         // broken on BOTH dialects (`split_part` is ternary on PG too), so it is an
@@ -2761,7 +2851,9 @@ impl Ctx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
+    use crate::model::expr::{
+        BinaryOp, CastTarget, Expr, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
+    };
     use crate::model::ir::{IndexElement, IrScalar};
 
     fn cols() -> Vec<String> {
@@ -2861,6 +2953,95 @@ mod tests {
             })),
         };
         assert!(validate_expr(&case, Dialect::Postgres, &sc, 1, None).is_ok());
+    }
+
+    fn pg_any(expr: Expr, elems: Vec<&str>) -> Expr {
+        Expr::PgArrayMembership {
+            expr: Box::new(expr),
+            op: PgArrayMembershipOp::Eq,
+            elems: elems.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    fn pg_ne_all(expr: Expr, elems: Vec<&str>) -> Expr {
+        Expr::PgArrayMembership {
+            expr: Box::new(expr),
+            op: PgArrayMembershipOp::Ne,
+            elems: elems.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn pg_only_expr_nodes_validate_on_pg() {
+        let c = cols();
+        let sc = scope("users", &c);
+        for e in [
+            pg_any(Expr::col("name"), vec!["active", "past_due"]),
+            pg_ne_all(Expr::col("name"), vec!["suspended"]),
+            Expr::PgRegexMatch {
+                expr: Box::new(Expr::col("name")),
+                pattern: "^[a-z]+$".to_string(),
+            },
+            Expr::BinOp {
+                op: BinaryOp::Le,
+                lhs: Box::new(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+                rhs: Box::new(Expr::lit(IrScalar::Int(8192))),
+            },
+        ] {
+            validate_expr(&e, Dialect::Postgres, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("PG-only expression must validate on PG: {err}"));
+        }
+    }
+
+    #[test]
+    fn pg_only_expr_nodes_reject_on_sqlite_and_mysql() {
+        let c = cols();
+        let sc = scope("users", &c);
+        for e in [
+            pg_any(Expr::col("name"), vec!["active"]),
+            Expr::PgRegexMatch {
+                expr: Box::new(Expr::col("name")),
+                pattern: "^[a-z]+$".to_string(),
+            },
+            Expr::PgColumnSize { expr: Box::new(Expr::col("name")) },
+        ] {
+            for d in [Dialect::Sqlite, Dialect::Mysql] {
+                let err = validate_expr(&e, d, &sc, 0, None)
+                    .expect_err("PG-only expression must reject on non-PG");
+                assert_eq!(err.code, CODE_UNSUPPORTED);
+                assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+                assert_eq!(err.dialect, d);
+                assert!(err.reason.contains("PostgreSQL-only"), "got: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn pg_only_expr_literal_shapes_are_checked() {
+        let c = cols();
+        let sc = scope("users", &c);
+        let empty_membership = Expr::PgArrayMembership {
+            expr: Box::new(Expr::col("name")),
+            op: PgArrayMembershipOp::Eq,
+            elems: vec![],
+        };
+        let err = validate_expr(&empty_membership, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert!(err.reason.contains("at least one"));
+
+        let nul_elem = pg_any(Expr::col("name"), vec!["ok", "bad\0value"]);
+        let err = validate_expr(&nul_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert!(err.reason.contains("NUL"));
+
+        let empty_pattern = Expr::PgRegexMatch {
+            expr: Box::new(Expr::col("name")),
+            pattern: String::new(),
+        };
+        let err = validate_expr(&empty_pattern, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert!(err.reason.contains("non-empty"));
     }
 
     // ── (b) splitPart envelope ─────────────────────────────────────────────

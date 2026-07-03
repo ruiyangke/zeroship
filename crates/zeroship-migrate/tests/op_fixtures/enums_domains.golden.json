@@ -35,6 +35,23 @@
       "notNull": true
     },
     {
+      "op": "createDomain",
+      "name": "account_state",
+      "as": "text",
+      "check": {
+        "node": "pgArrayMembership",
+        "expr": {
+          "node": "colRef",
+          "name": "VALUE"
+        },
+        "op": "eq",
+        "elems": [
+          "active",
+          "past_due"
+        ]
+      }
+    },
+    {
       "op": "createTable",
       "name": "subscriptions",
       "columns": [
@@ -95,6 +112,145 @@
         "id"
       ],
       "constraints": [],
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "op": "createTable",
+      "name": "pg_expr_checks",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "data",
+          "type": "json",
+          "nullable": false
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "constraints": [
+        {
+          "name": "status_ne_all",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "pgArrayMembership",
+              "expr": {
+                "node": "colRef",
+                "name": "status"
+              },
+              "op": "ne",
+              "elems": [
+                "x"
+              ]
+            }
+          }
+        },
+        {
+          "name": "name_shape",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "pgRegexMatch",
+              "expr": {
+                "node": "colRef",
+                "name": "name"
+              },
+              "pattern": "^[a-z]+$"
+            }
+          }
+        },
+        {
+          "name": "data_size",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "binOp",
+              "op": "le",
+              "lhs": {
+                "node": "pgColumnSize",
+                "expr": {
+                  "node": "colRef",
+                  "name": "data"
+                }
+              },
+              "rhs": {
+                "node": "literal",
+                "value": 8192
+              }
+            }
+          }
+        }
+      ],
       "indexes": [
         {
           "columns": [

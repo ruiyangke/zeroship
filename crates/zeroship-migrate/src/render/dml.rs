@@ -74,7 +74,7 @@ use std::collections::BTreeMap;
 use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
-use crate::model::expr::{BinaryOp, Expr, ScalarFn, SynthFn, UnaryOp};
+use crate::model::expr::{BinaryOp, Expr, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp};
 use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
 
@@ -368,6 +368,60 @@ pub(crate) fn inline_literal(s: &IrScalar) -> Result<String, DmlError> {
     })
 }
 
+fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
+    if s.is_empty() {
+        return Err(DmlError::UnrenderableExpr(format!("{what} must be non-empty")));
+    }
+    if s.contains('\0') {
+        return Err(DmlError::UnrenderableExpr(format!("{what} contains a NUL byte")));
+    }
+    Ok(format!("{}::text", sql_string_literal(s)))
+}
+
+fn render_pg_array_membership(
+    expr: &str,
+    op: PgArrayMembershipOp,
+    elems: &[String],
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
+    if !matches!(dialect, SqlDialect::Postgres) {
+        return Err(DmlError::UnrenderableExpr(
+            "PG ARRAY membership is PostgreSQL-only".to_string(),
+        ));
+    }
+    if elems.is_empty() {
+        return Err(DmlError::UnrenderableExpr(
+            "PG ARRAY membership requires at least one element".to_string(),
+        ));
+    }
+    let rendered: Result<Vec<_>, _> =
+        elems.iter().map(|elem| pg_text_literal(elem, "PG ARRAY membership element")).collect();
+    let (cmp, quantifier) = match op {
+        PgArrayMembershipOp::Eq => ("=", "ANY"),
+        PgArrayMembershipOp::Ne => ("<>", "ALL"),
+    };
+    Ok(format!(
+        "({expr} {cmp} {quantifier} (ARRAY[{}]))",
+        rendered?.join(", ")
+    ))
+}
+
+fn render_pg_regex_match(
+    expr: &str,
+    pattern: &str,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
+    if !matches!(dialect, SqlDialect::Postgres) {
+        return Err(DmlError::UnrenderableExpr(
+            "PG regex match is PostgreSQL-only".to_string(),
+        ));
+    }
+    Ok(format!(
+        "({expr} ~ {})",
+        pg_text_literal(pattern, "PG regex pattern")?
+    ))
+}
+
 /// The SQL spelling of a binary operator (§3.3.1 method↔node table). `Concat` is
 /// `||` — the one place PG/SQLite NULL semantics agree.
 fn binary_op_sql(op: BinaryOp) -> &'static str {
@@ -572,6 +626,23 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let o = render_expr_bound(operand, ctx)?;
             format!("CAST({o} AS {})", cast_target_sql(*target, ctx.dialect))
         }
+        Expr::PgArrayMembership { expr, op, elems } => {
+            let e = render_expr_bound(expr, ctx)?;
+            render_pg_array_membership(&e, *op, elems, ctx.dialect)?
+        }
+        Expr::PgRegexMatch { expr, pattern } => {
+            let e = render_expr_bound(expr, ctx)?;
+            render_pg_regex_match(&e, pattern, ctx.dialect)?
+        }
+        Expr::PgColumnSize { expr } => {
+            if !matches!(ctx.dialect, SqlDialect::Postgres) {
+                return Err(DmlError::UnrenderableExpr(
+                    "pg_column_size is PostgreSQL-only".to_string(),
+                ));
+            }
+            let e = render_expr_bound(expr, ctx)?;
+            format!("pg_column_size({e})")
+        }
     })
 }
 
@@ -717,6 +788,22 @@ where
                 render_expr_inline_with_col(operand, dialect, col_ref)?,
                 cast_target_sql(*target, dialect)
             )
+        }
+        Expr::PgArrayMembership { expr, op, elems } => {
+            let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
+            render_pg_array_membership(&e, *op, elems, dialect)?
+        }
+        Expr::PgRegexMatch { expr, pattern } => {
+            let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
+            render_pg_regex_match(&e, pattern, dialect)?
+        }
+        Expr::PgColumnSize { expr } => {
+            if !matches!(dialect, SqlDialect::Postgres) {
+                return Err(DmlError::UnrenderableExpr(
+                    "pg_column_size is PostgreSQL-only".to_string(),
+                ));
+            }
+            format!("pg_column_size({})", render_expr_inline_with_col(expr, dialect, col_ref)?)
         }
     })
 }
