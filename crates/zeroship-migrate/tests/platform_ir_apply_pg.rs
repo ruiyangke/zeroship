@@ -279,6 +279,60 @@ export function up() {
   });
 }
 "#;
+const PLATFORM_COMPOSITE_FK_TS: &str = r#"
+import { table, t } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate/pg";
+
+export const name = "platform_composite_fk";
+
+export function up() {
+  schema({ name: "zeroship", ifNotExists: true });
+
+  table("oauth_clients", { schema: "zeroship" }).create({
+    columns: {
+      client_id: t.text().notNull(),
+    },
+    primaryKey: ["client_id"],
+  });
+  table("app_oauth_clients", { schema: "zeroship" }).create({
+    columns: {
+      client_id: t.text().notNull(),
+    },
+    primaryKey: null,
+  });
+  table("app_oauth_clients", { schema: "zeroship" }).addForeignKey("app_oauth_clients_client_id_fkey", {
+    columns: ["client_id"],
+    references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" },
+    onDelete: "cascade",
+  });
+
+  table("invoice_lines", { schema: "zeroship" }).create({
+    columns: {
+      invoice_id: t.uuid().notNull(),
+      app_id: t.uuid().notNull(),
+      segment_no: t.int().notNull(),
+    },
+    primaryKey: ["invoice_id", "app_id", "segment_no"],
+  });
+  table("billing_line_provider_refs", { schema: "zeroship" }).create({
+    columns: {
+      invoice_id: t.uuid().notNull(),
+      app_id: t.uuid().notNull(),
+      segment_no: t.int().notNull(),
+    },
+    primaryKey: null,
+  });
+  table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+    columns: ["invoice_id", "app_id", "segment_no"],
+    references: {
+      table: "invoice_lines",
+      columns: ["invoice_id", "app_id", "segment_no"],
+      schema: "zeroship",
+    },
+    onDelete: "cascade",
+  });
+}
+"#;
 const PLATFORM_SYNTH_DEFAULT_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
 import { schema } from "@zeroship/migrate/pg";
@@ -1098,6 +1152,62 @@ async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg(
         )
         .await,
         "createTrigger attached to the platform-exact table"
+    );
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
+async fn platform_ts_composite_and_non_id_fks_round_trip_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_fk_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_composite_fk",
+        "20260703000000_platform_composite_fk.ts",
+        PLATFORM_COMPOSITE_FK_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with non-id and composite FKs applies");
+
+    assert_eq!(
+        constraint_definition(
+            &conn,
+            "zeroship",
+            "app_oauth_clients",
+            "app_oauth_clients_client_id_fkey",
+        )
+        .await
+        .as_deref(),
+        Some(
+            "FOREIGN KEY (client_id) REFERENCES oauth_clients(client_id) ON DELETE CASCADE"
+        ),
+        "non-id FK target column round-trips through pg_get_constraintdef \
+         (pg_get_constraintdef unqualifies the target schema when it is in search_path; \
+         the constraint is bound to zeroship.oauth_clients by OID)"
+    );
+    assert_eq!(
+        constraint_definition(
+            &conn,
+            "zeroship",
+            "billing_line_provider_refs",
+            "billing_line_provider_refs_line_fk",
+        )
+        .await
+        .as_deref(),
+        Some(
+            "FOREIGN KEY (invoice_id, app_id, segment_no) REFERENCES invoice_lines(invoice_id, app_id, segment_no) ON DELETE CASCADE"
+        ),
+        "composite FK column lists round-trip through pg_get_constraintdef \
+         (target schema unqualified by search_path; bound to zeroship.invoice_lines by OID)"
     );
 
     reset(&conn, &meta).await;

@@ -2984,22 +2984,26 @@ impl Op {
                     } if columns.is_empty() => all_unsupported(
                         "addConstraint(fk) with no local column is unsupported",
                     ),
-                    IrConstraintKind::Fk { columns, .. } if columns.len() != 1 => {
-                        all_unsupported("addConstraint(fk) multi-column is a later wave")
-                    }
-                    IrConstraintKind::Fk {
-                        references_columns,
-                        ..
-                    } if !(references_columns.is_empty()
-                        || (references_columns.len() == 1 && references_columns[0] == "id")) =>
-                    {
-                        all_unsupported(
-                            "addConstraint(fk) referencing a non-id column is a later wave",
-                        )
-                    }
                     IrConstraintKind::Exclusion { .. } => pg_only(
                         "exclusion constraints are PostgreSQL-only in the current engine",
                     ),
+                    // Multi-column and non-id-target FKs render only on Postgres
+                    // today. The support DECISION must reflect that (decision()
+                    // reads dialects, not features), so it stays consistent with
+                    // the CompositeForeignKey / NonIdForeignKey feature gates that
+                    // `validate` enforces.
+                    IrConstraintKind::Fk { columns, .. } if columns.len() != 1 => pg_only(
+                        "multi-column foreign keys are PostgreSQL-only in the current engine",
+                    ),
+                    IrConstraintKind::Fk {
+                        references_columns, ..
+                    } if !(references_columns.is_empty()
+                        || (references_columns.len() == 1 && references_columns[0] == "id")) =>
+                    {
+                        pg_only(
+                            "foreign keys referencing non-id columns are PostgreSQL-only in the current engine",
+                        )
+                    }
                     IrConstraintKind::Fk { .. } | IrConstraintKind::Unique { .. } => {
                         DialectSupport::new(
                             supported(RenderMode::Offline),

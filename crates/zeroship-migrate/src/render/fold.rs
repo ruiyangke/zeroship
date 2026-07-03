@@ -14,7 +14,7 @@
 //! The fold does NOT re-implement column / type / default / sentinel shaping. It
 //! REUSES the SHARED snapshot-builder the differ + the IR lower both use
 //! ([`build_table_snapshot`](crate::render::declarative::build_table_snapshot),
-//! [`ir_fk_constraint_snapshot`](crate::render::declarative::ir_fk_constraint_snapshot),
+//! [`ir_fk_constraint_snapshot_for_columns`](crate::render::declarative::ir_fk_constraint_snapshot_for_columns),
 //! [`ir_column_to_field`](crate::render::lower::ir_column_to_field),
 //! [`create_index_snapshot`](crate::render::lower::create_index_snapshot), …). Because
 //! the engine APPLIES the same ops the fold replays through that builder, and the
@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 
 use crate::render::declarative::{
     build_resolved_table_snapshot, build_table_snapshot, constraintdef_cols,
-    ir_fk_constraint_snapshot, push_primary_key_snapshot, quote_ident_if_needed,
+    ir_fk_constraint_snapshot_for_columns, push_primary_key_snapshot, quote_ident_if_needed,
     CollectionDescriptor, DeclarativeError,
 };
 use crate::model::snapshot::{
@@ -340,7 +340,7 @@ fn apply_alter_sequence_snapshot(
 ///
 /// **Why this is required (review HIGH).** A FK `definition` embeds the referenced
 /// table by name (`FOREIGN KEY (col) REFERENCES <schema>.<target>(id) …`, built by
-/// [`crate::render::declarative::ir_fk_constraint_snapshot`]). Live PG renders that body
+/// [`crate::render::declarative::ir_fk_constraint_snapshot_for_columns`]). Live PG renders that body
 /// via `pg_get_constraintdef(oid)`, which resolves the referenced relation by OID,
 /// so after `RENAME TO` the referencing FK reports the NEW name. If the fold left
 /// the FK pointing at the OLD name, `fold_ops != snapshot_schema(live)` for EVERY
@@ -1610,26 +1610,15 @@ fn fold_create_table_specs(
                          threaded into the emitter)",
                     ));
                 }
-                let local = columns
-                    .first()
-                    .ok_or(FoldError::Unsupported("createTable FOREIGN KEY with no local column"))?;
-                if columns.len() != 1 {
-                    return Err(FoldError::Unsupported(
-                        "createTable multi-column FOREIGN KEY (later wave)",
-                    ));
+                if columns.is_empty() {
+                    return Err(FoldError::Unsupported("createTable FOREIGN KEY with no local column"));
                 }
-                if !(references_columns.is_empty()
-                    || (references_columns.len() == 1 && references_columns[0] == "id"))
-                {
-                    return Err(FoldError::Unsupported(
-                        "createTable FOREIGN KEY referencing a non-`id` column (later wave)",
-                    ));
-                }
-                let fk = ir_fk_constraint_snapshot(
+                let fk = ir_fk_constraint_snapshot_for_columns(
                     project_schema,
                     c.name.as_deref(),
-                    local,
+                    columns,
                     references_table,
+                    references_columns,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
                     dialect,
@@ -1808,25 +1797,16 @@ fn add_constraint_snapshot(
             on_delete,
             on_update,
         } => {
-            let local = columns
-                .first()
-                .ok_or(FoldError::Unsupported("addConstraint(fk) with no local column"))?;
-            if columns.len() != 1 {
-                return Err(FoldError::Unsupported("addConstraint(fk) multi-column (later wave)"));
-            }
-            if !(references_columns.is_empty()
-                || (references_columns.len() == 1 && references_columns[0] == "id"))
-            {
-                return Err(FoldError::Unsupported(
-                    "addConstraint(fk) referencing a non-`id` column (later wave)",
-                ));
+            if columns.is_empty() {
+                return Err(FoldError::Unsupported("addConstraint(fk) with no local column"));
             }
             Ok(FoldedConstraint {
-                constraint: ir_fk_constraint_snapshot(
+                constraint: ir_fk_constraint_snapshot_for_columns(
                     project_schema,
                     name,
-                    local,
+                    columns,
                     references_table,
+                    references_columns,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
                     dialect,
