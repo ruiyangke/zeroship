@@ -66,10 +66,10 @@ use crate::model::ir::{
     RefAction, SafeI64, SafeU64, SequenceOwnedBy, TableRuntimeOptions,
 };
 use crate::render::lower::{
-    create_index_snapshot, derived_constraint_name, derived_exclusion_constraint_name,
-    enum_inline_check, index_method_access, ir_column_to_field, ir_column_to_field_resolved_create,
-    mysql_enum_type, render_domain_check, render_exclusion_constraint_body, render_ir_default,
-    IrLowerError, NamedTypeRegistry,
+    create_index_snapshot, derived_check_constraint_name, derived_constraint_name,
+    derived_exclusion_constraint_name, enum_inline_check, index_method_access, ir_column_to_field,
+    ir_column_to_field_resolved_create, mysql_enum_type, render_domain_check,
+    render_exclusion_constraint_body, render_ir_default, IrLowerError, NamedTypeRegistry,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -1435,7 +1435,7 @@ fn apply_fold_named_type_column_metadata(
 /// Fail-closed parity with the lower:
 /// - a create-table PRIMARY KEY is carried by the op's top-level `primary_key`;
 ///   stale constraint-form PKs are ignored here after validation;
-/// - validate rejects CHECK before fold; this helper keeps a defensive backstop;
+/// - table-level CHECK folds only on PostgreSQL until the non-PG renderers land;
 /// - a multi-column / non-`id`-referencing FK is refused;
 /// - a partial-index `where` is refused (closed-AST predicate);
 /// - on **SQLite**, a table-level FOREIGN KEY, a table-level UNIQUE, and a
@@ -1467,8 +1467,31 @@ fn fold_create_table_specs(
                 // PKs; the fold must not re-apply a platform-owned-id policy.
                 continue;
             }
-            IrConstraintKind::Check { .. } => {
-                return Err(FoldError::Unsupported("validated createTable CHECK reached fold"));
+            IrConstraintKind::Check { expr } => {
+                if !matches!(dialect, SqlDialect::Postgres) {
+                    return Err(FoldError::Unsupported(
+                        "createTable table-level CHECK is PostgreSQL-only",
+                    ));
+                }
+                let name = c
+                    .name
+                    .as_deref()
+                    .map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
+                let rendered = crate::render::dml::render_expr_inline(expr, dialect)
+                    .map_err(|e| FoldError::Render(e.to_string()))?;
+                push_folded_constraint(
+                    table,
+                    snap,
+                    FoldedConstraint {
+                        constraint: ConstraintSnapshot {
+                            name,
+                            kind: "CHECK".to_string(),
+                            definition: format!("CHECK ({rendered})"),
+                            comment: None,
+                        },
+                        index: None,
+                    },
+                )?;
             }
             IrConstraintKind::Fk {
                 columns,
@@ -1728,8 +1751,27 @@ fn add_constraint_snapshot(
                 "validated addConstraint user PRIMARY KEY reached fold",
             ))
         }
-        IrConstraintKind::Check { .. } => {
-            Err(FoldError::Unsupported("validated addConstraint(check) reached fold"))
+        IrConstraintKind::Check { expr } => {
+            if !matches!(dialect, SqlDialect::Postgres) {
+                return Err(FoldError::Unsupported(
+                    "addConstraint(check) is PostgreSQL-only",
+                ));
+            }
+            let cname = name.map_or_else(
+                || derived_check_constraint_name(table, expr),
+                str::to_string,
+            );
+            let rendered = crate::render::dml::render_expr_inline(expr, dialect)
+                .map_err(|e| FoldError::Render(e.to_string()))?;
+            Ok(FoldedConstraint {
+                constraint: ConstraintSnapshot {
+                    name: cname,
+                    kind: "CHECK".to_string(),
+                    definition: format!("CHECK ({rendered})"),
+                    comment: None,
+                },
+                index: None,
+            })
         }
         IrConstraintKind::Exclusion { elements, .. } => {
             if !dialect.supports(Capability::ExclusionConstraint) {
@@ -2799,6 +2841,28 @@ mod tests {
         .unwrap_err()
     }
 
+    fn assert_validate_ops_ok(ops: Vec<Op>, dialect: Dialect) {
+        let ir = crate::model::ir::MigrationIr {
+            ir_version: crate::model::ir::CURRENT_IR_VERSION,
+            name: "fold_validate".to_string(),
+            owner_app: "app_fold".to_string(),
+            ops,
+            flags: Default::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        validate_ir_scoped(
+            &ir,
+            dialect,
+            &[],
+            Some(&SchemaScope::Unconfined),
+            &PolicyProfile::platform(),
+        )
+        .expect("ops validate");
+    }
+
     fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
         IrColumn {
             name: name.to_string(),
@@ -3656,28 +3720,64 @@ mod tests {
     }
 
     #[test]
-    fn add_check_constraint_is_validate_refused() {
-        let chk = IrConstraint {
+    fn table_checks_fold_on_pg_and_validate_refuse_non_pg() {
+        let create_chk = IrConstraint {
+            name: Some("users_true".to_string()),
+            kind: IrConstraintKind::Check {
+                expr: Expr::Literal { value: IrScalar::Bool(true) },
+            },
+        };
+        let add_chk = IrConstraint {
             name: Some("age_pos".to_string()),
             kind: IrConstraintKind::Check {
                 expr: Expr::Literal { value: IrScalar::Bool(true) },
             },
         };
-        let err = validate_ops(
-            vec![
-            create("users", vec![col("age", ColType::Int, false)]),
+        let mut create_op = create("users", vec![col("age", ColType::Int, false)]);
+        let Op::CreateTable { constraints, .. } = &mut create_op else {
+            unreachable!("create helper returns createTable");
+        };
+        constraints.push(create_chk);
+
+        let pg_ops = vec![
+            create_op.clone(),
             Op::AddConstraint {
                 table: "users".to_string(),
-                constraint: chk,
+                constraint: add_chk.clone(),
                 schema: None,
                 existence_guard: None,
             },
-            ],
-            Dialect::Postgres,
-        );
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert!(err.reason.contains("CHECK") || err.reason.contains("check"));
+        ];
+        assert_validate_ops_ok(pg_ops.clone(), Dialect::Postgres);
+        let folded = fold(&pg_ops).expect("PG table-level CHECK constraints fold");
+        let users = folded.tables.get("users").expect("users table folded");
+        for name in ["users_true", "age_pos"] {
+            let constraint = users
+                .constraints
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} CHECK should be folded"));
+            assert_eq!(constraint.kind, "CHECK");
+            assert_eq!(constraint.definition, "CHECK (TRUE)");
+        }
+
+        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_ops(
+                vec![
+                    create("users", vec![col("age", ColType::Int, false)]),
+                    Op::AddConstraint {
+                        table: "users".to_string(),
+                        constraint: add_chk.clone(),
+                        schema: None,
+                        existence_guard: None,
+                    },
+                ],
+                dialect,
+            );
+            assert_eq!(err.code, CODE_UNSUPPORTED);
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+            assert!(err.reason.contains("CHECK") || err.reason.contains("check"));
+        }
     }
 
     #[test]

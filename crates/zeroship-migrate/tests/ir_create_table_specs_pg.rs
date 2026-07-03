@@ -12,8 +12,8 @@
 //! never reach the DDL).
 //!
 //! It also pins the FAIL-CLOSED arms (HIGH-finding mandate "never a silent
-//! no-op"): a composite/per-column user PRIMARY KEY and a table-level CHECK are
-//! HARD validate-time authoring errors, not silent drops.
+//! no-op"): a composite/per-column user PRIMARY KEY is a HARD validate-time
+//! authoring error, not a silent drop. Table-level CHECKs render/apply on PG.
 //!
 //! Requires `:5440` (the `*_pg` suite convention); run with `--test-threads=1`.
 
@@ -93,9 +93,9 @@ async fn author_and_apply(
     ir: &str,
     reg: &std::collections::BTreeMap<String, String>,
     approval: Approval,
-) {
+) -> AppliedPlan {
     let policy = PolicyProfile::confined();
-    let _ = author_and_apply_with_policy(conn, cfg, ir, reg, approval, &policy).await;
+    author_and_apply_with_policy(conn, cfg, ir, reg, approval, &policy).await
 }
 
 async fn author_and_apply_with_policy(
@@ -150,6 +150,26 @@ async fn constraint_kind(conn: &Client, schema: &str, table: &str, name: &str) -
         )
         .await
         .expect("query pg_constraint");
+    rows.first().map(|r| r.get::<_, String>(0))
+}
+
+async fn constraint_definition(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    name: &str,
+) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT pg_get_constraintdef(c.oid) \
+             FROM pg_constraint c \
+             JOIN pg_class t ON t.oid = c.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3",
+            &[&schema, &table, &name],
+        )
+        .await
+        .expect("query pg_get_constraintdef");
     rows.first().map(|r| r.get::<_, String>(0))
 }
 
@@ -429,42 +449,106 @@ async fn create_table_user_primary_key_is_hard_error_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// HIGH-fix fail-closed: a table-level CHECK is a validate-time HARD error, never
-/// a silent drop.
+/// Slice A: current-AST table-level CHECK constraints render on PG both in
+/// createTable and stand-alone addConstraint, and apply to the live catalog.
 #[compio::test]
-async fn create_table_check_is_hard_error_on_pg() {
+async fn table_level_checks_render_and_apply_on_pg() {
     let conn = pg().await;
     let cfg = cfg_for(&token());
     setup(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
 
-    let ir = r#"{"ir_version":1,"name":"create_chk","ops":[
-        {"op":"createTable","name":"chk_tbl","columns":[
-            {"name":"age","type":"int","nullable":false}
+    let ir = r#"{"ir_version":1,"name":"check_cases","ops":[
+        {"op":"createTable","name":"check_cases","columns":[
+            {"name":"a","type":"int","nullable":false},
+            {"name":"b","type":"int","nullable":true},
+            {"name":"subtotal","type":"int","nullable":false},
+            {"name":"tax","type":"int","nullable":false},
+            {"name":"total","type":"int","nullable":false},
+            {"name":"score","type":"int","nullable":false}
         ],
         "constraints":[
-            {"name":"age_pos","kind":{"kind":"check","expr":{"node":"binOp","op":"gt",
-                "lhs":{"node":"colRef","name":"age"},
-                "rhs":{"node":"literal","value":0}}}}
-        ]}
+            {"name":"checks_a_nonnegative","kind":{"kind":"check","expr":{"node":"binOp","op":"ge",
+                "lhs":{"node":"colRef","name":"a"},
+                "rhs":{"node":"literal","value":0}}}},
+            {"name":"checks_b_null_or_nonnegative","kind":{"kind":"check","expr":{"node":"binOp","op":"or",
+                "lhs":{"node":"unaryOp","op":"isNull","operand":{"node":"colRef","name":"b"}},
+                "rhs":{"node":"binOp","op":"ge",
+                    "lhs":{"node":"colRef","name":"b"},
+                    "rhs":{"node":"literal","value":0}}}}}
+        ]},
+        {"op":"addConstraint","table":"check_cases","constraint":
+            {"name":"checks_total_matches_parts","kind":{"kind":"check","expr":{"node":"binOp","op":"eq",
+                "lhs":{"node":"colRef","name":"total"},
+                "rhs":{"node":"binOp","op":"add",
+                    "lhs":{"node":"colRef","name":"subtotal"},
+                    "rhs":{"node":"colRef","name":"tax"}}}}}},
+        {"op":"addConstraint","table":"check_cases","constraint":
+            {"name":"checks_score_range","kind":{"kind":"check","expr":{"node":"binOp","op":"and",
+                "lhs":{"node":"binOp","op":"ge",
+                    "lhs":{"node":"colRef","name":"score"},
+                    "rhs":{"node":"literal","value":0}},
+                "rhs":{"node":"binOp","op":"le",
+                    "lhs":{"node":"colRef","name":"score"},
+                    "rhs":{"node":"literal","value":100}}}}}}
     ]}"#;
-    let policy = PolicyProfile::platform();
-    let err = zeroship_migrate::model::load::load_ir_document(
-        ir,
-        APP,
-        zeroship_migrate::model::validate::Dialect::Postgres,
-        &registry(&[]),
-        None,
-        Some(&policy),
-    )
-    .expect_err("a table-level CHECK must validate-refuse, not be dropped");
-    let IrLoadError::Validate(err) = err else {
-        panic!("expected validate error for table CHECK, got {err:?}");
-    };
-    assert_eq!(err.code, CODE_UNSUPPORTED);
-    assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+    let plan = author_and_apply(&conn, &cfg, ir, &registry(&[]), Approval::Approved).await;
+    let rendered = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            zeroship_migrate::PlanStep::Ddl(m) => Some(m.up.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for expected in [
+        r#"CONSTRAINT "checks_a_nonnegative" CHECK (("a" >= 0))"#,
+        r#"CONSTRAINT "checks_b_null_or_nonnegative" CHECK ((("b" IS NULL) OR ("b" >= 0)))"#,
+        r#"ADD CONSTRAINT "checks_total_matches_parts" CHECK (("total" = ("subtotal" + "tax")))"#,
+        r#"ADD CONSTRAINT "checks_score_range" CHECK ((("score" >= 0) AND ("score" <= 100)))"#,
+    ] {
+        assert!(rendered.contains(expected), "missing rendered CHECK `{expected}` in:\n{rendered}");
+    }
+
+    for (name, expected) in [
+        ("checks_a_nonnegative", "CHECK ((a >= 0))"),
+        (
+            "checks_b_null_or_nonnegative",
+            "CHECK (((b IS NULL) OR (b >= 0)))",
+        ),
+        (
+            "checks_total_matches_parts",
+            "CHECK ((total = (subtotal + tax)))",
+        ),
+        (
+            "checks_score_range",
+            "CHECK (((score >= 0) AND (score <= 100)))",
+        ),
+    ] {
+        assert_eq!(
+            constraint_kind(&conn, &schema, "check_cases", name).await.as_deref(),
+            Some("c"),
+            "{name} should be a live CHECK constraint"
+        );
+        assert_eq!(
+            constraint_definition(&conn, &schema, "check_cases", name)
+                .await
+                .as_deref(),
+            Some(expected),
+            "{name} should have the canonical live CHECK definition"
+        );
+    }
     assert!(
-        err.reason.to_lowercase().contains("check"),
-        "the error must name the deferred CHECK/expr (got: {err:?})"
+        conn.batch_execute(&format!(
+            "INSERT INTO \"{}\".\"check_cases\" \
+             (id, created_at, updated_at, version, a, b, subtotal, tax, total, score) \
+             VALUES ('ok', now(), now(), 1, 0, NULL, 2, 3, 5, 100)",
+            schema
+        ))
+        .await
+        .is_ok(),
+        "valid rows should satisfy every rendered CHECK"
     );
 
     teardown(&conn, &cfg).await;

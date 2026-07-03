@@ -441,13 +441,10 @@ pub enum IrLowerError {
          declarative diff rebuild seam (the 12-step table rebuild)"
     )]
     SqliteRebuildOnly(&'static str),
-    /// **PR10 Part B** — a guarded op (`ifNotExists` on the `addConstraint` family)
-    /// whose constraint shape cannot produce a verifiable [`GuardProbe`](crate::model::probe::GuardProbe) because the
-    /// CHECK body is a deferred-render closed-AST `Expr` (validate rejects that
-    /// authoring shape before this is reached). This
-    /// variant is reserved for any future guarded shape that lowers but cannot build
-    /// a probe; lowering REFUSES fail-closed rather than stamping a probe that could
-    /// not verify the declared shape. Carries the op tag.
+    /// **PR10 Part B** — a guarded op whose shape cannot produce a verifiable
+    /// [`GuardProbe`](crate::model::probe::GuardProbe). Lowering REFUSES fail-closed
+    /// rather than stamping a probe that could not verify the declared shape.
+    /// Carries the op tag.
     #[error(
         "IrAuthor::lower cannot build an existence-guard probe for op {0:?} \
          (the declared shape is not catalog-verifiable); refused fail-closed"
@@ -2778,10 +2775,23 @@ impl IrAuthor {
                     // lower must not re-apply the old platform-owned-id policy here.
                     continue;
                 }
-                IrConstraintKind::Check { .. } => {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "validated createTable CHECK reached lower",
-                    ));
+                IrConstraintKind::Check { expr } => {
+                    if !matches!(self.dialect, SqlDialect::Postgres) {
+                        return Err(IrLowerError::UnsupportedOp(
+                            "validated non-Postgres createTable CHECK reached lower",
+                        ));
+                    }
+                    let name = c
+                        .name
+                        .as_deref()
+                        .map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
+                    let rendered = crate::render::dml::render_expr_inline(expr, self.dialect)?;
+                    snap.constraints.push(ConstraintSnapshot {
+                        name,
+                        kind: "CHECK".to_string(),
+                        definition: format!("CHECK ({rendered})"),
+                        comment: None,
+                    });
                 }
                 IrConstraintKind::Fk {
                     columns,
@@ -3342,11 +3352,11 @@ impl IrAuthor {
         }
     }
 
-    /// Lower a stand-alone `addConstraint` op (§6). FK / UNIQUE are
-    /// column-list constraints that lower to `ALTER TABLE … ADD CONSTRAINT …` on
-    /// Postgres, reusing the differ's render seam (so an FK is byte-identical to a
-    /// deferred FK). Validate rejects PRIMARY KEY, CHECK, and unsupported FK shapes
-    /// before lower. SQLite is rebuild-only ([`IrLowerError::SqliteRebuildOnly`]).
+    /// Lower a stand-alone `addConstraint` op (§6). FK / UNIQUE / CHECK lower to
+    /// `ALTER TABLE … ADD CONSTRAINT …` on Postgres, reusing the differ's render
+    /// seam (so an FK is byte-identical to a deferred FK). Validate rejects PRIMARY
+    /// KEY and unsupported FK shapes before lower. SQLite is rebuild-only
+    /// ([`IrLowerError::SqliteRebuildOnly`]).
     fn lower_add_constraint(
         &self,
         decl: &DeclarativeAuthor,
@@ -3426,10 +3436,19 @@ impl IrAuthor {
                     "validated addConstraint user PRIMARY KEY reached lower",
                 ));
             }
-            IrConstraintKind::Check { .. } => {
-                return Err(IrLowerError::UnsupportedOp(
-                    "validated addConstraint(check) reached lower",
-                ));
+            IrConstraintKind::Check { expr } => {
+                if !matches!(self.dialect, SqlDialect::Postgres) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "validated non-Postgres addConstraint(check) reached lower",
+                    ));
+                }
+                let cname =
+                    name.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
+                let rendered = crate::render::dml::render_expr_inline(expr, self.dialect)?;
+                let body = format!("CHECK ({rendered})");
+                // Adding a CHECK validates existing rows and takes a table lock,
+                // so gate it like UNIQUE/PK-style constraint additions.
+                decl.lower_add_constraint(table, &cname, &body, true)
             }
             IrConstraintKind::Exclusion { elements, .. } => {
                 let cname = name.map_or_else(
@@ -4795,13 +4814,59 @@ pub(crate) fn derived_constraint_name(table: &str, cols: &[String], suffix: &str
     crate::plan::author::cap_ident_name(&format!("{table}_{}_{suffix}", cols.join("_")))
 }
 
+pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn collect_col_refs(expr: &Expr, out: &mut BTreeSet<String>) {
+        match expr {
+            Expr::ColRef { name } => {
+                out.insert(name.clone());
+            }
+            Expr::Literal { .. } => {}
+            Expr::BinOp { lhs, rhs, .. } => {
+                collect_col_refs(lhs, out);
+                collect_col_refs(rhs, out);
+            }
+            Expr::UnaryOp { operand, .. } | Expr::Cast { operand, .. } => {
+                collect_col_refs(operand, out);
+            }
+            Expr::Case { branches, r#else } => {
+                for branch in branches {
+                    collect_col_refs(&branch.condition, out);
+                    collect_col_refs(&branch.result, out);
+                }
+                if let Some(expr) = r#else {
+                    collect_col_refs(expr, out);
+                }
+            }
+            Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+                for arg in args {
+                    collect_col_refs(arg, out);
+                }
+            }
+        }
+    }
+
+    let mut cols = BTreeSet::new();
+    collect_col_refs(expr, &mut cols);
+    let cols = if cols.is_empty() {
+        "expr".to_string()
+    } else {
+        cols.into_iter().collect::<Vec<_>>().join("_")
+    };
+    let expr_json = serde_json::to_vec(expr).expect("Expr serialization is infallible");
+    let digest = Sha256::digest(expr_json);
+    let suffix = hex::encode(&digest[..5]);
+    crate::plan::author::cap_ident_name(&format!("{table}_{cols}_check_{suffix}"))
+}
+
 /// **PR10 Part B** — the catalog `(name, kind)` an `addConstraint` op will create,
 /// derived the SAME way [`IrAuthor::lower_add_constraint`] derives them, so the
 /// stamped [`crate::render::existence_probe::GuardProbe::Constraint`] names the constraint the
 /// executor will see in the live `information_schema` / `pg_get_constraintdef`.
     /// `kind` is the PG catalog spelling (`information_schema.table_constraints`):
     /// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. Validate rejects user
-    /// PRIMARY KEY and CHECK before lower, but they are handled for totality.
+    /// PRIMARY KEY before lower, but it is handled for totality.
 fn ir_constraint_name_and_kind(
     table: &str,
     constraint: &IrConstraint,
@@ -4830,8 +4895,8 @@ fn ir_constraint_name_and_kind(
             explicit.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string),
             "PRIMARY KEY".to_string(),
         ),
-        IrConstraintKind::Check { .. } => (
-            explicit.unwrap_or("").to_string(),
+        IrConstraintKind::Check { expr } => (
+            explicit.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string),
             "CHECK".to_string(),
         ),
         IrConstraintKind::Exclusion { elements, .. } => (
