@@ -19,6 +19,7 @@ import type {
   ExclusionMethod,
   ExclusionOperator,
   IndexElement,
+  IndexSortOrder,
   IrBatch,
   IrScalar,
   Join,
@@ -46,6 +47,7 @@ export type {
   ExclusionMethod,
   ExclusionOperator,
   IndexElement,
+  IndexSortOrder,
   IrBatch,
   IrScalar,
   Join,
@@ -648,12 +650,20 @@ export interface TableOptions {
 }
 
 export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
+/** Column index element object form. Use `order: "desc"` to render `col DESC`;
+ *  `order: "asc"` and omitted order serialize as the default ASC shape. */
+export interface IndexColumnElementArg {
+  kind: "column";
+  name: string;
+  order?: IndexSortOrder;
+}
+
 export type IndexElementArg =
   | string
   | ExprFn
   | ExprChain
   | Expr
-  | { kind: "column"; name: string }
+  | IndexColumnElementArg
   | { kind: "expr"; expr: ExprFn | ExprChain | Expr };
 
 export type CommentTargetArg =

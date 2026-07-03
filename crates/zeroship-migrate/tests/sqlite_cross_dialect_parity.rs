@@ -267,8 +267,14 @@ fn common_ops() -> Vec<Op> {
             indexes: vec![IrIndex {
                 name: Some("orders_account_status_active_idx".to_string()),
                 columns: vec![
-                    IndexElement::Column { name: "account_id".to_string() },
-                    IndexElement::Column { name: "status".to_string() },
+                    IndexElement::Column {
+                        name: "account_id".to_string(),
+                        order: None,
+                    },
+                    IndexElement::Column {
+                        name: "status".to_string(),
+                        order: None,
+                    },
                 ],
                 unique: Some(false),
                 using: None,

@@ -8,8 +8,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::ir::{
-    ColType, IndexElement, IrColumn, IrDefault, Op, SynthDefaultFn, CURRENT_IR_VERSION,
-    SYSTEM_FIELD_NAMES, TableRuntimeOptions, TableStrictness,
+    ColType, IndexElement, IndexSortOrder, IrColumn, IrDefault, Op, SynthDefaultFn,
+    CURRENT_IR_VERSION, SYSTEM_FIELD_NAMES, TableRuntimeOptions, TableStrictness,
 };
 use crate::model::profile::PolicyProfile;
 use crate::model::table_shape::{resolve_create_table_policy, TableShapeError};
@@ -252,15 +252,16 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
         idx.columns
             .iter()
             .cloned()
-            .map(|name| IndexElement::Column { name })
+            .map(|name| IndexElement::Column { name, order: None })
             .collect()
     } else {
         idx.elements
             .iter()
             .map(|element| match element {
-                IndexElementSnapshot::Column(name) => {
-                    Ok(IndexElement::Column { name: name.clone() })
-                }
+                IndexElementSnapshot::Column { name, order } => Ok(IndexElement::Column {
+                    name: name.clone(),
+                    order: *order,
+                }),
                 IndexElementSnapshot::Expr(_) => Err(ScaffoldError::UnsupportedIndex {
                     table: table.to_string(),
                     name: idx.name.clone(),
@@ -630,7 +631,14 @@ fn render_op_call(op: &Op) -> String {
             let cols: Vec<String> = columns
                 .iter()
                 .map(|c| match c {
-                    IndexElement::Column { name } => js_str(name),
+                    IndexElement::Column {
+                        name,
+                        order: Some(IndexSortOrder::Desc),
+                    } => format!(
+                        "{{ kind: \"column\", name: {}, order: \"desc\" }}",
+                        js_str(name)
+                    ),
+                    IndexElement::Column { name, .. } => js_str(name),
                     IndexElement::Expr { expr } => format!(
                         "{{ kind: \"expr\", expr: {} }}",
                         serde_json::to_string(expr).expect("Expr serializes")
@@ -645,7 +653,7 @@ fn render_op_call(op: &Op) -> String {
                     let parts = columns
                         .iter()
                         .map(|c| match c {
-                            IndexElement::Column { name } => name.as_str(),
+                            IndexElement::Column { name, .. } => name.as_str(),
                             IndexElement::Expr { .. } => "expr",
                         })
                         .collect::<Vec<_>>()

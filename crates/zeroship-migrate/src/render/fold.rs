@@ -3895,7 +3895,10 @@ mod tests {
             table: table.to_string(),
             columns: cols
                 .iter()
-                .map(|col| IndexElement::Column { name: (*col).to_string() })
+                .map(|col| IndexElement::Column {
+                    name: (*col).to_string(),
+                    order: None,
+                })
                 .collect(),
             name: name.map(ToString::to_string),
             unique: Some(unique),
@@ -4025,7 +4028,10 @@ mod tests {
             ],
             indexes: vec![IrIndex {
                 name: Some("m_team_idx".to_string()),
-                columns: vec![IndexElement::Column { name: "team_id".to_string() }],
+                columns: vec![IndexElement::Column {
+                    name: "team_id".to_string(),
+                    order: None,
+                }],
                 unique: None,
                 using: None,
                 r#where: None,
@@ -4064,8 +4070,14 @@ mod tests {
             Op::CreateIndex {
                 table: "posts".to_string(),
                 columns: vec![
-                    IndexElement::Column { name: "author_id".to_string() },
-                    IndexElement::Column { name: "status".to_string() },
+                    IndexElement::Column {
+                        name: "author_id".to_string(),
+                        order: None,
+                    },
+                    IndexElement::Column {
+                        name: "status".to_string(),
+                        order: None,
+                    },
                 ],
                 name: Some("posts_author_status_idx".to_string()),
                 unique: Some(false),
@@ -4313,7 +4325,10 @@ mod tests {
             Vec::new(),
             vec![IrIndex {
                 name: Some("t_doc_idx".to_string()),
-                columns: vec![IndexElement::Column { name: "doc".to_string() }],
+                columns: vec![IndexElement::Column {
+                    name: "doc".to_string(),
+                    order: None,
+                }],
                 unique: None,
                 using: Some(crate::model::ir::IndexMethod::Gin),
                 r#where: None,

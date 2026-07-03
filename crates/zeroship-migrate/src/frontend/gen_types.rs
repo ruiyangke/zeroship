@@ -232,7 +232,7 @@ fn plain_index_fields(columns: &[crate::IndexElement]) -> Option<Vec<String>> {
     columns
         .iter()
         .map(|c| match c {
-            crate::IndexElement::Column { name } => Some(name.clone()),
+            crate::IndexElement::Column { name, .. } => Some(name.clone()),
             crate::IndexElement::Expr { .. } => None,
         })
         .collect()

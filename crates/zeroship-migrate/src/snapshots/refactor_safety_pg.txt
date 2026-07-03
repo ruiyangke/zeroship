@@ -171,9 +171,10 @@ TableSnapshot {
                 "__fts",
             ],
             elements: [
-                Column(
-                    "__fts",
-                ),
+                Column {
+                    name: "__fts",
+                    order: None,
+                },
             ],
             access_method: "gin",
             predicate: None,
@@ -188,12 +189,14 @@ TableSnapshot {
                 "slug",
             ],
             elements: [
-                Column(
-                    "author",
-                ),
-                Column(
-                    "slug",
-                ),
+                Column {
+                    name: "author",
+                    order: None,
+                },
+                Column {
+                    name: "slug",
+                    order: None,
+                },
             ],
             access_method: "btree",
             predicate: None,
@@ -207,9 +210,10 @@ TableSnapshot {
                 "created_by",
             ],
             elements: [
-                Column(
-                    "created_by",
-                ),
+                Column {
+                    name: "created_by",
+                    order: None,
+                },
             ],
             access_method: "btree",
             predicate: None,
@@ -223,9 +227,10 @@ TableSnapshot {
                 "deleted_at",
             ],
             elements: [
-                Column(
-                    "deleted_at",
-                ),
+                Column {
+                    name: "deleted_at",
+                    order: None,
+                },
             ],
             access_method: "btree",
             predicate: None,
@@ -239,9 +244,10 @@ TableSnapshot {
                 "id",
             ],
             elements: [
-                Column(
-                    "id",
-                ),
+                Column {
+                    name: "id",
+                    order: None,
+                },
             ],
             access_method: "btree",
             predicate: None,
@@ -255,9 +261,10 @@ TableSnapshot {
                 "slug",
             ],
             elements: [
-                Column(
-                    "slug",
-                ),
+                Column {
+                    name: "slug",
+                    order: None,
+                },
             ],
             access_method: "btree",
             predicate: None,
@@ -271,9 +278,10 @@ TableSnapshot {
                 "updated_at",
             ],
             elements: [
-                Column(
-                    "updated_at",
-                ),
+                Column {
+                    name: "updated_at",
+                    order: None,
+                },
             ],
             access_method: "btree",
             predicate: None,

@@ -545,7 +545,10 @@ async fn create_index_ifnotexists_present_unique_flip_fails_closed() {
 
     let steps = lower(&cfg, Op::CreateIndex {
         table: "t".into(),
-        columns: vec![IndexElement::Column { name: "email".into() }],
+        columns: vec![IndexElement::Column {
+            name: "email".into(),
+            order: None,
+        }],
         name: Some("t_email_idx".into()),
         unique: Some(true),
         using: None,
@@ -603,7 +606,10 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
 
     let mut steps = lower(&cfg, Op::CreateIndex {
         table: "t".into(),
-        columns: vec![IndexElement::Column { name: "email".into() }],
+        columns: vec![IndexElement::Column {
+            name: "email".into(),
+            order: None,
+        }],
         name: Some("t_email_idx".into()),
         unique: Some(false),
         using: None,

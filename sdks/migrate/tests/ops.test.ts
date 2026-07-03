@@ -687,6 +687,30 @@ test("index columns normalize to closed column/expression elements", () => {
   });
 });
 
+test("index column order records DESC and omits ASC/default order", () => {
+  const ops = record(() =>
+    table("events").index("events_created_desc_idx").add({
+      columns: [
+        { kind: "column", name: "tenant_id", order: "asc" },
+        { kind: "column", name: "created_at", order: "desc" },
+      ],
+    }),
+  );
+  assert.deepEqual(ops[0].columns, [
+    { kind: "column", name: "tenant_id" },
+    { kind: "column", name: "created_at", order: "desc" },
+  ]);
+  assert.throws(
+    () =>
+      record(() =>
+        table("events").index("events_bad_order_idx").add({
+          columns: [{ kind: "column", name: "created_at", order: "latest" as any }],
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /order must be "asc" or "desc"/.test(e.message),
+  );
+});
+
 test("comment records closed COMMENT ON targets through handles and top-level API", () => {
   const ops = record(() => {
     table("users", { schema: "app" }).comment("User accounts");

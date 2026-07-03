@@ -756,7 +756,10 @@ fn add_column_omits_absent_optionals() {
 fn create_index_omits_all_absent_optionals() {
     let op = Op::CreateIndex {
         table: "users".into(),
-        columns: vec![IndexElement::Column { name: "email".into() }],
+        columns: vec![IndexElement::Column {
+            name: "email".into(),
+            order: None,
+        }],
         name: None,
         unique: None,
         using: None,
@@ -794,7 +797,10 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
     // IrIndex name/unique/using/where absent.
     let ix = IrIndex {
         name: None,
-        columns: vec![IndexElement::Column { name: "id".into() }],
+        columns: vec![IndexElement::Column {
+            name: "id".into(),
+            order: None,
+        }],
         unique: None,
         using: None,
         r#where: None,

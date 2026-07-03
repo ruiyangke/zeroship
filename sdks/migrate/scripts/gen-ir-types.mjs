@@ -46,6 +46,7 @@ const ENUM_DEFS = [
   "CastTarget",
   "PgArrayMembershipOp",
   "ExtractField",
+  "IndexSortOrder",
   "IndexMethod",
   "CmpOp",
   "OnUnmet",
