@@ -173,6 +173,21 @@ async fn constraint_definition(
     rows.first().map(|r| r.get::<_, String>(0))
 }
 
+async fn domain_constraint_definition(conn: &Client, schema: &str, domain: &str) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT pg_get_constraintdef(c.oid) \
+             FROM pg_constraint c \
+             JOIN pg_type t ON t.oid = c.contypid \
+             JOIN pg_namespace n ON n.oid = t.typnamespace \
+             WHERE n.nspname = $1 AND t.typname = $2 AND c.contype = 'c'",
+            &[&schema, &domain],
+        )
+        .await
+        .expect("query domain pg_get_constraintdef");
+    rows.first().map(|r| r.get::<_, String>(0))
+}
+
 async fn index_exists(conn: &Client, schema: &str, table: &str, name: &str) -> bool {
     let rows = conn
         .query(
@@ -669,4 +684,133 @@ async fn pg_only_expr_nodes_render_and_apply_on_pg() {
     );
 
     teardown(&conn, &cfg).await;
+}
+
+/// Slice C: PG-only EXTRACT(day FROM ...) and strict interval literal nodes render
+/// to the platform pg_dump idioms and apply as live CHECK constraints.
+#[compio::test]
+async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let schema = cfg.project_schema.clone();
+
+    let ir = r#"{"ir_version":1,"name":"pg_expr_slice_c","ops":[
+        {"op":"createDomain","name":"billing_period","as":"date","check":{
+            "node":"binOp","op":"eq",
+            "lhs":{"node":"extract","field":"day","expr":{"node":"colRef","name":"VALUE"}},
+            "rhs":{"node":"literal","value":1}}},
+        {"op":"createTable","name":"oauth_device_codes","columns":[
+            {"name":"issued_at","type":"timestamp","nullable":false},
+            {"name":"expires_at","type":"timestamp","nullable":false}
+        ],
+        "constraints":[
+            {"name":"expires_window_check","kind":{"kind":"check","expr":{
+                "node":"binOp","op":"le",
+                "lhs":{"node":"colRef","name":"expires_at"},
+                "rhs":{"node":"binOp","op":"add",
+                    "lhs":{"node":"colRef","name":"issued_at"},
+                    "rhs":{"node":"pgIntervalLiteral","value":"00:01:00"}}}}}
+        ]}
+    ]}"#;
+    let plan = author_and_apply(&conn, &cfg, ir, &registry(&[]), Approval::Approved).await;
+    let rendered = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            zeroship_migrate::PlanStep::Ddl(m) => Some(m.up.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains(&format!(
+            r#"CREATE DOMAIN "{schema}"."billing_period" AS date CHECK ((EXTRACT(day FROM VALUE) = 1))"#
+        )),
+        "missing rendered EXTRACT domain CHECK in:\n{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            r#"CONSTRAINT "expires_window_check" CHECK (("expires_at" <= ("issued_at" + '00:01:00'::interval)))"#
+        ),
+        "missing rendered interval CHECK in:\n{rendered}"
+    );
+
+    let domain_def = domain_constraint_definition(&conn, &schema, "billing_period").await;
+    assert!(
+        domain_def
+            .as_deref()
+            .is_some_and(|def| def.contains("EXTRACT(day FROM VALUE)")),
+        "billing_period domain should have a live EXTRACT(day FROM VALUE) CHECK, got {domain_def:?}"
+    );
+    conn.batch_execute(&format!(
+        r#"CREATE TABLE "{schema}".domain_probe (period "{schema}"."billing_period");
+           INSERT INTO "{schema}".domain_probe (period) VALUES (DATE '2026-07-01');"#
+    ))
+    .await
+    .expect("first-of-month domain value should satisfy the EXTRACT check");
+    assert!(
+        conn.batch_execute(&format!(
+            r#"INSERT INTO "{schema}".domain_probe (period) VALUES (DATE '2026-07-02')"#
+        ))
+        .await
+        .is_err(),
+        "non-first-of-month value should fail the EXTRACT domain check"
+    );
+
+    assert_eq!(
+        constraint_definition(&conn, &schema, "oauth_device_codes", "expires_window_check")
+            .await
+            .as_deref(),
+        Some("CHECK ((expires_at <= (issued_at + '00:01:00'::interval)))"),
+        "interval arithmetic should be present in the live CHECK definition"
+    );
+    conn.batch_execute(&format!(
+        r#"INSERT INTO "{schema}"."oauth_device_codes"
+           (id, created_at, updated_at, version, issued_at, expires_at)
+           VALUES ('ok', now(), now(), 1,
+                   TIMESTAMPTZ '2026-07-01 00:00:00+00',
+                   TIMESTAMPTZ '2026-07-01 00:00:30+00')"#
+    ))
+    .await
+    .expect("expires_at within the interval literal should satisfy the CHECK");
+    assert!(
+        conn.batch_execute(&format!(
+            r#"INSERT INTO "{schema}"."oauth_device_codes"
+               (id, created_at, updated_at, version, issued_at, expires_at)
+               VALUES ('bad', now(), now(), 1,
+                       TIMESTAMPTZ '2026-07-01 00:00:00+00',
+                       TIMESTAMPTZ '2026-07-01 00:02:00+00')"#
+        ))
+        .await
+        .is_err(),
+        "expires_at outside the interval literal should fail the CHECK"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[test]
+fn pg_extract_and_interval_literal_validate_refuse_non_pg() {
+    use zeroship_migrate::model::validate::{validate_ir, Dialect};
+
+    let cases = [
+        r#"{"ir_version":1,"name":"extract_refuse","ops":[
+            {"op":"update","table":"t","set":{"x":{
+                "node":"extract","field":"day","expr":{"node":"colRef","name":"x"}}}}
+        ]}"#,
+        r#"{"ir_version":1,"name":"interval_refuse","ops":[
+            {"op":"update","table":"t","set":{"x":{"node":"pgIntervalLiteral","value":"00:01:00"}}}
+        ]}"#,
+    ];
+
+    for raw in cases {
+        let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
+        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_ir(&ir, dialect, &[])
+                .expect_err("PG-only expression nodes must validate-refuse off PG");
+            assert_eq!(err.code, CODE_UNSUPPORTED);
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+    }
 }

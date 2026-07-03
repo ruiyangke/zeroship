@@ -675,6 +675,7 @@ export const t: TypeLexicon = {
   numeric: (precision = 38, scale = 9) =>
     new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
   timestamp: () => new ColumnDefImpl("timestamp"),
+  date: () => new ColumnDefImpl("date" as ColType),
   uuid: () => new ColumnDefImpl("uuid"),
   bytes: () => new ColumnDefImpl("bytea"),
   boolean: () => new ColumnDefImpl("bool"),
@@ -872,6 +873,32 @@ function pgRegexPattern(pattern: unknown): string {
   return pattern;
 }
 
+function pgExtractField(field: unknown): "day" {
+  if (field !== "day") {
+    throw structuredError("OP_INVALID", `c.pg.extract(field, expr): field must be "day"; got ${JSON.stringify(field)}`);
+  }
+  return field;
+}
+
+function pgIntervalLiteral(value: unknown): string {
+  if (typeof value !== "string") {
+    throw structuredError("OP_INVALID", `c.pg.interval(value): value must be a string; got ${typeof value}`);
+  }
+  if (!isSafePgIntervalLiteral(value)) {
+    throw structuredError(
+      "OP_INVALID",
+      `c.pg.interval(value): value must match HH:MM:SS or HH:MM:SS.ffffff; got ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+function isSafePgIntervalLiteral(value: string): boolean {
+  const m = /^([0-9]{1,6}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,6}))?$/.exec(value);
+  if (!m) return false;
+  return Number(m[2]) <= 59 && Number(m[3]) <= 59;
+}
+
 class ExprChainImpl implements ExprChainType {
   __node: Node;
   constructor(node: Node) {
@@ -972,6 +999,15 @@ const pgExpr: PgExprNamespace = {
     pattern: pgRegexPattern(pattern),
   }),
   columnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
+  extract: (field, expr) => chain({
+    node: "extract",
+    field: pgExtractField(field),
+    expr: exprArg(expr),
+  }),
+  interval: (value) => chain({
+    node: "pgIntervalLiteral",
+    value: pgIntervalLiteral(value),
+  }),
 };
 
 function makeBuilder(): ExprBuilder {

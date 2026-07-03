@@ -713,6 +713,7 @@ fn render_t_for(ty: &ColType) -> String {
         ColType::Bool => "t.boolean()".into(),
         ColType::Json => "t.json()".into(),
         ColType::Timestamp => "t.timestamp()".into(),
+        ColType::Date => "t.date()".into(),
         ColType::Uuid => "t.uuid()".into(),
         ColType::Bytea => "t.bytes()".into(),
         ColType::Decimal { precision, scale } => format!("t.numeric({precision}, {scale})"),

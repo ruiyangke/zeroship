@@ -559,7 +559,15 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
-        Op::SetColumnType { table, using, .. } => {
+        Op::SetColumnType { table, to_type, using, .. } => {
+            validate_col_type_position(
+                to_type,
+                "setColumnType.toType",
+                false,
+                target_dialect,
+                op_index,
+                ts_location,
+            )?;
             if let Some(cast) = using {
                 let scope = TargetScope::structural_only(table);
                 validate_expr(cast, target_dialect, &scope, op_index, ts_location)?;
@@ -570,7 +578,15 @@ pub fn validate_op_scoped(
             let scope = TargetScope::structural_only(table);
             check_constraint(&constraint.kind, &scope)
         }
-        Op::CreateDomain { check, .. } => {
+        Op::CreateDomain { as_type, check, .. } => {
+            validate_col_type_position(
+                as_type,
+                "createDomain.as",
+                true,
+                target_dialect,
+                op_index,
+                ts_location,
+            )?;
             if let Some(check) = check {
                 let cols = vec!["VALUE".to_string()];
                 let scope = TargetScope::new("domain", &cols);
@@ -818,6 +834,14 @@ pub fn validate_op_scoped(
         // remaining VENDOR ops carry no embedded Expr — their privileged payload is
         // closed sub-enums (`Privilege`/`TriggerTiming`/…) or the §3-gated raw
         // `body`/`sql` strings (parse-scanned by the guard deny-list at lower).
+        Op::RenameColumn { ty, .. } => validate_col_type_position(
+            ty,
+            "renameColumn.type",
+            false,
+            target_dialect,
+            op_index,
+            ts_location,
+        ),
         Op::DropTable { .. }
         | Op::RenameTable { .. }
         | Op::DropColumn { .. }
@@ -825,7 +849,6 @@ pub fn validate_op_scoped(
         | Op::DropColumnNotNull { .. }
         | Op::SetColumnDefault { .. }
         | Op::DropColumnDefault { .. }
-        | Op::RenameColumn { .. }
         | Op::DropConstraint { .. }
         | Op::CreateEnum { .. }
         | Op::DropEnum { .. }
@@ -2053,6 +2076,15 @@ fn validate_column_facets(
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
+    validate_col_type_position(
+        &col.ty,
+        "column.type",
+        false,
+        target_dialect,
+        op_index,
+        ts_location,
+    )?;
+
     let mk = |code: &str, reason: String, fix: String| AuthoringError {
         code: code.to_string(),
         kind: None,
@@ -2178,6 +2210,49 @@ fn validate_column_facets(
     }
 
     Ok(())
+}
+
+fn validate_col_type_position(
+    ty: &crate::model::ir::ColType,
+    position: &'static str,
+    allow_pg_domain_date_base: bool,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::ColType;
+
+    fn contains_date(ty: &ColType) -> bool {
+        match ty {
+            ColType::Date => true,
+            ColType::Encrypted { of } => contains_date(of),
+            _ => false,
+        }
+    }
+
+    if !contains_date(ty) {
+        return Ok(());
+    }
+    if allow_pg_domain_date_base && target_dialect == Dialect::Postgres && matches!(ty, ColType::Date)
+    {
+        return Ok(());
+    }
+    Err(AuthoringError {
+        code: CODE_UNSUPPORTED.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "{position} uses the narrow `date` type token, which Slice C admits only \
+             as a PostgreSQL createDomain base type"
+        ),
+        suggested_fix: Some(
+            "use `timestamp` for ordinary columns, or use `date` only as \
+             domain(name).create({ as: \"date\", ... }) on PostgreSQL"
+                .to_string(),
+        ),
+    })
 }
 
 fn validate_identity_placement(
@@ -2337,7 +2412,15 @@ pub fn validate_op_resolved(
                 validate_op(op, target_dialect, op_index, ts)?;
             }
         }
-        Op::SetColumnType { table, using, .. } => {
+        Op::SetColumnType { table, to_type, using, .. } => {
+            validate_col_type_position(
+                to_type,
+                "setColumnType.toType",
+                false,
+                target_dialect,
+                op_index,
+                ts,
+            )?;
             if let (Some(cols), Some(cast)) = (resolved_scope(table), using) {
                 let scope = TargetScope::new(table, &cols);
                 validate_expr(cast, target_dialect, &scope, op_index, ts)?;
@@ -2474,6 +2557,14 @@ impl Ctx<'_> {
             Expr::PgColumnSize { expr } => {
                 self.check_pg_only_expr("pg_column_size")?;
                 self.walk_depth(expr, d)
+            }
+            Expr::Extract { field: _, expr } => {
+                self.check_pg_only_expr("EXTRACT")?;
+                self.walk_depth(expr, d)
+            }
+            Expr::PgIntervalLiteral { value } => {
+                self.check_pg_only_expr("PG interval literal")?;
+                self.check_pg_interval_literal(value)
             }
         }
     }
@@ -2765,6 +2856,22 @@ impl Ctx<'_> {
         self.check_pg_text_literal(pattern, "PG regex pattern")
     }
 
+    fn check_pg_interval_literal(&self, value: &str) -> Result<(), AuthoringError> {
+        if !is_safe_pg_interval_literal(value) {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                format!(
+                    "PG interval literal {value:?} is outside the strict P1 interval grammar \
+                     (expected HH:MM:SS or HH:MM:SS.ffffff, with two-digit minutes/seconds)"
+                ),
+                Some("use a time-like interval literal such as \"00:01:00\"".to_string()),
+            ));
+        }
+        Ok(())
+    }
+
     fn check_split_part(&self, args: &[Expr]) -> Result<(), AuthoringError> {
         // Shape: splitPart(col, delim, n) — exactly three args. The WRONG ARITY is
         // broken on BOTH dialects (`split_part` is ternary on PG too), so it is an
@@ -2846,6 +2953,43 @@ impl Ctx<'_> {
         }
         Ok(())
     }
+}
+
+fn is_safe_pg_interval_literal(value: &str) -> bool {
+    if value.is_empty() || value.len() > 32 || value.contains('\0') {
+        return false;
+    }
+    let Some((hours, rest)) = value.split_once(':') else {
+        return false;
+    };
+    if hours.is_empty() || hours.len() > 6 || !hours.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let Some((minutes, seconds)) = rest.split_once(':') else {
+        return false;
+    };
+    if minutes.len() != 2
+        || !minutes.bytes().all(|b| b.is_ascii_digit())
+        || minutes.parse::<u8>().map_or(true, |m| m > 59)
+    {
+        return false;
+    }
+    let (seconds_whole, fraction) = match seconds.split_once('.') {
+        Some((whole, frac)) => (whole, Some(frac)),
+        None => (seconds, None),
+    };
+    if seconds_whole.len() != 2
+        || !seconds_whole.bytes().all(|b| b.is_ascii_digit())
+        || seconds_whole.parse::<u8>().map_or(true, |s| s > 59)
+    {
+        return false;
+    }
+    if let Some(frac) = fraction {
+        if frac.is_empty() || frac.len() > 6 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

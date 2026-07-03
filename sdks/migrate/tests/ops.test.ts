@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { t, table, comment, lintDeterminism, enumType } from "../src/index.js";
-import { sequence } from "../src/pg.js";
+import { domain, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 
@@ -432,6 +432,45 @@ test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
   });
 });
 
+test("c.pg builds PG-only extract and interval literal nodes", () => {
+  const ops = record(() => {
+    domain("billing_period").create({
+      as: t.date(),
+      check: (c) => c.pg.extract("day", c("VALUE")).eq(1),
+    });
+    table("oauth_device_codes").create({
+      columns: {
+        issued_at: t.timestamp().notNull(),
+        expires_at: t.timestamp().notNull(),
+      },
+      checks: [
+        {
+          name: "expires_window",
+          expr: (c) => c("expires_at").le(c("issued_at").add(c.pg.interval("00:01:00"))),
+        },
+      ],
+    });
+  });
+  assert.equal(ops[0].as, "date");
+  assert.deepEqual(ops[0].check, {
+    node: "binOp",
+    op: "eq",
+    lhs: { node: "extract", field: "day", expr: { node: "colRef", name: "VALUE" } },
+    rhs: { node: "literal", value: 1 },
+  });
+  assert.deepEqual(ops[1].constraints[0].kind.expr, {
+    node: "binOp",
+    op: "le",
+    lhs: { node: "colRef", name: "expires_at" },
+    rhs: {
+      node: "binOp",
+      op: "add",
+      lhs: { node: "colRef", name: "issued_at" },
+      rhs: { node: "pgIntervalLiteral", value: "00:01:00" },
+    },
+  });
+});
+
 test("c.pg rejects malformed text arrays and regex patterns", () => {
   assert.throws(
     () => record(() => table("t").update({ set: { x: (c) => c.pg.eqAnyArray(c("x"), []) } })),
@@ -447,6 +486,14 @@ test("c.pg rejects malformed text arrays and regex patterns", () => {
   assert.throws(
     () => record(() => table("t").update({ set: { x: (c) => c.pg.regex(c("x"), "") } })),
     (e: any) => e.code === "OP_INVALID" && /pattern must be non-empty/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c.pg.extract("month" as any, c("x")) } })),
+    (e: any) => e.code === "OP_INVALID" && /field must be "day"/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval("1 minute") } })),
+    (e: any) => e.code === "OP_INVALID" && /HH:MM:SS/.test(e.message),
   );
 });
 

@@ -24,6 +24,7 @@ import type {
   ExistenceGuard,
   ExclusionMethod,
   ExclusionOperator,
+  ExtractField,
   ForEach,
   FuncArgMode,
   FuncLanguage,
@@ -54,6 +55,7 @@ export type {
   ExistenceGuard,
   ExclusionMethod,
   ExclusionOperator,
+  ExtractField,
   ForEach,
   FuncArgMode,
   FuncLanguage,
@@ -104,6 +106,7 @@ export type ColType =
   | "bool"
   | "json"
   | "timestamp"
+  | "date"
   | "uuid"
   | "bytea"
   | "geoPoint"
@@ -162,7 +165,9 @@ export type Expr =
   | { node: "cast"; operand: Expr; target: CastTarget }
   | { node: "pgArrayMembership"; expr: Expr; op: PgArrayMembershipOp; elems: string[] }
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
-  | { node: "pgColumnSize"; expr: Expr };
+  | { node: "pgColumnSize"; expr: Expr }
+  | { node: "extract"; field: ExtractField; expr: Expr }
+  | { node: "pgIntervalLiteral"; value: string };
 
 /** A DML cell in an insert row or `onConflict.doUpdate`: either a typed scalar
  *  literal or a closed expression AST such as `fnSynth(now)`. */

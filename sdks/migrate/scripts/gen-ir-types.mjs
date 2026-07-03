@@ -45,6 +45,7 @@ const ENUM_DEFS = [
   "SynthDefaultFn",
   "CastTarget",
   "PgArrayMembershipOp",
+  "ExtractField",
   "IndexMethod",
   "CmpOp",
   "OnUnmet",

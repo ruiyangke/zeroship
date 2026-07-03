@@ -185,6 +185,8 @@ export interface TypeLexicon {
   /** Fixed-precision decimal (default (38, 9)). */
   numeric(precision?: number, scale?: number): ColumnDef;
   timestamp(): ColumnDef;
+  /** Narrow SQL DATE token. Validates only as a PostgreSQL domain base type. */
+  date(): ColumnDef;
   uuid(): ColumnDef;
   bytes(): ColumnDef;
   boolean(): ColumnDef;
@@ -414,6 +416,10 @@ export interface PgExprNamespace {
   regex(expr: unknown, pattern: string): ExprChain;
   /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
   columnSize(expr: unknown): ExprChain;
+  /** Renders `EXTRACT(day FROM <expr>)` on PostgreSQL. */
+  extract(field: "day", expr: unknown): ExprChain;
+  /** Renders `'<safe>'::interval` on PostgreSQL. Accepts strict `HH:MM:SS[.ffffff]`. */
+  interval(value: string): ExprChain;
 }
 
 /** The single injected builder handle: a column-accessor function `c("name")`

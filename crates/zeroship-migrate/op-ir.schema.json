@@ -2648,6 +2648,11 @@
           "const": "timestamp"
         },
         {
+          "description": "Narrow SQL `date`, admitted only as a PostgreSQL domain base type.",
+          "type": "string",
+          "const": "date"
+        },
+        {
           "description": "UUID.",
           "type": "string",
           "const": "uuid"
@@ -3332,6 +3337,49 @@
             "node",
             "expr"
           ]
+        },
+        {
+          "description": "**PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Closed EXTRACT field.",
+              "$ref": "#/$defs/ExtractField"
+            },
+            "expr": {
+              "description": "Source expression.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "extract"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "field",
+            "expr"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** interval literal rendered as `'<safe>'::interval`.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "description": "A strictly-validated interval literal. P1 admits only time-like\n`HH:MM:SS[.ffffff]` values such as `00:01:00`.",
+              "type": "string"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgIntervalLiteral"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "value"
+          ]
         }
       ]
     },
@@ -3576,6 +3624,16 @@
           "description": "`<expr> <> ALL (ARRAY[...])`",
           "type": "string",
           "const": "ne"
+        }
+      ]
+    },
+    "ExtractField": {
+      "description": "CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nP1 admits only the platform `day` marker. Add more fields only with a concrete\ngolden needing them and matching renderer/validation coverage.",
+      "oneOf": [
+        {
+          "description": "Day-of-month field.",
+          "type": "string",
+          "const": "day"
         }
       ]
     },
