@@ -808,13 +808,11 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
 }
 
 #[test]
-fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
+fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
     use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
-    let ir = MigrationIr {
-        ir_version: 1,
-        name: "m".into(),
-        owner_app: OWNER.into(),
-        ops: vec![Op::AddConstraint {
+    let live = BTreeSet::from(["posts".to_string(), "authors".to_string()]);
+    let ir = sql_pairs(&ir_lower_one(
+        Op::AddConstraint {
             table: "authors".into(),
             constraint: IrConstraint {
                 name: Some("authors_pinned_fk".into()),
@@ -828,23 +826,14 @@ fn standalone_add_constraint_fk_rejects_non_id_reference_columns_pg() {
             },
             schema: None,
             existence_guard: None,
-        }],
-        flags: Default::default(),
-        depends_on: vec![],
-        supersedes: vec![],
-        preconditions: vec![],
-        checksum: None,
-    };
-
-    let err = validate_ir(&ir, Dialect::Postgres, &[]).expect_err(
-        "standalone addConstraint(fk) must be validate-refused when referencesColumns \
-         names a non-id target column",
-    );
-    assert_eq!(err.code, CODE_UNSUPPORTED);
-    assert_eq!(err.kind, Some(UnsupportedKind::Op));
-    assert!(
-        err.reason.contains("non-id") || err.reason.contains("non-`id`"),
-        "error should explain that only id references are supported today, got: {err}"
+        },
+        &live,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(
+        ir[0].0,
+        r#"ALTER TABLE "app"."authors" ADD CONSTRAINT "authors_pinned_fk" FOREIGN KEY ("pinned") REFERENCES "app"."posts" ("other")"#,
+        "standalone addConstraint(fk) must render the authored referenced column"
     );
 }
 

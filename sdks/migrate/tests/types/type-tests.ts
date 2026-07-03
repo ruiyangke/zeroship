@@ -57,6 +57,10 @@ export function antiRotMigration(): void {
     columns: ["author_id"],
     references: { table: "another_missing_table", columns: ["id"] },
   });
+  table("nonexistent_table").addForeignKey("composite_fk", {
+    columns: ["tenant_id", "author_id"],
+    references: { schema: "ghost", table: "another_missing_table", columns: ["tenant_id", "author_id"] },
+  });
   table("nonexistent_table").update({
     set: { legacy_col: (c) => c("a_column_no_schema_declares").concat(" suffix") },
     where: (c) => c("yet_another_missing_column").isNull(),

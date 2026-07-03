@@ -1853,9 +1853,10 @@ fn build_table_snapshot_impl(
                     // and default actions are omitted per dialect. Built to
                     // match live byte-for-byte so a policy FK re-diffs clean.
                     definition: fk_definition_for_dialect(
-                        &f.name,
+                        &[f.name.clone()],
                         project_schema,
                         target,
+                        &["id".to_string()],
                         f.on_delete.as_deref(),
                         f.on_update.as_deref(),
                         f.deferrable.unwrap_or(false),
@@ -2069,36 +2070,28 @@ fn fk_constraint_name(field: &str) -> String {
     format!("{field}_fkey")
 }
 
-/// §6.4 — build the [`ConstraintSnapshot`] for a stand-alone IR `addConstraint`
-/// FK, in the EXACT shape the differ's deferred-FK path carries: the dialect
-/// canonical `definition` (via [`fk_definition_for_dialect`]) + the deterministic
-/// `<field>_fkey` name (or an explicit name). `IrAuthor` calls this so the FK body
-/// is built by the SAME helper the differ uses — never re-spelled — and
-/// `lower_add_fk` then renders it byte-identically to a deferred FK.
-///
-/// Single-column FK only in PR1 (the `t.*`/`op.*` `ref` shape is single-column,
-/// referencing the target's `id`); a multi-column FK is a later wave.
-pub(crate) fn ir_fk_constraint_snapshot(
+pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     project_schema: &str,
     explicit_name: Option<&str>,
-    local_column: &str,
+    local_columns: &[String],
     references_table: &str,
+    references_columns: &[String],
     on_delete: Option<&str>,
     on_update: Option<&str>,
     dialect: SqlDialect,
 ) -> ConstraintSnapshot {
-    let name = explicit_name
-        .map(ToString::to_string)
-        .unwrap_or_else(|| fk_constraint_name(local_column));
-    // C1 — the referential actions are rendered through the same dialect canonical
-    // path as declarative `ref` fields, so an action-free stand-alone IR FK stays
-    // byte-identical to the FK the differ builds for the same single-column
-    // reference. Omitted actions/deferrability are the SQL/Postgres defaults and
-    // render as a bare FK; explicit actions still render.
+    let name = explicit_name.map(ToString::to_string).unwrap_or_else(|| {
+        if local_columns.len() == 1 {
+            fk_constraint_name(&local_columns[0])
+        } else {
+            crate::plan::author::cap_ident_name(&format!("{}_fkey", local_columns.join("_")))
+        }
+    });
     let definition = fk_definition_for_dialect(
-        local_column,
+        local_columns,
         project_schema,
         references_table,
+        references_columns,
         on_delete,
         on_update,
         false,
@@ -2338,7 +2331,7 @@ fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'st
 /// Empirically (probed against PG 17), `pg_get_constraintdef` renders a FK as:
 ///
 /// ```text
-/// FOREIGN KEY (<col>) REFERENCES <schema>.<target>(id)[ ON UPDATE <u>][ ON DELETE <d>][ DEFERRABLE INITIALLY DEFERRED]
+/// FOREIGN KEY (<cols>) REFERENCES <schema>.<target>(<cols>)[ ON UPDATE <u>][ ON DELETE <d>][ DEFERRABLE INITIALLY DEFERRED]
 /// ```
 ///
 /// with two normalisations the DDL spelling does NOT have:
@@ -2352,9 +2345,10 @@ fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'st
 /// On MySQL, `RESTRICT` and `NO ACTION` are semantically identical and both fold
 /// to the omitted default; `CASCADE`, `SET NULL`, and `SET DEFAULT` still render.
 fn fk_definition_for_dialect(
-    field: &str,
+    local_columns: &[String],
     project_schema: &str,
     target: &str,
+    references_columns: &[String],
     on_delete: Option<&str>,
     on_update: Option<&str>,
     deferrable: bool,
@@ -2375,11 +2369,17 @@ fn fk_definition_for_dialect(
     // reuses it, and `ConstraintSnapshot` has FULL Eq) AND mis-resolve `order` as
     // the keyword. Over-quoting a safe lowercase column would equally phantom-diff
     // the catalog's bare body — hence conditional (`quote_ident_if_needed`).
+    let ref_cols = if references_columns.is_empty() {
+        vec!["id".to_string()]
+    } else {
+        references_columns.to_vec()
+    };
     let mut def = format!(
-        "FOREIGN KEY ({}) REFERENCES {}.{}(id)",
-        quote_ident_if_needed(field),
+        "FOREIGN KEY ({}) REFERENCES {}.{}({})",
+        constraintdef_cols(local_columns),
         quote_ident_if_needed(project_schema),
         quote_ident_if_needed(target),
+        constraintdef_cols(&ref_cols),
     );
     let on_update = normalize_fk_action_for_dialect(on_update, dialect);
     let on_delete = normalize_fk_action_for_dialect(on_delete, dialect);
@@ -2407,10 +2407,13 @@ fn fk_definition_pg(
     on_update: Option<&str>,
     deferrable: bool,
 ) -> String {
+    let local = vec![field.to_string()];
+    let refs = vec!["id".to_string()];
     fk_definition_for_dialect(
-        field,
+        &local,
         project_schema,
         target,
+        &refs,
         on_delete,
         on_update,
         deferrable,
@@ -4809,14 +4812,16 @@ impl DeclarativeAuthor {
         if matches!(self.dialect, SqlDialect::Mysql) {
             return self.mysql_fk_clause(fk);
         }
-        let col = fk_local_column(&fk.definition).unwrap_or_default();
+        let cols = fk_local_columns(&fk.definition);
         let target = fk_target_table(&fk.definition).unwrap_or_default();
+        let ref_cols = fk_referenced_columns(&fk.definition);
         let policy = fk_policy_tail(&fk.definition);
         format!(
-            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} (id){}",
+            "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){}",
             quote_ident(&fk.name),
-            quote_ident(&col),
+            fk_ddl_local_cols(&cols),
             self.qualified(&target),
+            fk_ddl_referenced_cols(&ref_cols),
             policy,
         )
     }
@@ -6174,8 +6179,86 @@ fn topo_order_new_tables<'a>(
     ordered
 }
 
+fn split_constraintdef_column_list(list: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut chars = list.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                current.push(ch);
+                if matches!(chars.peek(), Some('"')) {
+                    current.push(chars.next().unwrap());
+                } else {
+                    in_quote = !in_quote;
+                }
+            }
+            ',' if !in_quote => {
+                let col = unquote_constraintdef_column(&current);
+                if !col.is_empty() {
+                    cols.push(col);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let col = unquote_constraintdef_column(&current);
+    if !col.is_empty() {
+        cols.push(col);
+    }
+    cols
+}
+
+fn unquote_constraintdef_column(token: &str) -> String {
+    let trimmed = token.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].replace("\"\"", "\"")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn fk_definition_column_group(definition: &str, offset: usize) -> Option<(Vec<String>, usize)> {
+    let open = definition[offset..].find('(')? + offset;
+    let mut in_quote = false;
+    let mut chars = definition[open + 1..].char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '"' => {
+                if matches!(chars.peek(), Some((_, '"'))) {
+                    let _ = chars.next();
+                } else {
+                    in_quote = !in_quote;
+                }
+            }
+            ')' if !in_quote => {
+                let close = open + 1 + idx;
+                return Some((
+                    split_constraintdef_column_list(&definition[open + 1..close]),
+                    close + 1,
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn fk_ddl_local_cols(cols: &[String]) -> String {
+    cols.iter().map(|c| quote_ident(c)).collect::<Vec<_>>().join(", ")
+}
+
+fn fk_ddl_referenced_cols(cols: &[String]) -> String {
+    cols.iter()
+        .map(|c| if c == "id" { "id".to_string() } else { quote_ident(c) })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Extract the referenced (target) table from an FK definition of the form
-/// `FOREIGN KEY (<col>) REFERENCES <schema>.<table>(id)` (the schema-qualified
+/// `FOREIGN KEY (<col>) REFERENCES <schema>.<table>(<cols>)` (the schema-qualified
 /// `pg_get_constraintdef` spelling [`desired_snapshot`] now emits, matching live).
 /// Returns the BARE table name (schema stripped) so it matches `SchemaSnapshot`
 /// table keys.
@@ -6200,38 +6283,39 @@ fn fk_target_table(definition: &str) -> Option<String> {
     }
 }
 
-/// Extract the policy tail (everything AFTER `REFERENCES <schema>.<target>(id)`)
+/// Extract the policy tail (everything AFTER `REFERENCES <schema>.<target>(<cols>)`)
 /// from a FK definition built by [`fk_definition_for_dialect`] — i.e. the
 /// ` ON UPDATE …`/` ON DELETE …`/` DEFERRABLE INITIALLY DEFERRED` clauses, with
 /// a leading space, or an empty string for a bare FK.
-///
-/// The definition is the canonical `pg_get_constraintdef` body, where the target
-/// is always followed by `(id)` (the PK column, no space before the paren). We
-/// split on the FIRST `(id)` after `REFERENCES` and return the remainder. The
-/// emitted DDL appends this verbatim; Postgres accepts the same clause order, so
-/// the re-introspected constraint body is byte-identical and re-diffs clean (#1).
 fn fk_policy_tail(definition: &str) -> String {
     let Some(after_ref) = definition.split_once("REFERENCES") else {
         return String::new();
     };
-    // Find the `(id)` that closes the target reference and take what follows.
-    after_ref
-        .1
-        .find("(id)")
-        .map(|i| after_ref.1[i + "(id)".len()..].to_string())
+    let offset = definition.len() - after_ref.1.len();
+    fk_definition_column_group(definition, offset)
+        .map(|(_, end)| definition[end..].to_string())
         .unwrap_or_default()
 }
 
 /// Extract the local column from an FK definition `FOREIGN KEY (<col>) …`.
 fn fk_local_column(definition: &str) -> Option<String> {
-    let open = definition.find('(')?;
-    let close = definition[open + 1..].find(')')? + open + 1;
-    let col = definition[open + 1..close].trim().trim_matches('"');
-    if col.is_empty() {
-        None
-    } else {
-        Some(col.to_string())
-    }
+    fk_local_columns(definition).into_iter().next()
+}
+
+fn fk_local_columns(definition: &str) -> Vec<String> {
+    fk_definition_column_group(definition, 0)
+        .map(|(cols, _)| cols)
+        .unwrap_or_default()
+}
+
+fn fk_referenced_columns(definition: &str) -> Vec<String> {
+    let Some(after_ref) = definition.split_once("REFERENCES") else {
+        return vec!["id".to_string()];
+    };
+    let offset = definition.len() - after_ref.1.len();
+    fk_definition_column_group(definition, offset)
+        .map(|(cols, _)| if cols.is_empty() { vec!["id".to_string()] } else { cols })
+        .unwrap_or_else(|| vec!["id".to_string()])
 }
 
 

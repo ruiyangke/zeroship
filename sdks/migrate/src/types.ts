@@ -455,6 +455,9 @@ export type IndexMethod = "btree" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5"
 /** A named foreign-key reference (the `references` half of a FK add / a
  *  `create.foreignKeys[]` entry). */
 export interface ForeignKeyReference {
+  /** Optional authoring hint. The frozen IR carries the table name only, so this
+   *  must match the table/op schema when provided. */
+  schema?: string;
   table: string;
   columns: string[];
 }
@@ -707,9 +710,8 @@ export interface SetTableOptionsArgs {
  *    `foreignKeys` on SQLite is a HARD authoring error (the SQLite CREATE renders
  *    from the column descriptor — a table-level constraint is not threaded into
  *    the emitter; refused fail-closed rather than silently dropped).
- *  - `foreignKeys` are single-local-column, referencing the target's `id` (the
- *    only shape the renderer emits today); a multi-column / non-`id` FK is a HARD
- *    error (later wave).
+ *  - `foreignKeys` can name one or more local columns and one or more referenced
+ *    columns. Composite/non-`id` forms are PostgreSQL-only in the current engine.
  *  - `checks` lower from the closed `Expr` AST through the engine renderer.
  *    Partial-index `where` renders on PostgreSQL and SQLite; MySQL refuses it
  *    fail-closed because MySQL has no partial indexes.
@@ -861,6 +863,17 @@ export interface TableHandle {
   // §3.2/§3.3/§3.4 — selectors for named sub-objects
   column(name: string): ColumnRef;
   foreignKey(name: string): ForeignKeyRef;
+  addForeignKey(
+    name: string,
+    args: {
+      columns: string[];
+      references: ForeignKeyReference;
+      onDelete?: RefAction;
+      onUpdate?: RefAction;
+      ifNotExists?: boolean;
+      schema?: string;
+    },
+  ): TableHandle;
   unique(name: string): UniqueRef;
   check(name: string): CheckRef;
   addCheck(name: string, expr: ExprFn, args?: { ifNotExists?: boolean; schema?: string }): TableHandle;

@@ -1299,6 +1299,7 @@ function recordCreateTable(name, args) {
         references: fkSpec.references,
         onDelete: fkSpec.onDelete,
         onUpdate: fkSpec.onUpdate,
+        schema: args.schema,
       }),
     );
   }
@@ -1475,6 +1476,15 @@ function fkConstraintFromSpec(spec) {
   if (!spec || typeof spec !== "object" || !spec.references) {
     throw structuredError("OP_INVALID", ".foreignKey(name).add needs { columns, references:{ table, columns } }");
   }
+  if (spec.references.schema !== undefined) {
+    requireString(spec.references.schema, "foreign key references.schema");
+    if (spec.schema !== undefined && spec.references.schema !== spec.schema) {
+      throw structuredError(
+        "OP_INVALID",
+        "foreign key references.schema must match the table schema; cross-schema FKs are not representable in the frozen IR",
+      );
+    }
+  }
   return compact({
     name: spec.name,
     kind: compact({
@@ -1499,6 +1509,7 @@ function recordAddForeignKey(table, name, args) {
         references: args.references,
         onDelete: args.onDelete,
         onUpdate: args.onUpdate,
+        schema: args.schema,
       }),
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
@@ -2187,6 +2198,11 @@ export function table(name, opts = {}) {
           return handle;
         },
       };
+    },
+    addForeignKey(fkName, args) {
+      requireString(fkName, ".addForeignKey(name, args)");
+      recordAddForeignKey(name, fkName, { ...args, schema: pickSchema(args, dflt) });
+      return handle;
     },
     unique(uqName) {
       requireString(uqName, ".unique(name)");
