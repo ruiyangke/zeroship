@@ -363,6 +363,7 @@ import {
   and,
   or,
   membership,
+  notMembership,
   interval,
 } from "@zeroship/migrate";
 import { schema } from "@zeroship/migrate/pg";
@@ -392,6 +393,7 @@ export function up() {
       check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
       check("expr_user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
       check("expr_kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
+      check("expr_kind_not_reserved", (c) => notMembership(c("kind"), ["x", "y"])),
       check("expr_data_size", (c) => c("data").columnSize().lt(262144)),
       check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
       check("expr_floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
@@ -976,6 +978,10 @@ async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
         (
             "expr_kind_ok",
             "CHECK ((kind = ANY (ARRAY['a'::text, 'b'::text, 'c'::text])))",
+        ),
+        (
+            "expr_kind_not_reserved",
+            "CHECK ((kind <> ALL (ARRAY['x'::text, 'y'::text])))",
         ),
         (
             "expr_data_size",

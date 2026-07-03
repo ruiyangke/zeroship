@@ -18,6 +18,7 @@ import {
   or,
   not,
   membership,
+  notMembership,
   lit,
   interval,
 } from "../src/index.js";
@@ -497,6 +498,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         check("enabled_and_visible", (c) => and(c("enabled"), c("visible"))),
         check("expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
         check("not_archived", (c) => not(c("kind").eq(lit("archived")))),
+        check("kind_not_reserved", (c) => notMembership(c("kind"), ["x", "y"])),
       ],
     });
     table("expr_checks").addCheck("score_nonnegative", (c) => c("total_cents").ge(0));
@@ -574,6 +576,12 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       lhs: { node: "colRef", name: "kind" },
       rhs: { node: "literal", value: "archived" },
     },
+  });
+  assert.deepEqual(checks[9], {
+    node: "pgArrayMembership",
+    expr: { node: "colRef", name: "kind" },
+    op: "ne",
+    elems: ["x", "y"],
   });
   assert.deepEqual(ops[1], {
     op: "addConstraint",

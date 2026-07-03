@@ -30,6 +30,7 @@ export {
   or,
   not,
   membership,
+  notMembership,
   lit,
   interval,
   // the immutable fluent column-type lexicon
