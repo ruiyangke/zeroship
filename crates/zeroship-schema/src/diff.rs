@@ -1074,8 +1074,8 @@ pub fn compute_diff(
                             "field": field,
                             "target_table": target,
                             "target_column": "id",
-                            "on_delete": def.get("onDelete").cloned().unwrap_or(Value::String("restrict".into())),
-                            "on_update": def.get("onUpdate").cloned().unwrap_or(Value::String("restrict".into())),
+                            "on_delete": def.get("onDelete").cloned().unwrap_or(Value::String("noAction".into())),
+                            "on_update": def.get("onUpdate").cloned().unwrap_or(Value::String("noAction".into())),
                         }),
                         field: Some(field.clone()),
                     });
@@ -1101,8 +1101,8 @@ pub fn compute_diff(
                         "field": field,
                         "target_table": target,
                         "target_column": "id",
-                        "on_delete": def.get("onDelete").cloned().unwrap_or(Value::String("restrict".into())),
-                        "on_update": def.get("onUpdate").cloned().unwrap_or(Value::String("restrict".into())),
+                        "on_delete": def.get("onDelete").cloned().unwrap_or(Value::String("noAction".into())),
+                        "on_update": def.get("onUpdate").cloned().unwrap_or(Value::String("noAction".into())),
                     }),
                     field: Some(field.clone()),
                 });
@@ -1114,9 +1114,14 @@ pub fn compute_diff(
                 let declared_on_update = crate::query::normalize_fk_action(
                     def.get("onUpdate").and_then(|v| v.as_str()),
                 );
+                let declared_deferrable = def
+                    .get("deferrable")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let declared_target = target;
                 if declared_on_delete != fk.on_delete
                     || declared_on_update != fk.on_update
+                    || declared_deferrable != fk.deferrable
                     || declared_target != fk.target_table
                 {
                     ops.push(DiffOp {
@@ -1143,6 +1148,7 @@ pub fn compute_diff(
                             "target_column": "id",
                             "on_delete": declared_on_delete,
                             "on_update": declared_on_update,
+                            "deferrable": declared_deferrable,
                         }),
                         field: Some(field.clone()),
                     });
@@ -1907,9 +1913,9 @@ mod tests {
                 column: "authorId".into(),
                 target_table: "users".into(),
                 target_column: "id".into(),
-                on_delete: "RESTRICT".into(),
-                on_update: "RESTRICT".into(),
-                deferrable: true,
+                on_delete: "NO ACTION".into(),
+                on_update: "NO ACTION".into(),
+                deferrable: false,
             },
         );
         live.foreign_keys.insert("posts".to_string(), fks);
@@ -1948,9 +1954,9 @@ mod tests {
                 column: "authorId".into(),
                 target_table: "users".into(),
                 target_column: "id".into(),
-                on_delete: "RESTRICT".into(),
-                on_update: "RESTRICT".into(),
-                deferrable: true,
+                on_delete: "NO ACTION".into(),
+                on_update: "NO ACTION".into(),
+                deferrable: false,
             },
         );
         live.foreign_keys.insert("posts".to_string(), fks);

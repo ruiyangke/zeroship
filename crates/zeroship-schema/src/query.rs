@@ -1572,7 +1572,7 @@ fn build_fk_clause(
     let deferrable = def
         .get("deferrable")
         .and_then(|v| v.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     let target_qualified = renderer(dialect).foreign_key_target(app_id, target);
     let deferrable_clause = if deferrable && !matches!(dialect, SqlDialect::Mysql) {
@@ -1587,11 +1587,11 @@ fn build_fk_clause(
         quote_ident_for_dialect(field, dialect),
         target_qualified,
     );
-    if !matches!(dialect, SqlDialect::Mysql) || on_delete != "NO ACTION" {
+    if on_delete != "NO ACTION" {
         clause.push_str(" ON DELETE ");
         clause.push_str(on_delete);
     }
-    if !matches!(dialect, SqlDialect::Mysql) || on_update != "NO ACTION" {
+    if on_update != "NO ACTION" {
         clause.push_str(" ON UPDATE ");
         clause.push_str(on_update);
     }
@@ -1601,7 +1601,7 @@ fn build_fk_clause(
 
 /// Normalise an FK action to the SQL keyword form Postgres accepts.
 fn normalize_fk_action_inner(s: Option<&str>) -> &'static str {
-    match s.unwrap_or("restrict").to_ascii_lowercase().as_str() {
+    match s.unwrap_or("no action").to_ascii_lowercase().as_str() {
         "cascade" => "CASCADE",
         "set null" | "set_null" | "setnull" => "SET NULL",
         "set default" | "set_default" | "setdefault" => "SET DEFAULT",
@@ -8395,16 +8395,15 @@ mod tests {
         // **P7 PR 3** — TEXT column for the FK (cascades to match the
         // new `id TEXT PRIMARY KEY`; was INTEGER pre-PR 3).
         assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
-        // Inline FK clause with default ON DELETE RESTRICT
+        // Inline FK clause with SQL/Postgres defaults omitted.
         assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
         assert!(
             sql.contains("REFERENCES \"app1\".\"users\" (id)"),
             "{sql}"
         );
-        assert!(sql.contains("ON DELETE RESTRICT"), "{sql}");
-        assert!(sql.contains("ON UPDATE RESTRICT"), "{sql}");
-        // Default deferrable
-        assert!(sql.contains("DEFERRABLE INITIALLY DEFERRED"), "{sql}");
+        assert!(!sql.contains("ON DELETE"), "{sql}");
+        assert!(!sql.contains("ON UPDATE"), "{sql}");
+        assert!(!sql.contains("DEFERRABLE"), "{sql}");
     }
 
     #[test]
@@ -8476,6 +8475,23 @@ mod tests {
         });
         let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(!sql.contains("DEFERRABLE"), "{sql}");
+    }
+
+    #[test]
+    fn b2_ref_explicit_restrict_and_deferrable_render() {
+        let schema = json!({
+            "authorId": {
+                "type": "ref",
+                "refTarget": "users",
+                "onUpdate": "restrict",
+                "deferrable": true,
+            },
+        });
+        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+        assert!(sql.contains("REFERENCES \"app1\".\"users\" (id)"), "{sql}");
+        assert!(sql.contains("ON UPDATE RESTRICT"), "{sql}");
+        assert!(!sql.contains("ON DELETE"), "{sql}");
+        assert!(sql.contains("DEFERRABLE INITIALLY DEFERRED"), "{sql}");
     }
 
     #[test]
