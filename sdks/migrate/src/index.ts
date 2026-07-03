@@ -25,6 +25,13 @@ export {
   view,
   enumType,
   comment,
+  check,
+  and,
+  or,
+  not,
+  membership,
+  lit,
+  interval,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -48,6 +55,7 @@ export type {
   ExprBuilder,
   ExprChain,
   ExprFn,
+  CheckDef,
   FnNamespace,
   ScalarValue,
   Row,
