@@ -208,13 +208,10 @@ export function up() {
   table("invoice_lines", { schema: "zeroship" }).foreignKey("invoice_lines_invoice_id_fkey").add({ columns: ["invoice_id"], references: { table: "invoices", columns: ["id"] }, onDelete: "restrict" });
   table("invoice_lines", { schema: "zeroship" }).foreignKey("invoice_lines_plan_id_fkey").add({ columns: ["plan_id"], references: { table: "plans", columns: ["id"] }, onDelete: "restrict" });
   table("invoice_payments", { schema: "zeroship" }).foreignKey("invoice_payments_invoice_id_fkey").add({ columns: ["invoice_id"], references: { table: "invoices", columns: ["id"] }, onDelete: "restrict" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.invoices\n    ADD CONSTRAINT invoices_creator_id_fkey FOREIGN KEY (creator_id) REFERENCES zeroship.creator_billing(creator_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
+  table("invoices", { schema: "zeroship" }).addForeignKey("invoices_creator_id_fkey", { columns: ["creator_id"], references: { table: "creator_billing", columns: ["creator_id"], schema: "zeroship" }, onDelete: "cascade" });
   table("magic_links", { schema: "zeroship" }).foreignKey("magic_links_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.metering_exports\n    ADD CONSTRAINT metering_exports_creator_id_fkey FOREIGN KEY (creator_id) REFERENCES zeroship.creator_billing(creator_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.metric_weights\n    ADD CONSTRAINT metric_weights_metric_fkey FOREIGN KEY (metric) REFERENCES zeroship.billing_metrics(metric) ON DELETE RESTRICT", reason: "the current basic FK path is limited to single-column references to id" });
+  table("metering_exports", { schema: "zeroship" }).addForeignKey("metering_exports_creator_id_fkey", { columns: ["creator_id"], references: { table: "creator_billing", columns: ["creator_id"], schema: "zeroship" }, onDelete: "cascade" });
+  table("metric_weights", { schema: "zeroship" }).addForeignKey("metric_weights_metric_fkey", { columns: ["metric"], references: { table: "billing_metrics", columns: ["metric"], schema: "zeroship" }, onDelete: "restrict" });
   table("migrated_app_policies", { schema: "zeroship" }).foreignKey("migrated_app_policies_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   table("migrated_app_policies", { schema: "zeroship" }).foreignKey("migrated_app_policies_submitted_by_fkey").add({ columns: ["submitted_by"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
   table("migrated_migration_audit", { schema: "zeroship" }).foreignKey("migrated_migration_audit_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
@@ -222,24 +219,18 @@ export function up() {
   table("migrated_migrations", { schema: "zeroship" }).foreignKey("migrated_migrations_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   table("migrated_migrations", { schema: "zeroship" }).foreignKey("migrated_migrations_approved_by_fkey").add({ columns: ["approved_by"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
   table("migrated_migrations", { schema: "zeroship" }).foreignKey("migrated_migrations_submitted_by_fkey").add({ columns: ["submitted_by"], references: { table: "users", columns: ["id"] }, onDelete: "restrict" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_authorization_codes\n    ADD CONSTRAINT oauth_authorization_codes_client_id_fkey FOREIGN KEY (client_id) REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
+  table("oauth_authorization_codes", { schema: "zeroship" }).addForeignKey("oauth_authorization_codes_client_id_fkey", { columns: ["client_id"], references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" }, onDelete: "cascade" });
   table("oauth_authorization_codes", { schema: "zeroship" }).foreignKey("oauth_authorization_codes_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
   table("oauth_clients", { schema: "zeroship" }).foreignKey("oauth_clients_created_by_fkey").add({ columns: ["created_by"], references: { table: "users", columns: ["id"] } });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_grants\n    ADD CONSTRAINT oauth_grants_client_id_fkey FOREIGN KEY (client_id) REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
+  table("oauth_grants", { schema: "zeroship" }).addForeignKey("oauth_grants_client_id_fkey", { columns: ["client_id"], references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" }, onDelete: "cascade" });
   table("oauth_grants", { schema: "zeroship" }).foreignKey("oauth_grants_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.oauth_refresh_tokens\n    ADD CONSTRAINT oauth_refresh_tokens_client_id_fkey FOREIGN KEY (client_id) REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
+  table("oauth_refresh_tokens", { schema: "zeroship" }).addForeignKey("oauth_refresh_tokens_client_id_fkey", { columns: ["client_id"], references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" }, onDelete: "cascade" });
   table("oauth_refresh_tokens", { schema: "zeroship" }).foreignKey("oauth_refresh_tokens_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.oidc_session_clients\n    ADD CONSTRAINT oidc_session_clients_client_id_fkey FOREIGN KEY (client_id) REFERENCES zeroship.oauth_clients(client_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
+  table("oidc_session_clients", { schema: "zeroship" }).addForeignKey("oidc_session_clients_client_id_fkey", { columns: ["client_id"], references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" }, onDelete: "cascade" });
   table("oidc_session_clients", { schema: "zeroship" }).foreignKey("oidc_session_clients_idp_session_id_fkey").add({ columns: ["idp_session_id"], references: { table: "idp_sessions", columns: ["id"] }, onDelete: "cascade" });
   table("oidc_session_clients", { schema: "zeroship" }).foreignKey("oidc_session_clients_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.payout_failures\n    ADD CONSTRAINT payout_failures_creator_id_fkey FOREIGN KEY (creator_id) REFERENCES zeroship.creator_accounts(creator_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.payouts\n    ADD CONSTRAINT payouts_creator_id_fkey FOREIGN KEY (creator_id) REFERENCES zeroship.creator_accounts(creator_id) ON DELETE RESTRICT", reason: "the current basic FK path is limited to single-column references to id" });
+  table("payout_failures", { schema: "zeroship" }).addForeignKey("payout_failures_creator_id_fkey", { columns: ["creator_id"], references: { table: "creator_accounts", columns: ["creator_id"], schema: "zeroship" }, onDelete: "cascade" });
+  table("payouts", { schema: "zeroship" }).addForeignKey("payouts_creator_id_fkey", { columns: ["creator_id"], references: { table: "creator_accounts", columns: ["creator_id"], schema: "zeroship" }, onDelete: "restrict" });
   table("permission_tokens", { schema: "zeroship" }).foreignKey("permission_tokens_owner_id_fkey").add({ columns: ["owner_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
   table("plan_change_events", { schema: "zeroship" }).foreignKey("plan_change_events_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   table("plan_change_events", { schema: "zeroship" }).foreignKey("plan_change_events_from_plan_id_fkey").add({ columns: ["from_plan_id"], references: { table: "plans", columns: ["id"] }, onDelete: "restrict" });
@@ -250,10 +241,8 @@ export function up() {
   table("principal_grants", { schema: "zeroship" }).foreignKey("principal_grants_principal_id_fkey").add({ columns: ["principal_id"], references: { table: "users", columns: ["id"] } });
   table("refund_provider_refs", { schema: "zeroship" }).foreignKey("refund_provider_refs_refund_id_fkey").add({ columns: ["refund_id"], references: { table: "refunds", columns: ["id"] }, onDelete: "cascade" });
   table("refunds", { schema: "zeroship" }).foreignKey("refunds_invoice_id_fkey").add({ columns: ["invoice_id"], references: { table: "invoices", columns: ["id"] }, onDelete: "restrict" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandboxes\n    ADD CONSTRAINT sandboxes_host_id_fkey FOREIGN KEY (host_id) REFERENCES zeroship.hosts(host_id) ON DELETE RESTRICT", reason: "the current basic FK path is limited to single-column references to id" });
-  // TODO(dsl-v2): multi-column or non-id foreign keys remain raw until the FK lowerer accepts the full constraint model
-  raw({ sql: "ALTER TABLE ONLY zeroship.shares\n    ADD CONSTRAINT shares_sandbox_id_fkey FOREIGN KEY (sandbox_id) REFERENCES zeroship.sandboxes(sandbox_id) ON DELETE CASCADE", reason: "the current basic FK path is limited to single-column references to id" });
+  table("sandboxes", { schema: "zeroship" }).addForeignKey("sandboxes_host_id_fkey", { columns: ["host_id"], references: { table: "hosts", columns: ["host_id"], schema: "zeroship" }, onDelete: "restrict" });
+  table("shares", { schema: "zeroship" }).addForeignKey("shares_sandbox_id_fkey", { columns: ["sandbox_id"], references: { table: "sandboxes", columns: ["sandbox_id"], schema: "zeroship" }, onDelete: "cascade" });
   table("spend_state_history", { schema: "zeroship" }).foreignKey("spend_state_history_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   table("totp_backup_codes", { schema: "zeroship" }).foreignKey("totp_backup_codes_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
   table("totp_credentials", { schema: "zeroship" }).foreignKey("totp_credentials_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
