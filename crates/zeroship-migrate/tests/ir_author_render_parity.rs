@@ -740,10 +740,10 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
         SqlDialect::Postgres,
     ));
     let up = &ir[0].0;
-    assert!(up.contains("FOREIGN KEY"), "must render a FOREIGN KEY: {up}");
-    assert!(
-        up.contains("ON DELETE CASCADE"),
-        "C1: on_delete: cascade must render ON DELETE CASCADE (got: {up})"
+    assert_eq!(
+        up,
+        r#"ALTER TABLE "app"."authors" ADD CONSTRAINT "authors_pinned_fk" FOREIGN KEY ("pinned") REFERENCES "app"."posts" (id) ON DELETE CASCADE"#,
+        "C1/P1: only the explicit on_delete action should render"
     );
 
     // Neutrality: with NO actions the same FK renders WITHOUT an ON DELETE clause
@@ -768,10 +768,42 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
         &live,
         SqlDialect::Postgres,
     ));
-    assert!(
-        !ir_none[0].0.contains("ON DELETE CASCADE"),
-        "an action-free FK must NOT render ON DELETE CASCADE (got: {})",
+    assert_eq!(
+        ir_none[0].0,
+        r#"ALTER TABLE "app"."authors" ADD CONSTRAINT "authors_pinned_fk" FOREIGN KEY ("pinned") REFERENCES "app"."posts" (id)"#,
+        "an action-free FK must render bare (got: {})",
         ir_none[0].0
+    );
+}
+
+#[test]
+fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
+    let live = BTreeSet::from(["posts".to_string(), "authors".to_string()]);
+
+    let ir = sql_pairs(&ir_lower_one(
+        Op::AddConstraint {
+            table: "authors".into(),
+            constraint: IrConstraint {
+                name: Some("authors_pinned_fk".into()),
+                kind: IrConstraintKind::Fk {
+                    columns: vec!["pinned".into()],
+                    references_table: "posts".into(),
+                    references_columns: vec!["id".into()],
+                    on_delete: None,
+                    on_update: Some(RefAction::Restrict),
+                },
+            },
+            schema: None,
+            existence_guard: None,
+        },
+        &live,
+        SqlDialect::Postgres,
+    ));
+    assert_eq!(
+        ir[0].0,
+        r#"ALTER TABLE "app"."authors" ADD CONSTRAINT "authors_pinned_fk" FOREIGN KEY ("pinned") REFERENCES "app"."posts" (id) ON UPDATE RESTRICT"#,
+        "explicit ON UPDATE RESTRICT must not be treated as the implicit default"
     );
 }
 

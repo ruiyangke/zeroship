@@ -3532,6 +3532,18 @@ async fn apply_and_assert_clean_roundtrip(
     );
 }
 
+fn greenfield_create_sql(author: &DeclarativeAuthor, desired: &DesiredSchema, table: &str) -> String {
+    let plan = author
+        .diff(desired, &SchemaSnapshot::default(), &HashMap::new(), &[])
+        .expect("greenfield diff");
+    let name = format!("create_table_{table}");
+    plan.all_migrations()
+        .into_iter()
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("migration {name} present"))
+        .up
+}
+
 #[compio::test]
 async fn fk_with_cascade_policy_round_trips_clean() {
     // #1: a CASCADE/CASCADE deferrable FK must apply and re-diff to ZERO. RED
@@ -3575,7 +3587,7 @@ async fn fk_with_set_null_policy_round_trips_clean() {
     let child = CollectionDescriptor {
         name: "child".into(),
         owner_app: "app_test".into(),
-        // SET NULL on delete; default (restrict) on update; deferrable default true.
+        // SET NULL on delete; default NO ACTION on update; NOT DEFERRABLE by default.
         fields: vec![ref_field("p", "parent", Some("set null"), None, None)],
         indexes: vec![],
     runtime_options: Default::default(),
@@ -3587,44 +3599,9 @@ async fn fk_with_set_null_policy_round_trips_clean() {
 }
 
 #[compio::test]
-async fn fk_sdk_default_restrict_deferrable_round_trips_clean() {
-    // #1: the SDK default for a bare t.ref() is restrict/restrict/deferrable=true.
-    // A `references` with no explicit policy must round-trip clean (the most
-    // common shape). RED pre-fix: the engine emitted a bare FK (no DEFERRABLE),
-    // so live's DEFERRABLE INITIALLY DEFERRED phantom-drifted forever.
-    let tok = token();
-    let cfg = cfg_with_role(&tok);
-    let conn = pg().await;
-    teardown(&conn, &cfg).await;
-    setup(&conn, &cfg).await;
-    let author = author_for(&cfg);
-    let engine = MigrationEngine::new();
-
-    let parent = CollectionDescriptor { name: "authors".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
-    let child = CollectionDescriptor {
-        name: "posts".into(),
-        owner_app: "app_test".into(),
-        // Bare references: every policy defaulted (restrict/restrict/deferrable).
-        fields: vec![FieldDescriptor {
-            name: "author".into(),
-            ty: "ref".into(),
-            references: Some("authors".into()),
-            ..Default::default()
-        }],
-        indexes: vec![],
-    runtime_options: Default::default(),
-    };
-    let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
-    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
-
-    teardown(&conn, &cfg).await;
-}
-
-#[compio::test]
-async fn fk_no_action_non_deferrable_round_trips_clean() {
-    // #1: an explicit NO ACTION / NO ACTION, deferrable=false FK renders with NO
-    // policy clauses at all in pg_get_constraintdef — the desired snapshot must
-    // omit them too, else phantom drift.
+async fn fk_with_only_on_delete_cascade_renders_clean_and_round_trips() {
+    // P1: an explicit ON DELETE action must not pull in implicit ON UPDATE or
+    // DEFERRABLE clauses. This is the platform baseline shape.
     let tok = token();
     let cfg = cfg_with_role(&tok);
     let conn = pg().await;
@@ -3637,11 +3614,94 @@ async fn fk_no_action_non_deferrable_round_trips_clean() {
     let child = CollectionDescriptor {
         name: "child".into(),
         owner_app: "app_test".into(),
-        fields: vec![ref_field("p", "parent", Some("no action"), Some("no action"), Some(false))],
+        fields: vec![ref_field("p", "parent", Some("cascade"), None, None)],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
+    let create = greenfield_create_sql(&author, &desired, "child");
+    let fk = format!(
+        r#"CONSTRAINT "p_fkey" FOREIGN KEY ("p") REFERENCES "{}"."parent" (id) ON DELETE CASCADE"#,
+        cfg.project_schema
+    );
+    assert!(create.contains(&fk), "FK clause must be exact: {create}");
+    assert!(!create.contains("ON UPDATE"), "implicit ON UPDATE must be omitted: {create}");
+    assert!(!create.contains("DEFERRABLE"), "implicit DEFERRABLE must be omitted: {create}");
+
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn fk_default_no_action_not_deferrable_round_trips_clean() {
+    // P1: a `references` with no explicit policy is the PG default:
+    // ON DELETE/ON UPDATE NO ACTION and NOT DEFERRABLE, all omitted in SQL.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let parent = CollectionDescriptor { name: "authors".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
+    let child = CollectionDescriptor {
+        name: "posts".into(),
+        owner_app: "app_test".into(),
+        // Bare references: every policy stays at the SQL/Postgres default.
+        fields: vec![FieldDescriptor {
+            name: "author".into(),
+            ty: "ref".into(),
+            references: Some("authors".into()),
+            ..Default::default()
+        }],
         indexes: vec![],
     runtime_options: Default::default(),
     };
     let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
+    let create = greenfield_create_sql(&author, &desired, "posts");
+    let fk = format!(
+        r#"CONSTRAINT "author_fkey" FOREIGN KEY ("author") REFERENCES "{}"."authors" (id)"#,
+        cfg.project_schema
+    );
+    assert!(create.contains(&fk), "bare FK clause must be exact: {create}");
+    assert!(!create.contains("ON DELETE"), "implicit ON DELETE must be omitted: {create}");
+    assert!(!create.contains("ON UPDATE"), "implicit ON UPDATE must be omitted: {create}");
+    assert!(!create.contains("DEFERRABLE"), "implicit DEFERRABLE must be omitted: {create}");
+    apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn fk_explicit_on_update_restrict_deferrable_round_trips_clean() {
+    // P1: explicit non-defaults still render. RESTRICT is distinct from the
+    // omitted PG default (NO ACTION), and deferrable=true must keep the clause.
+    let tok = token();
+    let cfg = cfg_with_role(&tok);
+    let conn = pg().await;
+    teardown(&conn, &cfg).await;
+    setup(&conn, &cfg).await;
+    let author = author_for(&cfg);
+    let engine = MigrationEngine::new();
+
+    let parent = CollectionDescriptor { name: "parent".into(), owner_app: "app_test".into(), fields: vec![], indexes: vec![], runtime_options: Default::default() };
+    let child = CollectionDescriptor {
+        name: "child".into(),
+        owner_app: "app_test".into(),
+        fields: vec![ref_field("p", "parent", None, Some("restrict"), Some(true))],
+        indexes: vec![],
+    runtime_options: Default::default(),
+    };
+    let desired = desired_snapshot(&cfg.project_schema, &[parent, child]).expect("desired_snapshot");
+    let create = greenfield_create_sql(&author, &desired, "child");
+    let fk = format!(
+        r#"CONSTRAINT "p_fkey" FOREIGN KEY ("p") REFERENCES "{}"."parent" (id) ON UPDATE RESTRICT DEFERRABLE INITIALLY DEFERRED"#,
+        cfg.project_schema
+    );
+    assert!(create.contains(&fk), "explicit ON UPDATE/DEFERRABLE clause must be exact: {create}");
+    assert!(!create.contains("ON DELETE"), "implicit ON DELETE must be omitted: {create}");
     apply_and_assert_clean_roundtrip(&engine, &author, &cfg, &conn, &desired).await;
 
     teardown(&conn, &cfg).await;
@@ -4479,7 +4539,7 @@ fn golden_pg_create_table_and_index() {
     let accounts = find_mig(&migs, "create_table_accounts");
     assert_eq!(
         accounts.up,
-        "CREATE TABLE \"prj_g\".\"accounts\" (\"created_at\" timestamptz NOT NULL, \"created_by\" text, \"deleted_at\" timestamptz, \"id\" text PRIMARY KEY NOT NULL, \"owner\" text, \"secret\" bytea /* zsenc:randomised:k1:string */, \"secret_masked\" text, \"ssn\" text, \"ssn_masked\" text, \"title\" text NOT NULL, \"updated_at\" timestamptz NOT NULL, \"updated_by\" text, \"version\" integer NOT NULL, CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"prj_g\".\"users\" (id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED);\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret\" IS 'zsenc:randomised:k1:string';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret_masked\" IS '__zsmask:kind=full,classification=pii';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"ssn_masked\" IS '__zsmask:kind=last4,classification=pii'",
+        "CREATE TABLE \"prj_g\".\"accounts\" (\"created_at\" timestamptz NOT NULL, \"created_by\" text, \"deleted_at\" timestamptz, \"id\" text PRIMARY KEY NOT NULL, \"owner\" text, \"secret\" bytea /* zsenc:randomised:k1:string */, \"secret_masked\" text, \"ssn\" text, \"ssn_masked\" text, \"title\" text NOT NULL, \"updated_at\" timestamptz NOT NULL, \"updated_by\" text, \"version\" integer NOT NULL, CONSTRAINT \"owner_fkey\" FOREIGN KEY (\"owner\") REFERENCES \"prj_g\".\"users\" (id));\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret\" IS 'zsenc:randomised:k1:string';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"secret_masked\" IS '__zsmask:kind=full,classification=pii';\nCOMMENT ON COLUMN \"prj_g\".\"accounts\".\"ssn_masked\" IS '__zsmask:kind=last4,classification=pii'",
     );
     assert_eq!(accounts.down.as_deref(), Some(r#"DROP TABLE "prj_g"."accounts""#));
 

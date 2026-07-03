@@ -451,17 +451,14 @@ pub struct FieldDescriptor {
     #[serde(rename = "ref", default)]
     pub references: Option<String>,
     /// `ref` ON DELETE policy (`restrict` | `cascade` | `set null` | `no action`).
-    /// `None` ⇒ the SDK default `restrict` (`onDelete` on the wire `FieldDef`).
-    /// Mirrors plugin-db's `normalize_fk_action`: anything unrecognised folds to
-    /// `RESTRICT`.
+    /// `None` ⇒ the SQL/Postgres default `NO ACTION`, which renders as no clause.
     #[serde(rename = "onDelete", default)]
     pub on_delete: Option<String>,
-    /// `ref` ON UPDATE policy. `None` ⇒ the SDK default `restrict` (`onUpdate`).
+    /// `ref` ON UPDATE policy. `None` ⇒ the SQL/Postgres default `NO ACTION`.
     #[serde(rename = "onUpdate", default)]
     pub on_update: Option<String>,
-    /// Whether the FK is emitted `DEFERRABLE INITIALLY DEFERRED`. `None` ⇒ the SDK
-    /// default `true` (`deferrable` on the wire `FieldDef`). Mirrors plugin-db's
-    /// `build_fk_clause`, which defaults `deferrable` to `true`.
+    /// Whether the FK is emitted `DEFERRABLE INITIALLY DEFERRED`. `None` ⇒ the
+    /// SQL/Postgres default `NOT DEFERRABLE`, which renders as no clause.
     #[serde(default)]
     pub deferrable: Option<bool>,
     /// For a `literal` field (#3), the single accepted value (`literalValue` on the
@@ -1824,7 +1821,7 @@ fn build_table_snapshot_impl(
                         target,
                         f.on_delete.as_deref(),
                         f.on_update.as_deref(),
-                        f.deferrable.unwrap_or(true),
+                        f.deferrable.unwrap_or(false),
                         dialect,
                     ),
                     comment: None,
@@ -2055,15 +2052,15 @@ pub(crate) fn ir_fk_constraint_snapshot(
     // C1 — the referential actions are rendered through the same dialect canonical
     // path as declarative `ref` fields, so an action-free stand-alone IR FK stays
     // byte-identical to the FK the differ builds for the same single-column
-    // reference. On MySQL, `restrict`/`noAction`/absent all collapse to the omitted
-    // default; real actions still render explicitly.
+    // reference. Omitted actions/deferrability are the SQL/Postgres defaults and
+    // render as a bare FK; explicit actions still render.
     let definition = fk_definition_for_dialect(
         local_column,
         project_schema,
         references_table,
         on_delete,
         on_update,
-        true,
+        false,
         dialect,
     );
     ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition, comment: None }
@@ -2354,7 +2351,7 @@ fn fk_definition_for_dialect(
     if on_delete != "NO ACTION" {
         let _ = write!(def, " ON DELETE {on_delete}");
     }
-    if deferrable {
+    if deferrable && !matches!(dialect, SqlDialect::Mysql) {
         def.push_str(" DEFERRABLE INITIALLY DEFERRED");
     }
     def
