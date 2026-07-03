@@ -1,4 +1,4 @@
-import { and, membership, notMembership, or, table, t } from "@zeroship/migrate";
+import { and, membership, notMembership, or, p, partition, table, t } from "@zeroship/migrate";
 import { raw } from "@zeroship/migrate/pg";
 
 export const name = "sandbox_tables";
@@ -37,9 +37,7 @@ export function up() {
   table("hosts", { schema: "zeroship" }).addCheck("hosts_host_id_check", (c) => c("host_id").matches("^hst_[0-9A-Za-z]{20,40}$"));
   table("hosts", { schema: "zeroship" }).addCheck("hosts_region_check", (c) => c("region").matches("^[a-z][a-z0-9-]{1,63}$"));
   table("hosts", { schema: "zeroship" }).addCheck("hosts_status_check", (c) => membership(c("status"), ["alive", "draining", "dead"]));
-  // TODO(dsl-v2): add structural partitioned table support for exact platform tables
-  raw({ sql: "CREATE TABLE zeroship.sandbox_events (\n    event_id text NOT NULL,\n    sandbox_id text,\n    user_id text NOT NULL,\n    kind text NOT NULL,\n    ts timestamp with time zone DEFAULT now() NOT NULL,\n    data jsonb DEFAULT '{}'::jsonb NOT NULL,\n    CONSTRAINT sandbox_events_data_check CHECK ((pg_column_size(data) <= 8192)),\n    CONSTRAINT sandbox_events_event_id_check CHECK ((event_id ~ '^evt_[0-9A-Za-z]{20,40}$'::text)),\n    CONSTRAINT sandbox_events_sandbox_id_check CHECK ((sandbox_id ~ '^sbx_[0-9A-Za-z]{20,40}$'::text)),\n    CONSTRAINT sandbox_events_user_id_check CHECK ((user_id ~ '^usr_[0-9A-Za-z]{20,40}$'::text))\n)\nPARTITION BY RANGE (ts)", reason: "partitioned table zeroship.sandbox_events uses PARTITION BY RANGE (ts), which createTable cannot express yet" });
-  table("sandbox_events_2026_05", { schema: "zeroship" }).create({
+  table("sandbox_events", { schema: "zeroship" }).create({
     columns: {
       event_id: t.text().notNull(),
       sandbox_id: t.text(),
@@ -49,115 +47,21 @@ export function up() {
       data: t.json().notNull(),
     },
     primaryKey: ["ts", "event_id"],
+    partitionBy: p.range(["ts"]),
   });
   // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events_2026_05 ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events_2026_05.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  table("sandbox_events_2026_05", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
-  table("sandbox_events_2026_05", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_05", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_05", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_06", { schema: "zeroship" }).create({
-    columns: {
-      event_id: t.text().notNull(),
-      sandbox_id: t.text(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      ts: t.timestamp().notNull().default({ fn: "now" }),
-      data: t.json().notNull(),
-    },
-    primaryKey: ["ts", "event_id"],
-  });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events_2026_06 ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events_2026_06.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  table("sandbox_events_2026_06", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
-  table("sandbox_events_2026_06", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_06", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_06", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_07", { schema: "zeroship" }).create({
-    columns: {
-      event_id: t.text().notNull(),
-      sandbox_id: t.text(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      ts: t.timestamp().notNull().default({ fn: "now" }),
-      data: t.json().notNull(),
-    },
-    primaryKey: ["ts", "event_id"],
-  });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events_2026_07 ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events_2026_07.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  table("sandbox_events_2026_07", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
-  table("sandbox_events_2026_07", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_07", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_07", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_08", { schema: "zeroship" }).create({
-    columns: {
-      event_id: t.text().notNull(),
-      sandbox_id: t.text(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      ts: t.timestamp().notNull().default({ fn: "now" }),
-      data: t.json().notNull(),
-    },
-    primaryKey: ["ts", "event_id"],
-  });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events_2026_08 ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events_2026_08.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  table("sandbox_events_2026_08", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
-  table("sandbox_events_2026_08", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_08", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_08", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_09", { schema: "zeroship" }).create({
-    columns: {
-      event_id: t.text().notNull(),
-      sandbox_id: t.text(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      ts: t.timestamp().notNull().default({ fn: "now" }),
-      data: t.json().notNull(),
-    },
-    primaryKey: ["ts", "event_id"],
-  });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events_2026_09 ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events_2026_09.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  table("sandbox_events_2026_09", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
-  table("sandbox_events_2026_09", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_09", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_09", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_10", { schema: "zeroship" }).create({
-    columns: {
-      event_id: t.text().notNull(),
-      sandbox_id: t.text(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      ts: t.timestamp().notNull().default({ fn: "now" }),
-      data: t.json().notNull(),
-    },
-    primaryKey: ["ts", "event_id"],
-  });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events_2026_10 ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events_2026_10.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  table("sandbox_events_2026_10", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
-  table("sandbox_events_2026_10", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_10", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_2026_10", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_default", { schema: "zeroship" }).create({
-    columns: {
-      event_id: t.text().notNull(),
-      sandbox_id: t.text(),
-      user_id: t.text().notNull(),
-      kind: t.text().notNull(),
-      ts: t.timestamp().notNull().default({ fn: "now" }),
-      data: t.json().notNull(),
-    },
-    primaryKey: ["ts", "event_id"],
-  });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events_default ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events_default.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  table("sandbox_events_default", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
-  table("sandbox_events_default", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_default", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
-  table("sandbox_events_default", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
+  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
+  table("sandbox_events", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
+  table("sandbox_events", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
+  table("sandbox_events", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
+  table("sandbox_events", { schema: "zeroship" }).addCheck("sandbox_events_user_id_check", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$"));
+  partition("sandbox_events_2026_05", { schema: "zeroship" }).of("sandbox_events").forValues({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
+  partition("sandbox_events_2026_06", { schema: "zeroship" }).of("sandbox_events").forValues({ from: ["2026-06-01 00:00:00+00"], to: ["2026-07-01 00:00:00+00"] });
+  partition("sandbox_events_2026_07", { schema: "zeroship" }).of("sandbox_events").forValues({ from: ["2026-07-01 00:00:00+00"], to: ["2026-08-01 00:00:00+00"] });
+  partition("sandbox_events_2026_08", { schema: "zeroship" }).of("sandbox_events").forValues({ from: ["2026-08-01 00:00:00+00"], to: ["2026-09-01 00:00:00+00"] });
+  partition("sandbox_events_2026_09", { schema: "zeroship" }).of("sandbox_events").forValues({ from: ["2026-09-01 00:00:00+00"], to: ["2026-10-01 00:00:00+00"] });
+  partition("sandbox_events_2026_10", { schema: "zeroship" }).of("sandbox_events").forValues({ from: ["2026-10-01 00:00:00+00"], to: ["2026-11-01 00:00:00+00"] });
+  partition("sandbox_events_default", { schema: "zeroship" }).of("sandbox_events").asDefault();
   table("sandboxes", { schema: "zeroship" }).create({
     columns: {
       sandbox_id: t.text().notNull(),
@@ -254,20 +158,6 @@ export function up() {
   table("wake_jobs", { schema: "zeroship" }).addCheck("wake_jobs_error_code_check", (c) => or(c("error_code").isNull(), membership(c("error_code"), ["slot_unavailable", "source_teardown_timeout", "restore_failed", "livez_timeout", "clock_resync_failed", "register_failed", "internal", "wake_worker_aborted", "staging_path_missing", "agent_version_mismatch"])));
   table("wake_jobs", { schema: "zeroship" }).addCheck("wake_jobs_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
   table("wake_jobs", { schema: "zeroship" }).addCheck("wake_jobs_state_check", (c) => membership(c("state"), ["pending", "reserving_slot", "restoring", "livez_polling", "clock_resyncing", "registering", "ok", "failed"]));
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ATTACH PARTITION zeroship.sandbox_events_2026_05 FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-06-01 00:00:00+00')", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ATTACH PARTITION zeroship.sandbox_events_2026_06 FOR VALUES FROM ('2026-06-01 00:00:00+00') TO ('2026-07-01 00:00:00+00')", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ATTACH PARTITION zeroship.sandbox_events_2026_07 FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00')", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ATTACH PARTITION zeroship.sandbox_events_2026_08 FOR VALUES FROM ('2026-08-01 00:00:00+00') TO ('2026-09-01 00:00:00+00')", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ATTACH PARTITION zeroship.sandbox_events_2026_09 FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00')", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ATTACH PARTITION zeroship.sandbox_events_2026_10 FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00')", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ATTACH PARTITION zeroship.sandbox_events_default DEFAULT", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
 }
 
 export function down() {

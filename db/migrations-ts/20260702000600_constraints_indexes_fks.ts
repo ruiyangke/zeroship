@@ -4,10 +4,6 @@ import { raw } from "@zeroship/migrate/pg";
 export const name = "constraints_indexes_fks";
 
 export function up() {
-
-  // TODO(dsl-v2): primary key stays raw until partitioned table createTable support registers sandbox_events structurally
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events\n    ADD CONSTRAINT sandbox_events_pkey PRIMARY KEY (ts, event_id)", reason: "sandbox_events remains raw because createTable cannot express PARTITION BY RANGE yet" });
-
   table("app_oauth_clients", { schema: "zeroship" }).unique("app_oauth_clients_client_id_key").add({ columns: ["client_id"] });
   table("app_usage_history", { schema: "zeroship" }).unique("app_usage_history_app_id_period_key").add({ columns: ["app_id", "period"] });
   table("apps", { schema: "zeroship" }).unique("apps_name_key").add({ columns: ["name"] });
@@ -69,14 +65,12 @@ export function up() {
   table("hosts", { schema: "zeroship" }).index("idx_hosts_region_status").add({ columns: ["region", "status"] });
   table("hosts", { schema: "zeroship" }).index("idx_hosts_status_heartbeat").add({ columns: ["status", "last_heartbeat"] });
   table("payouts", { schema: "zeroship" }).index("idx_payouts_creator_time").add({ columns: ["creator_id", { kind: "column", name: "occurred_at", order: "desc" }] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_sandbox_events_metering ON ONLY zeroship.sandbox_events USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_sandbox_events_sandbox_ts ON ONLY zeroship.sandbox_events USING btree (sandbox_id, ts)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_sandbox_events_ts_brin ON ONLY zeroship.sandbox_events USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX idx_sandbox_events_user_id_ts ON ONLY zeroship.sandbox_events USING btree (user_id, ts)", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
+  table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_ts_brin").using("brin").with({ pagesPerRange: 32 }).add({ columns: ["ts"] });
+  table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_sandbox_ts").add({ columns: ["sandbox_id", "ts"] });
+  table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_user_id_ts").add({ columns: ["user_id", "ts"] });
+  table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_metering")
+    .include(["sandbox_id", "user_id", "data"])
+    .add({ columns: ["ts"], where: (c) => membership(c("kind"), ["compute_seconds", "share.used", "preview_egress"]) });
   table("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_active_user_project").add({ columns: ["user_id", "project_id"], unique: true, where: (c) => and(c("deleted_at").isNull(), membership(c("status"), ["starting", "running", "recreating"])) });
   table("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_created_at").add({ columns: ["created_at"] });
   table("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_host_id_status").add({ columns: ["host_id", "status"], where: (c) => c("deleted_at").isNull() });
@@ -111,48 +105,6 @@ export function up() {
   table("permission_tokens", { schema: "zeroship" }).index("permission_tokens_policies_gin_idx").add({ columns: ["policies"], using: "gin" });
   table("plan_change_events", { schema: "zeroship" }).index("plan_change_events_app_period_idx").add({ columns: ["app_id", "period"] });
   table("refunds", { schema: "zeroship" }).index("refunds_invoice_idx").add({ columns: ["invoice_id"] });
-  table("sandbox_events_2026_05", { schema: "zeroship" }).index("sandbox_events_2026_05_sandbox_id_ts_idx").add({ columns: ["sandbox_id", "ts"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_05_ts_idx ON zeroship.sandbox_events_2026_05 USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_05_ts_sandbox_id_user_id_data_idx ON zeroship.sandbox_events_2026_05 USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  table("sandbox_events_2026_05", { schema: "zeroship" }).index("sandbox_events_2026_05_user_id_ts_idx").add({ columns: ["user_id", "ts"] });
-  table("sandbox_events_2026_06", { schema: "zeroship" }).index("sandbox_events_2026_06_sandbox_id_ts_idx").add({ columns: ["sandbox_id", "ts"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_06_ts_idx ON zeroship.sandbox_events_2026_06 USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_06_ts_sandbox_id_user_id_data_idx ON zeroship.sandbox_events_2026_06 USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  table("sandbox_events_2026_06", { schema: "zeroship" }).index("sandbox_events_2026_06_user_id_ts_idx").add({ columns: ["user_id", "ts"] });
-  table("sandbox_events_2026_07", { schema: "zeroship" }).index("sandbox_events_2026_07_sandbox_id_ts_idx").add({ columns: ["sandbox_id", "ts"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_07_ts_idx ON zeroship.sandbox_events_2026_07 USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_07_ts_sandbox_id_user_id_data_idx ON zeroship.sandbox_events_2026_07 USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  table("sandbox_events_2026_07", { schema: "zeroship" }).index("sandbox_events_2026_07_user_id_ts_idx").add({ columns: ["user_id", "ts"] });
-  table("sandbox_events_2026_08", { schema: "zeroship" }).index("sandbox_events_2026_08_sandbox_id_ts_idx").add({ columns: ["sandbox_id", "ts"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_08_ts_idx ON zeroship.sandbox_events_2026_08 USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_08_ts_sandbox_id_user_id_data_idx ON zeroship.sandbox_events_2026_08 USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  table("sandbox_events_2026_08", { schema: "zeroship" }).index("sandbox_events_2026_08_user_id_ts_idx").add({ columns: ["user_id", "ts"] });
-  table("sandbox_events_2026_09", { schema: "zeroship" }).index("sandbox_events_2026_09_sandbox_id_ts_idx").add({ columns: ["sandbox_id", "ts"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_09_ts_idx ON zeroship.sandbox_events_2026_09 USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_09_ts_sandbox_id_user_id_data_idx ON zeroship.sandbox_events_2026_09 USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  table("sandbox_events_2026_09", { schema: "zeroship" }).index("sandbox_events_2026_09_user_id_ts_idx").add({ columns: ["user_id", "ts"] });
-  table("sandbox_events_2026_10", { schema: "zeroship" }).index("sandbox_events_2026_10_sandbox_id_ts_idx").add({ columns: ["sandbox_id", "ts"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_10_ts_idx ON zeroship.sandbox_events_2026_10 USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_2026_10_ts_sandbox_id_user_id_data_idx ON zeroship.sandbox_events_2026_10 USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  table("sandbox_events_2026_10", { schema: "zeroship" }).index("sandbox_events_2026_10_user_id_ts_idx").add({ columns: ["user_id", "ts"] });
-  table("sandbox_events_default", { schema: "zeroship" }).index("sandbox_events_default_sandbox_id_ts_idx").add({ columns: ["sandbox_id", "ts"] });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_default_ts_idx ON zeroship.sandbox_events_default USING brin (ts) WITH (pages_per_range='32')", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  // TODO(dsl-v2): rich index features need structural support (partial predicates, sort direction, INCLUDE, ONLY, BRIN/WITH, or expression predicates)
-  raw({ sql: "CREATE INDEX sandbox_events_default_ts_sandbox_id_user_id_data_idx ON zeroship.sandbox_events_default USING btree (ts) INCLUDE (sandbox_id, user_id, data) WHERE (kind = ANY (ARRAY['compute_seconds'::text, 'share.used'::text, 'preview_egress'::text]))", reason: "this index uses PostgreSQL index features outside the current structural index renderer" });
-  table("sandbox_events_default", { schema: "zeroship" }).index("sandbox_events_default_user_id_ts_idx").add({ columns: ["user_id", "ts"] });
   table("sandboxes", { schema: "zeroship" }).index("sandboxes_idle_snapshot_idx").add({ columns: ["last_used_at"], where: (c) => and(c("status").eq("running"), c("idle_snapshot_opted_in")) });
   table("sandboxes", { schema: "zeroship" }).index("sandboxes_status_lessee_idx").add({ columns: ["status", "lessee_updated_at"], where: (c) => membership(c("status"), ["snapshotting", "restoring", "restoring_cold"]) });
   table("signing_keys", { schema: "zeroship" }).index("signing_keys_status_idx").add({ columns: ["status"] });
@@ -249,76 +201,6 @@ export function up() {
   table("usage_aggregates", { schema: "zeroship" }).foreignKey("usage_aggregates_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
   // TODO(dsl-v2): add structural support for this table constraint shape
   raw({ sql: "ALTER TABLE ONLY zeroship.usage_aggregates\n    ADD CONSTRAINT usage_aggregates_metric_fkey FOREIGN KEY (metric) REFERENCES zeroship.billing_metrics(metric) DEFERRABLE INITIALLY DEFERRED", reason: "this constraint shape is outside the current structural renderer" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.sandbox_events_pkey ATTACH PARTITION zeroship.sandbox_events_2026_05_pkey", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_sandbox_ts ATTACH PARTITION zeroship.sandbox_events_2026_05_sandbox_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_ts_brin ATTACH PARTITION zeroship.sandbox_events_2026_05_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_metering ATTACH PARTITION zeroship.sandbox_events_2026_05_ts_sandbox_id_user_id_data_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_user_id_ts ATTACH PARTITION zeroship.sandbox_events_2026_05_user_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.sandbox_events_pkey ATTACH PARTITION zeroship.sandbox_events_2026_06_pkey", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_sandbox_ts ATTACH PARTITION zeroship.sandbox_events_2026_06_sandbox_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_ts_brin ATTACH PARTITION zeroship.sandbox_events_2026_06_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_metering ATTACH PARTITION zeroship.sandbox_events_2026_06_ts_sandbox_id_user_id_data_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_user_id_ts ATTACH PARTITION zeroship.sandbox_events_2026_06_user_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.sandbox_events_pkey ATTACH PARTITION zeroship.sandbox_events_2026_07_pkey", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_sandbox_ts ATTACH PARTITION zeroship.sandbox_events_2026_07_sandbox_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_ts_brin ATTACH PARTITION zeroship.sandbox_events_2026_07_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_metering ATTACH PARTITION zeroship.sandbox_events_2026_07_ts_sandbox_id_user_id_data_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_user_id_ts ATTACH PARTITION zeroship.sandbox_events_2026_07_user_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.sandbox_events_pkey ATTACH PARTITION zeroship.sandbox_events_2026_08_pkey", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_sandbox_ts ATTACH PARTITION zeroship.sandbox_events_2026_08_sandbox_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_ts_brin ATTACH PARTITION zeroship.sandbox_events_2026_08_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_metering ATTACH PARTITION zeroship.sandbox_events_2026_08_ts_sandbox_id_user_id_data_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_user_id_ts ATTACH PARTITION zeroship.sandbox_events_2026_08_user_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.sandbox_events_pkey ATTACH PARTITION zeroship.sandbox_events_2026_09_pkey", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_sandbox_ts ATTACH PARTITION zeroship.sandbox_events_2026_09_sandbox_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_ts_brin ATTACH PARTITION zeroship.sandbox_events_2026_09_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_metering ATTACH PARTITION zeroship.sandbox_events_2026_09_ts_sandbox_id_user_id_data_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_user_id_ts ATTACH PARTITION zeroship.sandbox_events_2026_09_user_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.sandbox_events_pkey ATTACH PARTITION zeroship.sandbox_events_2026_10_pkey", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_sandbox_ts ATTACH PARTITION zeroship.sandbox_events_2026_10_sandbox_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_ts_brin ATTACH PARTITION zeroship.sandbox_events_2026_10_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_metering ATTACH PARTITION zeroship.sandbox_events_2026_10_ts_sandbox_id_user_id_data_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_user_id_ts ATTACH PARTITION zeroship.sandbox_events_2026_10_user_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.sandbox_events_pkey ATTACH PARTITION zeroship.sandbox_events_default_pkey", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_sandbox_ts ATTACH PARTITION zeroship.sandbox_events_default_sandbox_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_ts_brin ATTACH PARTITION zeroship.sandbox_events_default_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_metering ATTACH PARTITION zeroship.sandbox_events_default_ts_sandbox_id_user_id_data_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER INDEX zeroship.idx_sandbox_events_user_id_ts ATTACH PARTITION zeroship.sandbox_events_default_user_id_ts_idx", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
 }
 
 export function down() {
