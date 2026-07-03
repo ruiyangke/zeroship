@@ -301,6 +301,11 @@ const UNSUPPORTED_ALL_SYNTH_DEFAULT: DialectSupport = DialectSupport::unsupporte
     "synth default rendering is deferred until the expression/default renderer lands",
 );
 
+const PG_ONLY_SYNTH_DEFAULT: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "synth default rendering is PostgreSQL-only in the current engine",
+);
+
 const UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN: DialectSupport =
     DialectSupport::unsupported_all(UNSUPPORTED, "foreign keys need exactly one local column");
 
@@ -334,7 +339,7 @@ const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::postgres_on
 
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
-    FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT),
+    FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
         Feature::TableLevelForeignKey,
@@ -394,7 +399,7 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
 ];
 
 pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] =
-    &[FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT)];
+    &[FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT)];
 
 pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(

@@ -223,24 +223,33 @@ export function up() {
 
   table("platform_apps", { schema: "zeroship" }).create({
     columns: {
-      id: t.text().notNull(),
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
 
   table("platform_registry", { schema: "zeroship" }).create({
     columns: {
-      app_id: t.text().notNull(),
+      app_id: t.uuid().notNull(),
       route: t.text().notNull(),
       target: t.text().notNull(),
+      status: t.text().notNull(),
+      created_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["app_id", "route"],
+    checks: [
+      { name: "platform_registry_target_nonempty", expr: (c) => c("target").ne("") },
+    ],
   });
 
   const registry = table("platform_registry", { schema: "zeroship" });
   registry.foreignKey("platform_registry_app_fk").add({
     columns: ["app_id"],
     references: { table: "platform_apps", columns: ["id"] },
+  });
+  registry.check("platform_registry_status_check").add({
+    expr: (c) => c.pg.eqAnyArray(c("status"), ["active", "paused"]),
   });
   registry.index("platform_registry_target_idx").add({ columns: ["target"] });
   registry.enableRowLevelSecurity();
@@ -267,6 +276,25 @@ export function up() {
     events: ["update"],
     forEach: "row",
     execute: "platform_registry_touch",
+  });
+}
+"#;
+const PLATFORM_SYNTH_DEFAULT_TS: &str = r#"
+import { table, t } from "@zeroship/migrate";
+import { schema } from "@zeroship/migrate/pg";
+
+export const name = "platform_synth_defaults";
+
+export function up() {
+  schema({ name: "zeroship", ifNotExists: true });
+
+  table("platform_events", { schema: "zeroship" }).create({
+    columns: {
+      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      occurred_at: t.timestamp().notNull().default({ fn: "now" }),
+      kind: t.text().notNull(),
+    },
+    primaryKey: ["id"],
   });
 }
 "#;
@@ -441,6 +469,50 @@ async fn table_columns(conn: &Client, schema: &str, table: &str) -> Vec<String> 
     .into_iter()
     .map(|row| row.get::<_, String>(0))
     .collect()
+}
+
+async fn column_udt_name(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT udt_name \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 AND column_name = $3",
+            &[&schema, &table, &column],
+        )
+        .await
+        .expect("query column type");
+    rows.first().map(|row| row.get::<_, String>(0))
+}
+
+fn sorted_columns(mut cols: Vec<String>) -> Vec<String> {
+    cols.sort();
+    cols
+}
+
+async fn column_default_expr(
+    conn: &Client,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Option<String> {
+    let rows = conn
+        .query(
+            "SELECT pg_get_expr(d.adbin, d.adrelid) \
+             FROM pg_attribute a \
+             JOIN pg_class t ON t.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+             WHERE n.nspname = $1 AND t.relname = $2 AND a.attname = $3",
+            &[&schema, &table, &column],
+        )
+        .await
+        .expect("query column default");
+    rows.first().map(|row| row.get::<_, String>(0))
 }
 
 async fn relation_rls(conn: &Client, schema: &str, table: &str) -> (bool, bool) {
@@ -659,6 +731,65 @@ async fn confined_ir_still_denies_role_and_grant_vendor_ops() {
 }
 
 #[compio::test]
+async fn platform_author_synth_defaults_render_and_apply_on_live_pg() {
+    ensure_dedicated_db().await;
+    let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
+    let conn = pg().await;
+    let tok = token();
+    let meta = format!("platform_synth_meta_{tok}");
+    reset(&conn, &meta).await;
+
+    let dir = transient_ir_corpus(
+        &tok,
+        "platform_synth_defaults",
+        "20260703000000_platform_synth_defaults.ts",
+        PLATFORM_SYNTH_DEFAULT_TS,
+    );
+    let cfg = platform_cfg(dir.path(), &meta, true);
+    run_migrate(&cfg)
+        .await
+        .expect("Platform TS migration with author synth defaults applies");
+
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_events", "id")
+            .await
+            .as_deref(),
+        Some("uuid"),
+        "author t.uuid() column renders as uuid"
+    );
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_events", "occurred_at")
+            .await
+            .as_deref(),
+        Some("timestamptz"),
+        "author t.timestamp() column renders as timestamptz"
+    );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_events", "id")
+            .await
+            .as_deref(),
+        Some("gen_random_uuid()"),
+        "author uuid synth default rendered as DEFAULT gen_random_uuid()"
+    );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_events", "occurred_at")
+            .await
+            .as_deref(),
+        Some("now()"),
+        "author timestamp synth default rendered as DEFAULT now()"
+    );
+    conn.batch_execute(
+        "INSERT INTO zeroship.platform_events (kind) VALUES ('boot'); \
+         SELECT id, occurred_at FROM zeroship.platform_events WHERE kind = 'boot';",
+    )
+    .await
+    .expect("insert using both synth defaults");
+
+    reset(&conn, &meta).await;
+    global_lock.release().await;
+}
+
+#[compio::test]
 async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg() {
     ensure_dedicated_db().await;
     let global_lock = acquire_global_platform_resource_lock(&dsn()).await;
@@ -683,9 +814,48 @@ async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg(
         "platform-exact table materialized"
     );
     assert_eq!(
-        table_columns(&conn, "zeroship", "platform_registry").await,
-        vec!["app_id".to_string(), "route".to_string(), "target".to_string()],
+        sorted_columns(table_columns(&conn, "zeroship", "platform_apps").await),
+        vec!["created_at".to_string(), "id".to_string()],
+        "platform CreateTable materializes exactly the author columns on the FK target"
+    );
+    assert_eq!(
+        sorted_columns(table_columns(&conn, "zeroship", "platform_registry").await),
+        vec![
+            "app_id".to_string(),
+            "created_at".to_string(),
+            "route".to_string(),
+            "status".to_string(),
+            "target".to_string(),
+        ],
         "platform CreateTable materializes exactly the author columns, with no confined system fields"
+    );
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_apps", "id")
+            .await
+            .as_deref(),
+        Some("uuid"),
+        "platform FK target id renders as uuid"
+    );
+    assert_eq!(
+        column_udt_name(&conn, "zeroship", "platform_registry", "app_id")
+            .await
+            .as_deref(),
+        Some("uuid"),
+        "platform FK column renders as uuid"
+    );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_apps", "id")
+            .await
+            .as_deref(),
+        Some("gen_random_uuid()"),
+        "guard target table carries author genRandomUuid default"
+    );
+    assert_eq!(
+        column_default_expr(&conn, "zeroship", "platform_registry", "created_at")
+            .await
+            .as_deref(),
+        Some("now()"),
+        "guard registry table carries author now default"
     );
     assert_eq!(
         primary_key_columns(&conn, "zeroship", "platform_registry").await,
@@ -703,6 +873,30 @@ async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg(
         .as_deref(),
         Some("f"),
         "same-file FK attach materialized"
+    );
+    assert_eq!(
+        constraint_kind(
+            &conn,
+            "zeroship",
+            "platform_registry",
+            "platform_registry_target_nonempty",
+        )
+        .await
+        .as_deref(),
+        Some("c"),
+        "table-level CHECK from createTable materialized"
+    );
+    assert_eq!(
+        constraint_kind(
+            &conn,
+            "zeroship",
+            "platform_registry",
+            "platform_registry_status_check",
+        )
+        .await
+        .as_deref(),
+        Some("c"),
+        "PG membership CHECK attach materialized"
     );
     assert!(
         index_exists(
