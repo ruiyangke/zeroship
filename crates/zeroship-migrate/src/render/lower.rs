@@ -34,17 +34,18 @@ use crate::guard::{guard_for, GuardConfig, GuardError, SqlGuard};
 use crate::model::expr::Expr;
 use crate::model::load::op_created_table;
 use crate::render::declarative::{
-    build_resolved_table_snapshot, build_table_snapshot, push_primary_key_snapshot,
-    CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
+    build_resolved_table_snapshot, build_table_snapshot, json_value_default_expr_for_col_type,
+    json_value_default_expr_for_data_type, push_primary_key_snapshot, CollectionDescriptor,
+    DeclarativeAuthor, DeclarativeError, FieldDescriptor, LoweredUnit,
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
     ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn,
     IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr,
-    Op, OrderDir, OrderItem, PartitionBounds, RaiseLevel, RefAction, SafeI64, SelectAst,
-    SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent,
-    TriggerStmt, VectorMetric, ViewQuery,
+    Op, OrderDir, OrderItem, RaiseLevel, RefAction, SafeI64, SelectAst, SelectItem,
+    SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerStmt,
+    VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
@@ -888,6 +889,9 @@ pub(crate) fn render_ir_default(default: &IrDefault, dialect: SqlDialect) -> Res
         IrDefault::Container { .. } => Err(IrLowerError::UnsupportedOp(
             "container defaults require a column type at render",
         )),
+        IrDefault::Json { .. } => Err(IrLowerError::UnsupportedOp(
+            "json value defaults require a column type at render",
+        )),
         IrDefault::Nextval { sequence } => {
             if !matches!(dialect, SqlDialect::Postgres) {
                 return Err(IrLowerError::UnsupportedOp(
@@ -906,6 +910,7 @@ pub(crate) fn render_ir_default_for_type(
 ) -> Result<String, IrLowerError> {
     match default {
         IrDefault::Container { kind } => render_container_default_for_col_type(*kind, ty),
+        IrDefault::Json { value } => render_json_default_for_col_type(value, ty, dialect),
         IrDefault::Literal { .. } | IrDefault::Fn { .. } | IrDefault::Nextval { .. } => {
             render_ir_default(default, dialect)
         }
@@ -932,6 +937,26 @@ pub(crate) fn render_container_default_for_data_type(
         .ok_or(IrLowerError::UnsupportedOp(
             "container default is not valid for this live column type",
         ))
+}
+
+pub(crate) fn render_json_default_for_col_type(
+    value: &crate::model::ir::IrJsonValue,
+    ty: &ColType,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    json_value_default_expr_for_col_type(value, ty, dialect).ok_or(IrLowerError::UnsupportedOp(
+        "json value default is valid only for json columns",
+    ))
+}
+
+pub(crate) fn render_json_default_for_data_type(
+    value: &crate::model::ir::IrJsonValue,
+    data_type: &str,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    json_value_default_expr_for_data_type(value, data_type, dialect).ok_or(
+        IrLowerError::UnsupportedOp("json value default is valid only for json live columns"),
+    )
 }
 
 pub(crate) fn render_domain_check(
@@ -2147,6 +2172,17 @@ impl IrAuthor {
                                 "setColumnDefault container defaults need live column type",
                             ))?;
                         render_container_default_for_data_type(*kind, data_type)?
+                    }
+                    IrDefault::Json { value } => {
+                        let data_type = live_schema
+                            .table_snapshots
+                            .get(table)
+                            .and_then(|snap| snap.columns.iter().find(|c| c.name == *column))
+                            .map(|col| col.data_type.as_str())
+                            .ok_or(IrLowerError::UnsupportedOp(
+                                "setColumnDefault json value defaults need live column type",
+                            ))?;
+                        render_json_default_for_data_type(value, data_type, self.dialect)?
                     }
                     IrDefault::Nextval { .. } => {
                         if let Some(data_type) = live_schema
@@ -4884,7 +4920,7 @@ fn apply_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. })) =
+        let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) =
             source.default.as_ref()
         else {
             continue;
@@ -4907,7 +4943,7 @@ fn apply_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. })) = default else {
+    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
         return Ok(());
     };
     if col.name != column {
@@ -4943,7 +4979,7 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
                 Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
         }),
-        IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. } => None,
+        IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. } => None,
     }
 }
 
@@ -5213,7 +5249,7 @@ mod tests {
             .collect()
     }
 
-    use crate::model::ir::{IrColumn as TIrColumn, IrFlagsOverride};
+    use crate::model::ir::{IrColumn as TIrColumn, IrFlagsOverride, IrJsonValue};
 
     fn platform_profile() -> crate::model::profile::PolicyProfile {
         crate::model::profile::PolicyProfile::platform()
@@ -6553,6 +6589,144 @@ mod tests {
         assert!(
             sql.contains("DEFAULT '{}'::text[]"),
             "text[] array container default must render as '{{}}'::text[]:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn json_value_default_on_user_column_renders_per_dialect() {
+        let value = IrJsonValue::Object(
+            [
+                ("max_sockets".to_string(), IrJsonValue::Int(4)),
+                (
+                    "egress_ceiling_bytes".to_string(),
+                    IrJsonValue::Int(10_485_760),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::CreateTable {
+                name: "limits".into(),
+                columns: vec![TIrColumn {
+                    name: "net_policy_limits_json".into(),
+                    ty: ColType::Json,
+                    nullable: None,
+                    default: Some(IrDefault::Json {
+                        value: value.clone(),
+                    }),
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                }],
+                primary_key: None,
+                constraints: vec![],
+                indexes: vec![],
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+
+        let expected_json = r#"{"egress_ceiling_bytes": 10485760, "max_sockets": 4}"#;
+        let cases = [
+            (
+                SqlDialect::Postgres,
+                format!("DEFAULT '{expected_json}'::jsonb"),
+            ),
+            (
+                SqlDialect::Mysql,
+                format!("DEFAULT (CAST('{expected_json}' AS JSON))"),
+            ),
+            (SqlDialect::Sqlite, format!("DEFAULT '{expected_json}'")),
+        ];
+        for (dialect, expected) in cases {
+            let migrations = IrAuthor::new("app", "app_a", dialect)
+                .lower(&ir, &LiveSchema::default())
+                .expect("json value defaults lower");
+            let sql = &migrations[0].up;
+            assert!(
+                sql.contains(&expected),
+                "{dialect:?} json value default must render as {expected:?}:\n{sql}"
+            );
+        }
+    }
+
+    // Regression: a JSON string value containing a double-quote is serde-escaped as
+    // `\"`, so the rendered json text carries a backslash. MySQL's default sql_mode
+    // treats a backslash as a string-literal escape, so the MySQL `CAST(... AS JSON)`
+    // literal MUST double the backslash (or MySQL decodes `\"`→`"` and CAST sees
+    // corrupt JSON). PG (standard_conforming_strings) + SQLite must NOT double it.
+    #[test]
+    fn json_value_string_with_backslash_escapes_only_for_mysql() {
+        let value = IrJsonValue::Object(
+            [("note".to_string(), IrJsonValue::Str("a\"b".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::CreateTable {
+                name: "limits".into(),
+                columns: vec![TIrColumn {
+                    name: "cfg".into(),
+                    ty: ColType::Json,
+                    nullable: None,
+                    default: Some(IrDefault::Json { value }),
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: None,
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                }],
+                primary_key: None,
+                constraints: vec![],
+                indexes: vec![],
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        let pg = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&ir, &LiveSchema::default())
+            .expect("pg lower")[0]
+            .up
+            .clone();
+        assert!(
+            pg.contains(r#"'{"note": "a\"b"}'::jsonb"#),
+            "PG must keep a single backslash:\n{pg}"
+        );
+        let my = IrAuthor::new("app", "app_a", SqlDialect::Mysql)
+            .lower(&ir, &LiveSchema::default())
+            .expect("mysql lower")[0]
+            .up
+            .clone();
+        assert!(
+            my.contains(r##"(CAST('{"note": "a\\"b"}' AS JSON))"##),
+            "MySQL must double the backslash:\n{my}"
         );
     }
 

@@ -559,6 +559,124 @@ pub enum EmptyContainerKind {
     Array,
 }
 
+/// A canonical JSON value admissible as a non-empty JSON column DEFAULT.
+///
+/// Objects use [`BTreeMap`] so direct serde output is deterministic before the
+/// wider IR checksum canonicalizer sees it. Numeric values are deliberately
+/// integers only in v1; floats/decimals are rejected until the cross-language
+/// canonical spelling is specified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IrJsonValue {
+    /// JSON `null`.
+    Null,
+    /// JSON boolean.
+    Bool(bool),
+    /// An exact integer (`|v| < 2^53` on deserialize).
+    Int(i64),
+    /// A UTF-8 string.
+    Str(String),
+    /// JSON array. Order is significant.
+    Array(Vec<IrJsonValue>),
+    /// JSON object. Keys are sorted by [`BTreeMap`].
+    Object(BTreeMap<String, IrJsonValue>),
+}
+
+impl Serialize for IrJsonValue {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self {
+            IrJsonValue::Null => ser.serialize_none(),
+            IrJsonValue::Bool(b) => ser.serialize_bool(*b),
+            IrJsonValue::Int(i) => ser.serialize_i64(*i),
+            IrJsonValue::Str(s) => ser.serialize_str(s),
+            IrJsonValue::Array(items) => items.serialize(ser),
+            IrJsonValue::Object(map) => map.serialize(ser),
+        }
+    }
+}
+
+impl IrJsonValue {
+    fn from_json_value(v: serde_json::Value) -> Result<Self, String> {
+        match v {
+            serde_json::Value::Null => Ok(IrJsonValue::Null),
+            serde_json::Value::Bool(b) => Ok(IrJsonValue::Bool(b)),
+            serde_json::Value::String(s) => Ok(IrJsonValue::Str(s)),
+            serde_json::Value::Array(items) => items
+                .into_iter()
+                .map(IrJsonValue::from_json_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(IrJsonValue::Array),
+            serde_json::Value::Object(map) => map
+                .into_iter()
+                .map(|(k, v)| IrJsonValue::from_json_value(v).map(|v| (k, v)))
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .map(IrJsonValue::Object),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    if i.unsigned_abs() >= MAX_EXACT_INT as u64 {
+                        return Err(format!(
+                            "{EXPR_INVALID_NUMERIC}: json default integer {i} has magnitude >= 2^53; \
+                             json default values must stay below the JS safe-integer boundary"
+                        ));
+                    }
+                    Ok(IrJsonValue::Int(i))
+                } else if let Some(u) = n.as_u64() {
+                    if u >= MAX_EXACT_INT as u64 {
+                        return Err(format!(
+                            "{EXPR_INVALID_NUMERIC}: json default integer {u} has magnitude >= 2^53; \
+                             json default values must stay below the JS safe-integer boundary"
+                        ));
+                    }
+                    Ok(IrJsonValue::Int(u as i64))
+                } else {
+                    Err(format!(
+                        "{EXPR_INVALID_NUMERIC}: json default values support integers only \
+                         (floats not yet supported); got {n}"
+                    ))
+                }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for IrJsonValue {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let v = serde_json::Value::deserialize(de)?;
+        IrJsonValue::from_json_value(v).map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for IrJsonValue {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "IrJsonValue".into()
+    }
+
+    fn json_schema(_g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let self_ref = serde_json::json!({ "$ref": "#/$defs/IrJsonValue" });
+        schemars::json_schema!({
+            "description": "A canonical JSON value for non-empty json defaults. Numbers are integers only and must satisfy |v| < 2^53.",
+            "oneOf": [
+                { "type": "null" },
+                { "type": "boolean" },
+                {
+                    "type": "integer",
+                    "minimum": -(MAX_EXACT_INT - 1),
+                    "maximum": MAX_EXACT_INT - 1
+                },
+                { "type": "string" },
+                {
+                    "type": "array",
+                    "items": self_ref.clone()
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": self_ref
+                }
+            ]
+        })
+    }
+}
+
 /// A closed sequence reference for `nextval(...)` defaults. This is a logical
 /// name, never raw SQL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -574,9 +692,10 @@ pub struct SequenceRef {
 /// A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —
 /// either a typed scalar literal, an engine-synthesized apply-time scalar
 /// (`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array
-/// columns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL
-/// string (property A); the per-dialect default clause is rendered by the shared
-/// snapshot-builder kernel from this structured value (§6.5).
+/// columns, a non-empty JSON value default for JSON columns, or a PostgreSQL
+/// sequence `nextval(...)` reference. NEVER a raw SQL string (property A); the
+/// per-dialect default clause is rendered by the shared snapshot-builder kernel
+/// from this structured value (§6.5).
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrDefault {
     /// A typed scalar literal default (constrained numeric domain — §2.5).
@@ -592,11 +711,16 @@ pub enum IrDefault {
         /// The synthesized function (`now` or `genRandomUuid`).
         r#fn: SynthDefaultFn,
     },
-    /// An empty-container default. Non-empty object/array defaults are deliberately
-    /// unrepresentable until the IR grows a value-carrying container default.
+    /// An empty-container default. Non-empty JSON values use [`IrDefault::Json`].
     Container {
         /// The empty container kind (`object` or `array`).
         kind: EmptyContainerKind,
+    },
+    /// A non-empty JSON value default for a JSON column. Empty `{}`/`[]` remain
+    /// represented by [`IrDefault::Container`] to preserve that wire contract.
+    Json {
+        /// The JSON value.
+        value: IrJsonValue,
     },
     /// A PostgreSQL `nextval('<sequence>'::regclass)` default.
     Nextval {
@@ -616,6 +740,7 @@ impl Serialize for IrDefault {
             IrDefault::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
             IrDefault::Fn { r#fn } => map.serialize_entry("fn", &serde_json::json!({ "fn": r#fn }))?,
             IrDefault::Container { kind } => map.serialize_entry("container", kind)?,
+            IrDefault::Json { value } => map.serialize_entry("json", value)?,
             IrDefault::Nextval { sequence } => map.serialize_entry("nextval", sequence)?,
         }
         map.end()
@@ -658,13 +783,18 @@ impl<'de> Deserialize<'de> for IrDefault {
                 serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
             return Ok(IrDefault::Container { kind });
         }
+        if let Some(v) = obj.get("json") {
+            let value: IrJsonValue =
+                serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            return Ok(IrDefault::Json { value });
+        }
         if let Some(v) = obj.get("nextval") {
             let sequence: SequenceRef =
                 serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
             return Ok(IrDefault::Nextval { sequence });
         }
         Err(D::Error::custom(
-            "IrDefault key must be one of \"literal\", \"fn\", \"container\", or \"nextval\"",
+            "IrDefault key must be one of \"literal\", \"fn\", \"container\", \"json\", or \"nextval\"",
         ))
     }
 }
@@ -681,10 +811,12 @@ impl JsonSchema for IrDefault {
             .expect("SynthDefaultFn schema ref serializes");
         let empty_container_kind = serde_json::to_value(g.subschema_for::<EmptyContainerKind>())
             .expect("EmptyContainerKind schema ref serializes");
+        let ir_json_value = serde_json::to_value(g.subschema_for::<IrJsonValue>())
+            .expect("IrJsonValue schema ref serializes");
         let sequence_ref = serde_json::to_value(g.subschema_for::<SequenceRef>())
             .expect("SequenceRef schema ref serializes");
         schemars::json_schema!({
-            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL\nstring (property A); the per-dialect default clause is rendered by the shared\nsnapshot-builder kernel from this structured value (§6.5).",
+            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, a non-empty JSON value default for JSON columns, or a PostgreSQL\nsequence `nextval(...)` reference. NEVER a raw SQL string (property A); the\nper-dialect default clause is rendered by the shared snapshot-builder kernel\nfrom this structured value (§6.5).",
             "oneOf": [
                 {
                     "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -725,7 +857,7 @@ impl JsonSchema for IrDefault {
                     "additionalProperties": false
                 },
                 {
-                    "description": "An empty-container default (`{}` or `[]`). Non-empty containers are not representable.",
+                    "description": "An empty-container default (`{}` or `[]`). Non-empty JSON values use the json arm.",
                     "type": "object",
                     "properties": {
                         "container": {
@@ -733,6 +865,17 @@ impl JsonSchema for IrDefault {
                         }
                     },
                     "required": ["container"],
+                    "additionalProperties": false
+                },
+                {
+                    "description": "A non-empty JSON value default for a JSON column.",
+                    "type": "object",
+                    "properties": {
+                        "json": {
+                            "$ref": ir_json_value["$ref"].clone()
+                        }
+                    },
+                    "required": ["json"],
                     "additionalProperties": false
                 },
                 {
@@ -3412,7 +3555,7 @@ impl Op {
                     all_unsupported(
                         "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
                     )
-                } else if matches!(value, IrDefault::Container { .. }) {
+                } else if matches!(value, IrDefault::Container { .. } | IrDefault::Json { .. }) {
                     all_live_resolved
                 } else if matches!(value, IrDefault::Nextval { .. }) {
                     pg_only(
@@ -4447,6 +4590,7 @@ fn jcs_write_string(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     // ---- IrScalar numeric-domain (§2.5) — RED before the custom Deserialize ----
 
@@ -4490,6 +4634,130 @@ mod tests {
         assert_eq!(small, IrScalar::Int(42));
         let neg: IrScalar = serde_json::from_str("-7").unwrap();
         assert_eq!(neg, IrScalar::Int(-7));
+    }
+
+    fn json_object(entries: impl IntoIterator<Item = (&'static str, IrJsonValue)>) -> IrJsonValue {
+        IrJsonValue::Object(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    }
+
+    fn json_default_create_op(value: IrJsonValue) -> Op {
+        Op::CreateTable {
+            name: "limits".into(),
+            columns: vec![IrColumn {
+                name: "policy".into(),
+                ty: ColType::Json,
+                nullable: None,
+                default: Some(IrDefault::Json { value }),
+                unique: None,
+                id_prefix: None,
+                case_sensitive: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn ir_json_value_object_serializes_with_sorted_keys_and_checksum_stable() {
+        let value_ab = json_object([
+            ("a", IrJsonValue::Int(1)),
+            ("b", IrJsonValue::Int(2)),
+            (
+                "nested",
+                json_object([("a", IrJsonValue::Int(2)), ("z", IrJsonValue::Int(1))]),
+            ),
+        ]);
+        let value_ba = json_object([
+            (
+                "nested",
+                json_object([("z", IrJsonValue::Int(1)), ("a", IrJsonValue::Int(2))]),
+            ),
+            ("b", IrJsonValue::Int(2)),
+            ("a", IrJsonValue::Int(1)),
+        ]);
+        let default_ab = IrDefault::Json { value: value_ab.clone() };
+        let default_ba = IrDefault::Json { value: value_ba.clone() };
+
+        let wire = serde_json::to_string(&default_ab).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"json":{"a":1,"b":2,"nested":{"a":2,"z":1}}}"#,
+            "IrJsonValue object keys must serialize deterministically"
+        );
+        assert_eq!(serde_json::to_string(&default_ba).unwrap(), wire);
+
+        let op_ab = json_default_create_op(value_ab);
+        let op_ba = json_default_create_op(value_ba);
+        let csum = |op: &Op| {
+            Checksum::of_ir(
+                &CanonicalOpList(std::slice::from_ref(op)),
+                &MigrationFlags::default(),
+                "",
+                &[],
+                &[],
+                &[],
+            )
+            .as_str()
+            .to_string()
+        };
+        assert_eq!(csum(&op_ab), csum(&op_ba));
+    }
+
+    #[test]
+    fn ir_default_json_round_trips_and_rejects_float_wire() {
+        let wire = r#"{"json":{"b":2,"a":1,"nested":{"z":1,"a":2},"arr":[true,null,"x",-7]}}"#;
+        let d: IrDefault = serde_json::from_str(wire).unwrap();
+        let canonical = r#"{"json":{"a":1,"arr":[true,null,"x",-7],"b":2,"nested":{"a":2,"z":1}}}"#;
+        assert_eq!(serde_json::to_string(&d).unwrap(), canonical);
+        let back: IrDefault = serde_json::from_str(canonical).unwrap();
+        assert_eq!(d, back);
+
+        let float_err = serde_json::from_str::<IrDefault>(r#"{"json":{"x":1.5}}"#).unwrap_err();
+        assert!(
+            float_err.to_string().contains("json default values support integers only")
+                || float_err.to_string().contains(EXPR_INVALID_NUMERIC),
+            "float JSON defaults must be rejected at deserialize, got: {float_err}"
+        );
+        let range_err =
+            serde_json::from_str::<IrDefault>(r#"{"json":9007199254740992}"#).unwrap_err();
+        assert!(
+            range_err.to_string().contains(EXPR_INVALID_NUMERIC),
+            ">=2^53 JSON integers must be rejected at deserialize, got: {range_err}"
+        );
+    }
+
+    #[test]
+    fn ir_column_without_json_default_keeps_absent_default_wire() {
+        let col = IrColumn {
+            name: "body".into(),
+            ty: ColType::Text,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        };
+        let wire = serde_json::to_string(&col).unwrap();
+        assert_eq!(wire, r#"{"name":"body","type":"text"}"#);
+        assert!(!wire.contains("default"));
     }
 
     #[test]

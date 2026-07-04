@@ -2168,6 +2168,27 @@ fn validate_default_for_type(
         });
     }
 
+    if let IrDefault::Json { .. } = default {
+        if matches!(ty, ColType::Json) {
+            return Ok(());
+        }
+        return Err(AuthoringError {
+            code: CODE_COLUMN_DEFAULT_TYPE.to_string(),
+            kind: None,
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "{position} declares a JSON value default on type {ty:?}; \
+                 JSON value defaults are valid only on json columns in v1"
+            ),
+            suggested_fix: Some(
+                "use this default only on json columns, or remove the non-empty object/array default"
+                    .to_string(),
+            ),
+        });
+    }
+
     let IrDefault::Container { kind } = default else {
         return Ok(());
     };
@@ -4652,7 +4673,7 @@ mod tests {
     // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
     // have passed validate and deferred the blow-up to render / mint colliding ids.
 
-    use crate::model::ir::{EmptyContainerKind, VectorMetric};
+    use crate::model::ir::{EmptyContainerKind, IrJsonValue, VectorMetric};
 
     /// Build a createTable Op with a single `id` column carrying `id_prefix`.
     fn create_with_id_prefix(prefix: &str) -> Op {
@@ -4705,6 +4726,16 @@ mod tests {
             runtime_options: None,
             schema: None,
             existence_guard: None,
+        }
+    }
+
+    fn json_value_default() -> crate::model::ir::IrDefault {
+        crate::model::ir::IrDefault::Json {
+            value: IrJsonValue::Object(
+                [("a".to_string(), IrJsonValue::Int(1))]
+                    .into_iter()
+                    .collect(),
+            ),
         }
     }
 
@@ -4846,6 +4877,33 @@ mod tests {
         assert!(
             err.reason.contains("empty array defaults require json or textArray"),
             "error should explain the allowed types: {err}"
+        );
+    }
+
+    #[test]
+    fn json_value_default_on_int_is_rejected() {
+        let ir = ir_with(vec![create_with_default(ColType::Int, json_value_default())]);
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("JSON value defaults are valid only on json columns");
+        assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
+        assert!(
+            err.reason.contains("JSON value defaults are valid only on json columns"),
+            "error should explain the json-only bound: {err}"
+        );
+    }
+
+    #[test]
+    fn json_value_default_on_text_array_is_rejected() {
+        let ir = ir_with(vec![create_with_default(
+            ColType::TextArray,
+            json_value_default(),
+        )]);
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("JSON value defaults are valid only on json columns");
+        assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
+        assert!(
+            err.reason.contains("JSON value defaults are valid only on json columns"),
+            "error should explain the json-only bound: {err}"
         );
     }
 

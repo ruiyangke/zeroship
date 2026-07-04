@@ -3036,7 +3036,7 @@
       ]
     },
     "IrDefault": {
-      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL\nstring (property A); the per-dialect default clause is rendered by the shared\nsnapshot-builder kernel from this structured value (§6.5).",
+      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, a non-empty JSON value default for JSON columns, or a PostgreSQL\nsequence `nextval(...)` reference. NEVER a raw SQL string (property A); the\nper-dialect default clause is rendered by the shared snapshot-builder kernel\nfrom this structured value (§6.5).",
       "oneOf": [
         {
           "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -3085,7 +3085,7 @@
           "additionalProperties": false
         },
         {
-          "description": "An empty-container default (`{}` or `[]`). Non-empty containers are not representable.",
+          "description": "An empty-container default (`{}` or `[]`). Non-empty JSON values use the json arm.",
           "type": "object",
           "properties": {
             "container": {
@@ -3094,6 +3094,19 @@
           },
           "required": [
             "container"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A non-empty JSON value default for a JSON column.",
+          "type": "object",
+          "properties": {
+            "json": {
+              "$ref": "#/$defs/IrJsonValue"
+            }
+          },
+          "required": [
+            "json"
           ],
           "additionalProperties": false
         },
@@ -3181,6 +3194,37 @@
           "description": "`[]`.",
           "type": "string",
           "const": "array"
+        }
+      ]
+    },
+    "IrJsonValue": {
+      "description": "A canonical JSON value for non-empty json defaults. Numbers are integers only and must satisfy |v| < 2^53.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IrJsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/IrJsonValue"
+          }
         }
       ]
     },

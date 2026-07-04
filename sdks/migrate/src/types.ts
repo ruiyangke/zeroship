@@ -22,6 +22,7 @@ import type {
   IndexSortOrder,
   IndexStorageParams,
   IrBatch,
+  IrJsonValue,
   IrScalar,
   Join,
   JoinKind,
@@ -55,6 +56,7 @@ export type {
   IndexSortOrder,
   IndexStorageParams,
   IrBatch,
+  IrJsonValue,
   IrScalar,
   Join,
   JoinKind,
@@ -379,9 +381,18 @@ export type DbSynthSymbol =
  *  `fnSynth(now/genRandomUuid)`; all other functions are rejected. */
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 
-/** Empty object/array defaults admitted for JSON/text-array columns. Non-empty
- *  containers are intentionally not part of the public default type. */
+/** Empty object/array defaults admitted for JSON/text-array columns. */
 export type EmptyContainerDefault = Record<string, never> | readonly [];
+
+/** JSON value defaults admitted for JSON columns. Runtime recording accepts only
+ *  integer JS numbers (`Number.isInteger(v) && Math.abs(v) < 2**53`) in v1. */
+export type JsonDefaultValue =
+  | null
+  | boolean
+  | string
+  | number
+  | readonly JsonDefaultValue[]
+  | { readonly [key: string]: JsonDefaultValue };
 
 /** A column default value accepted by default-bearing column terminals. */
 export type DefaultValue =
@@ -389,7 +400,8 @@ export type DefaultValue =
   | DbSynthSymbol
   | { fn: "now" | "genRandomUuid" }
   | NextvalDefault
-  | EmptyContainerDefault;
+  | EmptyContainerDefault
+  | JsonDefaultValue;
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */

@@ -46,8 +46,8 @@ use crate::model::snapshot::{
 };
 use crate::IndexSortOrder;
 use crate::model::ir::{
-    ColType, EmptyContainerKind, IndexStorageParams, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, TableRuntimeOptions,
+    ColType, EmptyContainerKind, IndexStorageParams, IrJsonValue, PartitionBoundValue,
+    PartitionBounds, PartitionSpec, TableRuntimeOptions,
 };
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
@@ -1402,6 +1402,67 @@ pub(crate) fn empty_container_default_expr_for_data_type(
         (EmptyContainerKind::Array, "jsonb" | "json") => Some("'[]'::jsonb"),
         (EmptyContainerKind::Array, "text[]") => Some("'{}'::text[]"),
         _ => None,
+    }
+}
+
+pub(crate) fn json_value_default_expr_for_col_type(
+    value: &IrJsonValue,
+    ty: &ColType,
+    dialect: SqlDialect,
+) -> Option<String> {
+    matches!(ty, ColType::Json).then(|| json_value_default_expr(value, dialect))
+}
+
+pub(crate) fn json_value_default_expr_for_data_type(
+    value: &IrJsonValue,
+    data_type: &str,
+    dialect: SqlDialect,
+) -> Option<String> {
+    matches!(data_type, "jsonb" | "json").then(|| json_value_default_expr(value, dialect))
+}
+
+fn json_value_default_expr(value: &IrJsonValue, dialect: SqlDialect) -> String {
+    let json = render_json_value_text(value);
+    match dialect {
+        // PG (`standard_conforming_strings=on`) and SQLite treat a backslash as a
+        // literal byte, so only single quotes need doubling.
+        SqlDialect::Postgres => {
+            format!("{}::jsonb", crate::render::dml::sql_string_literal(&json))
+        }
+        SqlDialect::Sqlite => crate::render::dml::sql_string_literal(&json),
+        // MySQL's default `sql_mode` treats a backslash as a string-literal escape,
+        // so a JSON string value containing a backslash (e.g. an escaped `"`) must
+        // have its backslashes DOUBLED as well, or `CAST(... AS JSON)` sees corrupt
+        // JSON. Single quotes are still doubled. (Scoped to this json render path so
+        // the shared `sql_string_literal` primitive stays dialect-neutral.)
+        SqlDialect::Mysql => {
+            let mysql_literal = format!("'{}'", json.replace('\\', "\\\\").replace('\'', "''"));
+            format!("(CAST({mysql_literal} AS JSON))")
+        }
+    }
+}
+
+fn render_json_value_text(value: &IrJsonValue) -> String {
+    match value {
+        IrJsonValue::Null => "null".to_string(),
+        IrJsonValue::Bool(true) => "true".to_string(),
+        IrJsonValue::Bool(false) => "false".to_string(),
+        IrJsonValue::Int(i) => i.to_string(),
+        IrJsonValue::Str(s) => serde_json::to_string(s).expect("JSON string serializes"),
+        IrJsonValue::Array(items) => {
+            let rendered = items.iter().map(render_json_value_text).collect::<Vec<_>>();
+            format!("[{}]", rendered.join(", "))
+        }
+        IrJsonValue::Object(map) => {
+            let rendered = map
+                .iter()
+                .map(|(k, v)| {
+                    let key = serde_json::to_string(k).expect("JSON object key serializes");
+                    format!("{key}: {}", render_json_value_text(v))
+                })
+                .collect::<Vec<_>>();
+            format!("{{{}}}", rendered.join(", "))
+        }
     }
 }
 

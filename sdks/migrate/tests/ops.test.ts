@@ -525,16 +525,63 @@ test("empty object and array defaults record as container defaults", () => {
   assert.deepEqual(cols[2].default, { container: "array" });
 });
 
-test("non-empty container defaults are rejected", () => {
-  const message = "non-empty container defaults are not supported yet; only {} and [] are";
+test("non-empty JSON defaults record as IrDefault::Json with sorted keys", () => {
+  const ab = record(() =>
+    table("t").create({
+      columns: {
+        v: t.json().default({ a: 1, b: 2, nested: { a: 2, z: 1 } }),
+      },
+    }),
+  );
+  const ba = record(() =>
+    table("t").create({
+      columns: {
+        v: t.json().default({ nested: { z: 1, a: 2 }, b: 2, a: 1 }),
+      },
+    }),
+  );
+  const expected = { json: { a: 1, b: 2, nested: { a: 2, z: 1 } } };
+  assert.deepEqual(ab[0].columns[0].default, expected);
+  assert.deepEqual(ba[0].columns[0].default, expected);
+  assert.equal(
+    JSON.stringify(ab[0].columns[0].default),
+    JSON.stringify(ba[0].columns[0].default),
+    "object-key insertion order must be canonicalized for checksum stability",
+  );
+});
+
+test("JSON default float values are rejected", () => {
+  const message = "json default values support integers only (floats not yet supported)";
   assert.throws(
-    () => record(() => table("t").create({ columns: { v: t.json().default({ a: 1 } as any) } })),
+    () => record(() => table("t").create({ columns: { v: t.json().default({ x: 1.5 }) } })),
     (e: any) => e.code === "OP_INVALID" && e.message.includes(message),
   );
-  assert.throws(
-    () => record(() => table("t").create({ columns: { v: t.json().default([1] as any) } })),
-    (e: any) => e.code === "OP_INVALID" && e.message.includes(message),
+});
+
+test("public and engine recorders match for JSON value defaults", () => {
+  const pub = record(() =>
+    table("t").create({
+      columns: {
+        v: t.json().default({ b: 2, a: 1, nested: { z: 1, a: 2 } }),
+        arr: t.json().default([1, { b: 2, a: 1 }]),
+      },
+    }),
   );
+  const eng = recordEngine(({ table, t }) =>
+    table("t").create({
+      columns: {
+        v: t.json().default({ b: 2, a: 1, nested: { z: 1, a: 2 } }),
+        arr: t.json().default([1, { b: 2, a: 1 }]),
+      },
+    }),
+  );
+  assert.deepEqual(pub, eng);
+  assert.deepEqual(pub[0].columns[0].default, {
+    json: { a: 1, b: 2, nested: { a: 2, z: 1 } },
+  });
+  assert.deepEqual(pub[0].columns[1].default, {
+    json: [1, { a: 1, b: 2 }],
+  });
 });
 
 test("empty container defaults record byte-identically to engine recorder", () => {

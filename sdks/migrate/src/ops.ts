@@ -696,8 +696,31 @@ function toIrValue(value: unknown): unknown {
   return toIrScalar(value);
 }
 
-const NON_EMPTY_CONTAINER_DEFAULT_ERROR =
-  "non-empty container defaults are not supported yet; only {} and [] are";
+const JSON_DEFAULT_INTEGER_ERROR =
+  "json default values support integers only (floats not yet supported)";
+const JSON_DEFAULT_VALUE_ERROR =
+  "json default values must be JSON values (null, boolean, integer, string, array, or object)";
+
+function toIrJsonValue(value: unknown): unknown {
+  rejectFunctionValue(value);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (Number.isInteger(value) && Math.abs(value) < 2 ** 53) return value;
+    throw structuredError("OP_INVALID", JSON_DEFAULT_INTEGER_ERROR);
+  }
+  if (Array.isArray(value)) return value.map((item) => toIrJsonValue(item));
+  if (isPlainObject(value)) {
+    if ("fn" in value && typeof value.fn === "string") {
+      throw structuredError("OP_INVALID", "json default values cannot contain nested function defaults");
+    }
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value).sort()) {
+      out[key] = toIrJsonValue(value[key]);
+    }
+    return out;
+  }
+  throw structuredError("OP_INVALID", JSON_DEFAULT_VALUE_ERROR);
+}
 
 function toIrDefault(value: DefaultValue): Node {
   const fn = nativeFnSynthName(value);
@@ -712,13 +735,13 @@ function toIrDefault(value: DefaultValue): Node {
   if (Array.isArray(value)) {
     if (value.length === 0) return { container: "array" };
     rejectNestedFunctionValues(value);
-    throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
+    return { json: toIrJsonValue(value) };
   }
   if (isPlainObject(value)) {
     if (Object.keys(value).length === 0) return { container: "object" };
     if (isExplicitScalarCarrier(value)) return { literal: { value: toIrScalar(value) } };
     rejectNestedFunctionValues(value);
-    throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
+    return { json: toIrJsonValue(value) };
   }
   return { literal: { value: toIrScalar(value) } };
 }

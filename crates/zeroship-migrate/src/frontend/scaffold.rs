@@ -792,6 +792,10 @@ fn render_default(d: &IrDefault) -> String {
             crate::model::ir::EmptyContainerKind::Object => ".default({})".to_string(),
             crate::model::ir::EmptyContainerKind::Array => ".default([])".to_string(),
         },
+        IrDefault::Json { value } => {
+            let v = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
+            format!(".default({v})")
+        }
         IrDefault::Nextval { sequence } => {
             let args = match sequence.schema.as_deref() {
                 Some(schema) => format!("{}, {{ schema: {} }}", js_str(&sequence.name), js_str(schema)),
