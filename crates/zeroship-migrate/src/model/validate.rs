@@ -42,7 +42,7 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
-use crate::model::expr::{CaseBranch, Expr, PgArrayMembershipOp, SynthFn};
+use crate::model::expr::{CaseBranch, Expr, PgArrayMembershipOp, ScalarFn, SynthFn};
 use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
@@ -2798,9 +2798,16 @@ impl Ctx<'_> {
                 }
                 Ok(())
             }
-            // FnCall is an allow-listed scalar by construction (the closed
-            // ScalarFn enum) — only its args need recursion.
-            Expr::FnCall { args, .. } => {
+            // FnCall is an allow-listed scalar by the closed ScalarFn enum, but
+            // two members are PG-only VENDOR scalars (vendor spec §2.10):
+            // `current_setting` / `current_user` render as PG built-ins with no
+            // faithful SQLite/MySQL form, so they must be gated off the portable
+            // core exactly like the other PG-only expr nodes below — otherwise a
+            // portable op carrying them validates clean and breaks at apply.
+            Expr::FnCall { r#fn, args } => {
+                if matches!(r#fn, ScalarFn::CurrentSetting | ScalarFn::CurrentUser) {
+                    self.check_pg_only_expr("current_setting / current_user")?;
+                }
                 for a in args {
                     self.walk_depth(a, d)?;
                 }
@@ -3313,6 +3320,29 @@ mod tests {
             validate_expr(&ok, Dialect::Postgres, &sc, 0, None).is_ok(),
             "a tree within the depth bound must validate"
         );
+    }
+
+    #[test]
+    fn current_setting_and_current_user_are_pg_only_rejected_off_postgres() {
+        // Regression: current_setting / current_user are PG-only VENDOR scalars
+        // (they render as PG built-ins with no SQLite/MySQL form). A portable op
+        // carrying them must be REFUSED at validate on SQLite/MySQL — not sail
+        // through and break at apply.
+        let c = cols();
+        let sc = scope("users", &c);
+        for f in [ScalarFn::CurrentUser, ScalarFn::CurrentSetting] {
+            let e = Expr::FnCall { r#fn: f, args: vec![] };
+            assert!(
+                validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok(),
+                "{f:?} must validate on Postgres"
+            );
+            for d in [Dialect::Sqlite, Dialect::Mysql] {
+                let err = validate_expr(&e, d, &sc, 0, None)
+                    .expect_err("a PG-only vendor scalar must be refused off Postgres");
+                assert_eq!(err.code, CODE_UNSUPPORTED, "{f:?} on {d:?}: {err}");
+                assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+            }
+        }
     }
 
     // ── (a) every allow-listed node validates ──────────────────────────────
