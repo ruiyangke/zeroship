@@ -510,6 +510,20 @@ fn binary_op_sql(op: BinaryOp) -> &'static str {
     }
 }
 
+/// Render a binary operation to SQL, **dialect-aware**. Every operator is a
+/// portable infix EXCEPT string concatenation on MySQL: MySQL's `||` is *logical
+/// OR* (not concat, absent the non-default `PIPES_AS_CONCAT` sql_mode), so a
+/// `Concat` rendered as `a || b` there would silently corrupt to a boolean. MySQL
+/// concatenation is the `CONCAT(a, b)` function. PG and SQLite use the `||`
+/// operator, where it is genuinely concatenation.
+fn render_binop(op: BinaryOp, l: &str, r: &str, dialect: SqlDialect) -> String {
+    if matches!(op, BinaryOp::Concat) && matches!(dialect, SqlDialect::Mysql) {
+        format!("CONCAT({l}, {r})")
+    } else {
+        format!("({} {} {})", l, binary_op_sql(op), r)
+    }
+}
+
 /// The SQL spelling of an allow-listed named scalar function (§3.3.1.1(a)). These
 /// are the provably-identical cross-dialect scalars (same name + semantics on PG
 /// and SQLite), so the spelling is dialect-neutral.
@@ -662,7 +676,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_bound(lhs, ctx)?;
             let r = render_expr_bound(rhs, ctx)?;
-            format!("({} {} {})", l, binary_op_sql(*op), r)
+            render_binop(*op, &l, &r, ctx.dialect)
         }
         Expr::UnaryOp { op, operand } => {
             let o = render_expr_bound(operand, ctx)?;
@@ -801,7 +815,7 @@ where
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_inline_with_col(lhs, dialect, col_ref)?;
             let r = render_expr_inline_with_col(rhs, dialect, col_ref)?;
-            format!("({} {} {})", l, binary_op_sql(*op), r)
+            render_binop(*op, &l, &r, dialect)
         }
         Expr::UnaryOp { op, operand } => render_unary(
             *op,
@@ -1358,6 +1372,32 @@ mod tests {
     }
     fn val(s: IrScalar) -> IrValue {
         IrValue::Scalar(s)
+    }
+
+    // ── Concat is dialect-specific (regression: MySQL `||` is logical OR) ─────
+
+    #[test]
+    fn concat_renders_per_dialect_pg_sqlite_mysql() {
+        // Regression guard: on MySQL, `||` is *logical OR*, so rendering `Concat`
+        // as `a || b` there silently corrupts a string concat to a boolean. It
+        // MUST render as `CONCAT(a, b)`. PG + SQLite keep the `||` operator.
+        let expr = Expr::BinOp {
+            op: BinaryOp::Concat,
+            lhs: Box::new(Expr::col("first")),
+            rhs: Box::new(Expr::col("last")),
+        };
+
+        let pg = render_expr_inline(&expr, SqlDialect::Postgres).unwrap();
+        assert_eq!(pg, "(\"first\" || \"last\")", "PG uses the || concat operator");
+
+        let sqlite = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap();
+        assert_eq!(sqlite, "(\"first\" || \"last\")", "SQLite uses the || concat operator");
+
+        let mysql = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
+        assert!(
+            mysql.starts_with("CONCAT(") && !mysql.contains("||"),
+            "MySQL MUST render Concat as CONCAT(...), never `||` (logical OR): got {mysql}"
+        );
     }
 
     // ── identifier safety ───────────────────────────────────────────────────
