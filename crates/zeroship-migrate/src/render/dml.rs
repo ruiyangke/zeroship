@@ -547,9 +547,15 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
 /// Render an allow-listed [`ScalarFn`] call from its already-rendered argument
 /// fragments. Most are `<name>(<args>)`; the VENDOR `CurrentUser` is a bare
 /// reserved keyword with NO parens (PG rejects `current_user()`).
-fn render_scalar_fn_call(f: ScalarFn, args: &[String]) -> String {
+fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> String {
     match f {
         ScalarFn::CurrentUser => "current_user".to_string(),
+        // The portable `length()` intent is CHARACTER length (PG + SQLite
+        // `length(text)`). MySQL's `LENGTH()` is *byte* length — wrong for any
+        // multibyte string — so MySQL must use `CHAR_LENGTH()`.
+        ScalarFn::Length if matches!(dialect, SqlDialect::Mysql) => {
+            format!("char_length({})", args.join(", "))
+        }
         _ => format!("{}({})", scalar_fn_sql(f), args.join(", ")),
     }
 }
@@ -701,7 +707,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             for a in args {
                 rs.push(render_expr_bound(a, ctx)?);
             }
-            render_scalar_fn_call(*r#fn, &rs)
+            render_scalar_fn_call(*r#fn, &rs, ctx.dialect)
         }
         Expr::FnSynth { r#fn, args } => render_synth_bound(*r#fn, args, ctx)?,
         Expr::Cast { operand, target } => {
@@ -842,7 +848,7 @@ where
                 args.iter()
                     .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
                     .collect();
-            render_scalar_fn_call(*r#fn, &rs?)
+            render_scalar_fn_call(*r#fn, &rs?, dialect)
         }
         Expr::FnSynth { r#fn, args } => match r#fn {
             SynthFn::SplitPart => {
@@ -1397,6 +1403,26 @@ mod tests {
         assert!(
             mysql.starts_with("CONCAT(") && !mysql.contains("||"),
             "MySQL MUST render Concat as CONCAT(...), never `||` (logical OR): got {mysql}"
+        );
+    }
+
+    #[test]
+    fn length_is_char_length_on_mysql() {
+        // Regression: MySQL LENGTH() is BYTE length; the portable length() intent
+        // is CHARACTER length (PG/SQLite length()). MySQL MUST use CHAR_LENGTH().
+        let expr = Expr::FnCall { r#fn: ScalarFn::Length, args: vec![Expr::col("name")] };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "length(\"name\")"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "length(\"name\")"
+        );
+        let mysql = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
+        assert!(
+            mysql.starts_with("char_length("),
+            "MySQL length() must render as CHAR_LENGTH (LENGTH is byte length): got {mysql}"
         );
     }
 
