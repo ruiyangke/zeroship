@@ -1,4 +1,4 @@
-import { interval, membership, or, table, t } from "@zeroship/migrate";
+import { interval, membership, nextval, or, table, t } from "@zeroship/migrate";
 import { raw, sequence } from "@zeroship/migrate/pg";
 
 export const name = "auth_oauth_tables";
@@ -32,7 +32,7 @@ export function up() {
   });
   table("audit_events", { schema: "zeroship" }).create({
     columns: {
-      id: t.bigInt().notNull(),
+      id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
       occurred_at: t.timestamp().notNull().default({ fn: "now" }),
       event_type: t.text().notNull(),
       outcome: t.text().notNull(),
@@ -343,7 +343,7 @@ export function up() {
   });
   table("totp_backup_codes", { schema: "zeroship" }).create({
     columns: {
-      id: t.bigInt().notNull(),
+      id: t.bigInt().notNull().identity({ always: true }),
       user_id: t.uuid().notNull(),
       code_hash: t.text().notNull(),
       used_at: t.timestamp(),
@@ -381,10 +381,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE zeroship.totp_backup_codes ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (\n    SEQUENCE NAME zeroship.totp_backup_codes_id_seq\n    START WITH 1\n    INCREMENT BY 1\n    NO MINVALUE\n    NO MAXVALUE\n    CACHE 1\n)", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
-  // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
-  raw({ sql: "ALTER TABLE ONLY zeroship.audit_events ALTER COLUMN id SET DEFAULT nextval('zeroship.audit_events_id_seq'::regclass)", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
 }
 
 export function down() {
