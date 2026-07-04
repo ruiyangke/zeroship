@@ -326,13 +326,11 @@ export function up() {
       from_plan_id: t.text(),
       to_plan_id: t.text().notNull(),
       effective_at: t.timestamp().notNull().default({ fn: "now" }),
-      usage_at_change: t.json().notNull(),
+      usage_at_change: t.json().notNull().default({}),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.plan_change_events ALTER COLUMN usage_at_change SET DEFAULT '{}'::jsonb", reason: "column plan_change_events.usage_at_change requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("plans", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
