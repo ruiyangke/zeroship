@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use zeroship_migrate::model::capability::VendorCapability;
 use zeroship_migrate::model::ir::{
-    ColType, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraintKind,
+    ColType, IdentityCol, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraintKind,
     IrDefault, Op, PartitionBounds, SequenceRef, TriggerAction, ViewQuery,
 };
 use zeroship_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
@@ -460,6 +460,49 @@ fn nextval_default_ops() -> Vec<Op> {
     ]
 }
 
+fn identity_always_ops() -> Vec<Op> {
+    let col = IrColumn {
+        name: "id".into(),
+        ty: ColType::BigInt,
+        nullable: Some(false),
+        default: None,
+        unique: None,
+        id_prefix: None,
+        case_sensitive: None,
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: Some(IdentityCol { always: true }),
+    };
+    vec![
+        Op::CreateTable {
+            name: "events".into(),
+            columns: vec![col.clone()],
+            primary_key: Some(vec!["id".into()]),
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::AddColumn {
+            table: "events".into(),
+            column: "id".into(),
+            ty: ColType::BigInt,
+            nullable: Some(false),
+            default: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: col.identity,
+            schema: None,
+            existence_guard: None,
+        },
+    ]
+}
+
 #[test]
 fn partition_ops_and_partition_index_features_are_pg_only() {
     for op in partition_feature_ops() {
@@ -476,6 +519,27 @@ fn partition_ops_and_partition_index_features_are_pg_only() {
                 decision_supported,
                 matches!(dialect, Dialect::Postgres),
                 "{tag} {dialect:?}: partition DSL slice is PostgreSQL-only"
+            );
+        }
+    }
+}
+
+#[test]
+fn identity_always_support_decision_matches_validate_and_is_pg_only() {
+    for op in identity_always_ops() {
+        let tag = op_tag(&op);
+        let support = op.support();
+        for dialect in DIALECTS {
+            let decision_supported = support.decision(dialect).is_supported();
+            let validates = validate_current(&op, dialect);
+            assert_eq!(
+                validates, decision_supported,
+                "{tag} {dialect:?}: identity(always:true) support decision and validate() must agree"
+            );
+            assert_eq!(
+                decision_supported,
+                matches!(dialect, Dialect::Postgres),
+                "{tag} {dialect:?}: identity(always:true) is PostgreSQL-only"
             );
         }
     }

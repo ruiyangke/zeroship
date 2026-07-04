@@ -295,3 +295,65 @@ async fn doc_hero_applies_byte_identically_on_both_backends() {
 
     pg_teardown(&conn, &cfg).await;
 }
+
+#[compio::test]
+async fn auto_increment_identity_assigns_id_on_pg_and_sqlite_apply() {
+    let Some(conn) = pg().await else { return };
+    let cfg = cfg_for(&token());
+    pg_setup(&conn, &cfg).await;
+    let sp = sqlite_paths("auto_increment");
+    let be = SqliteBackend::open(&sp.app, &sp.journal).expect("sqlite backend");
+
+    let create = r#"{"ir_version":6,"name":"create_widgets","ops":[{
+        "op":"createTable",
+        "name":"widgets",
+        "columns":[
+            {"name":"id","type":"bigInt","nullable":false,"identity":{"always":false}},
+            {"name":"label","type":"text","nullable":false}
+        ],
+        "primaryKey":["id"]
+    }]}"#;
+    pg_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+    sqlite_apply(&be, &cfg, create, &registry(&[]), Approval::None).await;
+
+    let schema = cfg.project_schema.replace('"', "\"\"");
+    let pg_id: String = conn
+        .query_one(
+            &format!(
+                "INSERT INTO \"{schema}\".\"widgets\" \
+                 (\"created_at\", \"updated_at\", \"version\", \"label\") \
+                 VALUES ('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 'pg') \
+                 RETURNING id::text"
+            ),
+            &[],
+        )
+        .await
+        .expect("PG insert without id")
+        .get(0);
+
+    let actor = be.actor();
+    actor.set_mode(Mode::CreatorUp).await.expect("creator mode");
+    actor
+        .exec(
+            "INSERT INTO \"widgets\" (\"created_at\", \"updated_at\", \"version\", \"label\") \
+             VALUES ('2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 'sqlite')",
+        )
+        .await
+        .expect("SQLite insert without id");
+    let sqlite_id = actor
+        .query("SELECT CAST(id AS TEXT) FROM \"widgets\" WHERE \"label\" = 'sqlite'")
+        .await
+        .expect("SQLite generated id query")
+        .into_iter()
+        .next()
+        .and_then(|row| row.into_iter().next().flatten())
+        .expect("SQLite generated id");
+
+    assert_eq!(pg_id, "1", "Postgres BY DEFAULT identity should assign id=1");
+    assert_eq!(
+        sqlite_id, "1",
+        "SQLite INTEGER PRIMARY KEY AUTOINCREMENT should assign id=1"
+    );
+
+    pg_teardown(&conn, &cfg).await;
+}

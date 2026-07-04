@@ -196,6 +196,32 @@ test("C2 — create() column that is both .unique() + .primaryKey() emits NO col
   assert.equal(ops2[0].constraints, undefined, "order-independent: no pk is hoisted");
 });
 
+test("t.int().autoIncrement() records identity always:false and matches engine recorder", () => {
+  const publicOps = record(() => {
+    table("u").create({
+      columns: {
+        id: t.int().autoIncrement().primaryKey(),
+        seq: t.bigInt().autoIncrement(),
+      },
+    });
+    table("u").column("next_id").add({ type: t.int().autoIncrement() });
+  });
+  const engineOps = recordEngine(({ table, t }) => {
+    table("u").create({
+      columns: {
+        id: t.int().autoIncrement().primaryKey(),
+        seq: t.bigInt().autoIncrement(),
+      },
+    });
+    table("u").column("next_id").add({ type: t.int().autoIncrement() });
+  });
+
+  assert.deepEqual(publicOps, engineOps);
+  assert.deepEqual(publicOps[0].columns[0].identity, { always: false });
+  assert.deepEqual(publicOps[0].columns[1].identity, { always: false });
+  assert.deepEqual(publicOps[1].identity, { always: false });
+});
+
 test(".column().add() carries a fluent ColumnDef's modifiers", () => {
   const ops = record(() =>
     table("u").column("status").add({ type: t.text().notNull().default("new") }),
