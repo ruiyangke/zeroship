@@ -130,6 +130,7 @@ export type {
   Classification,
   VectorMetric,
   IdOptions,
+  TextOptions,
   VectorOptions,
   MaskOptions,
   // re-exported generated IR wire types (ergonomics; goldens are the contract)

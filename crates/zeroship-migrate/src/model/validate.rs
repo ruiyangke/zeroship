@@ -702,6 +702,7 @@ pub fn validate_op_scoped(
             nullable,
             default,
             vector_metric,
+            case_sensitive,
             mask,
             generated,
             identity,
@@ -725,6 +726,7 @@ pub fn validate_op_scoped(
                 unique: None,
                 id_prefix: None,
                 vector_metric: *vector_metric,
+                case_sensitive: *case_sensitive,
                 mask: *mask,
                 generated: generated.clone(),
                 identity: *identity,
@@ -2318,6 +2320,21 @@ fn validate_column_facets(
         ));
     }
 
+    if matches!(col.case_sensitive, Some(false))
+        && !matches!(col.ty, crate::model::ir::ColType::Text)
+    {
+        return Err(mk(
+            CODE_UNSUPPORTED,
+            format!(
+                "column {:?} declares caseSensitive:false but is not a text column; \
+                 caseSensitive:false is only valid on a text column",
+                col.name
+            ),
+            "drop the caseSensitive facet, or declare the column as t.text({ caseSensitive: false })"
+                .to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -3706,7 +3723,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
             primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
@@ -4223,8 +4240,8 @@ mod tests {
             Op::CreateTable {
                 name: "users".into(),
                 columns: vec![
-                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
-                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    IrColumn { name: "first".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    IrColumn { name: "total".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 ],
                 primary_key: None,
                 constraints: vec![],
@@ -4301,7 +4318,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
             primary_key: None,
             constraints: vec![],
             indexes: vec![IrIndex {
@@ -4354,7 +4371,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
             primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
@@ -4389,7 +4406,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
             primary_key: None,
             constraints: vec![IrConstraint {
                 name: None,
@@ -4576,6 +4593,7 @@ mod tests {
                 default: None,
                 unique: None,
                 id_prefix: Some(prefix.to_string()),
+                case_sensitive: None,
                 vector_metric: None, mask: None,
                 generated: None,
                 identity: None,
@@ -4602,6 +4620,7 @@ mod tests {
                 default: Some(default),
                 unique: None,
                 id_prefix: None,
+                case_sensitive: None,
                 vector_metric: None,
                 mask: None,
                 generated: None,
@@ -4671,6 +4690,7 @@ mod tests {
                 default: None,
                 unique: None,
                 id_prefix: None,
+                case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
                 generated: None,
@@ -4689,6 +4709,42 @@ mod tests {
         let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("a vector_metric on a non-vector column must be refused");
         assert_eq!(err.code, CODE_VECTOR_METRIC_MISPLACED, "got: {err}");
+    }
+
+    #[test]
+    fn case_sensitive_false_rejects_non_text_columns() {
+        for ty in [ColType::Int, ColType::Json] {
+            let ir = ir_with(vec![Op::CreateTable {
+                name: "docs".into(),
+                columns: vec![IrColumn {
+                    name: "body".into(),
+                    ty,
+                    nullable: None,
+                    default: None,
+                    unique: None,
+                    id_prefix: None,
+                    case_sensitive: Some(false),
+                    vector_metric: None,
+                    mask: None,
+                    generated: None,
+                    identity: None,
+                }],
+                primary_key: None,
+                constraints: vec![],
+                indexes: vec![],
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }]);
+            let err = validate_ir_platform(&ir, Dialect::Postgres)
+                .expect_err("caseSensitive:false on a non-text column must be refused");
+            assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
+            assert!(
+                err.reason.contains("caseSensitive:false is only valid on a text column"),
+                "error should explain the text-only bound: {err}"
+            );
+        }
     }
 
     #[test]
@@ -4732,6 +4788,7 @@ mod tests {
                 default: None,
                 unique: None,
                 id_prefix: None,
+                case_sensitive: None,
                 vector_metric: Some(VectorMetric::Cosine),
                 mask: None,
                 generated: None,

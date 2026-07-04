@@ -388,6 +388,7 @@ fn synth_delta_ops(
                         // to the scaffold's fail-closed posture — it never invents a
                         // declared-only facet it cannot observe).
                         id_prefix: None,
+                        case_sensitive: col.case_sensitive,
                         vector_metric: None,
                         mask: None,
                         generated: None,
@@ -445,6 +446,7 @@ fn synth_delta_ops(
                             // diff; the snapshot column type carries no declared vector
                             // metric / standalone mask facet at this layer (op.* authoring,
                             // not scaffold, is the source of truth for those — #173/#174).
+                            case_sensitive: col.case_sensitive,
                             vector_metric: None,
                             mask: None,
                             generated: None,
@@ -616,9 +618,10 @@ fn render_op_call(op: &Op) -> String {
             ty,
             nullable,
             default,
+            case_sensitive,
             ..
         } => {
-            let mut chain = render_t_for(ty);
+            let mut chain = render_t_for_col(ty, *case_sensitive);
             if *nullable == Some(false) {
                 chain.push_str(".notNull()");
             }
@@ -703,7 +706,7 @@ fn render_create_runtime_options(options: &TableRuntimeOptions) -> Vec<String> {
 
 /// Render a column as a `t.*` chain inside a `create({ columns })` map.
 fn render_col(c: &IrColumn) -> String {
-    let mut chain = render_t_for(&c.ty);
+    let mut chain = render_t_for_col(&c.ty, c.case_sensitive);
     if c.nullable == Some(false) {
         chain.push_str(".notNull()");
     }
@@ -717,6 +720,14 @@ fn render_col(c: &IrColumn) -> String {
         chain.push_str(&render_default(d));
     }
     chain
+}
+
+fn render_t_for_col(ty: &ColType, case_sensitive: Option<bool>) -> String {
+    if matches!(case_sensitive, Some(false)) && matches!(ty, ColType::Text | ColType::String) {
+        "t.text({ caseSensitive: false })".into()
+    } else {
+        render_t_for(ty)
+    }
 }
 
 /// The `t.*` factory for a `ColType` (the portable subset generate synthesizes).

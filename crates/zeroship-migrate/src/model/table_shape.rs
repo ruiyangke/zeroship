@@ -188,6 +188,7 @@ fn system_column_to_ir(
         default: None,
         unique: None,
         id_prefix: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -218,6 +219,7 @@ fn validate_folded_id_prefix(table: &str, column: &IrColumn) -> Result<(), Table
         || column.mask.is_some()
         || column.generated.is_some()
         || column.identity.is_some()
+        || column.case_sensitive.is_some()
         || column.vector_metric.is_some()
     {
         return Err(TableShapeError::InvalidIdPrefixDeclaration {
@@ -242,6 +244,7 @@ fn validate_folded_id_identity(table: &str, column: &IrColumn) -> Result<(), Tab
         || has_default
         || column.mask.is_some()
         || column.generated.is_some()
+        || column.case_sensitive.is_some()
         || column.vector_metric.is_some()
         || column.id_prefix.is_some()
     {
@@ -311,6 +314,7 @@ fn system_columns_match(actual: &IrColumn, expected: &IrColumn) -> bool {
         && actual.nullable == expected.nullable
         && actual.default == expected.default
         && actual.unique == expected.unique
+        && actual.case_sensitive == expected.case_sensitive
         && actual.vector_metric == expected.vector_metric
         && actual.mask == expected.mask
         && actual.generated == expected.generated
@@ -356,6 +360,7 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,

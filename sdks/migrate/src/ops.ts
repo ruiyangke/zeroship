@@ -96,6 +96,7 @@ import type {
   TableOptions,
   TableStrictness,
   TableRef,
+  TextOptions,
   TriggerBodyBuilder,
   TriggerStmt,
   TypeLexicon,
@@ -418,6 +419,7 @@ class ColumnDefImpl implements ColumnDefType {
   // Absent ⇒ omitted on the wire.
   readonly _idPrefix: string | undefined;
   readonly _vectorMetric: string | undefined;
+  readonly _caseSensitive: boolean | undefined;
   readonly _mask: { kind: string; classification: string } | undefined;
   readonly _generated: { expr: Node; stored: boolean } | undefined;
   readonly _identity: { always: boolean } | undefined;
@@ -431,6 +433,7 @@ class ColumnDefImpl implements ColumnDefType {
       unique?: boolean;
       idPrefix?: string;
       vectorMetric?: string;
+      caseSensitive?: boolean;
       mask?: { kind: string; classification: string };
       generated?: { expr: Node; stored: boolean };
       identity?: { always: boolean };
@@ -443,6 +446,7 @@ class ColumnDefImpl implements ColumnDefType {
     this._unique = fields?.unique ?? false;
     this._idPrefix = fields?.idPrefix;
     this._vectorMetric = fields?.vectorMetric;
+    this._caseSensitive = fields?.caseSensitive;
     this._mask = fields?.mask;
     this._generated = fields?.generated;
     this._identity = fields?.identity;
@@ -457,6 +461,7 @@ class ColumnDefImpl implements ColumnDefType {
     unique?: boolean;
     idPrefix?: string;
     vectorMetric?: string;
+    caseSensitive?: boolean;
     mask?: { kind: string; classification: string };
     generated?: { expr: Node; stored: boolean };
     identity?: { always: boolean };
@@ -468,6 +473,7 @@ class ColumnDefImpl implements ColumnDefType {
       unique: over.unique ?? this._unique,
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
+      caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
       mask: "mask" in over ? over.mask : this._mask,
       generated: "generated" in over ? over.generated : this._generated,
       identity: "identity" in over ? over.identity : this._identity,
@@ -572,6 +578,7 @@ class ColumnDefImpl implements ColumnDefType {
       // pre-facet image (checksum-neutral).
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
+      caseSensitive: this._caseSensitive === false ? false : undefined,
       mask: this._mask,
       generated: this._generated,
       identity: this._identity,
@@ -598,6 +605,7 @@ class ColumnDefImpl implements ColumnDefType {
       // #173: carry the vector metric + standalone mask onto the addColumn op tail
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
       vectorMetric: this._vectorMetric,
+      caseSensitive: this._caseSensitive === false ? false : undefined,
       mask: this._mask,
       generated: this._generated,
       identity: this._identity,
@@ -607,6 +615,18 @@ class ColumnDefImpl implements ColumnDefType {
 
 function isColumnDef(x: unknown): x is ColumnDefImpl {
   return x instanceof ColumnDefImpl;
+}
+
+function textColumn(opts?: TextOptions): ColumnDefImpl {
+  if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+    throw structuredError("OP_INVALID", "t.text(opts): opts must be { caseSensitive?: boolean }");
+  }
+  if (opts?.caseSensitive !== undefined && typeof opts.caseSensitive !== "boolean") {
+    throw structuredError("OP_INVALID", "t.text({ caseSensitive }): caseSensitive must be a boolean");
+  }
+  return new ColumnDefImpl("text", {
+    caseSensitive: opts?.caseSensitive === false ? false : undefined,
+  });
 }
 
 /** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
@@ -702,7 +722,7 @@ export const t: TypeLexicon = {
     }
     return col;
   },
-  text: () => new ColumnDefImpl("text"),
+  text: (opts?: TextOptions) => textColumn(opts),
   textArray: () => new ColumnDefImpl("textArray"),
   numeric: (precision = 38, scale = 9) =>
     new ColumnDefImpl({ decimal: { precision, scale } } as ColType),

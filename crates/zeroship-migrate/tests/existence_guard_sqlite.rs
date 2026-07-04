@@ -85,7 +85,7 @@ async fn apply_one(be: &SqliteBackend, m: &Migration) -> Result<(), ApplyError> 
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
-    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }
+    IrColumn { name: name.into(), ty, nullable: Some(true), default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }
 }
 
 async fn table_has_column(be: &SqliteBackend, table: &str, column: &str) -> bool {
@@ -178,6 +178,7 @@ async fn add_column_ifnotexists_absent_runs() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -226,6 +227,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -242,6 +244,7 @@ async fn add_column_ifnotexists_present_text_affinity_match_is_noop() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -287,6 +290,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
         ty: ColType::Int,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -303,6 +307,7 @@ async fn add_column_ifnotexists_present_integer_affinity_match_is_noop() {
         ty: ColType::Int,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -355,6 +360,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -374,6 +380,7 @@ async fn add_column_ifnotexists_sqlite_ref_over_live_string_is_noop() {
         ty: ColType::Ref { references: "people".into() },
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -417,6 +424,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         ty: ColType::Int,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -434,6 +442,7 @@ async fn add_column_ifnotexists_present_divergent_type_fails_closed() {
         ty: ColType::String,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -653,7 +662,7 @@ async fn create_table_ifnotexists_fresh_creates_unique_secondary_index_and_rerun
             ty: ColType::String,
             nullable: Some(true),
             default: None,
-            unique: Some(true), id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+            unique: Some(true), id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         primary_key: None,
         constraints: vec![],
         indexes: vec![],
@@ -743,6 +752,7 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
         ty: ColType::Timestamp,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -762,6 +772,7 @@ async fn add_column_ifnotexists_timestamp_rerun_is_noop() {
         ty: ColType::Timestamp,
         nullable: Some(true),
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,

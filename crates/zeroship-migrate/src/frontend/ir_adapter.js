@@ -69,6 +69,7 @@ function fieldDefToDescriptor(name, def) {
   // `zeroship-schema` kernel maps them identically to plugin-db.
   if (def.vectorDims !== undefined) out.vectorDims = def.vectorDims;
   if (def.vectorMetric !== undefined) out.vectorMetric = def.vectorMetric;
+  if (def.caseSensitive !== undefined) out.caseSensitive = def.caseSensitive;
   if (def.encrypted !== undefined) out.encrypted = def.encrypted;
   if (def.mask !== undefined) out.mask = def.mask;
 

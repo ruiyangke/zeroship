@@ -332,6 +332,7 @@ class ColumnDef {
     // distance metric (`t.vector(n, {metric})`). Absent ⇒ omitted on the wire.
     this._idPrefix = fields ? fields.idPrefix : undefined;
     this._vectorMetric = fields ? fields.vectorMetric : undefined;
+    this._caseSensitive = fields ? fields.caseSensitive : undefined;
     // #174: a STANDALONE column mask (`.mask({ kind, classification })`) carried on the
     // IrColumn. Absent ⇒ omitted on the wire. An encrypted column's auto-mask is IMPLIED
     // by `t.encrypted()` (the engine re-derives it) — only an explicit mask lands here.
@@ -349,6 +350,7 @@ class ColumnDef {
       unique: over.unique !== undefined ? over.unique : this._unique,
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
+      caseSensitive: "caseSensitive" in over ? over.caseSensitive : this._caseSensitive,
       mask: "mask" in over ? over.mask : this._mask,
       generated: "generated" in over ? over.generated : this._generated,
       identity: "identity" in over ? over.identity : this._identity,
@@ -456,6 +458,7 @@ class ColumnDef {
       // so a plain column is byte-identical to the pre-P2a image (checksum-neutral).
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
+      caseSensitive: this._caseSensitive === false ? false : undefined,
       // #174: carry a STANDALONE mask onto the wire IrColumn (`{ kind, classification }`)
       // so the offline fold + gen-types keep the `MaskedValue<T>` brand and the lower
       // emits the `__zsmask` sentinel. Absent ⇒ omitted (compact), so a mask-less column
@@ -496,6 +499,7 @@ class ColumnDef {
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact),
       // so a plain ADD COLUMN is byte-identical to the pre-#173 wire image.
       vectorMetric: this._vectorMetric,
+      caseSensitive: this._caseSensitive === false ? false : undefined,
       mask: this._mask,
       generated: this._generated,
       identity: this._identity,
@@ -506,6 +510,18 @@ class ColumnDef {
 /** Marker the helpers use to tell a fluent `ColumnDef` from a bare ColType. */
 function isColumnDef(x) {
   return x instanceof ColumnDef;
+}
+
+function textColumn(opts) {
+  if (opts !== undefined && (opts === null || typeof opts !== "object")) {
+    throw structuredError("OP_INVALID", "t.text(opts): opts must be { caseSensitive?: boolean }");
+  }
+  if (opts && opts.caseSensitive !== undefined && typeof opts.caseSensitive !== "boolean") {
+    throw structuredError("OP_INVALID", "t.text({ caseSensitive }): caseSensitive must be a boolean");
+  }
+  return new ColumnDef("text", {
+    caseSensitive: opts && opts.caseSensitive === false ? false : undefined,
+  });
 }
 
 /** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
@@ -612,7 +628,7 @@ export const t = {
     }
     return col;
   },
-  text: () => new ColumnDef("text"),
+  text: (opts) => textColumn(opts),
   textArray: () => new ColumnDef("textArray"),
   /** Fixed-precision decimal. Defaults to (38, 9). */
   numeric: (precision = 38, scale = 9) => new ColumnDef({ decimal: { precision, scale } }),

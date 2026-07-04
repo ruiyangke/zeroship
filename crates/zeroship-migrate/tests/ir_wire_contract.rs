@@ -136,6 +136,7 @@ fn ir_column_facet_fields_are_camel_case() {
         default: None,
         unique: None,
         id_prefix: Some("post".into()),
+        case_sensitive: None,
         vector_metric: Some(VectorMetric::Cosine),
         mask: None,
         generated: None,
@@ -172,6 +173,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
                 default: None,
                 unique: None,
                 id_prefix: None,
+                case_sensitive: None,
                 vector_metric: None,
                 mask: None,
                 generated: None,
@@ -184,6 +186,7 @@ fn create_table_primary_key_round_trips_and_schema_carries_field() {
                 default: None,
                 unique: None,
                 id_prefix: None,
+                case_sensitive: None,
                 vector_metric: None,
                 mask: None,
                 generated: None,
@@ -734,6 +737,7 @@ fn add_column_omits_absent_optionals() {
         ty: zeroship_migrate::model::ir::ColType::Int,
         nullable: None,
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -797,7 +801,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         ty: ColType::Uuid,
         nullable: None,
         default: None,
-        unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None };
+        unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None };
     let cv = serde_json::to_value(&col).unwrap();
     let cobj = cv.as_object().unwrap();
     for absent in ["nullable", "default", "unique"] {
@@ -849,6 +853,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
             default: None,
             unique: None,
             id_prefix: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
@@ -973,6 +978,7 @@ fn checksum_of_ir_matches_js_idiomatic_omitted_optionals() {
         ty: ColType::Int,
         nullable: None,
         default: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,

@@ -1760,6 +1760,7 @@ impl IrAuthor {
                 nullable,
                 default,
                 vector_metric,
+                case_sensitive,
                 mask,
                 generated,
                 identity,
@@ -1778,6 +1779,7 @@ impl IrAuthor {
                     *nullable,
                     default.as_ref(),
                     *vector_metric,
+                    *case_sensitive,
                     *mask,
                     generated.as_ref(),
                     *identity,
@@ -1790,6 +1792,7 @@ impl IrAuthor {
                     unique: None,
                     id_prefix: None,
                     vector_metric: *vector_metric,
+                    case_sensitive: *case_sensitive,
                     mask: *mask,
                     generated: generated.clone(),
                     identity: *identity,
@@ -2028,8 +2031,9 @@ impl IrAuthor {
                 // Build the desired `ColumnSnapshot` via the SHARED builder (a
                 // one-field descriptor) so the emitted `data_type` is byte-identical
                 // to the differ's type mapping — never re-spelled (§6.5).
-                let mut col =
-                    self.add_column_snapshot(table, column, to_type, None, None, None, None, None, None)?;
+                let mut col = self.add_column_snapshot(
+                    table, column, to_type, None, None, None, None, None, None, None,
+                )?;
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
                         ColType::Enum { name }
@@ -2058,6 +2062,7 @@ impl IrAuthor {
                                 default: None,
                                 unique: None,
                                 id_prefix: None,
+                                case_sensitive: None,
                                 vector_metric: None,
                                 mask: None,
                                 generated: None,
@@ -2854,6 +2859,7 @@ impl IrAuthor {
                 c.nullable,
                 c.default.as_ref(),
                 c.vector_metric,
+                c.case_sensitive,
                 c.mask,
                 c.generated.as_ref(),
                 c.identity,
@@ -3051,6 +3057,7 @@ impl IrAuthor {
         nullable: Option<bool>,
         default: Option<&IrDefault>,
         vector_metric: Option<VectorMetric>,
+        case_sensitive: Option<bool>,
         mask: Option<IrMask>,
         generated: Option<&crate::model::ir::GeneratedCol>,
         identity: Option<crate::model::ir::IdentityCol>,
@@ -3063,6 +3070,7 @@ impl IrAuthor {
                 nullable,
                 default,
                 vector_metric,
+                case_sensitive,
                 mask,
                 generated,
                 identity,
@@ -3086,6 +3094,7 @@ impl IrAuthor {
         nullable: Option<bool>,
         default: Option<&IrDefault>,
         vector_metric: Option<VectorMetric>,
+        case_sensitive: Option<bool>,
         mask: Option<IrMask>,
         generated: Option<&crate::model::ir::GeneratedCol>,
         identity: Option<crate::model::ir::IdentityCol>,
@@ -3108,6 +3117,7 @@ impl IrAuthor {
             unique: None,
             id_prefix: None,
             vector_metric,
+            case_sensitive,
             mask,
             generated: generated.cloned(),
             identity,
@@ -3208,6 +3218,7 @@ impl IrAuthor {
                     source.nullable,
                     source.default.as_ref(),
                     source.vector_metric,
+                    source.case_sensitive,
                     source.mask,
                     source.generated.as_ref(),
                     source.identity,
@@ -3267,6 +3278,7 @@ impl IrAuthor {
                     "__domain",
                     "VALUE",
                     as_type,
+                    None,
                     None,
                     None,
                     None,
@@ -3335,7 +3347,7 @@ impl IrAuthor {
         // `data_type` via the SHARED builder (the SAME spelling the differ's
         // `field_data_type` produces and the live introspection records). This is
         // the type the IR ASSERTS the column has.
-        let col = self.add_column_snapshot(table, to, ty, None, None, None, None, None, None)?;
+        let col = self.add_column_snapshot(table, to, ty, None, None, None, None, None, None, None)?;
         let ir_data_type = col.data_type.clone();
 
         // **AUTHORITATIVE IR-vs-live type reconciliation (HIGH/MED — both legs).**
@@ -4725,6 +4737,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         vector_dims,
         char_len,
         vector_metric: c.vector_metric.map(|m| m.as_token().to_string()),
+        case_sensitive: c.case_sensitive,
         id_prefix: c.id_prefix.clone(),
         generated: c.generated.clone(),
         identity: c.identity,
@@ -5251,6 +5264,7 @@ mod tests {
                 ty: ColType::BigInt,
                 nullable: Some(false),
                 default: None,
+                case_sensitive: None,
                 vector_metric: None,
                 mask: None,
                 generated: None,
@@ -5297,7 +5311,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { constraints, .. } = &mut ir.ops[0] {
             constraints.push(IrConstraint {
@@ -5336,6 +5350,7 @@ mod tests {
                     default: None,
                     unique: None,
                     id_prefix: None,
+                    case_sensitive: None,
                     vector_metric: None,
                     mask: None,
                     generated: None,
@@ -5348,6 +5363,7 @@ mod tests {
                     default: None,
                     unique: None,
                     id_prefix: None,
+                    case_sensitive: None,
                     vector_metric: None,
                     mask: None,
                     generated: None,
@@ -5382,6 +5398,7 @@ mod tests {
                     default: None,
                     unique: None,
                     id_prefix: None,
+                    case_sensitive: None,
                     vector_metric: None,
                     mask: None,
                     generated: None,
@@ -5394,6 +5411,7 @@ mod tests {
                     default: None,
                     unique: None,
                     id_prefix: None,
+                    case_sensitive: None,
                     vector_metric: None,
                     mask: None,
                     generated: None,
@@ -5428,6 +5446,7 @@ mod tests {
                     default: None,
                     unique: None,
                     id_prefix: None,
+                    case_sensitive: None,
                     vector_metric: None,
                     mask: None,
                     generated: None,
@@ -5504,7 +5523,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("app2".into());
@@ -5546,7 +5565,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // A case-VARIANT of the bound project schema — the gate folds it in.
@@ -5593,13 +5612,13 @@ mod tests {
                     ty: ColType::Int,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(5) }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 TIrColumn {
                     name: "shard".into(),
                     ty: ColType::SmallInt,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal { value: IrScalar::Int(0) }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 // A bigint default beyond 2^53 — carried as a decimal STRING (the IR
                 // rejects a fractional/oversized JSON number), and `as_f64` would
                 // corrupt it; the verbatim string keeps it exact.
@@ -5610,7 +5629,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("9007199254740993".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 TIrColumn {
                     name: "ratio".into(),
                     ty: ColType::Float,
@@ -5618,7 +5637,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 TIrColumn {
                     name: "ratio_real".into(),
                     ty: ColType::Real,
@@ -5626,7 +5645,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.25".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 TIrColumn {
                     name: "addr".into(),
                     ty: ColType::Inet,
@@ -5634,7 +5653,7 @@ mod tests {
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Str("192.0.2.1".into()),
                     }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
             ],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres);
@@ -5686,7 +5705,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres)
             // Trusted CLI widens the scope to admit the connection default it binds.
@@ -5719,7 +5738,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         // No `with_schema_scope` ⇒ Confined `Single("app1")`; the op omits its own
         // qualifier, so the effective schema resolves to the foreign default "other".
@@ -5755,7 +5774,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         // The op itself names a FOREIGN schema "other" (≠ project "app1"); NO
         // connection default is bound, so this exercises the EXPLICIT-qualifier arm,
@@ -5791,7 +5810,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -5826,7 +5845,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             *schema = Some("reporting".into());
@@ -5862,7 +5881,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { schema, .. } = &mut ir.ops[0] {
             // The op names the project schema explicitly — the implicit main target.
@@ -6005,7 +6024,7 @@ mod tests {
                 ty: ColType::Int,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         if let Op::CreateTable { existence_guard, .. } = &mut ir.ops[0] {
             *existence_guard = Some(crate::model::ir::ExistenceGuard::IfNotExists);
@@ -6044,7 +6063,7 @@ mod tests {
                 ty: ColType::Encrypted { of: Box::new(ColType::String) },
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -6092,7 +6111,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: None,
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         // Guard confined to "other" — the rendered `CREATE TABLE "app".…` is then a
@@ -6122,7 +6141,7 @@ mod tests {
                 ty: ColType::String,
                 nullable: Some(false),
                 default: None,
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Sqlite);
         let guard_cfg = GuardConfig::confined_sqlite("app".to_string());
@@ -6161,7 +6180,7 @@ mod tests {
                 default: Some(IrDefault::Literal {
                     value: crate::model::ir::IrScalar::Str(nasty.into()),
                 }),
-                unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
         );
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let guard_cfg = GuardConfig::confined("app".to_string());
@@ -6323,6 +6342,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .expect("ir add_column_snapshot");
 
@@ -6373,7 +6393,7 @@ mod tests {
                     ty: ColType::Text,
                     nullable: Some(false),
                     default: None,
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None },
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
             ];
 
             // IrAuthor's createTable snapshot (its real lowering seam: the private
@@ -6444,6 +6464,7 @@ mod tests {
                         default: Some(IrDefault::Container { kind: EmptyContainerKind::Object }),
                         unique: None,
                         id_prefix: None,
+                        case_sensitive: None,
                         vector_metric: None,
                         mask: None,
                         generated: None,
@@ -6456,6 +6477,7 @@ mod tests {
                         default: Some(IrDefault::Container { kind: EmptyContainerKind::Array }),
                         unique: None,
                         id_prefix: None,
+                        case_sensitive: None,
                         vector_metric: None,
                         mask: None,
                         generated: None,
@@ -6468,6 +6490,7 @@ mod tests {
                         default: Some(IrDefault::Container { kind: EmptyContainerKind::Array }),
                         unique: None,
                         id_prefix: None,
+                        case_sensitive: None,
                         vector_metric: None,
                         mask: None,
                         generated: None,
@@ -6527,7 +6550,7 @@ mod tests {
                     ty: ColType::Timestamp,
                     nullable: None,
                     default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
-                    unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }],
+                    unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
                 primary_key: None,
                 constraints: vec![],
                 indexes: vec![],
@@ -6566,6 +6589,7 @@ mod tests {
                 ty: ColType::Uuid,
                 nullable: Some(false),
                 default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::GenRandomUuid }),
+                case_sensitive: None,
                 vector_metric: None,
                 mask: None,
                 generated: None,
@@ -6602,6 +6626,7 @@ mod tests {
                 ty: ColType::Text,
                 nullable: Some(false),
                 default: Some(IrDefault::Literal { value: crate::model::ir::IrScalar::Str("x".into()) }),
+                case_sensitive: None,
                 vector_metric: None,
                 mask: None,
                 generated: None,
@@ -7187,7 +7212,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
+            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let plan = author.lower_plan(&ir, &LiveSchema::default()).expect("lower_plan");
 
@@ -7246,7 +7271,7 @@ mod tests {
             ty: ColType::Text,
             nullable: Some(false),
             default: None,
-            unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
+            unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let pg = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
             .lower_plan(&ir, &LiveSchema::default())
             .expect("pg lower_plan");
@@ -7277,9 +7302,9 @@ mod tests {
     #[test]
     fn ir_plan_anchor_changes_when_op_list_changes() {
         let a = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
+            name: "c".into(), ty: ColType::Text, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let b = create_table_ir("t", vec![TIrColumn {
-            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, vector_metric: None, mask: None, generated: None, identity: None }]);
+            name: "c".into(), ty: ColType::Int, nullable: None, default: None, unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }]);
         let author = IrAuthor::new("app", "app_a", SqlDialect::Postgres);
         let pa = author.lower_plan(&a, &LiveSchema::default()).expect("lower a");
         let pb = author.lower_plan(&b, &LiveSchema::default()).expect("lower b");

@@ -102,6 +102,38 @@ test("t.text() is nullable-by-default; .notNull() opts in", () => {
   assert.equal(cols[1].nullable, false, "t.text().notNull() records nullable:false");
 });
 
+test("t.text({ caseSensitive:false }) records the caseSensitive facet", () => {
+  const ops = record(() => {
+    table("u").create({
+      columns: {
+        plain: t.text(),
+        insensitive: t.text({ caseSensitive: false }),
+        explicitDefault: t.text({ caseSensitive: true }),
+      },
+    });
+    table("u").column("email").add({ type: t.text({ caseSensitive: false }) });
+  });
+  const cols = ops[0].columns;
+  assert.equal(cols[0].caseSensitive, undefined, "t.text() omits caseSensitive");
+  assert.equal(cols[1].caseSensitive, false, "caseSensitive:false records the facet");
+  assert.equal(cols[2].caseSensitive, undefined, "caseSensitive:true is byte-identical");
+  assert.equal(ops[1].caseSensitive, false, "addColumn carries the text facet too");
+});
+
+test("public and engine recorders match for t.text({ caseSensitive:false })", () => {
+  const publicOps = record(() => {
+    table("u").create({ columns: { email: t.text({ caseSensitive: false }) } });
+    table("u").column("nickname").add({ type: t.text({ caseSensitive: false }) });
+  });
+  const engineOps = recordEngine(({ table, t }) => {
+    table("u").create({ columns: { email: t.text({ caseSensitive: false }) } });
+    table("u").column("nickname").add({ type: t.text({ caseSensitive: false }) });
+  });
+  assert.deepEqual(publicOps, engineOps);
+  assert.equal(publicOps[0].columns[0].caseSensitive, false);
+  assert.equal(publicOps[1].caseSensitive, false);
+});
+
 test("t.textArray() records the textArray column type", () => {
   const ops = record(() => {
     table("u").create({ columns: { scopes: t.textArray().notNull() } });

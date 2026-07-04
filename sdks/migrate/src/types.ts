@@ -111,6 +111,12 @@ export interface IdOptions {
   prefix: string;
 }
 
+/** Options for `t.text({ caseSensitive })`. `false` records the portable
+ *  case-insensitive-text facet; omitted/`true` emits no facet. */
+export interface TextOptions {
+  caseSensitive?: boolean;
+}
+
 /** Options for `t.vector(n, { metric })` — the pgvector distance metric (closed
  *  {@link VectorMetric} set). Omitted ⇒ the engine's opclass default. */
 export interface VectorOptions {
@@ -191,7 +197,7 @@ export interface TypeLexicon {
    *  fold / gen-types keep the `usr_<base62>`-style brand (declared-only in
    *  `create()` — an added column is never the system PK). */
   id(opts?: IdOptions): ColumnDef;
-  text(): ColumnDef;
+  text(opts?: TextOptions): ColumnDef;
   /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
   textArray(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
