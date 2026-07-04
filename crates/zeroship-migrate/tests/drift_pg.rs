@@ -124,6 +124,7 @@ fn ir_col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
         default: None,
         unique: None,
         id_prefix: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,
@@ -478,6 +479,55 @@ async fn snapshot_introspects_tables_columns_indexes_constraints() {
         users.constraints.iter().any(|c| c.kind == "PRIMARY KEY"),
         "constraints: {:?}",
         users.constraints
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn citext_column_round_trips_as_case_insensitive_text_without_drift() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+    conn.batch_execute("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public")
+        .await
+        .expect("install citext extension");
+
+    let sch = &cfg.project_schema;
+    let mut email = ir_col("email", ColType::Text, false);
+    email.case_sensitive = Some(false);
+    let ops = vec![Op::CreateTable {
+        name: "contacts".into(),
+        columns: vec![email],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    }];
+    let migrations = lower_ir_migrations(sch, "citext_case_insensitive_text", &ops);
+    apply(&conn, &cfg, &migrations, Approval::None, "actor")
+        .await
+        .expect("apply citext table");
+
+    let expected = fold_ops(&ops, SqlDialect::Postgres, sch).expect("fold citext expected");
+    let actual = snapshot_schema(&conn, sch).await.expect("snapshot citext table");
+    let live_col = actual.tables["contacts"]
+        .columns
+        .iter()
+        .find(|c| c.name == "email")
+        .expect("email column introspected");
+    assert_eq!(live_col.data_type, "text");
+    assert_eq!(live_col.case_sensitive, Some(false));
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.is_clean(),
+        "live citext must recover as text + caseSensitive:false: {drift:?}"
     );
 
     drop_schemas(&conn, &cfg).await;

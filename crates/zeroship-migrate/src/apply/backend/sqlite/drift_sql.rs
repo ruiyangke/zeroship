@@ -356,6 +356,7 @@ async fn introspect_columns(
             ddl_type_override: None,
             inline_checks: Vec::new(),
             comment_sentinel: recover_inline_sentinel(stored_create_sql, &name),
+            case_sensitive: recover_case_sensitive(stored_create_sql, &name),
             comment: None,
         });
     }
@@ -776,6 +777,29 @@ async fn introspect_foreign_keys(
 /// `/* … */` block before the next column boundary, and extracts a recognised
 /// sentinel body from that block.
 fn recover_inline_sentinel(create_sql: &str, column: &str) -> Option<String> {
+    let clause = sqlite_column_clause(create_sql, column)?;
+
+    // Extract the first `/* … */` block in this clause and pull a recognised body.
+    let open = clause.find("/*")?;
+    let close_rel = clause[open + 2..].find("*/")?;
+    let body = clause[open + 2..open + 2 + close_rel].trim();
+    if body.starts_with("__zsmask:") || body.starts_with("zsenc:") {
+        Some(body.to_string())
+    } else {
+        None
+    }
+}
+
+fn recover_case_sensitive(create_sql: &str, column: &str) -> Option<bool> {
+    let clause = sqlite_column_clause(create_sql, column)?;
+    if clause.to_ascii_lowercase().contains("collate nocase") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str> {
     // The emitter quotes identifiers with double-quotes: `"<col>_masked" TEXT NOT
     // NULL /* __zsmask:… */`. The masked SIBLING column carries the `__zsmask:`
     // sentinel; an encrypted column carries `zsenc:` on the column itself. We scan
@@ -825,17 +849,7 @@ fn recover_inline_sentinel(create_sql: &str, column: &str) -> Option<String> {
         }
         i += 1;
     }
-    let clause = &rest[..clause_end];
-
-    // Extract the first `/* … */` block in this clause and pull a recognised body.
-    let open = clause.find("/*")?;
-    let close_rel = clause[open + 2..].find("*/")?;
-    let body = clause[open + 2..open + 2 + close_rel].trim();
-    if body.starts_with("__zsmask:") || body.starts_with("zsenc:") {
-        Some(body.to_string())
-    } else {
-        None
-    }
+    Some(&rest[..clause_end])
 }
 
 /// Length of the quoted or bare needle we matched at `start`, so the slice past it

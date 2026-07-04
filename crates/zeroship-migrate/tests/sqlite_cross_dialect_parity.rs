@@ -153,6 +153,7 @@ fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
         default: None,
         unique: None,
         id_prefix: None,
+        case_sensitive: None,
         vector_metric: None,
         mask: None,
         generated: None,

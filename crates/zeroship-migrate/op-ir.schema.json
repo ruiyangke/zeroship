@@ -458,6 +458,13 @@
                 }
               ]
             },
+            "caseSensitive": {
+              "description": "Case-sensitivity facet for a text added column. Only `Some(false)` is\nmeaningful; absent/true omits the key and preserves the old wire image.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "mask": {
               "description": "**#173** — a STANDALONE column mask for a masked added column (the same facet\n`IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits\nthe `__zsmask` sentinel + `_masked` sibling). Default-absent +\n`skip_serializing_if` ⇒ byte-identical when absent.",
               "anyOf": [
@@ -2727,6 +2734,13 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "caseSensitive": {
+          "description": "Case-sensitivity facet for text columns. Only `Some(false)` is meaningful:\n`None` and `Some(true)` are the byte-identical default text behavior.",
+          "type": [
+            "boolean",
+            "null"
           ]
         },
         "mask": {
