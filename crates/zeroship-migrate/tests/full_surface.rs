@@ -802,8 +802,10 @@ fn record_path_allows_date_now_inside_comment_or_string() {
 // ───────────────────────────────────────────────────────────────────────────
 // PR10 review F1 (HIGH) — twin-fidelity round-trip.
 //
-// The engine-embedded V8 recorder (`migrate_ops.js`) is the byte-for-byte twin
-// of `sdks/migrate/src/ops.ts`. Before this fix the twin DROPPED the `schema`
+// The engine-embedded V8 recorder is the compiled artifact
+// (`sdks/migrate/dist/embedded-recorder.js`) built from `sdks/migrate/src/ops.ts`
+// (S0.5 collapsed the former hand-kept `migrate_ops.js` twin). Before this fix the
+// recorder DROPPED the `schema`
 // qualifier and `existenceGuard` token on 10 op variants at RECORD time — a
 // silently-dropped `ifNotExists` turned a guarded create into a bare
 // unconditional create (fail-OPEN over a divergent object), and a dropped schema

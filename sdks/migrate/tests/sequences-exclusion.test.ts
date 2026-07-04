@@ -8,13 +8,16 @@ import {
   table as pubTable,
 } from "../src/ops.js";
 import { sequence as pubSequence } from "../src/pg.js";
+// Artifact-identity oracle: the engine-embedded recorder is now the COMPILED
+// `dist/embedded-recorder.js` (the same build output the `zeroship-migrate` crate
+// `include_str!`s), not the deleted `migrate_ops.js` twin.
 import {
   __begin as engBegin,
   __drain as engDrain,
   __pgSequence as engSequence,
   t as engT,
   table as engTable,
-} from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
+} from "../dist/embedded-recorder.js";
 
 type Rec = {
   begin: () => void;

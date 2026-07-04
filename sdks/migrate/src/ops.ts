@@ -120,6 +120,40 @@ type Node = Record<string, unknown>;
 
 // ── The ambient recorder (§3.1 / §5) ──
 
+// Capture the native nondeterministic function symbols before a migration module
+// can mutate globals. A bare symbol (`crypto.randomUUID` without parens) is an
+// opt-in to DB-side evaluation, matched by IDENTITY below. In the constrained
+// engine V8 recorder isolate (the `FrontendGlobals::Migration` profile installs
+// no Web Crypto), `globalThis.crypto` may be absent, so a bare `crypto.randomUUID`
+// in the migration source would be a `ReferenceError`; install an identity-only
+// stub so the symbol resolves (its `randomUUID` throws if CALLED — the symbol form
+// is record-time-only). GUARDED by `if absent`: in Node / browsers, where real Web
+// Crypto exists, both guards skip and this is a pure no-op (the real
+// `crypto.randomUUID` is captured). This ran at the top of the former
+// `migrate_ops.js` twin; it moves here so the one compiled recorder artifact keeps
+// the identical engine behavior. MUST precede the capture below.
+if (typeof globalThis !== "undefined") {
+  if (typeof globalThis.crypto === "undefined" || globalThis.crypto === null) {
+    Object.defineProperty(globalThis, "crypto", {
+      value: {},
+      configurable: true,
+      writable: false,
+    });
+  }
+  if (typeof globalThis.crypto.randomUUID !== "function") {
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      value: function randomUUID() {
+        throw new Error(
+          "crypto.randomUUID() is not available in the migration recorder; " +
+            "use the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()",
+        );
+      },
+      configurable: true,
+      writable: false,
+    });
+  }
+}
+
 const nativeDateNow = typeof Date !== "undefined" ? Date.now : undefined;
 const nativeMathRandom = typeof Math !== "undefined" ? Math.random : undefined;
 const nativeCryptoRandomUUID =
@@ -1307,6 +1341,16 @@ function makeBuilder(): ExprBuilder {
   c.pg = pgExpr;
   return c;
 }
+
+// The standalone `c.fn` / `c.pg` namespaces surfaced at a value position
+// (`cFn.now()`, `cPg.eqAnyArray(...)`) — the SAME objects installed on the
+// `(c) => Expr` builder above. These are exported for the engine-embedded
+// recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
+// which requires the full engine-consumed surface. Not re-exported through the
+// SDK public `.` entry (`index.ts`); a value-position namespace is a Phase-2
+// surface decision.
+export const cFn = fn;
+export const cPg = pgExpr;
 
 function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
   if (slot === undefined || slot === null) return undefined;

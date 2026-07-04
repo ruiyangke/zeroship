@@ -14,7 +14,16 @@ const OP_RECORDER_JS: &str = include_str!("op_recorder.js");
 const IR_ADAPTER_JS: &str = include_str!("ir_adapter.js");
 
 /// The bundled `@zeroship/migrate` op.* DSL.
-const MIGRATE_OPS_JS: &str = include_str!("migrate_ops.js");
+///
+/// The ONE compiled recorder artifact (DSL redesign S0.5): the SDK recorder and
+/// this engine-embedded recorder are the same `tsup` build output of
+/// `sdks/migrate/src/{ops,pg}.ts` (via the `src/embedded-recorder.ts` entry).
+/// The former hand-kept `migrate_ops.js` twin is deleted; there is no byte-parity
+/// to maintain, only build provenance. `pnpm build` MUST run before
+/// `cargo build -p zeroship-migrate` (root `pnpm build` emits this dist file in
+/// dependency order) — the same ordering this file already relies on for the
+/// `@zeroship/db` bundle below.
+const MIGRATE_OPS_JS: &str = include_str!("../../../../sdks/migrate/dist/embedded-recorder.js");
 
 /// The bundled `@zeroship/db` schema DSL.
 const ZEROSHIP_DB_DIST_JS: &str = include_str!("../../../../sdks/db/dist/index.js");
