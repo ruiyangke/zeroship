@@ -686,7 +686,7 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
         }
         Expr::UnaryOp { op, operand } => {
             let o = render_expr_bound(operand, ctx)?;
-            render_unary(*op, &o)
+            render_unary(*op, &o, ctx.dialect)
         }
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
@@ -778,12 +778,17 @@ fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlE
     }
 }
 
-/// Render a unary op around an already-rendered operand.
-fn render_unary(op: UnaryOp, operand: &str) -> String {
+/// Render a unary op around an already-rendered operand, dialect-aware.
+fn render_unary(op: UnaryOp, operand: &str, dialect: SqlDialect) -> String {
     match op {
         UnaryOp::Not => format!("(NOT {operand})"),
         UnaryOp::IsNull => format!("({operand} IS NULL)"),
         UnaryOp::IsNotNull => format!("({operand} IS NOT NULL)"),
+        // SQLite has no native boolean type (values are 0/1) and rejects the
+        // `IS TRUE` / `IS FALSE` predicates at apply — render them as `= 1` / `= 0`
+        // there. PG and MySQL both support the standard spelling.
+        UnaryOp::IsTrue if matches!(dialect, SqlDialect::Sqlite) => format!("({operand} = 1)"),
+        UnaryOp::IsFalse if matches!(dialect, SqlDialect::Sqlite) => format!("({operand} = 0)"),
         UnaryOp::IsTrue => format!("({operand} IS TRUE)"),
         UnaryOp::IsFalse => format!("({operand} IS FALSE)"),
     }
@@ -826,6 +831,7 @@ where
         Expr::UnaryOp { op, operand } => render_unary(
             *op,
             &render_expr_inline_with_col(operand, dialect, col_ref)?,
+            dialect,
         ),
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
@@ -1424,6 +1430,27 @@ mod tests {
             mysql.starts_with("char_length("),
             "MySQL length() must render as CHAR_LENGTH (LENGTH is byte length): got {mysql}"
         );
+    }
+
+    #[test]
+    fn is_true_is_false_rewritten_for_sqlite() {
+        // SQLite has no IS TRUE / IS FALSE (no boolean type) — render as = 1 / = 0.
+        // PG + MySQL keep the standard spelling.
+        for (op, sqlite_expect, std_frag) in [
+            (UnaryOp::IsTrue, "= 1", "IS TRUE"),
+            (UnaryOp::IsFalse, "= 0", "IS FALSE"),
+        ] {
+            let e = Expr::UnaryOp { op, operand: Box::new(Expr::col("active")) };
+            let pg = render_expr_inline(&e, SqlDialect::Postgres).unwrap();
+            assert!(pg.contains(std_frag), "PG keeps `{std_frag}`: {pg}");
+            let mysql = render_expr_inline(&e, SqlDialect::Mysql).unwrap();
+            assert!(mysql.contains(std_frag), "MySQL keeps `{std_frag}`: {mysql}");
+            let sqlite = render_expr_inline(&e, SqlDialect::Sqlite).unwrap();
+            assert!(
+                sqlite.contains(sqlite_expect) && !sqlite.contains("IS TRUE") && !sqlite.contains("IS FALSE"),
+                "SQLite must rewrite `{std_frag}` to `{sqlite_expect}`: {sqlite}"
+            );
+        }
     }
 
     // ── identifier safety ───────────────────────────────────────────────────
