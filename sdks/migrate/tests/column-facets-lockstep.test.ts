@@ -1,24 +1,18 @@
-// Lock-step parity for the column-level facets (#173/#174/#178 + generated/identity):
-// `t.id({ prefix })`, `t.vector(n, { metric })`, standalone
+// Artifact-identity parity for the column-level facets (#173/#174/#178 +
+// generated/identity): `t.id({ prefix })`, `t.vector(n, { metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
-// These were added to the engine
-// recorder (`crates/zeroship-migrate/src/frontend/migrate_ops.js`) + the IR + fold +
-// gen-types FIRST, but never to the PUBLIC `@zeroship/migrate` authoring surface
-// (`src/ops.ts` / `src/types.ts`). #178 closes that gap.
 //
-// This is the byte-identity oracle for the facets: re-author the SAME migration
-// through BOTH the public `ops.ts` `table()`/`t.*` and the authoritative embedded
-// recorder `migrate_ops.js` `table()`/`t.*`, then assert the two recorded op lists
-// are byte-identical. Because the recorder twin is the source of truth the Rust
-// engine `include_str!`s into V8, this proves the public DSL records the EXACT
-// camelCase wire form (`idPrefix` / `vectorMetric` / `mask:{kind,classification}` /
-// `generated:{expr,stored}` / `identity:{always}`)
-// the engine deserializes.
-//
-// RED before #178: the public `t.id`/`t.vector` ignored their option bags and
-// `ColumnDef` had no `.mask`, so the public recording dropped every facet and the
-// deepEqual diverged (and the `.mask()` call was a TypeError at runtime + a tsc
-// error). GREEN after #178: the two recordings match.
+// S0.5 collapsed the recorder twin: there is no longer a hand-kept
+// `migrate_ops.js`. The SDK recorder (`src/ops.ts`) and the engine-embedded
+// recorder (`dist/embedded-recorder.js`, the `tsup` build output the
+// `zeroship-migrate` crate `include_str!`s into V8) are now the SAME source,
+// compiled two ways. This test is the design's "one-release parity tripwire →
+// artifact-identity assertion": re-author the SAME migration through BOTH the
+// `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
+// two recorded op lists are byte-identical — proving the shipped engine artifact
+// records the EXACT camelCase wire form (`idPrefix` / `vectorMetric` /
+// `mask:{kind,classification}` / `generated:{expr,stored}` / `identity:{always}`)
+// the source authors, with no compile-time drift.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -34,9 +28,9 @@ import {
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
-// The authoritative engine recorder twin (the file the Rust runtime include_str!s
-// into V8). Importing it directly makes this an oracle against the real engine
-// recording, not a self-referential restatement of the public surface.
+// The COMPILED engine-embedded recorder artifact (the file the Rust runtime
+// include_str!s into V8). Importing it directly makes this an oracle against the
+// real shipped engine recording, not a self-referential restatement of the source.
 import {
   __begin as engBegin,
   __drain as engDrain,
@@ -47,7 +41,7 @@ import {
   partition as engPartition,
   t as engT,
   table as engTable,
-} from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
+} from "../dist/embedded-recorder.js";
 
 type Rec = {
   begin: () => void;

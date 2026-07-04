@@ -31,13 +31,18 @@ import {
 import { domain, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
+// The engine-embedded recorder is now the COMPILED artifact
+// (`dist/embedded-recorder.js`) the `zeroship-migrate` crate `include_str!`s —
+// the same `tsup` build output of `src/{ops,pg}.ts`. Importing it here (instead
+// of the deleted `migrate_ops.js` twin) makes this an artifact-identity oracle:
+// the SDK source and the shipped engine artifact record byte-identically.
 import {
   __begin as engBegin,
   __drain as engDrain,
   t as engT,
   table as engTable,
   nextval as engNextval,
-} from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
+} from "../dist/embedded-recorder.js";
 
 /** Record one phase's ops via the ambient recorder. */
 function record(up: () => void): any[] {
