@@ -1705,6 +1705,8 @@ fn fold_create_table_specs(
                 references_columns,
                 on_delete,
                 on_update,
+                deferrable,
+                initially_deferred,
             } => {
                 if !dialect.supports(Capability::TableLevelForeignKey) {
                     return Err(FoldError::Unsupported(
@@ -1724,6 +1726,8 @@ fn fold_create_table_specs(
                     references_columns,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
+                    deferrable.unwrap_or(false),
+                    initially_deferred.unwrap_or(false),
                     dialect,
                 );
                 // A FOREIGN KEY materializes no index.
@@ -1902,6 +1906,8 @@ fn add_constraint_snapshot(
             references_columns,
             on_delete,
             on_update,
+            deferrable,
+            initially_deferred,
         } => {
             if columns.is_empty() {
                 return Err(FoldError::Unsupported("addConstraint(fk) with no local column"));
@@ -1915,6 +1921,8 @@ fn add_constraint_snapshot(
                     references_columns,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
+                    deferrable.unwrap_or(false),
+                    initially_deferred.unwrap_or(false),
                     dialect,
                 ),
                 index: None,
@@ -2854,6 +2862,8 @@ pub fn descriptors_to_create_ops(
                             references_columns: vec!["id".to_string()],
                             on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
                             on_update: f.on_update.as_deref().and_then(parse_ref_action),
+                            deferrable: None,
+                            initially_deferred: None,
                         },
                     });
                 }
@@ -3334,6 +3344,8 @@ mod tests {
                 references_columns: vec!["id".to_string()],
                 on_delete: None,
                 on_update: None,
+                deferrable: None,
+                initially_deferred: None,
             },
         };
         let dropped = fold(&[
@@ -3571,6 +3583,8 @@ mod tests {
                 references_columns: vec!["id".to_string()],
                 on_delete: None,
                 on_update: None,
+                deferrable: None,
+                initially_deferred: None,
             },
         };
         let snap = fold(&[
@@ -3621,6 +3635,8 @@ mod tests {
                         references_columns: vec!["id".to_string()],
                         on_delete: None,
                         on_update: None,
+                        deferrable: None,
+                        initially_deferred: None,
                     },
                 },
                 schema: None,
@@ -3653,6 +3669,8 @@ mod tests {
                 references_columns: vec!["id".to_string()],
                 on_delete: None,
                 on_update: None,
+                deferrable: None,
+                initially_deferred: None,
             },
         };
         let snap = fold(&[
@@ -3994,6 +4012,8 @@ mod tests {
                 references_columns: vec!["id".to_string()],
                 on_delete: Some(RefAction::Cascade),
                 on_update: None,
+                deferrable: None,
+                initially_deferred: None,
             },
         };
         let snap = fold(&[
@@ -4149,6 +4169,8 @@ mod tests {
                         references_columns: vec!["id".to_string()],
                         on_delete: None,
                         on_update: None,
+                        deferrable: None,
+                        initially_deferred: None,
                     },
                 },
             ],
@@ -4409,6 +4431,8 @@ mod tests {
                     references_columns: vec!["id".to_string()],
                     on_delete: None,
                     on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             }],
             Vec::new(),
@@ -4430,6 +4454,8 @@ mod tests {
                     references_columns: vec!["id".to_string()],
                     on_delete: None,
                     on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             }],
             Vec::new(),

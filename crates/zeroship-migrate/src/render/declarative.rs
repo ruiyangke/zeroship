@@ -2131,6 +2131,7 @@ fn build_table_snapshot_impl(
                         f.on_delete.as_deref(),
                         f.on_update.as_deref(),
                         f.deferrable.unwrap_or(false),
+                        true,
                         dialect,
                     ),
                     comment: None,
@@ -2350,6 +2351,8 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     references_columns: &[String],
     on_delete: Option<&str>,
     on_update: Option<&str>,
+    deferrable: bool,
+    initially_deferred: bool,
     dialect: SqlDialect,
 ) -> ConstraintSnapshot {
     let name = explicit_name.map(ToString::to_string).unwrap_or_else(|| {
@@ -2366,7 +2369,8 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
         references_columns,
         on_delete,
         on_update,
-        false,
+        deferrable,
+        initially_deferred,
         dialect,
     );
     ConstraintSnapshot { name, kind: "FOREIGN KEY".to_string(), definition, comment: None }
@@ -2616,7 +2620,7 @@ fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'st
 /// Empirically (probed against PG 17), `pg_get_constraintdef` renders a FK as:
 ///
 /// ```text
-/// FOREIGN KEY (<cols>) REFERENCES <schema>.<target>(<cols>)[ ON UPDATE <u>][ ON DELETE <d>][ DEFERRABLE INITIALLY DEFERRED]
+/// FOREIGN KEY (<cols>) REFERENCES <schema>.<target>(<cols>)[ ON UPDATE <u>][ ON DELETE <d>][ DEFERRABLE [INITIALLY DEFERRED]]
 /// ```
 ///
 /// with two normalisations the DDL spelling does NOT have:
@@ -2637,6 +2641,7 @@ fn fk_definition_for_dialect(
     on_delete: Option<&str>,
     on_update: Option<&str>,
     deferrable: bool,
+    initially_deferred: bool,
     dialect: SqlDialect,
 ) -> String {
     use std::fmt::Write as _;
@@ -2678,7 +2683,10 @@ fn fk_definition_for_dialect(
         let _ = write!(def, " ON DELETE {on_delete}");
     }
     if deferrable && !matches!(dialect, SqlDialect::Mysql) {
-        def.push_str(" DEFERRABLE INITIALLY DEFERRED");
+        def.push_str(" DEFERRABLE");
+        if initially_deferred {
+            def.push_str(" INITIALLY DEFERRED");
+        }
     }
     def
 }
@@ -2691,6 +2699,7 @@ fn fk_definition_pg(
     on_delete: Option<&str>,
     on_update: Option<&str>,
     deferrable: bool,
+    initially_deferred: bool,
 ) -> String {
     let local = vec![field.to_string()];
     let refs = vec!["id".to_string()];
@@ -2702,6 +2711,7 @@ fn fk_definition_pg(
         on_delete,
         on_update,
         deferrable,
+        initially_deferred,
         SqlDialect::Postgres,
     )
 }
@@ -7291,7 +7301,7 @@ mod fk_referenced_table_quoting_tests {
     /// unconditional `quote_ident` would over-quote and phantom-diff).
     #[test]
     fn lowercase_schema_and_target_render_bare() {
-        let def = fk_definition_pg("author", "app", "authors", None, None, true);
+        let def = fk_definition_pg("author", "app", "authors", None, None, true, true);
         assert!(
             def.contains("REFERENCES app.authors(id)"),
             "safe lowercase names must render bare (catalog parity); def = {def:?}"
@@ -7307,7 +7317,7 @@ mod fk_referenced_table_quoting_tests {
     /// it) AND mis-resolve as the `ORDER` keyword.
     #[test]
     fn reserved_word_target_renders_quoted() {
-        let def = fk_definition_pg("oid", "app", "order", None, None, true);
+        let def = fk_definition_pg("oid", "app", "order", None, None, true, true);
         assert!(
             def.contains(r#"REFERENCES app."order"(id)"#),
             "a reserved-word target must render quoted (catalog parity); def = {def:?}"
@@ -7323,7 +7333,7 @@ mod fk_referenced_table_quoting_tests {
     /// (and the bare `order` mis-resolves as the `ORDER` keyword).
     #[test]
     fn reserved_word_local_fk_column_renders_quoted() {
-        let def = fk_definition_pg("order", "app", "orders", None, None, true);
+        let def = fk_definition_pg("order", "app", "orders", None, None, true, true);
         assert!(
             def.contains(r#"FOREIGN KEY ("order")"#),
             "a reserved-word local FK column must render quoted (catalog parity); def = {def:?}"
@@ -7333,7 +7343,7 @@ mod fk_referenced_table_quoting_tests {
     /// A reserved-word SCHEMA (`user`) renders quoted on the schema side too.
     #[test]
     fn reserved_word_schema_renders_quoted() {
-        let def = fk_definition_pg("uid", "user", "accounts", None, None, true);
+        let def = fk_definition_pg("uid", "user", "accounts", None, None, true, true);
         assert!(
             def.contains(r#"REFERENCES "user".accounts(id)"#),
             "a reserved-word schema must render quoted; def = {def:?}"
@@ -7344,7 +7354,7 @@ mod fk_referenced_table_quoting_tests {
     /// the catalog quotes it; we must match to round-trip).
     #[test]
     fn mixed_case_target_renders_quoted() {
-        let def = fk_definition_pg("pid", "app", "Parent", None, None, true);
+        let def = fk_definition_pg("pid", "app", "Parent", None, None, true, true);
         assert!(
             def.contains(r#"REFERENCES app."Parent"(id)"#),
             "a mixed-case target must render quoted; def = {def:?}"

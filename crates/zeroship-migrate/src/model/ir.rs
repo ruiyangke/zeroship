@@ -1353,6 +1353,12 @@ pub enum IrConstraintKind {
         /// `on_delete`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         on_update: Option<RefAction>,
+        /// Optional `DEFERRABLE` flag.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deferrable: Option<bool>,
+        /// Optional `INITIALLY DEFERRED` flag. Meaningful only when deferrable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initially_deferred: Option<bool>,
     },
     /// UNIQUE over the named columns.
     Unique {

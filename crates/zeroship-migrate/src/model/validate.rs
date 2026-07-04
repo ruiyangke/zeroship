@@ -61,6 +61,8 @@ pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
 pub const CODE_DIALECT_SCOPE_PGONLY: &str = "DIALECT_SCOPE_PGONLY";
 /// An op-function called outside an active recorder (§3.1) — emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
+/// An op is structurally valid JSON but carries an internally inconsistent shape.
+pub const CODE_OP_INVALID: &str = "OP_INVALID";
 /// **PR10** — an op naming a `schema` the active [`SchemaScope`](crate::model::policy::SchemaScope)
 /// does not permit (§2.7). The Confined creator profile pins the project schema:
 /// an explicit `schema != project_schema` is REFUSED at validate-time, fail-closed,
@@ -1134,6 +1136,25 @@ fn validate_op_support(
         Ok(())
     }
 
+    let fk_deferrable_consistency =
+        |deferrable: &Option<bool>, initially_deferred: &Option<bool>| {
+            if *initially_deferred == Some(true) && *deferrable != Some(true) {
+                return Err(AuthoringError {
+                    code: CODE_OP_INVALID.to_string(),
+                    kind: None,
+                    op_index,
+                    ts_location: ts_location.map(str::to_string),
+                    dialect: target_dialect,
+                    reason: "initiallyDeferred requires deferrable".to_string(),
+                    suggested_fix: Some(
+                        "set deferrable: true when initiallyDeferred is true, or omit initiallyDeferred"
+                            .to_string(),
+                    ),
+                });
+            }
+            Ok(())
+        };
+
     let support = op.support();
     if let Some(err) = error_from_decision(
         support.decision(target_dialect),
@@ -1179,10 +1200,13 @@ fn validate_op_support(
                     IrConstraintKind::Fk {
                         columns,
                         references_columns,
+                        deferrable,
+                        initially_deferred,
                         ..
                     } => {
                         check(Feature::TableLevelForeignKey)?;
                         fk_features(columns, references_columns, &mut check)?;
+                        fk_deferrable_consistency(deferrable, initially_deferred)?;
                     }
                     IrConstraintKind::Unique { .. } => check(Feature::TableLevelUnique)?,
                     IrConstraintKind::Exclusion { .. } => check(Feature::ExclusionConstraint)?,
@@ -1273,8 +1297,13 @@ fn validate_op_support(
             IrConstraintKind::Fk {
                 columns,
                 references_columns,
+                deferrable,
+                initially_deferred,
                 ..
-            } => fk_features(columns, references_columns, &mut check)?,
+            } => {
+                fk_features(columns, references_columns, &mut check)?;
+                fk_deferrable_consistency(deferrable, initially_deferred)?;
+            }
             IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
             IrConstraintKind::Exclusion { .. } => check(Feature::ExclusionConstraint)?,
             IrConstraintKind::Unique { .. } => {}
@@ -4370,6 +4399,51 @@ mod tests {
         ]);
         assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
         assert!(validate_ir_platform(&ir, Dialect::Sqlite).is_ok());
+    }
+
+    #[test]
+    fn validate_ir_rejects_initially_deferred_without_deferrable() {
+        let create_table = op_json(
+            r#"{
+                "op":"createTable",
+                "name":"orders",
+                "columns":[{"name":"user_id","type":"text"}],
+                "constraints":[{
+                    "name":"orders_user_fk",
+                    "kind":{
+                        "kind":"fk",
+                        "columns":["user_id"],
+                        "referencesTable":"users",
+                        "referencesColumns":["id"],
+                        "initiallyDeferred":true
+                    }
+                }]
+            }"#,
+        );
+        let add_constraint = op_json(
+            r#"{
+                "op":"addConstraint",
+                "table":"orders",
+                "constraint":{
+                    "name":"orders_user_fk",
+                    "kind":{
+                        "kind":"fk",
+                        "columns":["user_id"],
+                        "referencesTable":"users",
+                        "referencesColumns":["id"],
+                        "initiallyDeferred":true
+                    }
+                }
+            }"#,
+        );
+
+        for op in [create_table, add_constraint] {
+            let ir = ir_with(vec![op]);
+            let err = validate_ir_platform(&ir, Dialect::Postgres)
+                .expect_err("initiallyDeferred without deferrable must be rejected");
+            assert_eq!(err.code, CODE_OP_INVALID);
+            assert_eq!(err.reason, "initiallyDeferred requires deferrable");
+        }
     }
 
     #[test]

@@ -1527,6 +1527,8 @@ function recordCreateTable(name, args) {
         references: fkSpec.references,
         onDelete: fkSpec.onDelete,
         onUpdate: fkSpec.onUpdate,
+        deferrable: fkSpec.deferrable,
+        initiallyDeferred: fkSpec.initiallyDeferred,
         schema: args.schema,
       }),
     );
@@ -1763,6 +1765,8 @@ function fkConstraintFromSpec(spec) {
       referencesColumns: spec.references.columns,
       onDelete: spec.onDelete,
       onUpdate: spec.onUpdate,
+      deferrable: spec.deferrable,
+      initiallyDeferred: spec.initiallyDeferred,
     }),
   });
 }
@@ -1778,6 +1782,8 @@ function recordAddForeignKey(table, name, args) {
         references: args.references,
         onDelete: args.onDelete,
         onUpdate: args.onUpdate,
+        deferrable: args.deferrable,
+        initiallyDeferred: args.initiallyDeferred,
         schema: args.schema,
       }),
       schema: args.schema,

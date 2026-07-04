@@ -561,6 +561,8 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
                     references_columns: vec!["id".into()],
                     on_delete,
                     on_update,
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             },
             schema: None,

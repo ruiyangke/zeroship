@@ -4070,6 +4070,20 @@
                 }
               ]
             },
+            "deferrable": {
+              "description": "Optional `DEFERRABLE` flag.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "initiallyDeferred": {
+              "description": "Optional `INITIALLY DEFERRED` flag. Meaningful only when deferrable.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "kind": {
               "type": "string",
               "const": "fk"
