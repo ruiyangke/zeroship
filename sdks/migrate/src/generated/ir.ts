@@ -107,23 +107,23 @@ export type ColType =
   | "int"
   | "smallInt"
   | "bigInt"
-  | "float"
+  | "double"
   | "real"
-  | "bool"
+  | "boolean"
   | "json"
   | "timestamp"
   | "date"
   | "uuid"
   | "inet"
   | "textArray"
-  | "bytea"
+  | "bytes"
   | "geoPoint"
-  | { char: { len: number } }
+  | { char: { length: number } }
   | { ref: { references: string } }
   | { vector: { vector: number } }
   | { decimal: { precision: number; scale: number } }
-  | { enum: { name: string } }
-  | { domain: { name: string } }
+  | { enum: { name: string; schema?: string } }
+  | { domain: { name: string; schema?: string } }
   | { encrypted: { of: ColType } };
 
 /** The CLOSED pgvector distance-metric lexicon (P2a §4) — drives the ivfflat/hnsw

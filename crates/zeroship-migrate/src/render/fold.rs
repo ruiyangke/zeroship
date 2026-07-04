@@ -871,7 +871,7 @@ pub fn fold_ops(
                 )?;
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
-                        ColType::Enum { name }
+                        ColType::Enum { name, .. }
                             if !dialect.supports(Capability::MaterializedEnumType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
@@ -880,7 +880,7 @@ pub fn fold_ops(
                                 reason: "unreachable use-site",
                             });
                         }
-                        ColType::Domain { name }
+                        ColType::Domain { name, .. }
                             if !dialect.supports(Capability::MaterializedDomainType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
@@ -1537,7 +1537,7 @@ fn apply_fold_named_type_column_metadata(
     project_schema: &str,
 ) -> Result<(), FoldError> {
     match &source.ty {
-        ColType::Enum { name } => {
+        ColType::Enum { name, .. } => {
             match dialect {
                 SqlDialect::Postgres => {
                     let schema = named_types.enum_schema_or(name, project_schema);
@@ -1559,7 +1559,7 @@ fn apply_fold_named_type_column_metadata(
                 }
             }
         }
-        ColType::Domain { name } => {
+        ColType::Domain { name, .. } => {
             if matches!(dialect, SqlDialect::Postgres) {
                 let schema = named_types.domain_schema_or(name, project_schema);
                 col.data_type = pg_type_data_type(schema, name);
@@ -2621,16 +2621,16 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             "int" | "integer" => ColType::Int,
             "smallInt" => ColType::SmallInt,
             "bigInt" => ColType::BigInt,
-            "number" | "float" => ColType::Float,
+            "number" | "float" => ColType::Double,
             "real" => ColType::Real,
-            "boolean" => ColType::Bool,
+            "boolean" => ColType::Boolean,
             "json" | "object" | "array" => ColType::Json,
             "date" | "timestamp" => ColType::Timestamp,
-            "bytes" => ColType::Bytea,
+            "bytes" => ColType::Bytes,
             "inet" => ColType::Inet,
             "textArray" => ColType::TextArray,
             "char" => ColType::Char {
-                len: u32::try_from(f.char_len?).ok().filter(|len| *len > 0)?,
+                length: u32::try_from(f.char_len?).ok().filter(|len| *len > 0)?,
             },
             "geoPoint" => ColType::GeoPoint,
             _ => return None,

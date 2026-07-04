@@ -459,12 +459,12 @@ pub enum ColType {
     SmallInt,
     /// 64-bit signed integer.
     BigInt,
-    /// Double-precision float.
-    Float,
+    /// Double-precision float (`float8` / `DOUBLE PRECISION`).
+    Double,
     /// Single-precision float.
     Real,
     /// Boolean.
-    Bool,
+    Boolean,
     /// JSON document (`JSONB` on PG).
     Json,
     /// Timestamp (with time zone on PG).
@@ -478,11 +478,11 @@ pub enum ColType {
     /// Text array (`text[]` on PG; JSON-encoded on non-PG backends).
     TextArray,
     /// Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).
-    Bytea,
+    Bytes,
     /// Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).
     Char {
         /// Fixed length in characters.
-        len: u32,
+        length: u32,
     },
     /// Foreign-key reference to another table (the referenced table name).
     Ref {
@@ -508,12 +508,20 @@ pub enum ColType {
     Enum {
         /// The enum type name.
         name: String,
+        /// Optional schema qualifier for the named enum type (§3.1). Absent =
+        /// the migration/op default schema. Additive optional field, skip-if-none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// Named domain type reference. Materialized as a Postgres `CREATE DOMAIN`
     /// ref, and inlined as base type + constraints on SQLite/MySQL.
     Domain {
         /// The domain type name.
         name: String,
+        /// Optional schema qualifier for the named domain type (§3.1). Absent =
+        /// the migration/op default schema. Additive optional field, skip-if-none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// Application-level encrypted column wrapping an inner type.
     Encrypted {

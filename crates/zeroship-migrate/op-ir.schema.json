@@ -2812,9 +2812,9 @@
           "const": "bigInt"
         },
         {
-          "description": "Double-precision float.",
+          "description": "Double-precision float (`float8` / `DOUBLE PRECISION`).",
           "type": "string",
-          "const": "float"
+          "const": "double"
         },
         {
           "description": "Single-precision float.",
@@ -2824,7 +2824,7 @@
         {
           "description": "Boolean.",
           "type": "string",
-          "const": "bool"
+          "const": "boolean"
         },
         {
           "description": "JSON document (`JSONB` on PG).",
@@ -2859,7 +2859,7 @@
         {
           "description": "Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).",
           "type": "string",
-          "const": "bytea"
+          "const": "bytes"
         },
         {
           "description": "Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).",
@@ -2868,7 +2868,7 @@
             "char": {
               "type": "object",
               "properties": {
-                "len": {
+                "length": {
                   "description": "Fixed length in characters.",
                   "type": "integer",
                   "format": "uint32",
@@ -2876,7 +2876,7 @@
                 }
               },
               "required": [
-                "len"
+                "length"
               ]
             }
           },
@@ -2977,6 +2977,13 @@
                 "name": {
                   "description": "The enum type name.",
                   "type": "string"
+                },
+                "schema": {
+                  "description": "Optional schema qualifier for the named enum type (§3.1). Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -2999,6 +3006,13 @@
                 "name": {
                   "description": "The domain type name.",
                   "type": "string"
+                },
+                "schema": {
+                  "description": "Optional schema qualifier for the named domain type (§3.1). Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [

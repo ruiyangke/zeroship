@@ -113,9 +113,11 @@ fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
                 vec![
                     col("tier", ColType::Enum {
                         name: "plan_tier".to_string(),
+                        schema: None,
                     }),
                     col("period", ColType::Domain {
                         name: "billing_period".to_string(),
+                        schema: None,
                     }),
                 ],
             ),
@@ -154,9 +156,11 @@ fn sqlite_enum_and_domain_inline_at_column_use_site() {
                 vec![
                     col("tier", ColType::Enum {
                         name: "plan_tier".to_string(),
+                        schema: None,
                     }),
                     col("period", ColType::Domain {
                         name: "billing_period".to_string(),
+                        schema: None,
                     }),
                 ],
             ),
@@ -185,9 +189,11 @@ fn mysql_enum_and_domain_inline_at_column_use_site() {
                 vec![
                     col("tier", ColType::Enum {
                         name: "plan_tier".to_string(),
+                        schema: None,
                     }),
                     col("period", ColType::Domain {
                         name: "billing_period".to_string(),
+                        schema: None,
                     }),
                 ],
             ),
@@ -216,6 +222,7 @@ fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
                     column: "tier".to_string(),
                     to_type: ColType::Enum {
                         name: "plan_tier".to_string(),
+                        schema: None,
                     },
                     using: None,
                     schema: None,

@@ -151,8 +151,8 @@ async fn fold_equals_introspect_sqlite() {
             {"name":"title","type":"text","nullable":false},
             {"name":"body","type":"text","nullable":true},
             {"name":"rank","type":"int","nullable":true},
-            {"name":"score","type":"float","nullable":true},
-            {"name":"done","type":"bool","nullable":false}
+            {"name":"score","type":"double","nullable":true},
+            {"name":"done","type":"boolean","nullable":false}
         ],
         "indexes":[
             {"name":"notes_rank_idx","columns":[{"kind":"column","name":"rank"}]}

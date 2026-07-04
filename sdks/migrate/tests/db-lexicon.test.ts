@@ -29,7 +29,7 @@ test("ONE lexicon: a @zeroship/db field reduces to the same ColType the migratio
   assert.deepEqual(colTypeFromDbField(dbT.json()), migrateColType(t.json()));
   assert.deepEqual(colTypeFromDbField(dbT.bytes()), migrateColType(t.bytes()));
   assert.deepEqual(colTypeFromDbField(dbT.geoPoint()), migrateColType(t.geoPoint()));
-  // `t.number()` (a db float) maps to the neutral `float` ColType.
+  // `t.number()` (a db float) maps to the neutral `double` ColType.
   assert.deepEqual(colTypeFromDbField(dbT.number()), migrateColType(t.float()));
   // `t.id(...)` reduces to the neutral `uuid` ColType (the typed_id PK candidate).
   assert.equal(colTypeFromDbField(dbT.id("post")), "uuid");
@@ -50,7 +50,7 @@ test("ONE lexicon: a pgvector field carries its dims through the shared ColType"
 test("ONE lexicon: an encrypted column reduces to the recursive `encrypted` ColType arm", () => {
   // db `t.encrypted({ wraps: t.number() })` → neutral { encrypted: { of: <inner> } }.
   assert.deepEqual(colTypeFromDbField(dbT.encrypted({ wraps: dbT.number() })), {
-    encrypted: { of: "float" },
+    encrypted: { of: "double" },
   });
   assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "string" } });
 });
