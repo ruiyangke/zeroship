@@ -523,7 +523,7 @@ fn fixture_ir() -> MigrationIr {
             "columns": [
                 { "name": "id", "type": "bigInt", "nullable": false, "identity": { "always": false } },
                 { "name": "email", "type": "string", "nullable": false },
-                { "name": "active", "type": "bool", "nullable": false },
+                { "name": "active", "type": "boolean", "nullable": false },
                 { "name": "profile", "type": "json", "nullable": true }
             ],
             "primaryKey": ["id"],

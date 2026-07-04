@@ -247,8 +247,8 @@ async fn fold_equals_introspect_pg() {
         {"op":"createTable","name":"users","columns":[
             {"name":"email","type":"text","nullable":false},
             {"name":"age","type":"int","nullable":true},
-            {"name":"score","type":"float","nullable":true},
-            {"name":"active","type":"bool","nullable":false},
+            {"name":"score","type":"double","nullable":true},
+            {"name":"active","type":"boolean","nullable":false},
             {"name":"meta","type":"json","nullable":true},
             {"name":"joined","type":"timestamp","nullable":true},
             {"name":"parent_id","type":{"ref":{"references":"parents"}},"nullable":true},
@@ -382,7 +382,7 @@ async fn fold_equals_introspect_pg() {
     let recreate_notes = r#"{"ir_version":1,"name":"recreate_notes","ops":[
         {"op":"createTable","name":"notes","columns":[
             {"name":"title","type":"text","nullable":false},
-            {"name":"pinned","type":"bool","nullable":false}
+            {"name":"pinned","type":"boolean","nullable":false}
         ]}
     ]}"#;
     all_ops.extend(apply_doc(&conn, &cfg, recreate_notes, &full, Approval::None).await);

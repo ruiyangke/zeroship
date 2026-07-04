@@ -81,11 +81,11 @@
         },
         {
           "name": "avatar",
-          "type": "bytea"
+          "type": "bytes"
         },
         {
           "name": "active",
-          "type": "bool",
+          "type": "boolean",
           "nullable": false,
           "default": {
             "literal": {
@@ -137,7 +137,7 @@
         },
         {
           "name": "ratio",
-          "type": "float"
+          "type": "double"
         },
         {
           "name": "secret",

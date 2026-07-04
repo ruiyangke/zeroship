@@ -189,6 +189,7 @@ fn common_ops() -> Vec<Op> {
         "status",
         ColType::Enum {
             name: "app_status".to_string(),
+            schema: None,
         },
         false,
     );
@@ -236,6 +237,7 @@ fn common_ops() -> Vec<Op> {
                     "credit_cents",
                     ColType::Domain {
                         name: "positive_cents".to_string(),
+                        schema: None,
                     },
                     false,
                 ),
@@ -260,6 +262,7 @@ fn common_ops() -> Vec<Op> {
                     "unit_cents",
                     ColType::Domain {
                         name: "positive_cents".to_string(),
+                        schema: None,
                     },
                     false,
                 ),
