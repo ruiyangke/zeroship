@@ -162,13 +162,25 @@ export interface SequenceRef {
   schema?: string | null;
 }
 
+/** A canonical JSON value for non-empty json defaults. Numbers are integers only
+ *  and must satisfy |v| < 2^53. */
+export type IrJsonValue =
+  | null
+  | boolean
+  | SafeI64
+  | string
+  | IrJsonValue[]
+  | { [key: string]: IrJsonValue };
+
 /** A column DEFAULT — a typed scalar literal, a nullary synth scalar
- *  (`now`/`genRandomUuid`), an empty container default, or a PostgreSQL
- *  sequence `nextval` reference. Never raw SQL (property A). */
+ *  (`now`/`genRandomUuid`), an empty container default, a non-empty JSON value
+ *  default, or a PostgreSQL sequence `nextval` reference. Never raw SQL
+ *  (property A). */
 export type IrDefault =
   | { literal: { value: IrScalar } }
   | { fn: { fn: SynthDefaultFn } }
   | { container: EmptyContainerKind }
+  | { json: IrJsonValue }
   | { nextval: SequenceRef };
 
 /** The CLOSED expression AST node (§3.3.1), internally tagged on `node`. */
