@@ -5,8 +5,36 @@
 //! dialect/refusal diagnostics are sourced from this support matrix.
 
 use crate::model::capability::VendorCapability;
+use crate::model::dialect_table::Disposition;
 
 pub use crate::model::validate::Dialect;
+
+impl Disposition {
+    /// Whether this generated-table disposition admits the token on its dialect —
+    /// everything except an explicit `Unsupported` refusal renders/validates
+    /// (portable core, admitted vendor, and the reserved transparent-degradable
+    /// class). This is the single supported-vs-refused reading of the generated
+    /// dialect vocabulary, shared by `Op::support`'s cell assembly and the
+    /// PostgreSQL-only expression gate below.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        !matches!(self, Disposition::Unsupported)
+    }
+}
+
+/// The disposition of a PostgreSQL-only EXPRESSION node on a dialect. Expression
+/// nodes are not op-kinds, so they have no row in the generated (op-keyed) dialect
+/// table; but their dialect verdict is exactly the canonical PG-only-core shape the
+/// table records for every `pg = portable, sqlite/mysql = unsupported` op — so the
+/// PG-only-expression gate reads that shape off the generated [`Disposition`]
+/// vocabulary instead of a bespoke `== Postgres` arm.
+#[must_use]
+pub const fn pg_only_expr_disposition(dialect: Dialect) -> Disposition {
+    match dialect {
+        Dialect::Postgres => Disposition::Portable,
+        Dialect::Sqlite | Dialect::Mysql => Disposition::Unsupported,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DialectSet(u8);
