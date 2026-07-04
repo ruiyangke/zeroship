@@ -860,6 +860,8 @@ export interface CreateTableArgs {
     references: ForeignKeyReference;
     onDelete?: RefAction;
     onUpdate?: RefAction;
+    deferrable?: boolean;
+    initiallyDeferred?: boolean;
   }>;
   exclusions?: Array<{ name: string } & ExclusionConstraintArgs>;
   indexes?: Array<{
@@ -906,6 +908,8 @@ export interface ForeignKeyRef {
     references: ForeignKeyReference;
     onDelete?: RefAction;
     onUpdate?: RefAction;
+    deferrable?: boolean;
+    initiallyDeferred?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   }): TableHandle;
@@ -1002,6 +1006,8 @@ export interface TableHandle {
       references: ForeignKeyReference;
       onDelete?: RefAction;
       onUpdate?: RefAction;
+      deferrable?: boolean;
+      initiallyDeferred?: boolean;
       ifNotExists?: boolean;
       schema?: string;
     },

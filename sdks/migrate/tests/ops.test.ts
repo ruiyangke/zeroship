@@ -385,6 +385,63 @@ test("C1 — .foreignKey().add({ onDelete }) emits onDelete/onUpdate; absent ⇒
   );
 });
 
+test("addForeignKey deferrable flags emit, omit when unset, and match engine recorder", () => {
+  const publicOps = record(() => {
+    table("orders").addForeignKey("orders_customer_fk", {
+      columns: ["customer_id"],
+      references: { table: "customers", columns: ["id"] },
+      deferrable: true,
+      initiallyDeferred: true,
+    });
+    table("orders").create({
+      columns: { owner_id: t.text() },
+      foreignKeys: [
+        {
+          name: "orders_owner_fk",
+          columns: ["owner_id"],
+          references: { table: "owners", columns: ["id"] },
+          deferrable: true,
+        },
+      ],
+    });
+    table("orders").addForeignKey("orders_plain_fk", {
+      columns: ["plain_id"],
+      references: { table: "plain", columns: ["id"] },
+    });
+  });
+  const engineOps = recordEngine(({ table, t }) => {
+    table("orders").addForeignKey("orders_customer_fk", {
+      columns: ["customer_id"],
+      references: { table: "customers", columns: ["id"] },
+      deferrable: true,
+      initiallyDeferred: true,
+    });
+    table("orders").create({
+      columns: { owner_id: t.text() },
+      foreignKeys: [
+        {
+          name: "orders_owner_fk",
+          columns: ["owner_id"],
+          references: { table: "owners", columns: ["id"] },
+          deferrable: true,
+        },
+      ],
+    });
+    table("orders").addForeignKey("orders_plain_fk", {
+      columns: ["plain_id"],
+      references: { table: "plain", columns: ["id"] },
+    });
+  });
+
+  assert.deepEqual(publicOps, engineOps);
+  assert.equal(publicOps[0].constraint.kind.deferrable, true);
+  assert.equal(publicOps[0].constraint.kind.initiallyDeferred, true);
+  assert.equal(publicOps[1].constraints[0].kind.deferrable, true);
+  assert.equal(publicOps[1].constraints[0].kind.initiallyDeferred, undefined);
+  assert.ok(!("deferrable" in publicOps[2].constraint.kind));
+  assert.ok(!("initiallyDeferred" in publicOps[2].constraint.kind));
+});
+
 test("insert row-object normalizes to columns + positional rows", () => {
   const ops = record(() =>
     table("t").insert({ rows: [{ code: 1, label: "a" }, { code: 2, label: "b" }] }),
