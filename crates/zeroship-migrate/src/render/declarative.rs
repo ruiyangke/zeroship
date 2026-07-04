@@ -243,19 +243,19 @@ fn pg_identity_clause(c: &ColumnSnapshot) -> String {
 }
 
 fn mysql_identity_clause(c: &ColumnSnapshot) -> &'static str {
-    if c.identity.is_some() {
+    if matches!(c.identity, Some(identity) if !identity.always) {
         " AUTO_INCREMENT"
     } else {
         ""
     }
 }
 
-fn sqlite_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
-    c.identity.is_some()
+fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
+    matches!(c.identity, Some(identity) if !identity.always)
         && inline_pk
         && matches!(
             c.data_type.to_ascii_lowercase().as_str(),
-            "integer" | "bigint" | "int" | "int4" | "int8"
+            "integer" | "bigint" | "smallint" | "int" | "int2" | "int4" | "int8"
         )
 }
 
@@ -268,7 +268,9 @@ fn column_type_for_render(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bo
             SqlDialect::Sqlite => "text COLLATE NOCASE".to_string(),
             SqlDialect::Mysql => "text".to_string(),
         }
-    } else if matches!(dialect, SqlDialect::Sqlite) && sqlite_identity_pk(c, inline_pk) {
+    } else if matches!(dialect, SqlDialect::Sqlite)
+        && sqlite_auto_increment_identity_pk(c, inline_pk)
+    {
         "INTEGER".to_string()
     } else if matches!(dialect, SqlDialect::Sqlite) {
         sqlite_ddl_type(&c.data_type).to_string()
@@ -329,7 +331,9 @@ fn sqlite_ddl_type(data_type: &str) -> &'static str {
 }
 
 fn primary_key_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
-    if matches!(dialect, SqlDialect::Sqlite) && sqlite_identity_pk(c, inline_pk) {
+    if matches!(dialect, SqlDialect::Sqlite)
+        && sqlite_auto_increment_identity_pk(c, inline_pk)
+    {
         " PRIMARY KEY AUTOINCREMENT"
     } else if inline_pk {
         " PRIMARY KEY"
@@ -340,8 +344,10 @@ fn primary_key_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) 
 
 fn null_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
     if c.nullable
-        || (matches!(dialect, SqlDialect::Sqlite) && sqlite_identity_pk(c, inline_pk))
-        || (matches!(dialect, SqlDialect::Mysql) && c.identity.is_some())
+        || (matches!(dialect, SqlDialect::Sqlite)
+            && sqlite_auto_increment_identity_pk(c, inline_pk))
+        || (matches!(dialect, SqlDialect::Mysql)
+            && matches!(c.identity, Some(identity) if !identity.always))
     {
         ""
     } else {

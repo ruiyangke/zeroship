@@ -437,6 +437,10 @@ class ColumnDef {
     return this._with({ identity: { always: opts && opts.always === true ? true : false } });
   }
 
+  autoIncrement() {
+    return this._with({ identity: { always: false } });
+  }
+
   /** Reduce to an `IrColumn` (the `createTable` columns[] shape). `name` is the
    *  map key. `nullable`/`default`/`unique` omitted when at their defaults.
    *  C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
