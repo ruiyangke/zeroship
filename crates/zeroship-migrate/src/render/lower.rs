@@ -888,6 +888,14 @@ pub(crate) fn render_ir_default(default: &IrDefault, dialect: SqlDialect) -> Res
         IrDefault::Container { .. } => Err(IrLowerError::UnsupportedOp(
             "container defaults require a column type at render",
         )),
+        IrDefault::Nextval { sequence } => {
+            if !matches!(dialect, SqlDialect::Postgres) {
+                return Err(IrLowerError::UnsupportedOp(
+                    "nextval defaults are PostgreSQL-only",
+                ));
+            }
+            Ok(crate::render::declarative::nextval_default_expr(sequence))
+        }
     }
 }
 
@@ -898,7 +906,9 @@ pub(crate) fn render_ir_default_for_type(
 ) -> Result<String, IrLowerError> {
     match default {
         IrDefault::Container { kind } => render_container_default_for_col_type(*kind, ty),
-        IrDefault::Literal { .. } | IrDefault::Fn { .. } => render_ir_default(default, dialect),
+        IrDefault::Literal { .. } | IrDefault::Fn { .. } | IrDefault::Nextval { .. } => {
+            render_ir_default(default, dialect)
+        }
     }
 }
 
@@ -2137,6 +2147,21 @@ impl IrAuthor {
                                 "setColumnDefault container defaults need live column type",
                             ))?;
                         render_container_default_for_data_type(*kind, data_type)?
+                    }
+                    IrDefault::Nextval { .. } => {
+                        if let Some(data_type) = live_schema
+                            .table_snapshots
+                            .get(table)
+                            .and_then(|snap| snap.columns.iter().find(|c| c.name == *column))
+                            .map(|col| col.data_type.as_str())
+                        {
+                            if !matches!(data_type, "smallint" | "integer" | "bigint") {
+                                return Err(IrLowerError::UnsupportedOp(
+                                    "nextval defaults require an integer live column type",
+                                ));
+                            }
+                        }
+                        render_ir_default(value, self.dialect)?
                     }
                     IrDefault::Literal { .. } | IrDefault::Fn { .. } => {
                         render_ir_default(value, self.dialect)?
@@ -4859,7 +4884,7 @@ fn apply_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. })) =
+        let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. })) =
             source.default.as_ref()
         else {
             continue;
@@ -4882,7 +4907,7 @@ fn apply_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. })) = default else {
+    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. })) = default else {
         return Ok(());
     };
     if col.name != column {
@@ -4918,7 +4943,7 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
                 Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
         }),
-        IrDefault::Fn { .. } | IrDefault::Container { .. } => None,
+        IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. } => None,
     }
 }
 

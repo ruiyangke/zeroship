@@ -35,6 +35,7 @@ import type {
   RaiseLevel,
   SelectAst,
   SelectItem,
+  SequenceRef,
   TableRef,
   TriggerAction,
   TriggerStmt,
@@ -67,6 +68,7 @@ export type {
   RaiseLevel,
   SelectAst,
   SelectItem,
+  SequenceRef,
   TableRef,
   TriggerAction,
   TriggerStmt,
@@ -140,6 +142,18 @@ export interface GeneratedOptions {
 /** Options for `.identity({ always })`. Omitted ⇒ `BY DEFAULT AS IDENTITY`. */
 export interface IdentityOptions {
   always?: boolean;
+}
+
+export interface NextvalOptions {
+  schema?: string;
+}
+
+declare const nextvalDefaultBrand: unique symbol;
+
+export interface NextvalDefault {
+  readonly [nextvalDefaultBrand]: "nextval";
+  readonly name: string;
+  readonly schema?: string;
 }
 
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
@@ -371,6 +385,7 @@ export type DefaultValue =
   | ScalarValue
   | DbSynthSymbol
   | { fn: "now" | "genRandomUuid" }
+  | NextvalDefault
   | EmptyContainerDefault;
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the

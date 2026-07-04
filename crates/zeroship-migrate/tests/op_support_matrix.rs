@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use zeroship_migrate::model::capability::VendorCapability;
 use zeroship_migrate::model::ir::{
-    IndexElement, IndexMethod, IndexStorageParams, IrConstraintKind, Op, PartitionBounds,
-    TriggerAction, ViewQuery,
+    ColType, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraintKind,
+    IrDefault, Op, PartitionBounds, SequenceRef, TriggerAction, ViewQuery,
 };
 use zeroship_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
 use zeroship_migrate::model::validate::validate_ir_scoped;
@@ -405,6 +405,61 @@ fn partition_feature_ops() -> Vec<Op> {
     ]
 }
 
+fn nextval_default_ops() -> Vec<Op> {
+    let col = IrColumn {
+        name: "id".into(),
+        ty: ColType::BigInt,
+        nullable: Some(false),
+        default: Some(IrDefault::Nextval {
+            sequence: SequenceRef {
+                name: "events_id_seq".into(),
+                schema: Some("app".into()),
+            },
+        }),
+        unique: None,
+        id_prefix: None,
+        case_sensitive: None,
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: None,
+    };
+    vec![
+        Op::CreateTable {
+            name: "events".into(),
+            columns: vec![col.clone()],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::AddColumn {
+            table: "events".into(),
+            column: "id".into(),
+            ty: ColType::BigInt,
+            nullable: Some(false),
+            default: col.default.clone(),
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::SetColumnDefault {
+            table: "events".into(),
+            column: "id".into(),
+            value: col.default.clone().expect("nextval default"),
+            schema: None,
+            existence_guard: None,
+        },
+    ]
+}
+
 #[test]
 fn partition_ops_and_partition_index_features_are_pg_only() {
     for op in partition_feature_ops() {
@@ -421,6 +476,27 @@ fn partition_ops_and_partition_index_features_are_pg_only() {
                 decision_supported,
                 matches!(dialect, Dialect::Postgres),
                 "{tag} {dialect:?}: partition DSL slice is PostgreSQL-only"
+            );
+        }
+    }
+}
+
+#[test]
+fn nextval_default_support_decision_matches_validate_and_is_pg_only() {
+    for op in nextval_default_ops() {
+        let tag = op_tag(&op);
+        let support = op.support();
+        for dialect in DIALECTS {
+            let decision_supported = support.decision(dialect).is_supported();
+            let validates = validate_current(&op, dialect);
+            assert_eq!(
+                validates, decision_supported,
+                "{tag} {dialect:?}: nextval support decision and validate() must agree"
+            );
+            assert_eq!(
+                decision_supported,
+                matches!(dialect, Dialect::Postgres),
+                "{tag} {dialect:?}: nextval defaults are PostgreSQL-only"
             );
         }
     }

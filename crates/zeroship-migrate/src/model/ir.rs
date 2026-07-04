@@ -559,12 +559,24 @@ pub enum EmptyContainerKind {
     Array,
 }
 
+/// A closed sequence reference for `nextval(...)` defaults. This is a logical
+/// name, never raw SQL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SequenceRef {
+    /// Sequence name.
+    pub name: String,
+    /// Optional schema qualifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+}
+
 /// A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —
-/// either a typed scalar literal or an engine-synthesized apply-time scalar
-/// (`now`/`genRandomUuid`) or an EMPTY container default for JSON/text-array
-/// columns. NEVER a raw SQL string (property A); the per-dialect default clause
-/// is rendered by the shared snapshot-builder kernel from this structured value
-/// (§6.5).
+/// either a typed scalar literal, an engine-synthesized apply-time scalar
+/// (`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array
+/// columns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL
+/// string (property A); the per-dialect default clause is rendered by the shared
+/// snapshot-builder kernel from this structured value (§6.5).
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrDefault {
     /// A typed scalar literal default (constrained numeric domain — §2.5).
@@ -586,6 +598,11 @@ pub enum IrDefault {
         /// The empty container kind (`object` or `array`).
         kind: EmptyContainerKind,
     },
+    /// A PostgreSQL `nextval('<sequence>'::regclass)` default.
+    Nextval {
+        /// Closed sequence reference.
+        sequence: SequenceRef,
+    },
 }
 
 impl Serialize for IrDefault {
@@ -599,6 +616,7 @@ impl Serialize for IrDefault {
             IrDefault::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
             IrDefault::Fn { r#fn } => map.serialize_entry("fn", &serde_json::json!({ "fn": r#fn }))?,
             IrDefault::Container { kind } => map.serialize_entry("container", kind)?,
+            IrDefault::Nextval { sequence } => map.serialize_entry("nextval", sequence)?,
         }
         map.end()
     }
@@ -640,8 +658,13 @@ impl<'de> Deserialize<'de> for IrDefault {
                 serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
             return Ok(IrDefault::Container { kind });
         }
+        if let Some(v) = obj.get("nextval") {
+            let sequence: SequenceRef =
+                serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            return Ok(IrDefault::Nextval { sequence });
+        }
         Err(D::Error::custom(
-            "IrDefault key must be one of \"literal\", \"fn\", or \"container\"",
+            "IrDefault key must be one of \"literal\", \"fn\", \"container\", or \"nextval\"",
         ))
     }
 }
@@ -658,8 +681,10 @@ impl JsonSchema for IrDefault {
             .expect("SynthDefaultFn schema ref serializes");
         let empty_container_kind = serde_json::to_value(g.subschema_for::<EmptyContainerKind>())
             .expect("EmptyContainerKind schema ref serializes");
+        let sequence_ref = serde_json::to_value(g.subschema_for::<SequenceRef>())
+            .expect("SequenceRef schema ref serializes");
         schemars::json_schema!({
-            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal or an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`) or an EMPTY container default for JSON/text-array\ncolumns. NEVER a raw SQL string (property A); the per-dialect default clause\nis rendered by the shared snapshot-builder kernel from this structured value\n(§6.5).",
+            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL\nstring (property A); the per-dialect default clause is rendered by the shared\nsnapshot-builder kernel from this structured value (§6.5).",
             "oneOf": [
                 {
                     "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -708,6 +733,17 @@ impl JsonSchema for IrDefault {
                         }
                     },
                     "required": ["container"],
+                    "additionalProperties": false
+                },
+                {
+                    "description": "A PostgreSQL `nextval('<sequence>'::regclass)` default.",
+                    "type": "object",
+                    "properties": {
+                        "nextval": {
+                            "$ref": sequence_ref["$ref"].clone()
+                        }
+                    },
+                    "required": ["nextval"],
                     "additionalProperties": false
                 }
             ]
@@ -3185,6 +3221,9 @@ impl Op {
         let pg_only = |reason: &'static str| {
             DialectSupport::postgres_only(RenderMode::Offline, reason)
         };
+        let default_is_nextval = |default: &Option<IrDefault>| {
+            matches!(default, Some(IrDefault::Nextval { .. }))
+        };
         let index_uses_pg_only_feature = |include: &[String],
                                           with: &Option<IndexStorageParams>,
                                           only: Option<bool>| {
@@ -3195,6 +3234,7 @@ impl Op {
 
         match self {
             Op::CreateTable {
+                columns,
                 partition_by,
                 indexes,
                 ..
@@ -3203,10 +3243,17 @@ impl Op {
                     matches!(index.using, Some(IndexMethod::Brin))
                         || index_uses_pg_only_feature(&index.include, &index.with, index.only)
                 });
+                let has_nextval_default = columns
+                    .iter()
+                    .any(|column| default_is_nextval(&column.default));
                 let dialects = if partition_by.is_some() {
                     pg_only("partitioned tables are PostgreSQL-only")
                 } else if has_pg_only_index_feature {
                     pg_only("createTable BRIN/INCLUDE/WITH/ONLY index features are PostgreSQL-only")
+                } else if has_nextval_default {
+                    pg_only(
+                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+                    )
                 } else {
                     all_offline
                 };
@@ -3221,7 +3268,16 @@ impl Op {
             Op::SetTableOptions { .. } => Support::core(all_offline, &[]),
             Op::DropTable { .. } => Support::core(all_offline, &[]),
             Op::RenameTable { .. } => Support::core(all_offline, &[]),
-            Op::AddColumn { .. } => Support::core(all_offline, ADD_COLUMN_FEATURES),
+            Op::AddColumn { default, .. } => {
+                let dialects = if default_is_nextval(default) {
+                    pg_only(
+                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+                    )
+                } else {
+                    all_offline
+                };
+                Support::core(dialects, ADD_COLUMN_FEATURES)
+            }
             Op::DropColumn { .. } => Support::core(all_offline, &[]),
             Op::CreateIndex {
                 columns,
@@ -3324,6 +3380,10 @@ impl Op {
                     )
                 } else if matches!(value, IrDefault::Container { .. }) {
                     all_live_resolved
+                } else if matches!(value, IrDefault::Nextval { .. }) {
+                    pg_only(
+                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+                    )
                 } else {
                     DialectSupport::new(
                         supported(RenderMode::Offline),
@@ -3467,7 +3527,16 @@ impl Op {
             }
             Op::CreateEnum { .. } => Support::core(all_offline, &[]),
             Op::DropEnum { .. } => Support::core(all_offline, &[]),
-            Op::CreateDomain { .. } => Support::core(all_offline, &[]),
+            Op::CreateDomain { default, .. } => {
+                let dialects = if default_is_nextval(default) {
+                    pg_only(
+                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+                    )
+                } else {
+                    all_offline
+                };
+                Support::core(dialects, &[])
+            }
             Op::DropDomain { .. } => Support::core(all_offline, &[]),
             Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
                 Support::core(
@@ -5038,6 +5107,39 @@ mod tests {
     }
 
     #[test]
+    fn ir_default_nextval_round_trips_compact_wire() {
+        for (wire, sequence) in [
+            (
+                r#"{"nextval":{"name":"audit_events_id_seq","schema":"zeroship"}}"#,
+                SequenceRef {
+                    name: "audit_events_id_seq".into(),
+                    schema: Some("zeroship".into()),
+                },
+            ),
+            (
+                r#"{"nextval":{"name":"audit_events_id_seq"}}"#,
+                SequenceRef {
+                    name: "audit_events_id_seq".into(),
+                    schema: None,
+                },
+            ),
+        ] {
+            let d: IrDefault = serde_json::from_str(wire).unwrap();
+            assert_eq!(
+                d,
+                IrDefault::Nextval {
+                    sequence: sequence.clone()
+                }
+            );
+            assert_eq!(
+                serde_json::to_string(&d).unwrap(),
+                wire,
+                "nextval default wire shape must stay a tagged single-key object"
+            );
+        }
+    }
+
+    #[test]
     fn case_sensitive_false_round_trips_on_ir_column() {
         let col = IrColumn {
             name: "email".into(),
@@ -5085,5 +5187,29 @@ mod tests {
             "a column without the new default must remain byte-identical"
         );
         assert!(!json.contains("container"), "absent container defaults add no key");
+    }
+
+    #[test]
+    fn column_without_nextval_default_omits_default_key() {
+        let col = IrColumn {
+            name: "id".into(),
+            ty: ColType::BigInt,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        };
+        let json = serde_json::to_string(&col).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"id","type":"bigInt"}"#,
+            "a column without a nextval default must remain byte-identical"
+        );
+        assert!(!json.contains("nextval"), "absent nextval defaults add no key");
     }
 }

@@ -38,6 +38,7 @@ export {
   p,
   minValue,
   maxValue,
+  nextval,
   // the immutable fluent column-type lexicon
   t,
   // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
@@ -65,6 +66,9 @@ export type {
   FnNamespace,
   ScalarValue,
   EmptyContainerDefault,
+  NextvalDefault,
+  NextvalOptions,
+  SequenceRef,
   DefaultValue,
   Row,
   Migration,

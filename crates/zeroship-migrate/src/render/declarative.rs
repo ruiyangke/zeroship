@@ -1399,6 +1399,17 @@ pub(crate) fn empty_container_default_expr_for_data_type(
     }
 }
 
+pub(crate) fn nextval_default_expr(sequence: &crate::model::ir::SequenceRef) -> String {
+    let regclass_name = match sequence.schema.as_deref() {
+        Some(schema) => format!("{schema}.{}", sequence.name),
+        None => sequence.name.clone(),
+    };
+    format!(
+        "nextval({}::regclass)",
+        crate::render::dml::sql_string_literal(&regclass_name)
+    )
+}
+
 fn generated_column_snapshot(
     generated: &crate::model::ir::GeneratedCol,
     dialect: SqlDialect,

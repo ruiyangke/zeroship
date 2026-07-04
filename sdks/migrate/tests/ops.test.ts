@@ -15,6 +15,7 @@ import {
   dropPartition,
   minValue,
   maxValue,
+  nextval,
   comment,
   lintDeterminism,
   enumType,
@@ -35,6 +36,7 @@ import {
   __drain as engDrain,
   t as engT,
   table as engTable,
+  nextval as engNextval,
 } from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
 
 /** Record one phase's ops via the ambient recorder. */
@@ -44,9 +46,9 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-function recordEngine(up: (api: { table: any; t: any }) => void): any[] {
+function recordEngine(up: (api: { table: any; t: any; nextval: any }) => void): any[] {
   engBegin();
-  up({ table: engTable, t: engT });
+  up({ table: engTable, t: engT, nextval: engNextval });
   return engDrain();
 }
 
@@ -206,6 +208,52 @@ test(".column().add() carries a fluent ColumnDef's modifiers", () => {
     nullable: false,
     default: { literal: { value: "new" } },
   });
+});
+
+test(".default(nextval(name,{schema})) emits IrDefault::Nextval", () => {
+  const createOps = record(() => {
+    table("audit_events").create({
+      columns: {
+        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
+      },
+    });
+  });
+  assert.deepEqual(createOps[0].columns[0].default, {
+    nextval: { name: "audit_events_id_seq", schema: "zeroship" },
+  });
+
+  const addOps = record(() => {
+    table("audit_events").column("id").add({
+      type: t.bigInt().default(nextval("audit_events_id_seq")),
+    });
+  });
+  assert.deepEqual(addOps[0].default, {
+    nextval: { name: "audit_events_id_seq" },
+  });
+});
+
+test("public and engine recorders match for nextval defaults", () => {
+  const publicOps = record(() => {
+    table("audit_events").create({
+      columns: {
+        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
+      },
+    });
+    table("audit_events").column("id").add({
+      type: t.bigInt().default(nextval("audit_events_id_seq")),
+    });
+  });
+  const engineOps = recordEngine(({ table, t, nextval }) => {
+    table("audit_events").create({
+      columns: {
+        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
+      },
+    });
+    table("audit_events").column("id").add({
+      type: t.bigInt().default(nextval("audit_events_id_seq")),
+    });
+  });
+  assert.deepEqual(publicOps, engineOps);
 });
 
 test("C2 — .column().add({ type: t.text().unique() }) emits the column + a follow-on unique", () => {
