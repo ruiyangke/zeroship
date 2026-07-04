@@ -738,6 +738,8 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
                     references_columns: vec!["id".to_string()],
                     on_delete: Some(RefAction::Cascade),
                     on_update: Some(RefAction::Restrict),
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             }],
         indexes: Vec::new(),

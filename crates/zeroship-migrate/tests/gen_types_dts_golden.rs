@@ -95,6 +95,8 @@ fn all_types_ops() -> Vec<Op> {
             references_columns: vec!["id".into()],
             on_delete: Some(RefAction::Cascade),
             on_update: None,
+            deferrable: None,
+            initially_deferred: None,
         },
     };
     vec![Op::CreateTable {

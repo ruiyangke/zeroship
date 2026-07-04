@@ -717,6 +717,8 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
                     references_columns: vec!["id".into()],
                     on_delete: None,
                     on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             },
             schema: None,
@@ -753,6 +755,8 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     references_columns: vec!["id".into()],
                     on_delete: Some(RefAction::Cascade),
                     on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             },
             schema: None,
@@ -782,6 +786,8 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     references_columns: vec!["id".into()],
                     on_delete: None,
                     on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             },
             schema: None,
@@ -795,6 +801,59 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
         r#"ALTER TABLE "app"."authors" ADD CONSTRAINT "authors_pinned_fk" FOREIGN KEY ("pinned") REFERENCES "app"."posts" (id)"#,
         "an action-free FK must render bare (got: {})",
         ir_none[0].0
+    );
+}
+
+#[test]
+fn add_constraint_fk_renders_deferrable_tail_pg() {
+    use zeroship_migrate::model::ir::{IrConstraint, IrConstraintKind, Op};
+
+    fn render_fk(deferrable: Option<bool>, initially_deferred: Option<bool>) -> String {
+        let live = BTreeSet::from(["posts".to_string(), "authors".to_string()]);
+        let ir = sql_pairs(&ir_lower_one(
+            Op::AddConstraint {
+                table: "authors".into(),
+                constraint: IrConstraint {
+                    name: Some("authors_pinned_fk".into()),
+                    kind: IrConstraintKind::Fk {
+                        columns: vec!["pinned".into()],
+                        references_table: "posts".into(),
+                        references_columns: vec!["id".into()],
+                        on_delete: None,
+                        on_update: None,
+                        deferrable,
+                        initially_deferred,
+                    },
+                },
+                schema: None,
+                existence_guard: None,
+            },
+            &live,
+            SqlDialect::Postgres,
+        ));
+        ir[0].0.clone()
+    }
+
+    let deferred = render_fk(Some(true), Some(true));
+    assert!(
+        deferred.ends_with("DEFERRABLE INITIALLY DEFERRED"),
+        "deferrable + initiallyDeferred must render both clauses: {deferred}"
+    );
+
+    let deferrable_only = render_fk(Some(true), None);
+    assert!(
+        deferrable_only.ends_with("DEFERRABLE"),
+        "deferrable-only FK must end with bare DEFERRABLE: {deferrable_only}"
+    );
+    assert!(
+        !deferrable_only.contains("INITIALLY"),
+        "deferrable-only FK must not render INITIALLY DEFERRED: {deferrable_only}"
+    );
+
+    let immediate = render_fk(None, None);
+    assert!(
+        !immediate.contains("DEFERRABLE"),
+        "default FK must omit the DEFERRABLE clause: {immediate}"
     );
 }
 
@@ -814,6 +873,8 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
                     references_columns: vec!["id".into()],
                     on_delete: None,
                     on_update: Some(RefAction::Restrict),
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             },
             schema: None,
@@ -844,6 +905,8 @@ fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
                     references_columns: vec!["other".into()],
                     on_delete: None,
                     on_update: None,
+                    deferrable: None,
+                    initially_deferred: None,
                 },
             },
             schema: None,

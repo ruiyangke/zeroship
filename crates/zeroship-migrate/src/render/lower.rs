@@ -3000,6 +3000,8 @@ impl IrAuthor {
                     references_columns,
                     on_delete,
                     on_update,
+                    deferrable,
+                    initially_deferred,
                 } => {
                     if !self.dialect.supports(Capability::TableLevelForeignKey) {
                         return Err(IrLowerError::UnsupportedOp(
@@ -3019,6 +3021,8 @@ impl IrAuthor {
                         references_columns,
                         on_delete.map(RefAction::as_token),
                         on_update.map(RefAction::as_token),
+                        deferrable.unwrap_or(false),
+                        initially_deferred.unwrap_or(false),
                         self.dialect,
                     );
                     snap.constraints.push(fk);
@@ -3598,6 +3602,8 @@ impl IrAuthor {
                 references_columns,
                 on_delete,
                 on_update,
+                deferrable,
+                initially_deferred,
             } => {
                 if columns.is_empty() {
                     return Err(IrLowerError::UnsupportedOp(
@@ -3618,6 +3624,8 @@ impl IrAuthor {
                     references_columns,
                     on_delete.map(RefAction::as_token),
                     on_update.map(RefAction::as_token),
+                    deferrable.unwrap_or(false),
+                    initially_deferred.unwrap_or(false),
                     self.dialect,
                 );
                 decl.lower_add_fk(table, &fk)
@@ -5181,11 +5189,21 @@ fn ir_constraint_name_and_kind(
         IrConstraintKind::Fk { columns, references_table, references_columns, .. } => {
             // Reuse the shared FK snapshot so the name derivation is byte-identical
             // to `lower_add_constraint`'s `ir_fk_constraint_snapshot_for_columns` call.
-            // Name derivation is independent of the referential actions (it keys on
-            // the local column / explicit name), so `None, None` keeps the derived
-            // `<col>_fkey` byte-identical to the lowered FK's name.
+            // Name derivation is independent of the referential actions and
+            // deferrability (it keys on the local column / explicit name), so
+            // neutral flags keep the derived `<col>_fkey` byte-identical to the
+            // lowered FK's name.
             let snap = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
-                "", explicit, columns, references_table, references_columns, None, None, dialect,
+                "",
+                explicit,
+                columns,
+                references_table,
+                references_columns,
+                None,
+                None,
+                false,
+                false,
+                dialect,
             );
             (snap.name, "FOREIGN KEY".to_string())
         }
