@@ -229,7 +229,7 @@ pub use model::ir::{
     IndexSortOrder, IndexStorageParams, IrBatch, IrClassification, IrColumn, IrConstraint,
     IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar,
     IrValue, IrVersionError, MigrationIr, Op, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SynthDefaultFn,
+    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, SynthDefaultFn,
     TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
     CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };

@@ -3036,7 +3036,7 @@
       ]
     },
     "IrDefault": {
-      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal or an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`) or an EMPTY container default for JSON/text-array\ncolumns. NEVER a raw SQL string (property A); the per-dialect default clause\nis rendered by the shared snapshot-builder kernel from this structured value\n(§6.5).",
+      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL\nstring (property A); the per-dialect default clause is rendered by the shared\nsnapshot-builder kernel from this structured value (§6.5).",
       "oneOf": [
         {
           "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -3094,6 +3094,19 @@
           },
           "required": [
             "container"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "A PostgreSQL `nextval('<sequence>'::regclass)` default.",
+          "type": "object",
+          "properties": {
+            "nextval": {
+              "$ref": "#/$defs/SequenceRef"
+            }
+          },
+          "required": [
+            "nextval"
           ],
           "additionalProperties": false
         }
@@ -3169,6 +3182,27 @@
           "type": "string",
           "const": "array"
         }
+      ]
+    },
+    "SequenceRef": {
+      "description": "A closed sequence reference for `nextval(...)` defaults. This is a logical\nname, never raw SQL.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Sequence name.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Optional schema qualifier.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
       ]
     },
     "VectorMetric": {

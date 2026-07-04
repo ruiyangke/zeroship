@@ -19,8 +19,9 @@ use crate::model::ir::{
 /// is set once at create time). Tracking it in equality would make the differ
 /// emit a phantom op and break the lossless round-trip oracle.
 ///
-/// Introspection (`snapshot_schema`) leaves it `None`; only `desired_snapshot`
-/// populates it (for emission). All drift comparison is on `data_type` +
+/// Introspection (`snapshot_schema`) leaves it `None` except for recovered
+/// PostgreSQL `nextval('<sequence>'::regclass)` defaults, which are compared by
+/// parsed sequence identity. All other drift comparison is on `data_type` +
 /// `nullable` only (see `diff_attrs`).
 #[derive(Clone, Default)]
 pub struct ColumnSnapshot {
@@ -33,8 +34,9 @@ pub struct ColumnSnapshot {
     pub nullable: bool,
     /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN (#4), e.g.
     /// `'active'` or `'{}'::jsonb`. Emission-only; NOT drift-compared (see the
-    /// type-level note). `None` ⇒ no default emitted; always `None` from
-    /// introspection.
+    /// type-level note). `None` ⇒ no default emitted; live introspection only
+    /// populates recovered PostgreSQL `nextval('<sequence>'::regclass)`
+    /// defaults.
     pub default: Option<String>,
     /// Dialect-rendered type spelling to use in DDL instead of deriving from
     /// `data_type`. This is emission-only for named type references: a Postgres
