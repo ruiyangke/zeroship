@@ -760,6 +760,10 @@ fn render_default(d: &IrDefault) -> String {
             let v = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
             format!(".default({v})")
         }
+        IrDefault::Container { kind } => match kind {
+            crate::model::ir::EmptyContainerKind::Object => ".default({})".to_string(),
+            crate::model::ir::EmptyContainerKind::Array => ".default([])".to_string(),
+        },
     }
 }
 

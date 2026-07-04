@@ -64,6 +64,8 @@ export type {
   CheckDef,
   FnNamespace,
   ScalarValue,
+  EmptyContainerDefault,
+  DefaultValue,
   Row,
   Migration,
   // the fluent handle + selector sub-handles

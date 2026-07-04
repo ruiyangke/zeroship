@@ -43,6 +43,7 @@ const ENUM_DEFS = [
   "ScalarFn",
   "SynthFn",
   "SynthDefaultFn",
+  "EmptyContainerKind",
   "CastTarget",
   "PgArrayMembershipOp",
   "ExtractField",

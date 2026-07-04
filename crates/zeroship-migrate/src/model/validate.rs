@@ -94,6 +94,9 @@ pub const CODE_VECTOR_METRIC_MISPLACED: &str = "VECTOR_METRIC_MISPLACED";
 /// A column carries mutually-exclusive facets (`default` + `generated`,
 /// `identity` + `generated`, etc.).
 pub const CODE_COLUMN_FACET_CONFLICT: &str = "COLUMN_FACET_CONFLICT";
+/// A column/domain default is structurally valid but invalid for the declared
+/// column type (for example `{}` on `text[]`).
+pub const CODE_COLUMN_DEFAULT_TYPE: &str = "COLUMN_DEFAULT_TYPE";
 /// A sequence carries a semantically invalid option (`increment = 0`,
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
@@ -578,7 +581,7 @@ pub fn validate_op_scoped(
             let scope = TargetScope::structural_only(table);
             check_constraint(&constraint.kind, &scope)
         }
-        Op::CreateDomain { as_type, check, .. } => {
+        Op::CreateDomain { as_type, check, default, .. } => {
             validate_col_type_position(
                 as_type,
                 "createDomain.as",
@@ -587,6 +590,16 @@ pub fn validate_op_scoped(
                 op_index,
                 ts_location,
             )?;
+            if let Some(default) = default {
+                validate_default_for_type(
+                    "createDomain.default",
+                    as_type,
+                    default,
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
+            }
             if let Some(check) = check {
                 let cols = vec!["VALUE".to_string()];
                 let scope = TargetScope::new("domain", &cols);
@@ -2082,6 +2095,49 @@ fn is_safe_schema_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn validate_default_for_type(
+    position: &str,
+    ty: &crate::model::ir::ColType,
+    default: &crate::model::ir::IrDefault,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{ColType, EmptyContainerKind, IrDefault};
+
+    let IrDefault::Container { kind } = default else {
+        return Ok(());
+    };
+    let ok = matches!(
+        (kind, ty),
+        (EmptyContainerKind::Object, ColType::Json)
+            | (EmptyContainerKind::Array, ColType::Json | ColType::TextArray)
+    );
+    if ok {
+        return Ok(());
+    }
+
+    let expected = match kind {
+        EmptyContainerKind::Object => "json",
+        EmptyContainerKind::Array => "json or textArray",
+    };
+    Err(AuthoringError {
+        code: CODE_COLUMN_DEFAULT_TYPE.to_string(),
+        kind: None,
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "{position} declares an empty {kind:?} container default on type {ty:?}; \
+             empty object defaults require json, and empty array defaults require \
+             json or textArray"
+        ),
+        suggested_fix: Some(format!(
+            "use this default only on {expected} columns, or remove `.default({{}})` / `.default([])`"
+        )),
+    })
+}
+
 /// **Migration-first P2a (§4)** — validate one [`IrColumn`](crate::model::ir::IrColumn)'s
 /// declared-only facets (`id_prefix` / `vector_metric`) against their bounds.
 ///
@@ -2171,6 +2227,17 @@ fn validate_column_facets(
             ),
             "remove either `.identity(...)` or `.generated(...)` from the column".to_string(),
         ));
+    }
+
+    if let Some(default) = &col.default {
+        validate_default_for_type(
+            &format!("column {:?}.default", col.name),
+            &col.ty,
+            default,
+            target_dialect,
+            op_index,
+            ts_location,
+        )?;
     }
 
     if matches!(target_dialect, Dialect::Postgres)
@@ -4496,7 +4563,7 @@ mod tests {
     // carrying a malformed/reserved/over-long id_prefix or a misplaced metric would
     // have passed validate and deferred the blow-up to render / mint colliding ids.
 
-    use crate::model::ir::VectorMetric;
+    use crate::model::ir::{EmptyContainerKind, VectorMetric};
 
     /// Build a createTable Op with a single `id` column carrying `id_prefix`.
     fn create_with_id_prefix(prefix: &str) -> Op {
@@ -4520,6 +4587,31 @@ mod tests {
         partition_by: None,
 
         runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn create_with_default(ty: ColType, default: crate::model::ir::IrDefault) -> Op {
+        Op::CreateTable {
+            name: "docs".into(),
+            columns: vec![IrColumn {
+                name: "body".into(),
+                ty,
+                nullable: None,
+                default: Some(default),
+                unique: None,
+                id_prefix: None,
+                vector_metric: None,
+                mask: None,
+                generated: None,
+                identity: None,
+            }],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
             schema: None,
             existence_guard: None,
         }
@@ -4597,6 +4689,36 @@ mod tests {
         let err = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("a vector_metric on a non-vector column must be refused");
         assert_eq!(err.code, CODE_VECTOR_METRIC_MISPLACED, "got: {err}");
+    }
+
+    #[test]
+    fn container_default_object_on_text_array_is_rejected() {
+        let ir = ir_with(vec![create_with_default(
+            ColType::TextArray,
+            crate::model::ir::IrDefault::Container { kind: EmptyContainerKind::Object },
+        )]);
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("empty object defaults are valid only on json columns");
+        assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
+        assert!(
+            err.reason.contains("empty object defaults require json"),
+            "error should explain the allowed type: {err}"
+        );
+    }
+
+    #[test]
+    fn container_default_array_on_int_is_rejected() {
+        let ir = ir_with(vec![create_with_default(
+            ColType::Int,
+            crate::model::ir::IrDefault::Container { kind: EmptyContainerKind::Array },
+        )]);
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("empty array defaults are valid only on json/textArray columns");
+        assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
+        assert!(
+            err.reason.contains("empty array defaults require json or textArray"),
+            "error should explain the allowed types: {err}"
+        );
     }
 
     #[test]
