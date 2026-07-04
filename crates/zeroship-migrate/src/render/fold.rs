@@ -982,6 +982,9 @@ pub fn fold_ops(
                         render_container_default_for_data_type(*kind, &col.data_type)
                             .map_err(fold_named_type_error)?
                     }
+                    IrDefault::Nextval { .. } => {
+                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
+                    }
                 };
                 col.default = Some(rendered);
             }
@@ -1442,7 +1445,7 @@ fn apply_fold_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
     for source in columns {
-        let Some(IrDefault::Fn { .. } | IrDefault::Container { .. }) = source.default.as_ref() else {
+        let Some(IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. }) = source.default.as_ref() else {
             continue;
         };
         let col = snap
@@ -1473,7 +1476,7 @@ fn apply_fold_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
-    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. })) = default else {
+    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Nextval { .. })) = default else {
         return Ok(());
     };
     if col.name != column {

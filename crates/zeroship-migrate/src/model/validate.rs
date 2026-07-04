@@ -1098,6 +1098,10 @@ fn validate_op_support(
         matches!(default, Some(IrDefault::Fn { .. }))
     }
 
+    fn default_is_nextval(default: Option<&IrDefault>) -> bool {
+        matches!(default, Some(IrDefault::Nextval { .. }))
+    }
+
     fn non_btree_index_method(using: Option<IndexMethod>) -> bool {
         !matches!(using, None | Some(IndexMethod::Btree))
     }
@@ -1156,6 +1160,12 @@ fn validate_op_support(
             {
                 check(Feature::SynthDefault)?;
             }
+            if columns
+                .iter()
+                .any(|col| default_is_nextval(col.default.as_ref()))
+            {
+                check(Feature::SequenceDefault)?;
+            }
             for constraint in constraints {
                 match &constraint.kind {
                     IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
@@ -1204,12 +1214,19 @@ fn validate_op_support(
             if default_is_synth(default.as_ref()) {
                 check(Feature::SynthDefault)?;
             }
+            if default_is_nextval(default.as_ref()) {
+                check(Feature::SequenceDefault)?;
+            }
         }
         Op::SetColumnType { using: Some(_), .. } => check(Feature::AlterColumnUsing)?,
         Op::SetColumnDefault {
             value: IrDefault::Fn { .. },
             ..
         } => check(Feature::SynthDefault)?,
+        Op::SetColumnDefault {
+            value: IrDefault::Nextval { .. },
+            ..
+        } => check(Feature::SequenceDefault)?,
         Op::CreateIndex {
             columns,
             using,
@@ -2106,6 +2123,44 @@ fn validate_default_for_type(
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{ColType, EmptyContainerKind, IrDefault};
+
+    if let IrDefault::Nextval { .. } = default {
+        if !matches!(target_dialect, Dialect::Postgres) {
+            return Err(AuthoringError {
+                code: CODE_UNSUPPORTED.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: format!(
+                    "{position} declares a nextval sequence default, but standalone \
+                     sequences and nextval defaults are PostgreSQL-only"
+                ),
+                suggested_fix: Some(
+                    "target PostgreSQL, use an identity/auto-increment shape for this dialect, or remove `.default(nextval(...))`"
+                        .to_string(),
+                ),
+            });
+        }
+        if matches!(ty, ColType::Int | ColType::BigInt | ColType::SmallInt) {
+            return Ok(());
+        }
+        return Err(AuthoringError {
+            code: CODE_COLUMN_DEFAULT_TYPE.to_string(),
+            kind: None,
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason: format!(
+                "{position} declares a nextval sequence default on type {ty:?}; \
+                 nextval defaults require an integer column"
+            ),
+            suggested_fix: Some(
+                "use nextval only on int, bigInt, or smallInt columns, or remove `.default(nextval(...))`"
+                    .to_string(),
+            ),
+        });
+    }
 
     let IrDefault::Container { kind } = default else {
         return Ok(());

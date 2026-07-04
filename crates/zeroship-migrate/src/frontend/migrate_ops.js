@@ -68,6 +68,7 @@ const __nativeCryptoRandomUUID =
   typeof globalThis.crypto.randomUUID === "function"
     ? globalThis.crypto.randomUUID
     : undefined;
+const NEXTVAL_DEFAULT_MARKER = "__zeroshipMigrateNextvalDefault";
 
 function nativeFnSynthName(value) {
   if (value === __nativeDateNow) return "now";
@@ -592,6 +593,9 @@ function toIrDefault(value) {
   if (fn !== undefined) {
     return { fn: { fn } };
   }
+  if (isNextvalDefault(value)) {
+    return { nextval: compact({ name: value.name, schema: value.schema }) };
+  }
   rejectFunctionValue(value);
   if (value && typeof value === "object" && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
@@ -608,6 +612,27 @@ function toIrDefault(value) {
     throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
   }
   return { literal: { value: toIrScalar(value) } };
+}
+
+function isNextvalDefault(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    value[NEXTVAL_DEFAULT_MARKER] === true
+  );
+}
+
+export function nextval(name, opts = {}) {
+  requireString(name, "nextval(name)");
+  if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    throw structuredError("OP_INVALID", "nextval(name, opts): opts must be { schema?: string }");
+  }
+  if (opts.schema !== undefined) requireString(opts.schema, "nextval(name, { schema })");
+  return Object.freeze({
+    [NEXTVAL_DEFAULT_MARKER]: true,
+    name,
+    schema: opts.schema,
+  });
 }
 
 /** The immutable fluent column-type lexicon (§4). Canonical names only. */

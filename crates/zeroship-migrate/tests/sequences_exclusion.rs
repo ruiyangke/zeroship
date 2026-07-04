@@ -2,12 +2,16 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use zeroship_migrate::model::ir::ExistenceGuard;
-use zeroship_migrate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+use zeroship_migrate::model::profile::PolicyProfile;
+use zeroship_migrate::model::validate::{
+    validate_ir, validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED,
+};
 use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
     fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
     ExclusionMethod, ExclusionOperator, Expr, IndexElement, IrConstraint, IrConstraintKind,
-    IrScalar, LiveSchema, MigrationIr, Op, ScalarFn, SequenceOwnedBy, UnaryOp,
+    IrColumn, IrDefault, IrScalar, LiveSchema, MigrationIr, Op, ScalarFn, SequenceOwnedBy,
+    SequenceRef, UnaryOp,
     SafeI64, SafeU64,
 };
 use zeroship_schema::query::SqlDialect;
@@ -62,6 +66,27 @@ fn create_sequence_op() -> Op {
     }
 }
 
+fn nextval_col(name: &str, schema: Option<&str>) -> IrColumn {
+    IrColumn {
+        name: name.into(),
+        ty: ColType::BigInt,
+        nullable: Some(false),
+        default: Some(IrDefault::Nextval {
+            sequence: SequenceRef {
+                name: "invoice_seq".into(),
+                schema: schema.map(str::to_string),
+            },
+        }),
+        unique: None,
+        id_prefix: None,
+        case_sensitive: None,
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: None,
+    }
+}
+
 #[test]
 fn postgres_renders_create_alter_drop_sequence() {
     let create = lower(vec![create_sequence_op()], SqlDialect::Postgres, &BTreeSet::new());
@@ -108,6 +133,51 @@ fn postgres_renders_create_alter_drop_sequence() {
 }
 
 #[test]
+fn postgres_renders_nextval_default_with_and_without_schema() {
+    let with_schema = lower(
+        vec![Op::CreateTable {
+            name: "invoices".into(),
+            columns: vec![nextval_col("id", Some("app"))],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }],
+        SqlDialect::Postgres,
+        &BTreeSet::new(),
+    );
+    assert!(
+        with_schema[0].up.contains("DEFAULT nextval('app.invoice_seq'::regclass)"),
+        "schema-qualified nextval default must render pg_dump-style: {}",
+        with_schema[0].up
+    );
+
+    let without_schema = lower(
+        vec![Op::CreateTable {
+            name: "invoices".into(),
+            columns: vec![nextval_col("id", None)],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }],
+        SqlDialect::Postgres,
+        &BTreeSet::new(),
+    );
+    assert!(
+        without_schema[0].up.contains("DEFAULT nextval('invoice_seq'::regclass)"),
+        "unqualified nextval default must render pg_dump-style: {}",
+        without_schema[0].up
+    );
+}
+
+#[test]
 fn postgres_renders_valid_descending_sequence() {
     let create = lower(
         vec![Op::CreateSequence {
@@ -138,6 +208,53 @@ fn sqlite_and_mysql_fail_closed_on_sequences() {
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("sequence"));
+    }
+}
+
+#[test]
+fn nextval_default_rejects_non_integer_and_non_postgres() {
+    let text_nextval = Op::CreateTable {
+        name: "events".into(),
+        columns: vec![IrColumn {
+            ty: ColType::Text,
+            ..nextval_col("counter", Some("app"))
+        }],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: None,
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    };
+    // Validate under the platform profile (author-PK allowed → the createTable
+    // table-shape gate returns Ok), so validation reaches the column-default-type
+    // check — the realistic profile, since nextval defaults are used on the platform.
+    let err = validate_ir_scoped(
+        &ir(vec![text_nextval.clone()]),
+        Dialect::Postgres,
+        &[],
+        None,
+        &PolicyProfile::platform(),
+    )
+    .unwrap_err();
+    assert_eq!(err.code, zeroship_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE);
+    assert!(err.reason.contains("nextval defaults require an integer column"));
+
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        // Platform profile so the createTable table-shape gate does not pre-empt the
+        // dialect-level unsupported check (nextval defaults are PostgreSQL-only).
+        let err = validate_ir_scoped(
+            &ir(vec![text_nextval.clone()]),
+            dialect,
+            &[],
+            None,
+            &PolicyProfile::platform(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(UnsupportedKind::Op));
+        assert!(err.reason.contains("nextval"));
     }
 }
 

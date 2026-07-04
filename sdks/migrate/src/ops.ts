@@ -78,6 +78,8 @@ import type {
   Join,
   JoinKind,
   MaskOptions,
+  NextvalDefault,
+  NextvalOptions,
   OrderItem,
   PartitionBoundInput,
   PartitionBoundSentinel,
@@ -124,6 +126,7 @@ const nativeCryptoRandomUUID =
   typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function"
     ? globalThis.crypto.randomUUID
     : undefined;
+const NEXTVAL_DEFAULT_MARKER = "__zeroshipMigrateNextvalDefault";
 
 function nativeFnSynthName(value: unknown): "now" | "genRandomUuid" | undefined {
   if (value === nativeDateNow) return "now";
@@ -695,6 +698,9 @@ const NON_EMPTY_CONTAINER_DEFAULT_ERROR =
 function toIrDefault(value: DefaultValue): Node {
   const fn = nativeFnSynthName(value);
   if (fn !== undefined) return { fn: { fn } };
+  if (isNextvalDefault(value)) {
+    return { nextval: compact({ name: value.name, schema: value.schema }) };
+  }
   rejectFunctionValue(value);
   if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
@@ -711,6 +717,31 @@ function toIrDefault(value: DefaultValue): Node {
     throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
   }
   return { literal: { value: toIrScalar(value) } };
+}
+
+type NextvalDefaultMarker = NextvalDefault & {
+  readonly [NEXTVAL_DEFAULT_MARKER]: true;
+};
+
+function isNextvalDefault(value: unknown): value is NextvalDefaultMarker {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[NEXTVAL_DEFAULT_MARKER] === true
+  );
+}
+
+export function nextval(name: string, opts: NextvalOptions = {}): NextvalDefault {
+  requireString(name, "nextval(name)");
+  if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    throw structuredError("OP_INVALID", "nextval(name, opts): opts must be { schema?: string }");
+  }
+  if (opts.schema !== undefined) requireString(opts.schema, "nextval(name, { schema })");
+  return Object.freeze({
+    [NEXTVAL_DEFAULT_MARKER]: true,
+    name,
+    schema: opts.schema,
+  }) as unknown as NextvalDefault;
 }
 
 export const t: TypeLexicon = {

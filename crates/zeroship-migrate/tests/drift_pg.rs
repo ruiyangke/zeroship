@@ -13,9 +13,10 @@ use zeroship_migrate::{
     apply, check_checksum_drift, diff_snapshots, fold_ops, rollback, snapshot_schema, Approval,
     ColType, ColumnSnapshot, CommentTarget, ConstraintSnapshot, ExecutorConfig, Expr,
     IndexElement, IndexElementSnapshot, IndexSnapshot, IrAuthor, IrColumn, IrFlagsOverride,
-    LiveSchema, Migration, MigrationFlags, MigrationId, MigrationIr, Op, RollbackRequest,
-    RollbackTarget, SafeI64, SafeU64, ScalarFn, SchemaScope, SchemaSnapshot, SequenceOwnedBy,
-    SqlDialect, StructuralDrift, TableSnapshot, UnaryOp, CURRENT_IR_VERSION,
+    IrDefault, LiveSchema, Migration, MigrationFlags, MigrationId, MigrationIr, Op,
+    RollbackRequest, RollbackTarget, SafeI64, SafeU64, ScalarFn, SchemaScope, SchemaSnapshot,
+    SequenceOwnedBy, SequenceRef, SqlDialect, StructuralDrift, TableSnapshot, UnaryOp,
+    CURRENT_IR_VERSION,
     PolicyProfile, resolve_create_table_policy,
 };
 
@@ -528,6 +529,80 @@ async fn citext_column_round_trips_as_case_insensitive_text_without_drift() {
     assert!(
         drift.is_clean(),
         "live citext must recover as text + caseSensitive:false: {drift:?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn nextval_default_recovers_from_live_pg_and_diffs_clean() {
+    let conn = pg().await;
+    let tok = token();
+    let cfg = cfg_for(&tok);
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let sch = &cfg.project_schema;
+    conn.batch_execute(&format!(
+        "CREATE SEQUENCE \"{sch}\".\"audit_events_id_seq\"; \
+         CREATE TABLE \"{sch}\".\"audit_events\" (\
+             \"id\" bigint DEFAULT nextval('{sch}.audit_events_id_seq'::regclass)\
+         );"
+    ))
+    .await
+    .expect("seed nextval default");
+
+    let mut id = ir_col("id", ColType::BigInt, true);
+    id.default = Some(IrDefault::Nextval {
+        sequence: SequenceRef {
+            name: "audit_events_id_seq".into(),
+            schema: Some(sch.to_string()),
+        },
+    });
+    let ops = vec![
+        Op::CreateSequence {
+            name: "audit_events_id_seq".into(),
+            schema: None,
+            as_type: Some(ColType::BigInt),
+            increment: None,
+            start: None,
+            min_value: None,
+            max_value: None,
+            cache: None,
+            cycle: None,
+            owned_by: None,
+        },
+        Op::CreateTable {
+            name: "audit_events".into(),
+            columns: vec![id],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        },
+    ];
+
+    let expected = fold_ops(&ops, SqlDialect::Postgres, sch).expect("fold nextval expected");
+    let actual = snapshot_schema(&conn, sch).await.expect("snapshot nextval table");
+    let want_default = format!("nextval('{sch}.audit_events_id_seq'::regclass)");
+    let live_default = actual.tables["audit_events"]
+        .columns
+        .iter()
+        .find(|c| c.name == "id")
+        .and_then(|c| c.default.as_deref());
+    assert_eq!(
+        live_default,
+        Some(want_default.as_str()),
+        "live nextval default should recover into normalized pg_dump-style metadata"
+    );
+
+    let drift = diff_snapshots(&expected, &actual);
+    assert!(
+        drift.is_clean(),
+        "live nextval default must recover and diff cleanly: {drift:?}"
     );
 
     drop_schemas(&conn, &cfg).await;

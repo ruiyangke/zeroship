@@ -156,12 +156,20 @@ export interface IrMask {
   classification: Classification;
 }
 
-/** A column DEFAULT — a typed scalar literal OR a nullary synth scalar
- *  (`now`/`genRandomUuid`). Never raw SQL (property A). */
+/** A closed sequence reference for `nextval(...)` defaults. */
+export interface SequenceRef {
+  name: string;
+  schema?: string | null;
+}
+
+/** A column DEFAULT — a typed scalar literal, a nullary synth scalar
+ *  (`now`/`genRandomUuid`), an empty container default, or a PostgreSQL
+ *  sequence `nextval` reference. Never raw SQL (property A). */
 export type IrDefault =
   | { literal: { value: IrScalar } }
   | { fn: { fn: SynthDefaultFn } }
-  | { container: EmptyContainerKind };
+  | { container: EmptyContainerKind }
+  | { nextval: SequenceRef };
 
 /** The CLOSED expression AST node (§3.3.1), internally tagged on `node`. */
 export type Expr =

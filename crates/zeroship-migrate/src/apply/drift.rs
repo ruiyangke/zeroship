@@ -48,7 +48,7 @@ use crate::model::snapshot::{
 };
 use crate::model::ir::{
     IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec,
-    SafeI64, SafeU64, SequenceOwnedBy,
+    SafeI64, SafeU64, SequenceOwnedBy, SequenceRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -763,11 +763,13 @@ pub async fn snapshot_schema(
             "SELECT c.table_name, c.column_name, c.data_type, c.udt_name, c.is_nullable, \
                     c.character_maximum_length, \
                     format_type(a.atttypid, a.atttypmod) AS format_type, \
+                    pg_get_expr(ad.adbin, ad.adrelid) AS column_default, \
                     col_description(rel.oid, a.attnum) AS comment \
              FROM information_schema.columns c \
              JOIN pg_namespace n ON n.nspname = c.table_schema \
              JOIN pg_class rel ON rel.relname = c.table_name AND rel.relnamespace = n.oid \
              JOIN pg_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name \
+             LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
              WHERE c.table_schema = $1 AND a.attnum > 0 AND NOT a.attisdropped \
              ORDER BY c.table_name, c.column_name",
             &[&project_schema],
@@ -810,6 +812,7 @@ pub async fn snapshot_schema(
                 // `comment_sentinel` so they do not drift against user-authored
                 // catalog comments.
                 case_sensitive: if is_citext { Some(false) } else { None },
+                default: recover_nextval_default(r.try_get("column_default").ok().flatten()),
                 comment,
                 comment_sentinel,
                 ..Default::default()
@@ -1368,6 +1371,50 @@ fn format_sequence_owned_by(value: Option<&SequenceOwnedBy>) -> String {
     value.map_or_else(String::new, |owned| format!("{}.{}", owned.table, owned.column))
 }
 
+fn parse_single_quoted_sql_string(input: &str) -> Option<String> {
+    let mut chars = input.chars();
+    if chars.next()? != '\'' {
+        return None;
+    }
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            match chars.next() {
+                Some('\'') => out.push('\''),
+                None => return Some(out),
+                Some(_) => return None,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    None
+}
+
+fn parse_nextval_sequence_ref(expr: &str) -> Option<SequenceRef> {
+    let inner = expr.trim().strip_prefix("nextval(")?.strip_suffix(')')?.trim();
+    let literal = inner.strip_suffix("::regclass")?.trim();
+    let regclass = parse_single_quoted_sql_string(literal)?;
+    let (schema, name) = match regclass.split_once('.') {
+        Some((schema, name)) if !schema.is_empty() && !name.is_empty() => {
+            (Some(schema.to_string()), name.to_string())
+        }
+        None if !regclass.is_empty() => (None, regclass),
+        _ => return None,
+    };
+    Some(SequenceRef { name, schema })
+}
+
+fn recover_nextval_default(expr: Option<String>) -> Option<String> {
+    let sequence = parse_nextval_sequence_ref(expr.as_deref()?)?;
+    Some(crate::render::declarative::nextval_default_expr(&sequence))
+}
+
+fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
+    let sequence = parse_nextval_sequence_ref(expr?)?;
+    Some(crate::render::declarative::nextval_default_expr(&sequence))
+}
+
 fn diff_sequence_attrs(
     name: &str,
     expected: &SequenceSnapshot,
@@ -1630,6 +1677,16 @@ fn diff_attrs(
                 ec.comment.as_deref().unwrap_or(""),
                 ac.comment.as_deref().unwrap_or(""),
             );
+            let expected_nextval = comparable_nextval_default(ec.default.as_deref());
+            let actual_nextval = comparable_nextval_default(ac.default.as_deref());
+            if expected_nextval.is_some() || actual_nextval.is_some() {
+                push(
+                    &obj,
+                    "default",
+                    expected_nextval.as_deref().unwrap_or(""),
+                    actual_nextval.as_deref().unwrap_or(""),
+                );
+            }
         }
     }
 
