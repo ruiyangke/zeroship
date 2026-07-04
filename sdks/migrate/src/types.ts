@@ -200,6 +200,9 @@ export interface ColumnDef {
   /** Declare a SQL identity column. `{ always: true }` renders
    * `GENERATED ALWAYS AS IDENTITY`; otherwise `BY DEFAULT`. */
   identity(opts?: IdentityOptions): ColumnDef;
+  /** Portable auto-increment intent for integer columns. Sugar for
+   * `.identity({ always: false })`. */
+  autoIncrement(): ColumnDef;
 }
 
 /** The fluent `t.*` column-type lexicon (shared in shape with `@zeroship/db`).

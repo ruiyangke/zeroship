@@ -1056,6 +1056,12 @@ fn validate_op_support(
 
     fn op_kind(op: &Op) -> UnsupportedKind {
         match op {
+            Op::CreateTable { columns, .. } if columns.iter().any(|col| col.identity.is_some()) => {
+                UnsupportedKind::Identity
+            }
+            Op::AddColumn {
+                identity: Some(_), ..
+            } => UnsupportedKind::Identity,
             Op::SetColumnType { using: Some(_), .. } => UnsupportedKind::Expr,
             Op::SetColumnDefault {
                 value: IrDefault::Fn { .. },
@@ -2456,7 +2462,10 @@ fn validate_identity_placement(
     op_index: usize,
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
-    if col.identity.is_none() || !matches!(target_dialect, Dialect::Sqlite | Dialect::Mysql) {
+    let Some(identity) = col.identity else {
+        return Ok(());
+    };
+    if !matches!(target_dialect, Dialect::Sqlite | Dialect::Mysql) {
         return Ok(());
     }
     let err = |reason: String| AuthoringError {
@@ -2472,18 +2481,26 @@ fn validate_identity_placement(
                 .to_string(),
         ),
     };
+    if identity.always {
+        return Err(err(
+            "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support \
+             only identity({ always: false }) / autoIncrement() on the sole integer \
+             primary key"
+                .to_string(),
+        ));
+    }
     if is_add_column {
         return Err(err(
-            "identity: non-PK identity has no sound target-dialect render; SQLite \
-             AUTOINCREMENT and MySQL AUTO_INCREMENT are only sound on an inline \
-             integer primary key"
+            "autoIncrement identity: non-PK identity has no sound target-dialect \
+             render; SQLite AUTOINCREMENT and MySQL AUTO_INCREMENT are only sound \
+             on the sole integer primary key"
                 .to_string(),
         ));
     }
     let Some(pk_cols) = pk_cols else {
         return Err(err(format!(
-            "identity: column {:?} is not the declared primary key; non-PK identity \
-             has no sound target-dialect render",
+            "autoIncrement identity: column {:?} is not the declared primary key; \
+             non-PK identity has no sound target-dialect render",
             col.name
         )));
     };
@@ -2491,8 +2508,8 @@ fn validate_identity_placement(
         return Ok(());
     }
     Err(err(format!(
-        "identity: column {:?} is part of {:?}, but this dialect's identity is only \
-         sound for the sole integer primary key",
+        "autoIncrement identity: column {:?} is part of {:?}, but this dialect's \
+         identity is only sound for the sole integer primary key",
         col.name, pk_cols
     )))
 }

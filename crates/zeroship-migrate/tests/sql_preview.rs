@@ -87,13 +87,13 @@ const MYSQL_FEATURE_IR: &str = r#"{
   "name": "mysql_feature",
   "ops": [
     {"op":"createTable","name":"teams","columns":[
-      {"name":"id","type":"int","nullable":false,"identity":{"always":true}},
+      {"name":"id","type":"int","nullable":false,"identity":{"always":false}},
       {"name":"name","type":"text","nullable":false},
       {"name":"name_lc","type":"string",
         "generated":{"expr":{"node":"fnCall","fn":"lower","args":[{"node":"colRef","name":"name"}]},"stored":true}}
     ],"primaryKey":["id"]},
     {"op":"createTable","name":"members","columns":[
-      {"name":"id","type":"int","nullable":false,"identity":{"always":true}},
+      {"name":"id","type":"int","nullable":false,"identity":{"always":false}},
       {"name":"team_id","type":"int","nullable":false},
       {"name":"email","type":"text","nullable":false}
     ],"primaryKey":["id"],"constraints":[

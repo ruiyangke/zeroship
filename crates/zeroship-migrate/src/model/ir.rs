@@ -3224,6 +3224,12 @@ impl Op {
         let default_is_nextval = |default: &Option<IrDefault>| {
             matches!(default, Some(IrDefault::Nextval { .. }))
         };
+        let identity_always_pg_only =
+            "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support only \
+             identity({ always: false }) / autoIncrement() on the sole integer primary key";
+        let by_default_identity_requires_single_pk =
+            "identity({ always: false }) / autoIncrement() must be the sole primary-key \
+             column on SQLite/MySQL";
         let index_uses_pg_only_feature = |include: &[String],
                                           with: &Option<IndexStorageParams>,
                                           only: Option<bool>| {
@@ -3235,6 +3241,8 @@ impl Op {
         match self {
             Op::CreateTable {
                 columns,
+                primary_key,
+                constraints,
                 partition_by,
                 indexes,
                 ..
@@ -3246,6 +3254,19 @@ impl Op {
                 let has_nextval_default = columns
                     .iter()
                     .any(|column| default_is_nextval(&column.default));
+                let has_identity_always = columns
+                    .iter()
+                    .any(|column| matches!(column.identity, Some(identity) if identity.always));
+                let pk_cols = primary_key.as_deref().or_else(|| {
+                    constraints.iter().find_map(|constraint| match &constraint.kind {
+                        IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
+                        _ => None,
+                    })
+                });
+                let has_nonportable_by_default_identity = columns.iter().any(|column| {
+                    matches!(column.identity, Some(identity) if !identity.always)
+                        && !matches!(pk_cols, Some(cols) if cols.len() == 1 && cols[0] == column.name)
+                });
                 let dialects = if partition_by.is_some() {
                     pg_only("partitioned tables are PostgreSQL-only")
                 } else if has_pg_only_index_feature {
@@ -3253,6 +3274,14 @@ impl Op {
                 } else if has_nextval_default {
                     pg_only(
                         "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+                    )
+                } else if has_identity_always {
+                    pg_only(identity_always_pg_only)
+                } else if has_nonportable_by_default_identity {
+                    DialectSupport::new(
+                        supported(RenderMode::Offline),
+                        unsupported(CODE_UNSUPPORTED, by_default_identity_requires_single_pk),
+                        unsupported(CODE_UNSUPPORTED, by_default_identity_requires_single_pk),
                     )
                 } else {
                     all_offline
@@ -3268,8 +3297,13 @@ impl Op {
             Op::SetTableOptions { .. } => Support::core(all_offline, &[]),
             Op::DropTable { .. } => Support::core(all_offline, &[]),
             Op::RenameTable { .. } => Support::core(all_offline, &[]),
-            Op::AddColumn { default, .. } => {
-                let dialects = if default_is_nextval(default) {
+            Op::AddColumn { default, identity, .. } => {
+                let dialects = if identity.is_some() {
+                    pg_only(
+                        "addColumn identity is PostgreSQL-only; SQLite/MySQL auto-increment \
+                         identity requires a createTable sole primary key",
+                    )
+                } else if default_is_nextval(default) {
                     pg_only(
                         "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
                     )

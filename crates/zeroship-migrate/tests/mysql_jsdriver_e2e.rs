@@ -582,7 +582,7 @@ fn fk_roundtrip_ir() -> MigrationIr {
                 "name": "accounts",
                 "existenceGuard": "ifNotExists",
                 "columns": [
-                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": false } },
                     { "name": "name", "type": "text", "nullable": false }
                 ],
                 "primaryKey": ["id"]
@@ -592,7 +592,7 @@ fn fk_roundtrip_ir() -> MigrationIr {
                 "name": "orders",
                 "existenceGuard": "ifNotExists",
                 "columns": [
-                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": false } },
                     { "name": "account_id", "type": "int", "nullable": true },
                     { "name": "code", "type": "text", "nullable": false }
                 ],
@@ -644,7 +644,7 @@ fn fk_default_action_ir(on_delete: Option<&str>, on_update: Option<&str>) -> Mig
                 "name": "accounts",
                 "existenceGuard": "ifNotExists",
                 "columns": [
-                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": false } },
                     { "name": "name", "type": "text", "nullable": false }
                 ],
                 "primaryKey": ["id"]
@@ -654,7 +654,7 @@ fn fk_default_action_ir(on_delete: Option<&str>, on_update: Option<&str>) -> Mig
                 "name": "orders",
                 "existenceGuard": "ifNotExists",
                 "columns": [
-                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": true } },
+                    { "name": "id", "type": "int", "nullable": false, "identity": { "always": false } },
                     { "name": "account_id", "type": "int", "nullable": true },
                     { "name": "code", "type": "text", "nullable": false }
                 ],

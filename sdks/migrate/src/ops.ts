@@ -563,6 +563,10 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ identity: { always: opts?.always === true } });
   }
 
+  autoIncrement(): ColumnDefImpl {
+    return this.with({ identity: { always: false } });
+  }
+
   __toIrColumn(name: string): Node {
     return compact({
       name,

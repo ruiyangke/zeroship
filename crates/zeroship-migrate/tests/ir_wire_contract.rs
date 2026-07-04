@@ -160,6 +160,49 @@ fn ir_column_facet_fields_are_camel_case() {
 }
 
 #[test]
+fn identity_by_default_round_trips_and_absent_identity_omits_key() {
+    use zeroship_migrate::model::ir::{ColType, IdentityCol, IrColumn};
+
+    let with_identity = IrColumn {
+        name: "id".into(),
+        ty: ColType::BigInt,
+        nullable: None,
+        default: None,
+        unique: None,
+        id_prefix: None,
+        case_sensitive: None,
+        vector_metric: None,
+        mask: None,
+        generated: None,
+        identity: Some(IdentityCol { always: false }),
+    };
+    let json = serde_json::to_string(&with_identity).expect("identity column serializes");
+    assert!(
+        json.contains(r#""identity":{"always":false}"#),
+        "identity(always:false) must serialize as the existing identity facet: {json}"
+    );
+    let back: IrColumn = serde_json::from_str(&json).expect("identity column round-trips");
+    assert_eq!(back.identity, Some(IdentityCol { always: false }));
+
+    let without_identity = IrColumn {
+        identity: None,
+        ..with_identity
+    };
+    let plain = serde_json::to_string(&without_identity).expect("plain column serializes");
+    assert_eq!(
+        plain,
+        r#"{"name":"id","type":"bigInt"}"#,
+        "a column without identity must keep the byte-identical omitted-key image"
+    );
+    let plain_back: IrColumn = serde_json::from_str(&plain).expect("plain column round-trips");
+    assert_eq!(
+        serde_json::to_string(&plain_back).expect("plain column reserializes"),
+        plain,
+        "plain-column round-trip must preserve the omitted identity key"
+    );
+}
+
+#[test]
 fn create_table_primary_key_round_trips_and_schema_carries_field() {
     use zeroship_migrate::model::ir::{ColType, IrColumn};
 
