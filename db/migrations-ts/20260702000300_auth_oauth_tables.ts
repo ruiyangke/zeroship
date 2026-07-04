@@ -102,48 +102,42 @@ export function up() {
   });
   table("email_suppressions", { schema: "zeroship" }).create({
     columns: {
-      email: t.text().notNull(),
+      email: t.text({ caseSensitive: false }).notNull(),
       reason: t.text().notNull(),
       suppressed_at: t.timestamp().notNull().default({ fn: "now" }),
       provider_msg: t.text(),
     },
     primaryKey: ["email"],
   });
-  // TODO(dsl-v2): add structural column type support for public.citext
-  raw({ sql: "ALTER TABLE ONLY zeroship.email_suppressions ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column email_suppressions.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
   table("email_verifications", { schema: "zeroship" }).create({
     columns: {
       token_hash: t.bytes().notNull(),
       user_id: t.uuid().notNull(),
-      email: t.text().notNull(),
+      email: t.text({ caseSensitive: false }).notNull(),
       issued_at: t.timestamp().notNull().default({ fn: "now" }),
       expires_at: t.timestamp().notNull(),
       consumed_at: t.timestamp(),
     },
     primaryKey: ["token_hash"],
   });
-  // TODO(dsl-v2): add structural column type support for public.citext
-  raw({ sql: "ALTER TABLE ONLY zeroship.email_verifications ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column email_verifications.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
   table("federated_identities", { schema: "zeroship" }).create({
     columns: {
       id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
       user_id: t.uuid().notNull(),
       provider: t.text().notNull(),
       subject: t.text().notNull(),
-      email_at_link: t.text(),
+      email_at_link: t.text({ caseSensitive: false }),
       raw_profile: t.json(),
       linked_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for public.citext
-  raw({ sql: "ALTER TABLE ONLY zeroship.federated_identities ALTER COLUMN email_at_link TYPE public.citext USING email_at_link::public.citext", reason: "column federated_identities.email_at_link uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
   table("gateway_sessions", { schema: "zeroship" }).create({
     columns: {
       id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
       user_id: t.uuid().notNull(),
       app_id: t.uuid().notNull(),
-      email: t.text(),
+      email: t.text({ caseSensitive: false }),
       name: t.text(),
       avatar_url: t.text(),
       email_verified: t.boolean().notNull().default(false),
@@ -158,8 +152,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for public.citext
-  raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column gateway_sessions.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
   table("identity_links", { schema: "zeroship" }).create({
     columns: {
       principal_id: t.uuid().notNull(),
@@ -197,7 +189,7 @@ export function up() {
     columns: {
       csrf_nonce: t.text().notNull(),
       code: t.text().notNull(),
-      email: t.text().notNull(),
+      email: t.text({ caseSensitive: false }).notNull(),
       login_challenge: t.text().notNull(),
       attempts: t.smallInt().notNull().default(0),
       expires_at: t.timestamp().notNull(),
@@ -206,12 +198,10 @@ export function up() {
     },
     primaryKey: ["csrf_nonce"],
   });
-  // TODO(dsl-v2): add structural column type support for public.citext
-  raw({ sql: "ALTER TABLE ONLY zeroship.magic_completions ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column magic_completions.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
   table("magic_links", { schema: "zeroship" }).create({
     columns: {
       token_hash: t.bytes().notNull(),
-      email: t.text().notNull(),
+      email: t.text({ caseSensitive: false }).notNull(),
       csrf_nonce: t.text().notNull(),
       purpose: t.text().notNull(),
       request_ip: t.inet(),
@@ -224,8 +214,6 @@ export function up() {
     },
     primaryKey: ["token_hash"],
   });
-  // TODO(dsl-v2): add structural column type support for public.citext
-  raw({ sql: "ALTER TABLE ONLY zeroship.magic_links ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column magic_links.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
   table("oauth_authorization_codes", { schema: "zeroship" }).create({
     columns: {
       code_hash: t.bytes().notNull(),
@@ -375,7 +363,7 @@ export function up() {
   table("users", { schema: "zeroship" }).create({
     columns: {
       id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      email: t.text().notNull(),
+      email: t.text({ caseSensitive: false }).notNull(),
       email_verified_at: t.timestamp(),
       name: t.text().notNull(),
       avatar_url: t.text(),
@@ -393,8 +381,6 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): add structural column type support for public.citext
-  raw({ sql: "ALTER TABLE ONLY zeroship.users ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column users.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
   // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
   raw({ sql: "ALTER TABLE zeroship.totp_backup_codes ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (\n    SEQUENCE NAME zeroship.totp_backup_codes_id_seq\n    START WITH 1\n    INCREMENT BY 1\n    NO MINVALUE\n    NO MAXVALUE\n    CACHE 1\n)", reason: "this platform DDL object has no exact structural operation in the current v2 surface" });
   // TODO(dsl-v2): add a structural operation for this exact platform DDL fragment
