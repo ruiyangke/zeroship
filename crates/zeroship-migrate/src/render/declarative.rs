@@ -46,7 +46,8 @@ use crate::model::snapshot::{
 };
 use crate::IndexSortOrder;
 use crate::model::ir::{
-    IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec, TableRuntimeOptions,
+    ColType, EmptyContainerKind, IndexStorageParams, PartitionBoundValue, PartitionBounds,
+    PartitionSpec, TableRuntimeOptions,
 };
 use crate::render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
@@ -1346,6 +1347,34 @@ fn field_default_expr(f: &FieldDescriptor, synth_json_defaults: bool) -> Option<
     match f.ty.as_str() {
         "json" | "object" => Some("'{}'::jsonb".into()),
         "array" => Some("'[]'::jsonb".into()),
+        _ => None,
+    }
+}
+
+/// Explicit empty-container defaults from the migration IR. These spellings must
+/// stay byte-identical to [`field_default_expr`]'s JSON default output above; this
+/// helper is only for explicit `.default({})` / `.default([])` and does not affect
+/// the confined `synth_json_defaults` branch.
+pub(crate) fn empty_container_default_expr_for_col_type(
+    kind: EmptyContainerKind,
+    ty: &ColType,
+) -> Option<&'static str> {
+    match (kind, ty) {
+        (EmptyContainerKind::Object, ColType::Json) => Some("'{}'::jsonb"),
+        (EmptyContainerKind::Array, ColType::Json) => Some("'[]'::jsonb"),
+        (EmptyContainerKind::Array, ColType::TextArray) => Some("'{}'::text[]"),
+        _ => None,
+    }
+}
+
+pub(crate) fn empty_container_default_expr_for_data_type(
+    kind: EmptyContainerKind,
+    data_type: &str,
+) -> Option<&'static str> {
+    match (kind, data_type) {
+        (EmptyContainerKind::Object, "jsonb" | "json") => Some("'{}'::jsonb"),
+        (EmptyContainerKind::Array, "jsonb" | "json") => Some("'[]'::jsonb"),
+        (EmptyContainerKind::Array, "text[]") => Some("'{}'::text[]"),
         _ => None,
     }
 }

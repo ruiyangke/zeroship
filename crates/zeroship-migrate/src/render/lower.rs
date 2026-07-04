@@ -39,12 +39,12 @@ use crate::render::declarative::{
 };
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::model::ir::{
-    ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod, ExclusionOperator,
-    ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn, IrConstraint,
-    IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr, Op, OrderDir,
-    OrderItem, PartitionBounds, RaiseLevel, RefAction, SafeI64, SelectAst, SelectItem,
-    SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerStmt,
-    VectorMetric, ViewQuery,
+    ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
+    ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn,
+    IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr,
+    Op, OrderDir, OrderItem, PartitionBounds, RaiseLevel, RefAction, SafeI64, SelectAst,
+    SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent,
+    TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
@@ -885,7 +885,43 @@ pub(crate) fn render_ir_default(default: &IrDefault, dialect: SqlDialect) -> Res
                 crate::render::renderer::renderer(dialect).synth_uuid()
             }
         }),
+        IrDefault::Container { .. } => Err(IrLowerError::UnsupportedOp(
+            "container defaults require a column type at render",
+        )),
     }
+}
+
+pub(crate) fn render_ir_default_for_type(
+    default: &IrDefault,
+    ty: &ColType,
+    dialect: SqlDialect,
+) -> Result<String, IrLowerError> {
+    match default {
+        IrDefault::Container { kind } => render_container_default_for_col_type(*kind, ty),
+        IrDefault::Literal { .. } | IrDefault::Fn { .. } => render_ir_default(default, dialect),
+    }
+}
+
+pub(crate) fn render_container_default_for_col_type(
+    kind: EmptyContainerKind,
+    ty: &ColType,
+) -> Result<String, IrLowerError> {
+    crate::render::declarative::empty_container_default_expr_for_col_type(kind, ty)
+        .map(str::to_string)
+        .ok_or(IrLowerError::UnsupportedOp(
+            "container default is not valid for this column type",
+        ))
+}
+
+pub(crate) fn render_container_default_for_data_type(
+    kind: EmptyContainerKind,
+    data_type: &str,
+) -> Result<String, IrLowerError> {
+    crate::render::declarative::empty_container_default_expr_for_data_type(kind, data_type)
+        .map(str::to_string)
+        .ok_or(IrLowerError::UnsupportedOp(
+            "container default is not valid for this live column type",
+        ))
 }
 
 pub(crate) fn render_domain_check(
@@ -1587,7 +1623,11 @@ impl IrAuthor {
                     );
                     if let Some(default) = default {
                         up.push_str(" DEFAULT ");
-                        up.push_str(&render_ir_default(default, self.dialect)?);
+                        up.push_str(&render_ir_default_for_type(
+                            default,
+                            as_type,
+                            self.dialect,
+                        )?);
                     }
                     if not_null.unwrap_or(false) {
                         up.push_str(" NOT NULL");
@@ -1661,7 +1701,7 @@ impl IrAuthor {
                     push_primary_key_snapshot(name, &mut snap, pk);
                 }
                 apply_author_type_overrides_to_snapshot(name, columns, &mut snap, self.dialect)?;
-                apply_synth_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;
+                apply_structured_defaults_to_snapshot(name, columns, &mut snap, self.dialect)?;
                 self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
                 // **#174 createTable parity** — keep the CREATE path on the same
                 // masked-sibling source as ADD COLUMN. `build_table_snapshot` normally
@@ -2081,7 +2121,22 @@ impl IrAuthor {
                         "validated setColumnDefault synth default reached lower",
                     ));
                 }
-                let default_sql = render_ir_default(value, self.dialect)?;
+                let default_sql = match value {
+                    IrDefault::Container { kind } => {
+                        let data_type = live_schema
+                            .table_snapshots
+                            .get(table)
+                            .and_then(|snap| snap.columns.iter().find(|c| c.name == *column))
+                            .map(|col| col.data_type.as_str())
+                            .ok_or(IrLowerError::UnsupportedOp(
+                                "setColumnDefault container defaults need live column type",
+                            ))?;
+                        render_container_default_for_data_type(*kind, data_type)?
+                    }
+                    IrDefault::Literal { .. } | IrDefault::Fn { .. } => {
+                        render_ir_default(value, self.dialect)?
+                    }
+                };
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::ColumnPresence {
                         schema: eff_schema.clone(),
@@ -3073,7 +3128,7 @@ impl IrAuthor {
             .cloned()
             .ok_or(IrLowerError::UnsupportedOp("addColumn (column folded away)"))?;
         apply_author_type_override_to_column(table, column, ty, &mut main, self.dialect)?;
-        apply_synth_default_to_column(table, column, default, &mut main, self.dialect)?;
+        apply_structured_default_to_column(table, column, ty, default, &mut main, self.dialect)?;
         let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
         Ok((main, sibling))
     }
@@ -3168,7 +3223,11 @@ impl IrAuthor {
                     }
                     if col.default.is_none() {
                         if let Some(default) = &def.default {
-                            col.default = Some(render_ir_default(default, self.dialect)?);
+                            col.default = Some(render_ir_default_for_type(
+                                default,
+                                &def.as_type,
+                                self.dialect,
+                            )?);
                         }
                     }
                     if let Some(check) = &def.check {
@@ -4780,45 +4839,53 @@ fn author_data_type_override(ty: &ColType, dialect: SqlDialect) -> Option<&'stat
     }
 }
 
-fn apply_synth_defaults_to_snapshot(
+fn apply_structured_defaults_to_snapshot(
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        let Some(IrDefault::Fn { .. }) = source.default.as_ref() else {
+        let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. })) =
+            source.default.as_ref()
+        else {
             continue;
         };
         let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
-            return Err(IrLowerError::UnsupportedOp("createTable synth default column folded away"));
+            return Err(IrLowerError::UnsupportedOp(
+                "createTable structured default column folded away",
+            ));
         };
-        apply_synth_default_to_column(table, &source.name, source.default.as_ref(), col, dialect)?;
+        apply_structured_default_to_column(table, &source.name, &source.ty, Some(default), col, dialect)?;
     }
     Ok(())
 }
 
-fn apply_synth_default_to_column(
+fn apply_structured_default_to_column(
     _table: &str,
     column: &str,
+    ty: &ColType,
     default: Option<&IrDefault>,
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(default @ IrDefault::Fn { .. }) = default else {
+    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. })) = default else {
         return Ok(());
     };
     if col.name != column {
-        return Err(IrLowerError::UnsupportedOp("synth default column folded away"));
+        return Err(IrLowerError::UnsupportedOp(
+            "structured default column folded away",
+        ));
     }
-    col.default = Some(render_ir_default(default, dialect)?);
+    col.default = Some(render_ir_default_for_type(default, ty, dialect)?);
     Ok(())
 }
 
 /// Map an [`IrDefault`] to the descriptor's `default` JSON value. A literal maps
-/// to its scalar. A synth `now`/`genRandomUuid` maps to `None` here because the
-/// descriptor bridge cannot carry function defaults; CreateTable/AddColumn overlay
-/// the rendered synth default onto the returned snapshot before emitting DDL.
+/// to its scalar. Synth and container defaults map to `None` here because the
+/// descriptor bridge cannot carry type-aware structured defaults; CreateTable /
+/// AddColumn overlay the rendered default onto the returned snapshot before
+/// emitting DDL.
 fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
     use crate::model::ir::IrScalar;
     use serde_json::Value;
@@ -4838,7 +4905,7 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
                 Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
         }),
-        IrDefault::Fn { .. } => None,
+        IrDefault::Fn { .. } | IrDefault::Container { .. } => None,
     }
 }
 
@@ -6356,6 +6423,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn container_defaults_on_user_columns_render_on_pg() {
+        use crate::model::ir::EmptyContainerKind;
+        use crate::model::validate::Dialect;
+
+        let ir = MigrationIr {
+            ir_version: 1,
+            name: "m".into(),
+            owner_app: "app_a".into(),
+            ops: vec![Op::CreateTable {
+                name: "events".into(),
+                columns: vec![
+                    TIrColumn {
+                        name: "settings".into(),
+                        ty: ColType::Json,
+                        nullable: None,
+                        default: Some(IrDefault::Container { kind: EmptyContainerKind::Object }),
+                        unique: None,
+                        id_prefix: None,
+                        vector_metric: None,
+                        mask: None,
+                        generated: None,
+                        identity: None,
+                    },
+                    TIrColumn {
+                        name: "items".into(),
+                        ty: ColType::Json,
+                        nullable: None,
+                        default: Some(IrDefault::Container { kind: EmptyContainerKind::Array }),
+                        unique: None,
+                        id_prefix: None,
+                        vector_metric: None,
+                        mask: None,
+                        generated: None,
+                        identity: None,
+                    },
+                    TIrColumn {
+                        name: "scopes".into(),
+                        ty: ColType::TextArray,
+                        nullable: None,
+                        default: Some(IrDefault::Container { kind: EmptyContainerKind::Array }),
+                        unique: None,
+                        id_prefix: None,
+                        vector_metric: None,
+                        mask: None,
+                        generated: None,
+                        identity: None,
+                    },
+                ],
+                primary_key: None,
+                constraints: vec![],
+                indexes: vec![],
+                partition_by: None,
+                runtime_options: None,
+                schema: None,
+                existence_guard: None,
+            }],
+            flags: IrFlagsOverride::default(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            checksum: None,
+        };
+        validate_ir_platform(&ir, Dialect::Postgres)
+            .expect("container defaults validate on matching column types");
+        let migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&ir, &LiveSchema::default())
+            .expect("container defaults lower");
+        let sql = &migrations[0].up;
+        assert!(
+            sql.contains("DEFAULT '{}'::jsonb"),
+            "json object container default must render as '{{}}'::jsonb:\n{sql}"
+        );
+        assert!(
+            sql.contains("DEFAULT '[]'::jsonb"),
+            "json array container default must render as '[]'::jsonb:\n{sql}"
+        );
+        assert!(
+            sql.contains("DEFAULT '{}'::text[]"),
+            "text[] array container default must render as '{{}}'::text[]:\n{sql}"
+        );
     }
 
     // The closed author-supplied SYNTH defaults (`now()`/`genRandomUuid()`) render

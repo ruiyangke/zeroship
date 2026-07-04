@@ -548,13 +548,24 @@ impl From<SynthDefaultFn> for SynthFn {
     }
 }
 
+/// Empty container defaults admitted as column DEFAULTs. This is intentionally
+/// EMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum EmptyContainerKind {
+    /// `{}`.
+    Object,
+    /// `[]`.
+    Array,
+}
+
 /// A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —
 /// either a typed scalar literal or an engine-synthesized apply-time scalar
-/// (`now`/`genRandomUuid`). NEVER a raw SQL string (property A); the per-dialect
-/// default clause is rendered by the shared snapshot-builder kernel from this
-/// structured value (§6.5).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// (`now`/`genRandomUuid`) or an EMPTY container default for JSON/text-array
+/// columns. NEVER a raw SQL string (property A); the per-dialect default clause
+/// is rendered by the shared snapshot-builder kernel from this structured value
+/// (§6.5).
+#[derive(Debug, Clone, PartialEq)]
 pub enum IrDefault {
     /// A typed scalar literal default (constrained numeric domain — §2.5).
     Literal {
@@ -569,6 +580,139 @@ pub enum IrDefault {
         /// The synthesized function (`now` or `genRandomUuid`).
         r#fn: SynthDefaultFn,
     },
+    /// An empty-container default. Non-empty object/array defaults are deliberately
+    /// unrepresentable until the IR grows a value-carrying container default.
+    Container {
+        /// The empty container kind (`object` or `array`).
+        kind: EmptyContainerKind,
+    },
+}
+
+impl Serialize for IrDefault {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self {
+            IrDefault::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
+            IrDefault::Fn { r#fn } => map.serialize_entry("fn", &serde_json::json!({ "fn": r#fn }))?,
+            IrDefault::Container { kind } => map.serialize_entry("container", kind)?,
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for IrDefault {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| D::Error::custom("IrDefault must be a single-key object"))?;
+        if obj.len() != 1 {
+            return Err(D::Error::custom("IrDefault must carry exactly one key"));
+        }
+        if let Some(v) = obj.get("literal") {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct LiteralWire {
+                value: IrScalar,
+            }
+            let wire: LiteralWire = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            return Ok(IrDefault::Literal { value: wire.value });
+        }
+        if let Some(v) = obj.get("fn") {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct FnWire {
+                r#fn: SynthDefaultFn,
+            }
+            let wire: FnWire = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            return Ok(IrDefault::Fn { r#fn: wire.r#fn });
+        }
+        if let Some(v) = obj.get("container") {
+            let kind: EmptyContainerKind =
+                serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            return Ok(IrDefault::Container { kind });
+        }
+        Err(D::Error::custom(
+            "IrDefault key must be one of \"literal\", \"fn\", or \"container\"",
+        ))
+    }
+}
+
+impl JsonSchema for IrDefault {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "IrDefault".into()
+    }
+
+    fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let ir_scalar = serde_json::to_value(g.subschema_for::<IrScalar>())
+            .expect("IrScalar schema ref serializes");
+        let synth_default_fn = serde_json::to_value(g.subschema_for::<SynthDefaultFn>())
+            .expect("SynthDefaultFn schema ref serializes");
+        let empty_container_kind = serde_json::to_value(g.subschema_for::<EmptyContainerKind>())
+            .expect("EmptyContainerKind schema ref serializes");
+        schemars::json_schema!({
+            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal or an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`) or an EMPTY container default for JSON/text-array\ncolumns. NEVER a raw SQL string (property A); the per-dialect default clause\nis rendered by the shared snapshot-builder kernel from this structured value\n(§6.5).",
+            "oneOf": [
+                {
+                    "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
+                    "type": "object",
+                    "properties": {
+                        "literal": {
+                            "type": "object",
+                            "properties": {
+                                "value": {
+                                    "description": "The literal value.",
+                                    "$ref": ir_scalar["$ref"].clone()
+                                }
+                            },
+                            "additionalProperties": false,
+                            "required": ["value"]
+                        }
+                    },
+                    "required": ["literal"],
+                    "additionalProperties": false
+                },
+                {
+                    "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Constrained at the TYPE level to\nthe two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is\nrejected at deserialize, not at render.",
+                    "type": "object",
+                    "properties": {
+                        "fn": {
+                            "type": "object",
+                            "properties": {
+                                "fn": {
+                                    "description": "The synthesized function (`now` or `genRandomUuid`).",
+                                    "$ref": synth_default_fn["$ref"].clone()
+                                }
+                            },
+                            "additionalProperties": false,
+                            "required": ["fn"]
+                        }
+                    },
+                    "required": ["fn"],
+                    "additionalProperties": false
+                },
+                {
+                    "description": "An empty-container default (`{}` or `[]`). Non-empty containers are not representable.",
+                    "type": "object",
+                    "properties": {
+                        "container": {
+                            "$ref": empty_container_kind["$ref"].clone()
+                        }
+                    },
+                    "required": ["container"],
+                    "additionalProperties": false
+                }
+            ]
+        })
+    }
 }
 
 /// The CLOSED pgvector distance-metric lexicon (P2a §4). A `t.vector(n, { metric })`
@@ -3018,6 +3162,7 @@ impl Op {
         use crate::model::validate::CODE_UNSUPPORTED;
 
         let all_offline = DialectSupport::all_supported(RenderMode::Offline);
+        let all_live_resolved = DialectSupport::all_supported(RenderMode::LiveResolved);
         let all_unsupported = |reason: &'static str| {
             DialectSupport::unsupported_all(CODE_UNSUPPORTED, reason)
         };
@@ -3161,6 +3306,8 @@ impl Op {
                     all_unsupported(
                         "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
                     )
+                } else if matches!(value, IrDefault::Container { .. }) {
+                    all_live_resolved
                 } else {
                     DialectSupport::new(
                         supported(RenderMode::Offline),
@@ -4846,5 +4993,44 @@ mod tests {
             // …and round-trips byte-identically (the wire shape is unchanged).
             assert_eq!(serde_json::to_string(&d).unwrap(), wire);
         }
+    }
+
+    #[test]
+    fn ir_default_container_round_trips_compact_wire() {
+        for (wire, kind) in [
+            (r#"{"container":"object"}"#, EmptyContainerKind::Object),
+            (r#"{"container":"array"}"#, EmptyContainerKind::Array),
+        ] {
+            let d: IrDefault = serde_json::from_str(wire).unwrap();
+            assert_eq!(d, IrDefault::Container { kind });
+            assert_eq!(
+                serde_json::to_string(&d).unwrap(),
+                wire,
+                "container default wire shape must stay a tagged single-key object"
+            );
+        }
+    }
+
+    #[test]
+    fn column_without_container_default_omits_default_key() {
+        let col = IrColumn {
+            name: "body".into(),
+            ty: ColType::Text,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        };
+        let json = serde_json::to_string(&col).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"body","type":"text"}"#,
+            "a column without the new default must remain byte-identical"
+        );
+        assert!(!json.contains("container"), "absent container defaults add no key");
     }
 }

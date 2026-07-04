@@ -522,6 +522,15 @@ function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
+function isExplicitScalarCarrier(value) {
+  const keys = Object.keys(value);
+  return (
+    keys.length === 1 &&
+    ((keys[0] === "decimal" && typeof value.decimal === "string") ||
+      (keys[0] === "bytes" && typeof value.bytes === "string"))
+  );
+}
+
 function rejectNestedFunctionValues(value) {
   rejectFunctionValue(value);
   if (Array.isArray(value)) {
@@ -555,8 +564,12 @@ function toIrValue(value) {
   return toIrScalar(value);
 }
 
+const NON_EMPTY_CONTAINER_DEFAULT_ERROR =
+  "non-empty container defaults are not supported yet; only {} and [] are";
+
 /** Coerce a `.default(value)` arg into the closed `IrDefault` carrier:
  *   - `{ fn: "now" | "genRandomUuid" }` → a nullary synth default;
+ *   - `{}` / `[]` → an EMPTY container default;
  *   - any other typed scalar → a `{ literal: { value } }` literal default. */
 function toIrDefault(value) {
   const fn = nativeFnSynthName(value);
@@ -566,6 +579,17 @@ function toIrDefault(value) {
   rejectFunctionValue(value);
   if (value && typeof value === "object" && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return { container: "array" };
+    rejectNestedFunctionValues(value);
+    throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
+  }
+  if (isPlainObject(value)) {
+    if (Object.keys(value).length === 0) return { container: "object" };
+    if (isExplicitScalarCarrier(value)) return { literal: { value: toIrScalar(value) } };
+    rejectNestedFunctionValues(value);
+    throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
   }
   return { literal: { value: toIrScalar(value) } };
 }

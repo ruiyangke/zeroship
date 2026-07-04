@@ -69,7 +69,8 @@ use crate::render::lower::{
     create_index_snapshot, derived_check_constraint_name, derived_constraint_name,
     derived_exclusion_constraint_name, enum_inline_check, index_method_access, ir_column_to_field,
     ir_column_to_field_resolved_create, mysql_enum_type, render_domain_check,
-    render_exclusion_constraint_body, render_ir_default, IrLowerError, NamedTypeRegistry,
+    render_exclusion_constraint_body, render_container_default_for_data_type,
+    render_ir_default, render_ir_default_for_type, IrLowerError, NamedTypeRegistry,
 };
 use zeroship_schema::query::SqlDialect;
 
@@ -538,7 +539,7 @@ pub fn fold_ops(
                     push_primary_key_snapshot(name, &mut snap, pk);
                 }
                 apply_fold_author_type_overrides_to_snapshot(name, columns, &mut snap, dialect)?;
-                apply_fold_synth_defaults_to_snapshot(name, columns, &mut snap, dialect)?;
+                apply_fold_structured_defaults_to_snapshot(name, columns, &mut snap, dialect)?;
                 apply_fold_named_type_metadata(
                     name,
                     columns,
@@ -954,16 +955,6 @@ pub fn fold_ops(
                 col.nullable = true;
             }
             Op::SetColumnDefault { table, column, value, .. } => {
-                let rendered = match value {
-                    IrDefault::Literal { .. } => {
-                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
-                    }
-                    IrDefault::Fn { .. } => {
-                        return Err(FoldError::Unsupported(
-                            "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
-                        ));
-                    }
-                };
                 let snap = table_mut(&mut tables, table)?;
                 let col = snap
                     .columns
@@ -973,6 +964,20 @@ pub fn fold_ops(
                         table: table.clone(),
                         column: column.clone(),
                     })?;
+                let rendered = match value {
+                    IrDefault::Literal { .. } => {
+                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
+                    }
+                    IrDefault::Fn { .. } => {
+                        return Err(FoldError::Unsupported(
+                            "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
+                        ));
+                    }
+                    IrDefault::Container { kind } => {
+                        render_container_default_for_data_type(*kind, &col.data_type)
+                            .map_err(fold_named_type_error)?
+                    }
+                };
                 col.default = Some(rendered);
             }
             Op::DropColumnDefault { table, column, .. } => {
@@ -1368,7 +1373,7 @@ fn add_column_snapshot(
         .cloned()
         .ok_or(FoldError::Unsupported("addColumn (column folded away)"))?;
     apply_fold_author_type_override_to_column(table, column, ty, &mut main, dialect)?;
-    apply_fold_synth_default_to_column(table, column, default, &mut main, dialect)?;
+    apply_fold_structured_default_to_column(table, column, ty, default, &mut main, dialect)?;
     let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
     Ok((main, sibling))
 }
@@ -1423,14 +1428,14 @@ fn fold_author_data_type_override(ty: &ColType, dialect: SqlDialect) -> Option<&
     }
 }
 
-fn apply_fold_synth_defaults_to_snapshot(
+fn apply_fold_structured_defaults_to_snapshot(
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
     for source in columns {
-        let Some(IrDefault::Fn { .. }) = source.default.as_ref() else {
+        let Some(IrDefault::Fn { .. } | IrDefault::Container { .. }) = source.default.as_ref() else {
             continue;
         };
         let col = snap
@@ -1441,9 +1446,10 @@ fn apply_fold_synth_defaults_to_snapshot(
                 table: table.to_string(),
                 column: source.name.clone(),
             })?;
-        apply_fold_synth_default_to_column(
+        apply_fold_structured_default_to_column(
             table,
             &source.name,
+            &source.ty,
             source.default.as_ref(),
             col,
             dialect,
@@ -1452,14 +1458,15 @@ fn apply_fold_synth_defaults_to_snapshot(
     Ok(())
 }
 
-fn apply_fold_synth_default_to_column(
+fn apply_fold_structured_default_to_column(
     table: &str,
     column: &str,
+    ty: &ColType,
     default: Option<&IrDefault>,
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
-    let Some(default @ IrDefault::Fn { .. }) = default else {
+    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. })) = default else {
         return Ok(());
     };
     if col.name != column {
@@ -1468,7 +1475,8 @@ fn apply_fold_synth_default_to_column(
             column: column.to_string(),
         });
     }
-    col.default = Some(render_ir_default(default, dialect).map_err(fold_named_type_error)?);
+    col.default =
+        Some(render_ir_default_for_type(default, ty, dialect).map_err(fold_named_type_error)?);
     Ok(())
 }
 
@@ -1574,7 +1582,8 @@ fn apply_fold_named_type_column_metadata(
                 if col.default.is_none() {
                     if let Some(default) = &def.default {
                         col.default =
-                            Some(render_ir_default(default, dialect).map_err(fold_named_type_error)?);
+                            Some(render_ir_default_for_type(default, &def.as_type, dialect)
+                                .map_err(fold_named_type_error)?);
                     }
                 }
                 if let Some(check) = &def.check {

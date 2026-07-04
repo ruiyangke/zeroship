@@ -224,7 +224,7 @@ pub use model::snapshot::{
 // `Checksum::of_ir` front door folds. There is NO `Raw`/`RawDown` (property A);
 // every transform/predicate is the closed [`expr::Expr`] AST.
 pub use model::ir::{
-    CanonicalOpList, ColType, ColumnOrExpr, CommentTarget, ExclusionElement,
+    CanonicalOpList, ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement,
     ExclusionMethod, ExclusionOperator, GeneratedCol, IdentityCol, IndexElement, IndexMethod,
     IndexSortOrder, IndexStorageParams, IrBatch, IrClassification, IrColumn, IrConstraint,
     IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrMask, IrMaskKind, IrScalar,
