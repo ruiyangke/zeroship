@@ -3045,7 +3045,11 @@ impl Ctx<'_> {
     /// PostgreSQL-only value nodes, so SQLite/MySQL validation refuses them as
     /// `UNSUPPORTED { kind:"expr" }` before rendering.
     fn check_pg_only_expr(&self, name: &'static str) -> Result<(), AuthoringError> {
-        if self.target_dialect == Dialect::Postgres {
+        // Read the PG-only verdict off the generated dialect vocabulary (a
+        // `pg = portable, else = unsupported` disposition) rather than a bespoke
+        // `== Postgres` dialect arm — the same `Disposition::is_supported` reading
+        // `Op::support` uses when assembling per-dialect support cells.
+        if crate::model::support::pg_only_expr_disposition(self.target_dialect).is_supported() {
             return Ok(());
         }
         Err(self.err(
