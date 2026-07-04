@@ -337,6 +337,9 @@ impl StructuralDrift {
 fn canonical_extension_type(format_type: &str) -> String {
     let trimmed = format_type.trim();
     let lower = trimmed.to_ascii_lowercase();
+    if is_citext_extension_type(trimmed) {
+        return "text".to_string();
+    }
     // PostGIS geography point: `geography(Point,4326)` → `geography(POINT, 4326)`
     // (the engine's `field_to_column` / `dsl_to_pg_data_type` spelling). Match on
     // the lowercased form so we are robust to PG capitalisation changes, and
@@ -348,6 +351,15 @@ fn canonical_extension_type(format_type: &str) -> String {
     // Return `format_type`'s output verbatim for vector (and any other extension
     // type) — it is the precise live spelling.
     trimmed.to_string()
+}
+
+fn is_citext_extension_type(format_type: &str) -> bool {
+    format_type
+        .trim()
+        .split('.')
+        .next_back()
+        .map(|tail| tail.trim_matches('"').eq_ignore_ascii_case("citext"))
+        .unwrap_or(false)
 }
 
 fn split_column_catalog_comment(comment: Option<String>) -> (Option<String>, Option<String>) {
@@ -768,6 +780,8 @@ pub async fn snapshot_schema(
             let data_type: String = r.get("data_type");
             let udt_name: String = r.get("udt_name");
             let format_type: String = r.get("format_type");
+            let is_citext = data_type.eq_ignore_ascii_case("USER-DEFINED")
+                && (is_citext_extension_type(&format_type) || udt_name.eq_ignore_ascii_case("citext"));
             // For a `USER-DEFINED` (extension) type, recover the precise spelling
             // from `format_type` and canonicalise it to the engine's DDL form so
             // it round-trips against the desired snapshot.
@@ -795,6 +809,7 @@ pub async fn snapshot_schema(
                 // COMMENT-based runtime sentinels are classified into
                 // `comment_sentinel` so they do not drift against user-authored
                 // catalog comments.
+                case_sensitive: if is_citext { Some(false) } else { None },
                 comment,
                 comment_sentinel,
                 ..Default::default()
@@ -1526,6 +1541,13 @@ fn diff_extension_attrs(
     }
 }
 
+fn format_case_sensitive(case_sensitive: Option<bool>) -> &'static str {
+    match case_sensitive {
+        Some(false) => "false",
+        _ => "",
+    }
+}
+
 /// Compare the attributes of same-name children (columns/indexes/constraints
 /// present on BOTH sides of one table), pushing an [`AlteredObject`] per diverging
 /// field. Added/removed children are NOT this function's concern (they go to the
@@ -1583,7 +1605,7 @@ fn diff_attrs(
         act_t.comment.as_deref().unwrap_or(""),
     );
 
-    // Columns: data_type + nullable + catalog comment.
+    // Columns: data_type + nullable + recoverable text case-sensitivity + catalog comment.
     let act_cols: BTreeMap<&str, &ColumnSnapshot> =
         act_t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
     for ec in &exp_t.columns {
@@ -1595,6 +1617,12 @@ fn diff_attrs(
                 "nullable",
                 &ec.nullable.to_string(),
                 &ac.nullable.to_string(),
+            );
+            push(
+                &obj,
+                "case_sensitive",
+                &format_case_sensitive(ec.case_sensitive),
+                &format_case_sensitive(ac.case_sensitive),
             );
             push(
                 &obj,

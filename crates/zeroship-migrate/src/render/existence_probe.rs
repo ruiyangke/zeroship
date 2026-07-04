@@ -678,6 +678,7 @@ mod tests {
             inline_checks: Vec::new(),
             generated: None,
             identity: None,
+            case_sensitive: None,
             encryption_sentinel: None,
             comment_sentinel: None,
             comment: None,

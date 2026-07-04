@@ -215,6 +215,9 @@ export interface IrColumn {
   /** **P2a §2b** — the `t.vector(n, { metric })` distance metric (closed
    *  {@link VectorMetric}). Default-absent. */
   vectorMetric?: VectorMetric | null;
+  /** Case-sensitivity facet for text columns. Only `false` is meaningful;
+   *  omitted/`true` is the byte-identical default. */
+  caseSensitive?: boolean | null;
   /** **#174** — a STANDALONE column mask. Default-absent. */
   mask?: IrMask | null;
   /** Generated/computed column facet. Default-absent. */
@@ -431,7 +434,7 @@ export type Op =
   | { op: "dropPartition"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
-  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropColumn"; table: string; column: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | {
       op: "createIndex";

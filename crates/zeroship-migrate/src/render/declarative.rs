@@ -262,6 +262,12 @@ fn sqlite_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
 fn column_type_for_render(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> String {
     if let Some(ty) = &c.ddl_type_override {
         ty.clone()
+    } else if matches!(c.case_sensitive, Some(false)) && c.data_type.eq_ignore_ascii_case("text") {
+        match dialect {
+            SqlDialect::Postgres => "public.citext".to_string(),
+            SqlDialect::Sqlite => "text COLLATE NOCASE".to_string(),
+            SqlDialect::Mysql => "text".to_string(),
+        }
     } else if matches!(dialect, SqlDialect::Sqlite) && sqlite_identity_pk(c, inline_pk) {
         "INTEGER".to_string()
     } else if matches!(dialect, SqlDialect::Sqlite) {
@@ -351,6 +357,12 @@ fn has_generated_or_identity(t: &TableSnapshot) -> bool {
 
 fn has_inline_checks(t: &TableSnapshot) -> bool {
     t.columns.iter().any(|c| !c.inline_checks.is_empty())
+}
+
+fn has_case_insensitive_text(t: &TableSnapshot) -> bool {
+    t.columns
+        .iter()
+        .any(|c| matches!(c.case_sensitive, Some(false)))
 }
 
 fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String {
@@ -632,6 +644,11 @@ pub struct FieldDescriptor {
     /// `innerProduct`), drives the ivfflat opclass. Mirrors `vectorMetric`.
     #[serde(rename = "vectorMetric", default)]
     pub vector_metric: Option<String>,
+    /// `t.text({ caseSensitive: false })` — portable case-insensitive text intent.
+    /// Only `Some(false)` is meaningful; absent/true is the default byte-identical
+    /// text shape.
+    #[serde(rename = "caseSensitive", default)]
+    pub case_sensitive: Option<bool>,
     /// `t.encrypted({ mode, keyId, wraps })` — the encryption sub-object,
     /// carried VERBATIM. When present the column DDLs to `BYTEA` with the inline
     /// `/* zsenc:mode:keyId:wraps */` sentinel (the contract plugin-db reads at
@@ -832,6 +849,9 @@ fn field_to_sdk_def(f: &FieldDescriptor) -> serde_json::Value {
     }
     if let Some(m) = &f.vector_metric {
         def.insert("vectorMetric".into(), serde_json::Value::String(m.clone()));
+    }
+    if matches!(f.case_sensitive, Some(false)) {
+        def.insert("caseSensitive".into(), serde_json::Value::Bool(false));
     }
     if let Some(enc) = &f.encrypted {
         def.insert("encrypted".into(), enc.clone());
@@ -1407,17 +1427,29 @@ fn column_snapshot_for_field(
     let encryption_sentinel = zeroship_schema::query::encryption_sentinel_for_field(&sdk_def);
     let comment_sentinel =
         encryption_meta_for_field(&sdk_def).map(|m| zeroship_schema::mask_codec::build_encryption_sentinel(&m));
+    let case_sensitive = if matches!(f.case_sensitive, Some(false)) && !matches!(dialect, SqlDialect::Mysql) {
+        Some(false)
+    } else {
+        None
+    };
+    let ddl_type_override = if matches!(f.case_sensitive, Some(false)) && matches!(dialect, SqlDialect::Mysql) {
+        Some("text".to_string())
+    } else {
+        None
+    };
     Ok(ColumnSnapshot {
         name: f.name.clone(),
         data_type,
         nullable: !f.required,
         default: field_default_expr(f, synth_json_defaults),
+        ddl_type_override,
         generated: f
             .generated
             .as_ref()
             .map(|g| generated_column_snapshot(g, dialect))
             .transpose()?,
         identity: f.identity,
+        case_sensitive,
         encryption_sentinel,
         comment_sentinel,
         ..Default::default()
@@ -1942,6 +1974,7 @@ fn build_table_snapshot_impl(
                 default: None,
                 generated: None,
                 identity: None,
+                case_sensitive: None,
                 encryption_sentinel: None,
                 comment_sentinel,
                 ..Default::default()
@@ -2407,6 +2440,7 @@ fn fts_objects_pg(
         inline_checks: Vec::new(),
         generated: None,
         identity: None,
+        case_sensitive: None,
         encryption_sentinel: None,
         comment_sentinel: None,
         comment: None,
@@ -3607,6 +3641,7 @@ impl DeclarativeAuthor {
                             if sqlite_canonical_type(&lc.data_type)
                                 != sqlite_canonical_type(&c.data_type)
                                 || lc.nullable != c.nullable
+                                || lc.case_sensitive != c.case_sensitive
                             {
                                 return Err(DeclarativeError::Invalid(format!(
                                     "internal: SQLite column {table}.{} has a type/nullability \
@@ -3617,7 +3652,7 @@ impl DeclarativeAuthor {
                             }
                             continue;
                         }
-                        if lc.data_type != c.data_type {
+                        if lc.data_type != c.data_type || lc.case_sensitive != c.case_sensitive {
                             out.push(self.render_alter_column_type(table, c));
                         }
                         if lc.nullable != c.nullable {
@@ -4055,7 +4090,10 @@ impl DeclarativeAuthor {
             ))
         })?;
         if let Some(snapshot) = desired.snapshot.tables.get(table) {
-            if has_generated_or_identity(snapshot) || has_inline_checks(snapshot) {
+            if has_generated_or_identity(snapshot)
+                || has_inline_checks(snapshot)
+                || has_case_insensitive_text(snapshot)
+            {
                 return Ok(self
                     .render_create_table_sqlite_snapshot_statements(table, snapshot)
                     .join(";\n"));
@@ -4150,6 +4188,14 @@ impl DeclarativeAuthor {
                     return Some(format!(
                         "alter column {} nullability {} → {}",
                         c.name, lc.nullable, c.nullable
+                    ));
+                }
+                if lc.case_sensitive != c.case_sensitive {
+                    return Some(format!(
+                        "alter column {} caseSensitive {} → {}",
+                        c.name,
+                        lc.case_sensitive.unwrap_or(true),
+                        c.case_sensitive.unwrap_or(true)
                     ));
                 }
             }
@@ -6111,7 +6157,10 @@ impl DdlEmitter for SqliteEmitter {
         } else {
             String::new()
         };
-        let ty = if c.generated.is_some() || c.identity.is_some() {
+        let ty = if c.generated.is_some()
+            || c.identity.is_some()
+            || matches!(c.case_sensitive, Some(false))
+        {
             column_type_for_render(c, SqlDialect::Sqlite, inline_pk)
         } else {
             ddl_type(&c.data_type).to_string()
@@ -6835,6 +6884,38 @@ mod snapshot_builder_refactor_safety_tests {
             indexes: vec![],
             runtime_options: Default::default(),
         }
+    }
+
+    #[test]
+    fn case_insensitive_text_renders_dialect_type_tokens() {
+        let d = resolved_descriptor(
+            "contacts",
+            vec![FieldDescriptor {
+                name: "email".into(),
+                ty: "string".into(),
+                case_sensitive: Some(false),
+                ..Default::default()
+            }],
+        );
+
+        let pg_snap = build_resolved_table_snapshot("app", &d, SqlDialect::Postgres)
+            .expect("PG snapshot builds");
+        let pg_sql =
+            DeclarativeAuthor::new("app", "app_test").render_create_table(&d.name, &pg_snap, &[]);
+        assert!(
+            pg_sql.contains("\"email\" public.citext"),
+            "Postgres case-insensitive text must render public.citext:\n{pg_sql}"
+        );
+
+        let sqlite_snap = build_resolved_table_snapshot("app", &d, SqlDialect::Sqlite)
+            .expect("SQLite snapshot builds");
+        let sqlite_sql = DeclarativeAuthor::new("app", "app_test")
+            .render_create_table_sqlite_snapshot_statements(&d.name, &sqlite_snap)
+            .join(";\n");
+        assert!(
+            sqlite_sql.contains("\"email\" text COLLATE NOCASE"),
+            "SQLite case-insensitive text must render text COLLATE NOCASE:\n{sqlite_sql}"
+        );
     }
 
     /// Platform-exact resolved createTable is not an SDK collection table, so the

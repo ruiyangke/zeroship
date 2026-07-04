@@ -144,6 +144,7 @@ fn live_with_column(table: &str, column: &str, data_type: &str) -> LiveSchema {
             inline_checks: Vec::new(),
             generated: None,
             identity: None,
+            case_sensitive: None,
             encryption_sentinel: None,
             comment_sentinel: None,
             comment: None,

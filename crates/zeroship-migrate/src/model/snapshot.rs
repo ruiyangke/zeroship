@@ -54,6 +54,11 @@ pub struct ColumnSnapshot {
     /// A SQL identity column facet. Emission-only: drift tracks the physical
     /// column and primary-key constraint, not the sequence metadata.
     pub identity: Option<IdentityCol>,
+    /// `Some(false)` means this logical text column is case-insensitive. It is a
+    /// drift-comparable catalog attribute on engines where the intent is
+    /// recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`). `None` is the
+    /// byte-identical default case-sensitive text behavior.
+    pub case_sensitive: Option<bool>,
     /// **P4 HALF A** — the inline encryption sentinel to append after this
     /// column's type in CREATE / ADD COLUMN DDL, e.g.
     /// `/* zsenc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
@@ -111,6 +116,7 @@ impl std::fmt::Debug for ColumnSnapshot {
         }
         s.field("generated", &self.generated)
             .field("identity", &self.identity)
+            .field("case_sensitive", &self.case_sensitive)
             .field("encryption_sentinel", &self.encryption_sentinel)
             .field("comment_sentinel", &self.comment_sentinel)
             .field("comment", &self.comment)
@@ -123,6 +129,7 @@ impl PartialEq for ColumnSnapshot {
         self.name == other.name
             && self.data_type == other.data_type
             && self.nullable == other.nullable
+            && self.case_sensitive == other.case_sensitive
             && self.comment == other.comment
     }
 }
@@ -132,6 +139,7 @@ impl std::hash::Hash for ColumnSnapshot {
         self.name.hash(state);
         self.data_type.hash(state);
         self.nullable.hash(state);
+        self.case_sensitive.hash(state);
         self.comment.hash(state);
     }
 }

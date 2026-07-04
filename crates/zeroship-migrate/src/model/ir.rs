@@ -971,6 +971,14 @@ pub struct IrColumn {
     /// (`#[serde(rename = "vectorMetric")]`) and the design §4.
     #[serde(rename = "vectorMetric", skip_serializing_if = "Option::is_none")]
     pub vector_metric: Option<VectorMetric>,
+    /// Case-sensitivity facet for text columns. Only `Some(false)` is meaningful:
+    /// `None` and `Some(true)` are the byte-identical default text behavior.
+    #[serde(
+        rename = "caseSensitive",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub case_sensitive: Option<bool>,
     /// A STANDALONE column mask (`t.string().mask({ kind, classification })`). Unlike
     /// `id_prefix`/`vector_metric` (declared-only), a mask IS recoverable from the live
     /// `__zsmask` sentinel by the RUNTIME — but the OFFLINE op fold + gen-types have no
@@ -2340,6 +2348,14 @@ pub enum Op {
         /// fail-closed.)
         #[serde(rename = "vectorMetric", default, skip_serializing_if = "Option::is_none")]
         vector_metric: Option<VectorMetric>,
+        /// Case-sensitivity facet for a text added column. Only `Some(false)` is
+        /// meaningful; absent/true omits the key and preserves the old wire image.
+        #[serde(
+            rename = "caseSensitive",
+            default,
+            skip_serializing_if = "Option::is_none"
+        )]
+        case_sensitive: Option<bool>,
         /// **#173** — a STANDALONE column mask for a masked added column (the same facet
         /// `IrColumn` carries). Meaningful on an added column (a masked ADD COLUMN emits
         /// the `__zsmask` sentinel + `_masked` sibling). Default-absent +
@@ -4515,6 +4531,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
@@ -4528,6 +4545,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
@@ -4557,6 +4575,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
@@ -4767,6 +4786,7 @@ mod tests {
                 unique: None,
                 // The new P2a facets, both ABSENT (a plain `t.text()` column).
                 id_prefix: None,
+                case_sensitive: None,
                 vector_metric: None,
                 mask: None,
                 generated: None,
@@ -4797,6 +4817,10 @@ mod tests {
         assert!(
             !json.contains("vectorMetric"),
             "an absent vector_metric must NOT appear on the wire: {json}"
+        );
+        assert!(
+            !json.contains("caseSensitive"),
+            "an absent case_sensitive facet must NOT appear on the wire: {json}"
         );
         // #174 — the same byte-identity guarantee extends to the standalone `mask`
         // facet: a mask-less column must NOT emit a `mask` key (skip_serializing_if),
@@ -4882,6 +4906,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
@@ -4901,6 +4926,7 @@ mod tests {
             ty: ColType::Int,
             nullable: None,
             default: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
@@ -5012,6 +5038,32 @@ mod tests {
     }
 
     #[test]
+    fn case_sensitive_false_round_trips_on_ir_column() {
+        let col = IrColumn {
+            name: "email".into(),
+            ty: ColType::Text,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            case_sensitive: Some(false),
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        };
+        let json = serde_json::to_string(&col).unwrap();
+        assert_eq!(
+            json,
+            r#"{"name":"email","type":"text","caseSensitive":false}"#,
+            "caseSensitive:false must serialize as the camelCase facet"
+        );
+        let back: IrColumn = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.case_sensitive, Some(false));
+        assert_eq!(back.ty, ColType::Text);
+    }
+
+    #[test]
     fn column_without_container_default_omits_default_key() {
         let col = IrColumn {
             name: "body".into(),
@@ -5020,6 +5072,7 @@ mod tests {
             default: None,
             unique: None,
             id_prefix: None,
+            case_sensitive: None,
             vector_metric: None,
             mask: None,
             generated: None,
