@@ -344,12 +344,10 @@ export function up() {
       archived: t.boolean().notNull().default(false),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
       updated_at: t.timestamp().notNull().default({ fn: "now" }),
-      net_policy_limits_json: t.json().notNull(),
+      net_policy_limits_json: t.json().notNull().default({ max_sockets: 4, egress_ceiling_bytes: 10485760 }),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.plans ALTER COLUMN net_policy_limits_json SET DEFAULT '{\"max_sockets\": 4, \"egress_ceiling_bytes\": 10485760}'::jsonb", reason: "column plans.net_policy_limits_json requires exact default '{\"max_sockets\": 4, \"egress_ceiling_bytes\": 10485760}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("plans", { schema: "zeroship" }).addCheck("plans_base_fee_cents_check", (c) => c("base_fee_cents").ge(0));
   table("plans", { schema: "zeroship" }).addCheck("plans_fx_pico_cents_per_unit_check", (c) => or(c("fx_pico_cents_per_unit").isNull(), c("fx_pico_cents_per_unit").ge(1000)));
   table("plans", { schema: "zeroship" }).addCheck("plans_included_units_check", (c) => c("included_units").ge(0));
