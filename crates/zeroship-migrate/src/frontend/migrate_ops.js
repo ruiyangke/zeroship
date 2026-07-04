@@ -167,6 +167,99 @@ function pushOrDeferUp(op) {
   return op;
 }
 
+// ── The `defineOp` chokepoint + derived tier-1 producer registry (S0.3) ──
+//
+// Every op producer emits through an emitter minted by `defineOp(kind, …)`, the
+// single chokepoint wrapping `push`/`pushOrDeferUp`. The emitter is
+// behaviour-preserving: it records `compact({ op: kind, ...payload })` —
+// byte-identical to the prior in-line `push(compact({ op: kind, … }))`. Each mint
+// APPENDS to `tier1Producers`, so the producer registry (op-kind → producer(s)) is
+// DERIVED from the mints, never self-reported. A later slice's census asserts
+// one-producer-per-op-kind over this data (which is why the multi-producer kinds
+// `addConstraint`/`createView` mint several distinct producers here). Lock-step
+// twin of the public SDK `sdks/migrate/src/ops.ts`.
+
+const tier1Producers = [];
+
+/** Mint the single emitter every producer for `kind` records through, and register
+ *  the (kind → producer) fact so the tier-1 registry is derivable. `producer`
+ *  defaults to `kind` (the common one-producer-per-kind case). */
+function defineOp(kind, producer = kind, opts = {}) {
+  const deferrable = opts.deferrable === true;
+  tier1Producers.push({ kind, producer, deferrable });
+  const sink = deferrable ? pushOrDeferUp : push;
+  return (payload) => sink(compact({ op: kind, ...payload }));
+}
+
+/** The flat tier-1 producer list, in mint (declaration) order — DATA the census
+ *  consumes (a later slice asserts one-producer-per-op-kind over it). */
+export function opProducers() {
+  return tier1Producers;
+}
+
+/** The tier-1 producer registry: per op-kind, the producer(s) that emit it —
+ *  DERIVED from the `defineOp` mints (never self-reported). */
+export function opProducerRegistry() {
+  const byKind = new Map();
+  for (const producer of tier1Producers) {
+    const list = byKind.get(producer.kind);
+    if (list === undefined) byKind.set(producer.kind, [producer]);
+    else list.push(producer);
+  }
+  return byKind;
+}
+
+// The minted emitters — one per producer site. Multi-producer op-kinds
+// (`addConstraint`, `createView`) mint several, so the registry surfaces the
+// duplication as data.
+const emitCreateEnum = defineOp("createEnum", "createEnum", { deferrable: true });
+const emitDropEnum = defineOp("dropEnum");
+const emitCreateDomain = defineOp("createDomain", "createDomain", { deferrable: true });
+const emitDropDomain = defineOp("dropDomain");
+const emitCreateSequence = defineOp("createSequence", "createSequence", { deferrable: true });
+const emitAlterSequence = defineOp("alterSequence");
+const emitDropSequence = defineOp("dropSequence");
+const emitComment = defineOp("comment");
+const emitCreateTable = defineOp("createTable");
+const emitCreatePartition = defineOp("createPartition");
+const emitDetachPartition = defineOp("detachPartition");
+const emitDropPartition = defineOp("dropPartition");
+const emitSetTableOptions = defineOp("setTableOptions");
+const emitDropTable = defineOp("dropTable");
+const emitRenameTable = defineOp("renameTable");
+const emitAddColumn = defineOp("addColumn");
+const emitAddColumnUnique = defineOp("addConstraint", "addColumn.unique");
+const emitAddColumnPk = defineOp("addConstraint", "addColumn.pk");
+const emitDropColumn = defineOp("dropColumn");
+const emitRenameColumn = defineOp("renameColumn");
+const emitSetColumnType = defineOp("setColumnType");
+const emitSetColumnNotNull = defineOp("setColumnNotNull");
+const emitDropColumnNotNull = defineOp("dropColumnNotNull");
+const emitSetColumnDefault = defineOp("setColumnDefault");
+const emitDropColumnDefault = defineOp("dropColumnDefault");
+const emitAddForeignKey = defineOp("addConstraint", "foreignKey");
+const emitAddUnique = defineOp("addConstraint", "unique");
+const emitAddCheck = defineOp("addConstraint", "check");
+const emitAddExclusion = defineOp("addConstraint", "exclusion");
+const emitDropConstraint = defineOp("dropConstraint");
+const emitCreateIndex = defineOp("createIndex");
+const emitDropIndex = defineOp("dropIndex");
+const emitInsert = defineOp("insert");
+const emitUpdate = defineOp("update");
+const emitDelete = defineOp("delete");
+const emitBackfill = defineOp("backfill");
+const emitCreateView = defineOp("createView", "view.create");
+const emitCreateRawView = defineOp("createView", "view.createRaw");
+const emitDropView = defineOp("dropView");
+const emitEnableRls = defineOp("enableRls");
+const emitForceRls = defineOp("forceRls");
+const emitDisableRls = defineOp("disableRls");
+const emitNoForceRls = defineOp("noForceRls");
+const emitCreatePolicy = defineOp("createPolicy");
+const emitDropPolicy = defineOp("dropPolicy");
+const emitCreateTrigger = defineOp("createTrigger");
+const emitDropTrigger = defineOp("dropTrigger");
+
 /** Register a handed-out selector; returns its id (used at terminate). */
 function registerSelector(selector, name) {
   const rec = recorder();
@@ -1316,26 +1409,20 @@ function recordCreateEnum(name, args) {
       "enumType(name).create({ values }): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
     );
   }
-  pushOrDeferUp(
-    compact({
-      op: "createEnum",
-      name,
-      schema: args.schema,
-      values: enumValues,
-    }),
-  );
+  emitCreateEnum({
+    name,
+    schema: args.schema,
+    values: enumValues,
+  });
 }
 
 function recordDropEnum(name, args = {}) {
   requireString(name, "enumType(name).drop()");
-  push(
-    compact({
-      op: "dropEnum",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropEnum({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordCreateDomain(name, args) {
@@ -1346,29 +1433,23 @@ function recordCreateDomain(name, args) {
   if (args.notNull !== undefined && typeof args.notNull !== "boolean") {
     throw structuredError("OP_INVALID", "domain(name).create({ notNull }): notNull must be a boolean");
   }
-  pushOrDeferUp(
-    compact({
-      op: "createDomain",
-      name,
-      schema: args.schema,
-      as: colTypeOf(args.as),
-      check: resolveExpr(args.check),
-      default: args.default === undefined ? undefined : toIrDefault(args.default),
-      notNull: args.notNull,
-    }),
-  );
+  emitCreateDomain({
+    name,
+    schema: args.schema,
+    as: colTypeOf(args.as),
+    check: resolveExpr(args.check),
+    default: args.default === undefined ? undefined : toIrDefault(args.default),
+    notNull: args.notNull,
+  });
 }
 
 function recordDropDomain(name, args = {}) {
   requireString(name, "domain(name).drop()");
-  push(
-    compact({
-      op: "dropDomain",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropDomain({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordCreateSequence(name, args = {}) {
@@ -1386,21 +1467,18 @@ function recordCreateSequence(name, args = {}) {
       `sequence.create({ as }): as must be one of ${SEQUENCE_AS_TYPES.join(" | ")}; got ${JSON.stringify(asType)}`,
     );
   }
-  pushOrDeferUp(
-    compact({
-      op: "createSequence",
-      name,
-      schema: args.schema,
-      as: asType,
-      increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
-      start: requireSafeI64(args.start, "sequence.create({ start })"),
-      minValue,
-      maxValue,
-      cache: requireSequenceCache(args.cache, "sequence.create({ cache })"),
-      cycle: args.cycle,
-      ownedBy: args.ownedBy,
-    }),
-  );
+  emitCreateSequence({
+    name,
+    schema: args.schema,
+    as: asType,
+    increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
+    start: requireSafeI64(args.start, "sequence.create({ start })"),
+    minValue,
+    maxValue,
+    cache: requireSequenceCache(args.cache, "sequence.create({ cache })"),
+    cycle: args.cycle,
+    ownedBy: args.ownedBy,
+  });
 }
 
 function recordAlterSequence(name, args) {
@@ -1411,45 +1489,36 @@ function recordAlterSequence(name, args) {
   const minValue = requireNullableSafeI64(args.minValue, "sequence.alter({ minValue })");
   const maxValue = requireNullableSafeI64(args.maxValue, "sequence.alter({ maxValue })");
   requireSequenceBounds(minValue, maxValue, "sequence.alter(args)");
-  push(
-    compact({
-      op: "alterSequence",
-      name,
-      schema: args.schema,
-      increment: requireSequenceIncrement(args.increment, "sequence.alter({ increment })"),
-      restart: requireNullableSafeI64(args.restart, "sequence.alter({ restart })"),
-      minValue,
-      maxValue,
-      cache: requireSequenceCache(args.cache, "sequence.alter({ cache })"),
-      cycle: args.cycle,
-      ownedBy: args.ownedBy,
-    }),
-  );
+  emitAlterSequence({
+    name,
+    schema: args.schema,
+    increment: requireSequenceIncrement(args.increment, "sequence.alter({ increment })"),
+    restart: requireNullableSafeI64(args.restart, "sequence.alter({ restart })"),
+    minValue,
+    maxValue,
+    cache: requireSequenceCache(args.cache, "sequence.alter({ cache })"),
+    cycle: args.cycle,
+    ownedBy: args.ownedBy,
+  });
 }
 
 function recordDropSequence(name, args = {}) {
   requireString(name, "sequence(name)");
-  push(
-    compact({
-      op: "dropSequence",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropSequence({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordComment(target, text) {
   if (text !== null && typeof text !== "string") {
     throw structuredError("OP_INVALID", "comment text must be a string or null");
   }
-  push(
-    compact({
-      op: "comment",
-      target: commentTargetToIr(target),
-      comment: text === null ? undefined : text,
-    }),
-  );
+  emitComment({
+    target: commentTargetToIr(target),
+    comment: text === null ? undefined : text,
+  });
 }
 
 function commentTargetToIr(target) {
@@ -1548,105 +1617,81 @@ function recordCreateTable(name, args) {
     );
   }
 
-  push(
-    compact({
-      op: "createTable",
-      name,
-      columns: cols,
-      primaryKey,
-      constraints: constraints.length ? constraints : undefined,
-      indexes: indexes.length ? indexes : undefined,
-      partitionBy: partitionSpecToIr(args.partitionBy, "create({ partitionBy })"),
-      runtimeOptions: runtimeOptionsFromCreateArgs(args),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitCreateTable({
+    name,
+    columns: cols,
+    primaryKey,
+    constraints: constraints.length ? constraints : undefined,
+    indexes: indexes.length ? indexes : undefined,
+    partitionBy: partitionSpecToIr(args.partitionBy, "create({ partitionBy })"),
+    runtimeOptions: runtimeOptionsFromCreateArgs(args),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordCreatePartition(name, parent, bounds, args) {
-  push(
-    compact({
-      op: "createPartition",
-      name,
-      of: parent,
-      bounds,
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitCreatePartition({
+    name,
+    of: parent,
+    bounds,
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordDetachPartition(parent, name, args) {
-  push(
-    compact({
-      op: "detachPartition",
-      parent,
-      name,
-      schema: args.schema,
-      concurrently: args.concurrently,
-    }),
-  );
+  emitDetachPartition({
+    parent,
+    name,
+    schema: args.schema,
+    concurrently: args.concurrently,
+  });
 }
 
 function recordDropPartition(name, args) {
-  push(
-    compact({
-      op: "dropPartition",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-      cascade: args.cascade,
-    }),
-  );
+  emitDropPartition({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+    cascade: args.cascade,
+  });
 }
 
 function recordSetTableOptions(table, args) {
-  push(
-    compact({
-      op: "setTableOptions",
-      table,
-      options: runtimeOptionsPatchFromArgs(args),
-      schema: args.schema,
-    }),
-  );
+  emitSetTableOptions({
+    table,
+    options: runtimeOptionsPatchFromArgs(args),
+    schema: args.schema,
+  });
 }
 
 function recordDropTable(table, args) {
-  push(
-    compact({
-      op: "dropTable",
-      table,
-      cascade: args.cascade,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropTable({
+    table,
+    cascade: args.cascade,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordRenameTable(table, to, args) {
-  push(
-    compact({
-      op: "renameTable",
-      table,
-      to,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitRenameTable({
+    table,
+    to,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordAddColumn(table, column, type, args) {
-  push(
-    compact({
-      op: "addColumn",
-      table,
-      column,
-      ...type.__toAddColumnTail(),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitAddColumn({
+    table,
+    column,
+    ...type.__toAddColumnTail(),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
   // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: an
   // ADD COLUMN has no inline UNIQUE, so it lowers to a separate ADD CONSTRAINT.
   // Likewise `.primaryKey()` hoists a pk add. A PRIMARY KEY already IMPLIES
@@ -1654,90 +1699,72 @@ function recordAddColumn(table, column, type, args) {
   // suppress it (lock-step with the TS surface + the differ, which never emits a
   // separate UNIQUE for the PK column). Only the pk add is recorded.
   if (type._unique && !type._primaryKey) {
-    push(
-      compact({
-        op: "addConstraint",
-        table,
-        constraint: { kind: { kind: "unique", columns: [column] } },
-        schema: args.schema,
-        existenceGuard: ifNotExistsGuard(args.ifNotExists),
-      }),
-    );
+    emitAddColumnUnique({
+      table,
+      constraint: { kind: { kind: "unique", columns: [column] } },
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    });
   }
   if (type._primaryKey) {
-    push(
-      compact({
-        op: "addConstraint",
-        table,
-        constraint: { kind: { kind: "pk", columns: [column] } },
-        schema: args.schema,
-        existenceGuard: ifNotExistsGuard(args.ifNotExists),
-      }),
-    );
+    emitAddColumnPk({
+      table,
+      constraint: { kind: { kind: "pk", columns: [column] } },
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    });
   }
 }
 
 function recordDropColumn(table, column, args) {
-  push(
-    compact({
-      op: "dropColumn",
-      table,
-      column,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropColumn({
+    table,
+    column,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordRenameColumn(table, from, to, type, args) {
-  push(
-    compact({
-      op: "renameColumn",
-      table,
-      from,
-      to,
-      type: colTypeOf(type),
-      schema: args.schema,
-    }),
-  );
+  emitRenameColumn({
+    table,
+    from,
+    to,
+    type: colTypeOf(type),
+    schema: args.schema,
+  });
 }
 
 function recordSetColumnType(table, name, change) {
   requireColumnDef(change.to, ".column(name).setType({ to })");
-  push(
-    compact({
-      op: "setColumnType",
-      table,
-      column: name,
-      toType: colTypeOf(change.to),
-      using: resolveExpr(change.using),
-      schema: change.schema,
-    }),
-  );
+  emitSetColumnType({
+    table,
+    column: name,
+    toType: colTypeOf(change.to),
+    using: resolveExpr(change.using),
+    schema: change.schema,
+  });
 }
 
 function recordSetColumnNotNull(table, name, args) {
-  push(compact({ op: "setColumnNotNull", table, column: name, schema: args.schema }));
+  emitSetColumnNotNull({ table, column: name, schema: args.schema });
 }
 
 function recordDropColumnNotNull(table, name, args) {
-  push(compact({ op: "dropColumnNotNull", table, column: name, schema: args.schema }));
+  emitDropColumnNotNull({ table, column: name, schema: args.schema });
 }
 
 function recordSetColumnDefault(table, name, value, args) {
-  push(
-    compact({
-      op: "setColumnDefault",
-      table,
-      column: name,
-      value: toIrDefault(value),
-      schema: args.schema,
-    }),
-  );
+  emitSetColumnDefault({
+    table,
+    column: name,
+    value: toIrDefault(value),
+    schema: args.schema,
+  });
 }
 
 function recordDropColumnDefault(table, name, args) {
-  push(compact({ op: "dropColumnDefault", table, column: name, schema: args.schema }));
+  emitDropColumnDefault({ table, column: name, schema: args.schema });
 }
 
 /** Build an `IrConstraint` of kind `fk`. **C1**: `onDelete`/`onUpdate` ARE
@@ -1772,54 +1799,45 @@ function fkConstraintFromSpec(spec) {
 }
 
 function recordAddForeignKey(table, name, args) {
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: fkConstraintFromSpec({
-        name,
-        columns: args.columns,
-        references: args.references,
-        onDelete: args.onDelete,
-        onUpdate: args.onUpdate,
-        deferrable: args.deferrable,
-        initiallyDeferred: args.initiallyDeferred,
-        schema: args.schema,
-      }),
+  emitAddForeignKey({
+    table,
+    constraint: fkConstraintFromSpec({
+      name,
+      columns: args.columns,
+      references: args.references,
+      onDelete: args.onDelete,
+      onUpdate: args.onUpdate,
+      deferrable: args.deferrable,
+      initiallyDeferred: args.initiallyDeferred,
       schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
-  );
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordAddUnique(table, name, args) {
   if (!Array.isArray(args.columns)) {
     throw structuredError("OP_INVALID", ".unique(name).add needs { columns: string[] }");
   }
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: compact({ name, kind: { kind: "unique", columns: args.columns } }),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitAddUnique({
+    table,
+    constraint: compact({ name, kind: { kind: "unique", columns: args.columns } }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordAddCheck(table, name, args) {
   if (!args || args.expr === undefined) {
     throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
   }
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: compact({ name, kind: { kind: "check", expr: resolveExpr(args.expr) } }),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitAddCheck({
+    table,
+    constraint: compact({ name, kind: { kind: "check", expr: resolveExpr(args.expr) } }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function exclusionConstraintFromSpec(spec) {
@@ -1903,64 +1921,52 @@ function indexColumnOrderToIr(order) {
 }
 
 function recordAddExclusion(table, name, args) {
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: exclusionConstraintFromSpec({ ...args, name }),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitAddExclusion({
+    table,
+    constraint: exclusionConstraintFromSpec({ ...args, name }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordDropConstraint(table, name, args) {
-  push(
-    compact({
-      op: "dropConstraint",
-      table,
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropConstraint({
+    table,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordCreateIndex(table, name, args) {
   if (!Array.isArray(args.columns)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { columns: IndexElementArg[] }");
   }
-  push(
-    compact({
-      op: "createIndex",
-      table,
-      columns: args.columns.map(indexElementToIr),
-      name,
-      unique: args.unique,
-      using: args.using,
-      where: resolveExpr(args.where),
-      include: indexIncludeToIr(args.include),
-      with: indexWithToIr(args.with),
-      only: requireOptionalBoolean(args.only, "index only"),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitCreateIndex({
+    table,
+    columns: args.columns.map(indexElementToIr),
+    name,
+    unique: args.unique,
+    using: args.using,
+    where: resolveExpr(args.where),
+    include: indexIncludeToIr(args.include),
+    with: indexWithToIr(args.with),
+    only: requireOptionalBoolean(args.only, "index only"),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordDropIndex(table, name, args) {
-  push(
-    compact({
-      op: "dropIndex",
-      name,
-      table,
-      // `unique` drives the destructive/approval gating at apply — preserved here.
-      unique: args.unique,
-      concurrently: args.concurrently,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropIndex({
+    name,
+    table,
+    // `unique` drives the destructive/approval gating at apply — preserved here.
+    unique: args.unique,
+    concurrently: args.concurrently,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function normalizeInsertRows(rows, what) {
@@ -1994,16 +2000,13 @@ function normalizeInsertRows(rows, what) {
 
 function recordInsert(table, args) {
   const normalized = normalizeInsertRows(args.rows, "insert({ rows })");
-  push(
-    compact({
-      op: "insert",
-      table,
-      columns: normalized.columns,
-      rows: normalized.rows,
-      onConflict: normalizeOnConflict(args.onConflict),
-      schema: args.schema,
-    }),
-  );
+  emitInsert({
+    table,
+    columns: normalized.columns,
+    rows: normalized.rows,
+    onConflict: normalizeOnConflict(args.onConflict),
+    schema: args.schema,
+  });
 }
 
 /** Normalize an `onConflict.doUpdate` `column → scalar` map through the IrScalar
@@ -2018,23 +2021,20 @@ function normalizeOnConflict(oc) {
 }
 
 function recordUpdate(table, args) {
-  push(
-    compact({
-      op: "update",
-      table,
-      set: resolveSet(args.set),
-      where: resolveExpr(args.where),
-      batch: args.batch,
-      schema: args.schema,
-    }),
-  );
+  emitUpdate({
+    table,
+    set: resolveSet(args.set),
+    where: resolveExpr(args.where),
+    batch: args.batch,
+    schema: args.schema,
+  });
 }
 
 function recordDel(table, args) {
   if (args.where === undefined || args.where === null) {
     throw structuredError("OP_INVALID", "del({ where }): where is mandatory (no unfiltered delete)");
   }
-  push(compact({ op: "delete", table, where: resolveExpr(args.where), limit: args.limit, schema: args.schema }));
+  emitDelete({ table, where: resolveExpr(args.where), limit: args.limit, schema: args.schema });
 }
 
 const DEFAULT_BACKFILL_CURSOR = "id";
@@ -2044,18 +2044,15 @@ function recordBackfill(table, args) {
   if (args.set === undefined) {
     throw structuredError("OP_INVALID", "backfill({ set }): set is required");
   }
-  push(
-    compact({
-      op: "backfill",
-      table,
-      cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
-      batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
-      set: resolveSet(args.set),
-      filter: resolveExpr(args.where),
-      name: args.name || `backfill_${table}`,
-      schema: args.schema,
-    }),
-  );
+  emitBackfill({
+    table,
+    cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
+    batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
+    set: resolveSet(args.set),
+    filter: resolveExpr(args.where),
+    name: args.name || `backfill_${table}`,
+    schema: args.schema,
+  });
 }
 
 function normalizeTableRef(input, what) {
@@ -2198,17 +2195,14 @@ function recordCreateView(name, args) {
   if (!args || args.as === undefined) {
     throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder");
   }
-  push(
-    compact({
-      op: "createView",
-      name,
-      schema: args.schema,
-      columns: args.columns,
-      query: { kind: "structured", select: resolveSelectAst(args.as) },
-      replace: args.replace,
-      materialized: args.materialized,
-    }),
-  );
+  emitCreateView({
+    name,
+    schema: args.schema,
+    columns: args.columns,
+    query: { kind: "structured", select: resolveSelectAst(args.as) },
+    replace: args.replace,
+    materialized: args.materialized,
+  });
 }
 
 function recordCreateRawView(name, args) {
@@ -2216,29 +2210,23 @@ function recordCreateRawView(name, args) {
     throw structuredError("OP_INVALID", "view(name).createRaw({ sql }) needs an object");
   }
   requireString(args.sql, "view(name).createRaw({ sql })");
-  push(
-    compact({
-      op: "createView",
-      name,
-      schema: args.schema,
-      columns: args.columns,
-      query: { kind: "raw", sql: args.sql },
-      replace: args.replace,
-      materialized: args.materialized,
-    }),
-  );
+  emitCreateRawView({
+    name,
+    schema: args.schema,
+    columns: args.columns,
+    query: { kind: "raw", sql: args.sql },
+    replace: args.replace,
+    materialized: args.materialized,
+  });
 }
 
 function recordDropView(name, args) {
-  push(
-    compact({
-      op: "dropView",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-      materialized: args.materialized,
-    }),
-  );
+  emitDropView({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+    materialized: args.materialized,
+  });
 }
 
 const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"];
@@ -2661,19 +2649,19 @@ export function table(name, opts = {}) {
     // Exposed always; the engine's capability gate refuses them fail-closed under
     // a confined capability set. Each pushes a vendor op carrying the table.
     enableRowLevelSecurity() {
-      push(compact({ op: "enableRls", table: name, schema: dflt }));
+      emitEnableRls({ table: name, schema: dflt });
       return handle;
     },
     forceRowLevelSecurity() {
-      push(compact({ op: "forceRls", table: name, schema: dflt }));
+      emitForceRls({ table: name, schema: dflt });
       return handle;
     },
     disableRowLevelSecurity() {
-      push(compact({ op: "disableRls", table: name, schema: dflt }));
+      emitDisableRls({ table: name, schema: dflt });
       return handle;
     },
     noForceRowLevelSecurity() {
-      push(compact({ op: "noForceRls", table: name, schema: dflt }));
+      emitNoForceRls({ table: name, schema: dflt });
       return handle;
     },
     createPolicy(args) {
@@ -2684,8 +2672,7 @@ export function table(name, opts = {}) {
       if (args.using === undefined) {
         throw structuredError("OP_INVALID", ".createPolicy({ using }): using is required (the renderer always emits USING)");
       }
-      push(compact({
-        op: "createPolicy",
+      emitCreatePolicy({
         name: args.name,
         table: name,
         schema: pickSchema(args, dflt),
@@ -2693,24 +2680,22 @@ export function table(name, opts = {}) {
         to: args.to,
         using: resolveExpr(args.using),
         withCheck: resolveExpr(args.withCheck),
-      }));
+      });
       return handle;
     },
     dropPolicy(args) {
       requireString(args.name, ".dropPolicy({ name })");
-      push(compact({
-        op: "dropPolicy",
+      emitDropPolicy({
         name: args.name,
         table: name,
         schema: pickSchema(args, dflt),
         ifExists: args.ifExists,
-      }));
+      });
       return handle;
     },
     createTrigger(args) {
       requireString(args.name, ".createTrigger({ name })");
-      push(compact({
-        op: "createTrigger",
+      emitCreateTrigger({
         name: args.name,
         table: name,
         schema: pickSchema(args, dflt),
@@ -2719,18 +2704,17 @@ export function table(name, opts = {}) {
         forEach: args.forEach,
         action: resolveTriggerAction(args),
         when: resolveExpr(args.when),
-      }));
+      });
       return handle;
     },
     dropTrigger(args) {
       requireString(args.name, ".dropTrigger({ name })");
-      push(compact({
-        op: "dropTrigger",
+      emitDropTrigger({
         name: args.name,
         table: name,
         schema: pickSchema(args, dflt),
         ifExists: args.ifExists,
-      }));
+      });
       return handle;
     },
   };
