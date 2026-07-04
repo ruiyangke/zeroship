@@ -2467,7 +2467,7 @@ fn validate_col_type_position(
         }
     }
 
-    if matches!(ty, ColType::Char { len: 0 }) {
+    if matches!(ty, ColType::Char { length: 0 }) {
         return Err(AuthoringError {
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),

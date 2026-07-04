@@ -595,7 +595,7 @@ fn alter_column_type_render_is_byte_identical_pg() {
         Op::SetColumnType {
             table: "widgets".into(),
             column: "qty".into(),
-            to_type: ColType::Float,
+            to_type: ColType::Double,
             using: None,
             schema: None,
             existence_guard: None,
@@ -1035,7 +1035,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
             Op::SetColumnType {
                 table: "widgets".into(),
                 column: "qty".into(),
-                to_type: ColType::Float,
+                to_type: ColType::Double,
                 using: None,
                 schema: None,
                 existence_guard: None,

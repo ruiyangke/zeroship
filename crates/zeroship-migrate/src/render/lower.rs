@@ -2071,7 +2071,7 @@ impl IrAuthor {
                 )?;
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
-                        ColType::Enum { name }
+                        ColType::Enum { name, .. }
                             if !self.dialect.supports(Capability::MaterializedEnumType) =>
                         {
                             return Err(IrLowerError::NamedTypeUnsupported {
@@ -2080,7 +2080,7 @@ impl IrAuthor {
                                 reason: "unreachable use-site",
                             });
                         }
-                        ColType::Domain { name }
+                        ColType::Domain { name, .. }
                             if !self.dialect.supports(Capability::MaterializedDomainType) =>
                         {
                             return Err(IrLowerError::NamedTypeUnsupported {
@@ -3237,7 +3237,7 @@ impl IrAuthor {
         named_types: &NamedTypeRegistry,
     ) -> Result<(), IrLowerError> {
         match &source.ty {
-            ColType::Enum { name } => {
+            ColType::Enum { name, .. } => {
                 match self.dialect {
                     SqlDialect::Postgres => {
                         let schema = named_types.enum_schema_or(name, default_schema);
@@ -3261,7 +3261,7 @@ impl IrAuthor {
                     }
                 }
             }
-            ColType::Domain { name } => {
+            ColType::Domain { name, .. } => {
                 if matches!(self.dialect, SqlDialect::Postgres) {
                     let schema = named_types.domain_schema_or(name, default_schema);
                     col.data_type = pg_type_data_type(schema, name);
@@ -3329,11 +3329,11 @@ impl IrAuthor {
         named_types: &NamedTypeRegistry,
     ) -> Result<String, IrLowerError> {
         match as_type {
-            ColType::Enum { name } => {
+            ColType::Enum { name, .. } => {
                 let def = named_types.enum_def(name)?;
                 pg_type_qname(&def.schema, name)
             }
-            ColType::Domain { name } => Err(IrLowerError::NamedTypeUnsupported {
+            ColType::Domain { name, .. } => Err(IrLowerError::NamedTypeUnsupported {
                 kind: "domain",
                 name: name.clone(),
                 reason: "nested named base type",
@@ -4776,7 +4776,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         _ => None,
     };
     let char_len = match &c.ty {
-        ColType::Char { len } => Some(i64::from(*len)),
+        ColType::Char { length } => Some(i64::from(*length)),
         _ => None,
     };
     // **Migration-first P2a (§2b)** — thread the two DECLARED-ONLY, uncatalogable
@@ -4834,10 +4834,10 @@ fn encrypted_wraps_token(of: &ColType) -> &'static str {
         ColType::SmallInt
         | ColType::Int
         | ColType::BigInt
-        | ColType::Float
+        | ColType::Double
         | ColType::Real
         | ColType::Decimal { .. } => "number",
-        ColType::Bytea => "bytes",
+        ColType::Bytes => "bytes",
         _ => "string",
     }
 }
@@ -4852,16 +4852,16 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Int => ("int".into(), None),
         ColType::SmallInt => ("smallInt".into(), None),
         ColType::BigInt => ("bigInt".into(), None),
-        ColType::Float => ("number".into(), None),
+        ColType::Double => ("number".into(), None),
         ColType::Real => ("real".into(), None),
-        ColType::Bool => ("boolean".into(), None),
+        ColType::Boolean => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
         ColType::Timestamp => ("date".into(), None),
         ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
         ColType::Inet => ("inet".into(), None),
         ColType::TextArray => ("textArray".into(), None),
-        ColType::Bytea => ("bytes".into(), None),
+        ColType::Bytes => ("bytes".into(), None),
         ColType::Char { .. } => ("char".into(), None),
         ColType::Ref { references } => ("ref".into(), Some(references.clone())),
         ColType::Vector { .. } => ("vector".into(), None),
@@ -5711,7 +5711,7 @@ mod tests {
                     unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 TIrColumn {
                     name: "ratio".into(),
-                    ty: ColType::Float,
+                    ty: ColType::Double,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),

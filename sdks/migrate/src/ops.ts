@@ -927,13 +927,13 @@ export const t: TypeLexicon = {
     if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
       throw structuredError("OP_INVALID", `t.char(n): n must be a positive integer, got ${n}`);
     }
-    return new ColumnDefImpl({ char: { len: n } } as ColType);
+    return new ColumnDefImpl({ char: { length: n } } as ColType);
   },
   timestamp: () => new ColumnDefImpl("timestamp"),
   date: () => new ColumnDefImpl("date" as ColType),
   uuid: () => new ColumnDefImpl("uuid"),
-  bytes: () => new ColumnDefImpl("bytea"),
-  boolean: () => new ColumnDefImpl("bool"),
+  bytes: () => new ColumnDefImpl("bytes"),
+  boolean: () => new ColumnDefImpl("boolean"),
   json: () => new ColumnDefImpl("json"),
   ref: (targetTable) => {
     requireString(targetTable, "t.ref(target)");
@@ -967,7 +967,7 @@ export const t: TypeLexicon = {
   int: () => new ColumnDefImpl("int"),
   bigInt: () => new ColumnDefImpl("bigInt"),
   real: () => new ColumnDefImpl("real"),
-  float: () => new ColumnDefImpl("float"),
+  float: () => new ColumnDefImpl("double"),
   inet: () => new ColumnDefImpl("inet"),
   enum: (name) => {
     const n = typeof name === "string" ? name : name.name;

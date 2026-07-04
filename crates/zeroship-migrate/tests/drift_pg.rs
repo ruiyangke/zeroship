@@ -1321,7 +1321,7 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
             name: "users".into(),
             columns: vec![
                 ir_col("email", ColType::Text, true),
-                ir_col("active", ColType::Bool, true),
+                ir_col("active", ColType::Boolean, true),
             ],
             primary_key: None,
             constraints: Vec::new(),
@@ -1523,7 +1523,7 @@ async fn top_level_comment_metadata_reintrospects_and_drifts() {
             name: "users".into(),
             columns: vec![
                 ir_col("email", ColType::Text, true),
-                ir_col("active", ColType::Bool, true),
+                ir_col("active", ColType::Boolean, true),
             ],
             primary_key: None,
             constraints: Vec::new(),

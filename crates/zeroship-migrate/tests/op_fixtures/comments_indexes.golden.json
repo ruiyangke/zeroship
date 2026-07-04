@@ -61,7 +61,7 @@
         },
         {
           "name": "active",
-          "type": "bool",
+          "type": "boolean",
           "nullable": false,
           "default": {
             "literal": {

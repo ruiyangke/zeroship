@@ -136,15 +136,15 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
         ColType::Int,
         ColType::SmallInt,
         ColType::BigInt,
-        ColType::Float,
+        ColType::Double,
         ColType::Real,
-        ColType::Bool,
+        ColType::Boolean,
         ColType::Json,
         ColType::Timestamp,
         ColType::Uuid,
         ColType::Inet,
         ColType::TextArray,
-        ColType::Bytea,
+        ColType::Bytes,
         ColType::Decimal { precision: 38, scale: 9 },
     ] {
         assert!(
