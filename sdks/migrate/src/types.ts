@@ -156,7 +156,7 @@ export interface ColumnDef {
   /** A structured default — a typed scalar literal OR a nullary synth scalar
    *  (`{ fn: "now" | "genRandomUuid" }`). NEVER raw SQL (property A). Returns a
    *  fresh def. */
-  default(value: ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" }): ColumnDef;
+  default(value: DefaultValue): ColumnDef;
   /** Re-target as a foreign-key reference (a plain-string target table). Returns
    *  a fresh def. */
   ref(targetTable: string): ColumnDef;
@@ -356,8 +356,16 @@ export type DbSynthSymbol =
  *  `fnSynth(now/genRandomUuid)`; all other functions are rejected. */
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 
+/** Empty object/array defaults admitted for JSON/text-array columns. Non-empty
+ *  containers are intentionally not part of the public default type. */
+export type EmptyContainerDefault = Record<string, never> | readonly [];
+
 /** A column default value accepted by default-bearing column terminals. */
-export type DefaultValue = ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" };
+export type DefaultValue =
+  | ScalarValue
+  | DbSynthSymbol
+  | { fn: "now" | "genRandomUuid" }
+  | EmptyContainerDefault;
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */

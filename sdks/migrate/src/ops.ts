@@ -486,7 +486,7 @@ class ColumnDefImpl implements ColumnDefType {
   notNull(): ColumnDefImpl {
     return this.with({ nullable: false });
   }
-  default(value: ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" }): ColumnDefImpl {
+  default(value: DefaultValue): ColumnDefImpl {
     return this.with({ default: toIrDefault(value) });
   }
   ref(targetTable: string): ColumnDefImpl {
@@ -624,6 +624,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+function isExplicitScalarCarrier(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value);
+  return (
+    keys.length === 1 &&
+    ((keys[0] === "decimal" && typeof value.decimal === "string") ||
+      (keys[0] === "bytes" && typeof value.bytes === "string"))
+  );
+}
+
 function rejectNestedFunctionValues(value: unknown): void {
   rejectFunctionValue(value);
   if (Array.isArray(value)) {
@@ -660,12 +669,26 @@ function toIrValue(value: unknown): unknown {
   return toIrScalar(value);
 }
 
-function toIrDefault(value: ScalarValue | DbSynthSymbol | { fn: "now" | "genRandomUuid" }): Node {
+const NON_EMPTY_CONTAINER_DEFAULT_ERROR =
+  "non-empty container defaults are not supported yet; only {} and [] are";
+
+function toIrDefault(value: DefaultValue): Node {
   const fn = nativeFnSynthName(value);
   if (fn !== undefined) return { fn: { fn } };
   rejectFunctionValue(value);
   if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return { container: "array" };
+    rejectNestedFunctionValues(value);
+    throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
+  }
+  if (isPlainObject(value)) {
+    if (Object.keys(value).length === 0) return { container: "object" };
+    if (isExplicitScalarCarrier(value)) return { literal: { value: toIrScalar(value) } };
+    rejectNestedFunctionValues(value);
+    throw structuredError("OP_INVALID", NON_EMPTY_CONTAINER_DEFAULT_ERROR);
   }
   return { literal: { value: toIrScalar(value) } };
 }

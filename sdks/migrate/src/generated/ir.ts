@@ -21,6 +21,7 @@ import type {
   BinaryOp,
   CastTarget,
   CmpOp,
+  EmptyContainerKind,
   ExistenceGuard,
   ExclusionMethod,
   ExclusionOperator,
@@ -53,6 +54,7 @@ export type {
   BinaryOp,
   CastTarget,
   CmpOp,
+  EmptyContainerKind,
   ExistenceGuard,
   ExclusionMethod,
   ExclusionOperator,
@@ -158,7 +160,8 @@ export interface IrMask {
  *  (`now`/`genRandomUuid`). Never raw SQL (property A). */
 export type IrDefault =
   | { literal: { value: IrScalar } }
-  | { fn: { fn: SynthDefaultFn } };
+  | { fn: { fn: SynthDefaultFn } }
+  | { container: EmptyContainerKind };
 
 /** The CLOSED expression AST node (§3.3.1), internally tagged on `node`. */
 export type Expr =

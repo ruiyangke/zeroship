@@ -30,12 +30,24 @@ import {
 import { domain, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
+import {
+  __begin as engBegin,
+  __drain as engDrain,
+  t as engT,
+  table as engTable,
+} from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
 
 /** Record one phase's ops via the ambient recorder. */
 function record(up: () => void): any[] {
   __begin();
   up();
   return __drain();
+}
+
+function recordEngine(up: (api: { table: any; t: any }) => void): any[] {
+  engBegin();
+  up({ table: engTable, t: engT });
+  return engDrain();
 }
 
 test("@zeroship/migrate core exports enumType and omits pg-only/old names", async () => {
@@ -389,6 +401,56 @@ test("a column default carries a bigint/Uint8Array through the same IrScalar car
   const cols = ops[0].columns;
   assert.deepEqual(cols[0].default, { literal: { value: { decimal: "9007199254740993" } } });
   assert.deepEqual(cols[1].default, { literal: { value: { bytes: "/wA=" } } });
+});
+
+test("empty object and array defaults record as container defaults", () => {
+  const ops = record(() =>
+    table("t").create({
+      columns: {
+        settings: t.json().default({}),
+        events: t.json().default([]),
+        scopes: t.textArray().default([]),
+      },
+    }),
+  );
+  const cols = ops[0].columns;
+  assert.deepEqual(cols[0].default, { container: "object" });
+  assert.deepEqual(cols[1].default, { container: "array" });
+  assert.deepEqual(cols[2].default, { container: "array" });
+});
+
+test("non-empty container defaults are rejected", () => {
+  const message = "non-empty container defaults are not supported yet; only {} and [] are";
+  assert.throws(
+    () => record(() => table("t").create({ columns: { v: t.json().default({ a: 1 } as any) } })),
+    (e: any) => e.code === "OP_INVALID" && e.message.includes(message),
+  );
+  assert.throws(
+    () => record(() => table("t").create({ columns: { v: t.json().default([1] as any) } })),
+    (e: any) => e.code === "OP_INVALID" && e.message.includes(message),
+  );
+});
+
+test("empty container defaults record byte-identically to engine recorder", () => {
+  const pub = record(() =>
+    table("t").create({
+      columns: {
+        settings: t.json().default({}),
+        events: t.json().default([]),
+        scopes: t.textArray().default([]),
+      },
+    }),
+  );
+  const eng = recordEngine(({ table, t }) =>
+    table("t").create({
+      columns: {
+        settings: t.json().default({}),
+        events: t.json().default([]),
+        scopes: t.textArray().default([]),
+      },
+    }),
+  );
+  assert.deepEqual(pub, eng);
 });
 
 test("onConflict.doUpdate normalizes bigint/Uint8Array scalar assignments", () => {

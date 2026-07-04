@@ -3022,7 +3022,7 @@
       ]
     },
     "IrDefault": {
-      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal or an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`). NEVER a raw SQL string (property A); the per-dialect\ndefault clause is rendered by the shared snapshot-builder kernel from this\nstructured value (§6.5).",
+      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal or an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`) or an EMPTY container default for JSON/text-array\ncolumns. NEVER a raw SQL string (property A); the per-dialect default clause\nis rendered by the shared snapshot-builder kernel from this structured value\n(§6.5).",
       "oneOf": [
         {
           "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -3067,6 +3067,19 @@
           },
           "required": [
             "fn"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "description": "An empty-container default (`{}` or `[]`). Non-empty containers are not representable.",
+          "type": "object",
+          "properties": {
+            "container": {
+              "$ref": "#/$defs/EmptyContainerKind"
+            }
+          },
+          "required": [
+            "container"
           ],
           "additionalProperties": false
         }
@@ -3126,6 +3139,21 @@
           "description": "`gen_random_uuid()`, evaluated at apply time.",
           "type": "string",
           "const": "genRandomUuid"
+        }
+      ]
+    },
+    "EmptyContainerKind": {
+      "description": "Empty container defaults admitted as column DEFAULTs. This is intentionally\nEMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.",
+      "oneOf": [
+        {
+          "description": "`{}`.",
+          "type": "string",
+          "const": "object"
+        },
+        {
+          "description": "`[]`.",
+          "type": "string",
+          "const": "array"
         }
       ]
     },

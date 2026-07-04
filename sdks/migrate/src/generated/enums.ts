@@ -75,6 +75,12 @@ export type SynthFn = "concatWs" | "splitPart" | "now" | "genRandomUuid";
 export type SynthDefaultFn = "now" | "genRandomUuid";
 
 /**
+ * Empty container defaults admitted as column DEFAULTs. This is intentionally
+ * EMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.
+ */
+export type EmptyContainerKind = "object" | "array";
+
+/**
  * The closed portable cast-target set (§3.3.1). A non-portable cast target is
  * rejected (`UNSUPPORTED { kind: "expr" }`).
  */
