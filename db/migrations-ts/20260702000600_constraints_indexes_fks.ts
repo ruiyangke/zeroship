@@ -1,5 +1,4 @@
 import { and, membership, notMembership, table } from "@zeroship/migrate";
-import { raw } from "@zeroship/migrate/pg";
 
 export const name = "constraints_indexes_fks";
 
@@ -199,8 +198,7 @@ export function up() {
   table("totp_backup_codes", { schema: "zeroship" }).foreignKey("totp_backup_codes_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
   table("totp_credentials", { schema: "zeroship" }).foreignKey("totp_credentials_user_id_fkey").add({ columns: ["user_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
   table("usage_aggregates", { schema: "zeroship" }).foreignKey("usage_aggregates_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
-  // TODO(dsl-v2): add structural support for this table constraint shape
-  raw({ sql: "ALTER TABLE ONLY zeroship.usage_aggregates\n    ADD CONSTRAINT usage_aggregates_metric_fkey FOREIGN KEY (metric) REFERENCES zeroship.billing_metrics(metric) DEFERRABLE INITIALLY DEFERRED", reason: "this constraint shape is outside the current structural renderer" });
+  table("usage_aggregates", { schema: "zeroship" }).addForeignKey("usage_aggregates_metric_fkey", { columns: ["metric"], references: { table: "billing_metrics", columns: ["metric"], schema: "zeroship" }, deferrable: true, initiallyDeferred: true });
 }
 
 export function down() {
