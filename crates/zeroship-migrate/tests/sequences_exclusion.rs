@@ -474,7 +474,7 @@ fn postgres_and_sqlite_render_partial_index_where() {
     let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
     assert_eq!(
         sqlite[0].up,
-        r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "users" ("active") WHERE ("active" IS TRUE)"#
+        r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "users" ("active") WHERE ("active" = 1)"#
     );
 }
 
@@ -506,7 +506,7 @@ fn postgres_and_sqlite_render_expression_index_elements() {
     let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
     assert_eq!(
         sqlite[0].up,
-        r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "users" ("email", (lower("email"))) WHERE ("active" IS TRUE)"#
+        r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "users" ("email", (lower("email"))) WHERE ("active" = 1)"#
     );
 }
 
