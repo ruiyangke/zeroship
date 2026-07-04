@@ -26,12 +26,10 @@ export function up() {
       status: t.text().notNull().default("alive"),
       drain_started_at: t.timestamp(),
       version: t.text().notNull().default(""),
-      metadata: t.json().notNull(),
+      metadata: t.json().notNull().default({}),
     },
     primaryKey: ["host_id"],
   });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.hosts ALTER COLUMN metadata SET DEFAULT '{}'::jsonb", reason: "column hosts.metadata requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("hosts", { schema: "zeroship" }).addCheck("hosts_backend_check", (c) => membership(c("backend"), ["docker", "k8s", "nomad-ch"]));
   table("hosts", { schema: "zeroship" }).addCheck("hosts_boot_id_check", (c) => c("boot_id").matches("^[0-9A-Za-z]{20,40}$"));
   table("hosts", { schema: "zeroship" }).addCheck("hosts_host_id_check", (c) => c("host_id").matches("^hst_[0-9A-Za-z]{20,40}$"));
@@ -44,13 +42,11 @@ export function up() {
       user_id: t.text().notNull(),
       kind: t.text().notNull(),
       ts: t.timestamp().notNull().default({ fn: "now" }),
-      data: t.json().notNull(),
+      data: t.json().notNull().default({}),
     },
     primaryKey: ["ts", "event_id"],
     partitionBy: p.range(["ts"]),
   });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandbox_events ALTER COLUMN data SET DEFAULT '{}'::jsonb", reason: "column sandbox_events.data requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("sandbox_events", { schema: "zeroship" }).addCheck("sandbox_events_data_check", (c) => c("data").columnSize().le(8192));
   table("sandbox_events", { schema: "zeroship" }).addCheck("sandbox_events_event_id_check", (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$"));
   table("sandbox_events", { schema: "zeroship" }).addCheck("sandbox_events_sandbox_id_check", (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$"));
@@ -79,7 +75,7 @@ export function up() {
       stopped_at: t.timestamp(),
       last_used_at: t.timestamp().notNull().default({ fn: "now" }),
       deleted_at: t.timestamp(),
-      metadata: t.json().notNull(),
+      metadata: t.json().notNull().default({}),
       snapshot_artifact_path: t.text(),
       snapshot_taken_at: t.timestamp(),
       snapshot_ch_version: t.text(),
@@ -96,8 +92,6 @@ export function up() {
     },
     primaryKey: ["sandbox_id"],
   });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.sandboxes ALTER COLUMN metadata SET DEFAULT '{}'::jsonb", reason: "column sandboxes.metadata requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_backend_check", (c) => membership(c("backend"), ["docker", "k8s", "nomad-ch"]));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_generation_check", (c) => c("generation").ge(0));
   table("sandboxes", { schema: "zeroship" }).addCheck("sandboxes_key_fp_check", (c) => c("key_fp").matches("^[0-9a-f]{32}$"));

@@ -12,15 +12,13 @@ export function up() {
       global_user_id: t.uuid().notNull(),
       refresh_token_enc: t.bytes().notNull(),
       refresh_family_id: t.text().notNull(),
-      granted_scopes: t.textArray().notNull(),
+      granted_scopes: t.textArray().notNull().default([]),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.app_session_anchors ALTER COLUMN granted_scopes SET DEFAULT '{}'::text[]", reason: "column app_session_anchors.granted_scopes requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
   table("app_user_identities", { schema: "zeroship" }).create({
     columns: {
       app_client_id: t.text().notNull(),
@@ -59,14 +57,12 @@ export function up() {
       resource_type: t.text().notNull(),
       resource_id: t.text(),
       decision: t.text().notNull(),
-      matched_policies: t.textArray().notNull(),
+      matched_policies: t.textArray().notNull().default([]),
       request_ip: t.inet(),
       request_id: t.text(),
     },
     primaryKey: ["id"],
   });
-  // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.authz_decisions ALTER COLUMN matched_policies SET DEFAULT '{}'::text[]", reason: "column authz_decisions.matched_policies requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
   table("authz_decisions", { schema: "zeroship" }).addCheck("authz_decisions_decision_check", (c) => membership(c("decision"), ["allow", "deny"]));
   table("cron_state", { schema: "zeroship" }).create({
     columns: {
@@ -155,19 +151,15 @@ export function up() {
       idle_expires_at: t.timestamp().notNull(),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
-      granted_scopes: t.textArray().notNull(),
+      granted_scopes: t.textArray().notNull().default([]),
       auth_time: t.timestamp(),
-      amr: t.textArray().notNull(),
+      amr: t.textArray().notNull().default([]),
       sid: t.text(),
     },
     primaryKey: ["id"],
   });
   // TODO(dsl-v2): add structural column type support for public.citext
   raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN email TYPE public.citext USING email::public.citext", reason: "column gateway_sessions.email uses PostgreSQL type public.citext, which is not in the current closed column lexicon/lowerer use-site set" });
-  // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN granted_scopes SET DEFAULT '{}'::text[]", reason: "column gateway_sessions.granted_scopes requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): array default is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.gateway_sessions ALTER COLUMN amr SET DEFAULT '{}'::text[]", reason: "column gateway_sessions.amr requires exact default '{}'::text[], which the current structural default surface/lowerer cannot emit for this table" });
   table("identity_links", { schema: "zeroship" }).create({
     columns: {
       principal_id: t.uuid().notNull(),

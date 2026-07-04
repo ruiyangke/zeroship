@@ -1,6 +1,4 @@
 import { and, membership, table, t } from "@zeroship/migrate";
-import { raw } from "@zeroship/migrate/pg";
-
 export const name = "control_tables";
 
 export function up() {
@@ -165,7 +163,7 @@ export function up() {
       audit_id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
       app_id: t.uuid().notNull(),
       migration_id: t.uuid().notNull(),
-      migration_versions: t.json().notNull(),
+      migration_versions: t.json().notNull().default([]),
       action: t.text().notNull(),
       outcome: t.text().notNull(),
       principal_id: t.uuid().notNull(),
@@ -173,15 +171,11 @@ export function up() {
       sealed_profile: t.json(),
       ceiling_id: t.text().notNull(),
       ceiling_version: t.bigInt().notNull(),
-      detail: t.json().notNull(),
+      detail: t.json().notNull().default({}),
       created_at: t.timestamp().notNull().default({ fn: "now" }),
     },
     primaryKey: ["audit_id"],
   });
-  // TODO(dsl-v2): json array default is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ALTER COLUMN migration_versions SET DEFAULT '[]'::jsonb", reason: "column migrated_migration_audit.migration_versions requires exact default '[]'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
-  // TODO(dsl-v2): default expression is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migration_audit ALTER COLUMN detail SET DEFAULT '{}'::jsonb", reason: "column migrated_migration_audit.detail requires exact default '{}'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("migrated_migration_audit", { schema: "zeroship" }).addCheck("migrated_migration_audit_action_check", (c) => membership(c("action"), ["submit", "reject_pending", "approve", "apply"]));
   table("migrated_migration_audit", { schema: "zeroship" }).addCheck("migrated_migration_audit_ceiling_version_check", (c) => c("ceiling_version").gt(0));
   table("migrated_migrations", { schema: "zeroship" }).create({
@@ -193,7 +187,7 @@ export function up() {
       effective_profile: t.json().notNull(),
       ceiling_id: t.text().notNull(),
       ceiling_version: t.bigInt().notNull(),
-      gated_versions: t.json().notNull(),
+      gated_versions: t.json().notNull().default([]),
       submitted_by: t.uuid().notNull(),
       submitted_at: t.timestamp().notNull().default({ fn: "now" }),
       approved_by: t.uuid(),
@@ -203,8 +197,6 @@ export function up() {
     },
     primaryKey: ["app_id", "migration_id"],
   });
-  // TODO(dsl-v2): json array default is not expressible in createTable column defaults yet
-  raw({ sql: "ALTER TABLE ONLY zeroship.migrated_migrations ALTER COLUMN gated_versions SET DEFAULT '[]'::jsonb", reason: "column migrated_migrations.gated_versions requires exact default '[]'::jsonb, which the current structural default surface/lowerer cannot emit for this table" });
   table("migrated_migrations", { schema: "zeroship" }).addCheck("migrated_migrations_ceiling_version_check", (c) => c("ceiling_version").gt(0));
   table("migrated_migrations", { schema: "zeroship" }).addCheck("migrated_migrations_status_check", (c) => membership(c("status"), ["submitted", "pending_approval", "approved", "applied", "failed"]));
   table("net_policy_catalog", { schema: "zeroship" }).create({
