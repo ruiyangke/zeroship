@@ -4,7 +4,7 @@ use zeroship_migrate::model::expr::{
     AggFunc, BinaryOp, CaseBranch, CastTarget, Expr, ExtractField, PgExtractField, ScalarFn,
     SynthFn, UnaryOp,
 };
-use zeroship_migrate::model::ir::IrScalar;
+use zeroship_migrate::model::ir::{IrScalar, IrValue};
 use zeroship_migrate::model::validate::{validate_expr, Dialect, TargetScope};
 use zeroship_migrate::render::dml::assemble_backfill_clauses;
 use zeroship_migrate::SqlDialect;
@@ -299,7 +299,7 @@ fn assert_validates_and_renders_on_all_three(expr: &Expr, variant: &str) {
         });
 
         let mut set = BTreeMap::new();
-        set.insert("out".to_string(), expr.clone());
+        set.insert("out".to_string(), IrValue::Expr(expr.clone()));
         let rendered = assemble_backfill_clauses(sql_dialect, "t", &set, Some(expr))
             .unwrap_or_else(|err| panic!("{variant} must render on {sql_dialect:?}: {err:?}"));
         assert!(

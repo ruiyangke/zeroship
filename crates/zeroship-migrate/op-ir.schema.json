@@ -1254,10 +1254,10 @@
               "type": "string"
             },
             "set": {
-              "description": "Column → closed-AST assignment (sorted map for canonicality).",
+              "description": "Column → typed scalar or closed-AST assignment (sorted map for canonicality).",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/Expr"
+                "$ref": "#/$defs/IrValue"
               }
             },
             "where": {
@@ -1360,10 +1360,10 @@
               "$ref": "#/$defs/SafeU64"
             },
             "set": {
-              "description": "Column → closed-AST assignment.",
+              "description": "Column → typed scalar or closed-AST assignment.",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/Expr"
+                "$ref": "#/$defs/IrValue"
               }
             },
             "filter": {
@@ -5539,7 +5539,7 @@
       ]
     },
     "IrValue": {
-      "description": "A DML value in an insert row or `onConflict.doUpdate`: either the existing typed\nscalar wire shape or a closed expression AST such as `FnSynth(now)`.",
+      "description": "A DML value in an insert row, `update.set`, `backfill.set`, trigger update\n`set`, or `onConflict.doUpdate`: either the existing typed scalar wire shape\nor a closed expression AST such as `FnSynth(now)`.",
       "anyOf": [
         {
           "description": "A typed scalar literal. The wire shape is exactly [`IrScalar`]'s existing\nscalar representation, preserving committed scalar rows byte-for-byte.",
@@ -6304,10 +6304,10 @@
               "type": "string"
             },
             "set": {
-              "description": "Column → closed-AST assignment.",
+              "description": "Column → typed scalar or closed-AST assignment.",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/Expr"
+                "$ref": "#/$defs/IrValue"
               }
             },
             "where": {

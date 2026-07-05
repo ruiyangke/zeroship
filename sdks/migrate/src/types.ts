@@ -404,6 +404,10 @@ export type DbSynthSymbol =
  *  `fnSynth(now/genRandomUuid)`; all other functions are rejected. */
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 
+/** A DML assignment RHS accepts the same scalar/expression values as insert rows,
+ *  plus the `(c) => Expr` callback shorthand. */
+export type DmlSetValue = DmlValue | ExprFn;
+
 /** Empty object/array defaults admitted for JSON/text-array columns. */
 export type EmptyContainerDefault = Record<string, never> | readonly [];
 
@@ -724,7 +728,7 @@ export interface InsertArgs<R extends Row = Row> {
 }
 
 export interface UpdateArgs {
-  set: Record<string, ExprFn>;
+  set: Record<string, DmlSetValue>;
   where?: ExprFn;
   /** Page a large one-shot UPDATE over a cursor column (`Op::Update.batch`): the
    *  engine lowers it to the same windowed/batched executor a `backfill` uses
@@ -743,7 +747,7 @@ export interface DelArgs {
 }
 
 export interface BackfillArgs {
-  set: Record<string, ExprFn>;
+  set: Record<string, DmlSetValue>;
   where?: ExprFn;
   /** Defaults to the single-column PK (`"id"`). */
   cursorColumn?: string;
@@ -772,7 +776,7 @@ export interface TriggerInsertArgs<R extends Row = Row> {
 
 export interface TriggerUpdateArgs {
   table: string;
-  set: Record<string, ExprFn>;
+  set: Record<string, DmlSetValue>;
   where?: ExprFn;
   schema?: string;
 }

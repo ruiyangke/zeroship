@@ -38,7 +38,8 @@
               "value": "unknown"
             }
           ]
-        }
+        },
+        "marker": "fixed"
       },
       "where": {
         "node": "binOp",
@@ -89,7 +90,8 @@
               "name": "label"
             }
           ]
-        }
+        },
+        "marker": "backfilled"
       },
       "filter": {
         "node": "binOp",

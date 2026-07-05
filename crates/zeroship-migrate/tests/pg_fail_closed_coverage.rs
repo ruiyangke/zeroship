@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zeroship_migrate::model::expr::{Expr, PgExtractField, ScalarFn};
 use zeroship_migrate::model::ir::{
-    FuncLanguage, GrantTarget, IrScalar, MigrationIr, Op, PolicyCmd, Privilege, SelectAst,
+    FuncLanguage, GrantTarget, IrScalar, IrValue, MigrationIr, Op, PolicyCmd, Privilege, SelectAst,
     TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
 use zeroship_migrate::model::validate::{
@@ -136,7 +136,7 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         validate_expr(&expr, Dialect::Postgres, &scope, 0, None)
             .unwrap_or_else(|err| panic!("{kind} must validate on Postgres: {err:?}"));
         let mut set = BTreeMap::new();
-        set.insert("out".to_string(), expr.clone());
+        set.insert("out".to_string(), IrValue::Expr(expr.clone()));
         let rendered = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, Some(&expr))
             .unwrap_or_else(|err| panic!("{kind} must render on Postgres: {err:?}"));
         assert!(!rendered.set_clause.trim().is_empty(), "{kind} PG render is empty");

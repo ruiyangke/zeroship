@@ -784,7 +784,7 @@ fn render_mysql_trigger_stmt(
                 assigns.push(format!(
                     "{} = {}",
                     dml::quote_bare_ident_for_dialect("column", col, SqlDialect::Mysql)?,
-                    crate::render::dml::render_expr_inline(rhs, SqlDialect::Mysql)?
+                    crate::render::dml::render_value_inline(rhs, SqlDialect::Mysql)?
                 ));
             }
             let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));

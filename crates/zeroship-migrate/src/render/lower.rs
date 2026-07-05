@@ -3037,7 +3037,7 @@ impl IrAuthor {
         table: &str,
         cursor_column: &str,
         batch_size: u64,
-        set: &std::collections::BTreeMap<String, crate::model::expr::Expr>,
+        set: &std::collections::BTreeMap<String, crate::model::ir::IrValue>,
         filter: Option<&crate::model::expr::Expr>,
         name: &str,
     ) -> Result<PlanStep, IrLowerError> {
@@ -4738,7 +4738,7 @@ fn render_sqlite_trigger_stmt(
                 assigns.push(format!(
                     "{} = {}",
                     crate::render::dml::quote_bare_ident("column", col)?,
-                    crate::render::dml::render_expr_inline(rhs, SqlDialect::Sqlite)?
+                    crate::render::dml::render_value_inline(rhs, SqlDialect::Sqlite)?
                 ));
             }
             let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));

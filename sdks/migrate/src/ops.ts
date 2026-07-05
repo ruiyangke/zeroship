@@ -54,6 +54,7 @@ import type {
   DefaultExprFn,
   DefaultValue,
   DelArgs,
+  DmlSetValue,
   DomainHandle,
   DeterminismFinding,
   DropTablePolicyArgs,
@@ -2025,12 +2026,19 @@ export function __pgResolveExpr(slot: ExprFn | ExprChainType | Expr | undefined)
   return resolveExpr(slot as ExprFn | ExprChainType | Node | undefined);
 }
 
-function resolveSet(set: Record<string, ExprFn>): Record<string, Node> {
+function resolveSetValue(value: DmlSetValue): unknown {
+  const synth = nativeFnSynthNode(value);
+  if (synth !== undefined) return synth;
+  if (typeof value === "function") return resolveExpr(value as ExprFn)!;
+  return toIrValue(value);
+}
+
+function resolveSet(set: Record<string, DmlSetValue>): Record<string, unknown> {
   if (!set || typeof set !== "object") {
-    throw structuredError("OP_INVALID", "`set` must be an object of column → expression");
+    throw structuredError("OP_INVALID", "`set` must be an object of column → DML value");
   }
-  const out: Record<string, Node> = {};
-  for (const col of Object.keys(set)) out[col] = resolveExpr(set[col])!;
+  const out: Record<string, unknown> = {};
+  for (const col of Object.keys(set)) out[col] = resolveSetValue(set[col]);
   return out;
 }
 
