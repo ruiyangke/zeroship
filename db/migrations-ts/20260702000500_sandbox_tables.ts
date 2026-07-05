@@ -12,8 +12,8 @@ export function up() {
     },
     primaryKey: ["sandbox_id"],
   });
-  pgTable("deleted_sandboxes", { schema: "zeroship" }).check("deleted_sandboxes_sandbox_id_check").add({ expr: (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$") });
-  pgTable("deleted_sandboxes", { schema: "zeroship" }).check("deleted_sandboxes_user_id_check").add({ expr: (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$") });
+  pgTable("deleted_sandboxes", { schema: "zeroship" }).check("deleted_sandboxes_sandbox_id_check").add({ expr: (c) => c.pg.regex(c("sandbox_id"), "^sbx_[0-9A-Za-z]{20,40}$") });
+  pgTable("deleted_sandboxes", { schema: "zeroship" }).check("deleted_sandboxes_user_id_check").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$") });
   table("hosts", { schema: "zeroship" }).create({
     columns: {
       host_id: t.text().notNull(),
@@ -31,9 +31,9 @@ export function up() {
     primaryKey: ["host_id"],
   });
   table("hosts", { schema: "zeroship" }).check("hosts_backend_check").add({ expr: (c) => c("backend").in(["docker", "k8s", "nomad-ch"]) });
-  pgTable("hosts", { schema: "zeroship" }).check("hosts_boot_id_check").add({ expr: (c) => c("boot_id").matches("^[0-9A-Za-z]{20,40}$") });
-  pgTable("hosts", { schema: "zeroship" }).check("hosts_host_id_check").add({ expr: (c) => c("host_id").matches("^hst_[0-9A-Za-z]{20,40}$") });
-  pgTable("hosts", { schema: "zeroship" }).check("hosts_region_check").add({ expr: (c) => c("region").matches("^[a-z][a-z0-9-]{1,63}$") });
+  pgTable("hosts", { schema: "zeroship" }).check("hosts_boot_id_check").add({ expr: (c) => c.pg.regex(c("boot_id"), "^[0-9A-Za-z]{20,40}$") });
+  pgTable("hosts", { schema: "zeroship" }).check("hosts_host_id_check").add({ expr: (c) => c.pg.regex(c("host_id"), "^hst_[0-9A-Za-z]{20,40}$") });
+  pgTable("hosts", { schema: "zeroship" }).check("hosts_region_check").add({ expr: (c) => c.pg.regex(c("region"), "^[a-z][a-z0-9-]{1,63}$") });
   table("hosts", { schema: "zeroship" }).check("hosts_status_check").add({ expr: (c) => c("status").in(["alive", "draining", "dead"]) });
   table("sandbox_events", { schema: "zeroship" }).create({
     columns: {
@@ -47,10 +47,10 @@ export function up() {
     primaryKey: ["ts", "event_id"],
     partitionBy: { range: ["ts"] },
   });
-  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_data_check").add({ expr: (c) => c("data").columnSize().le(8192) });
-  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_event_id_check").add({ expr: (c) => c("event_id").matches("^evt_[0-9A-Za-z]{20,40}$") });
-  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_sandbox_id_check").add({ expr: (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$") });
-  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_user_id_check").add({ expr: (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$") });
+  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_data_check").add({ expr: (c) => c.pg.pgColumnSize(c("data")).le(8192) });
+  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_event_id_check").add({ expr: (c) => c.pg.regex(c("event_id"), "^evt_[0-9A-Za-z]{20,40}$") });
+  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_sandbox_id_check").add({ expr: (c) => c.pg.regex(c("sandbox_id"), "^sbx_[0-9A-Za-z]{20,40}$") });
+  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_user_id_check").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$") });
   table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").create({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
   table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_06").create({ from: ["2026-06-01 00:00:00+00"], to: ["2026-07-01 00:00:00+00"] });
   table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_07").create({ from: ["2026-07-01 00:00:00+00"], to: ["2026-08-01 00:00:00+00"] });
@@ -94,9 +94,9 @@ export function up() {
   });
   table("sandboxes", { schema: "zeroship" }).check("sandboxes_backend_check").add({ expr: (c) => c("backend").in(["docker", "k8s", "nomad-ch"]) });
   table("sandboxes", { schema: "zeroship" }).check("sandboxes_generation_check").add({ expr: (c) => c("generation").ge(0) });
-  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_key_fp_check").add({ expr: (c) => c("key_fp").matches("^[0-9a-f]{32}$") });
-  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_project_id_check").add({ expr: (c) => c("project_id").matches("^prj_[0-9A-Za-z]{20,40}$") });
-  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_sandbox_id_check").add({ expr: (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$") });
+  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_key_fp_check").add({ expr: (c) => c.pg.regex(c("key_fp"), "^[0-9a-f]{32}$") });
+  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_project_id_check").add({ expr: (c) => c.pg.regex(c("project_id"), "^prj_[0-9A-Za-z]{20,40}$") });
+  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_sandbox_id_check").add({ expr: (c) => c.pg.regex(c("sandbox_id"), "^sbx_[0-9A-Za-z]{20,40}$") });
   table("sandboxes", { schema: "zeroship" }).check("sandboxes_snapshot_artifact_consistency").add({ expr: (c) =>
     or(
       c("status").notIn(["snapshotted", "snapshotted_suspect"]),
@@ -107,7 +107,7 @@ export function up() {
       ),
     ) });
   table("sandboxes", { schema: "zeroship" }).check("sandboxes_status_check").add({ expr: (c) => c("status").in(["starting", "running", "stopping", "stopped", "lost", "recreating", "orphan", "unreachable", "snapshotting", "snapshotted", "snapshotting_aborted", "snapshotted_suspect", "restoring", "restoring_cold"]) });
-  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_user_id_check").add({ expr: (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$") });
+  pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_user_id_check").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$") });
   table("shares", { schema: "zeroship" }).create({
     columns: {
       token_id: t.text().notNull(),
@@ -127,11 +127,11 @@ export function up() {
   });
   table("shares", { schema: "zeroship" }).check("shares_check").add({ expr: (c) => c("expires_at").gt(c("issued_at")) });
   table("shares", { schema: "zeroship" }).check("shares_check1").add({ expr: (c) => or(c("revoked_at").isNull(), c("revoked_at").ge(c("issued_at"))) });
-  pgTable("shares", { schema: "zeroship" }).check("shares_iss_check").add({ expr: (c) => or(c("iss").isNull(), c("iss").matches("^usr_[0-9A-Za-z]{20,40}$")) });
+  pgTable("shares", { schema: "zeroship" }).check("shares_iss_check").add({ expr: (c) => or(c("iss").isNull(), c.pg.regex(c("iss"), "^usr_[0-9A-Za-z]{20,40}$")) });
   table("shares", { schema: "zeroship" }).check("shares_port_check").add({ expr: (c) => and(c("port").ge(1), c("port").le(65535)) });
   table("shares", { schema: "zeroship" }).check("shares_scope_check").add({ expr: (c) => c("scope").in(["ro", "rw"]) });
   table("shares", { schema: "zeroship" }).check("shares_secret_version_check").add({ expr: (c) => c("secret_version").ge(1) });
-  pgTable("shares", { schema: "zeroship" }).check("shares_token_id_check").add({ expr: (c) => c("token_id").matches("^tok_[A-Za-z0-9_-]{20,40}$") });
+  pgTable("shares", { schema: "zeroship" }).check("shares_token_id_check").add({ expr: (c) => c.pg.regex(c("token_id"), "^tok_[A-Za-z0-9_-]{20,40}$") });
   table("wake_jobs", { schema: "zeroship" }).create({
     columns: {
       wake_id: t.text().notNull(),
@@ -148,9 +148,9 @@ export function up() {
     },
     primaryKey: ["wake_id"],
   });
-  pgTable("wake_jobs", { schema: "zeroship" }).check("wake_jobs_agent_url_chk").add({ expr: (c) => or(c("agent_url").isNull(), c("agent_url").matches("^https?://[a-zA-Z0-9._:/-]+$")) });
+  pgTable("wake_jobs", { schema: "zeroship" }).check("wake_jobs_agent_url_chk").add({ expr: (c) => or(c("agent_url").isNull(), c.pg.regex(c("agent_url"), "^https?://[a-zA-Z0-9._:/-]+$")) });
   table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_error_code_check").add({ expr: (c) => or(c("error_code").isNull(), c("error_code").in(["slot_unavailable", "source_teardown_timeout", "restore_failed", "livez_timeout", "clock_resync_failed", "register_failed", "internal", "wake_worker_aborted", "staging_path_missing", "agent_version_mismatch"])) });
-  pgTable("wake_jobs", { schema: "zeroship" }).check("wake_jobs_sandbox_id_check").add({ expr: (c) => c("sandbox_id").matches("^sbx_[0-9A-Za-z]{20,40}$") });
+  pgTable("wake_jobs", { schema: "zeroship" }).check("wake_jobs_sandbox_id_check").add({ expr: (c) => c.pg.regex(c("sandbox_id"), "^sbx_[0-9A-Za-z]{20,40}$") });
   table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_state_check").add({ expr: (c) => c("state").in(["pending", "reserving_slot", "restoring", "livez_polling", "clock_resyncing", "registering", "ok", "failed"]) });
 }
 

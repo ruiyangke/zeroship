@@ -468,9 +468,6 @@ export interface ExprChain {
   isNotNull(): ExprChain;
   isTrue(): ExprChain;
   isFalse(): ExprChain;
-  // PG-only value nodes used by the platform CHECK corpus.
-  matches(pattern: string): ExprChain;
-  columnSize(): ExprChain;
   // cast (the closed portable target set only)
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
   // portable predicates (§3.4): `between`/`like` render identical syntax on all
@@ -509,10 +506,6 @@ export interface FnNamespace {
   replace(s: unknown, from: unknown, to: unknown): ExprChain;
   /** Portable date/time part extraction. */
   extract(field: ExtractField, expr: unknown): ExprChain;
-  /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
-  currentSetting(name: string, missingOk?: boolean): ExprChain;
-  /** PG vendor scalar for RLS policies: current_user. */
-  currentUser(): ExprChain;
   /** NULL-skipping safe-join (renders byte-identically on PG/SQLite). */
   concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
@@ -525,8 +518,8 @@ export interface FnNamespace {
 
 /** The immutable-only scalar namespace for generated columns and index predicates.
  *  Immutable members: lower/upper/trim/length/abs/coalesce/nullif/mod/round/
- *  floor/ceil/substr/replace/concatWs/splitPart. Volatile now/genRandomUuid and
- *  PG-vendor currentSetting/currentUser are intentionally absent. */
+ *  floor/ceil/substr/replace/concatWs/splitPart. Volatile now/genRandomUuid are
+ *  intentionally absent; PG-vendor helpers live on PgExprNamespace. */
 export type ImmutableFnNamespace = Pick<
   FnNamespace,
   | "lower"
@@ -610,6 +603,10 @@ export interface PgExprNamespace {
   regex(expr: unknown, pattern: string): ExprChain;
   /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
   pgColumnSize(expr: unknown): ExprChain;
+  /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
+  currentSetting(name: string, missingOk?: boolean): ExprChain;
+  /** PG vendor scalar for RLS policies: current_user. */
+  currentUser(): ExprChain;
   /** Renders portable fields as `extract` and PG-only fields as `pgExtract`. */
   extract(field: ExtractField, expr: unknown): ExprChain;
   extract(field: PgExtractField, expr: unknown): ExprChain;

@@ -404,9 +404,9 @@ import { and, or, not } from "@zeroship/migrate";
 // CASE expression — explicit when/then branches, with an optional else
 (c) => c.case({ branches: [{ when: c("n").gt(0), then: lit("pos") }], else: lit("nonpos") })
 
-// PG-flavoured settings (used in RLS policies) — reachable via c.fn on the pg-aware builder
-(c) => c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")
-(c) => c.fn.currentUser()
+// PG-flavoured settings (used in RLS policies) — reachable via c.pg on the pg-aware builder
+(c) => c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")
+(c) => c.pg.currentUser()
 ```
 
 ### Literals & helpers
@@ -567,18 +567,18 @@ view("legacy_report").create({
 
 ```ts
 // Table-scoped RLS toggles
-table("apps", { schema: "zeroship" }).enableRowLevelSecurity();
-table("apps", { schema: "zeroship" }).forceRowLevelSecurity();
-table("apps", { schema: "zeroship" }).disableRowLevelSecurity();
-table("apps", { schema: "zeroship" }).noForceRowLevelSecurity();
+pgTable("apps", { schema: "zeroship" }).enableRowLevelSecurity();
+pgTable("apps", { schema: "zeroship" }).forceRowLevelSecurity();
+pgTable("apps", { schema: "zeroship" }).disableRowLevelSecurity();
+pgTable("apps", { schema: "zeroship" }).noForceRowLevelSecurity();
 
 // Policy via the table handle
-table("apps", { schema: "zeroship" }).createPolicy({
+pgTable("apps", { schema: "zeroship" }).createPolicy({
   name: "tenant_isolation",
-  using: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")),
-  withCheck: (c) => c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")),
+  using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
+  withCheck: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
 });
-table("apps", { schema: "zeroship" }).dropPolicy({ name: "tenant_isolation" });
+pgTable("apps", { schema: "zeroship" }).dropPolicy({ name: "tenant_isolation" });
 
 // Standalone policy functions are also available from @zeroship/migrate/pg:
 import { createPolicy, dropPolicy } from "@zeroship/migrate/pg";

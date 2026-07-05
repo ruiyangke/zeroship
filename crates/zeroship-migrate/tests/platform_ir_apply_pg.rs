@@ -393,10 +393,10 @@ export function up() {
     },
     checks: [
       check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
-      check("expr_user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
+      check("expr_user_id_fmt", (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$")),
       check("expr_kind_ok", (c) => c("kind").in(["a", "b", "c"])),
       check("expr_kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
-      check("expr_data_size", (c) => c("data").columnSize().lt(262144)),
+      check("expr_data_size", (c) => c.pg.pgColumnSize(c("data")).lt(262144)),
       check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
       check("expr_floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
       check("expr_active_visible", (c) => and(c("active"), c("visible"))),

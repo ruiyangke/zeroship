@@ -1012,8 +1012,8 @@ test("the two-arg c('table','col') records a qualified colRef; one-arg stays unq
   assert.equal("table" in set.u, false);
 });
 
-test("c.pg builds PG-only regex and pg_column_size nodes", () => {
-  const ops = record(() =>
+test("c.pg builds PG-only regex, pg_column_size, and RLS scalar nodes", () => {
+  const ops = record(() => {
     pgTable("t").create({
       columns: {
         status: t.text().notNull(),
@@ -1024,8 +1024,14 @@ test("c.pg builds PG-only regex and pg_column_size nodes", () => {
         { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
         { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).le(8192) },
       ],
-    }),
-  );
+    });
+    table("t").update({
+      set: {
+        setting: (c) => c.pg.currentSetting("tenant.id", true),
+        user: (c) => c.pg.currentUser(),
+      },
+    });
+  });
   const checks = ops[0].constraints.map((c: any) => c.kind.expr);
   assert.deepEqual(checks[0], {
     node: "pgRegexMatch",
@@ -1038,6 +1044,15 @@ test("c.pg builds PG-only regex and pg_column_size nodes", () => {
     lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
     rhs: { node: "literal", value: 8192 },
   });
+  assert.deepEqual(ops[1].set.setting, {
+    node: "fnCall",
+    fn: "currentSetting",
+    args: [
+      { node: "literal", value: "tenant.id" },
+      { node: "literal", value: true },
+    ],
+  });
+  assert.deepEqual(ops[1].set.user, { node: "fnCall", fn: "currentUser", args: [] });
 });
 
 test("core CHECK expressions reject vendor, aggregate, and volatile nodes at record time", () => {
@@ -1249,9 +1264,9 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       },
       checks: [
         check("pkce_method_check", (c) => c("pkce_method").eq("S256")),
-        check("user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
+        { name: "user_id_fmt", expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$") },
         check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-        check("data_size", (c) => c("data").columnSize().lt(262144)),
+        { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).lt(262144) },
         check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
         check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
         check("enabled_and_visible", (c) => and(c("enabled"), c("visible"))),

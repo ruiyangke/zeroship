@@ -224,7 +224,7 @@ test("table-scoped pg methods record RLS and policy op shapes", () => {
       .forceRowLevelSecurity()
       .createPolicy({
         name: "tenant_only",
-        using: (c) => c("tenant_id").eq(c.fn.currentSetting("tenant.id", true)),
+        using: (c) => c("tenant_id").eq(c.pg.currentSetting("tenant.id", true)),
       })
       .dropPolicy({ name: "tenant_only", ifExists: true })
       .disableRowLevelSecurity()
