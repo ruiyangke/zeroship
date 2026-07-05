@@ -71,7 +71,7 @@ table("orders").comment(null);                       // clear the comment
 
 ```ts
 table("posts").softDelete();                 // enable soft-delete (adds deleted_at semantics)
-table("posts").softDelete(false);            // disable
+table("posts").softDelete({ enabled: false }); // disable
 table("posts").withVersioning();             // optimistic-concurrency version column
 table("posts").strictness("strict");         // TableStrictness: strict | lenient | off
 table("posts").setOptions({ /* SetTableOptionsArgs */ });

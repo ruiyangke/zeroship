@@ -1056,8 +1056,8 @@ export interface TableHandle {
    *  `renameTable` Op; the engine emits the inverse rename as the down-migration. */
   rename(args: { to: string; ifExists?: boolean; schema?: string }): TableHandle;
   setOptions(args: SetTableOptionsArgs): TableHandle;
-  softDelete(enabled?: boolean, args?: { schema?: string }): TableHandle;
-  withVersioning(enabled?: boolean, args?: { schema?: string }): TableHandle;
+  softDelete(args?: { enabled?: boolean; schema?: string }): TableHandle;
+  withVersioning(args?: { enabled?: boolean; schema?: string }): TableHandle;
   strictness(level: TableStrictness, args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
   detachPartition(name: string, args?: DetachPartitionArgs): TableHandle;

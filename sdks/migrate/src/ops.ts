@@ -2902,12 +2902,12 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       recordSetTableOptions(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
-    softDelete(enabled = true, args = {}) {
-      recordSetTableOptions(name, { softDelete: enabled, schema: pickSchema(args, dflt) });
+    softDelete(args = {}) {
+      recordSetTableOptions(name, { softDelete: args.enabled ?? true, schema: pickSchema(args, dflt) });
       return handle;
     },
-    withVersioning(enabled = true, args = {}) {
-      recordSetTableOptions(name, { versioning: enabled, schema: pickSchema(args, dflt) });
+    withVersioning(args = {}) {
+      recordSetTableOptions(name, { versioning: args.enabled ?? true, schema: pickSchema(args, dflt) });
       return handle;
     },
     strictness(level, args = {}) {
