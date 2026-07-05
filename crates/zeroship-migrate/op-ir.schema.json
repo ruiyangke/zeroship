@@ -3412,6 +3412,13 @@
               "description": "The column name (plain string).",
               "type": "string"
             },
+            "table": {
+              "description": "Optional qualifying table/alias (`c(\"orders\", \"customer_id\")` →\n`table: Some(\"orders\")`). Present only for the two-arg qualified form\n(§3.4, the join-ON fix). An unqualified `c(\"col\")` leaves this `None`\nand, via `skip_serializing_if`, serializes byte-identically to the\npre-qualification wire shape — additive, no `ir_version` bump.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "node": {
               "type": "string",
               "const": "colRef"

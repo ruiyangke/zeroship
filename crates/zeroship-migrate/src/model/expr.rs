@@ -201,6 +201,13 @@ pub enum Expr {
     ColRef {
         /// The column name (plain string).
         name: String,
+        /// Optional qualifying table/alias (`c("orders", "customer_id")` →
+        /// `table: Some("orders")`). Present only for the two-arg qualified form
+        /// (§3.4, the join-ON fix). An unqualified `c("col")` leaves this `None`
+        /// and, via `skip_serializing_if`, serializes byte-identically to the
+        /// pre-qualification wire shape — additive, no `ir_version` bump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table: Option<String>,
     },
     /// A typed scalar literal (a bare JS value auto-wrapped by a fluent operator
     /// method). Carries an [`IrScalar`] so the numeric domain is enforced at
@@ -312,7 +319,19 @@ impl Expr {
     /// A `ColRef` convenience constructor (tests / IrAuthor).
     #[must_use]
     pub fn col(name: impl Into<String>) -> Self {
-        Expr::ColRef { name: name.into() }
+        Expr::ColRef {
+            name: name.into(),
+            table: None,
+        }
+    }
+
+    /// A qualified `ColRef` convenience constructor (`c("orders", "id")`).
+    #[must_use]
+    pub fn col_qualified(table: impl Into<String>, name: impl Into<String>) -> Self {
+        Expr::ColRef {
+            name: name.into(),
+            table: Some(table.into()),
+        }
     }
 
     /// A `Literal` convenience constructor.
