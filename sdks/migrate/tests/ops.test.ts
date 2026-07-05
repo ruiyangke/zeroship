@@ -27,6 +27,7 @@ import {
   notMembership,
   lit,
   interval,
+  dialect,
 } from "../src/index.js";
 import { domain, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
@@ -816,6 +817,39 @@ test("portable between/like/distinctFrom chain builders record the right nodes",
     left: { node: "colRef", name: "a" },
     right: { node: "colRef", name: "b" },
   });
+});
+
+test("dialect() records the Layer-2 per-dialect value escape in canonical leg order", () => {
+  // §3.4 the one Layer-2 escape. Each leg is a full expression; the legs record
+  // in full in the `dialect` node in canonical order (default, pg, sqlite, mysql).
+  const ops = record(() =>
+    table("t").update({
+      set: {
+        // all three explicit legs, no default
+        u: () => dialect({ pg: lit("A"), sqlite: lit("B"), mysql: lit("C") }),
+        // default + one explicit leg
+        d: () => dialect({ default: lit(0), pg: lit(1) }),
+      },
+    }),
+  );
+  const set = ops[0].set;
+  assert.deepEqual(set.u, {
+    node: "dialect",
+    pg: { node: "literal", value: "A" },
+    sqlite: { node: "literal", value: "B" },
+    mysql: { node: "literal", value: "C" },
+  });
+  // Canonical leg order: default serializes first.
+  assert.deepEqual(Object.keys(set.d), ["node", "default", "pg"]);
+  assert.deepEqual(set.d, {
+    node: "dialect",
+    default: { node: "literal", value: 0 },
+    pg: { node: "literal", value: 1 },
+  });
+});
+
+test("dialect() rejects an empty leg set at record time", () => {
+  assert.throws(() => record(() => table("t").update({ set: { x: () => dialect({}) } })), /at least one leg/);
 });
 
 test("c.agg builders record the portable aggregate node (count(*)/sum/distinct)", () => {

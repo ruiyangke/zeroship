@@ -1277,6 +1277,55 @@ export function interval(value: string): ExprChainType {
   return chain({ node: "pgIntervalLiteral", value: pgIntervalLiteral(value) });
 }
 
+/**
+ * The one Layer-2 portability escape (design §3.4): a per-dialect VALUE
+ * divergence in an expression position. Each leg is an expression (a `(c) =>
+ * Expr` chain node, another combinator, or a bare scalar), and the engine
+ * renders the leg matching the target dialect — the dialect's own leg if
+ * present, else `default`:
+ *
+ * ```ts
+ * default(dialect({ pg: c.fn.genRandomUuid(), sqlite: c.fn.now(), mysql: myUuid }))
+ * dialect({ default: lit(0), pg: c("n") })   // pg leg on PG, default(0) elsewhere
+ * ```
+ *
+ * At least one leg (`default`/`pg`/`sqlite`/`mysql`) must be present; the legs
+ * record in full in the checksummed IR as the `dialect` node in canonical order.
+ * The engine's validate applies the per-TARGET scope math: a target with no own
+ * leg and no `default` is refused (`EXPR_NOT_PORTABLE`). RATCHET (P11): each leg
+ * is a ratcheted budget counter — the budget mechanism is a later phase.
+ */
+export function dialect(legs: {
+  default?: unknown;
+  pg?: unknown;
+  sqlite?: unknown;
+  mysql?: unknown;
+}): ExprChainType {
+  if (legs === null || typeof legs !== "object") {
+    throw structuredError(
+      "OP_INVALID",
+      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression legs",
+    );
+  }
+  const node: Node = { node: "dialect" };
+  // Canonical leg order: default, pg, sqlite, mysql (mirrors the IR field order).
+  let count = 0;
+  for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
+    const value = (legs as Record<string, unknown>)[leg];
+    if (value !== undefined) {
+      node[leg] = exprArg(value);
+      count++;
+    }
+  }
+  if (count === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "dialect(legs): at least one leg (default/pg/sqlite/mysql) must be present",
+    );
+  }
+  return chain(node);
+}
+
 const fn: FnNamespace = {
   lower: (e) => chain({ node: "fnCall", fn: "lower", args: [exprArg(e)] }),
   upper: (e) => chain({ node: "fnCall", fn: "upper", args: [exprArg(e)] }),

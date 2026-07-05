@@ -2939,7 +2939,81 @@ impl Ctx<'_> {
                 self.check_pg_only_expr("PG interval literal")?;
                 self.check_pg_interval_literal(value)
             }
+            // The one Layer-2 portability escape (§3.4): a per-dialect value
+            // divergence. Structurally validate EVERY present leg (dialect-
+            // neutral), then apply the per-TARGET scope math (own leg OR default).
+            Expr::Dialectal { default, pg, sqlite, mysql } => {
+                self.check_dialectal(default, pg, sqlite, mysql, d)
+            }
         }
+    }
+
+    /// Validate an [`Expr::Dialectal`] — the `dialect({ default?, pg?, sqlite?,
+    /// mysql? })` Layer-2 escape (design §3.4). Three checks, in order:
+    ///
+    /// 1. **At least one leg** — a legless `dialect({})` is malformed on EVERY
+    ///    target (dialect-neutral [`CODE_UNSUPPORTED`]).
+    /// 2. **Recurse into every present leg** structurally, regardless of the
+    ///    target dialect — an unresolved `ColRef` / malformed nested node in ANY
+    ///    leg must reject (dialect-neutral, mirroring `check_synth`). Runs before
+    ///    the scope check so a precise per-node error surfaces rather than being
+    ///    masked by the coverage refusal.
+    /// 3. **Scope math, per-TARGET** — the target must be covered by either its
+    ///    OWN leg or a `default`; else refuse fail-closed with
+    ///    [`CODE_EXPR_NOT_PORTABLE`]. This is per-target: a `dialect()` missing
+    ///    the sqlite leg (no default) is fine targeting PG, refused targeting
+    ///    SQLite/MySQL.
+    ///
+    /// RATCHET (P11 / §3.4): each leg is one of the four ratcheted budget
+    /// counters. The budget mechanism is a later phase (not yet built); the
+    /// per-leg count is wired in when it lands. Deferred — not gated here.
+    fn check_dialectal(
+        &self,
+        default: &Option<Box<Expr>>,
+        pg: &Option<Box<Expr>>,
+        sqlite: &Option<Box<Expr>>,
+        mysql: &Option<Box<Expr>>,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        // (1) at least one leg.
+        if default.is_none() && pg.is_none() && sqlite.is_none() && mysql.is_none() {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                "dialect({}) carries no legs; a per-dialect value escape must \
+                 provide at least one of default/pg/sqlite/mysql"
+                    .to_string(),
+                Some("supply at least one dialect leg (or a default)".to_string()),
+            ));
+        }
+        // (2) recurse into EVERY present leg, dialect-neutral.
+        for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+            self.walk_depth(leg, depth)?;
+        }
+        // (3) SCOPE MATH, per-TARGET: own leg OR default covers this dialect.
+        let own_present = match self.target_dialect {
+            Dialect::Postgres => pg.is_some(),
+            Dialect::Sqlite => sqlite.is_some(),
+            Dialect::Mysql => mysql.is_some(),
+        };
+        if own_present || default.is_some() {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_EXPR_NOT_PORTABLE,
+            Some(UnsupportedKind::Expr),
+            self.target_dialect,
+            format!(
+                "dialect() has no leg for the {} target and no default leg; the \
+                 per-dialect divergence does not cover this dialect",
+                self.target_dialect.as_str()
+            ),
+            Some(format!(
+                "add a {} leg or a default leg to the dialect() escape",
+                self.target_dialect.as_str()
+            )),
+        ))
     }
 
     /// Rule (c): a `ColRef` must resolve to a column on the enclosing target
@@ -4006,6 +4080,99 @@ mod tests {
         );
         let err = validate_expr(&e, Dialect::Sqlite, &sc, 0, None).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+    }
+
+    // ── the Layer-2 dialect() per-dialect value escape (§3.4) ────────────────
+
+    fn dialectal(
+        default: Option<Expr>,
+        pg: Option<Expr>,
+        sqlite: Option<Expr>,
+        mysql: Option<Expr>,
+    ) -> Expr {
+        Expr::Dialectal {
+            default: default.map(Box::new),
+            pg: pg.map(Box::new),
+            sqlite: sqlite.map(Box::new),
+            mysql: mysql.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn dialectal_missing_leg_no_default_accepted_on_own_target_refused_off_target() {
+        // dialect({ pg: A }) — no default. Its covered set is exactly {pg}: it is
+        // ACCEPTED targeting PG (its own leg), REFUSED targeting SQLite/MySQL
+        // (neither own leg nor default) — the per-TARGET scope math.
+        let sc = TargetScope::structural_only("t");
+        let e = dialectal(None, Some(Expr::lit(IrScalar::Str("A".into()))), None, None);
+
+        assert!(
+            validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok(),
+            "a pg-only dialect() covers the PG target"
+        );
+        for d in [Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(
+                err.code, CODE_EXPR_NOT_PORTABLE,
+                "a pg-only dialect() must refuse the {d:?} target (no own leg, no default); got: {err}"
+            );
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+    }
+
+    #[test]
+    fn dialectal_default_covers_every_off_target() {
+        // dialect({ default: D, pg: A }) covers ALL dialects: PG via its own leg,
+        // SQLite/MySQL via the default. Accepted on every target.
+        let sc = TargetScope::structural_only("t");
+        let e = dialectal(
+            Some(Expr::lit(IrScalar::Int(0))),
+            Some(Expr::lit(IrScalar::Str("A".into()))),
+            None,
+            None,
+        );
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            assert!(
+                validate_expr(&e, d, &sc, 0, None).is_ok(),
+                "a default leg covers the {d:?} target"
+            );
+        }
+    }
+
+    #[test]
+    fn dialectal_with_no_legs_is_refused_on_every_target() {
+        // dialect({}) — zero legs — is malformed on EVERY target (dialect-neutral
+        // CODE_UNSUPPORTED), enforced at validate (serde deserializes the empty
+        // node, the structural gate refuses it).
+        let sc = TargetScope::structural_only("t");
+        let e = dialectal(None, None, None, None);
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(err.code, CODE_UNSUPPORTED, "legless dialect() refused on {d:?}; got: {err}");
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+    }
+
+    #[test]
+    fn dialectal_recurses_into_every_present_leg() {
+        // The scope check must not short-circuit recursion: a malformed nested
+        // node in ANY leg rejects, dialect-neutrally, even on a target the leg
+        // does not select. Here an unresolved ColRef sits in the (unselected)
+        // mysql leg while targeting PG.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            Some(Expr::lit(IrScalar::Int(0))),
+            Some(Expr::col("name")),
+            None,
+            Some(Expr::col("ghost")), // not a column on `users`
+        );
+        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_UNSUPPORTED,
+            "an unresolved ColRef in ANY leg must reject (rule c), even off-target; got: {err}"
+        );
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
 
     #[test]

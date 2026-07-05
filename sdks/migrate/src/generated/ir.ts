@@ -203,7 +203,11 @@ export type Expr =
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
   | { node: "pgColumnSize"; expr: Expr }
   | { node: "extract"; field: ExtractField; expr: Expr }
-  | { node: "pgIntervalLiteral"; value: string };
+  | { node: "pgIntervalLiteral"; value: string }
+  // The one Layer-2 portability escape (§3.4): a per-dialect value divergence.
+  // Legs serialize in canonical order (default, pg, sqlite, mysql); a `None` leg
+  // is skipped on the wire. Scope math is validated per-target by the engine.
+  | { node: "dialect"; default?: Expr | null; pg?: Expr | null; sqlite?: Expr | null; mysql?: Expr | null };
 
 /** A DML cell in an insert row or `onConflict.doUpdate`: either a typed scalar
  *  literal or a closed expression AST such as `fnSynth(now)`. */
