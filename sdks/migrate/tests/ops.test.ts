@@ -182,6 +182,47 @@ test("create() with a composite primaryKey records the top-level primaryKey", ()
   assert.equal(ops[0].constraints, undefined);
 });
 
+test("table runtime option terminals take object args and default enabled true", () => {
+  const publicOps = record(() => {
+    table("posts").softDelete();
+    table("posts").softDelete({ enabled: false, schema: "archive" });
+    table("posts").withVersioning();
+    table("posts", { schema: "app" }).withVersioning({ enabled: false });
+  });
+  const engineOps = recordEngine(({ table }) => {
+    table("posts").softDelete();
+    table("posts").softDelete({ enabled: false, schema: "archive" });
+    table("posts").withVersioning();
+    table("posts", { schema: "app" }).withVersioning({ enabled: false });
+  });
+
+  assert.deepEqual(publicOps, engineOps);
+  assert.deepEqual(publicOps, [
+    {
+      op: "setTableOptions",
+      table: "posts",
+      options: { softDelete: true },
+    },
+    {
+      op: "setTableOptions",
+      table: "posts",
+      options: { softDelete: false },
+      schema: "archive",
+    },
+    {
+      op: "setTableOptions",
+      table: "posts",
+      options: { versioning: true },
+    },
+    {
+      op: "setTableOptions",
+      table: "posts",
+      options: { versioning: false },
+      schema: "app",
+    },
+  ]);
+});
+
 test("C2 — create() column that is both .unique() + .primaryKey() emits NO column-level unique", () => {
   // A PRIMARY KEY already implies uniqueness, so the per-column image must NOT
   // carry `unique:true` (lock-step with the addColumn-path suppression + the
