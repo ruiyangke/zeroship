@@ -4,17 +4,17 @@ import { domain, extension, role, schema, sequence } from "@zeroship/migrate/pg"
 export const name = "schema_roles_extensions";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
-  extension({ name: "citext", ifNotExists: true, schema: "public" });
-  role({ name: "zeroship_auth", login: true, password: "zeroship_auth", bypassRls: true, setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role({ name: "zeroship_control", login: true, password: "zeroship_control", bypassRls: true, setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role({ name: "zeroship_gateway", login: true, password: "zeroship_gateway", setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role({ name: "zeroship_worker", login: true, password: "zeroship_worker", setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role({ name: "zeroship_app", login: true, password: "zeroship_app", setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role({ name: "sandbox_admin", login: false, ifNotExists: true });
-  role({ name: "sandbox_app", login: true, password: "sandbox_app", setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role({ name: "sandbox_audit", login: true, password: "sandbox_audit", setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  role({ name: "sandbox_gdpr", login: true, password: "sandbox_gdpr", setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
+  extension("citext").create({ ifNotExists: true, schema: "public" });
+  role("zeroship_auth").create({ login: true, password: "zeroship_auth", bypassRls: true, setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("zeroship_control").create({ login: true, password: "zeroship_control", bypassRls: true, setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("zeroship_gateway").create({ login: true, password: "zeroship_gateway", setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("zeroship_worker").create({ login: true, password: "zeroship_worker", setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("zeroship_app").create({ login: true, password: "zeroship_app", setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("sandbox_admin").create({ login: false, ifNotExists: true });
+  role("sandbox_app").create({ login: true, password: "sandbox_app", setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("sandbox_audit").create({ login: true, password: "sandbox_audit", setSearchPath: ["zeroship", "public"], ifNotExists: true });
+  role("sandbox_gdpr").create({ login: true, password: "sandbox_gdpr", setSearchPath: ["zeroship", "public"], ifNotExists: true });
   domain("account_state").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["active", "past_due", "suspended"]) });
   domain("billing_notification_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["payment_failed", "past_due", "suspended", "recovered", "invoice_finalized", "refunded", "disputed", "payout_failed", "checkout_failed", "spend_warn", "spend_degrade", "spend_block"]) });
   domain("billing_period").create({ schema: "zeroship", as: t.date(), check: (v) => v.pg.extract("day", v).eq(1) });

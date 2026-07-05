@@ -20,13 +20,9 @@ import { test } from "node:test";
 
 import { decimal, t, table } from "../src/index.js";
 import {
-  alterRole,
   createFunction,
-  dropExtension,
   dropFunction,
   dropOwnedBy,
-  dropRole,
-  dropSchema,
   extension,
   grant,
   pgTable,
@@ -244,21 +240,20 @@ test("ddl_rename_table fluent-recorded ops equal the committed golden", async ()
 
 test("pg_vendor typed pg surface records ops equal the committed golden", async () => {
   const ops = record(() => {
-    extension({ name: "citext", ifNotExists: true });
-    dropExtension({ name: "citext", ifExists: true });
-    schema({ name: "zeroship", ifNotExists: true });
-    dropSchema({ name: "zeroship", ifExists: true, cascade: true });
+    extension("citext").create({ ifNotExists: true });
+    extension("citext").drop({ ifExists: true });
+    schema("zeroship").create({ ifNotExists: true });
+    schema("zeroship").drop({ ifExists: true, cascade: true });
 
-    role({
-      name: "zeroship_auth",
+    role("zeroship_auth").create({
       login: true,
       password: "zeroship_auth",
       bypassRls: true,
       setSearchPath: ["zeroship", "public"],
       ifNotExists: true,
     });
-    alterRole({ name: "zeroship_auth", setSearchPath: ["zeroship", "public"] });
-    dropRole({ name: "zeroship_auth", ifExists: true });
+    role("zeroship_auth").setOptions({ setSearchPath: ["zeroship", "public"] });
+    role("zeroship_auth").drop({ ifExists: true });
     dropOwnedBy({ roles: ["zeroship_auth"] });
 
     grant({

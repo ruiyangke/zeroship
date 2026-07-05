@@ -622,19 +622,18 @@ dropFunction({ name: "app_audit_block_tamper", schema: "zeroship", ifExists: tru
 ## 17. Schemas, extensions, roles, grants (`/pg`)
 
 ```ts
-import { schema, dropSchema, extension, dropExtension,
-         role, alterRole, dropRole, dropOwnedBy, grant, revoke } from "@zeroship/migrate/pg";
+import { schema, extension, role, dropOwnedBy, grant, revoke } from "@zeroship/migrate/pg";
 
-schema({ name: "zeroship" });
-dropSchema({ name: "zeroship", cascade: true });
+schema("zeroship").create();
+schema("zeroship").drop({ cascade: true });
 
-extension({ name: "citext" });
-extension({ name: "vector", schema: "zeroship" });
-dropExtension({ name: "citext", ifExists: true });
+extension("citext").create();
+extension("vector").create({ schema: "zeroship" });
+extension("citext").drop({ ifExists: true });
 
-role({ name: "app_rw", login: false });
-alterRole({ name: "app_rw", /* … */ });
-dropRole({ name: "app_rw", ifExists: true });
+role("app_rw").create({ login: false });
+role("app_rw").setOptions({ /* ... */ });
+role("app_rw").drop({ ifExists: true });
 dropOwnedBy({ roles: ["app_rw"] });          // `roles` is an array
 
 // `on` is a GrantTarget tagged union ({ table }/{ schema }/{ sequence }/… — check GrantTarget);

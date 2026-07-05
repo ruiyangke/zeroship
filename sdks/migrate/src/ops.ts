@@ -61,6 +61,12 @@ import type {
   DropEnumArgs,
   DropSequenceArgs,
   DropViewArgs,
+  DroppedExtensionHandle,
+  DroppedRoleHandle,
+  DroppedSchemaHandle,
+  ExtensionCreateArgs,
+  ExtensionDropArgs,
+  ExtensionHandle,
   ExclusionAddArgs,
   ExclusionConstraintArgs,
   ExclusionElementArg,
@@ -102,9 +108,16 @@ import type {
   PgIndexDropArgs,
   PgIndexRef,
   PgTableHandle,
+  RoleCreateArgs,
+  RoleDropArgs,
+  RoleHandle,
+  RoleSetOptionsArgs,
   RefAction,
   Row,
   ScalarValue,
+  SchemaCreateArgs,
+  SchemaDropArgs,
+  SchemaHandle,
   SelectAst,
   SelectItem,
   SequenceHandle,
@@ -401,6 +414,13 @@ const emitDropDomain = defineOp("dropDomain");
 const emitCreateSequence = defineOp("createSequence", "createSequence", { deferrable: true });
 const emitAlterSequence = defineOp("alterSequence");
 const emitDropSequence = defineOp("dropSequence");
+const emitCreateSchema = defineOp("createSchema");
+const emitDropSchema = defineOp("dropSchema");
+const emitCreateExtension = defineOp("createExtension");
+const emitDropExtension = defineOp("dropExtension");
+const emitCreateRole = defineOp("createRole");
+const emitAlterRole = defineOp("alterRole");
+const emitDropRole = defineOp("dropRole");
 const emitComment = defineOp("comment");
 const emitCreateTable = defineOp("createTable");
 const emitCreatePartition = defineOp("createPartition");
@@ -1302,6 +1322,82 @@ export function __pgDomain(name: string): DomainHandle {
     comment(text: string | null, commentArgs: { schema?: string } = {}) {
       recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
       return handle;
+    },
+  };
+  return handle;
+}
+
+export function __pgSchema(name: string): SchemaHandle {
+  requireString(name, "schema(name)");
+  let handle: SchemaHandle;
+  const dropped: DroppedSchemaHandle = {
+    name,
+    create(args: SchemaCreateArgs = {}) {
+      recordCreateSchema(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: SchemaCreateArgs = {}) {
+      recordCreateSchema(name, args);
+      return handle;
+    },
+    drop(args: SchemaDropArgs = {}) {
+      recordDropSchema(name, args);
+      return dropped;
+    },
+  };
+  return handle;
+}
+
+export function __pgExtension(name: string): ExtensionHandle {
+  requireString(name, "extension(name)");
+  let handle: ExtensionHandle;
+  const dropped: DroppedExtensionHandle = {
+    name,
+    create(args: ExtensionCreateArgs = {}) {
+      recordCreateExtension(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: ExtensionCreateArgs = {}) {
+      recordCreateExtension(name, args);
+      return handle;
+    },
+    drop(args: ExtensionDropArgs = {}) {
+      recordDropExtension(name, args);
+      return dropped;
+    },
+  };
+  return handle;
+}
+
+export function __pgRole(name: string): RoleHandle {
+  requireString(name, "role(name)");
+  let handle: RoleHandle;
+  const dropped: DroppedRoleHandle = {
+    name,
+    create(args: RoleCreateArgs = {}) {
+      recordCreateRole(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: RoleCreateArgs = {}) {
+      recordCreateRole(name, args);
+      return handle;
+    },
+    setOptions(args: RoleSetOptionsArgs) {
+      recordSetRoleOptions(name, args);
+      return handle;
+    },
+    drop(args: RoleDropArgs = {}) {
+      recordDropRole(name, args);
+      return dropped;
     },
   };
   return handle;
@@ -2312,6 +2408,87 @@ function recordDropSequence(name: string, args: DropSequenceArgs = {}): void {
     name,
     schema: args.schema,
     existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function requirePlainArgs(args: unknown, what: string): asserts args is Record<string, unknown> {
+  if (args === null || typeof args !== "object") {
+    throw structuredError("OP_INVALID", `${what} needs an object`);
+  }
+}
+
+function recordCreateSchema(name: string, args: SchemaCreateArgs = {}): void {
+  requireString(name, "schema(name)");
+  requirePlainArgs(args, "schema(name).create(args)");
+  emitCreateSchema({
+    name,
+    ifNotExists: args.ifNotExists,
+    authorization: args.authorization,
+  });
+}
+
+function recordDropSchema(name: string, args: SchemaDropArgs = {}): void {
+  requireString(name, "schema(name)");
+  requirePlainArgs(args, "schema(name).drop(args)");
+  emitDropSchema({
+    name,
+    ifExists: args.ifExists,
+    cascade: args.cascade,
+  });
+}
+
+function recordCreateExtension(name: string, args: ExtensionCreateArgs = {}): void {
+  requireString(name, "extension(name)");
+  requirePlainArgs(args, "extension(name).create(args)");
+  emitCreateExtension({
+    name,
+    ifNotExists: args.ifNotExists,
+    schema: args.schema,
+  });
+}
+
+function recordDropExtension(name: string, args: ExtensionDropArgs = {}): void {
+  requireString(name, "extension(name)");
+  requirePlainArgs(args, "extension(name).drop(args)");
+  emitDropExtension({
+    name,
+    ifExists: args.ifExists,
+  });
+}
+
+function recordCreateRole(name: string, args: RoleCreateArgs = {}): void {
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).create(args)");
+  emitCreateRole({
+    name,
+    login: args.login,
+    password: args.password,
+    bypassRls: args.bypassRls,
+    createRole: args.createRole,
+    createDb: args.createDb,
+    superuser: args.superuser,
+    inRole: args.inRole,
+    setSearchPath: args.setSearchPath,
+    ifNotExists: args.ifNotExists,
+  });
+}
+
+function recordSetRoleOptions(name: string, args: RoleSetOptionsArgs): void {
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).setOptions(args)");
+  emitAlterRole({
+    name,
+    setSearchPath: args.setSearchPath,
+    resetSearchPath: args.resetSearchPath,
+  });
+}
+
+function recordDropRole(name: string, args: RoleDropArgs = {}): void {
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).drop(args)");
+  emitDropRole({
+    name,
+    ifExists: args.ifExists,
   });
 }
 

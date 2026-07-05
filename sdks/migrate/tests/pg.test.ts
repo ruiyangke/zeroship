@@ -5,13 +5,9 @@ import { test } from "node:test";
 
 import { __begin, __drain } from "../src/ops.js";
 import {
-  alterRole,
   createFunction,
-  dropExtension,
   dropFunction,
   dropOwnedBy,
-  dropRole,
-  dropSchema,
   extension,
   grant,
   pgTable,
@@ -39,6 +35,10 @@ test("@zeroship/migrate/pg subpath resolves through package exports", async () =
   assert.equal(typeof imported.domain, "function");
   assert.equal(typeof imported.pgTable, "function");
   assert.equal(typeof imported.sequence, "function");
+  assert.equal(imported.dropSchema, undefined);
+  assert.equal(imported.dropExtension, undefined);
+  assert.equal(imported.alterRole, undefined);
+  assert.equal(imported.dropRole, undefined);
   assert.equal(imported.createPolicy, undefined);
   assert.equal(imported.dropPolicy, undefined);
   assert.equal(imported.sql, undefined);
@@ -75,12 +75,11 @@ test("pgTable().policy().create requires using and rejects an explicit empty to[
 
 test("vendor exports and policy selectors record every vendor op shape", () => {
   const ops = record(() => {
-    schema({ name: "zs", ifNotExists: true, authorization: "owner" });
-    dropSchema({ name: "zs", ifExists: true, cascade: true });
-    extension({ name: "citext", ifNotExists: true, schema: "public" });
-    dropExtension({ name: "citext", ifExists: true });
-    role({
-      name: "app_role",
+    schema("zs").create({ ifNotExists: true, authorization: "owner" });
+    schema("zs").drop({ ifExists: true, cascade: true });
+    extension("citext").create({ ifNotExists: true, schema: "public" });
+    extension("citext").drop({ ifExists: true });
+    role("app_role").create({
       login: true,
       password: "secret",
       bypassRls: true,
@@ -91,8 +90,8 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
       setSearchPath: ["zs", "public"],
       ifNotExists: true,
     });
-    alterRole({ name: "app_role", setSearchPath: ["zs"], resetSearchPath: true });
-    dropRole({ name: "app_role", ifExists: true });
+    role("app_role").setOptions({ setSearchPath: ["zs"], resetSearchPath: true });
+    role("app_role").drop({ ifExists: true });
     dropOwnedBy({ roles: ["app_role"] });
     grant({
       privileges: ["select", "usage"],

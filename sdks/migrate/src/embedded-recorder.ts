@@ -56,12 +56,8 @@ export {
 
 export {
   schema,
-  dropSchema,
   extension,
-  dropExtension,
   role,
-  alterRole,
-  dropRole,
   dropOwnedBy,
   grant,
   revoke,
