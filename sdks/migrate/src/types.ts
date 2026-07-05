@@ -674,6 +674,7 @@ export type PartitionBoundArgs =
 export interface PartitionRef {
   create(bound: PartitionBoundArgs, args?: CreatePartitionOptions): TableHandle;
   drop(args?: DropPartitionArgs): TableHandle;
+  detach(args?: DetachPartitionArgs): PgTableHandle;
 }
 
 export interface DropPartitionArgs {
@@ -782,8 +783,7 @@ export interface TriggerBodyBuilder {
   select(expr: ExprFn | ExprChain | Expr): TriggerStmt;
 }
 
-interface CreateTriggerBaseArgs {
-  name: string;
+interface TriggerCreateBaseArgs {
   timing: TriggerTiming;
   events: TriggerEvent[];
   forEach: ForEach;
@@ -791,18 +791,21 @@ interface CreateTriggerBaseArgs {
   schema?: string;
 }
 
-export type CreateTriggerArgs =
-  | (CreateTriggerBaseArgs & { execute: string; body?: never })
-  | (CreateTriggerBaseArgs & { body: (b: TriggerBodyBuilder) => TriggerStmt[]; execute?: never });
+export type TriggerCreateArgs =
+  | (TriggerCreateBaseArgs & { execute: string; body?: never })
+  | (TriggerCreateBaseArgs & { body: (b: TriggerBodyBuilder) => TriggerStmt[]; execute?: never });
 
-export interface DropTriggerArgs {
-  name: string;
+export interface TriggerDropArgs {
   ifExists?: boolean;
   schema?: string;
 }
 
-export interface CreateTablePolicyArgs {
-  name: string;
+export interface TriggerRef {
+  create(args: TriggerCreateArgs): TableHandle;
+  drop(args?: TriggerDropArgs): TableHandle;
+}
+
+export interface PolicyCreateArgs {
   for?: PolicyCmd;
   to?: string[];
   using: ExprFn | ExprChain | Expr;
@@ -810,10 +813,14 @@ export interface CreateTablePolicyArgs {
   schema?: string;
 }
 
-export interface DropTablePolicyArgs {
-  name: string;
+export interface PolicyDropArgs {
   ifExists?: boolean;
   schema?: string;
+}
+
+export interface PolicyRef {
+  create(args: PolicyCreateArgs): PgTableHandle;
+  drop(args?: PolicyDropArgs): PgTableHandle;
 }
 
 // ── `view()` entry + the closed SelectAst builder (§A1/§3.1) ──
@@ -1044,7 +1051,7 @@ export interface ForeignKeyRef {
     deferrable?: boolean;
     initiallyDeferred?: boolean;
     /** PostgreSQL-only online constraint adoption — add `NOT VALID` (skip the
-     *  add-time scan), then `.validateConstraint(name)` later. Refused off PG. */
+     *  add-time scan), then `pgTable(...).constraint(name).validate()` later. */
     notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
@@ -1061,7 +1068,7 @@ export interface CheckRef {
   add(args: {
     expr: CheckExprFn;
     /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
-     *  `.validateConstraint(name)` later. Refused off PG. */
+     *  `pgTable(...).constraint(name).validate()` later. */
     notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
@@ -1072,7 +1079,7 @@ export interface PgCheckRef extends CheckRef {
   add(args: {
     expr: PgCheckExprFn;
     /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
-     *  `.validateConstraint(name)` later. Refused off PG. */
+     *  `pgTable(...).constraint(name).validate()` later. */
     notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
@@ -1085,11 +1092,17 @@ export interface ExclusionRef {
   add(args: ExclusionAddArgs): PgTableHandle;
 }
 
-/** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic drop by
- *  name; its only terminal is `.drop`. */
+/** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic operations
+ *  on an existing named constraint. */
 export interface ConstraintRef {
   drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
+}
+
+export interface PgConstraintRef extends ConstraintRef {
+  /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
+   *  rows under a weaker lock (records a `validateConstraint` Op). */
+  validate(args?: { ifExists?: boolean; schema?: string }): PgTableHandle;
 }
 
 /** The `.index(name)` selector sub-handle (§3.4). */
@@ -1192,8 +1205,7 @@ export interface TableHandle {
   backfill(args: BackfillArgs): TableHandle;
 
   // §A2 — cross-dialect core triggers.
-  createTrigger(args: CreateTriggerArgs): TableHandle;
-  dropTrigger(args: DropTriggerArgs): TableHandle;
+  trigger(name: string): TriggerRef;
 }
 
 /** The widened table handle returned by `@zeroship/migrate/pg`'s `pgTable()`.
@@ -1201,18 +1213,14 @@ export interface TableHandle {
  *  methods made reachable only from the `/pg` type surface. */
 export interface PgTableHandle extends TableHandle {
   check(name: string): PgCheckRef;
+  constraint(name: string): PgConstraintRef;
   index(name: string): PgIndexRef;
-  detachPartition(name: string, args?: DetachPartitionArgs): PgTableHandle;
-  /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
-   *  rows under a weaker lock (records a `validateConstraint` Op). */
-  validateConstraint(name: string, args?: { ifExists?: boolean; schema?: string }): PgTableHandle;
   exclusion(name: string): ExclusionRef;
   enableRowLevelSecurity(): PgTableHandle;
   forceRowLevelSecurity(): PgTableHandle;
   disableRowLevelSecurity(): PgTableHandle;
   noForceRowLevelSecurity(): PgTableHandle;
-  createPolicy(args: CreateTablePolicyArgs): PgTableHandle;
-  dropPolicy(args: DropTablePolicyArgs): PgTableHandle;
+  policy(name: string): PolicyRef;
 }
 
 /** One determinism-lint finding. */

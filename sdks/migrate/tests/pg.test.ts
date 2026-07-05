@@ -7,11 +7,9 @@ import { __begin, __drain } from "../src/ops.js";
 import {
   alterRole,
   createFunction,
-  createPolicy,
   dropExtension,
   dropFunction,
   dropOwnedBy,
-  dropPolicy,
   dropRole,
   dropSchema,
   extension,
@@ -41,6 +39,8 @@ test("@zeroship/migrate/pg subpath resolves through package exports", async () =
   assert.equal(typeof imported.domain, "function");
   assert.equal(typeof imported.pgTable, "function");
   assert.equal(typeof imported.sequence, "function");
+  assert.equal(imported.createPolicy, undefined);
+  assert.equal(imported.dropPolicy, undefined);
   assert.equal(imported.sql, undefined);
 });
 
@@ -59,21 +59,21 @@ test("SA-8: grant/revoke reject empty privilege/role arrays and a non-object tar
   );
 });
 
-test("SA-10/SA-11: createPolicy requires using and rejects an explicit empty to[]", () => {
+test("pgTable().policy().create requires using and rejects an explicit empty to[]", () => {
   assert.throws(
-    () => record(() => createPolicy({ name: "p", table: "u" } as any)),
+    () => record(() => pgTable("u").policy("p").create({} as any)),
     (e: any) => e.code === "OP_INVALID" && /using is required/.test(e.message),
   );
   assert.throws(
     () =>
       record(() =>
-        createPolicy({ name: "p", table: "u", to: [], using: (c: any) => c("x").isNotNull() } as any),
+        pgTable("u").policy("p").create({ to: [], using: (c: any) => c("x").isNotNull() } as any),
       ),
     (e: any) => e.code === "OP_INVALID" && /to must be a non-empty role array/.test(e.message),
   );
 });
 
-test("vendor named exports record every standalone vendor op shape", () => {
+test("vendor exports and policy selectors record every vendor op shape", () => {
   const ops = record(() => {
     schema({ name: "zs", ifNotExists: true, authorization: "owner" });
     dropSchema({ name: "zs", ifExists: true, cascade: true });
@@ -105,16 +105,13 @@ test("vendor named exports record every standalone vendor op shape", () => {
       on: { kind: "table", names: ["users"], schema: "zs" },
       from: ["public"],
     });
-    createPolicy({
-      name: "tenant_only",
-      table: "users",
-      schema: "zs",
+    pgTable("users", { schema: "zs" }).policy("tenant_only").create({
       for: "select",
       to: ["app_role"],
       using: (c) => c("app_id").eq("app_demo"),
       withCheck: (c) => c("app_id").isNotNull(),
     });
-    dropPolicy({ name: "tenant_only", table: "users", schema: "zs", ifExists: true });
+    pgTable("users", { schema: "zs" }).policy("tenant_only").drop({ ifExists: true });
     createFunction({
       name: "tenant_guard",
       schema: "zs",
@@ -217,16 +214,15 @@ test("vendor named exports record every standalone vendor op shape", () => {
   ]);
 });
 
-test("table-scoped pg methods record RLS and policy op shapes", () => {
+test("table-scoped pg methods record RLS and legacy policy op payloads", () => {
   const ops = record(() => {
     pgTable("secrets", { schema: "zs" })
       .enableRowLevelSecurity()
       .forceRowLevelSecurity()
-      .createPolicy({
-        name: "tenant_only",
+      .policy("tenant_only").create({
         using: (c) => c("tenant_id").eq(c.pg.currentSetting("tenant.id", true)),
       })
-      .dropPolicy({ name: "tenant_only", ifExists: true })
+      .policy("tenant_only").drop({ ifExists: true })
       .disableRowLevelSecurity()
       .noForceRowLevelSecurity();
   });

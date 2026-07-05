@@ -11,17 +11,15 @@
 // from `@zeroship/migrate`. Each method records the same op payload shape as the
 // engine-embedded recorder twin (`crates/zeroship-migrate/src/frontend/migrate_ops.js`).
 
-import type { Expr, ExprChain, ExprFn, PgTableHandle, TableOptions } from "./types.js";
+import type { PgTableHandle, TableOptions } from "./types.js";
 import type {
   FuncArg,
   FuncLanguage,
   FuncVolatility,
   GrantTarget,
-  PolicyCmd,
-  PgExtractField,
   Privilege,
 } from "./generated/ir.js";
-import { __makePgTableHandle, __pgDomain, __pgPush, __pgResolveExpr, __pgSequence } from "./ops.js";
+import { __makePgTableHandle, __pgDomain, __pgPush, __pgSequence } from "./ops.js";
 
 type Node = Record<string, unknown>;
 
@@ -49,12 +47,16 @@ export type {
   PgCheckDef,
   PgCheckExprFn,
   PgCheckRef,
+  PgConstraintRef,
   PgIndexAdd,
   PgIndexDropArgs,
   PgIndexElement,
   PgIndexMethod,
   PgIndexRef,
   PgTableHandle,
+  PolicyCreateArgs,
+  PolicyDropArgs,
+  PolicyRef,
   SequenceHandle,
   SequenceOwnedBy,
 } from "./types.js";
@@ -121,23 +123,6 @@ export interface RevokeArgs {
   privileges: Privilege[];
   on: GrantTarget;
   from: string[];
-}
-
-export interface CreatePolicyArgs {
-  name: string;
-  table: string;
-  schema?: string;
-  for?: PolicyCmd;
-  to?: string[];
-  using: ExprFn | ExprChain | Expr;
-  withCheck?: ExprFn | ExprChain | Expr;
-}
-
-export interface DropPolicyArgs {
-  name: string;
-  table: string;
-  schema?: string;
-  ifExists?: boolean;
 }
 
 export interface CreateFunctionArgs {
@@ -302,39 +287,6 @@ export function revoke(args: RevokeArgs): Node {
     privileges: args.privileges,
     on: args.on,
     from: args.from,
-  });
-}
-
-export function createPolicy(args: CreatePolicyArgs): Node {
-  requireString(args.name, "createPolicy({ name })");
-  requireString(args.table, "createPolicy({ table })");
-  if (Array.isArray(args.to) && args.to.length === 0) {
-    throw structuredError("OP_INVALID", "createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
-  }
-  if (args.using === undefined) {
-    throw structuredError("OP_INVALID", "createPolicy({ using }): using is required (the renderer always emits USING)");
-  }
-  return record({
-    op: "createPolicy",
-    name: args.name,
-    table: args.table,
-    schema: args.schema,
-    forCmd: args.for || "all",
-    to: args.to,
-    using: __pgResolveExpr(args.using),
-    withCheck: __pgResolveExpr(args.withCheck),
-  });
-}
-
-export function dropPolicy(args: DropPolicyArgs): Node {
-  requireString(args.name, "dropPolicy({ name })");
-  requireString(args.table, "dropPolicy({ table })");
-  return record({
-    op: "dropPolicy",
-    name: args.name,
-    table: args.table,
-    schema: args.schema,
-    ifExists: args.ifExists,
   });
 }
 

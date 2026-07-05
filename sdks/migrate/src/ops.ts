@@ -37,15 +37,13 @@ import type {
   ColType,
   ColumnDef as ColumnDefType,
   ColumnRef,
-  ConstraintRef,
   CommentTargetArg,
   AlterSequenceArgs,
   CreateDomainArgs,
   CreateEnumArgs,
   CreateSequenceArgs,
-  CreateTablePolicyArgs,
-  CreateTriggerArgs,
   CreateTableArgs,
+  TriggerCreateArgs,
   CreateViewArgs,
   DbSynthSymbol,
   DecimalValue,
@@ -59,7 +57,6 @@ import type {
   DomainHandle,
   DomainValueBuilder,
   DeterminismFinding,
-  DropTablePolicyArgs,
   DropDomainArgs,
   DropEnumArgs,
   DropSequenceArgs,
@@ -98,6 +95,7 @@ import type {
   PartitionBoundSentinel,
   PartitionByInput,
   PgCheckExprFn,
+  PgConstraintRef,
   PgCheckRef,
   PgExprNamespace,
   PgIndexAdd,
@@ -3303,25 +3301,25 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
   };
 }
 
-function resolveTriggerAction(args: CreateTriggerArgs): Node {
+function resolveTriggerAction(args: TriggerCreateArgs): Node {
   const hasExecute = "execute" in args && args.execute !== undefined;
   const hasBody = "body" in args && args.body !== undefined;
   if (hasExecute === hasBody) {
     throw structuredError(
       "OP_INVALID",
-      ".createTrigger(...) needs exactly one action: { execute: string } or { body: (b) => TriggerStmt[] }",
+      ".trigger(name).create(...) needs exactly one action: { execute: string } or { body: (b) => TriggerStmt[] }",
     );
   }
   if (hasExecute) {
-    requireString(args.execute, ".createTrigger({ execute })");
+    requireString(args.execute, ".trigger(name).create({ execute })");
     return { kind: "executeFunction", name: args.execute };
   }
   if (!("body" in args) || typeof args.body !== "function") {
-    throw structuredError("OP_INVALID", ".createTrigger({ body }) must be a function");
+    throw structuredError("OP_INVALID", ".trigger(name).create({ body }) must be a function");
   }
   const statements = args.body(triggerBodyBuilder());
   if (!Array.isArray(statements)) {
-    throw structuredError("OP_INVALID", ".createTrigger({ body }) must return an array of trigger statements");
+    throw structuredError("OP_INVALID", ".trigger(name).create({ body }) must return an array of trigger statements");
   }
   for (const stmt of statements) {
     if (!stmt || typeof stmt !== "object" || typeof (stmt as Node).stmt !== "string") {
@@ -3438,15 +3436,15 @@ export function __makeTableHandle(
           });
           return handle;
         },
+        detach(args = {}) {
+          terminateSelector(id);
+          recordDetachPartition(name, partitionName, {
+            concurrently: args.concurrently,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
       };
-    },
-    detachPartition(partitionName, args = {}) {
-      requireString(partitionName, ".detachPartition(name)");
-      recordDetachPartition(name, partitionName, {
-        concurrently: args.concurrently,
-        schema: pickSchema(args, dflt),
-      });
-      return handle;
     },
     // §3.2 — columns
     column(col): ColumnRef {
@@ -3546,11 +3544,6 @@ export function __makeTableHandle(
         },
       };
     },
-    validateConstraint(vcName, args = {}) {
-      requireString(vcName, ".validateConstraint(name)");
-      recordValidateConstraint(name, vcName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
-      return handle;
-    },
     exclusion(exName): ExclusionRef {
       requireString(exName, ".exclusion(name)");
       const id = registerSelector("exclusion", exName);
@@ -3562,7 +3555,7 @@ export function __makeTableHandle(
         },
       };
     },
-    constraint(cName): ConstraintRef {
+    constraint(cName): PgConstraintRef {
       requireString(cName, ".constraint(name)");
       const id = registerSelector("constraint", cName);
       return {
@@ -3574,6 +3567,11 @@ export function __makeTableHandle(
         comment(text, args = {}) {
           terminateSelector(id);
           recordComment({ kind: "constraint", table: name, name: cName, schema: pickSchema(args, dflt) }, text);
+          return handle;
+        },
+        validate(args = {}) {
+          terminateSelector(id);
+          recordValidateConstraint(name, cName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
           return handle;
         },
       };
@@ -3643,58 +3641,70 @@ export function __makeTableHandle(
       emitNoForceRls({ table: name, schema: dflt });
       return handle;
     },
-    createPolicy(args: CreateTablePolicyArgs) {
-      requireString(args.name, ".createPolicy({ name })");
-      if (Array.isArray(args.to) && args.to.length === 0) {
-        throw structuredError("OP_INVALID", ".createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
-      }
-      if (args.using === undefined) {
-        throw structuredError("OP_INVALID", ".createPolicy({ using }): using is required (the renderer always emits USING)");
-      }
-      emitCreatePolicy({
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        forCmd: args.for || "all",
-        to: args.to,
-        using: resolveExpr(args.using),
-        withCheck: resolveExpr(args.withCheck),
-      });
-      return handle;
+    policy(policyName) {
+      requireString(policyName, ".policy(name)");
+      const id = registerSelector("policy", policyName);
+      return {
+        create(args) {
+          terminateSelector(id);
+          if (Array.isArray(args.to) && args.to.length === 0) {
+            throw structuredError("OP_INVALID", ".policy(name).create({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+          }
+          if (args.using === undefined) {
+            throw structuredError("OP_INVALID", ".policy(name).create({ using }): using is required (the renderer always emits USING)");
+          }
+          emitCreatePolicy({
+            name: policyName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            forCmd: args.for || "all",
+            to: args.to,
+            using: resolveExpr(args.using),
+            withCheck: resolveExpr(args.withCheck),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          emitDropPolicy({
+            name: policyName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            ifExists: args.ifExists,
+          });
+          return handle;
+        },
+      };
     },
-    dropPolicy(args: DropTablePolicyArgs) {
-      requireString(args.name, ".dropPolicy({ name })");
-      emitDropPolicy({
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        ifExists: args.ifExists,
-      });
-      return handle;
-    },
-    createTrigger(args) {
-      requireString(args.name, ".createTrigger({ name })");
-      emitCreateTrigger({
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        timing: args.timing,
-        events: args.events,
-        forEach: args.forEach,
-        action: resolveTriggerAction(args),
-        when: resolveExpr(args.when),
-      });
-      return handle;
-    },
-    dropTrigger(args) {
-      requireString(args.name, ".dropTrigger({ name })");
-      emitDropTrigger({
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        ifExists: args.ifExists,
-      });
-      return handle;
+    trigger(triggerName) {
+      requireString(triggerName, ".trigger(name)");
+      const id = registerSelector("trigger", triggerName);
+      return {
+        create(args) {
+          terminateSelector(id);
+          emitCreateTrigger({
+            name: triggerName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            timing: args.timing,
+            events: args.events,
+            forEach: args.forEach,
+            action: resolveTriggerAction(args),
+            when: resolveExpr(args.when),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          emitDropTrigger({
+            name: triggerName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            ifExists: args.ifExists,
+          });
+          return handle;
+        },
+      };
     },
   };
 
