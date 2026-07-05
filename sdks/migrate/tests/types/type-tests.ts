@@ -425,6 +425,26 @@ export function checkExpressionSurfaceTypechecks(): void {
   });
 }
 
+export function vendorExprSurfaceBoundaryTypechecks(): void {
+  pgTable("app_secrets").createPolicy({
+    name: "tenant_only",
+    using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
+    withCheck: (c) => c("owner").eq(c.pg.currentUser()),
+  });
+
+  // @ts-expect-error — dot-spelled PG regex is vendor-only; use `c.pg.regex(c("x"), pattern)`.
+  table("exprs").update({ set: { x: (c) => c("x")["matches"]("^a$") } });
+
+  // @ts-expect-error — dot-spelled PG column size is vendor-only; use `c.pg.pgColumnSize(c("x"))`.
+  table("exprs").update({ set: { x: (c) => c("x")["columnSize"]() } });
+
+  // @ts-expect-error — current_setting is PG-vendor and lives under `c.pg`.
+  table("exprs").update({ set: { x: (c) => c.fn["currentSetting"]("zeroship.tenant_app", true) } });
+
+  // @ts-expect-error — current_user is PG-vendor and lives under `c.pg`.
+  table("exprs").update({ set: { x: (c) => c.fn["currentUser"]() } });
+}
+
 export function domainValueCheckSurfaceTypechecks(): void {
   domain("account_state").create({
     as: t.text(),

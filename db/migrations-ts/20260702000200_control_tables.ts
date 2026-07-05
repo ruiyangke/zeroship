@@ -225,7 +225,7 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  pgTable("payouts", { schema: "zeroship" }).check("control_payouts_currency_shape").add({ expr: (c) => c("currency").matches("^[a-z]{3}$") });
+  pgTable("payouts", { schema: "zeroship" }).check("control_payouts_currency_shape").add({ expr: (c) => c.pg.regex(c("currency"), "^[a-z]{3}$") });
   table("payouts", { schema: "zeroship" }).check("control_payouts_fee_lte_gross").add({ expr: (c) => c("platform_fee").le(c("gross_amount")) });
   table("payouts", { schema: "zeroship" }).check("control_payouts_fee_nonnegative").add({ expr: (c) => c("platform_fee").ge(0) });
   table("payouts", { schema: "zeroship" }).check("control_payouts_gross_nonnegative").add({ expr: (c) => c("gross_amount").ge(0) });

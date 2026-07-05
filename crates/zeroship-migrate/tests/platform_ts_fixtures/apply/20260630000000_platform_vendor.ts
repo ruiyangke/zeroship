@@ -35,8 +35,8 @@ export function up() {
     name: "tenant_isolation",
     for: "all",
     using: (c) =>
-      c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
     withCheck: (c) =>
-      c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
   });
 }

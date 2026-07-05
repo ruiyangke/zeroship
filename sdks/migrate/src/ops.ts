@@ -1515,12 +1515,6 @@ class ExprChainImpl implements ExprChainType {
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
-  matches(pattern: string) {
-    return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
-  }
-  columnSize() {
-    return chain({ node: "pgColumnSize", expr: this.__node });
-  }
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
     return chain({ node: "cast", operand: this.__node, target });
   }
@@ -1671,15 +1665,6 @@ const fn: FnNamespace = {
     field: extractField(field),
     from: exprArg(expr),
   }),
-  currentSetting: (name, missingOk) =>
-    chain({
-      node: "fnCall",
-      fn: "currentSetting",
-      args: missingOk === undefined
-        ? [{ node: "literal", value: name }]
-        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
-    }),
-  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
   concatWs: (sep, ...parts) => chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
   splitPart: (col, delim, n) => {
     splitPartGrammarLint(delim, n);
@@ -1740,6 +1725,15 @@ const pgExpr: PgExprNamespace = {
     pattern: pgRegexPattern(pattern),
   }),
   pgColumnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
+  currentSetting: (name, missingOk) =>
+    chain({
+      node: "fnCall",
+      fn: "currentSetting",
+      args: missingOk === undefined
+        ? [{ node: "literal", value: name }]
+        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+    }),
+  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
   extract: (field, expr) => {
     const f = pgExtractField(field);
     return chain({
