@@ -69,18 +69,6 @@ export type ScalarFn =
 export type SynthFn = "concatWs" | "splitPart" | "now" | "genRandomUuid";
 
 /**
- * The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two
- * NULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the
- * full [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a
- * non-nullary synth (`splitPart`/`concatWs`) as an unknown variant at
- * DESERIALIZE, so a hand-crafted `.ir.json` carrying `{"fn":"splitPart"}` as a
- * default cannot pass the loader and defer the blow-up to rendering. The wire
- * tokens match [`SynthFn`]'s (`"now"`, `"genRandomUuid"`) so the on-disk bytes
- * are unchanged from the pre-narrowing type.
- */
-export type SynthDefaultFn = "now" | "genRandomUuid";
-
-/**
  * Empty container defaults admitted as column DEFAULTs. This is intentionally
  * EMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.
  */

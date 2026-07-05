@@ -291,15 +291,35 @@ export function insertValueShapes(): void {
   });
   table("users").create({
     columns: {
-      created_at: t.timestamp().default(Date.now),
-      random_id: t.uuid().default(Math.random),
-      id: t.uuid().default(crypto.randomUUID),
+      created_at: t.timestamp().default((c) => c.fn.now()),
+      random_id: t.uuid().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().default((c) => c.fn.genRandomUuid()),
     },
   });
 
-  // TypeScript cannot distinguish this from Date.now; the runtime identity guard
-  // rejects it. This line intentionally typechecks.
+  // TypeScript cannot distinguish this from Date.now in DML values; the runtime
+  // identity guard rejects it. This line intentionally typechecks.
   table("users").insert({ rows: { count: () => 42 } });
+
+  // @ts-expect-error — native symbols are no longer valid in column default position.
+  table("users").create({ columns: { created_at: t.timestamp().default(Date.now) } });
+
+  // @ts-expect-error — native symbols are no longer valid in column default position.
+  table("users").create({ columns: { random_id: t.uuid().default(Math.random) } });
+
+  // @ts-expect-error — native symbols are no longer valid in column default position.
+  table("users").create({ columns: { id: t.uuid().default(crypto.randomUUID) } });
+
+  // @ts-expect-error — the removed `{ fn }` carrier is not a DefaultValue.
+  table("users").create({ columns: { created_at: t.timestamp().default({ fn: "now" }) } });
+
+  // @ts-expect-error — DefaultBuilder is not callable; defaults cannot reference columns.
+  table("users").create({ columns: { name_copy: t.text().default((c) => c("name")) } });
+
+  // @ts-expect-error — DefaultBuilder has no aggregate namespace.
+  table("users").create({ columns: { n: t.int().default((c) => c.agg.count()) } });
+
+  // @ts-expect-error — a default callback must return an expression, not a scalar.
   table("users").create({ columns: { count: t.int().default(() => 1) } });
 
   // @ts-expect-error — a function returning an object is not a native-compatible synth symbol.

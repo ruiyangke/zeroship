@@ -3,7 +3,8 @@
 //
 // These are MANUAL types that codegen cannot express: the fluent `table()`
 // handle + its selector sub-handles (`.column`/`.foreignKey`/…), the chainable
-// `ColumnDef` (`t.*`), the `(c) => Expr` `ExprBuilder`, and the all-strings
+// `ColumnDef` (`t.*`), the `(c) => Expr` `ExprBuilder`, default-expression
+// `DefaultBuilder`, and the all-strings
 // typing stance (§3 — names are plain `string`, NOT live-schema-bound). The
 // dialect-neutral IR wire types (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are
 // GENERATED from the engine's `op-ir.schema.json` (`json-schema-to-typescript`)
@@ -175,10 +176,10 @@ export interface NextvalDefault {
 export interface ColumnDef {
   /** Mark the column `NOT NULL` (the rarer, riskier opt-in). Returns a fresh def. */
   notNull(): ColumnDef;
-  /** A structured default — a typed scalar literal OR a nullary synth scalar
-   *  (`{ fn: "now" | "genRandomUuid" }`). NEVER raw SQL (property A). Returns a
-   *  fresh def. */
-  default(value: DefaultValue): ColumnDef;
+  /** A structured default — a typed scalar/container literal, `nextval(...)`, or
+   *  a narrow expression callback `(c) => c.fn.*`. NEVER raw SQL (property A).
+   *  Returns a fresh def. */
+  default(value: DefaultValue | DefaultExprFn): ColumnDef;
   /** Re-target as a foreign-key reference (a plain-string target table). Returns
    *  a fresh def. */
   ref(targetTable: string): ColumnDef;
@@ -277,7 +278,7 @@ export interface EnumHandle {
 export interface CreateDomainArgs {
   as: ColumnDef | ColType;
   check?: ExprFn | ExprChain | Expr;
-  default?: ScalarValue | { fn: "now" | "genRandomUuid" };
+  default?: ScalarValue | DefaultExprFn;
   notNull?: boolean;
   schema?: string;
 }
@@ -402,6 +403,12 @@ export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 /** Empty object/array defaults admitted for JSON/text-array columns. */
 export type EmptyContainerDefault = Record<string, never> | readonly [];
 
+export type JsonDefaultObject = {
+  readonly [key: string]: JsonDefaultValue;
+} & {
+  readonly fn?: never;
+};
+
 /** JSON value defaults admitted for JSON columns. Runtime recording accepts only
  *  integer JS numbers (`Number.isInteger(v) && Math.abs(v) < 2**53`) in v1. */
 export type JsonDefaultValue =
@@ -410,13 +417,11 @@ export type JsonDefaultValue =
   | string
   | number
   | readonly JsonDefaultValue[]
-  | { readonly [key: string]: JsonDefaultValue };
+  | JsonDefaultObject;
 
 /** A column default value accepted by default-bearing column terminals. */
 export type DefaultValue =
   | ScalarValue
-  | DbSynthSymbol
-  | { fn: "now" | "genRandomUuid" }
   | NextvalDefault
   | EmptyContainerDefault
   | JsonDefaultValue;
@@ -507,6 +512,18 @@ export interface FnNamespace {
   now(): ExprChain;
   genRandomUuid(): ExprChain;
 }
+
+/** The deliberately narrow builder available in column default expressions.
+ *  Defaults cannot reference columns, aggregates, vendor PG helpers, or trigger
+ *  OLD/NEW state by construction. */
+export interface DefaultBuilder {
+  fn: FnNamespace;
+  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
+}
+
+/** A column default expression callback. */
+export type DefaultExprFn = (c: DefaultBuilder) => ExprChain | Expr;
 
 /** The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count`/`sum`/`avg`/
  *  `min`/`max` render identically on PG, SQLite, and MySQL (only identifier
@@ -963,7 +980,7 @@ export interface ColumnRef {
   setType(args: { to: ColumnDef; using?: ExprFn; schema?: string }): TableHandle;
   setNotNull(args?: { schema?: string }): TableHandle;
   dropNotNull(args?: { schema?: string }): TableHandle;
-  setDefault(value: DefaultValue, args?: { schema?: string }): TableHandle;
+  setDefault(value: DefaultValue | DefaultExprFn, args?: { schema?: string }): TableHandle;
   dropDefault(args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 }

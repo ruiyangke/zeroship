@@ -7,8 +7,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
-    ColType, IndexElement, IndexSortOrder, IrColumn, IrDefault, Op, SynthDefaultFn,
+    ColType, IndexElement, IndexSortOrder, IrColumn, IrDefault, Op,
     CURRENT_IR_VERSION, SYSTEM_FIELD_NAMES, TableRuntimeOptions, TableStrictness,
 };
 use crate::model::profile::PolicyProfile;
@@ -153,8 +154,8 @@ export function up() {{
   // synth scalar so the value is computed at apply time — deterministic by
   // construction, NEVER a host clock / RNG (those bake a frozen value into the
   // transient recording and may diverge across replays). Uncomment to use:
-  //   table("{name}").column("token").add({{ type: t.uuid().notNull().default({{ fn: "genRandomUuid" }}) }});
-  //   table("{name}").column("expires_at").add({{ type: t.timestamp().notNull().default({{ fn: "now" }}) }});
+  //   table("{name}").column("token").add({{ type: t.uuid().notNull().default((c) => c.fn.genRandomUuid()) }});
+  //   table("{name}").column("expires_at").add({{ type: t.timestamp().notNull().default((c) => c.fn.now()) }});
 }}
 
 export function down() {{
@@ -786,16 +787,21 @@ fn render_t_for(ty: &ColType) -> String {
     }
 }
 
-/// Render an `IrDefault` as a `.default(...)` chain call. A synth fn renders to the
-/// DB-evaluated `{ fn: "now" | "genRandomUuid" }` (deterministic by construction).
+/// Render an `IrDefault` as a `.default(...)` chain call. Synth expressions render
+/// to DB-evaluated default lambdas (deterministic by construction).
 fn render_default(d: &IrDefault) -> String {
     match d {
-        IrDefault::Fn { r#fn } => {
-            let token = match r#fn {
-                SynthDefaultFn::Now => "now",
-                SynthDefaultFn::GenRandomUuid => "genRandomUuid",
-            };
-            format!(".default({{ fn: {} }})", js_str(token))
+        IrDefault::Expr { expr } => match expr {
+            Expr::FnSynth { r#fn: SynthFn::Now, args } if args.is_empty() => {
+                ".default((c) => c.fn.now())".to_string()
+            }
+            Expr::FnSynth { r#fn: SynthFn::GenRandomUuid, args } if args.is_empty() => {
+                ".default((c) => c.fn.genRandomUuid())".to_string()
+            }
+            _ => {
+                let v = serde_json::to_string(expr).unwrap_or_else(|_| r#"{"node":"literal","value":null}"#.into());
+                format!(".default(() => {v} as any)")
+            }
         }
         IrDefault::Literal { value } => {
             // A typed literal default — render via serde_json (a string/number/bool).
@@ -857,9 +863,9 @@ mod tests {
     fn scaffold_is_deterministic_by_construction() {
         let ts = scaffold_new_ts("add_widgets").unwrap();
         // The recommended synth-default pattern is documented in the scaffold.
-        assert!(ts.contains("c.fn.now()") || ts.contains(r#"{ fn: "now" }"#));
+        assert!(ts.contains("c.fn.now()"));
         assert!(
-            ts.contains("c.fn.genRandomUuid()") || ts.contains(r#"{ fn: "genRandomUuid" }"#)
+            ts.contains("c.fn.genRandomUuid()")
         );
         // Tighten the guarantee (LOW-fix): scan ONLY the EXECUTABLE op body (line
         // comments stripped) for host clock / RNG accessors — so the test genuinely

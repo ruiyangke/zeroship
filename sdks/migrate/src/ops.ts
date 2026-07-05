@@ -50,6 +50,8 @@ import type {
   DbSynthSymbol,
   DecimalValue,
   BytesValue,
+  DefaultBuilder,
+  DefaultExprFn,
   DefaultValue,
   DelArgs,
   DomainHandle,
@@ -688,7 +690,7 @@ class ColumnDefImpl implements ColumnDefType {
   notNull(): ColumnDefImpl {
     return this.with({ nullable: false });
   }
-  default(value: DefaultValue): ColumnDefImpl {
+  default(value: DefaultValue | DefaultExprFn): ColumnDefImpl {
     return this.with({ default: toIrDefault(value) });
   }
   ref(targetTable: string): ColumnDefImpl {
@@ -943,15 +945,167 @@ function toIrJsonValue(value: unknown): unknown {
   throw structuredError("OP_INVALID", JSON_DEFAULT_VALUE_ERROR);
 }
 
-function toIrDefault(value: DefaultValue): Node {
-  const fn = nativeFnSynthName(value);
-  if (fn !== undefined) return { fn: { fn } };
+const DEFAULT_SCALAR_FNS = new Set([
+  "coalesce",
+  "nullif",
+  "lower",
+  "upper",
+  "trim",
+  "length",
+  "abs",
+  "mod",
+  "round",
+  "floor",
+  "ceil",
+  "substr",
+  "replace",
+]);
+
+const DEFAULT_SYNTH_FNS = new Set([
+  "now",
+  "genRandomUuid",
+  "concatWs",
+  "splitPart",
+]);
+
+function defaultBuilder(): DefaultBuilder {
+  return Object.freeze({ fn, case: caseExpr });
+}
+
+function defaultFunctionValueError(): Error {
+  return structuredError(
+    "OP_INVALID",
+    "function defaults must be authored as an expression callback, e.g. " +
+      "`.default((c) => c.fn.now())` or `.default((c) => c.fn.genRandomUuid())`; " +
+      "the old `{ fn: ... }` and bare native-symbol default forms are removed",
+  );
+}
+
+function rejectRemovedDefaultFunctionValue(value: unknown): void {
+  if (
+    value === nativeDateNow ||
+    value === nativeMathRandom ||
+    (nativeCryptoRandomUUID !== undefined && value === nativeCryptoRandomUUID)
+  ) {
+    throw defaultFunctionValueError();
+  }
+}
+
+function resolveDefaultExpr(slot: DefaultExprFn): Node {
+  rejectRemovedDefaultFunctionValue(slot);
+  const resolved = slot(defaultBuilder());
+  if (resolved instanceof ExprChainImpl) return resolved.__node;
+  if (resolved && typeof resolved === "object" && typeof (resolved as Node).node === "string") {
+    return resolved as Node;
+  }
+  return exprArg(resolved);
+}
+
+function validateDefaultExpr(expr: Node): void {
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
+      throw structuredError("OP_INVALID", "default expression must be a closed Expr node");
+    }
+    const n = node as Node;
+    switch (n.node) {
+      case "colRef":
+        throw structuredError("OP_INVALID", "a column default cannot reference a column");
+      case "agg":
+        throw structuredError("OP_INVALID", "a column default cannot use an aggregate");
+      case "literal":
+        return;
+      case "fnCall": {
+        if (typeof n.fn !== "string" || !DEFAULT_SCALAR_FNS.has(n.fn)) {
+          throw structuredError(
+            "OP_INVALID",
+            "a column default cannot use volatile or vendor-only functions; use immutable c.fn helpers",
+          );
+        }
+        if (!Array.isArray(n.args)) {
+          throw structuredError("OP_INVALID", "default function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "fnSynth": {
+        if (typeof n.fn !== "string" || !DEFAULT_SYNTH_FNS.has(n.fn)) {
+          throw structuredError("OP_INVALID", "a column default cannot use this synthesized function");
+        }
+        if (!Array.isArray(n.args)) {
+          throw structuredError("OP_INVALID", "default synth expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "binOp":
+        walk(n.lhs);
+        walk(n.rhs);
+        return;
+      case "unaryOp":
+        walk(n.operand);
+        return;
+      case "case": {
+        if (!Array.isArray(n.branches)) {
+          throw structuredError("OP_INVALID", "default CASE expression branches must be an array");
+        }
+        for (const branch of n.branches) {
+          if (!isPlainObject(branch)) {
+            throw structuredError("OP_INVALID", "default CASE branches must be { when, then } objects");
+          }
+          walk(branch.when);
+          walk(branch.then);
+        }
+        if (n.else !== undefined && n.else !== null) walk(n.else);
+        return;
+      }
+      case "cast":
+        walk(n.operand);
+        return;
+      case "between":
+        walk(n.operand);
+        walk(n.low);
+        walk(n.high);
+        return;
+      case "like":
+        walk(n.operand);
+        walk(n.pattern);
+        return;
+      case "distinctFrom":
+        walk(n.left);
+        walk(n.right);
+        return;
+      case "inList":
+        walk(n.expr);
+        return;
+      case "pgRegexMatch":
+      case "pgColumnSize":
+      case "extract":
+      case "pgInterval":
+      case "dialect":
+        throw structuredError(
+          "OP_INVALID",
+          "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes",
+        );
+      default:
+        throw structuredError("OP_INVALID", `unsupported default expression node ${JSON.stringify(n.node)}`);
+    }
+  };
+  walk(expr);
+}
+
+function defaultExprIr(slot: DefaultExprFn): Node {
+  const expr = resolveDefaultExpr(slot);
+  validateDefaultExpr(expr);
+  return { expr };
+}
+
+function toIrDefault(value: DefaultValue | DefaultExprFn): Node {
+  if (typeof value === "function") return defaultExprIr(value);
   if (isNextvalDefault(value)) {
     return { nextval: compact({ name: value.name, schema: value.schema }) };
   }
-  rejectFunctionValue(value);
   if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
-    return { fn: { fn: value.fn } };
+    throw defaultFunctionValueError();
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return { container: "array" };
@@ -996,7 +1150,7 @@ export function nextval(name: string, opts: NextvalOptions = {}): NextvalDefault
 
 export const t: TypeLexicon = {
   id: (opts?: IdOptions) => {
-    let col = new ColumnDefImpl("uuid").primaryKey().default({ fn: "genRandomUuid" });
+    let col = new ColumnDefImpl("uuid").primaryKey().default((c) => c.fn.genRandomUuid());
     if (opts && opts.prefix !== undefined) {
       requireString(opts.prefix, "t.id({ prefix })");
       col = col.__withIdPrefix(opts.prefix);
@@ -2108,7 +2262,7 @@ function recordDropColumnNotNull(table: string, name: string, args: { schema?: s
 function recordSetColumnDefault(
   table: string,
   name: string,
-  value: DefaultValue,
+  value: DefaultValue | DefaultExprFn,
   args: { schema?: string },
 ): void {
   emitSetColumnDefault({

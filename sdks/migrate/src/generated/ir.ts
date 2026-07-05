@@ -42,7 +42,6 @@ import type {
   RaiseLevel,
   RefAction,
   ScalarFn,
-  SynthDefaultFn,
   SynthFn,
   TableStrictness,
   TriggerEvent,
@@ -75,7 +74,6 @@ export type {
   RaiseLevel,
   RefAction,
   ScalarFn,
-  SynthDefaultFn,
   SynthFn,
   TableStrictness,
   TriggerEvent,
@@ -172,13 +170,12 @@ export type IrJsonValue =
   | IrJsonValue[]
   | { [key: string]: IrJsonValue };
 
-/** A column DEFAULT — a typed scalar literal, a nullary synth scalar
- *  (`now`/`genRandomUuid`), an empty container default, a non-empty JSON value
- *  default, or a PostgreSQL sequence `nextval` reference. Never raw SQL
- *  (property A). */
+/** A column DEFAULT — a typed scalar literal, a closed expression AST, an empty
+ *  container default, a non-empty JSON value default, or a PostgreSQL sequence
+ *  `nextval` reference. Never raw SQL (property A). */
 export type IrDefault =
   | { literal: { value: IrScalar } }
-  | { fn: { fn: SynthDefaultFn } }
+  | { expr: Expr }
   | { container: EmptyContainerKind }
   | { json: IrJsonValue }
   | { nextval: SequenceRef };

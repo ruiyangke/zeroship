@@ -229,8 +229,8 @@ pub use model::ir::{
     IndexSortOrder, IndexStorageParams, IrBatch, IrClassification, IrColumn, IrConstraint,
     IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrJsonValue, IrMask, IrMaskKind,
     IrScalar, IrValue, IrVersionError, MigrationIr, Op, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, SynthDefaultFn,
-    TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
+    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions,
+    TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
     CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →

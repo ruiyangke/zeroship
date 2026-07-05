@@ -121,7 +121,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
         id: t.id(),
         email: t.text().notNull().unique(),
         balance: t.numeric(12, 2).notNull().default(decimal("0.00")),
-        authored_at: t.timestamp().notNull().default({ fn: "now" }),
+        authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
