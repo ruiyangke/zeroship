@@ -3490,6 +3490,52 @@ mod tests {
     }
 
     #[test]
+    fn portable_scalar_fns_validate_on_all_three_dialects() {
+        // mod / round / floor / ceil / substr / replace are PORTABLE ScalarFns
+        // (§3.4): identical spelling on PG/SQLite/MySQL (mod renders as the `%`
+        // operator), so the walk accepts them with NO dialect gate — unlike the
+        // PG-only currentSetting/currentUser vendor scalars.
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::FnCall {
+                r#fn: ScalarFn::Mod,
+                args: vec![Expr::col("total"), Expr::lit(IrScalar::Int(3))],
+            },
+            Expr::FnCall { r#fn: ScalarFn::Round, args: vec![Expr::col("total")] },
+            Expr::FnCall {
+                r#fn: ScalarFn::Round,
+                args: vec![Expr::col("total"), Expr::lit(IrScalar::Int(2))],
+            },
+            Expr::FnCall { r#fn: ScalarFn::Floor, args: vec![Expr::col("total")] },
+            Expr::FnCall { r#fn: ScalarFn::Ceil, args: vec![Expr::col("total")] },
+            Expr::FnCall {
+                r#fn: ScalarFn::Substr,
+                args: vec![
+                    Expr::col("name"),
+                    Expr::lit(IrScalar::Int(1)),
+                    Expr::lit(IrScalar::Int(3)),
+                ],
+            },
+            Expr::FnCall {
+                r#fn: ScalarFn::Replace,
+                args: vec![
+                    Expr::col("name"),
+                    Expr::lit(IrScalar::Str("a".into())),
+                    Expr::lit(IrScalar::Str("b".into())),
+                ],
+            },
+        ];
+        for e in &nodes {
+            for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+                validate_expr(e, d, &sc, 0, None).unwrap_or_else(|err| {
+                    panic!("portable scalar fn must validate on {d:?}: {err}")
+                });
+            }
+        }
+    }
+
+    #[test]
     fn pg_only_expr_nodes_reject_on_sqlite_and_mysql() {
         let c = cols();
         let sc = scope("users", &c);

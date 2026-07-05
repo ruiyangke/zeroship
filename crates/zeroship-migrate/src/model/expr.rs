@@ -109,6 +109,27 @@ pub enum ScalarFn {
     Length,
     /// `abs(e)`
     Abs,
+    /// `(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a
+    /// `mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;
+    /// the `%` spelling is identical on PG, SQLite, and MySQL, so this stays a
+    /// dialect-NEUTRAL `ScalarFn` (special-cased at the render seam, §3.4).
+    Mod,
+    /// `round(<x>)` / `round(<x>, <n>)` — portable rounding. Identical spelling on
+    /// PG, SQLite, and MySQL. Optional second (precision) argument.
+    Round,
+    /// `floor(<x>)` — portable floor. `floor()` exists on PG, MySQL, and SQLite
+    /// (≥3.35). Identical spelling.
+    Floor,
+    /// `ceil(<x>)` — portable ceiling. `ceil()` exists on PG, SQLite (≥3.35), and
+    /// MySQL (where `CEIL` is an alias of `CEILING`). Identical spelling.
+    Ceil,
+    /// `substr(<s>, <start>[, <len>])` — portable substring. `substr()` exists on
+    /// PG, SQLite, and MySQL (where `SUBSTR` is an alias of `SUBSTRING`). Identical
+    /// spelling. 1-based `start`; optional `len`.
+    Substr,
+    /// `replace(<s>, <from>, <to>)` — portable string replace. `replace()` exists
+    /// on PG, SQLite, and MySQL with identical spelling and semantics.
+    Replace,
     /// **VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).
     /// A PG GUC read needed by the RLS policy predicates (`0025`'s
     /// `current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it

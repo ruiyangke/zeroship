@@ -1275,6 +1275,22 @@ const fn: FnNamespace = {
   abs: (e) => chain({ node: "fnCall", fn: "abs", args: [exprArg(e)] }),
   coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
   nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
+  mod: (a, b) => chain({ node: "fnCall", fn: "mod", args: [exprArg(a), exprArg(b)] }),
+  round: (x, n) =>
+    chain({
+      node: "fnCall",
+      fn: "round",
+      args: n === undefined ? [exprArg(x)] : [exprArg(x), exprArg(n)],
+    }),
+  floor: (x) => chain({ node: "fnCall", fn: "floor", args: [exprArg(x)] }),
+  ceil: (x) => chain({ node: "fnCall", fn: "ceil", args: [exprArg(x)] }),
+  substr: (s, start, len) =>
+    chain({
+      node: "fnCall",
+      fn: "substr",
+      args: len === undefined ? [exprArg(s), exprArg(start)] : [exprArg(s), exprArg(start), exprArg(len)],
+    }),
+  replace: (s, from, to) => chain({ node: "fnCall", fn: "replace", args: [exprArg(s), exprArg(from), exprArg(to)] }),
   currentSetting: (name, missingOk) =>
     chain({
       node: "fnCall",

@@ -3968,6 +3968,36 @@
           "const": "abs"
         },
         {
+          "description": "`(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a\n`mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;\nthe `%` spelling is identical on PG, SQLite, and MySQL, so this stays a\ndialect-NEUTRAL `ScalarFn` (special-cased at the render seam, §3.4).",
+          "type": "string",
+          "const": "mod"
+        },
+        {
+          "description": "`round(<x>)` / `round(<x>, <n>)` — portable rounding. Identical spelling on\nPG, SQLite, and MySQL. Optional second (precision) argument.",
+          "type": "string",
+          "const": "round"
+        },
+        {
+          "description": "`floor(<x>)` — portable floor. `floor()` exists on PG, MySQL, and SQLite\n(≥3.35). Identical spelling.",
+          "type": "string",
+          "const": "floor"
+        },
+        {
+          "description": "`ceil(<x>)` — portable ceiling. `ceil()` exists on PG, SQLite (≥3.35), and\nMySQL (where `CEIL` is an alias of `CEILING`). Identical spelling.",
+          "type": "string",
+          "const": "ceil"
+        },
+        {
+          "description": "`substr(<s>, <start>[, <len>])` — portable substring. `substr()` exists on\nPG, SQLite, and MySQL (where `SUBSTR` is an alias of `SUBSTRING`). Identical\nspelling. 1-based `start`; optional `len`.",
+          "type": "string",
+          "const": "substr"
+        },
+        {
+          "description": "`replace(<s>, <from>, <to>)` — portable string replace. `replace()` exists\non PG, SQLite, and MySQL with identical spelling and semantics.",
+          "type": "string",
+          "const": "replace"
+        },
+        {
           "description": "**VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).\nA PG GUC read needed by the RLS policy predicates (`0025`'s\n`current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
           "type": "string",
           "const": "currentSetting"

@@ -92,7 +92,7 @@ const TS = {
   // The closed string-enums (generated into enums.ts).
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
-  ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "currentSetting", "currentUser"].sort(),
+  ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
   SynthDefaultFn: ["now", "genRandomUuid"].sort(),
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),

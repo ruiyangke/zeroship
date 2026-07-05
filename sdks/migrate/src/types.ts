@@ -461,6 +461,18 @@ export interface FnNamespace {
   abs(e: unknown): ExprChain;
   coalesce(...args: unknown[]): ExprChain;
   nullif(a: unknown, b: unknown): ExprChain;
+  /** Integer/numeric modulo, `(a % b)` — portable (`%` on PG/SQLite/MySQL). */
+  mod(a: unknown, b: unknown): ExprChain;
+  /** `round(x)` / `round(x, n)` — portable rounding, optional precision. */
+  round(x: unknown, n?: unknown): ExprChain;
+  /** `floor(x)` — portable floor (PG/MySQL/SQLite≥3.35). */
+  floor(x: unknown): ExprChain;
+  /** `ceil(x)` — portable ceiling (PG/SQLite≥3.35/MySQL). */
+  ceil(x: unknown): ExprChain;
+  /** `substr(s, start[, len])` — portable substring, 1-based start. */
+  substr(s: unknown, start: unknown, len?: unknown): ExprChain;
+  /** `replace(s, from, to)` — portable string replace. */
+  replace(s: unknown, from: unknown, to: unknown): ExprChain;
   /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
   currentSetting(name: string, missingOk?: boolean): ExprChain;
   /** PG vendor scalar for RLS policies: current_user. */
