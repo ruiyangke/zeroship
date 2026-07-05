@@ -281,7 +281,7 @@ pub enum Expr {
         /// The operand.
         operand: Box<Expr>,
     },
-    /// A searched `CASE` (`c.case({ when: [{ when, then }], else? })`). Each branch is
+    /// A searched `CASE` (`c.case({ branches: [{ when, then }], else? })`). Each branch is
     /// `(when, then)`; both halves are themselves closed-AST nodes.
     Case {
         /// `(when, then)` branches, in order.

@@ -702,7 +702,7 @@ test("the (c) => Expr builder constructs the closed AST", () => {
       set: {
         a: (c) => c("x").add(1).mul(2).cast("integer"),
         b: (c) => c.fn.concatWs(" ", c("p"), c("q")),
-        d: (c) => c.case({ when: [{ when: c("x").lt(0), then: c("y") }], else: c("z") }),
+        d: (c) => c.case({ branches: [{ when: c("x").lt(0), then: c("y") }], else: c("z") }),
       },
       where: (c) => c("x").gt(0).and(c("y").isNotNull()),
     }),
@@ -722,21 +722,21 @@ test("c.case validates the object branch shape", () => {
     () =>
       record(() =>
         table("t").update({
-          set: { x: (c) => c.case({ when: [] }) },
+          set: { x: (c) => c.case({ branches: [] }) },
           where: (c) => c("id").isNotNull(),
         }),
       ),
-    /c\.case\(\{ when: \[\{ when, then \}\], else\? \}\): when must be a non-empty array/,
+    /c\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches must be a non-empty array/,
   );
   assert.throws(
     () =>
       record(() =>
         table("t").update({
-          set: { x: (c) => c.case({ when: [[c("a"), c("b")]] as any }) },
+          set: { x: (c) => c.case({ branches: [[c("a"), c("b")]] as any }) },
           where: (c) => c("id").isNotNull(),
         }),
       ),
-    /c\.case\(\{ when: \[\{ when, then \}\], else\? \}\): when\[0\] must be an object with when and then/,
+    /c\.case\(\{ branches: \[\{ when, then \}\], else\? \}\): branches\[0\] must be an object with when and then/,
   );
 });
 
