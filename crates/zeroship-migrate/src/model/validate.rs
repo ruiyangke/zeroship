@@ -855,6 +855,18 @@ pub fn validate_op_scoped(
             op_index,
             ts_location,
         ),
+        Op::SetColumnDefault { value, .. } => {
+            if let crate::model::ir::IrDefault::Expr { expr } = value {
+                validate_default_expr(
+                    "setColumnDefault.value",
+                    expr,
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
+            }
+            Ok(())
+        }
         Op::DropTable { .. }
         | Op::CreatePartition { .. }
         | Op::DetachPartition { .. }
@@ -863,7 +875,6 @@ pub fn validate_op_scoped(
         | Op::DropColumn { .. }
         | Op::SetColumnNotNull { .. }
         | Op::DropColumnNotNull { .. }
-        | Op::SetColumnDefault { .. }
         | Op::DropColumnDefault { .. }
         | Op::DropConstraint { .. }
         // ValidateConstraint carries no embedded Expr; its PG-only dialect refusal
@@ -1048,9 +1059,7 @@ fn validate_op_support(
 
     fn feature_kind(feature: Feature) -> UnsupportedKind {
         match feature {
-            Feature::TableLevelCheck | Feature::AlterColumnUsing | Feature::SynthDefault => {
-                UnsupportedKind::Expr
-            }
+            Feature::TableLevelCheck | Feature::AlterColumnUsing => UnsupportedKind::Expr,
             _ => UnsupportedKind::Op,
         }
     }
@@ -1064,10 +1073,6 @@ fn validate_op_support(
                 identity: Some(_), ..
             } => UnsupportedKind::Identity,
             Op::SetColumnType { using: Some(_), .. } => UnsupportedKind::Expr,
-            Op::SetColumnDefault {
-                value: IrDefault::Fn { .. },
-                ..
-            } => UnsupportedKind::Expr,
             Op::AddConstraint {
                 constraint,
                 ..
@@ -1099,10 +1104,6 @@ fn validate_op_support(
             return Err(err);
         }
         Ok(())
-    }
-
-    fn default_is_synth(default: Option<&IrDefault>) -> bool {
-        matches!(default, Some(IrDefault::Fn { .. }))
     }
 
     fn default_is_nextval(default: Option<&IrDefault>) -> bool {
@@ -1202,12 +1203,6 @@ fn validate_op_support(
             }
             if columns
                 .iter()
-                .any(|col| default_is_synth(col.default.as_ref()))
-            {
-                check(Feature::SynthDefault)?;
-            }
-            if columns
-                .iter()
                 .any(|col| default_is_nextval(col.default.as_ref()))
             {
                 check(Feature::SequenceDefault)?;
@@ -1287,18 +1282,11 @@ fn validate_op_support(
             check(Feature::PartitionDdl)?;
         }
         Op::AddColumn { default, .. } => {
-            if default_is_synth(default.as_ref()) {
-                check(Feature::SynthDefault)?;
-            }
             if default_is_nextval(default.as_ref()) {
                 check(Feature::SequenceDefault)?;
             }
         }
         Op::SetColumnType { using: Some(_), .. } => check(Feature::AlterColumnUsing)?,
-        Op::SetColumnDefault {
-            value: IrDefault::Fn { .. },
-            ..
-        } => check(Feature::SynthDefault)?,
         Op::SetColumnDefault {
             value: IrDefault::Nextval { .. },
             ..
@@ -2223,6 +2211,11 @@ fn validate_default_for_type(
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{ColType, EmptyContainerKind, IrDefault};
 
+    if let IrDefault::Expr { expr } = default {
+        validate_default_expr(position, expr, target_dialect, op_index, ts_location)?;
+        return Ok(());
+    }
+
     if let IrDefault::Nextval { .. } = default {
         if !matches!(target_dialect, Dialect::Postgres) {
             return Err(AuthoringError {
@@ -2313,6 +2306,123 @@ fn validate_default_for_type(
             "use this default only on {expected} columns, or remove `.default({{}})` / `.default([])`"
         )),
     })
+}
+
+fn validate_default_expr(
+    position: &str,
+    expr: &Expr,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let scope = TargetScope::structural_only(position);
+    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+
+    fn mk_err(
+        reason: String,
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+    ) -> AuthoringError {
+        AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Expr),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason,
+            suggested_fix: Some(
+                "use only literals, CASE, immutable scalar helpers, and c.fn.now()/c.fn.genRandomUuid() in column defaults"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn walk(
+        expr: &Expr,
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+    ) -> Result<(), AuthoringError> {
+        match expr {
+            Expr::ColRef { .. } => Err(mk_err(
+                "a column default cannot reference a column".to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::Agg { .. } => Err(mk_err(
+                "a column default cannot use an aggregate".to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::FnCall { r#fn, args } => {
+                if matches!(r#fn, ScalarFn::CurrentSetting | ScalarFn::CurrentUser) {
+                    return Err(mk_err(
+                        "a column default cannot use volatile or vendor-only functions".to_string(),
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    ));
+                }
+                for arg in args {
+                    walk(arg, target_dialect, op_index, ts_location)?;
+                }
+                Ok(())
+            }
+            Expr::PgRegexMatch { .. }
+            | Expr::PgColumnSize { .. }
+            | Expr::Extract { .. }
+            | Expr::PgInterval { .. }
+            | Expr::Dialectal { .. } => Err(mk_err(
+                "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes"
+                    .to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::Literal { .. } => Ok(()),
+            Expr::BinOp { lhs, rhs, .. } => {
+                walk(lhs, target_dialect, op_index, ts_location)?;
+                walk(rhs, target_dialect, op_index, ts_location)
+            }
+            Expr::UnaryOp { operand, .. } => walk(operand, target_dialect, op_index, ts_location),
+            Expr::Case { branches, r#else } => {
+                for CaseBranch { when, then } in branches {
+                    walk(when, target_dialect, op_index, ts_location)?;
+                    walk(then, target_dialect, op_index, ts_location)?;
+                }
+                if let Some(expr) = r#else {
+                    walk(expr, target_dialect, op_index, ts_location)?;
+                }
+                Ok(())
+            }
+            Expr::FnSynth { args, .. } => {
+                for arg in args {
+                    walk(arg, target_dialect, op_index, ts_location)?;
+                }
+                Ok(())
+            }
+            Expr::Cast { operand, .. } => walk(operand, target_dialect, op_index, ts_location),
+            Expr::Between { operand, low, high } => {
+                walk(operand, target_dialect, op_index, ts_location)?;
+                walk(low, target_dialect, op_index, ts_location)?;
+                walk(high, target_dialect, op_index, ts_location)
+            }
+            Expr::Like { operand, pattern } => {
+                walk(operand, target_dialect, op_index, ts_location)?;
+                walk(pattern, target_dialect, op_index, ts_location)
+            }
+            Expr::DistinctFrom { left, right } => {
+                walk(left, target_dialect, op_index, ts_location)?;
+                walk(right, target_dialect, op_index, ts_location)
+            }
+            Expr::InList { expr, .. } => walk(expr, target_dialect, op_index, ts_location),
+        }
+    }
+
+    walk(expr, target_dialect, op_index, ts_location)
 }
 
 /// **Migration-first P2a (§4)** — validate one [`IrColumn`](crate::model::ir::IrColumn)'s

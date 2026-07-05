@@ -839,13 +839,6 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             kind: EmptyContainerKind::Object,
         }),
     ));
-    c.push((
-        "setColumnDefault",
-        "fn",
-        set_col_default(IrDefault::Fn {
-            r#fn: zeroship_migrate::model::ir::SynthDefaultFn::Now,
-        }),
-    ));
     c.push(("setColumnDefault", "nextval", set_col_default(nextval_default())));
 
     // ── renameColumn ─────────────────────────────────────────────────────────

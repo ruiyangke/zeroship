@@ -3,7 +3,7 @@
 // `json-schema-to-typescript`.
 //
 // SCOPE — codegen covers the CLOSED STRING-ENUM defs only (BinaryOp, UnaryOp,
-// ScalarFn, SynthFn, CastTarget, IndexMethod, SynthDefaultFn, CmpOp, OnUnmet,
+// ScalarFn, SynthFn, CastTarget, IndexMethod, CmpOp, OnUnmet,
 // OnlinePhase). The RECURSIVE structural defs (`Expr`/`Op`/`ColType`/
 // `IrConstraint`/`MigrationIr`/…) are a self-recursive `oneOf` AST that
 // json-schema-to-typescript v15 CANNOT express (it inlines the `$ref` cycle and
@@ -42,7 +42,6 @@ const ENUM_DEFS = [
   "UnaryOp",
   "ScalarFn",
   "SynthFn",
-  "SynthDefaultFn",
   "EmptyContainerKind",
   "CastTarget",
   "ExtractField",

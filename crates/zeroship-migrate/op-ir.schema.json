@@ -3099,7 +3099,7 @@
       ]
     },
     "IrDefault": {
-      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, a non-empty JSON value default for JSON columns, or a PostgreSQL\nsequence `nextval(...)` reference. NEVER a raw SQL string (property A); the\nper-dialect default clause is rendered by the shared snapshot-builder kernel\nfrom this structured value (§6.5).",
+      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value (§6.5).",
       "oneOf": [
         {
           "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -3125,25 +3125,15 @@
           "additionalProperties": false
         },
         {
-          "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Constrained at the TYPE level to\nthe two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is\nrejected at deserialize, not at render.",
+          "description": "A closed expression default.",
           "type": "object",
           "properties": {
-            "fn": {
-              "type": "object",
-              "properties": {
-                "fn": {
-                  "description": "The synthesized function (`now` or `genRandomUuid`).",
-                  "$ref": "#/$defs/SynthDefaultFn"
-                }
-              },
-              "additionalProperties": false,
-              "required": [
-                "fn"
-              ]
+            "expr": {
+              "$ref": "#/$defs/Expr"
             }
           },
           "required": [
-            "fn"
+            "expr"
           ],
           "additionalProperties": false
         },
@@ -3228,226 +3218,6 @@
           ],
           "additionalProperties": false
         }
-      ]
-    },
-    "SynthDefaultFn": {
-      "description": "The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two\nNULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the\nfull [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a\nnon-nullary synth (`splitPart`/`concatWs`) as an unknown variant at\nDESERIALIZE, so a hand-crafted `.ir.json` carrying `{\"fn\":\"splitPart\"}` as a\ndefault cannot pass the loader and defer the blow-up to rendering. The wire\ntokens match [`SynthFn`]'s (`\"now\"`, `\"genRandomUuid\"`) so the on-disk bytes\nare unchanged from the pre-narrowing type.",
-      "oneOf": [
-        {
-          "description": "`now()` / current timestamp, evaluated at apply time.",
-          "type": "string",
-          "const": "now"
-        },
-        {
-          "description": "`gen_random_uuid()`, evaluated at apply time.",
-          "type": "string",
-          "const": "genRandomUuid"
-        }
-      ]
-    },
-    "EmptyContainerKind": {
-      "description": "Empty container defaults admitted as column DEFAULTs. This is intentionally\nEMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.",
-      "oneOf": [
-        {
-          "description": "`{}`.",
-          "type": "string",
-          "const": "object"
-        },
-        {
-          "description": "`[]`.",
-          "type": "string",
-          "const": "array"
-        }
-      ]
-    },
-    "IrJsonValue": {
-      "description": "A canonical JSON value for non-empty json defaults. Numbers are integers only and must satisfy |v| < 2^53.",
-      "oneOf": [
-        {
-          "type": "null"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "integer",
-          "minimum": -9007199254740991,
-          "maximum": 9007199254740991
-        },
-        {
-          "type": "string"
-        },
-        {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/IrJsonValue"
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/IrJsonValue"
-          }
-        }
-      ]
-    },
-    "SequenceRef": {
-      "description": "A closed sequence reference for `nextval(...)` defaults. This is a logical\nname, never raw SQL.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "description": "Sequence name.",
-          "type": "string"
-        },
-        "schema": {
-          "description": "Optional schema qualifier.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "name"
-      ]
-    },
-    "VectorMetric": {
-      "description": "The CLOSED pgvector distance-metric lexicon (P2a §4). A `t.vector(n, { metric })`\ncolumn carries one of these; it drives the ivfflat/hnsw operator class\n(`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like\nevery other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE\n(a hand-crafted `.ir.json` cannot smuggle an arbitrary metric string into the\nopclass render seam). Camel-cased on the wire (`\"cosine\"`, `\"l2\"`,\n`\"innerProduct\"`), matching the SDK `vectorMetric` spelling\n(`declarative::vector_opclass`).\n\n**Migration-first P2a (§2b):** the search metric is a DECLARED-ONLY hint DB\nintrospection cannot recover (pgvector encodes dims, not the search metric; the\nopclass is an index choice not reliably reversible to the declared metric), so\n— unlike every recoverable facet — it is CARRIED on the column.",
-      "oneOf": [
-        {
-          "description": "Cosine distance (`vector_cosine_ops`).",
-          "type": "string",
-          "const": "cosine"
-        },
-        {
-          "description": "L2 / Euclidean distance (`vector_l2_ops`).",
-          "type": "string",
-          "const": "l2"
-        },
-        {
-          "description": "Inner product (`vector_ip_ops`).",
-          "type": "string",
-          "const": "innerProduct"
-        }
-      ]
-    },
-    "IrMask": {
-      "description": "A column-masking facet (`.mask({ kind, classification })`) carried on the IR.\n\n**Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a\nmask from the LIVE `__zsmask` COMMENT sentinel on the `_masked` sibling\n(`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold\n([`crate::fold_to_field_defs`]) and `gen-types` have NO live DB — there is no\nsentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried\non the IR or it is DROPPED through author→generate→fold (the creator's\n`MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the\nsentinel — never gets a sentinel emitted because the op lower had no mask to emit).\nCarrying it closes BOTH the gen-types type-fidelity gap and the runtime\nmasking-fidelity gap in one move (the lower stamps the `__zsmask` sentinel from\nthis facet).\n\nAn ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the\n`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),\nso it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.\n\nDefault-absent + `skip_serializing_if` so a column declaring no mask is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.",
-      "type": "object",
-      "properties": {
-        "kind": {
-          "description": "The masking transform (closed [`IrMaskKind`]).",
-          "$ref": "#/$defs/IrMaskKind"
-        },
-        "classification": {
-          "description": "The sensitivity classification (closed [`IrClassification`]).",
-          "$ref": "#/$defs/IrClassification"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "kind",
-        "classification"
-      ]
-    },
-    "IrMaskKind": {
-      "description": "The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the\nSDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff\n[`zeroship_schema::diff::MaskKind`] EXACTLY. A CLOSED enum — like every other IR\ntoken-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted\n`.ir.json` cannot smuggle an arbitrary mask-kind string into the `__zsmask`\nsentinel render seam).\n\n**Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the\ntwo date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form\nthat `t.string().mask()` emits and that\n[`zeroship_schema::query::mask_sentinel_for_field`] reads via\n[`zeroship_schema::diff::MaskKind::from_sql`] (which accepts the kebab form). The\non-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that\nspelling lives in the codec, NOT here — this enum carries the SDK/IR wire form.",
-      "oneOf": [
-        {
-          "description": "`\"***\"` — maximum redaction. The kernel default for an encrypted column.",
-          "type": "string",
-          "const": "full"
-        },
-        {
-          "description": "`\"***-**-6789\"` — last 4 visible (SSN, card, phone).",
-          "type": "string",
-          "const": "last4"
-        },
-        {
-          "description": "`\"4111-****-…\"` — first 4 visible (BIN/IIN preservation).",
-          "type": "string",
-          "const": "first4"
-        },
-        {
-          "description": "`\"a****@example.com\"` — preserve domain for analytics.",
-          "type": "string",
-          "const": "email"
-        },
-        {
-          "description": "`\"A. A***\"` — initials (name fields).",
-          "type": "string",
-          "const": "name"
-        },
-        {
-          "description": "`\"1985-**-**\"` — preserve year (age-bucket analytics).",
-          "type": "string",
-          "const": "date-year"
-        },
-        {
-          "description": "`\"198?-**-**\"` — preserve decade (coarser analytics).",
-          "type": "string",
-          "const": "date-decade"
-        },
-        {
-          "description": "Explicit opt-out: no sibling, no mask wrap on read.",
-          "type": "string",
-          "const": "none"
-        }
-      ]
-    },
-    "IrClassification": {
-      "description": "The CLOSED sensitivity-classification lexicon (`.mask({ classification })`),\nmirroring the SDK `Classification` union and [`zeroship_schema::diff::Classification`]\nEXACTLY. CLOSED so serde REJECTS an out-of-set token at DESERIALIZE.",
-      "oneOf": [
-        {
-          "description": "Usernames, display names, public profile data.",
-          "type": "string",
-          "const": "public"
-        },
-        {
-          "description": "Full name, email, address, phone, IP, DOB — the encrypted-column default.",
-          "type": "string",
-          "const": "pii"
-        },
-        {
-          "description": "SSN, driver's license, biometric (CPRA \"sensitive PI\").",
-          "type": "string",
-          "const": "spi"
-        },
-        {
-          "description": "Health records, medical IDs (HIPAA scope).",
-          "type": "string",
-          "const": "phi"
-        },
-        {
-          "description": "Card numbers, CVV, magnetic stripe (PCI-DSS scope).",
-          "type": "string",
-          "const": "pci"
-        },
-        {
-          "description": "Platform-internal metadata, system-field overrides.",
-          "type": "string",
-          "const": "internal"
-        }
-      ]
-    },
-    "GeneratedCol": {
-      "description": "A generated/computed column facet.\n\nThe expression is the closed [`Expr`] AST. `stored = true` renders STORED;\n`stored = false` renders VIRTUAL on SQLite and is fail-closed on Postgres.",
-      "type": "object",
-      "properties": {
-        "expr": {
-          "description": "The generated-column expression.",
-          "$ref": "#/$defs/Expr"
-        },
-        "stored": {
-          "description": "`true` ⇒ STORED; `false` ⇒ VIRTUAL (SQLite only).",
-          "type": "boolean"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "expr",
-        "stored"
       ]
     },
     "Expr": {
@@ -4248,6 +4018,211 @@
           "type": "string",
           "const": "day"
         }
+      ]
+    },
+    "EmptyContainerKind": {
+      "description": "Empty container defaults admitted as column DEFAULTs. This is intentionally\nEMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.",
+      "oneOf": [
+        {
+          "description": "`{}`.",
+          "type": "string",
+          "const": "object"
+        },
+        {
+          "description": "`[]`.",
+          "type": "string",
+          "const": "array"
+        }
+      ]
+    },
+    "IrJsonValue": {
+      "description": "A canonical JSON value for non-empty json defaults. Numbers are integers only and must satisfy |v| < 2^53.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IrJsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/IrJsonValue"
+          }
+        }
+      ]
+    },
+    "SequenceRef": {
+      "description": "A closed sequence reference for `nextval(...)` defaults. This is a logical\nname, never raw SQL.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Sequence name.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "Optional schema qualifier.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "VectorMetric": {
+      "description": "The CLOSED pgvector distance-metric lexicon (P2a §4). A `t.vector(n, { metric })`\ncolumn carries one of these; it drives the ivfflat/hnsw operator class\n(`vector_cosine_ops` / `vector_l2_ops` / `vector_ip_ops`). A CLOSED enum — like\nevery other IR token-set — so serde REJECTS an out-of-set metric at DESERIALIZE\n(a hand-crafted `.ir.json` cannot smuggle an arbitrary metric string into the\nopclass render seam). Camel-cased on the wire (`\"cosine\"`, `\"l2\"`,\n`\"innerProduct\"`), matching the SDK `vectorMetric` spelling\n(`declarative::vector_opclass`).\n\n**Migration-first P2a (§2b):** the search metric is a DECLARED-ONLY hint DB\nintrospection cannot recover (pgvector encodes dims, not the search metric; the\nopclass is an index choice not reliably reversible to the declared metric), so\n— unlike every recoverable facet — it is CARRIED on the column.",
+      "oneOf": [
+        {
+          "description": "Cosine distance (`vector_cosine_ops`).",
+          "type": "string",
+          "const": "cosine"
+        },
+        {
+          "description": "L2 / Euclidean distance (`vector_l2_ops`).",
+          "type": "string",
+          "const": "l2"
+        },
+        {
+          "description": "Inner product (`vector_ip_ops`).",
+          "type": "string",
+          "const": "innerProduct"
+        }
+      ]
+    },
+    "IrMask": {
+      "description": "A column-masking facet (`.mask({ kind, classification })`) carried on the IR.\n\n**Why CARRIED, not recovered (unlike the runtime path).** The runtime recovers a\nmask from the LIVE `__zsmask` COMMENT sentinel on the `_masked` sibling\n(`crates/plugin-db .../introspect_schema.rs`). But the OFFLINE op fold\n([`crate::fold_to_field_defs`]) and `gen-types` have NO live DB — there is no\nsentinel to read. So a STANDALONE `.mask()` on a plaintext column must be carried\non the IR or it is DROPPED through author→generate→fold (the creator's\n`MaskedValue<T>` silently downgrades to `T`, and the runtime — which DOES read the\nsentinel — never gets a sentinel emitted because the op lower had no mask to emit).\nCarrying it closes BOTH the gen-types type-fidelity gap and the runtime\nmasking-fidelity gap in one move (the lower stamps the `__zsmask` sentinel from\nthis facet).\n\nAn ENCRYPTED column's fail-safe auto-mask (`{ full, pii }`) is IMPLIED by the\n`ColType::Encrypted` carrier (recovered in [`crate::ir_author::ir_column_to_field`]),\nso it is NOT carried here; an explicit `.mask()` here OVERRIDES that auto-mask.\n\nDefault-absent + `skip_serializing_if` so a column declaring no mask is\nBYTE-IDENTICAL on the wire and in the checksum to the pre-mask image.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "The masking transform (closed [`IrMaskKind`]).",
+          "$ref": "#/$defs/IrMaskKind"
+        },
+        "classification": {
+          "description": "The sensitivity classification (closed [`IrClassification`]).",
+          "$ref": "#/$defs/IrClassification"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "classification"
+      ]
+    },
+    "IrMaskKind": {
+      "description": "The CLOSED column-masking transform lexicon (`.mask({ kind })`), mirroring the\nSDK `MaskKind` union (`sdks/db/src/types.ts`) and the runtime/diff\n[`zeroship_schema::diff::MaskKind`] EXACTLY. A CLOSED enum — like every other IR\ntoken-set — so serde REJECTS an out-of-set kind at DESERIALIZE (a hand-crafted\n`.ir.json` cannot smuggle an arbitrary mask-kind string into the `__zsmask`\nsentinel render seam).\n\n**Wire spelling.** Most variants are camelCase (`full`, `last4`, `name`, …); the\ntwo date forms are KEBAB (`date-year`, `date-decade`) to match the SDK wire form\nthat `t.string().mask()` emits and that\n[`zeroship_schema::query::mask_sentinel_for_field`] reads via\n[`zeroship_schema::diff::MaskKind::from_sql`] (which accepts the kebab form). The\non-DB sentinel itself uses the camelCase `as_sql` (`dateYear`/`dateDecade`); that\nspelling lives in the codec, NOT here — this enum carries the SDK/IR wire form.",
+      "oneOf": [
+        {
+          "description": "`\"***\"` — maximum redaction. The kernel default for an encrypted column.",
+          "type": "string",
+          "const": "full"
+        },
+        {
+          "description": "`\"***-**-6789\"` — last 4 visible (SSN, card, phone).",
+          "type": "string",
+          "const": "last4"
+        },
+        {
+          "description": "`\"4111-****-…\"` — first 4 visible (BIN/IIN preservation).",
+          "type": "string",
+          "const": "first4"
+        },
+        {
+          "description": "`\"a****@example.com\"` — preserve domain for analytics.",
+          "type": "string",
+          "const": "email"
+        },
+        {
+          "description": "`\"A. A***\"` — initials (name fields).",
+          "type": "string",
+          "const": "name"
+        },
+        {
+          "description": "`\"1985-**-**\"` — preserve year (age-bucket analytics).",
+          "type": "string",
+          "const": "date-year"
+        },
+        {
+          "description": "`\"198?-**-**\"` — preserve decade (coarser analytics).",
+          "type": "string",
+          "const": "date-decade"
+        },
+        {
+          "description": "Explicit opt-out: no sibling, no mask wrap on read.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
+    "IrClassification": {
+      "description": "The CLOSED sensitivity-classification lexicon (`.mask({ classification })`),\nmirroring the SDK `Classification` union and [`zeroship_schema::diff::Classification`]\nEXACTLY. CLOSED so serde REJECTS an out-of-set token at DESERIALIZE.",
+      "oneOf": [
+        {
+          "description": "Usernames, display names, public profile data.",
+          "type": "string",
+          "const": "public"
+        },
+        {
+          "description": "Full name, email, address, phone, IP, DOB — the encrypted-column default.",
+          "type": "string",
+          "const": "pii"
+        },
+        {
+          "description": "SSN, driver's license, biometric (CPRA \"sensitive PI\").",
+          "type": "string",
+          "const": "spi"
+        },
+        {
+          "description": "Health records, medical IDs (HIPAA scope).",
+          "type": "string",
+          "const": "phi"
+        },
+        {
+          "description": "Card numbers, CVV, magnetic stripe (PCI-DSS scope).",
+          "type": "string",
+          "const": "pci"
+        },
+        {
+          "description": "Platform-internal metadata, system-field overrides.",
+          "type": "string",
+          "const": "internal"
+        }
+      ]
+    },
+    "GeneratedCol": {
+      "description": "A generated/computed column facet.\n\nThe expression is the closed [`Expr`] AST. `stored = true` renders STORED;\n`stored = false` renders VIRTUAL on SQLite and is fail-closed on Postgres.",
+      "type": "object",
+      "properties": {
+        "expr": {
+          "description": "The generated-column expression.",
+          "$ref": "#/$defs/Expr"
+        },
+        "stored": {
+          "description": "`true` ⇒ STORED; `false` ⇒ VIRTUAL (SQLite only).",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "expr",
+        "stored"
       ]
     },
     "IdentityCol": {

@@ -138,7 +138,6 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "revoke", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "setColumnDefault", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "setColumnDefault", variant: "containerOrJson", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
-    DispositionRow { kind: "setColumnDefault", variant: "fn", postgres: Disposition::Unsupported, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "setColumnDefault", variant: "nextval", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "setColumnNotNull", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "setColumnType", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },

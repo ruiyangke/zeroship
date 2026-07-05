@@ -21,7 +21,6 @@ use zeroship_migrate::model::ir::{
     ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr,
     Op,
 };
-use zeroship_migrate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,

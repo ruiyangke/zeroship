@@ -207,7 +207,6 @@ pub enum Feature {
     ExclusionConstraint,
     NativeAlterColumn,
     AlterColumnUsing,
-    SynthDefault,
     SequenceDefault,
     RenameColumnGuard,
     InsertOnConflict,
@@ -327,16 +326,6 @@ const PG_ONLY_TABLE_LEVEL_CHECK: DialectSupport = DialectSupport::postgres_only(
     "table-level CHECK expression rendering is PostgreSQL-only in the current engine",
 );
 
-const UNSUPPORTED_ALL_SYNTH_DEFAULT: DialectSupport = DialectSupport::unsupported_all(
-    UNSUPPORTED,
-    "synth default rendering is deferred until the expression/default renderer lands",
-);
-
-const PG_ONLY_SYNTH_DEFAULT: DialectSupport = DialectSupport::postgres_only(
-    RenderMode::Offline,
-    "synth default rendering is PostgreSQL-only in the current engine",
-);
-
 const PG_ONLY_SEQUENCE_DEFAULT: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
     "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
@@ -416,7 +405,6 @@ const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::postgres_only(
 );
 
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
     FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
@@ -482,10 +470,8 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
-    FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
-];
+pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] =
+    &[FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT)];
 
 pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(
@@ -559,10 +545,8 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT),
-    FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
-];
+pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] =
+    &[FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT)];
 
 pub(crate) const INSERT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::InsertOnConflict,

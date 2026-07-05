@@ -974,10 +974,8 @@ pub fn fold_ops(
                     IrDefault::Literal { .. } => {
                         render_ir_default(value, dialect).map_err(fold_named_type_error)?
                     }
-                    IrDefault::Fn { .. } => {
-                        return Err(FoldError::Unsupported(
-                            "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
-                        ));
+                    IrDefault::Expr { .. } => {
+                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
                     }
                     IrDefault::Container { kind } => {
                         render_container_default_for_data_type(*kind, &col.data_type)
@@ -1458,7 +1456,7 @@ fn apply_fold_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
     for source in columns {
-        let Some(IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. }) = source.default.as_ref() else {
+        let Some(IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. }) = source.default.as_ref() else {
             continue;
         };
         let col = snap
@@ -1489,7 +1487,7 @@ fn apply_fold_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
-    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
+    let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
         return Ok(());
     };
     if col.name != column {

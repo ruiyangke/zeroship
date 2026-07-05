@@ -70,8 +70,10 @@
           "type": "timestamp",
           "nullable": false,
           "default": {
-            "fn": {
-              "fn": "now"
+            "expr": {
+              "node": "fnSynth",
+              "fn": "now",
+              "args": []
             }
           }
         },

@@ -161,9 +161,23 @@ test("t.id() records a uuid PK + genRandomUuid default + top-level primaryKey", 
   const col = ops[0].columns[0];
   assert.equal(col.type, "uuid");
   assert.equal(col.nullable, false);
-  assert.deepEqual(col.default, { fn: { fn: "genRandomUuid" } });
+  assert.deepEqual(col.default, { expr: { node: "fnSynth", fn: "genRandomUuid", args: [] } });
   assert.deepEqual(ops[0].primaryKey, ["id"]);
   assert.equal(ops[0].constraints, undefined);
+});
+
+test("default expression callbacks record IrDefault::Expr", () => {
+  const ops = record(() => {
+    table("u").create({
+      columns: {
+        created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      },
+    });
+    table("u").column("updated_at").setDefault((c) => c.fn.now());
+  });
+  const expr = { node: "fnSynth", fn: "now", args: [] };
+  assert.deepEqual(ops[0].columns[0].default, { expr });
+  assert.deepEqual(ops[1].value, { expr });
 });
 
 test("create() without primaryKey leaves the top-level field absent", () => {
@@ -654,8 +668,28 @@ test("non-native function values fail closed instead of recording as JSON null",
     isInvalidFunction,
   );
   assert.throws(
-    () => record(() => table("t").create({ columns: { v: t.text().default((() => 1) as any) } })),
-    isInvalidFunction,
+    () => record(() => table("t").create({ columns: { v: t.text().default({ fn: "now" } as any) } })),
+    (e: any) => e.code === "OP_INVALID" && /old `\{ fn: \.\.\. \}`/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").create({ columns: { v: t.timestamp().default(Date.now as any) } })),
+    (e: any) => e.code === "OP_INVALID" && /bare native-symbol default forms are removed/.test(e.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").create({
+          columns: { v: t.text().default((() => ({ node: "colRef", column: "name" })) as any) },
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /column default cannot reference a column/.test(e.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").create({ columns: { v: t.int().default((() => ({ node: "agg", func: "count" })) as any) } }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /column default cannot use an aggregate/.test(e.message),
   );
   assert.throws(
     () =>

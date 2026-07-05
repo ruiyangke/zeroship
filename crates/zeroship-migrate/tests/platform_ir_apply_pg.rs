@@ -223,8 +223,8 @@ export function up() {
 
   table("platform_apps", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["id"],
   });
@@ -235,7 +235,7 @@ export function up() {
       route: t.text().notNull(),
       target: t.text().notNull(),
       status: t.text().notNull(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["app_id", "route"],
     checks: [
@@ -344,8 +344,8 @@ export function up() {
 
   table("platform_events", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      occurred_at: t.timestamp().notNull().default({ fn: "now" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
       kind: t.text().notNull(),
       payload: t.json().notNull(),
       items: t.json().notNull(),
@@ -445,7 +445,7 @@ export function up() {
 
   table("platform_scalar_types", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       shard: t.smallInt().notNull(),
       ratio: t.real().notNull(),
       source_ip: t.inet(),

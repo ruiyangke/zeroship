@@ -13,7 +13,7 @@ export const name = "ddl_create";
 export function up() {
   table("orders").create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       total: t.int().notNull().default(0),
       note: t.text(),
     },
