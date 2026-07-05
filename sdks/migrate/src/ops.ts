@@ -73,9 +73,13 @@ import type {
   FnNamespace,
   ForeignKeyRef,
   ForeignKeyReference,
+  GeneratedColumnExprFn,
   GeneratedOptions,
   IdOptions,
   IdentityOptions,
+  ImmutableFnNamespace,
+  IndexExprBuilder,
+  IndexExprFn,
   IndexRef,
   IndexElementArg,
   InsertArgs,
@@ -736,7 +740,7 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ mask: { kind: opts.kind, classification } });
   }
 
-  generated(expr: ExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
+  generated(expr: GeneratedColumnExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
     if (opts !== undefined && (opts === null || typeof opts !== "object")) {
       throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
     }
@@ -744,7 +748,10 @@ class ColumnDefImpl implements ColumnDefType {
       throw structuredError("OP_INVALID", "t.*.generated(expr, { virtual }): virtual must be a boolean");
     }
     return this.with({
-      generated: { expr: resolveExpr(expr as ExprFn | ExprChainType | Node)!, stored: opts?.virtual === true ? false : true },
+      generated: {
+        expr: resolveImmutableExpr(expr as GeneratedColumnExprFn | ExprChainType | Node, "generated column expression")!,
+        stored: opts?.virtual === true ? false : true,
+      },
     });
   }
 
@@ -967,6 +974,30 @@ const DEFAULT_SYNTH_FNS = new Set([
   "concatWs",
   "splitPart",
 ]);
+
+const IMMUTABLE_SCALAR_FNS = new Set([
+  "coalesce",
+  "nullif",
+  "lower",
+  "upper",
+  "trim",
+  "length",
+  "abs",
+  "mod",
+  "round",
+  "floor",
+  "ceil",
+  "substr",
+  "replace",
+]);
+
+const IMMUTABLE_SYNTH_FNS = new Set([
+  "concatWs",
+  "splitPart",
+]);
+
+const IMMUTABLE_HELPERS =
+  "lower/upper/trim/length/abs/coalesce/nullif/mod/round/floor/ceil/substr/replace/concatWs/splitPart";
 
 function defaultBuilder(): DefaultBuilder {
   return Object.freeze({ fn, case: caseExpr });
@@ -1604,6 +1635,24 @@ const fn: FnNamespace = {
   genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
 };
 
+const immutableFn: ImmutableFnNamespace = Object.freeze({
+  lower: fn.lower,
+  upper: fn.upper,
+  trim: fn.trim,
+  length: fn.length,
+  abs: fn.abs,
+  coalesce: fn.coalesce,
+  nullif: fn.nullif,
+  mod: fn.mod,
+  round: fn.round,
+  floor: fn.floor,
+  ceil: fn.ceil,
+  substr: fn.substr,
+  replace: fn.replace,
+  concatWs: fn.concatWs,
+  splitPart: fn.splitPart,
+});
+
 // The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count()` (no arg)
 // records `count(*)`; a present arg records `<func>(<arg>)`. The optional
 // `{ distinct: true }` sets the `distinct` flag (skipped on the wire when false).
@@ -1680,11 +1729,11 @@ function caseExpr(args: CaseExprArgs): ExprChainType {
   return chain(node);
 }
 
-function makeBuilder(): ExprBuilder {
+function makeColumnAccessor(): (first: string, second?: string) => ExprChainType {
   // One-arg `c("col")` → unqualified colRef (byte-identical to the pre-
   // qualification wire shape). Two-arg `c("table", "col")` → qualified colRef
   // (§3.4, the join-ON fix): the wire `colRef` node gains an optional `table`.
-  const c = ((first: string, second?: string) => {
+  return ((first: string, second?: string) => {
     if (second === undefined) {
       requireString(first, 'c("name")');
       return chain({ node: "colRef", name: first });
@@ -1692,7 +1741,18 @@ function makeBuilder(): ExprBuilder {
     requireString(first, 'c("table", "col")');
     requireString(second, 'c("table", "col")');
     return chain({ node: "colRef", table: first, name: second });
-  }) as unknown as ExprBuilder;
+  });
+}
+
+function immutableExprBuilder(): IndexExprBuilder {
+  const c = makeColumnAccessor() as unknown as IndexExprBuilder;
+  c.case = caseExpr;
+  c.fn = immutableFn;
+  return Object.freeze(c);
+}
+
+function makeBuilder(): ExprBuilder {
+  const c = makeColumnAccessor() as unknown as ExprBuilder;
   c.col = c;
   c.case = caseExpr;
   c.fn = fn;
@@ -1719,6 +1779,122 @@ function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | un
   if (slot instanceof ExprChainImpl) return slot.__node;
   if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") return slot as Node;
   throw structuredError("OP_INVALID", "expression slot must be a (c) => Expr callback or a built expression");
+}
+
+type ImmutableExprSlot = IndexExprFn | GeneratedColumnExprFn | ExprChainType | Node | undefined;
+
+function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (c: IndexExprBuilder) => unknown)(immutableExprBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position);
+  return resolved;
+}
+
+function rejectImmutableExpr(position: string, reason: string): never {
+  throw structuredError(
+    "OP_INVALID",
+    `${position} must use only immutable expressions: column refs, literals, CASE, operators, and immutable c.fn helpers ` +
+      `(${IMMUTABLE_HELPERS}); ${reason}`,
+  );
+}
+
+function validateImmutableExpr(expr: Node, position: string): void {
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
+      rejectImmutableExpr(position, "found a non-expression value");
+    }
+    const n = node as Node;
+    switch (n.node) {
+      case "colRef":
+      case "literal":
+        return;
+      case "agg":
+        rejectImmutableExpr(position, "aggregates are not allowed here");
+      case "fnCall": {
+        if (n.fn === "currentSetting" || n.fn === "currentUser") {
+          rejectImmutableExpr(position, `${String(n.fn)} is PG-vendor and non-portable`);
+        }
+        if (typeof n.fn !== "string" || !IMMUTABLE_SCALAR_FNS.has(n.fn)) {
+          rejectImmutableExpr(position, `function ${JSON.stringify(n.fn)} is not an immutable c.fn helper`);
+        }
+        if (!Array.isArray(n.args)) {
+          rejectImmutableExpr(position, "function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "fnSynth": {
+        if (n.fn === "now" || n.fn === "genRandomUuid") {
+          rejectImmutableExpr(position, `${String(n.fn)} is volatile`);
+        }
+        if (typeof n.fn !== "string" || !IMMUTABLE_SYNTH_FNS.has(n.fn)) {
+          rejectImmutableExpr(position, `synthesized function ${JSON.stringify(n.fn)} is not immutable here`);
+        }
+        if (!Array.isArray(n.args)) {
+          rejectImmutableExpr(position, "synthesized function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "binOp":
+        walk(n.lhs);
+        walk(n.rhs);
+        return;
+      case "unaryOp":
+        walk(n.operand);
+        return;
+      case "case": {
+        if (!Array.isArray(n.branches)) {
+          rejectImmutableExpr(position, "CASE expression branches must be an array");
+        }
+        for (const branch of n.branches) {
+          if (!isPlainObject(branch)) {
+            rejectImmutableExpr(position, "CASE branches must be { when, then } objects");
+          }
+          walk(branch.when);
+          walk(branch.then);
+        }
+        if (n.else !== undefined && n.else !== null) walk(n.else);
+        return;
+      }
+      case "cast":
+        walk(n.operand);
+        return;
+      case "between":
+        walk(n.operand);
+        walk(n.low);
+        walk(n.high);
+        return;
+      case "like":
+        walk(n.operand);
+        walk(n.pattern);
+        return;
+      case "distinctFrom":
+        walk(n.left);
+        walk(n.right);
+        return;
+      case "inList":
+        walk(n.expr);
+        return;
+      case "dialect":
+        for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
+          if (n[leg] !== undefined && n[leg] !== null) walk(n[leg]);
+        }
+        return;
+      default:
+        rejectImmutableExpr(position, `unsupported expression node ${JSON.stringify(n.node)}`);
+    }
+  };
+  walk(expr);
 }
 
 /** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
@@ -2077,7 +2253,7 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
         columns: idx.on.map(indexElementToIr),
         unique: idx.unique,
         using: idx.using,
-        where: resolveExpr(idx.where),
+        where: resolveImmutableExpr(idx.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
         include: indexIncludeToIr(idx.include),
         with: indexWithToIr(idx.with),
         only: requireOptionalBoolean(idx.only, "index only"),
@@ -2418,7 +2594,10 @@ function exclusionConstraintFromSpec(
       kind: "exclusion",
       usingMethod: spec.using,
       elements: spec.elements.map(exclusionElementToIr),
-      wherePredicate: resolveExpr(spec.where as ExprFn | ExprChainType | Node | undefined),
+      wherePredicate: resolveImmutableExpr(
+        spec.where as IndexExprFn | ExprChainType | Node | undefined,
+        "exclusion predicate",
+      ),
       deferrable: spec.deferrable,
       initiallyDeferred: spec.initiallyDeferred,
     }),
@@ -2476,7 +2655,10 @@ function indexElementToIr(element: IndexElementArg): Node {
     }
     if ("expr" in element) {
       indexColumnOrderToIr((element as { order?: unknown }).order);
-      const expr = resolveExpr((element as { expr?: ExprFn | ExprChainType | Node }).expr);
+      const expr = resolveImmutableExpr(
+        (element as { expr?: IndexExprFn | ExprChainType | Node }).expr,
+        "index expression element",
+      );
       if (!expr) {
         throw structuredError("OP_INVALID", "index expr element needs { expr }");
       }
@@ -2529,7 +2711,7 @@ function recordCreateIndex(
     on: IndexElementArg[];
     unique?: boolean;
     using?: import("./types.js").IndexMethod;
-    where?: ExprFn;
+    where?: IndexExprFn;
     include?: readonly string[];
     with?: IndexStorageParamsArg;
     only?: boolean;
@@ -2547,7 +2729,7 @@ function recordCreateIndex(
     name,
     unique: args.unique,
     using: args.using,
-    where: resolveExpr(args.where),
+    where: resolveImmutableExpr(args.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
     include: indexIncludeToIr(args.include),
     with: indexWithToIr(args.with),
     only: requireOptionalBoolean(args.only, "index only"),

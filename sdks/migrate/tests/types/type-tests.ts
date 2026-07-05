@@ -153,6 +153,32 @@ export function indexGrammar(): void {
   table("users").index("bad_tagged_column").add({ on: [{ [oldKindKey]: oldColumnKind, name: "email" }] });
 }
 
+export function immutableOnlyBuilderSlots(): void {
+  t.text().generated((c) => c.fn.lower(c("email")));
+  table("users").index("users_email_lower_idx").add({
+    on: [{ expr: (c) => c.fn.lower(c("email")) }],
+    where: (c) => c("active").isTrue(),
+  });
+
+  // @ts-expect-error — generated column expressions cannot use volatile c.fn.now().
+  t.timestamp().generated((c) => c.fn.now());
+
+  // @ts-expect-error — index expression elements cannot use volatile c.fn.now().
+  table("users").index("bad_index_now").add({ on: [{ expr: (c) => c.fn.now() }] });
+
+  // @ts-expect-error — partial-index predicates cannot use volatile c.fn.now().
+  table("users").index("bad_partial_now").add({ on: ["email"], where: (c) => c.fn.now() });
+
+  // @ts-expect-error — generated column expressions cannot use aggregates.
+  t.int().generated((c) => c.agg.count());
+
+  // @ts-expect-error — index expression elements cannot use aggregates.
+  table("users").index("bad_index_agg").add({ on: [{ expr: (c) => c.agg.count() }] });
+
+  // @ts-expect-error — partial-index predicates cannot use aggregates.
+  table("users").index("bad_partial_agg").add({ on: ["email"], where: (c) => c.agg.count() });
+}
+
 // The table-level `.rename({ to })` now type-checks (the renameTable op shipped):
 // a bare rename and a schema+ifExists rename, both returning the chainable handle.
 export function goodTableRename(): void {

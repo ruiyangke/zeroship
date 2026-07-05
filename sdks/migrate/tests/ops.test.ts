@@ -1336,6 +1336,57 @@ test("index columns normalize to closed column/expression elements", () => {
   });
 });
 
+test("immutable-only slots reject forced volatile, aggregate, and vendor nodes at record time", () => {
+  assert.throws(
+    () =>
+      record(() =>
+        table("users").create({
+          columns: {
+            created_day: t.timestamp().generated({ node: "fnSynth", fn: "now", args: [] } as any),
+          },
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /generated column expression/.test(e.message) && /now is volatile/.test(e.message),
+  );
+
+  assert.throws(
+    () =>
+      record(() =>
+        table("users").index("users_bad_agg_idx").add({
+          on: [{ expr: { node: "agg", func: "count" } as any }],
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /index expression element/.test(e.message) && /aggregates/.test(e.message),
+  );
+
+  assert.throws(
+    () =>
+      record(() =>
+        table("users").create({
+          columns: { email: t.text() },
+          indexes: [{
+            name: "users_bad_partial_idx",
+            on: ["email"],
+            where: { node: "fnSynth", fn: "genRandomUuid", args: [] } as any,
+          }],
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /partial index predicate/.test(e.message) && /genRandomUuid is volatile/.test(e.message),
+  );
+
+  assert.throws(
+    () =>
+      record(() =>
+        table("bookings").exclusion("bookings_bad_excl").add({
+          using: "gist",
+          elements: [{ target: "room", operator: "=" }],
+          where: { node: "fnCall", fn: "currentUser", args: [] } as any,
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /exclusion predicate/.test(e.message) && /currentUser/.test(e.message),
+  );
+});
+
 test("index column order records DESC and omits ASC/default order", () => {
   const ops = record(() =>
     table("events").index("events_created_desc_idx").add({

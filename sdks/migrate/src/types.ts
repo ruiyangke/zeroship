@@ -4,7 +4,7 @@
 // These are MANUAL types that codegen cannot express: the fluent `table()`
 // handle + its selector sub-handles (`.column`/`.foreignKey`/…), the chainable
 // `ColumnDef` (`t.*`), the `(c) => Expr` `ExprBuilder`, default-expression
-// `DefaultBuilder`, and the all-strings
+// `DefaultBuilder`, immutable index/generated expression builders, and the all-strings
 // typing stance (§3 — names are plain `string`, NOT live-schema-bound). The
 // dialect-neutral IR wire types (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are
 // GENERATED from the engine's `op-ir.schema.json` (`json-schema-to-typescript`)
@@ -199,7 +199,7 @@ export interface ColumnDef {
   /** Declare a generated/computed column from a closed expression AST. Omitted
    * options render a STORED generated column; `{ virtual: true }` requests a
    * SQLite VIRTUAL column and is rejected on Postgres. */
-  generated(expr: ExprFn | ExprChain | Expr, opts?: GeneratedOptions): ColumnDef;
+  generated(expr: GeneratedColumnExprFn | ExprChain | Expr, opts?: GeneratedOptions): ColumnDef;
   /** Declare a SQL identity column. `{ always: true }` renders
    * `GENERATED ALWAYS AS IDENTITY`; otherwise `BY DEFAULT`. */
   identity(opts?: IdentityOptions): ColumnDef;
@@ -513,6 +513,29 @@ export interface FnNamespace {
   genRandomUuid(): ExprChain;
 }
 
+/** The immutable-only scalar namespace for generated columns and index predicates.
+ *  Immutable members: lower/upper/trim/length/abs/coalesce/nullif/mod/round/
+ *  floor/ceil/substr/replace/concatWs/splitPart. Volatile now/genRandomUuid and
+ *  PG-vendor currentSetting/currentUser are intentionally absent. */
+export type ImmutableFnNamespace = Pick<
+  FnNamespace,
+  | "lower"
+  | "upper"
+  | "trim"
+  | "length"
+  | "abs"
+  | "coalesce"
+  | "nullif"
+  | "mod"
+  | "round"
+  | "floor"
+  | "ceil"
+  | "substr"
+  | "replace"
+  | "concatWs"
+  | "splitPart"
+>;
+
 /** The deliberately narrow builder available in column default expressions.
  *  Defaults cannot reference columns, aggregates, vendor PG helpers, or trigger
  *  OLD/NEW state by construction. */
@@ -524,6 +547,26 @@ export interface DefaultBuilder {
 
 /** A column default expression callback. */
 export type DefaultExprFn = (c: DefaultBuilder) => ExprChain | Expr;
+
+interface ImmutableExprBuilderBase {
+  (name: string): ExprChain;
+  (table: string, name: string): ExprChain;
+  fn: ImmutableFnNamespace;
+  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
+}
+
+/** Builder for index expressions and predicates. Column refs, immutable
+ *  `c.fn.*`, and `c.case(...)` are available; aggregates, `c.pg`, and trigger
+ *  OLD/NEW state are not. */
+export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
+
+/** Builder for generated column expressions. Structurally matches
+ *  `IndexExprBuilder` today but remains distinct so the slots can diverge. */
+export interface GeneratedColumnBuilder extends ImmutableExprBuilderBase {}
+
+export type IndexExprFn = (c: IndexExprBuilder) => ExprChain | Expr;
+export type GeneratedColumnExprFn = (c: GeneratedColumnBuilder) => ExprChain | Expr;
 
 /** The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count`/`sum`/`avg`/
  *  `min`/`max` render identically on PG, SQLite, and MySQL (only identifier
@@ -848,7 +891,7 @@ export interface IndexColumnElementArg {
 }
 
 export interface IndexExprElementArg {
-  expr: ExprFn | ExprChain | Expr;
+  expr: IndexExprFn | ExprChain | Expr;
   order?: IndexSortOrder;
 }
 
@@ -875,7 +918,7 @@ export interface ExclusionElementArg {
 export interface ExclusionConstraintArgs {
   using?: ExclusionMethod;
   elements: ExclusionElementArg[];
-  where?: ExprFn | ExprChain | Expr;
+  where?: IndexExprFn | ExprChain | Expr;
   deferrable?: boolean;
   initiallyDeferred?: boolean;
 }
@@ -952,7 +995,7 @@ export interface CreateTableArgs {
     using?: IndexMethod;
     /** Partial-index predicate. Renders on PostgreSQL and SQLite; MySQL refuses
      *  it fail-closed because MySQL has no partial indexes. */
-    where?: ExprFn;
+    where?: IndexExprFn;
     include?: readonly string[];
     with?: IndexStorageParamsArg;
     only?: boolean;
@@ -1038,7 +1081,7 @@ export interface IndexRef {
     on: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
-    where?: ExprFn;
+    where?: IndexExprFn;
     include?: readonly string[];
     with?: IndexStorageParamsArg;
     only?: boolean;
