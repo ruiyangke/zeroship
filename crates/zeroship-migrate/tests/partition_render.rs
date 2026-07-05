@@ -1,8 +1,11 @@
 use zeroship_migrate::model::ir::{
-    ColType, IndexElement, IndexMethod, IndexStorageParams, IrColumn, MigrationIr, Op,
-    PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
+    ColType, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrScalar, IrValue,
+    MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
 };
-use zeroship_migrate::{IrAuthor, IrFlagsOverride, LiveSchema, SqlDialect, SqliteBackend, CURRENT_IR_VERSION};
+use zeroship_migrate::{
+    fold_ops, Approval, ExecutorConfig, IrAuthor, IrFlagsOverride, LiveSchema, LockMode,
+    MigrationEngine, SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
+};
 
 fn col(name: &str, ty: ColType) -> IrColumn {
     col_with_nullability(name, ty, None)
@@ -70,42 +73,157 @@ fn int_bound(value: i64) -> PartitionBoundValue {
     }
 }
 
+fn create_events_parent() -> Op {
+    Op::CreateTable {
+        name: "events".into(),
+        columns: vec![
+            not_null_col("bucket", ColType::Int),
+            not_null_col("payload", ColType::Text),
+        ],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: Some(PartitionSpec::Range {
+            columns: vec!["bucket".into()],
+            collapse: true,
+        }),
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn create_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBoundValue) -> Op {
+    Op::CreatePartition {
+        name: name.into(),
+        of: "events".into(),
+        bounds: PartitionBounds::Range {
+            from: vec![from],
+            to: vec![to],
+        },
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn create_default_partition() -> Op {
+    Op::CreatePartition {
+        name: "events_default".into(),
+        of: "events".into(),
+        bounds: PartitionBounds::Default,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn drop_events_partition(name: &str) -> Op {
+    Op::DropPartition {
+        parent: "events".into(),
+        name: name.into(),
+        schema: None,
+        existence_guard: None,
+        cascade: None,
+    }
+}
+
+fn insert_events(rows: &[(i64, &str)]) -> Op {
+    Op::Insert {
+        table: "events".into(),
+        columns: vec!["bucket".into(), "payload".into()],
+        rows: rows
+            .iter()
+            .map(|(bucket, payload)| {
+                vec![
+                    IrValue::from(IrScalar::Int(*bucket)),
+                    IrValue::from(IrScalar::Str((*payload).into())),
+                ]
+            })
+            .collect(),
+        on_conflict: None,
+        schema: None,
+    }
+}
+
+fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
+    let snap = fold_ops(ops, SqlDialect::Sqlite, "prj_partition").expect("fold partition ops");
+    let mut live = LiveSchema::from_tables(snap.tables.keys().cloned().collect());
+    live.table_snapshots = snap.tables;
+    live.partitions = snap.partitions;
+    live
+}
+
+fn partition_exec_cfg() -> ExecutorConfig {
+    ExecutorConfig::new("prj_partition", "app_partition")
+}
+
+fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zeroship_migrate::PlanStep> {
+    IrAuthor::new("prj_partition", "app_partition", SqlDialect::Sqlite)
+        .lower_steps(&ir_ops(ops), live)
+        .expect("lower partition ops to SQLite")
+}
+
+fn rendered_partition_sql(steps: &[zeroship_migrate::PlanStep]) -> String {
+    steps
+        .iter()
+        .map(|step| match step {
+            zeroship_migrate::PlanStep::Ddl(migration) => migration.up.clone(),
+            zeroship_migrate::PlanStep::Dml { template, .. } => template.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn apply_sqlite_partition_steps(
+    backend: &SqliteBackend,
+    steps: &[zeroship_migrate::PlanStep],
+    approval: Approval,
+) -> Result<zeroship_migrate::DeclarativeDeployOutcome, zeroship_migrate::DeclarativeApplyError> {
+    let cfg = partition_exec_cfg();
+    MigrationEngine::new()
+        .apply_plan(
+            steps,
+            approval,
+            backend,
+            &cfg,
+            "partition-test",
+            LockMode::Acquire,
+        )
+        .await
+}
+
+async fn sqlite_event_rows(backend: &SqliteBackend) -> Vec<(i64, String)> {
+    backend
+        .actor()
+        .query("SELECT bucket, payload FROM events ORDER BY bucket")
+        .await
+        .expect("read events")
+        .into_iter()
+        .map(|row| {
+            let bucket = row[0]
+                .as_ref()
+                .expect("bucket")
+                .parse::<i64>()
+                .expect("integer bucket");
+            let payload = row[1].as_ref().expect("payload").clone();
+            (bucket, payload)
+        })
+        .collect()
+}
+
+fn sqlite_partition_backend(label: &str) -> (tempfile::TempDir, SqliteBackend) {
+    let dir = tempfile::tempdir().expect("sqlite tempdir");
+    let app = dir.path().join(format!("{label}.sqlite"));
+    let journal = dir.path().join(format!("{label}.migrations.sqlite"));
+    let backend = SqliteBackend::open(&app, &journal).expect("open sqlite backend");
+    (dir, backend)
+}
+
 fn collapse_events_ops() -> Vec<Op> {
     vec![
-        Op::CreateTable {
-            name: "events".into(),
-            columns: vec![
-                not_null_col("bucket", ColType::Int),
-                not_null_col("payload", ColType::Text),
-            ],
-            primary_key: None,
-            constraints: vec![],
-            indexes: vec![],
-            partition_by: Some(PartitionSpec::Range {
-                columns: vec!["bucket".into()],
-                collapse: true,
-            }),
-            runtime_options: None,
-            schema: None,
-            existence_guard: None,
-        },
-        Op::CreatePartition {
-            name: "events_0".into(),
-            of: "events".into(),
-            bounds: PartitionBounds::Range {
-                from: vec![int_bound(0)],
-                to: vec![int_bound(100)],
-            },
-            schema: None,
-            existence_guard: None,
-        },
-        Op::CreatePartition {
-            name: "events_default".into(),
-            of: "events".into(),
-            bounds: PartitionBounds::Default,
-            schema: None,
-            existence_guard: None,
-        },
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
     ]
 }
 
@@ -173,18 +291,22 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
     )
     .expect("collapse-affirmed partition recording validates on SQLite");
 
-    let migrations = IrAuthor::new("prj_demo", "app_partition", SqlDialect::Sqlite)
-        .lower(&migration_ir, &LiveSchema::default())
+    let steps = IrAuthor::new("prj_partition", "app_partition", SqlDialect::Sqlite)
+        .lower_steps(&migration_ir, &LiveSchema::default())
         .expect("lower collapse-affirmed partition recording on SQLite");
     assert_eq!(
-        migrations.len(),
-        1,
-        "child createPartition ops must lower to no DDL on SQLite"
+        steps.len(),
+        2,
+        "bounded createPartition lowers to a mirror guard DML step; default child remains no-DDL on SQLite"
     );
-    let sql = &migrations[0].up;
+    let sql = rendered_partition_sql(&steps);
     assert!(
         sql.contains("partitionBy collapsed to a plain table"),
         "degraded leg should be visible in plan output:\n{sql}"
+    );
+    assert!(
+        sql.contains("partition collapse populated-default mirror guard"),
+        "bounded child create should carry the populated-default mirror guard:\n{sql}"
     );
     assert!(sql.contains("CREATE TABLE"), "parent table DDL missing:\n{sql}");
     assert!(
@@ -192,7 +314,7 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
         "SQLite collapse must not emit native partition syntax:\n{sql}"
     );
     assert!(
-        !sql.contains("events_0") && !sql.contains("events_default"),
+        !sql.contains("events_default"),
         "SQLite collapse must not emit child table DDL:\n{sql}"
     );
 
@@ -200,8 +322,7 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
     let app = dir.path().join("collapse.sqlite");
     let journal = dir.path().join("collapse.migrations.sqlite");
     let backend = SqliteBackend::open(&app, &journal).expect("open sqlite backend");
-    backend
-        .apply_one_additive(&migrations[0], "tester")
+    apply_sqlite_partition_steps(&backend, &steps, Approval::None)
         .await
         .expect("apply collapsed parent table on SQLite");
     backend
@@ -234,6 +355,193 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
         .await
         .expect("check child tables");
     assert!(children.is_empty(), "collapse child partitions must be no-DDL");
+}
+
+#[compio::test]
+async fn collapse_bounded_child_drop_deletes_bound_rows_on_sqlite() {
+    let ops = vec![
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
+        insert_events(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+        drop_events_partition("events_0"),
+    ];
+    let steps = lower_sqlite_partition_steps(ops, &LiveSchema::default());
+    let rendered = rendered_partition_sql(&steps);
+    assert!(
+        rendered.contains("partition child drop collapsed to DELETE FROM parent")
+            && rendered.contains("DELETE FROM \"events\" WHERE \"bucket\" >= 0 AND \"bucket\" < 100"),
+        "bounded child drop must render a bounded DELETE:\n{rendered}"
+    );
+
+    let (_dir, backend) = sqlite_partition_backend("bounded_drop");
+    apply_sqlite_partition_steps(&backend, &steps, Approval::Approved)
+        .await
+        .expect("apply bounded child drop");
+    assert_eq!(
+        sqlite_event_rows(&backend).await,
+        vec![
+            (150, "default-a".to_string()),
+            (250, "default-b".to_string()),
+        ]
+    );
+}
+
+#[compio::test]
+async fn collapse_default_child_drop_deletes_residual_rows_on_sqlite() {
+    let ops = vec![
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
+        insert_events(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+        drop_events_partition("events_default"),
+    ];
+    let steps = lower_sqlite_partition_steps(ops, &LiveSchema::default());
+    let rendered = rendered_partition_sql(&steps);
+    assert!(
+        rendered.contains("DELETE FROM \"events\" WHERE NOT (\"bucket\" >= 0 AND \"bucket\" < 100)"),
+        "default child drop must render residual sibling negation:\n{rendered}"
+    );
+
+    let (_dir, backend) = sqlite_partition_backend("default_drop");
+    apply_sqlite_partition_steps(&backend, &steps, Approval::Approved)
+        .await
+        .expect("apply default child drop realization");
+    assert_eq!(sqlite_event_rows(&backend).await, vec![(42, "range".to_string())]);
+}
+
+#[compio::test]
+async fn collapse_create_bounded_child_mirror_guard_errors_only_when_default_has_matching_rows_sqlite()
+{
+    let dirty_ops = vec![
+        create_events_parent(),
+        create_default_partition(),
+        insert_events(&[(42, "stray")]),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+    ];
+    let dirty_steps = lower_sqlite_partition_steps(dirty_ops, &LiveSchema::default());
+    let dirty_rendered = rendered_partition_sql(&dirty_steps);
+    assert!(
+        dirty_rendered.contains("partition collapse populated-default mirror guard")
+            && dirty_rendered.contains("INSERT INTO \"events\" (\"bucket\") SELECT NULL"),
+        "bounded create must carry the populated-default mirror guard:\n{dirty_rendered}"
+    );
+    let (_dir, dirty_backend) = sqlite_partition_backend("mirror_dirty");
+    let err = apply_sqlite_partition_steps(&dirty_backend, &dirty_steps, Approval::None)
+        .await
+        .expect_err("matching default rows must trip the mirror guard");
+    assert!(
+        format!("{err:?}").contains("NOT NULL") || format!("{err:?}").contains("constraint"),
+        "mirror guard should fail closed through the NOT NULL key insert, got {err:?}"
+    );
+
+    let clean_ops = vec![
+        create_events_parent(),
+        create_default_partition(),
+        insert_events(&[(250, "default")]),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+    ];
+    let clean_steps = lower_sqlite_partition_steps(clean_ops, &LiveSchema::default());
+    let (_dir, clean_backend) = sqlite_partition_backend("mirror_clean");
+    apply_sqlite_partition_steps(&clean_backend, &clean_steps, Approval::None)
+        .await
+        .expect("non-matching default rows must not trip the mirror guard");
+    assert_eq!(
+        sqlite_event_rows(&clean_backend).await,
+        vec![(250, "default".to_string())]
+    );
+}
+
+#[compio::test]
+async fn collapse_child_create_down_drops_rows_before_parent_drop_on_sqlite() {
+    let up_ops = vec![
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
+        insert_events(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+    ];
+    let up_steps = lower_sqlite_partition_steps(up_ops.clone(), &LiveSchema::default());
+    let (_dir, backend) = sqlite_partition_backend("auto_down");
+    apply_sqlite_partition_steps(&backend, &up_steps, Approval::None)
+        .await
+        .expect("apply partitioned up migration");
+    assert_eq!(
+        sqlite_event_rows(&backend).await,
+        vec![
+            (42, "range".to_string()),
+            (150, "default-a".to_string()),
+            (250, "default-b".to_string()),
+        ]
+    );
+
+    let live = partition_live_from_fold(&up_ops);
+    let down_child_ops = vec![
+        drop_events_partition("events_default"),
+        drop_events_partition("events_0"),
+    ];
+    let down_child_steps = lower_sqlite_partition_steps(down_child_ops, &live);
+    let rendered = rendered_partition_sql(&down_child_steps);
+    assert!(
+        rendered.contains("DELETE FROM \"events\" WHERE NOT (\"bucket\" >= 0 AND \"bucket\" < 100)")
+            && rendered.contains("DELETE FROM \"events\" WHERE \"bucket\" >= 0 AND \"bucket\" < 100"),
+        "child-create down must realize semantic child drops:\n{rendered}"
+    );
+    apply_sqlite_partition_steps(&backend, &down_child_steps, Approval::Approved)
+        .await
+        .expect("apply semantic child drops");
+    assert!(sqlite_event_rows(&backend).await.is_empty(), "child drops remove all rows");
+
+    let drop_parent_steps = lower_sqlite_partition_steps(
+        vec![Op::DropTable {
+            table: "events".into(),
+            cascade: None,
+            schema: None,
+            existence_guard: None,
+        }],
+        &LiveSchema::default(),
+    );
+    apply_sqlite_partition_steps(&backend, &drop_parent_steps, Approval::Approved)
+        .await
+        .expect("drop collapsed parent table");
+    let tables = backend
+        .actor()
+        .query("SELECT name FROM sqlite_master WHERE type='table' AND name='events'")
+        .await
+        .expect("check events table");
+    assert!(tables.is_empty(), "events table should be gone after down");
+}
+
+#[compio::test]
+async fn collapse_range_min_value_omits_lower_delete_bound_on_sqlite() {
+    let ops = vec![
+        create_events_parent(),
+        create_range_partition(
+            "events_lt_100",
+            PartitionBoundValue::MinValue,
+            int_bound(100),
+        ),
+        create_range_partition(
+            "events_gte_100",
+            int_bound(100),
+            PartitionBoundValue::MaxValue,
+        ),
+        create_default_partition(),
+        insert_events(&[(-10, "min-a"), (42, "min-b"), (150, "max")]),
+        drop_events_partition("events_lt_100"),
+    ];
+    let steps = lower_sqlite_partition_steps(ops, &LiveSchema::default());
+    let rendered = rendered_partition_sql(&steps);
+    assert!(
+        rendered.contains("DELETE FROM \"events\" WHERE \"bucket\" < 100")
+            && !rendered.contains("DELETE FROM \"events\" WHERE \"bucket\" >= MINVALUE"),
+        "minValue range delete should omit the lower bound:\n{rendered}"
+    );
+
+    let (_dir, backend) = sqlite_partition_backend("min_value");
+    apply_sqlite_partition_steps(&backend, &steps, Approval::Approved)
+        .await
+        .expect("apply minValue delete");
+    assert_eq!(sqlite_event_rows(&backend).await, vec![(150, "max".to_string())]);
 }
 
 #[test]

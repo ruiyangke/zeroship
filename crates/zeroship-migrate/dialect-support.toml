@@ -179,8 +179,8 @@ mysql = "unsupported"
 kind = "dropPartition"
 variant = "base"
 pg = "portable"
-sqlite = "unsupported"
-mysql = "unsupported"
+sqlite = "portable"
+mysql = "portable"
 
 [[row]]
 kind = "createSequence"

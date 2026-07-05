@@ -5,10 +5,12 @@
 use compio_postgres::Client;
 use zeroship_migrate::{
     apply, diff_snapshots, fold_ops, snapshot_schema, Approval, ColType, ExecutorConfig, Expr,
-    IndexElement, IndexMethod, IndexStorageParams, IrAuthor, IrColumn, IrFlagsOverride,
-    LiveSchema, MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec,
-    PolicyProfile, SafeI64, SchemaScope, SqlDialect, UnaryOp, CURRENT_IR_VERSION,
+    IndexElement, IndexMethod, IndexStorageParams, IrAuthor, IrColumn, IrFlagsOverride, IrScalar,
+    IrValue, LiveSchema, LockMode, MigrationEngine, MigrationIr, Op, PartitionBoundValue,
+    PartitionBounds, PartitionSpec, PolicyProfile, PostgresBackend, SafeI64, SchemaScope,
+    SqlDialect, UnaryOp, CURRENT_IR_VERSION,
 };
+use zeroship_migrate::render::step::PlanStep;
 use zeroship_migrate::model::validate::{validate_ir_scoped, Dialect};
 
 const DEFAULT_DSN: &str =
@@ -125,6 +127,124 @@ fn int_bound(value: i64) -> PartitionBoundValue {
     }
 }
 
+fn create_events_parent() -> Op {
+    Op::CreateTable {
+        name: "events".to_string(),
+        columns: vec![
+            ir_col("bucket", ColType::Int, false),
+            ir_col("payload", ColType::Text, false),
+        ],
+        primary_key: None,
+        constraints: Vec::new(),
+        indexes: Vec::new(),
+        partition_by: Some(PartitionSpec::Range {
+            columns: vec!["bucket".to_string()],
+            collapse: true,
+        }),
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn create_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBoundValue) -> Op {
+    Op::CreatePartition {
+        name: name.to_string(),
+        of: "events".to_string(),
+        bounds: PartitionBounds::Range {
+            from: vec![from],
+            to: vec![to],
+        },
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn create_default_partition() -> Op {
+    Op::CreatePartition {
+        name: "events_default".to_string(),
+        of: "events".to_string(),
+        bounds: PartitionBounds::Default,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn drop_events_partition(name: &str) -> Op {
+    Op::DropPartition {
+        parent: "events".to_string(),
+        name: name.to_string(),
+        schema: None,
+        existence_guard: None,
+        cascade: None,
+    }
+}
+
+fn insert_events(rows: &[(i64, &str)]) -> Op {
+    Op::Insert {
+        table: "events".to_string(),
+        columns: vec!["bucket".to_string(), "payload".to_string()],
+        rows: rows
+            .iter()
+            .map(|(bucket, payload)| {
+                vec![
+                    IrValue::from(IrScalar::Int(*bucket)),
+                    IrValue::from(IrScalar::Str((*payload).to_string())),
+                ]
+            })
+            .collect(),
+        on_conflict: None,
+        schema: None,
+    }
+}
+
+fn live_from_fold(schema: &str, ops: &[Op]) -> LiveSchema {
+    let snap = fold_ops(ops, SqlDialect::Postgres, schema).expect("fold partition ops");
+    let mut live = LiveSchema::from_tables(snap.tables.keys().cloned().collect());
+    live.table_snapshots = snap.tables;
+    live.partitions = snap.partitions;
+    live
+}
+
+fn lower_pg_steps(schema: &str, name: &str, ops: &[Op], live: &LiveSchema) -> Vec<PlanStep> {
+    let author = IrAuthor::new(schema, "app_test", SqlDialect::Postgres)
+        .with_schema_scope(SchemaScope::Allowlist(vec![schema.to_string()]));
+    author
+        .lower_steps(&ir_doc(name, ops.to_vec()), live)
+        .expect("lower partition steps to Postgres")
+}
+
+async fn apply_pg_steps(
+    conn: &Client,
+    cfg: &ExecutorConfig,
+    steps: &[PlanStep],
+    approval: Approval,
+) -> Result<zeroship_migrate::DeclarativeDeployOutcome, zeroship_migrate::DeclarativeApplyError> {
+    MigrationEngine::new()
+        .apply_plan(
+            steps,
+            approval,
+            &PostgresBackend::new(conn),
+            cfg,
+            "partition-test",
+            LockMode::Acquire,
+        )
+        .await
+}
+
+async fn pg_event_rows(conn: &Client, schema: &str) -> Vec<(i32, String)> {
+    let rows = conn
+        .query(
+            &format!("SELECT bucket, payload FROM \"{schema}\".\"events\" ORDER BY bucket"),
+            &[],
+        )
+        .await
+        .expect("read events");
+    rows.into_iter()
+        .map(|row| (row.get::<_, i32>(0), row.get::<_, String>(1)))
+        .collect()
+}
+
 fn user_id_is_present() -> Expr {
     Expr::UnaryOp {
         op: UnaryOp::IsNotNull,
@@ -215,40 +335,9 @@ fn partition_ops() -> Vec<Op> {
 
 fn collapse_events_ops() -> Vec<Op> {
     vec![
-        Op::CreateTable {
-            name: "events".to_string(),
-            columns: vec![
-                ir_col("bucket", ColType::Int, false),
-                ir_col("payload", ColType::Text, false),
-            ],
-            primary_key: None,
-            constraints: Vec::new(),
-            indexes: Vec::new(),
-            partition_by: Some(PartitionSpec::Range {
-                columns: vec!["bucket".to_string()],
-                collapse: true,
-            }),
-            runtime_options: None,
-            schema: None,
-            existence_guard: None,
-        },
-        Op::CreatePartition {
-            name: "events_0".to_string(),
-            of: "events".to_string(),
-            bounds: PartitionBounds::Range {
-                from: vec![int_bound(0)],
-                to: vec![int_bound(100)],
-            },
-            schema: None,
-            existence_guard: None,
-        },
-        Op::CreatePartition {
-            name: "events_default".to_string(),
-            of: "events".to_string(),
-            bounds: PartitionBounds::Default,
-            schema: None,
-            existence_guard: None,
-        },
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
     ]
 }
 
@@ -361,6 +450,191 @@ async fn collapse_affirmed_events_apply_natively_on_postgres() {
         got[0].2.ends_with("events_0") && got[1].2.ends_with("events_default"),
         "rows must physically land in native child partitions: {got:?}"
     );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn collapse_bounded_child_drop_matches_native_postgres_drop_table() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let ops = vec![
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
+        insert_events(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+        drop_events_partition("events_0"),
+    ];
+    let steps = lower_pg_steps(&cfg.project_schema, "partition_bounded_drop_pg", &ops, &LiveSchema::default());
+    let rendered = format!("{steps:#?}");
+    assert!(
+        rendered.contains("DROP TABLE") && rendered.contains("events_0"),
+        "Postgres bounded child drop must stay native DROP TABLE:\n{rendered}"
+    );
+    apply_pg_steps(&conn, &cfg, &steps, Approval::Approved)
+        .await
+        .expect("apply bounded child drop on Postgres");
+    assert_eq!(
+        pg_event_rows(&conn, &cfg.project_schema).await,
+        vec![
+            (150, "default-a".to_string()),
+            (250, "default-b".to_string()),
+        ]
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn collapse_default_child_drop_matches_native_postgres_drop_table() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let ops = vec![
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
+        insert_events(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+        drop_events_partition("events_default"),
+    ];
+    let steps = lower_pg_steps(&cfg.project_schema, "partition_default_drop_pg", &ops, &LiveSchema::default());
+    apply_pg_steps(&conn, &cfg, &steps, Approval::Approved)
+        .await
+        .expect("apply default child drop on Postgres");
+    assert_eq!(
+        pg_event_rows(&conn, &cfg.project_schema).await,
+        vec![(42, "range".to_string())]
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn create_bounded_child_mirrors_populated_default_error_on_postgres() {
+    let conn = pg().await;
+
+    let dirty_cfg = cfg_for(&token());
+    drop_schemas(&conn, &dirty_cfg).await;
+    ensure_project_schema(&conn, &dirty_cfg).await;
+    let dirty_ops = vec![
+        create_events_parent(),
+        create_default_partition(),
+        insert_events(&[(42, "stray")]),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+    ];
+    let dirty_steps = lower_pg_steps(
+        &dirty_cfg.project_schema,
+        "partition_mirror_dirty_pg",
+        &dirty_ops,
+        &LiveSchema::default(),
+    );
+    let err = apply_pg_steps(&conn, &dirty_cfg, &dirty_steps, Approval::None)
+        .await
+        .expect_err("native PG must reject creating a bounded child over matching default rows");
+    assert!(
+        format!("{err:?}").contains("updated partition constraint")
+            || format!("{err:?}").contains("would be violated"),
+        "unexpected PG populated-default error: {err:?}"
+    );
+    drop_schemas(&conn, &dirty_cfg).await;
+
+    let clean_cfg = cfg_for(&token());
+    drop_schemas(&conn, &clean_cfg).await;
+    ensure_project_schema(&conn, &clean_cfg).await;
+    let clean_ops = vec![
+        create_events_parent(),
+        create_default_partition(),
+        insert_events(&[(250, "default")]),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+    ];
+    let clean_steps = lower_pg_steps(
+        &clean_cfg.project_schema,
+        "partition_mirror_clean_pg",
+        &clean_ops,
+        &LiveSchema::default(),
+    );
+    apply_pg_steps(&conn, &clean_cfg, &clean_steps, Approval::None)
+        .await
+        .expect("native PG must accept clean default when adding bounded child");
+    assert_eq!(
+        pg_event_rows(&conn, &clean_cfg.project_schema).await,
+        vec![(250, "default".to_string())]
+    );
+    drop_schemas(&conn, &clean_cfg).await;
+}
+
+#[compio::test]
+async fn child_create_down_round_trip_matches_native_postgres_end_states() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let up_ops = vec![
+        create_events_parent(),
+        create_range_partition("events_0", int_bound(0), int_bound(100)),
+        create_default_partition(),
+        insert_events(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+    ];
+    let up_steps = lower_pg_steps(&cfg.project_schema, "partition_up_pg", &up_ops, &LiveSchema::default());
+    apply_pg_steps(&conn, &cfg, &up_steps, Approval::None)
+        .await
+        .expect("apply native partition up");
+    assert_eq!(
+        pg_event_rows(&conn, &cfg.project_schema).await,
+        vec![
+            (42, "range".to_string()),
+            (150, "default-a".to_string()),
+            (250, "default-b".to_string()),
+        ]
+    );
+
+    let live = live_from_fold(&cfg.project_schema, &up_ops);
+    let down_child_ops = vec![
+        drop_events_partition("events_default"),
+        drop_events_partition("events_0"),
+    ];
+    let down_child_steps = lower_pg_steps(
+        &cfg.project_schema,
+        "partition_down_children_pg",
+        &down_child_ops,
+        &live,
+    );
+    apply_pg_steps(&conn, &cfg, &down_child_steps, Approval::Approved)
+        .await
+        .expect("apply native semantic child drops");
+    assert!(
+        pg_event_rows(&conn, &cfg.project_schema).await.is_empty(),
+        "child drops should remove all rows before parent drop"
+    );
+
+    let drop_parent_steps = lower_pg_steps(
+        &cfg.project_schema,
+        "partition_down_parent_pg",
+        &[Op::DropTable {
+            table: "events".to_string(),
+            cascade: None,
+            schema: None,
+            existence_guard: None,
+        }],
+        &LiveSchema::default(),
+    );
+    apply_pg_steps(&conn, &cfg, &drop_parent_steps, Approval::Approved)
+        .await
+        .expect("apply native semantic down");
+    let rows = conn
+        .query(
+            "SELECT 1 FROM information_schema.tables WHERE table_schema=$1 AND table_name='events'",
+            &[&cfg.project_schema],
+        )
+        .await
+        .expect("check events table absence");
+    assert!(rows.is_empty(), "events table should be gone after down");
 
     drop_schemas(&conn, &cfg).await;
 }

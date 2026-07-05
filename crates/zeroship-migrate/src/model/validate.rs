@@ -134,9 +134,8 @@ pub const CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE: &str =
     "PARTITION_KEY_NULLABLE_UNDER_COLLAPSE";
 /// Partition rule 3: sibling bounds must be PG-well-formed.
 pub const CODE_PARTITION_BOUNDS_ILL_FORMED: &str = "PARTITION_BOUNDS_ILL_FORMED";
-/// Partition rule 4 realization is intentionally deferred to #234b for collapse
-/// targets.
-pub const CODE_COLLAPSE_DROP_NOT_YET_REALIZED: &str = "COLLAPSE_DROP_NOT_YET_REALIZED";
+/// Partition tier split: hash child drops have no portable collapse predicate.
+pub const CODE_PARTITION_HASH_DROP_UNDERIVABLE: &str = "PARTITION_HASH_DROP_UNDERIVABLE";
 
 /// The MAX byte length a `t.id({prefix})` prefix may carry (P2a §4). Mirrors the
 /// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
@@ -661,20 +660,27 @@ fn validate_partition_recording(
                 }
             }
             Op::DropPartition { parent, name, .. } => {
-                if !matches!(target_dialect, Dialect::Postgres) {
-                    return Err(partition_error(
-                        CODE_COLLAPSE_DROP_NOT_YET_REALIZED,
-                        op_index,
-                        ts_locations,
-                        target_dialect,
-                        format!(
-                            "dropping partition {name:?} from parent {parent:?} on a collapse target needs the bounded DELETE realization, which is #234b"
-                        ),
-                        "defer partition child drops on SQLite/MySQL until #234b, or target Postgres for native DROP TABLE of the child partition",
-                    ));
+                if let Some(parent_state) = parents.get(parent) {
+                    if parent_state.spec.collapse()
+                        && parent_state
+                            .children
+                            .get(name)
+                            .is_some_and(|(_, bounds)| matches!(bounds, crate::model::ir::PartitionBounds::Hash { .. }))
+                    {
+                        return Err(partition_error(
+                            CODE_PARTITION_HASH_DROP_UNDERIVABLE,
+                            op_index,
+                            ts_locations,
+                            target_dialect,
+                            format!(
+                                "dropping hash partition {name:?} from collapse-affirmed parent {parent:?} has no portable row predicate"
+                            ),
+                            "omit partitionBy.whenUnsupported for PG-only hash repartitioning, or avoid dropping hash children under collapse",
+                        ));
+                    }
                 }
-                if let Some(parent) = parents.get_mut(parent) {
-                    parent.children.remove(name);
+                if let Some(parent_state) = parents.get_mut(parent) {
+                    parent_state.children.remove(name);
                 }
             }
             Op::SetColumnNotNull { table, column, .. } => {
@@ -1855,24 +1861,6 @@ fn validate_op_support(
                 ),
                 suggested_fix: Some(
                     "add partitionBy.whenUnsupported: \"collapse\" and satisfy the partition collapse validation rules, or target Postgres only"
-                        .to_string(),
-                ),
-            });
-        }
-        Op::DropPartition { name, parent, .. }
-            if !matches!(target_dialect, Dialect::Postgres) =>
-        {
-            return Err(AuthoringError {
-                code: CODE_COLLAPSE_DROP_NOT_YET_REALIZED.to_string(),
-                kind: Some(UnsupportedKind::Op),
-                op_index,
-                ts_location: ts_location.map(str::to_string),
-                dialect: target_dialect,
-                reason: format!(
-                    "dropping partition {name:?} from parent {parent:?} on a collapse target needs the bounded DELETE realization, which is #234b"
-                ),
-                suggested_fix: Some(
-                    "defer partition child drops on SQLite/MySQL until #234b, or target Postgres for native DROP TABLE of the child partition"
                         .to_string(),
                 ),
             });
@@ -5256,6 +5244,16 @@ mod tests {
         }
     }
 
+    fn drop_part(parent: &str, name: &str) -> Op {
+        Op::DropPartition {
+            parent: parent.into(),
+            name: name.into(),
+            schema: None,
+            existence_guard: None,
+            cascade: None,
+        }
+    }
+
     #[test]
     fn partitioned_table_without_collapse_is_dialect_unsupported_off_postgres() {
         let ir = ir_with(vec![create_parent(
@@ -5389,6 +5387,50 @@ mod tests {
             ),
         ]);
         assert!(validate_ir_platform(&hash_total, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn collapse_hash_child_drop_is_underivable_but_pg_only_hash_drop_is_valid() {
+        let parent = |collapse| {
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+        let child_0 = || {
+            create_part(
+                "sessions_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            )
+        };
+        let child_1 = || {
+            create_part(
+                "sessions_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 1 },
+            )
+        };
+
+        let collapse_drop = ir_with(vec![
+            parent(true),
+            child_0(),
+            child_1(),
+            drop_part("sessions", "sessions_0"),
+        ]);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_ir_platform(&collapse_drop, dialect)
+                .expect_err("collapse hash child drop must be recording-level underivable");
+            assert_eq!(err.code, CODE_PARTITION_HASH_DROP_UNDERIVABLE, "got: {err}");
+        }
+
+        let pg_only_drop =
+            ir_with(vec![parent(false), child_0(), child_1(), drop_part("sessions", "sessions_0")]);
+        assert!(validate_ir_platform(&pg_only_drop, Dialect::Postgres).is_ok());
     }
 
     #[test]

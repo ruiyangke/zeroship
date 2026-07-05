@@ -541,7 +541,7 @@ fn identity_always_ops() -> Vec<Op> {
 }
 
 #[test]
-fn partition_ops_and_partition_index_features_are_pg_only() {
+fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
     for op in partition_feature_ops() {
         if matches!(op, Op::CreatePartition { .. }) {
             continue;
@@ -555,11 +555,9 @@ fn partition_ops_and_partition_index_features_are_pg_only() {
                 validates, decision_supported,
                 "{tag} {dialect:?}: support decision and validate() must agree"
             );
-            assert_eq!(
-                decision_supported,
-                matches!(dialect, Dialect::Postgres),
-                "{tag} {dialect:?}: partition DSL slice is PostgreSQL-only"
-            );
+            let expected_supported =
+                matches!(op, Op::DropPartition { .. }) || matches!(dialect, Dialect::Postgres);
+            assert_eq!(decision_supported, expected_supported, "{tag} {dialect:?}");
         }
     }
 }

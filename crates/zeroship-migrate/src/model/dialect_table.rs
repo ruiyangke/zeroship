@@ -117,7 +117,7 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "dropFunction", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "dropIndex", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "dropOwnedBy", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
-    DispositionRow { kind: "dropPartition", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
+    DispositionRow { kind: "dropPartition", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "dropPolicy", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "dropRole", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "dropSchema", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
