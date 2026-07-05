@@ -21,6 +21,6 @@ export function up() {
     on: ["author_id", "status"],
   });
 
-  table("posts").withVersioning(false);
+  table("posts").withVersioning({ enabled: false });
   table("posts").strictness("off");
 }

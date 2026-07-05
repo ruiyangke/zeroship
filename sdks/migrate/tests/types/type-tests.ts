@@ -159,6 +159,21 @@ export function goodTableRename(): void {
   table("users").rename({ to: "people", ifExists: true, schema: "reporting" });
 }
 
+export function tableRuntimeOptionTerminals(): void {
+  table("posts").softDelete();
+  table("posts").softDelete({ enabled: false });
+  table("posts").softDelete({ enabled: true, schema: "archive" });
+  table("posts").withVersioning();
+  table("posts").withVersioning({ enabled: false });
+  table("posts").withVersioning({ enabled: true, schema: "archive" });
+
+  // @ts-expect-error — `.softDelete()` no longer accepts a positional boolean.
+  table("posts").softDelete(false);
+
+  // @ts-expect-error — `.withVersioning()` no longer accepts a positional boolean.
+  table("posts").withVersioning(true);
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // 3. The `t.*` ColType builder is structurally typed.
 // ───────────────────────────────────────────────────────────────────────────
