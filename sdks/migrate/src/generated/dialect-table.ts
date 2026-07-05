@@ -83,7 +83,7 @@ export const DIALECT_TABLE: readonly DispositionRow[] = [
   { kind: "dropFunction", variant: "base", postgres: "vendor", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "dropIndex", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "dropOwnedBy", variant: "base", postgres: "vendor", sqlite: "unsupported", mysql: "unsupported" },
-  { kind: "dropPartition", variant: "base", postgres: "portable", sqlite: "unsupported", mysql: "unsupported" },
+  { kind: "dropPartition", variant: "base", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "dropPolicy", variant: "base", postgres: "vendor", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "dropRole", variant: "base", postgres: "vendor", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "dropSchema", variant: "base", postgres: "vendor", sqlite: "unsupported", mysql: "unsupported" },

@@ -638,6 +638,7 @@ async fn ir_unresolved_colref_rejected_at_apply_seam_on_pg() {
             .map(|idx| idx.name.clone())
             .collect(),
         table_snapshots: live.tables.clone(),
+        partitions: live.partitions.clone(),
         table_ownership: live.tables.keys().map(|t| (t.clone(), APP.to_string())).collect(),
         sqlite_schemas: std::collections::BTreeMap::new(),
     };
