@@ -168,6 +168,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::RenameColumn { table, .. }
         | Op::AddConstraint { table, .. }
         | Op::DropConstraint { table, .. }
+        | Op::ValidateConstraint { table, .. }
         | Op::Insert { table, .. }
         | Op::Update { table, .. }
         | Op::Delete { table, .. }

@@ -97,6 +97,8 @@ fn all_types_ops() -> Vec<Op> {
             on_update: None,
             deferrable: None,
             initially_deferred: None,
+        
+            not_valid: None,
         },
     };
     vec![Op::CreateTable {

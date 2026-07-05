@@ -206,6 +206,7 @@ fn fk(columns: Vec<&str>, references_columns: Vec<&str>) -> IrConstraintKind {
         on_update: None,
         deferrable: None,
         initially_deferred: None,
+        not_valid: None,
     }
 }
 
@@ -375,6 +376,16 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "dropConstraint",
         "base",
         Op::DropConstraint {
+            table: "t".into(),
+            name: "c".into(),
+            schema: None,
+            existence_guard: None,
+        },
+    ));
+    c.push((
+        "validateConstraint",
+        "base",
+        Op::ValidateConstraint {
             table: "t".into(),
             name: "c".into(),
             schema: None,
@@ -859,7 +870,7 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     c.push((
         "addConstraint",
         "check",
-        add_constraint(IrConstraintKind::Check { expr: col_ref() }),
+        add_constraint(IrConstraintKind::Check { expr: col_ref(), not_valid: None }),
     ));
     c.push((
         "addConstraint",
@@ -874,6 +885,20 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     ));
     c.push(("addConstraint", "fkComposite", add_constraint(fk(vec!["a", "b"], vec!["id", "x"]))));
     c.push(("addConstraint", "fkNonId", add_constraint(fk(vec!["a"], vec!["other_col"]))));
+    c.push((
+        "addConstraint",
+        "fkNotValid",
+        add_constraint(IrConstraintKind::Fk {
+            columns: vec!["a".into()],
+            references_table: "other".into(),
+            references_columns: vec!["id".into()],
+            on_delete: None,
+            on_update: None,
+            deferrable: None,
+            initially_deferred: None,
+            not_valid: Some(true),
+        }),
+    ));
     c.push((
         "addConstraint",
         "pk",
@@ -1044,13 +1069,13 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     let corpus = corpus();
 
     // 1. Exhaustiveness over op-KINDS: the corpus covers exactly the schema's Op
-    //    discriminants (the 54-op wire contract). No op silently uncovered.
+    //    discriminants (the 55-op wire contract). No op silently uncovered.
     let corpus_kinds: BTreeSet<String> = corpus.iter().map(|(k, _, _)| (*k).to_string()).collect();
     let schema_kinds = schema_op_tags();
     assert_eq!(
         schema_kinds.len(),
-        54,
-        "the wire contract must still carry the closed 54-op discriminant set"
+        55,
+        "the wire contract must still carry the closed 55-op discriminant set"
     );
     assert_eq!(
         corpus_kinds, schema_kinds,
