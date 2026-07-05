@@ -1823,7 +1823,7 @@ fn live_partition_collapse_mirror_guard_errors_only_for_matching_default_rows_ov
         let rendered = format!("{dirty_steps:#?}");
         assert!(
             rendered.contains("partition collapse populated-default mirror guard")
-                && rendered.contains("JSON_EXTRACT('zeroship_partition_mirror_guard', '$')"),
+                && rendered.contains("JSON_EXTRACT(CONCAT('!', `bucket`), '$')"),
             "bounded create must carry the MySQL mirror guard:\n{rendered}"
         );
         apply_mysql_steps(backend, cfg, &dirty_steps, Approval::None)

@@ -636,11 +636,13 @@ test("public and engine recorders match for byteValue() scalar values", () => {
   assert.deepEqual(pub, eng);
 });
 
-test("bigint and the removed {decimal} carrier fail closed at record time", () => {
+test("bigint and removed scalar carriers fail closed at record time", () => {
   const isBigintRefusal = (e: any) =>
     e.code === "OP_INVALID" && e.message.includes('bigint is not a value — use decimal("<n>")');
-  const isCarrierRefusal = (e: any) =>
+  const isDecimalCarrierRefusal = (e: any) =>
     e.code === "OP_INVALID" && e.message.includes('the { decimal } carrier is removed — use decimal("<n>")');
+  const isBytesCarrierRefusal = (e: any) =>
+    e.code === "OP_INVALID" && e.message.includes("the { bytes } carrier is removed — use byteValue(...)");
 
   assert.throws(
     () => record(() => table("t").insert({ rows: [{ big: 9007199254740993n }] } as any)),
@@ -662,11 +664,19 @@ test("bigint and the removed {decimal} carrier fail closed at record time", () =
   );
   assert.throws(
     () => record(() => table("t").insert({ rows: [{ price: { decimal: "0.00" } }] } as any)),
-    isCarrierRefusal,
+    isDecimalCarrierRefusal,
   );
   assert.throws(
     () => record(() => table("t").create({ columns: { price: t.numeric(12, 2).default({ decimal: "0.00" } as any) } })),
-    isCarrierRefusal,
+    isDecimalCarrierRefusal,
+  );
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ raw: { bytes: "x" } }] } as any)),
+    isBytesCarrierRefusal,
+  );
+  assert.throws(
+    () => record(() => table("t").create({ columns: { raw: t.bytes().default({ bytes: "x" } as any) } })),
+    isBytesCarrierRefusal,
   );
 });
 
@@ -1370,6 +1380,26 @@ test("domain check value builder records the VALUE colRef shape", () => {
       },
     },
   ]);
+});
+
+test("domain check validation rejects raw non-VALUE colRefs", () => {
+  const isDomainValueRefusal = (e: any) =>
+    e.code === "OP_INVALID" && /domain VALUE pseudo-column/.test(e.message);
+
+  assert.throws(
+    () => record(() => domain("bad_other").create({
+      as: t.text(),
+      check: { node: "colRef", name: "other" } as any,
+    })),
+    isDomainValueRefusal,
+  );
+  assert.throws(
+    () => record(() => domain("bad_qualified").create({
+      as: t.text(),
+      check: { node: "colRef", table: "users", name: "VALUE" } as any,
+    })),
+    isDomainValueRefusal,
+  );
 });
 
 test("platform corpus domain checks record byte-identical VALUE colRef ops", async () => {

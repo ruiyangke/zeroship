@@ -883,7 +883,8 @@ function isRemovedDecimalCarrier(value: unknown): boolean {
   return keys.length === 1 && keys[0] === "decimal" && typeof value.decimal === "string";
 }
 
-function isExplicitScalarCarrier(value: Record<string, unknown>): boolean {
+function isRemovedBytesCarrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isBytesValue(value)) return false;
   const keys = Object.keys(value);
   return keys.length === 1 && keys[0] === "bytes" && typeof value.bytes === "string";
 }
@@ -915,6 +916,9 @@ function toIrScalar(value: unknown): unknown {
   }
   if (isRemovedDecimalCarrier(value)) {
     throw structuredError("OP_INVALID", 'the { decimal } carrier is removed — use decimal("<n>")');
+  }
+  if (isRemovedBytesCarrier(value)) {
+    throw structuredError("OP_INVALID", "the { bytes } carrier is removed — use byteValue(...)");
   }
   if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
     return { decimal: String(value) };
@@ -1152,10 +1156,11 @@ function toIrDefault(value: DefaultValue | DefaultExprFn): Node {
     return { json: toIrJsonValue(value) };
   }
   if (isDecimalValue(value)) return { literal: { value: toIrScalar(value) } };
+  if (isBytesValue(value)) return { literal: { value: toIrScalar(value) } };
   if (isPlainObject(value)) {
     if (Object.keys(value).length === 0) return { container: "object" };
     if (isRemovedDecimalCarrier(value)) return { literal: { value: toIrScalar(value) } };
-    if (isExplicitScalarCarrier(value)) return { literal: { value: toIrScalar(value) } };
+    if (isRemovedBytesCarrier(value)) return { literal: { value: toIrScalar(value) } };
     rejectNestedFunctionValues(value);
     return { json: toIrJsonValue(value) };
   }
@@ -1891,6 +1896,27 @@ function resolveCheckWithPg(
   return resolved;
 }
 
+function validateDomainCheckColRefs(expr: Node, position: string): void {
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (!isPlainObject(value)) return;
+    if (value.node === "colRef") {
+      const table = (value as { table?: unknown }).table;
+      if (value.name !== "VALUE" || (table !== undefined && table !== null)) {
+        throw structuredError(
+          "OP_INVALID",
+          `${position} may reference only the domain VALUE pseudo-column; non-VALUE colRef nodes are not valid in domain SQL`,
+        );
+      }
+    }
+    Object.values(value).forEach(walk);
+  };
+  walk(expr);
+}
+
 function resolveDomainCheck(
   slot: DomainCheckFn | ExprChainType | Node | undefined,
   position: string,
@@ -1907,6 +1933,7 @@ function resolveDomainCheck(
     throw structuredError("OP_INVALID", `${position} must be a (v) => Expr callback or a built expression`);
   }
   validateImmutableExpr(resolved, position, { allowPgImmutable: true });
+  validateDomainCheckColRefs(resolved, position);
   return resolved;
 }
 
