@@ -702,6 +702,36 @@ fn render_split_part(
     crate::render::renderer::renderer(dialect).render_split_part(col_sql, delim, n)
 }
 
+/// Select the [`Expr::Dialectal`] leg to render for `dialect` (design §3.4): the
+/// target dialect's OWN leg if present, else the `default` leg. Returns a borrow
+/// of the chosen leg. This is the one leg-selection rule shared by both the bound
+/// and inline render paths.
+///
+/// A `Dialectal` with neither an own leg nor a `default` for the target is
+/// UNREACHABLE here because [`crate::model::validate`] refuses it per-target
+/// (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
+/// defensively: it returns [`DmlError::UnrenderableExpr`] rather than silently
+/// dropping the value.
+fn select_dialect_leg<'a>(
+    dialect: SqlDialect,
+    default: &'a Option<Box<Expr>>,
+    pg: &'a Option<Box<Expr>>,
+    sqlite: &'a Option<Box<Expr>>,
+    mysql: &'a Option<Box<Expr>>,
+) -> Result<&'a Expr, DmlError> {
+    let own = match dialect {
+        SqlDialect::Postgres => pg,
+        SqlDialect::Sqlite => sqlite,
+        SqlDialect::Mysql => mysql,
+    };
+    own.as_deref().or_else(|| default.as_deref()).ok_or_else(|| {
+        DmlError::UnrenderableExpr(format!(
+            "dialect() has no leg for the {dialect:?} target and no default — the \
+             structural validator must refuse this before assembly"
+        ))
+    })
+}
+
 /// A bind accumulator carried through the parameterized render walk: it owns the
 /// running placeholder counter (1-based, dialect-specific) and the ordered
 /// [`BindValue`] list.
@@ -820,6 +850,10 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             render_extract(*field, &e, ctx.dialect)?
         }
         Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, ctx.dialect)?,
+        Expr::Dialectal { default, pg, sqlite, mysql } => {
+            let leg = select_dialect_leg(ctx.dialect, default, pg, sqlite, mysql)?;
+            render_expr_bound(leg, ctx)?
+        }
     })
 }
 
@@ -1025,6 +1059,10 @@ where
             render_extract(*field, &e, dialect)?
         }
         Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, dialect)?,
+        Expr::Dialectal { default, pg, sqlite, mysql } => {
+            let leg = select_dialect_leg(dialect, default, pg, sqlite, mysql)?;
+            render_expr_inline_with_col(leg, dialect, col_ref)?
+        }
     })
 }
 
@@ -1799,6 +1837,89 @@ mod tests {
             render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
             "(NOT (`a` <=> `b`))"
         );
+    }
+
+    // ── the Layer-2 dialect() per-dialect value escape (§3.4) ────────────────
+
+    #[test]
+    fn dialectal_renders_the_target_dialects_own_leg() {
+        // dialect({ pg: A, sqlite: B, mysql: C }) renders A on PG, B on SQLite,
+        // C on MySQL — each target picks its OWN leg.
+        let expr = Expr::Dialectal {
+            default: None,
+            pg: Some(Box::new(lit_str("A"))),
+            sqlite: Some(Box::new(lit_str("B"))),
+            mysql: Some(Box::new(lit_str("C"))),
+        };
+        // Inline path: each leg is an inline string literal.
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), "'A'");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "'B'");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), "'C'");
+
+        // Bound path: each leg's literal becomes exactly ONE placeholder — the
+        // shape is fixed by the chosen leg, not by the other legs.
+        for (dialect, ph) in [
+            (SqlDialect::Postgres, "$1"),
+            (SqlDialect::Sqlite, "?1"),
+            (SqlDialect::Mysql, "?"),
+        ] {
+            let mut ctx = BindCtx::new(dialect);
+            let sql = render_expr_bound(&expr, &mut ctx).unwrap();
+            assert_eq!(sql, ph, "dialect() binds its chosen leg on {dialect:?}");
+            assert_eq!(ctx.binds.len(), 1, "exactly one leg's literal binds on {dialect:?}");
+        }
+    }
+
+    #[test]
+    fn dialectal_falls_back_to_default_when_no_own_leg() {
+        // dialect({ default: D, pg: A }) renders A on PG (its own leg) but D on
+        // SQLite AND MySQL (fallback to default).
+        let expr = Expr::Dialectal {
+            default: Some(Box::new(lit_str("D"))),
+            pg: Some(Box::new(lit_str("A"))),
+            sqlite: None,
+            mysql: None,
+        };
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), "'A'", "PG uses its own leg");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "'D'", "SQLite falls back to default");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), "'D'", "MySQL falls back to default");
+    }
+
+    #[test]
+    fn dialectal_recurses_into_the_chosen_leg_expression() {
+        // A leg is a full Expr, not just a literal — the chosen leg renders
+        // recursively (here a BETWEEN on PG vs a bare column on the default).
+        let expr = Expr::Dialectal {
+            default: Some(Box::new(Expr::col("age"))),
+            pg: Some(Box::new(Expr::Between {
+                operand: Box::new(Expr::col("age")),
+                low: Box::new(lit_int(1)),
+                high: Box::new(lit_int(9)),
+            })),
+            sqlite: None,
+            mysql: None,
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"age\" BETWEEN 1 AND 9)",
+        );
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "\"age\"");
+    }
+
+    #[test]
+    fn dialectal_with_no_leg_for_target_is_a_fail_closed_render_backstop() {
+        // A dialect({ pg: A }) (no default) has no SQLite leg — validate refuses
+        // this per-target BEFORE assembly, but the renderer is defensively
+        // fail-closed rather than silently dropping the value.
+        let expr = Expr::Dialectal {
+            default: None,
+            pg: Some(Box::new(lit_str("A"))),
+            sqlite: None,
+            mysql: None,
+        };
+        assert!(render_expr_inline(&expr, SqlDialect::Postgres).is_ok());
+        let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
+        assert!(matches!(err, DmlError::UnrenderableExpr(_)), "no SQLite leg → fail-closed: {err:?}");
     }
 
     // ── portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT (§3.4) ──
