@@ -264,6 +264,43 @@ pub enum Expr {
         /// The portable target type.
         target: CastTarget,
     },
+    /// A **portable** inclusive range test (`c("x").between(low, high)`) rendered
+    /// exactly as `(<operand> BETWEEN <low> AND <high>)` — IDENTICAL SQL on PG,
+    /// SQLite, and MySQL (standard SQL, inclusive on both ends).
+    Between {
+        /// The expression under test.
+        operand: Box<Expr>,
+        /// The inclusive lower bound.
+        low: Box<Expr>,
+        /// The inclusive upper bound.
+        high: Box<Expr>,
+    },
+    /// A **portable** `LIKE` pattern match (`c("x").like(pattern)`) rendered exactly
+    /// as `(<operand> LIKE <pattern>)` — the SAME syntax on PG, SQLite, and MySQL.
+    ///
+    /// NOTE: LIKE *case-sensitivity* semantics differ per dialect — PG is
+    /// case-sensitive, SQLite is ASCII-case-insensitive by default, and MySQL is
+    /// collation-dependent — so a dialect-uniform portability PROOF is a Phase-4
+    /// claiming-phase obligation (design §5). This slice adds the node + the
+    /// faithful syntax render only; it does not yet claim cross-dialect parity.
+    Like {
+        /// The expression under test.
+        operand: Box<Expr>,
+        /// The LIKE pattern expression.
+        pattern: Box<Expr>,
+    },
+    /// A **portable** NULL-safe inequality (`c("x").distinctFrom(y)`). The
+    /// per-dialect lowering is the engine's job (this is the point): PG + SQLite
+    /// render the standard `(<left> IS DISTINCT FROM <right>)`; MySQL has NO
+    /// `IS DISTINCT FROM` operator, so it lowers to `(NOT (<left> <=> <right>))` —
+    /// `<=>` is MySQL's NULL-safe equality, so its negation is exactly
+    /// "distinct from" (NULL-aware inequality).
+    DistinctFrom {
+        /// Left operand.
+        left: Box<Expr>,
+        /// Right operand.
+        right: Box<Expr>,
+    },
     /// **PG-ONLY** text-array membership rendered exactly as
     /// `(<expr> = ANY (ARRAY['a'::text, ...]))` or
     /// `(<expr> <> ALL (ARRAY['a'::text, ...]))`.

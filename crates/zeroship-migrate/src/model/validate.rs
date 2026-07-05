@@ -2827,6 +2827,22 @@ impl Ctx<'_> {
             // Cast target is portable by the closed CastTarget enum (rule d);
             // recurse into the operand.
             Expr::Cast { operand, .. } => self.walk_depth(operand, d),
+            // Portable predicate nodes (§3.4): between/like/distinctFrom render on
+            // ALL three dialects (the engine owns distinctFrom's per-dialect
+            // lowering), so there is NO dialect gate — just recurse structurally.
+            Expr::Between { operand, low, high } => {
+                self.walk_depth(operand, d)?;
+                self.walk_depth(low, d)?;
+                self.walk_depth(high, d)
+            }
+            Expr::Like { operand, pattern } => {
+                self.walk_depth(operand, d)?;
+                self.walk_depth(pattern, d)
+            }
+            Expr::DistinctFrom { left, right } => {
+                self.walk_depth(left, d)?;
+                self.walk_depth(right, d)
+            }
             Expr::PgArrayMembership { expr, op, elems } => {
                 self.check_pg_array_membership(expr, *op, elems, d)
             }
@@ -3438,6 +3454,38 @@ mod tests {
         ] {
             validate_expr(&e, Dialect::Postgres, &sc, 0, None)
                 .unwrap_or_else(|err| panic!("PG-only expression must validate on PG: {err}"));
+        }
+    }
+
+    #[test]
+    fn portable_predicate_nodes_validate_on_all_three_dialects() {
+        // between / like / distinctFrom are PORTABLE (§3.4): they render on all
+        // three dialects (the engine owns distinctFrom's per-dialect lowering), so
+        // the walk accepts them with NO dialect gate — including on SQLite/MySQL,
+        // exactly where the PG-only nodes are refused.
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::Between {
+                operand: Box::new(Expr::col("total")),
+                low: Box::new(Expr::lit(IrScalar::Int(0))),
+                high: Box::new(Expr::lit(IrScalar::Int(100))),
+            },
+            Expr::Like {
+                operand: Box::new(Expr::col("name")),
+                pattern: Box::new(Expr::lit(IrScalar::Str("A%".into()))),
+            },
+            Expr::DistinctFrom {
+                left: Box::new(Expr::col("first")),
+                right: Box::new(Expr::col("last")),
+            },
+        ];
+        for e in &nodes {
+            for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+                validate_expr(e, d, &sc, 0, None).unwrap_or_else(|err| {
+                    panic!("portable predicate must validate on {d:?}: {err}")
+                });
+            }
         }
     }
 
