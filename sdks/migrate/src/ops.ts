@@ -55,7 +55,9 @@ import type {
   DefaultValue,
   DelArgs,
   DmlSetValue,
+  DomainCheckFn,
   DomainHandle,
+  DomainValueBuilder,
   DeterminismFinding,
   DropTablePolicyArgs,
   DropDomainArgs,
@@ -1814,6 +1816,14 @@ function checkWithPgBuilder(): CheckBuilderWithPg {
   return Object.freeze(c);
 }
 
+function domainValueBuilder(): DomainValueBuilder {
+  const v = chain({ node: "colRef", name: "VALUE" }) as unknown as DomainValueBuilder;
+  v.case = caseExpr;
+  v.fn = immutableFn;
+  v.pg = pgExpr;
+  return Object.freeze(v);
+}
+
 function makeBuilder(): ExprBuilder {
   const c = makeColumnAccessor() as unknown as ExprBuilder;
   c.col = c;
@@ -1876,6 +1886,25 @@ function resolveCheckWithPg(
     resolved = slot as Node;
   } else {
     throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position, { allowPgImmutable: true });
+  return resolved;
+}
+
+function resolveDomainCheck(
+  slot: DomainCheckFn | ExprChainType | Node | undefined,
+  position: string,
+): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (v: DomainValueBuilder) => unknown)(domainValueBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (v) => Expr callback or a built expression`);
   }
   validateImmutableExpr(resolved, position, { allowPgImmutable: true });
   return resolved;
@@ -2215,7 +2244,7 @@ function recordCreateDomain(name: string, args: CreateDomainArgs): void {
     name,
     schema: args.schema,
     as: colTypeOf(args.as),
-    check: resolveExpr(args.check as ExprFn | ExprChainType | Node | undefined),
+    check: resolveDomainCheck(args.check as DomainCheckFn | ExprChainType | Node | undefined, "domain(name).create({ check })"),
     default: args.default === undefined ? undefined : toIrDefault(args.default),
     notNull: args.notNull,
   });

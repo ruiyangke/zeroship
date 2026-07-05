@@ -36,7 +36,7 @@ import {
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
-import { pgTable } from "../../src/pg.js";
+import { domain, pgTable } from "../../src/pg.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
 import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
@@ -422,6 +422,45 @@ export function checkExpressionSurfaceTypechecks(): void {
   table("oauth_authorization_codes").check("active_is_bool").add({
     expr: (c) => c("active").isNotNull(),
     ifNotExists: true,
+  });
+}
+
+export function domainValueCheckSurfaceTypechecks(): void {
+  domain("account_state").create({
+    as: t.text(),
+    check: (v) => v.in(["active", "past_due"]).and(v.isNotNull()),
+  });
+  domain("billing_period").create({
+    as: t.date(),
+    check: (v) => v.pg.extract("day", v).eq(1),
+  });
+  domain("email_domain").create({
+    as: t.text(),
+    check: (v) => v.fn.lower(v).like("%@%"),
+  });
+
+  domain("bad_domain_call").create({
+    as: t.text(),
+    // @ts-expect-error — DomainValueBuilder is the value, not a callable column accessor.
+    check: (v) => v("other_column").eq("x"),
+  });
+
+  domain("bad_domain_col").create({
+    as: t.text(),
+    // @ts-expect-error — DomainValueBuilder exposes no general column accessor.
+    check: (v) => v.col("other_column").eq("x"),
+  });
+
+  domain("bad_domain_now").create({
+    as: t.timestamp(),
+    // @ts-expect-error — domain checks expose only immutable v.fn helpers.
+    check: (v) => v.fn.now().isNotNull(),
+  });
+
+  domain("bad_domain_agg").create({
+    as: t.text(),
+    // @ts-expect-error — DomainValueBuilder has no aggregate namespace.
+    check: (v) => v.agg.count().gt(0),
   });
 }
 

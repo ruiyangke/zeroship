@@ -15,20 +15,20 @@ export function up() {
   role({ name: "sandbox_app", login: true, password: "sandbox_app", setSearchPath: ["zeroship", "public"], ifNotExists: true });
   role({ name: "sandbox_audit", login: true, password: "sandbox_audit", setSearchPath: ["zeroship", "public"], ifNotExists: true });
   role({ name: "sandbox_gdpr", login: true, password: "sandbox_gdpr", setSearchPath: ["zeroship", "public"], ifNotExists: true });
-  domain("account_state").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["active", "past_due", "suspended"]) });
-  domain("billing_notification_kind").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["payment_failed", "past_due", "suspended", "recovered", "invoice_finalized", "refunded", "disputed", "payout_failed", "checkout_failed", "spend_warn", "spend_degrade", "spend_block"]) });
-  domain("billing_period").create({ schema: "zeroship", as: t.date(), check: (c) => c.pg.extract("day", c("VALUE")).eq(1) });
-  domain("credit_entry_kind").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["grant", "promo", "goodwill", "refund_to_credit", "consumed", "void_reversal", "refund_clawback"]) });
-  domain("dispute_status").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["open", "won", "lost"]) });
-  domain("invoice_payment_kind").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["charge", "dispute_debit", "dispute_reversal"]) });
-  domain("invoice_status").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["draft", "finalized", "void"]) });
-  domain("metric_kind").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["platform", "primitive", "custom"]) });
-  domain("notification_status").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["pending", "sent"]) });
-  domain("reconciliation_finding_kind").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["missed_invoice_payment", "invoice_status_drift", "refund_status_drift", "dispute_status_drift", "missing_dispute"]) });
-  domain("reconciliation_finding_severity").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["low", "medium", "high"]) });
-  domain("refund_destination").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["cash", "credit"]) });
-  domain("refund_status").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["pending", "issued", "failed", "canceled"]) });
-  domain("spend_state").create({ schema: "zeroship", as: t.text(), check: (c) => c("VALUE").in(["allow", "warn", "degrade", "block"]) });
+  domain("account_state").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["active", "past_due", "suspended"]) });
+  domain("billing_notification_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["payment_failed", "past_due", "suspended", "recovered", "invoice_finalized", "refunded", "disputed", "payout_failed", "checkout_failed", "spend_warn", "spend_degrade", "spend_block"]) });
+  domain("billing_period").create({ schema: "zeroship", as: t.date(), check: (v) => v.pg.extract("day", v).eq(1) });
+  domain("credit_entry_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["grant", "promo", "goodwill", "refund_to_credit", "consumed", "void_reversal", "refund_clawback"]) });
+  domain("dispute_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["open", "won", "lost"]) });
+  domain("invoice_payment_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["charge", "dispute_debit", "dispute_reversal"]) });
+  domain("invoice_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["draft", "finalized", "void"]) });
+  domain("metric_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["platform", "primitive", "custom"]) });
+  domain("notification_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["pending", "sent"]) });
+  domain("reconciliation_finding_kind").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["missed_invoice_payment", "invoice_status_drift", "refund_status_drift", "dispute_status_drift", "missing_dispute"]) });
+  domain("reconciliation_finding_severity").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["low", "medium", "high"]) });
+  domain("refund_destination").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["cash", "credit"]) });
+  domain("refund_status").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["pending", "issued", "failed", "canceled"]) });
+  domain("spend_state").create({ schema: "zeroship", as: t.text(), check: (v) => v.in(["allow", "warn", "degrade", "block"]) });
   sequence("audit_events_id_seq").create({ schema: "zeroship", as: t.bigInt(), start: 1, increment: 1, minValue: null, maxValue: null, cache: 1 });
 }
 

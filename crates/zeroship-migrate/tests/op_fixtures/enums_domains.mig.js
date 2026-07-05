@@ -9,13 +9,13 @@ export function up() {
   planTier.create({ values: ["free", "pro"] });
   billingPeriod.create({
     as: t.int(),
-    check: (c) => c("VALUE").ge(1),
+    check: (v) => v.ge(1),
     default: 1,
     notNull: true,
   });
   accountState.create({
     as: t.text(),
-    check: (c) => c("VALUE").in(["active", "past_due"]),
+    check: (v) => v.in(["active", "past_due"]),
   });
 
   table("subscriptions").create({

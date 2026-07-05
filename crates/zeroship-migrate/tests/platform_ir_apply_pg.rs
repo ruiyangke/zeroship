@@ -468,7 +468,7 @@ export function up() {
   domain("myd").create({
     schema: "zeroship",
     as: t.text(),
-    check: (c) => c("VALUE").in(["a", "b"]),
+    check: (v) => v.in(["a", "b"]),
   });
 
   table("domain_surface", { schema: "zeroship" }).create({
