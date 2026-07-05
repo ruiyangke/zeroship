@@ -18,7 +18,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { t, table } from "../src/index.js";
+import { decimal, t, table } from "../src/index.js";
 import {
   alterRole,
   createFunction,
@@ -120,7 +120,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
       columns: {
         id: t.id(),
         email: t.text().notNull().unique(),
-        balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
+        balance: t.numeric(12, 2).notNull().default(decimal("0.00")),
         authored_at: t.timestamp().notNull().default({ fn: "now" }),
         external_id: t.uuid(),
         avatar: t.bytes(),

@@ -27,10 +27,12 @@ import {
   not,
   membership,
   lit,
+  decimal,
   interval,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
+  type DecimalValue,
 } from "../../src/index.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
@@ -289,6 +291,37 @@ export function insertValueShapes(): void {
 
   // @ts-expect-error — column defaults reject clearly wrong function return shapes.
   table("users").create({ columns: { bad: t.json().default(() => ({ nope: true })) } });
+}
+
+export function decimalValueShapes(): void {
+  const cents: DecimalValue = decimal("9007199254740993");
+  table("ledger").insert({ rows: { amount: cents } });
+  table("ledger").create({ columns: { amount: t.numeric(38, 0).default(decimal("9007199254740993")) } });
+  table("ledger").insert({
+    rows: { id: 1, amount: decimal("0.00") },
+    onConflict: { columns: ["id"], doUpdate: { amount: decimal("1.25") } },
+  });
+  lit(decimal("0.00"));
+
+  // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").
+  table("ledger").insert({ rows: { amount: 9007199254740993n } });
+
+  // @ts-expect-error — bigint defaults are refused by the authored value union.
+  table("ledger").create({ columns: { amount: t.numeric(38, 0).default(9007199254740993n) } });
+
+  table("ledger").insert({
+    rows: { id: 1, amount: decimal("0.00") },
+    onConflict: {
+      columns: ["id"],
+      doUpdate: {
+        // @ts-expect-error — bigint is not valid in onConflict.doUpdate values.
+        amount: 9007199254740993n,
+      },
+    },
+  });
+
+  // @ts-expect-error — bigint is not valid in expression literals.
+  lit(9007199254740993n);
 }
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -26,6 +26,7 @@ import {
   membership,
   notMembership,
   lit,
+  decimal,
   interval,
   dialect,
 } from "../src/index.js";
@@ -43,6 +44,7 @@ import {
   t as engT,
   table as engTable,
   nextval as engNextval,
+  decimal as engDecimal,
 } from "../dist/embedded-recorder.js";
 
 /** Record one phase's ops via the ambient recorder. */
@@ -52,9 +54,9 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-function recordEngine(up: (api: { table: any; t: any; nextval: any }) => void): any[] {
+function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any }) => void): any[] {
   engBegin();
-  up({ table: engTable, t: engT, nextval: engNextval });
+  up({ table: engTable, t: engT, nextval: engNextval, decimal: engDecimal });
   return engDrain();
 }
 
@@ -459,12 +461,85 @@ test("insert row-object rejects ragged later-row keys", () => {
   );
 });
 
-test("insert normalizes a bigint to {decimal} and Uint8Array to {bytes:base64}", () => {
+test("insert normalizes decimal() to {decimal} and Uint8Array to {bytes:base64}", () => {
   const ops = record(() =>
-    table("t").insert({ rows: [{ big: 9007199254740993n, raw: new Uint8Array([1, 2, 3]) }] }),
+    table("t").insert({ rows: [{ big: decimal("9007199254740993"), raw: new Uint8Array([1, 2, 3]) }] }),
   );
   assert.deepEqual(ops[0].rows, [[{ decimal: "9007199254740993" }, { bytes: "AQID" }]]);
   assert.doesNotThrow(() => JSON.stringify(ops[0]));
+});
+
+test("decimal() validates decimal strings and records byte-identical IR", () => {
+  const ops = record(() => {
+    table("t").insert({ rows: [{ price: decimal("0.00") }] });
+    table("t").create({ columns: { price: t.numeric(12, 2).default(decimal("-10.50")) } });
+    table("t").insert({
+      rows: [{ id: 1 }],
+      onConflict: { columns: ["id"], doUpdate: { price: decimal("9007199254740993") } as any },
+    });
+    table("t").check("price_chk").add({ expr: (c) => c("price").ge(decimal("0.00")) });
+    lit(decimal("1.25"));
+  });
+
+  assert.deepEqual(ops[0].rows, [[{ decimal: "0.00" }]]);
+  assert.deepEqual(ops[1].columns[0].default, { literal: { value: { decimal: "-10.50" } } });
+  assert.deepEqual(ops[2].onConflict.doUpdate, { price: { decimal: "9007199254740993" } });
+  assert.deepEqual(ops[3].constraint.kind.expr.rhs.value, { decimal: "0.00" });
+
+  assert.throws(
+    () => decimal("1."),
+    (e: any) => e.code === "OP_INVALID" && /well-formed decimal string/.test(e.message) && /decimal\("<n>"\)/.test(e.message),
+  );
+  assert.throws(
+    () => decimal("1e3"),
+    (e: any) => e.code === "OP_INVALID" && /well-formed decimal string/.test(e.message) && /decimal\("<n>"\)/.test(e.message),
+  );
+});
+
+test("public and engine recorders match for decimal() scalar values", () => {
+  const pub = record(() => {
+    table("t").insert({ rows: [{ price: decimal("0.00") }] });
+    table("t").create({ columns: { price: t.numeric(12, 2).default(decimal("0.00")) } });
+  });
+  const eng = recordEngine(({ table, t, decimal }) => {
+    table("t").insert({ rows: [{ price: decimal("0.00") }] });
+    table("t").create({ columns: { price: t.numeric(12, 2).default(decimal("0.00")) } });
+  });
+  assert.deepEqual(pub, eng);
+});
+
+test("bigint and the removed {decimal} carrier fail closed at record time", () => {
+  const isBigintRefusal = (e: any) =>
+    e.code === "OP_INVALID" && e.message.includes('bigint is not a value — use decimal("<n>")');
+  const isCarrierRefusal = (e: any) =>
+    e.code === "OP_INVALID" && e.message.includes('the { decimal } carrier is removed — use decimal("<n>")');
+
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ big: 9007199254740993n }] } as any)),
+    isBigintRefusal,
+  );
+  assert.throws(
+    () => record(() => table("t").create({ columns: { big: t.numeric(38, 0).default(9007199254740993n as any) } })),
+    isBigintRefusal,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").insert({
+          rows: [{ id: 1 }],
+          onConflict: { columns: ["id"], doUpdate: { big: 9007199254740993n } as any },
+        }),
+      ),
+    isBigintRefusal,
+  );
+  assert.throws(
+    () => record(() => table("t").insert({ rows: [{ price: { decimal: "0.00" } }] } as any)),
+    isCarrierRefusal,
+  );
+  assert.throws(
+    () => record(() => table("t").create({ columns: { price: t.numeric(12, 2).default({ decimal: "0.00" } as any) } })),
+    isCarrierRefusal,
+  );
 });
 
 test("non-native function values fail closed instead of recording as JSON null", () => {
@@ -554,11 +629,11 @@ test("supported native function symbols still record as fnSynth", () => {
   }
 });
 
-test("a column default carries a bigint/Uint8Array through the same IrScalar carrier", () => {
+test("a column default carries decimal()/Uint8Array through the same IrScalar carrier", () => {
   const ops = record(() =>
     table("t").create({
       columns: {
-        big: t.numeric(38, 0).default(9007199254740993n),
+        big: t.numeric(38, 0).default(decimal("9007199254740993")),
         raw: t.bytes().default(new Uint8Array([255, 0])),
       },
     }),
@@ -665,11 +740,11 @@ test("empty container defaults record byte-identically to engine recorder", () =
   assert.deepEqual(pub, eng);
 });
 
-test("onConflict.doUpdate normalizes bigint/Uint8Array scalar assignments", () => {
+test("onConflict.doUpdate normalizes decimal()/Uint8Array scalar assignments", () => {
   const ops = record(() =>
     table("t").insert({
       rows: [{ id: 1 }],
-      onConflict: { columns: ["id"], doUpdate: { big: 9007199254740993n, raw: new Uint8Array([7]) } as any },
+      onConflict: { columns: ["id"], doUpdate: { big: decimal("9007199254740993"), raw: new Uint8Array([7]) } as any },
     }),
   );
   assert.deepEqual(ops[0].onConflict.doUpdate, {
