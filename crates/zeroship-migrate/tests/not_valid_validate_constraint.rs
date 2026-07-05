@@ -9,7 +9,7 @@
 //!      `Op::ValidateConstraint` is REFUSED off Postgres; both are accepted on PG.
 //!   3. RECORDER — the `constraint_not_valid` corpus fixture (op_round_trip.rs) is
 //!      the byte-stable REAL-recorder gate for `addForeignKey/addCheck { notValid }`
-//!      + `.validateConstraint(name)`; this file asserts the recorded golden shape.
+//!      + `.constraint(name).validate()`; this file asserts the recorded golden shape.
 
 use std::path::PathBuf;
 
