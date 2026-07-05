@@ -4,10 +4,9 @@ import { extension, grant, pgTable, role, schema } from "@zeroship/migrate/pg";
 export const name = "platform_ts_vendor";
 
 export function up() {
-  extension({ name: "citext", ifNotExists: true });
-  schema({ name: "zeroship", ifNotExists: true });
-  role({
-    name: "zeroship_ts_test_app",
+  extension("citext").create({ ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
+  role("zeroship_ts_test_app").create({
     login: true,
     password: "zeroship_ts_test_app",
     setSearchPath: ["zeroship", "public"],
