@@ -423,10 +423,9 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
             }]
         }
         // ── Row-Level Security ────────────────────────────────────────────────
-        Op::EnableRls { table, .. } => rls_stmt(eff_schema, table, "ENABLE", "DISABLE")?,
-        Op::ForceRls { table, .. } => rls_stmt(eff_schema, table, "FORCE", "NO FORCE")?,
-        Op::DisableRls { table, .. } => rls_stmt(eff_schema, table, "DISABLE", "ENABLE")?,
-        Op::NoForceRls { table, .. } => rls_stmt(eff_schema, table, "NO FORCE", "FORCE")?,
+        Op::SetRls { table, enabled, forced, .. } => {
+            set_rls_stmts(eff_schema, table, *enabled, *forced)?
+        }
         // ── Policies ─────────────────────────────────────────────────────────
         Op::CreatePolicy { name, table, for_cmd, to, using, with_check, .. } => {
             let qtable = qualified(eff_schema, table)?;
@@ -577,6 +576,32 @@ pub fn render_vendor_op(op: &Op, eff_schema: &str) -> Result<Vec<VendorStatement
         // Non-vendor ops never reach here (the lower seam routes only vendor ops).
         _ => return Err(VendorError::Predicate("non-vendor op routed to vendor renderer".to_string())),
     })
+}
+
+fn set_rls_stmts(
+    eff_schema: &str,
+    table: &str,
+    enabled: Option<bool>,
+    forced: Option<bool>,
+) -> Result<Vec<VendorStatement>, VendorError> {
+    let mut stmts = Vec::new();
+    if let Some(enabled) = enabled {
+        let (verb, inverse) = if enabled {
+            ("ENABLE", "DISABLE")
+        } else {
+            ("DISABLE", "ENABLE")
+        };
+        stmts.extend(rls_stmt(eff_schema, table, verb, inverse)?);
+    }
+    if let Some(forced) = forced {
+        let (verb, inverse) = if forced {
+            ("FORCE", "NO FORCE")
+        } else {
+            ("NO FORCE", "FORCE")
+        };
+        stmts.extend(rls_stmt(eff_schema, table, verb, inverse)?);
+    }
+    Ok(stmts)
 }
 
 /// Render an `ALTER TABLE … <verb> ROW LEVEL SECURITY` RLS statement + its inverse.

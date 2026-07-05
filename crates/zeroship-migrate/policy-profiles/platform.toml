@@ -13,6 +13,7 @@ schema = true
 role = { allow = true, attrs = [] }
 grant = true
 rls = true
+partition = true
 policy = true
 function = true
 raw_sql = true

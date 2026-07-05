@@ -169,6 +169,13 @@ sqlite = "transparentDegradable"
 mysql = "transparentDegradable"
 
 [[row]]
+kind = "attachPartition"
+variant = "base"
+pg = "vendor"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+[[row]]
 kind = "detachPartition"
 variant = "base"
 pg = "portable"
@@ -281,28 +288,7 @@ sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
-kind = "enableRls"
-variant = "base"
-pg = "vendor"
-sqlite = "unsupported"
-mysql = "unsupported"
-
-[[row]]
-kind = "forceRls"
-variant = "base"
-pg = "vendor"
-sqlite = "unsupported"
-mysql = "unsupported"
-
-[[row]]
-kind = "disableRls"
-variant = "base"
-pg = "vendor"
-sqlite = "unsupported"
-mysql = "unsupported"
-
-[[row]]
-kind = "noForceRls"
+kind = "setRls"
 variant = "base"
 pg = "vendor"
 sqlite = "unsupported"

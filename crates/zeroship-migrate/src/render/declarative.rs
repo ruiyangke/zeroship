@@ -5459,6 +5459,32 @@ impl DeclarativeAuthor {
         )
     }
 
+    fn render_attach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        bound: &PartitionBounds,
+    ) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} ATTACH PARTITION {} {}",
+            self.qualified(parent),
+            self.qualified(name),
+            render_partition_bounds_pg(bound),
+        );
+        let down = Some(format!(
+            "ALTER TABLE {} DETACH PARTITION {}",
+            self.qualified(parent),
+            self.qualified(name),
+        ));
+        self.make(
+            &format!("attach_partition_{parent}_{name}"),
+            up,
+            down,
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
     fn render_detach_partition(
         &self,
         parent: &str,
@@ -5766,6 +5792,14 @@ impl DeclarativeAuthor {
         bounds: &PartitionBounds,
     ) -> LoweredUnit {
         single_stmt(self.render_create_partition(name, of, bounds))
+    }
+    pub(crate) fn lower_attach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        bound: &PartitionBounds,
+    ) -> LoweredUnit {
+        single_stmt(self.render_attach_partition(parent, name, bound))
     }
     pub(crate) fn lower_detach_partition(
         &self,
