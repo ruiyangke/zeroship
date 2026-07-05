@@ -43,6 +43,7 @@ export {
   membership,
   notMembership,
   lit,
+  decimal,
   interval,
   nextval,
   p,

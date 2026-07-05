@@ -347,19 +347,26 @@ export interface SequenceHandle {
 
 // ── Scalars / rows ──
 
+declare const decimalValueBrand: unique symbol;
+
+/** A branded decimal value produced by the top-level `decimal("...")`
+ *  constructor. The recorder normalizes it to the IR `{ decimal: "..." }`
+ *  scalar carrier; authors cannot pass the in-band carrier directly. */
+export interface DecimalValue {
+  readonly [decimalValueBrand]: "decimal";
+  readonly decimal: string;
+}
+
 /** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
- *  carry (§3.5 numeric domain). The builder normalizes a JS `bigint` into the
- *  `{ decimal }` carrier (integers beyond 2^53) and a `Uint8Array` into the
- *  `{ bytes: base64 }` carrier before recording — both are accepted here for
- *  authoring ergonomics; you MAY also pass the explicit `{ decimal }` carrier (e.g.
- *  for a fractional value). */
+ *  carry (§3.5 numeric domain). The builder normalizes a branded `decimal(...)`
+ *  into the `{ decimal }` IR carrier and a `Uint8Array` into the `{ bytes:
+ *  base64 }` carrier before recording. */
 export type ScalarValue =
   | string
   | number
-  | bigint
   | boolean
   | null
-  | { decimal: string }
+  | DecimalValue
   | Uint8Array;
 
 declare const dbSynthSymbolBrand: unique symbol;

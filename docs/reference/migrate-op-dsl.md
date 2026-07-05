@@ -487,11 +487,11 @@ table("orders").backfill({
   resumable loop that persists crash-safe cursor progress under the project
   lock. It runs on **both backends** (PG via the existing windowed executor;
   SQLite via the committed batched executor).
-- Row values may be a string / safe number / `bigint` / boolean / `null` /
-  `Uint8Array` / `{ decimal: "…" }`. A `bigint` (integers beyond 2^53) is
-  normalized to the `{ decimal }` carrier and a `Uint8Array` to a base64
-  `{ bytes }` carrier before recording, so the wire shape matches the engine's
-  scalar deserializer.
+- Row values may be a string / safe number / `decimal("…")` / boolean / `null`
+  / `Uint8Array`. Use `decimal("<n>")` for integers beyond 2^53 or fixed-scale
+  numeric values; it records the IR `{ decimal }` carrier. A `Uint8Array` is
+  normalized to a base64 `{ bytes }` carrier before recording, so the wire shape
+  matches the engine's scalar deserializer.
 - DML carries **no existence guard** (it is not guardable); `schema` rides on the
   args object.
 

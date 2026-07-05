@@ -583,26 +583,26 @@ fn fluent_expr_builder_constructs_closed_ast() {
     assert_eq!(w.get("rhs").unwrap().get("op").unwrap(), "le");
 }
 
-/// A spec-blessed `bigint` / `Uint8Array` author value passed through the FLUENT
+/// A spec-blessed `decimal()` / `Uint8Array` author value passed through the FLUENT
 /// insert + column default records the closed `IrScalar` WIRE carriers
 /// (`{decimal}` / `{bytes:base64}`), so the RECORD path produces a shape Rust
 /// accepts value-equal — the previously promised-but-broken §3.2/§2.3.2 path. A
-/// pre-fix recorder either THROWS on the bigint (JSON.stringify) or emits the
-/// `{"0":…}` array-index spelling Rust HARD-REJECTS, so `record` would fail.
+/// pre-fix recorder either cannot expose the decimal value constructor or emits
+/// the `{"0":…}` array-index spelling Rust HARD-REJECTS, so `record` would fail.
 #[test]
-fn fluent_insert_normalizes_bigint_and_bytes_scalars() {
+fn fluent_insert_normalizes_decimal_and_bytes_scalars() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, decimal } from "@zeroship/migrate";
         export default { name: "n", up() {
             const tbl = table("t");
             tbl.create({
                 columns: {
                     id: t.id(),
-                    seq: t.numeric(38, 0).notNull().default(9007199254740993n),
+                    seq: t.numeric(38, 0).notNull().default(decimal("9007199254740993")),
                     salt: t.bytes().default(new Uint8Array([1, 2, 3, 255])),
                 },
             });
-            tbl.insert({ rows: [ { seq: 9007199254740993n, salt: new Uint8Array([0, 255]) } ] });
+            tbl.insert({ rows: [ { seq: decimal("9007199254740993"), salt: new Uint8Array([0, 255]) } ] });
         }};
     "#;
     // Recording succeeds (the typed `MigrationIr` deserialize is the gate) — the

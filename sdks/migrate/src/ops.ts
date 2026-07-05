@@ -48,6 +48,7 @@ import type {
   CreateTableArgs,
   CreateViewArgs,
   DbSynthSymbol,
+  DecimalValue,
   DefaultValue,
   DelArgs,
   DomainHandle,
@@ -162,6 +163,24 @@ const nativeCryptoRandomUUID =
     ? globalThis.crypto.randomUUID
     : undefined;
 const NEXTVAL_DEFAULT_MARKER = "__zeroshipMigrateNextvalDefault";
+const DECIMAL_VALUE_BRAND = Symbol.for("zeroship.migrate.decimal/v1");
+const DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
+const DECIMAL_VALUE_ERROR =
+  'decimal(value) requires a well-formed decimal string; use decimal("<n>") or decimal("0.00")';
+
+function requireDecimalString(value: unknown): string {
+  if (typeof value !== "string" || !DECIMAL_STRING_RE.test(value)) {
+    throw structuredError("OP_INVALID", DECIMAL_VALUE_ERROR);
+  }
+  return value;
+}
+
+export function decimal(value: string): DecimalValue {
+  return Object.freeze({
+    [DECIMAL_VALUE_BRAND]: true,
+    decimal: requireDecimalString(value),
+  }) as unknown as DecimalValue;
+}
 
 function nativeFnSynthName(value: unknown): "now" | "genRandomUuid" | undefined {
   if (value === nativeDateNow) return "now";
@@ -799,13 +818,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+function isDecimalValue(value: unknown): value is DecimalValue {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[DECIMAL_VALUE_BRAND] === true &&
+    typeof (value as { decimal?: unknown }).decimal === "string"
+  );
+}
+
+function isRemovedDecimalCarrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isDecimalValue(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "decimal" && typeof value.decimal === "string";
+}
+
 function isExplicitScalarCarrier(value: Record<string, unknown>): boolean {
   const keys = Object.keys(value);
-  return (
-    keys.length === 1 &&
-    ((keys[0] === "decimal" && typeof value.decimal === "string") ||
-      (keys[0] === "bytes" && typeof value.bytes === "string"))
-  );
+  return keys.length === 1 && keys[0] === "bytes" && typeof value.bytes === "string";
 }
 
 function rejectNestedFunctionValues(value: unknown): void {
@@ -820,14 +850,20 @@ function rejectNestedFunctionValues(value: unknown): void {
 /**
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
  * shape is exactly what Rust's `IrScalar` deserializer accepts (§3.5):
- *  - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify);
+ *  - a branded `decimal("...")` value → `{ decimal: "<v>" }`;
  *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
  *  - JSON containers are scanned so function values fail closed at any depth;
  *  - everything else passes through verbatim.
  */
 function toIrScalar(value: unknown): unknown {
   rejectNestedFunctionValues(value);
-  if (typeof value === "bigint") return { decimal: value.toString() };
+  if (isDecimalValue(value)) return { decimal: requireDecimalString(value.decimal) };
+  if (typeof value === "bigint") {
+    throw structuredError("OP_INVALID", 'bigint is not a value — use decimal("<n>")');
+  }
+  if (isRemovedDecimalCarrier(value)) {
+    throw structuredError("OP_INVALID", 'the { decimal } carrier is removed — use decimal("<n>")');
+  }
   if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
     return { decimal: String(value) };
   }
@@ -885,8 +921,10 @@ function toIrDefault(value: DefaultValue): Node {
     rejectNestedFunctionValues(value);
     return { json: toIrJsonValue(value) };
   }
+  if (isDecimalValue(value)) return { literal: { value: toIrScalar(value) } };
   if (isPlainObject(value)) {
     if (Object.keys(value).length === 0) return { container: "object" };
+    if (isRemovedDecimalCarrier(value)) return { literal: { value: toIrScalar(value) } };
     if (isExplicitScalarCarrier(value)) return { literal: { value: toIrScalar(value) } };
     rejectNestedFunctionValues(value);
     return { json: toIrJsonValue(value) };

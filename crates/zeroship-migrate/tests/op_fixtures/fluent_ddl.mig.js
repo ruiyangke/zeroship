@@ -12,7 +12,7 @@
 //   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
-import { table, t } from "@zeroship/migrate";
+import { table, t, decimal } from "@zeroship/migrate";
 
 export default {
   name: "fluent_ddl",
@@ -22,7 +22,7 @@ export default {
       columns: {
         id: t.id(), // uuid PK, default gen_random_uuid()
         email: t.text().notNull().unique(),
-        balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
+        balance: t.numeric(12, 2).notNull().default(decimal("0.00")),
         authored_at: t.timestamp().notNull().default({ fn: "now" }),
         external_id: t.uuid(),
         avatar: t.bytes(),
