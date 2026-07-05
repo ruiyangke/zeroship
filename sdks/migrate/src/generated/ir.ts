@@ -202,8 +202,8 @@ export type Expr =
   | { node: "pgArrayMembership"; expr: Expr; op: PgArrayMembershipOp; elems: string[] }
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
   | { node: "pgColumnSize"; expr: Expr }
-  | { node: "extract"; field: ExtractField; expr: Expr }
-  | { node: "pgIntervalLiteral"; value: string }
+  | { node: "extract"; field: ExtractField; from: Expr }
+  | { node: "pgInterval"; duration: string }
   // The one Layer-2 portability escape (§3.4): a per-dialect value divergence.
   // Legs serialize in canonical order (default, pg, sqlite, mysql); a `None` leg
   // is skipped on the wire. Scope math is validated per-target by the engine.

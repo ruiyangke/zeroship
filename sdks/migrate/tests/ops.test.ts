@@ -1175,7 +1175,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       node: "binOp",
       op: "add",
       lhs: { node: "colRef", name: "created_at" },
-      rhs: { node: "pgIntervalLiteral", value: "00:01:00" },
+      rhs: { node: "pgInterval", duration: "00:01:00" },
     },
   });
   assert.deepEqual(checks[8], {
@@ -1235,7 +1235,7 @@ test("c.pg builds PG-only extract and interval literal nodes", () => {
   assert.deepEqual(ops[0].check, {
     node: "binOp",
     op: "eq",
-    lhs: { node: "extract", field: "day", expr: { node: "colRef", name: "VALUE" } },
+    lhs: { node: "extract", field: "day", from: { node: "colRef", name: "VALUE" } },
     rhs: { node: "literal", value: 1 },
   });
   assert.deepEqual(ops[1].constraints[0].kind.expr, {
@@ -1246,7 +1246,7 @@ test("c.pg builds PG-only extract and interval literal nodes", () => {
       node: "binOp",
       op: "add",
       lhs: { node: "colRef", name: "issued_at" },
-      rhs: { node: "pgIntervalLiteral", value: "00:01:00" },
+      rhs: { node: "pgInterval", duration: "00:01:00" },
     },
   });
 });

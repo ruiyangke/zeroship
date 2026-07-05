@@ -1357,7 +1357,7 @@ export function lit(value: ScalarValue): ExprChainType {
 }
 
 export function interval(value: string): ExprChainType {
-  return chain({ node: "pgIntervalLiteral", value: pgIntervalLiteral(value) });
+  return chain({ node: "pgInterval", duration: pgIntervalLiteral(value) });
 }
 
 /**
@@ -1498,11 +1498,11 @@ const pgExpr: PgExprNamespace = {
   extract: (field, expr) => chain({
     node: "extract",
     field: pgExtractField(field),
-    expr: exprArg(expr),
+    from: exprArg(expr),
   }),
   interval: (value) => chain({
-    node: "pgIntervalLiteral",
-    value: pgIntervalLiteral(value),
+    node: "pgInterval",
+    duration: pgIntervalLiteral(value),
   }),
 };
 
