@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use zeroship_migrate::render::dml::assemble_backfill_clauses;
 use zeroship_migrate::model::expr::{Expr, SynthFn};
-use zeroship_migrate::model::ir::IrScalar;
+use zeroship_migrate::model::ir::{IrScalar, IrValue};
 use zeroship_migrate::model::load::load_ir_document;
 use zeroship_migrate::model::validate::Dialect;
 use zeroship_migrate::SqlDialect;
@@ -109,7 +109,7 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
 #[test]
 fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
     // multi-char delimiter, the §9 grammar-boundary example.
-    let set = BTreeMap::from([("x".to_string(), split("v", ", ", 1))]);
+    let set = BTreeMap::from([("x".to_string(), IrValue::Expr(split("v", ", ", 1)))]);
     let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None)
         .expect("out-of-envelope splitPart must LOWER to native split_part on PG");
     assert_eq!(c.set_clause, "\"x\" = split_part(\"v\", ', ', 1)");

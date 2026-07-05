@@ -246,6 +246,53 @@ async fn ir_authored_insert_update_delete_on_pg() {
 }
 
 #[compio::test]
+async fn update_set_scalar_and_expr_apply_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    let create = r#"{"ir_version":1,"name":"create_mix","ops":[
+        {"op":"createTable","name":"mix","columns":[
+            {"name":"base","type":"int","nullable":false},
+            {"name":"scalar_val","type":"int","nullable":false},
+            {"name":"expr_val","type":"int","nullable":false}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    let seed = r#"{"ir_version":1,"name":"seed_mix","ops":[
+        {"op":"insert","table":"mix",
+         "columns":["id","created_at","updated_at","version","base","scalar_val","expr_val"],
+         "rows":[["m1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,5,0,0]]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, seed, &registry(&[("mix", APP)]), Approval::None).await;
+
+    let update = r#"{"ir_version":1,"name":"update_mix","ops":[
+        {"op":"update","table":"mix",
+         "set":{"scalar_val":7,"expr_val":{"node":"binOp","op":"add",
+             "lhs":{"node":"colRef","name":"base"},
+             "rhs":{"node":"literal","value":1}}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"id"},
+             "rhs":{"node":"literal","value":"m1"}}}
+    ]}"#;
+    author_and_apply(&conn, &cfg, update, &registry(&[("mix", APP)]), Approval::None).await;
+
+    let row = conn
+        .query_one(&format!("SELECT scalar_val, expr_val FROM {s}.mix WHERE id = 'm1'"), &[])
+        .await
+        .expect("read mixed set update proof row");
+    assert_eq!(
+        (row.get::<_, i32>(0), row.get::<_, i32>(1)),
+        (7, 6),
+        "PG update.set scalar and expression values apply identically"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
+#[compio::test]
 async fn in_list_predicates_apply_identically_on_pg() {
     let conn = pg().await;
     let cfg = cfg_for(&token());

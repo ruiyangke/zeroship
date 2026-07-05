@@ -525,6 +525,21 @@ test("insert normalizes decimal() to {decimal} and Uint8Array to {bytes:base64}"
   assert.doesNotThrow(() => JSON.stringify(ops[0]));
 });
 
+test("update set records scalar RHS as IrValue scalar and callback RHS as IrValue expr", () => {
+  const ops = record(() => {
+    table("t").insert({ rows: [{ a: 1 }] });
+    table("t").update({ set: { a: 1, b: (c) => c("x").add(1) } });
+  });
+
+  assert.deepEqual(ops[1].set.a, ops[0].rows[0][0], "set scalar must match insert scalar wire shape");
+  assert.deepEqual(ops[1].set.b, {
+    node: "binOp",
+    op: "add",
+    lhs: { node: "colRef", name: "x" },
+    rhs: { node: "literal", value: 1 },
+  });
+});
+
 test("decimal() validates decimal strings and records byte-identical IR", () => {
   const ops = record(() => {
     table("t").insert({ rows: [{ price: decimal("0.00") }] });

@@ -677,6 +677,8 @@ pub struct SequenceRef {
 /// columns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL
 /// string (property A); the per-dialect default clause is rendered by the shared
 /// snapshot-builder kernel from this structured value (§6.5).
+/// Deliberately richer than the DML [`IrValue`] slot: container/json/nextval
+/// defaults carry real distinctions that are not scalar-or-expression values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrDefault {
     /// A typed scalar literal default (constrained numeric domain — §2.5).
@@ -1980,8 +1982,8 @@ pub enum TriggerStmt {
     Update {
         /// Target table.
         table: String,
-        /// Column → closed-AST assignment.
-        set: BTreeMap<String, Expr>,
+        /// Column → typed scalar or closed-AST assignment.
+        set: BTreeMap<String, IrValue>,
         /// Optional WHERE predicate.
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
@@ -2856,8 +2858,8 @@ pub enum Op {
     Update {
         /// Target table.
         table: String,
-        /// Column → closed-AST assignment (sorted map for canonicality).
-        set: BTreeMap<String, Expr>,
+        /// Column → typed scalar or closed-AST assignment (sorted map for canonicality).
+        set: BTreeMap<String, IrValue>,
         /// Optional WHERE predicate (closed AST).
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
@@ -2896,8 +2898,8 @@ pub enum Op {
         cursor_column: String,
         /// Rows per batch (JS-safe-integer bounded).
         batch_size: SafeU64,
-        /// Column → closed-AST assignment.
-        set: BTreeMap<String, Expr>,
+        /// Column → typed scalar or closed-AST assignment.
+        set: BTreeMap<String, IrValue>,
         /// Optional row filter (closed AST).
         #[serde(skip_serializing_if = "Option::is_none")]
         filter: Option<Expr>,
@@ -4711,8 +4713,9 @@ impl JsonSchema for IrScalar {
     }
 }
 
-/// A DML value in an insert row or `onConflict.doUpdate`: either the existing typed
-/// scalar wire shape or a closed expression AST such as `FnSynth(now)`.
+/// A DML value in an insert row, `update.set`, `backfill.set`, trigger update
+/// `set`, or `onConflict.doUpdate`: either the existing typed scalar wire shape
+/// or a closed expression AST such as `FnSynth(now)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum IrValue {

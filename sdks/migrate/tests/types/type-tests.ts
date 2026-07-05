@@ -104,8 +104,8 @@ export function badOpShapes(): void {
   // @ts-expect-error — `delete` requires a `where` predicate (mandatory).
   table("users").delete({});
 
-  // @ts-expect-error — `update.set` values must be (c) => Expr callbacks, not raw strings.
-  table("users").update({ set: { name: "raw sql string" } });
+  // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").
+  table("users").update({ set: { name: 1n } });
 
   // @ts-expect-error — the table-level `.rename({ to })` REQUIRES a `to` string.
   table("users").rename({});

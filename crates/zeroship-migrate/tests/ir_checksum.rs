@@ -15,7 +15,7 @@ use zeroship_migrate::{
 };
 use zeroship_migrate::model::ir::{
     CanonicalOpList, ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar,
-    Op,
+    IrValue, Op,
 };
 
 // ---------------------------------------------------------------------------
@@ -377,7 +377,7 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
         let mut set = BTreeMap::new();
         set.insert(
             "flagged".to_string(),
-            Expr::lit(IrScalar::Bool(true)),
+            IrValue::Expr(Expr::lit(IrScalar::Bool(true))),
         );
         Op::Update {
             table: "t".into(),

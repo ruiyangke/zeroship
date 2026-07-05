@@ -1275,8 +1275,10 @@ pub fn validate_op_scoped(
         }
         Op::Update { table, set, r#where, .. } => {
             let scope = TargetScope::structural_only(table);
-            for rhs in set.values() {
-                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            for value in set.values() {
+                if let crate::model::ir::IrValue::Expr(expr) = value {
+                    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                }
             }
             if let Some(pred) = r#where {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
@@ -1289,8 +1291,10 @@ pub fn validate_op_scoped(
         }
         Op::Backfill { table, set, filter, .. } => {
             let scope = TargetScope::structural_only(table);
-            for rhs in set.values() {
-                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            for value in set.values() {
+                if let crate::model::ir::IrValue::Expr(expr) = value {
+                    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                }
             }
             if let Some(pred) = filter {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
@@ -2840,8 +2844,10 @@ fn validate_trigger_stmt(
         crate::model::ir::TriggerStmt::Update { table, set, r#where, schema } => {
             validate_schema(schema.as_deref())?;
             let scope = TargetScope::structural_only(table);
-            for rhs in set.values() {
-                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            for value in set.values() {
+                if let crate::model::ir::IrValue::Expr(expr) = value {
+                    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                }
             }
             if let Some(pred) = r#where {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
@@ -3513,8 +3519,10 @@ pub fn validate_op_resolved(
         Op::Update { table, set, r#where, .. } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
-                for rhs in set.values() {
-                    validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
+                for value in set.values() {
+                    if let crate::model::ir::IrValue::Expr(expr) = value {
+                        validate_expr(expr, target_dialect, &scope, op_index, ts)?;
+                    }
                 }
                 if let Some(pred) = r#where {
                     validate_expr(pred, target_dialect, &scope, op_index, ts)?;
@@ -3534,8 +3542,10 @@ pub fn validate_op_resolved(
         Op::Backfill { table, set, filter, .. } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
-                for rhs in set.values() {
-                    validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
+                for value in set.values() {
+                    if let crate::model::ir::IrValue::Expr(expr) = value {
+                        validate_expr(expr, target_dialect, &scope, op_index, ts)?;
+                    }
                 }
                 if let Some(pred) = filter {
                     validate_expr(pred, target_dialect, &scope, op_index, ts)?;
@@ -4236,7 +4246,7 @@ mod tests {
     use crate::model::expr::{
         BinaryOp, CastTarget, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
     };
-    use crate::model::ir::{IndexElement, IrScalar};
+    use crate::model::ir::{IndexElement, IrScalar, IrValue};
 
     fn cols() -> Vec<String> {
         vec!["name".into(), "first".into(), "last".into(), "total".into()]
@@ -5964,7 +5974,9 @@ mod tests {
         // on the live `users` table.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
-            set: [("name".to_string(), Expr::col("ghost"))].into_iter().collect(),
+            set: [("name".to_string(), IrValue::Expr(Expr::col("ghost")))]
+                .into_iter()
+                .collect(),
             r#where: None,
             batch: None,
             schema: None,
@@ -6020,7 +6032,9 @@ mod tests {
         // The SAME shape but the ColRef references a column that DOES exist.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
-            set: [("name".to_string(), Expr::col("name"))].into_iter().collect(),
+            set: [("name".to_string(), IrValue::Expr(Expr::col("name")))]
+                .into_iter()
+                .collect(),
             r#where: None,
             batch: None,
             schema: None,
@@ -6290,7 +6304,7 @@ mod tests {
         // The Update is the SECOND op — the walker must stamp op_index = 1, and
         // it must reach the `set` RHS (the splitPart) to reject it.
         let mut set = BTreeMap::new();
-        set.insert("name".to_string(), split(", ", 1)); // multi-char delim
+        set.insert("name".to_string(), IrValue::Expr(split(", ", 1))); // multi-char delim
         let ir = ir_with(vec![
             Op::DropColumn {
                 table: "t".into(),
@@ -6357,7 +6371,7 @@ mod tests {
     #[test]
     fn validate_ir_walks_backfill_filter_and_set() {
         let mut set = BTreeMap::new();
-        set.insert("name".to_string(), Expr::col("first")); // fine structurally
+        set.insert("name".to_string(), IrValue::Expr(Expr::col("first"))); // fine structurally
         let ir = ir_with(vec![Op::Backfill {
             table: "users".into(),
             cursor_column: "id".into(),
@@ -6394,7 +6408,10 @@ mod tests {
         // bound) and that does NOT exist on the live `users` table.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
-            set: [("name".to_string(), Expr::col("column_that_was_dropped"))]
+            set: [(
+                "name".to_string(),
+                IrValue::Expr(Expr::col("column_that_was_dropped")),
+            )]
                 .into_iter()
                 .collect(),
             r#where: Some(Expr::BinOp {

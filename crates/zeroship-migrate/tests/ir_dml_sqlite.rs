@@ -270,6 +270,50 @@ async fn one_shot_insert_update_delete_apply_on_sqlite() {
 }
 
 #[compio::test]
+async fn update_set_scalar_and_expr_apply_on_sqlite() {
+    let p = paths("mixed_set");
+    let be = backend(&p);
+
+    let create = r#"{"ir_version":1,"name":"create_mix","ops":[
+        {"op":"createTable","name":"mix","columns":[
+            {"name":"base","type":"int","nullable":false},
+            {"name":"scalar_val","type":"int","nullable":false},
+            {"name":"expr_val","type":"int","nullable":false}
+        ]}
+    ]}"#;
+    lower_and_apply(&be, create, &registry(&[]), Approval::None).await;
+
+    let seed = r#"{"ir_version":1,"name":"seed_mix","ops":[
+        {"op":"insert","table":"mix",
+         "columns":["id","created_at","updated_at","version","base","scalar_val","expr_val"],
+         "rows":[["m1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,5,0,0]]}
+    ]}"#;
+    lower_plan_and_apply(&be, seed, &registry(&[("mix", APP)]), Approval::None).await;
+
+    let update = r#"{"ir_version":1,"name":"update_mix","ops":[
+        {"op":"update","table":"mix",
+         "set":{"scalar_val":7,"expr_val":{"node":"binOp","op":"add",
+             "lhs":{"node":"colRef","name":"base"},
+             "rhs":{"node":"literal","value":1}}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"id"},
+             "rhs":{"node":"literal","value":"m1"}}}
+    ]}"#;
+    lower_plan_and_apply(&be, update, &registry(&[("mix", APP)]), Approval::None).await;
+
+    let rows = be
+        .actor()
+        .query("SELECT scalar_val, expr_val FROM mix WHERE id = 'm1'")
+        .await
+        .expect("read mixed set update proof row");
+    assert_eq!(
+        rows,
+        vec![vec![Some("7".into()), Some("6".into())]],
+        "SQLite update.set scalar and expression values apply identically"
+    );
+}
+
+#[compio::test]
 async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_sqlite() {
     let p = paths("fnsynth_symbol");
     let be = backend(&p);

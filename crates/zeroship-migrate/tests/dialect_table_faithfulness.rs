@@ -35,9 +35,10 @@ use zeroship_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
 use zeroship_migrate::model::expr::Expr;
 use zeroship_migrate::model::ir::{
     ColType, EmptyContainerKind, ExclusionMethod, ForEach, GrantTarget, IdentityCol, IndexElement,
-    IndexMethod, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, Op, PartitionBounds,
-    PartitionSpec, PolicyCmd, Privilege, RaiseLevel, SafeU64, SelectAst, SequenceRef, TableRef,
-    TableRuntimeOptionsPatch, TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
+    IndexMethod, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrValue, Op,
+    PartitionBounds, PartitionSpec, PolicyCmd, Privilege, RaiseLevel, SafeU64, SelectAst,
+    SequenceRef, TableRef, TableRuntimeOptionsPatch, TriggerAction, TriggerEvent, TriggerStmt,
+    TriggerTiming, ViewQuery,
 };
 
 /// The `op` wire tag (op-kind discriminant) of a concrete op, via its serde image.
@@ -399,7 +400,7 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "base",
         Op::Update {
             table: "t".into(),
-            set: std::iter::once(("a".to_string(), col_ref())).collect(),
+            set: std::iter::once(("a".to_string(), IrValue::Expr(col_ref()))).collect(),
             r#where: None,
             batch: None,
             schema: None,
@@ -422,7 +423,7 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             table: "t".into(),
             cursor_column: "id".into(),
             batch_size: SafeU64::new(100).expect("safe u64"),
-            set: std::iter::once(("a".to_string(), col_ref())).collect(),
+            set: std::iter::once(("a".to_string(), IrValue::Expr(col_ref()))).collect(),
             filter: None,
             name: "bf".into(),
             schema: None,

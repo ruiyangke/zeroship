@@ -2084,6 +2084,70 @@ fn in_list_predicates_apply_identically_on_mysql() {
 }
 
 #[test]
+fn update_set_scalar_and_expr_apply_on_mysql() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "mixed_set", |backend, cfg, _account| Box::pin(async move {
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (\
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,\
+                    base BIGINT NOT NULL,\
+                    scalar_val BIGINT NOT NULL,\
+                    expr_val BIGINT NOT NULL\
+                )",
+                qi(&cfg.project_schema),
+                qi("mix")
+            ))
+            .await
+            .expect("create MySQL mixed-set proof table");
+        backend
+            .exec(&format!(
+                "INSERT INTO {}.{} (id, base, scalar_val, expr_val) VALUES ('m1', 5, 0, 0)",
+                qi(&cfg.project_schema),
+                qi("mix")
+            ))
+            .await
+            .expect("seed MySQL mixed-set proof row");
+
+        let reg = std::collections::BTreeMap::from([("mix".to_string(), OWNER.to_string())]);
+        let update = r#"{"ir_version":1,"name":"update_mix","ops":[
+            {"op":"update","table":"mix",
+             "set":{"scalar_val":7,"expr_val":{"node":"binOp","op":"add",
+                 "lhs":{"node":"colRef","name":"base"},
+                 "rhs":{"node":"literal","value":1}}},
+             "where":{"node":"binOp","op":"eq",
+                 "lhs":{"node":"colRef","name":"id"},
+                 "rhs":{"node":"literal","value":"m1"}}}
+        ]}"#;
+        lower_plan_and_apply_mysql(backend, cfg, update, &reg).await;
+
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT scalar_val, expr_val FROM {}.{} WHERE id = 'm1'",
+                qi(&cfg.project_schema),
+                qi("mix")
+            ),
+            &[],
+        )
+        .await;
+        assert_eq!(rows_len(&rows), 1, "one MySQL mixed-set proof row");
+        let row = &rows.rows[0];
+        assert_eq!(
+            (
+                value_as_string(row.get("scalar_val")),
+                value_as_string(row.get("expr_val")),
+            ),
+            ("7".to_string(), "6".to_string()),
+            "MySQL update.set scalar and expression values apply identically"
+        );
+    }));
+}
+
+#[test]
 fn mysql_dml_step_rejects_destructive_out_of_scope() {
     let _lock = lock_env();
     let _env = EnvGuard::set_dev();
