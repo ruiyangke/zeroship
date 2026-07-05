@@ -121,6 +121,7 @@ fn user_id_is_present() -> Expr {
         op: UnaryOp::IsNotNull,
         operand: Box::new(Expr::ColRef {
             name: "user_id".to_string(),
+            table: None,
         }),
     }
 }

@@ -469,6 +469,7 @@ pub fn validate_op_scoped(
                             ColumnOrExpr::Column { name } => {
                                 let col = crate::model::expr::Expr::ColRef {
                                     name: name.clone(),
+                                    table: None,
                                 };
                                 validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
                             }
@@ -490,7 +491,7 @@ pub fn validate_op_scoped(
         |element: &IndexElement, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
             match element {
                 IndexElement::Column { name, .. } => {
-                    let col = crate::model::expr::Expr::ColRef { name: name.clone() };
+                    let col = crate::model::expr::Expr::ColRef { name: name.clone(), table: None };
                     validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
                 }
                 IndexElement::Expr { expr } => {
@@ -2781,7 +2782,16 @@ impl Ctx<'_> {
         }
         let d = depth + 1;
         match expr {
-            Expr::ColRef { name } => self.check_colref(name),
+            // Unqualified ref: resolve against the enclosing single target table
+            // (rule (c)). Qualified ref (`c("t","col")`, §3.4): the full
+            // "qualified-ref table must be in the FROM set" scope check
+            // (`QUALIFIED_REF_UNKNOWN_TABLE`) is coupled with the Phase-2 view/FROM
+            // builder; for this additive slice accept the qualified form
+            // structurally (lenient pass — see design §3.4).
+            Expr::ColRef { name, table } => match table {
+                Some(_) => Ok(()),
+                None => self.check_colref(name),
+            },
             Expr::Literal { .. } => Ok(()),
             Expr::BinOp { lhs, rhs, .. } => {
                 self.walk_depth(lhs, d)?;

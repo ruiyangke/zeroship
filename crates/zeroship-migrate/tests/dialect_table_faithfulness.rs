@@ -144,7 +144,7 @@ fn schema_op_tags() -> BTreeSet<String> {
 }
 
 fn col_ref() -> Expr {
-    Expr::ColRef { name: "x".into() }
+    Expr::ColRef { name: "x".into(), table: None }
 }
 
 /// A minimal `IrColumn` with the given type / default / identity facets. Only the

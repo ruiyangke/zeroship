@@ -2092,7 +2092,9 @@ fn match_col_op_lit(
     use crate::model::expr::Expr;
     if let Expr::BinOp { op, lhs, rhs } = expr {
         if *op == want {
-            if let (Expr::ColRef { name }, Expr::Literal { value }) = (lhs.as_ref(), rhs.as_ref()) {
+            if let (Expr::ColRef { name, table: None }, Expr::Literal { value }) =
+                (lhs.as_ref(), rhs.as_ref())
+            {
                 return Some((name.as_str(), value));
             }
         }

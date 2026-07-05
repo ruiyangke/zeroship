@@ -5124,7 +5124,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
 
     fn collect_col_refs(expr: &Expr, out: &mut BTreeSet<String>) {
         match expr {
-            Expr::ColRef { name } => {
+            Expr::ColRef { name, .. } => {
                 out.insert(name.clone());
             }
             Expr::Literal { .. } => {}
@@ -6875,7 +6875,7 @@ mod tests {
                 table: "events".into(),
                 column: "kind".into(),
                 to_type: ColType::Text,
-                using: Some(Expr::ColRef { name: "kind".into() }),
+                using: Some(Expr::ColRef { name: "kind".into(), table: None }),
                 schema: None,
                 existence_guard: None,
             }],

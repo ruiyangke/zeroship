@@ -1332,9 +1332,17 @@ const pgExpr: PgExprNamespace = {
 };
 
 function makeBuilder(): ExprBuilder {
-  const c = ((name: string) => {
-    requireString(name, 'c("name")');
-    return chain({ node: "colRef", name });
+  // One-arg `c("col")` → unqualified colRef (byte-identical to the pre-
+  // qualification wire shape). Two-arg `c("table", "col")` → qualified colRef
+  // (§3.4, the join-ON fix): the wire `colRef` node gains an optional `table`.
+  const c = ((first: string, second?: string) => {
+    if (second === undefined) {
+      requireString(first, 'c("name")');
+      return chain({ node: "colRef", name: first });
+    }
+    requireString(first, 'c("table", "col")');
+    requireString(second, 'c("table", "col")');
+    return chain({ node: "colRef", table: first, name: second });
   }) as unknown as ExprBuilder;
   c.col = c;
   c.fn = fn;

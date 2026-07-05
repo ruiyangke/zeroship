@@ -490,10 +490,13 @@ export interface PgExprNamespace {
 }
 
 /** The single injected builder handle: a column-accessor function `c("name")`
- *  (or `c.col("name")`) carrying the `c.fn.*` namespace. */
+ *  (or `c.col("name")`) carrying the `c.fn.*` namespace. A two-arg form
+ *  `c("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
 export interface ExprBuilder {
   (name: string): ExprChain;
+  (table: string, name: string): ExprChain;
   col(name: string): ExprChain;
+  col(table: string, name: string): ExprChain;
   fn: FnNamespace;
   pg: PgExprNamespace;
 }
