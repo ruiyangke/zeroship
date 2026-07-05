@@ -193,6 +193,9 @@ export type Expr =
   | { node: "fnCall"; fn: ScalarFn; args: Expr[] }
   | { node: "fnSynth"; fn: SynthFn; args: Expr[] }
   | { node: "cast"; operand: Expr; target: CastTarget }
+  | { node: "between"; operand: Expr; low: Expr; high: Expr }
+  | { node: "like"; operand: Expr; pattern: Expr }
+  | { node: "distinctFrom"; left: Expr; right: Expr }
   | { node: "pgArrayMembership"; expr: Expr; op: PgArrayMembershipOp; elems: string[] }
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
   | { node: "pgColumnSize"; expr: Expr }

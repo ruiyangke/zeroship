@@ -1196,6 +1196,18 @@ class ExprChainImpl implements ExprChainType {
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
     return chain({ node: "cast", operand: this.__node, target });
   }
+  // Portable predicate nodes (§3.4). `between`/`like` render identical syntax on
+  // all three dialects; `distinctFrom` is portably named but per-dialect rendered
+  // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
+  between(low: unknown, high: unknown) {
+    return chain({ node: "between", operand: this.__node, low: exprArg(low), high: exprArg(high) });
+  }
+  like(pattern: unknown) {
+    return chain({ node: "like", operand: this.__node, pattern: exprArg(pattern) });
+  }
+  distinctFrom(x: unknown) {
+    return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
+  }
 }
 
 function foldExprs(op: "and" | "or", exprs: readonly unknown[], what: string): ExprChainImpl {

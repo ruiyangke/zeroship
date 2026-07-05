@@ -442,6 +442,12 @@ export interface ExprChain {
   columnSize(): ExprChain;
   // cast (the closed portable target set only)
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
+  // portable predicates (§3.4): `between`/`like` render identical syntax on all
+  // three dialects; `distinctFrom` is portably named but per-dialect rendered
+  // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
+  between(low: unknown, high: unknown): ExprChain;
+  like(pattern: unknown): ExprChain;
+  distinctFrom(x: unknown): ExprChain;
 }
 
 /** The `c.fn.*` scalar-function namespace (§3.6) — reached off the single
