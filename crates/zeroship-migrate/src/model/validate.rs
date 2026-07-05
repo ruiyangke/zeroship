@@ -3797,9 +3797,21 @@ impl Ctx<'_> {
                 Some("supply at least one dialect leg (or a default)".to_string()),
             ));
         }
-        // (2) recurse into EVERY present leg, dialect-neutral.
-        for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
-            self.walk_depth(leg, depth)?;
+        // (2) recurse into EVERY present leg. The structural checks remain the
+        // same, but PG-only portability gates must be judged against the leg that
+        // could render them: pg as PG, sqlite as SQLite, mysql as MySQL. The
+        // default leg is required to be portable because it may cover any target.
+        if let Some(leg) = default {
+            self.walk_depth_portable_default(leg, depth)?;
+        }
+        if let Some(leg) = pg {
+            self.walk_depth_as(Dialect::Postgres, leg, depth)?;
+        }
+        if let Some(leg) = sqlite {
+            self.walk_depth_as(Dialect::Sqlite, leg, depth)?;
+        }
+        if let Some(leg) = mysql {
+            self.walk_depth_as(Dialect::Mysql, leg, depth)?;
         }
         // (3) SCOPE MATH, per-TARGET: own leg OR default covers this dialect.
         let own_present = match self.target_dialect {
@@ -3824,6 +3836,35 @@ impl Ctx<'_> {
                 self.target_dialect.as_str()
             )),
         ))
+    }
+
+    fn with_target_dialect(&self, target_dialect: Dialect) -> Ctx<'_> {
+        Ctx {
+            target_dialect,
+            scope: self.scope,
+            op_index: self.op_index,
+            ts_location: self.ts_location,
+        }
+    }
+
+    fn walk_depth_as(
+        &self,
+        target_dialect: Dialect,
+        expr: &Expr,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        self.with_target_dialect(target_dialect).walk_depth(expr, depth)
+    }
+
+    fn walk_depth_portable_default(
+        &self,
+        expr: &Expr,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            self.walk_depth_as(dialect, expr, depth)?;
+        }
+        Ok(())
     }
 
     /// Rule (c): a `ColRef` must resolve to a column on the enclosing target
@@ -4943,6 +4984,70 @@ mod tests {
                 validate_expr(&e, d, &sc, 0, None).is_ok(),
                 "a default leg covers the {d:?} target"
             );
+        }
+    }
+
+    #[test]
+    fn dialectal_pg_vendor_node_in_pg_leg_validates_on_all_covered_targets() {
+        // Regression: the PG-only gate must validate each dialect() leg as the
+        // dialect that owns that leg. A PG-vendor node in the pg leg is fine even
+        // while validating a SQLite/MySQL target, because those targets render
+        // their own portable legs and never render the pg leg.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            None,
+            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            Some(Expr::col("name")),
+            Some(Expr::col("name")),
+        );
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_expr(&e, d, &sc, 0, None).unwrap_or_else(|err| {
+                panic!("pgColumnSize in the pg leg must validate on covered {d:?}: {err}")
+            });
+        }
+    }
+
+    #[test]
+    fn dialectal_pg_vendor_node_in_pg_leg_does_not_cover_missing_mysql_leg() {
+        // The per-leg PG-only fix must not weaken the existing coverage rule:
+        // pg+sqlite with no default still cannot target MySQL.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            None,
+            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            Some(Expr::col("name")),
+            None,
+        );
+        assert!(validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok());
+        assert!(validate_expr(&e, Dialect::Sqlite, &sc, 0, None).is_ok());
+        let err = validate_expr(&e, Dialect::Mysql, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_EXPR_NOT_PORTABLE,
+            "a dialect() with no mysql/default leg must still refuse MySQL; got: {err}"
+        );
+    }
+
+    #[test]
+    fn dialectal_default_leg_must_remain_portable() {
+        // `default` is not a vendor bucket. It may be selected for any target, so
+        // a PG-only node in default is refused even when the current target is PG.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            None,
+            Some(Expr::col("name")),
+            Some(Expr::col("name")),
+        );
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(
+                err.code, CODE_UNSUPPORTED,
+                "a PG-only node in default must be refused on {d:?}; got: {err}"
+            );
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         }
     }
 
