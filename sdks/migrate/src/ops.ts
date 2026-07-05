@@ -90,12 +90,10 @@ import type {
   NextvalDefault,
   NextvalOptions,
   OrderItem,
+  PartitionBoundArgs,
   PartitionBoundInput,
   PartitionBoundSentinel,
-  PartitionBuilder,
-  PartitionHandle,
-  PartitionOptions,
-  PartitionSpec,
+  PartitionByInput,
   PgExprNamespace,
   RefAction,
   Row,
@@ -1933,31 +1931,19 @@ const PARTITION_BOUND_SENTINEL = "__zeroshipPartitionBound";
 export const minValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "minValue" }) as PartitionBoundSentinel;
 export const maxValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "maxValue" }) as PartitionBoundSentinel;
 
-function partitionSpec(kind: PartitionSpec["kind"], columns: readonly string[], what: string): PartitionSpec {
-  return { kind, columns: stringArray(columns, what) } as PartitionSpec;
-}
-
-export const p: PartitionBuilder = Object.freeze({
-  range(columns: readonly string[]) {
-    return partitionSpec("range", columns, "p.range(columns)");
-  },
-  list(columns: readonly string[]) {
-    return partitionSpec("list", columns, "p.list(columns)");
-  },
-  hash(columns: readonly string[]) {
-    return partitionSpec("hash", columns, "p.hash(columns)");
-  },
-});
-
-function partitionSpecToIr(spec: PartitionSpec | undefined, what: string): Node | undefined {
+function partitionSpecToIr(spec: PartitionByInput | undefined, what: string): Node | undefined {
   if (spec === undefined) return undefined;
   if (!spec || typeof spec !== "object") {
-    throw structuredError("OP_INVALID", `${what} must be built with p.range/list/hash`);
+    throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
   }
-  if (spec.kind !== "range" && spec.kind !== "list" && spec.kind !== "hash") {
-    throw structuredError("OP_INVALID", `${what}.kind must be "range", "list", or "hash"`);
+  const shape = spec as { range?: unknown; list?: unknown; hash?: unknown };
+  const variants = (shape.range !== undefined ? 1 : 0) + (shape.list !== undefined ? 1 : 0) + (shape.hash !== undefined ? 1 : 0);
+  if (variants !== 1) {
+    throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
   }
-  return partitionSpec(spec.kind, spec.columns, `${what}.columns`);
+  if (shape.range !== undefined) return { kind: "range", columns: stringArray(shape.range, `${what}.range`) };
+  if (shape.list !== undefined) return { kind: "list", columns: stringArray(shape.list, `${what}.list`) };
+  return { kind: "hash", columns: stringArray(shape.hash, `${what}.hash`) };
 }
 
 function requireU32(v: unknown, what: string): number | undefined {
@@ -1988,23 +1974,30 @@ function partitionBoundListToIr(values: unknown, what: string): Node[] {
   return values.map((value, i) => partitionBoundValueToIr(value as PartitionBoundInput, `${what}[${i}]`));
 }
 
-function partitionBoundsFromForValues(args: unknown): Node {
+function partitionBoundToIr(args: PartitionBoundArgs | unknown): Node {
   if (!args || typeof args !== "object") {
     throw structuredError(
       "OP_INVALID",
-      "partition(name).of(parent).forValues(args) needs a bounds object",
+      "table(parent).partition(name).create(bound) needs a bounds object",
     );
   }
-  const bounds = args as { from?: unknown; to?: unknown; in?: unknown; modulus?: unknown; remainder?: unknown };
+  const bounds = args as { from?: unknown; to?: unknown; in?: unknown; modulus?: unknown; remainder?: unknown; default?: unknown };
   const hasRange = bounds.from !== undefined || bounds.to !== undefined;
   const hasList = bounds.in !== undefined;
   const hasHash = bounds.modulus !== undefined || bounds.remainder !== undefined;
-  const variantCount = (hasRange ? 1 : 0) + (hasList ? 1 : 0) + (hasHash ? 1 : 0);
+  const hasDefault = bounds.default !== undefined;
+  const variantCount = (hasRange ? 1 : 0) + (hasList ? 1 : 0) + (hasHash ? 1 : 0) + (hasDefault ? 1 : 0);
   if (variantCount !== 1) {
     throw structuredError(
       "OP_INVALID",
-      "partition bounds must be exactly one of { from, to }, { in }, or { modulus, remainder }",
+      "partition bounds must be exactly one of { from, to }, { in }, { modulus, remainder }, or { default: true }",
     );
+  }
+  if (hasDefault) {
+    if (bounds.default !== true) {
+      throw structuredError("OP_INVALID", "partition bounds.default must be true");
+    }
+    return { kind: "default" };
   }
   if (hasRange) {
     return {
@@ -2304,10 +2297,12 @@ function recordDetachPartition(
 }
 
 function recordDropPartition(
+  parent: string,
   name: string,
   args: { ifExists?: boolean; cascade?: boolean; schema?: string },
 ): void {
   emitDropPartition({
+    parent,
     name,
     schema: args.schema,
     existenceGuard: ifExistsGuard(args.ifExists),
@@ -3194,40 +3189,6 @@ export function comment(target: CommentTargetArg, text: string | null): void {
   recordComment(target, text);
 }
 
-export function partition(name: string, opts: PartitionOptions = {}): PartitionHandle {
-  requireString(name, "partition(name, …)");
-  const dflt = opts.schema;
-
-  return {
-    of(parent) {
-      requireString(parent, "partition(name).of(parent)");
-      return {
-        forValues(bounds, args = {}) {
-          recordCreatePartition(name, parent, partitionBoundsFromForValues(bounds), {
-            ifNotExists: args.ifNotExists,
-            schema: pickSchema(args, dflt),
-          });
-        },
-        asDefault(args = {}) {
-          recordCreatePartition(name, parent, { kind: "default" }, {
-            ifNotExists: args.ifNotExists,
-            schema: pickSchema(args, dflt),
-          });
-        },
-      };
-    },
-  };
-}
-
-export function dropPartition(name: string, args: { ifExists?: boolean; cascade?: boolean; schema?: string } = {}): void {
-  requireString(name, "dropPartition(name)");
-  recordDropPartition(name, {
-    ifExists: args.ifExists,
-    cascade: args.cascade,
-    schema: args.schema,
-  });
-}
-
 export function table(name: string, opts: TableOptions = {}): TableHandle {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
@@ -3273,6 +3234,29 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     comment(text, args = {}) {
       recordComment({ kind: "table", name, schema: pickSchema(args, dflt) }, text);
       return handle;
+    },
+    partition(partitionName) {
+      requireString(partitionName, ".partition(name)");
+      const id = registerSelector("partition", partitionName);
+      return {
+        create(bound, args = {}) {
+          terminateSelector(id);
+          recordCreatePartition(partitionName, name, partitionBoundToIr(bound), {
+            ifNotExists: args.ifNotExists,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          recordDropPartition(name, partitionName, {
+            ifExists: args.ifExists,
+            cascade: args.cascade,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+      };
     },
     detachPartition(partitionName, args = {}) {
       requireString(partitionName, ".detachPartition(name)");

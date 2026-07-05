@@ -16,6 +16,7 @@
 
 import { t as dbT } from "@zeroship/db";
 
+import * as migrate from "../../src/index.js";
 import {
   colTypeFromDbField,
   fromDb,
@@ -110,6 +111,28 @@ export function badOpShapes(): void {
 
   // @ts-expect-error — `.rename({ to })` has no `from` (that is the column-rename shape).
   table("users").rename({ from: "users", to: "people" });
+}
+
+export function partitionGrammar(): void {
+  table("events").create({
+    columns: { created_at: t.timestamp() },
+    partitionBy: { range: ["created_at"] },
+  });
+  table("events").partition("events_2026").create({
+    from: ["2026-01-01"],
+    to: ["2027-01-01"],
+  });
+  table("events").partition("events_default").create({ default: true });
+  table("events").partition("events_2026").drop({ ifExists: true, cascade: true });
+
+  // @ts-expect-error - deleted `p` builder namespace; use `partitionBy: { range: [...] }`.
+  table("bad").create({ columns: { created_at: t.timestamp() }, partitionBy: migrate.p.range(["created_at"]) });
+
+  // @ts-expect-error - deleted free `partition(name).of(parent)` grammar; use `table(parent).partition(name)`.
+  migrate.partition("events_2026").of("events");
+
+  // @ts-expect-error - deleted free `dropPartition`; use `table(parent).partition(name).drop()`.
+  migrate.dropPartition("events_2026");
 }
 
 export function indexGrammar(): void {

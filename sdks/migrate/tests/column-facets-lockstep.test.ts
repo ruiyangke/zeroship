@@ -20,11 +20,8 @@ import { test } from "node:test";
 import {
   __begin as pubBegin,
   __drain as pubDrain,
-  dropPartition as pubDropPartition,
   maxValue as pubMaxValue,
   minValue as pubMinValue,
-  p as pubP,
-  partition as pubPartition,
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
@@ -34,11 +31,8 @@ import {
 import {
   __begin as engBegin,
   __drain as engDrain,
-  dropPartition as engDropPartition,
   maxValue as engMaxValue,
   minValue as engMinValue,
-  p as engP,
-  partition as engPartition,
   t as engT,
   table as engTable,
 } from "../dist/embedded-recorder.js";
@@ -48,9 +42,6 @@ type Rec = {
   drain: () => any[];
   t: any;
   table: any;
-  p: any;
-  partition: any;
-  dropPartition: any;
   minValue: any;
   maxValue: any;
 };
@@ -60,9 +51,6 @@ const PUBLIC: Rec = {
   drain: pubDrain,
   t: pubT,
   table: pubTable,
-  p: pubP,
-  partition: pubPartition,
-  dropPartition: pubDropPartition,
   minValue: pubMinValue,
   maxValue: pubMaxValue,
 };
@@ -71,9 +59,6 @@ const ENGINE: Rec = {
   drain: engDrain,
   t: engT,
   table: engTable,
-  p: engP,
-  partition: engPartition,
-  dropPartition: engDropPartition,
   minValue: engMinValue,
   maxValue: engMaxValue,
 };
@@ -176,9 +161,6 @@ function authorPartitionWith({
   drain,
   t,
   table,
-  p,
-  partition,
-  dropPartition,
   minValue,
   maxValue,
 }: Rec): any[] {
@@ -188,13 +170,13 @@ function authorPartitionWith({
       ts: t.timestamp(),
       tenant_id: t.text(),
     },
-    partitionBy: p.range(["ts"]),
+    partitionBy: { range: ["ts"] },
   });
-  partition("events_2026_05", { schema: "app" }).of("events").forValues({
+  table("events", { schema: "app" }).partition("events_2026_05").create({
     from: [minValue, "2026-05-01T00:00:00Z"],
     to: ["2026-06-01T00:00:00Z", maxValue],
   }, { ifNotExists: true });
-  partition("events_default").of("events").asDefault();
+  table("events").partition("events_default").create({ default: true });
   table("events")
     .index("events_ts_brin_idx")
     .add({
@@ -205,7 +187,7 @@ function authorPartitionWith({
       only: true,
     });
   table("events", { schema: "app" }).detachPartition("events_2026_05", { concurrently: true });
-  dropPartition("events_2026_05", { schema: "app", ifExists: true, cascade: true });
+  table("events", { schema: "app" }).partition("events_2026_05").drop({ ifExists: true, cascade: true });
   return drain();
 }
 

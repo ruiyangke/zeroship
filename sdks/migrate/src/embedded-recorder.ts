@@ -32,8 +32,6 @@ export {
   // core op producers + value factories
   table,
   view,
-  partition,
-  dropPartition,
   enumType,
   comment,
   check,
@@ -45,7 +43,6 @@ export {
   byteValue,
   interval,
   nextval,
-  p,
   minValue,
   maxValue,
   t,

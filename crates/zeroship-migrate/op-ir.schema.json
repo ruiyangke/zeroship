@@ -256,6 +256,10 @@
           "description": "`DROP TABLE <partition> [CASCADE]`.",
           "type": "object",
           "properties": {
+            "parent": {
+              "description": "Parent partitioned table.",
+              "type": "string"
+            },
             "name": {
               "description": "Partition table name.",
               "type": "string"
@@ -293,6 +297,7 @@
           "additionalProperties": false,
           "required": [
             "op",
+            "parent",
             "name"
           ]
         },

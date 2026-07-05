@@ -10,9 +10,6 @@ import { test } from "node:test";
 import {
   t,
   table,
-  p,
-  partition,
-  dropPartition,
   minValue,
   maxValue,
   nextval,
@@ -64,6 +61,9 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   const imported = await import("@zeroship/migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
+  assert.equal((imported as any).p, undefined);
+  assert.equal((imported as any).partition, undefined);
+  assert.equal((imported as any).dropPartition, undefined);
   assert.equal((imported as any).membership, undefined);
   assert.equal((imported as any).notMembership, undefined);
   assert.equal(typeof imported.interval, "function");
@@ -1457,15 +1457,15 @@ test("partitionBy records range/list/hash specs on createTable", () => {
   const ops = record(() => {
     table("events_range").create({
       columns: { ts: t.timestamp() },
-      partitionBy: p.range(["ts"]),
+      partitionBy: { range: ["ts"] },
     });
     table("events_list").create({
       columns: { region: t.text() },
-      partitionBy: p.list(["region"]),
+      partitionBy: { list: ["region"] },
     });
     table("events_hash").create({
       columns: { tenant_id: t.text() },
-      partitionBy: p.hash(["tenant_id"]),
+      partitionBy: { hash: ["tenant_id"] },
     });
   });
 
@@ -1491,13 +1491,13 @@ test("partitionBy records range/list/hash specs on createTable", () => {
   ]);
 });
 
-test("partition() records range and default createPartition ops", () => {
+test("table().partition().create records range and default createPartition ops", () => {
   const ops = record(() => {
-    partition("events_2026_05", { schema: "app" }).of("events").forValues({
+    table("events", { schema: "app" }).partition("events_2026_05").create({
       from: [minValue, "2026-05-01T00:00:00Z", 1],
       to: ["2026-06-01T00:00:00Z", maxValue, 31],
     }, { ifNotExists: true });
-    partition("events_default").of("events").asDefault();
+    table("events").partition("events_default").create({ default: true });
   });
 
   assert.deepEqual(ops, [
@@ -1530,10 +1530,10 @@ test("partition() records range and default createPartition ops", () => {
   ]);
 });
 
-test("partition() records list and hash createPartition ops", () => {
+test("table().partition().create records list and hash createPartition ops", () => {
   const ops = record(() => {
-    partition("orders_us").of("orders").forValues({ in: ["US", 840] });
-    partition("orders_h1").of("orders").forValues({ modulus: 4, remainder: 1 });
+    table("orders").partition("orders_us").create({ in: ["US", 840] });
+    table("orders").partition("orders_h1").create({ modulus: 4, remainder: 1 });
   });
 
   assert.deepEqual(ops, [
@@ -1576,14 +1576,15 @@ test("table().detachPartition records parent-subject detachPartition", () => {
   ]);
 });
 
-test("dropPartition records child-subject dropPartition", () => {
+test("table().partition().drop records parent-scoped dropPartition", () => {
   const ops = record(() =>
-    dropPartition("events_2026_05", { schema: "app", ifExists: true, cascade: true }),
+    table("events", { schema: "app" }).partition("events_2026_05").drop({ ifExists: true, cascade: true }),
   );
 
   assert.deepEqual(ops, [
     {
       op: "dropPartition",
+      parent: "events",
       name: "events_2026_05",
       schema: "app",
       existenceGuard: "ifExists",

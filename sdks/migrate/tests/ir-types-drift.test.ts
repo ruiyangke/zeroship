@@ -136,7 +136,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "partitionBy", "primaryKey", "runtimeOptions", "schema"].sort(),
   createPartition: ["bounds", "existenceGuard", "name", "of", "schema"].sort(),
   detachPartition: ["concurrently", "name", "parent", "schema"].sort(),
-  dropPartition: ["cascade", "existenceGuard", "name", "schema"].sort(),
+  dropPartition: ["cascade", "existenceGuard", "name", "parent", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // #173/#174 + generated/identity — addColumn carries the column facets that are
