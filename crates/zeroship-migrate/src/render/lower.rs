@@ -5614,6 +5614,9 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             Expr::Extract { from, .. } => {
                 collect_col_refs(from, out);
             }
+            Expr::PgExtract { from, .. } => {
+                collect_col_refs(from, out);
+            }
             Expr::Between { operand, low, high } => {
                 collect_col_refs(operand, out);
                 collect_col_refs(low, out);

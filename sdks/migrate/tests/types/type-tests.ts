@@ -404,8 +404,14 @@ export function checkExpressionSurfaceTypechecks(): void {
   // @ts-expect-error — core CHECK builders do not expose PostgreSQL vendor helpers.
   table("oauth_authorization_codes").check("no_pg").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_") });
 
+  // @ts-expect-error — PG-only extract fields are not in the portable extract union.
+  table("oauth_authorization_codes").check("no_pg_extract_field").add({ expr: (c) => c.fn.extract("epoch", c("created_at")).gt(0) });
+
   pgTable("oauth_authorization_codes").check("max_ttl").add({
     expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))),
+  });
+  pgTable("oauth_authorization_codes").check("epoch_positive").add({
+    expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
   });
   pgTable("oauth_authorization_codes").check("user_id_fmt").add({
     expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$"),

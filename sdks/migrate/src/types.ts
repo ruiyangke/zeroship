@@ -17,6 +17,7 @@ import type {
   ColType,
   CommentTarget,
   Expr,
+  ExtractField,
   ExclusionMethod,
   ExclusionOperator,
   IndexElement,
@@ -33,6 +34,7 @@ import type {
   PartitionBoundValue,
   PartitionBounds,
   PartitionSpec,
+  PgExtractField,
   PolicyCmd,
   RaiseLevel,
   SelectAst,
@@ -51,6 +53,7 @@ export type {
   ColType,
   CommentTarget,
   Expr,
+  ExtractField,
   ExclusionMethod,
   ExclusionOperator,
   IndexElement,
@@ -67,6 +70,7 @@ export type {
   PartitionBoundValue,
   PartitionBounds,
   PartitionSpec,
+  PgExtractField,
   Classification,
   RaiseLevel,
   SelectAst,
@@ -499,6 +503,8 @@ export interface FnNamespace {
   substr(s: unknown, start: unknown, len?: unknown): ExprChain;
   /** `replace(s, from, to)` — portable string replace. */
   replace(s: unknown, from: unknown, to: unknown): ExprChain;
+  /** Portable date/time part extraction. */
+  extract(field: ExtractField, expr: unknown): ExprChain;
   /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
   currentSetting(name: string, missingOk?: boolean): ExprChain;
   /** PG vendor scalar for RLS policies: current_user. */
@@ -532,6 +538,7 @@ export type ImmutableFnNamespace = Pick<
   | "ceil"
   | "substr"
   | "replace"
+  | "extract"
   | "concatWs"
   | "splitPart"
 >;
@@ -599,8 +606,9 @@ export interface PgExprNamespace {
   regex(expr: unknown, pattern: string): ExprChain;
   /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
   pgColumnSize(expr: unknown): ExprChain;
-  /** Renders `EXTRACT(day FROM <expr>)` on PostgreSQL. */
-  extract(field: "day", expr: unknown): ExprChain;
+  /** Renders portable fields as `extract` and PG-only fields as `pgExtract`. */
+  extract(field: ExtractField, expr: unknown): ExprChain;
+  extract(field: PgExtractField, expr: unknown): ExprChain;
   /** Renders `'<safe>'::interval` on PostgreSQL. Accepts strict `HH:MM:SS[.ffffff]`. */
   interval(value: string): ExprChain;
 }

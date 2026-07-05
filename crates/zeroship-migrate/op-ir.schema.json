@@ -3624,7 +3624,7 @@
           ]
         },
         {
-          "description": "**PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.",
+          "description": "**PORTABLE** scalar expression extracting a date/time part whose numeric\nsemantics are identical on PostgreSQL, SQLite, and MySQL.",
           "type": "object",
           "properties": {
             "field": {
@@ -3638,6 +3638,30 @@
             "node": {
               "type": "string",
               "const": "extract"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "field",
+            "from"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Closed PostgreSQL EXTRACT field.",
+              "$ref": "#/$defs/PgExtractField"
+            },
+            "from": {
+              "description": "Source expression.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgExtract"
             }
           },
           "additionalProperties": false,
@@ -4016,12 +4040,117 @@
       ]
     },
     "ExtractField": {
-      "description": "CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nP1 admits only the platform `day` marker. Add more fields only with a concrete\ngolden needing them and matching renderer/validation coverage.",
+      "description": "CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nEach admitted field has a live three-dialect proof and a faithful renderer on\nPostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in\n[`PgExtractField`] instead.",
       "oneOf": [
+        {
+          "description": "Calendar year.",
+          "type": "string",
+          "const": "year"
+        },
+        {
+          "description": "Month-of-year, 1-12.",
+          "type": "string",
+          "const": "month"
+        },
         {
           "description": "Day-of-month field.",
           "type": "string",
           "const": "day"
+        },
+        {
+          "description": "Hour-of-day, 0-23.",
+          "type": "string",
+          "const": "hour"
+        },
+        {
+          "description": "Minute-of-hour, 0-59.",
+          "type": "string",
+          "const": "minute"
+        },
+        {
+          "description": "Day-of-week, 0=Sunday through 6=Saturday.",
+          "type": "string",
+          "const": "dow"
+        }
+      ]
+    },
+    "PgExtractField": {
+      "description": "CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.\n\nThese fields either have no portable SQLite/MySQL analogue or have semantics\nthat diverge under the mandated portable renderers.",
+      "oneOf": [
+        {
+          "description": "Seconds including fractional seconds on PostgreSQL.",
+          "type": "string",
+          "const": "second"
+        },
+        {
+          "description": "Day-of-year.",
+          "type": "string",
+          "const": "doy"
+        },
+        {
+          "description": "Seconds since 1970-01-01 00:00:00 UTC.",
+          "type": "string",
+          "const": "epoch"
+        },
+        {
+          "description": "Calendar quarter.",
+          "type": "string",
+          "const": "quarter"
+        },
+        {
+          "description": "ISO week number.",
+          "type": "string",
+          "const": "week"
+        },
+        {
+          "description": "ISO day-of-week, 1=Monday through 7=Sunday.",
+          "type": "string",
+          "const": "isodow"
+        },
+        {
+          "description": "ISO week-numbering year.",
+          "type": "string",
+          "const": "isoyear"
+        },
+        {
+          "description": "Century.",
+          "type": "string",
+          "const": "century"
+        },
+        {
+          "description": "Decade.",
+          "type": "string",
+          "const": "decade"
+        },
+        {
+          "description": "Millennium.",
+          "type": "string",
+          "const": "millennium"
+        },
+        {
+          "description": "Seconds field including fractional microseconds.",
+          "type": "string",
+          "const": "microseconds"
+        },
+        {
+          "description": "Seconds field including fractional milliseconds.",
+          "type": "string",
+          "const": "milliseconds"
+        },
+        {
+          "description": "Time-zone offset in seconds.",
+          "type": "string",
+          "const": "timezone"
+        },
+        {
+          "description": "Time-zone offset hour.",
+          "type": "string",
+          "const": "timezone_hour"
+        },
+        {
+          "description": "Time-zone offset minute.",
+          "type": "string",
+          "const": "timezone_minute"
         }
       ]
     },

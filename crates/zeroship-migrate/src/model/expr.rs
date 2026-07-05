@@ -12,7 +12,7 @@
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
 //! Cast | Between | Like | DistinctFrom | Agg | InList | PgRegexMatch |
-//! PgColumnSize | Extract | PgInterval | Dialectal`.
+//! PgColumnSize | Extract | PgExtract | PgInterval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -183,15 +183,65 @@ pub enum CastTarget {
     Uuid,
 }
 
-/// CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
+/// CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
 ///
-/// P1 admits only the platform `day` marker. Add more fields only with a concrete
-/// golden needing them and matching renderer/validation coverage.
+/// Each admitted field has a live three-dialect proof and a faithful renderer on
+/// PostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in
+/// [`PgExtractField`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ExtractField {
+    /// Calendar year.
+    Year,
+    /// Month-of-year, 1-12.
+    Month,
     /// Day-of-month field.
     Day,
+    /// Hour-of-day, 0-23.
+    Hour,
+    /// Minute-of-hour, 0-59.
+    Minute,
+    /// Day-of-week, 0=Sunday through 6=Saturday.
+    Dow,
+}
+
+/// CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.
+///
+/// These fields either have no portable SQLite/MySQL analogue or have semantics
+/// that diverge under the mandated portable renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PgExtractField {
+    /// Seconds including fractional seconds on PostgreSQL.
+    Second,
+    /// Day-of-year.
+    Doy,
+    /// Seconds since 1970-01-01 00:00:00 UTC.
+    Epoch,
+    /// Calendar quarter.
+    Quarter,
+    /// ISO week number.
+    Week,
+    /// ISO day-of-week, 1=Monday through 7=Sunday.
+    Isodow,
+    /// ISO week-numbering year.
+    Isoyear,
+    /// Century.
+    Century,
+    /// Decade.
+    Decade,
+    /// Millennium.
+    Millennium,
+    /// Seconds field including fractional microseconds.
+    Microseconds,
+    /// Seconds field including fractional milliseconds.
+    Milliseconds,
+    /// Time-zone offset in seconds.
+    Timezone,
+    /// Time-zone offset hour.
+    TimezoneHour,
+    /// Time-zone offset minute.
+    TimezoneMinute,
 }
 
 /// The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).
@@ -390,10 +440,18 @@ pub enum Expr {
         /// The expression whose on-disk size Postgres should measure.
         expr: Box<Expr>,
     },
-    /// **PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.
+    /// **PORTABLE** scalar expression extracting a date/time part whose numeric
+    /// semantics are identical on PostgreSQL, SQLite, and MySQL.
     Extract {
         /// Closed EXTRACT field.
         field: ExtractField,
+        /// Source expression.
+        from: Box<Expr>,
+    },
+    /// **PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.
+    PgExtract {
+        /// Closed PostgreSQL EXTRACT field.
+        field: PgExtractField,
         /// Source expression.
         from: Box<Expr>,
     },

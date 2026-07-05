@@ -38,6 +38,7 @@ import type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
+  PgExtractField,
   Privilege,
   RaiseLevel,
   RefAction,
@@ -70,6 +71,7 @@ export type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
+  PgExtractField,
   Privilege,
   RaiseLevel,
   RefAction,
@@ -198,6 +200,7 @@ export type Expr =
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
   | { node: "pgColumnSize"; expr: Expr }
   | { node: "extract"; field: ExtractField; from: Expr }
+  | { node: "pgExtract"; field: PgExtractField; from: Expr }
   | { node: "pgInterval"; duration: string }
   // The one Layer-2 portability escape (§3.4): a per-dialect value divergence.
   // Legs serialize in canonical order (default, pg, sqlite, mysql); a `None` leg

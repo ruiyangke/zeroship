@@ -1321,11 +1321,19 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
   });
 });
 
-test("c.pg builds PG-only extract and interval literal nodes", () => {
+test("c.fn and c.pg build portable extract, pgExtract, and interval literal nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
       as: t.date(),
       check: (c) => c.pg.extract("day", c("VALUE")).eq(1),
+    });
+    table("events").update({
+      set: {
+        year_part: (c) => c.fn.extract("year", c("created_at")),
+      },
+    });
+    pgTable("epoch_events").check("epoch_positive").add({
+      expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
     });
     pgTable("oauth_device_codes").create({
       columns: {
@@ -1347,7 +1355,20 @@ test("c.pg builds PG-only extract and interval literal nodes", () => {
     lhs: { node: "extract", field: "day", from: { node: "colRef", name: "VALUE" } },
     rhs: { node: "literal", value: 1 },
   });
-  assert.deepEqual(ops[1].constraints[0].kind.expr, {
+  assert.deepEqual(ops[1], {
+    op: "update",
+    table: "events",
+    set: {
+      year_part: { node: "extract", field: "year", from: { node: "colRef", name: "created_at" } },
+    },
+  });
+  assert.deepEqual(ops[2].constraint.kind.expr, {
+    node: "binOp",
+    op: "gt",
+    lhs: { node: "pgExtract", field: "epoch", from: { node: "colRef", name: "created_at" } },
+    rhs: { node: "literal", value: 0 },
+  });
+  assert.deepEqual(ops[3].constraints[0].kind.expr, {
     node: "binOp",
     op: "le",
     lhs: { node: "colRef", name: "expires_at" },
@@ -1374,8 +1395,12 @@ test("inList rejects malformed text arrays and c.pg rejects regex patterns", () 
     (e: any) => e.code === "OP_INVALID" && /pattern must be non-empty/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.extract("month" as any, c("x")) } })),
-    (e: any) => e.code === "OP_INVALID" && /field must be "day"/.test(e.message),
+    () => record(() => table("t").update({ set: { x: (c) => c.fn.extract("epoch" as any, c("x")) } })),
+    (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c.pg.extract("bogus" as any, c("x")) } })),
+    (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
   );
   assert.throws(
     () => record(() => table("t").update({ set: { x: (c) => c.pg.interval("1 minute") } })),

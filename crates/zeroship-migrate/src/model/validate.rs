@@ -3064,11 +3064,17 @@ fn validate_default_expr(
             }
             Expr::PgRegexMatch { .. }
             | Expr::PgColumnSize { .. }
-            | Expr::Extract { .. }
+            | Expr::PgExtract { .. }
             | Expr::PgInterval { .. }
             | Expr::Dialectal { .. } => Err(mk_err(
                 "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes"
                     .to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::Extract { .. } => Err(mk_err(
+                "a column default cannot use an EXTRACT expression".to_string(),
                 target_dialect,
                 op_index,
                 ts_location,
@@ -3724,8 +3730,9 @@ impl Ctx<'_> {
                 self.check_pg_only_expr("pg_column_size")?;
                 self.walk_depth(expr, d)
             }
-            Expr::Extract { field: _, from } => {
-                self.check_pg_only_expr("EXTRACT")?;
+            Expr::Extract { field: _, from } => self.walk_depth(from, d),
+            Expr::PgExtract { field: _, from } => {
+                self.check_pg_only_expr("PG EXTRACT")?;
                 self.walk_depth(from, d)
             }
             Expr::PgInterval { duration } => {
@@ -4226,7 +4233,9 @@ fn is_safe_pg_interval_literal(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
+    use crate::model::expr::{
+        BinaryOp, CastTarget, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
+    };
     use crate::model::ir::{IndexElement, IrScalar};
 
     fn cols() -> Vec<String> {
@@ -4381,6 +4390,10 @@ mod tests {
                 lhs: Box::new(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
                 rhs: Box::new(Expr::lit(IrScalar::Int(8192))),
             },
+            Expr::PgExtract {
+                field: PgExtractField::Epoch,
+                from: Box::new(Expr::col("total")),
+            },
         ] {
             validate_expr(&e, Dialect::Postgres, &sc, 0, None)
                 .unwrap_or_else(|err| panic!("PG-only expression must validate on PG: {err}"));
@@ -4388,9 +4401,9 @@ mod tests {
     }
 
     #[test]
-    fn portable_predicate_nodes_validate_on_all_three_dialects() {
-        // between / like / distinctFrom / inList are PORTABLE (§3.4): they render
-        // on all three dialects (the engine owns distinctFrom's per-dialect
+    fn portable_predicate_and_extract_nodes_validate_on_all_three_dialects() {
+        // between / like / distinctFrom / inList / extract are PORTABLE (§3.4):
+        // they render on all three dialects (the engine owns each per-dialect
         // lowering), so the walk accepts them with NO dialect gate — including on
         // SQLite/MySQL, exactly where the PG-only nodes are refused.
         let c = cols();
@@ -4412,11 +4425,17 @@ mod tests {
             in_list(Expr::col("name"), vec!["active", "past_due"]),
             not_in_list(Expr::col("name"), vec!["suspended"]),
             in_list(Expr::col("name"), vec![]),
+            Expr::Extract { field: ExtractField::Year, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Month, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Day, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Hour, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Minute, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Dow, from: Box::new(Expr::col("total")) },
         ];
         for e in &nodes {
             for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
                 validate_expr(e, d, &sc, 0, None).unwrap_or_else(|err| {
-                    panic!("portable predicate must validate on {d:?}: {err}")
+                    panic!("portable predicate/extract must validate on {d:?}: {err}")
                 });
             }
         }
@@ -4518,6 +4537,10 @@ mod tests {
                 pattern: "^[a-z]+$".to_string(),
             },
             Expr::PgColumnSize { expr: Box::new(Expr::col("name")) },
+            Expr::PgExtract {
+                field: PgExtractField::Epoch,
+                from: Box::new(Expr::col("total")),
+            },
         ] {
             for d in [Dialect::Sqlite, Dialect::Mysql] {
                 let err = validate_expr(&e, d, &sc, 0, None)
