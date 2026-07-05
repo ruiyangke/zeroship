@@ -66,8 +66,6 @@ export {
   grant,
   revoke,
   pgTable,
-  createPolicy,
-  dropPolicy,
   createFunction,
   dropFunction,
   raw,

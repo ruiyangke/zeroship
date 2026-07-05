@@ -254,8 +254,7 @@ export function up() {
   registry.index("platform_registry_target_idx").add({ on: ["target"] });
   registry.enableRowLevelSecurity();
   registry.forceRowLevelSecurity();
-  registry.createPolicy({
-    name: "tenant_isolation",
+  registry.policy("tenant_isolation").create({
     for: "all",
     using: (c) => c("app_id").isNotNull(),
     withCheck: (c) => c("app_id").isNotNull(),
@@ -270,8 +269,7 @@ export function up() {
     replace: true,
     body: "BEGIN RETURN NEW; END;",
   });
-  registry.createTrigger({
-    name: "platform_registry_touch_trg",
+  registry.trigger("platform_registry_touch_trg").create({
     timing: "before",
     events: ["update"],
     forEach: "row",

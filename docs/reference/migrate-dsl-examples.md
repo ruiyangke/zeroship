@@ -487,6 +487,7 @@ the parent's `partitionBy`.
 
 ```ts
 import { table, t, minValue, maxValue } from "@zeroship/migrate";
+import { pgTable } from "@zeroship/migrate/pg";
 
 // 1) Parent declares the partition strategy at create()
 table("sandbox_events", { schema: "zeroship" }).create({
@@ -513,7 +514,7 @@ table("events").partition("events_head").create({ from: [minValue], to: ["2026-0
 table("events").partition("events_tail").create({ from: ["2027-01-01"], to: [maxValue] });
 
 // Lifecycle: detach and drop (both parent-subject)
-table("sandbox_events", { schema: "zeroship" }).detachPartition("sandbox_events_2026_05");
+pgTable("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").detach();
 table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").drop();
 ```
 
@@ -565,6 +566,8 @@ view("legacy_report").create({
 ## 14. Row-level security & policies (`/pg`)
 
 ```ts
+import { pgTable } from "@zeroship/migrate/pg";
+
 // Table-scoped RLS toggles
 pgTable("apps", { schema: "zeroship" }).enableRowLevelSecurity();
 pgTable("apps", { schema: "zeroship" }).forceRowLevelSecurity();
@@ -572,16 +575,11 @@ pgTable("apps", { schema: "zeroship" }).disableRowLevelSecurity();
 pgTable("apps", { schema: "zeroship" }).noForceRowLevelSecurity();
 
 // Policy via the table handle
-pgTable("apps", { schema: "zeroship" }).createPolicy({
-  name: "tenant_isolation",
+pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").create({
   using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
   withCheck: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
 });
-pgTable("apps", { schema: "zeroship" }).dropPolicy({ name: "tenant_isolation" });
-
-// Standalone policy functions are also available from @zeroship/migrate/pg:
-import { createPolicy, dropPolicy } from "@zeroship/migrate/pg";
-createPolicy({ name: "p", table: "apps", schema: "zeroship", for: "select", using: (c) => /* … */ });
+pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").drop();
 ```
 
 `PolicyCmd` (the `for` field) = `all | select | insert | update | delete`.
@@ -591,15 +589,16 @@ createPolicy({ name: "p", table: "apps", schema: "zeroship", for: "select", usin
 ## 15. Triggers
 
 ```ts
-table("app_audit", { schema: "zeroship" }).createTrigger({
-  name: "app_audit_block_delete",
+import { table } from "@zeroship/migrate";
+
+table("app_audit", { schema: "zeroship" }).trigger("app_audit_block_delete").create({
   timing: "before",              // before | after | insteadOf
   events: ["delete"],            // insert | update | delete (array)
   forEach: "row",                // row | statement
   execute: "app_audit_block_tamper",   // the function to EXECUTE
 });
 
-table("app_audit", { schema: "zeroship" }).dropTrigger({ name: "app_audit_block_delete" });
+table("app_audit", { schema: "zeroship" }).trigger("app_audit_block_delete").drop();
 ```
 
 ---

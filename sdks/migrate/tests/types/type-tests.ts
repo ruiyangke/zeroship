@@ -17,6 +17,8 @@
 import { t as dbT } from "@zeroship/db";
 // @ts-expect-error — free boolean combinators are no longer exported from the public package.
 import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
+// @ts-expect-error — free policy helpers were deleted; use pgTable(...).policy(name).create/drop().
+import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate/pg";
 
 import * as migrate from "../../src/index.js";
 import {
@@ -117,7 +119,13 @@ export function badOpShapes(): void {
 
 export function pgTableBoundary(): void {
   // @ts-expect-error — PG table policies are only reachable through `pgTable()`.
-  table("secrets").createPolicy({ name: "tenant_only", using: (c) => c("tenant_id").isNotNull() });
+  table("secrets").policy("tenant_only").create({ using: (c) => c("tenant_id").isNotNull() });
+
+  // @ts-expect-error — deleted direct table trigger method; use `.trigger(name).create(...)`.
+  table("audit_events").createTrigger({ name: "audit_events_trg", timing: "before", events: ["insert"], forEach: "row", execute: "audit_events_fn" });
+
+  // @ts-expect-error — deleted direct table trigger method; use `.trigger(name).drop(...)`.
+  table("audit_events").dropTrigger({ name: "audit_events_trg", ifExists: true });
 
   // @ts-expect-error — RLS is a PG table method and is not on portable `table()`.
   table("secrets").enableRowLevelSecurity();
@@ -125,25 +133,46 @@ export function pgTableBoundary(): void {
   // @ts-expect-error — exclusion constraints are a PG table method and are not on portable `table()`.
   table("bookings").exclusion("bookings_no_overlap");
 
-  // @ts-expect-error — constraint validation is a PG table method and is not on portable `table()`.
+  // @ts-expect-error — direct constraint validation method was deleted; use `pgTable(...).constraint(name).validate()`.
   table("line_items").validateConstraint("line_items_order_fkey");
 
-  // @ts-expect-error — partition detach is a PG table method and is not on portable `table()`.
+  // @ts-expect-error — direct partition detach method was deleted; use `pgTable(...).partition(name).detach()`.
   table("events").detachPartition("events_2026_05");
+
+  // @ts-expect-error — constraint validate is PG-only and only on the PG constraint ref.
+  table("line_items").constraint("line_items_order_fkey").validate();
+
+  table("audit_events").trigger("audit_events_trg").create({
+    timing: "before",
+    events: ["insert"],
+    forEach: "row",
+    execute: "audit_events_fn",
+  });
+  table("audit_events").trigger("audit_events_trg").drop({ ifExists: true });
+
+  // @ts-expect-error — deleted direct PG policy method; use `.policy(name).create(...)`.
+  pgTable("secrets").createPolicy({ name: "tenant_only", using: (c) => c("tenant_id").isNotNull() });
+
+  // @ts-expect-error — deleted direct PG policy method; use `.policy(name).drop(...)`.
+  pgTable("secrets").dropPolicy({ name: "tenant_only", ifExists: true });
 
   pgTable("secrets")
     .enableRowLevelSecurity()
     .forceRowLevelSecurity()
-    .createPolicy({ name: "tenant_only", using: (c) => c("tenant_id").isNotNull() })
-    .dropPolicy({ name: "tenant_only", ifExists: true })
+    .policy("tenant_only").create({ using: (c) => c("tenant_id").isNotNull() })
+    .policy("tenant_only").drop({ ifExists: true })
     .disableRowLevelSecurity()
     .noForceRowLevelSecurity();
   pgTable("bookings").exclusion("bookings_no_overlap").add({
     using: "gist",
     elements: [{ target: "room_id", operator: "=" }],
   });
+  // @ts-expect-error — deleted direct PG constraint validation method; use `.constraint(name).validate(...)`.
   pgTable("line_items").validateConstraint("line_items_order_fkey");
+  pgTable("line_items").constraint("line_items_order_fkey").validate();
+  // @ts-expect-error — deleted direct PG partition detach method; use `.partition(name).detach(...)`.
   pgTable("events").detachPartition("events_2026_05", { concurrently: true });
+  pgTable("events").partition("events_2026_05").detach({ concurrently: true });
 }
 
 export function viewGrammar(): void {
@@ -427,8 +456,7 @@ export function checkExpressionSurfaceTypechecks(): void {
 }
 
 export function vendorExprSurfaceBoundaryTypechecks(): void {
-  pgTable("app_secrets").createPolicy({
-    name: "tenant_only",
+  pgTable("app_secrets").policy("tenant_only").create({
     using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
     withCheck: (c) => c("owner").eq(c.pg.currentUser()),
   });

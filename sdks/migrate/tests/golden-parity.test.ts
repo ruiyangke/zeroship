@@ -275,15 +275,14 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     const secrets = pgTable("app_secrets", { schema: "zeroship" });
     secrets.enableRowLevelSecurity();
     secrets.forceRowLevelSecurity();
-    secrets.createPolicy({
-      name: "tenant_isolation",
+    secrets.policy("tenant_isolation").create({
       for: "all",
       using: (c) =>
         c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
       withCheck: (c) =>
         c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
     });
-    secrets.dropPolicy({ name: "tenant_isolation", ifExists: true });
+    secrets.policy("tenant_isolation").drop({ ifExists: true });
     secrets.disableRowLevelSecurity();
     secrets.noForceRowLevelSecurity();
 
@@ -297,22 +296,20 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     });
 
     const audit = table("audit_events", { schema: "zeroship" });
-    audit.createTrigger({
-      name: "audit_events_block_update",
+    audit.trigger("audit_events_block_update").create({
       timing: "before",
       events: ["update", "delete"],
       forEach: "row",
       execute: "audit_events_block_tamper",
       when: (c) => c("app_id").isNotNull(),
     });
-    audit.createTrigger({
-      name: "audit_events_append_only",
+    audit.trigger("audit_events_append_only").create({
       timing: "before",
       events: ["update"],
       forEach: "row",
       body: (b) => [b.raise({ level: "abort", message: "append-only", errcode: "P0001" })],
     });
-    audit.dropTrigger({ name: "audit_events_block_update", ifExists: true });
+    audit.trigger("audit_events_block_update").drop({ ifExists: true });
 
     dropFunction({
       name: "audit_events_block_tamper",

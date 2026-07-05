@@ -192,7 +192,7 @@ function authorPartitionWith({
       with: { pagesPerRange: 32 },
       only: true,
     });
-  pgTable("events", { schema: "app" }).detachPartition("events_2026_05", { concurrently: true });
+  pgTable("events", { schema: "app" }).partition("events_2026_05").detach({ concurrently: true });
   table("events", { schema: "app" }).partition("events_2026_05").drop({ ifExists: true, cascade: true });
   return drain();
 }

@@ -1906,9 +1906,50 @@ test("table().partition().create records list and hash createPartition ops", () 
   ]);
 });
 
-test("pgTable().detachPartition records parent-subject detachPartition", () => {
+test("table().trigger().create/drop record legacy trigger op payloads", () => {
   const ops = record(() =>
-    pgTable("events", { schema: "app" }).detachPartition("events_2026_05", {
+    table("audit_events", { schema: "zs" })
+      .trigger("audit_events_trg")
+      .create({
+        timing: "before",
+        events: ["insert", "update"],
+        forEach: "row",
+        execute: "audit_events_fn",
+        when: (c) => c("id").isNotNull(),
+      })
+      .trigger("audit_events_trg")
+      .drop({ ifExists: true }),
+  );
+
+  assert.deepEqual(ops, [
+    {
+      op: "createTrigger",
+      name: "audit_events_trg",
+      table: "audit_events",
+      schema: "zs",
+      timing: "before",
+      events: ["insert", "update"],
+      forEach: "row",
+      action: { kind: "executeFunction", name: "audit_events_fn" },
+      when: {
+        node: "unaryOp",
+        op: "isNotNull",
+        operand: { node: "colRef", name: "id" },
+      },
+    },
+    {
+      op: "dropTrigger",
+      name: "audit_events_trg",
+      table: "audit_events",
+      schema: "zs",
+      ifExists: true,
+    },
+  ]);
+});
+
+test("pgTable().partition().detach records legacy detachPartition payload", () => {
+  const ops = record(() =>
+    pgTable("events", { schema: "app" }).partition("events_2026_05").detach({
       concurrently: true,
     }),
   );
@@ -1920,6 +1961,22 @@ test("pgTable().detachPartition records parent-subject detachPartition", () => {
       name: "events_2026_05",
       schema: "app",
       concurrently: true,
+    },
+  ]);
+});
+
+test("pgTable().constraint().validate records legacy validateConstraint payload", () => {
+  const ops = record(() =>
+    pgTable("line_items", { schema: "app" }).constraint("line_items_order_fkey").validate({ ifExists: true }),
+  );
+
+  assert.deepEqual(ops, [
+    {
+      op: "validateConstraint",
+      table: "line_items",
+      name: "line_items_order_fkey",
+      schema: "app",
+      existenceGuard: "ifExists",
     },
   ]);
 });

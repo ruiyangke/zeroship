@@ -1110,9 +1110,11 @@ for the build/watch wiring.
 > subpath exposes direct named exports, not a `pg` namespace object. The current
 > vendor value exports are `schema`, `dropSchema`, `extension`, `dropExtension`,
 > `role`, `alterRole`, `dropRole`, `dropOwnedBy`, `grant`, `revoke`,
-> `createPolicy`, `dropPolicy`, `createFunction`, `dropFunction`, `domain`,
-> `sequence`, and `raw`. These are Postgres-only and operator-gated so the
-> platform's own privileged DDL can be authored in the DSL. The engine lowers
+> `pgTable`, `createFunction`, `dropFunction`, `domain`, `sequence`, and `raw`.
+> Table-scoped policies are authored as
+> `pgTable(table).policy(name).create/drop(...)`. These are Postgres-only and
+> operator-gated so the platform's own privileged DDL can be authored in the DSL.
+> The engine lowers
 > these vendor ops through the Postgres vendor renderer, hard-gated to the
 > Trusted/Platform profile and unreachable from a Confined creator migration by
 > construction.

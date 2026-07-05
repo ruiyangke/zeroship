@@ -21,7 +21,7 @@ export function up() {
   });
   table("events").partition("events_default").create({ default: true });
 
-  pgTable("events").detachPartition("events_2026_05", { concurrently: true });
+  pgTable("events").partition("events_2026_05").detach({ concurrently: true });
   table("events").partition("events_2026_05").drop({ cascade: true });
 
   pgTable("events")

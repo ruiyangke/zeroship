@@ -1,6 +1,6 @@
 // op.* migration fixture — PostgreSQL online constraint adoption:
 // foreignKey().add / check().add with `notValid: true` (rendered `ADD CONSTRAINT
-// … NOT VALID`), then a later `validateConstraint(name)` (rendered `ALTER TABLE …
+// … NOT VALID`), then a later `constraint(name).validate()` (rendered `ALTER TABLE …
 // VALIDATE CONSTRAINT …`). Gates the new `not_valid` FK/CHECK facet + the new
 // `Op::ValidateConstraint` through the REAL recorder → frozen wire ops.
 import { table } from "@zeroship/migrate";
@@ -23,6 +23,6 @@ export function up() {
     notValid: true,
   });
   // …then validate both later under a weaker lock.
-  pgLineItems.validateConstraint("line_items_order_fkey");
-  pgLineItems.validateConstraint("line_items_qty_positive");
+  pgLineItems.constraint("line_items_order_fkey").validate();
+  pgLineItems.constraint("line_items_qty_positive").validate();
 }

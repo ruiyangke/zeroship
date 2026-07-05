@@ -31,8 +31,7 @@ export function up() {
   const accounts = pgTable("ts_accounts", { schema: "zeroship" });
   accounts.enableRowLevelSecurity();
   accounts.forceRowLevelSecurity();
-  accounts.createPolicy({
-    name: "tenant_isolation",
+  accounts.policy("tenant_isolation").create({
     for: "all",
     using: (c) =>
       c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
