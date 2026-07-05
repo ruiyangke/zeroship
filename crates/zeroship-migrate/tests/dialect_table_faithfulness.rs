@@ -504,6 +504,7 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "dropPartition",
         "base",
         Op::DropPartition {
+            parent: "t".into(),
             name: "p".into(),
             schema: None,
             existence_guard: None,
