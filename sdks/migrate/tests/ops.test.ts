@@ -815,6 +815,21 @@ test("c.case validates the object branch shape", () => {
   );
 });
 
+test("eq(null)/ne(null) are record-time errors steering to isNull()/isNotNull() (P4)", () => {
+  assert.throws(
+    () => record(() => table("t").check("c_eq").add({ expr: (c) => c("a").eq(null) })),
+    /eq\(null\) is always UNKNOWN in SQL — use isNull\(\)/,
+  );
+  assert.throws(
+    () => record(() => table("t").check("c_ne").add({ expr: (c) => c("a").ne(null) })),
+    /ne\(null\) is always UNKNOWN in SQL — use isNotNull\(\)/,
+  );
+  // the steer target itself still records without error
+  const ops = record(() => table("t").check("c_ok").add({ expr: (c) => c("a").isNull() }));
+  assert.equal(ops.length, 1);
+  assert.equal(JSON.stringify(ops[0]).includes('"isNull"'), true);
+});
+
 test("the two-arg c('table','col') records a qualified colRef; one-arg stays unqualified", () => {
   // §3.4 the join-ON fix: `c("orders", "customer_id")` records a colRef carrying
   // an optional `table`; `c("id")` records the pre-qualification unqualified shape
