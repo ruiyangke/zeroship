@@ -241,10 +241,7 @@ table("users").unique("users_email_key").add({ columns: ["email"] });
 ### Check
 
 ```ts
-// Inline shorthand
-table("orders").addCheck("orders_qty_positive", (c) => c("qty").gt(0));
-
-// Named selector form (supports ifNotExists / schema)
+// The one spelling — the named selector form (supports notValid / ifNotExists / schema)
 table("orders").check("orders_qty_positive").add({ expr: (c) => c("qty").gt(0) });
 ```
 
@@ -255,15 +252,15 @@ table("orders").check("orders_qty_positive").add({ expr: (c) => c("qty").gt(0) }
 table("posts").foreignKey("posts_author_fkey")
   .add({ columns: ["author_id"], references: { table: "users", columns: ["id"] }, onDelete: "cascade" });
 
-// addForeignKey — composite, non-id target, cross-schema reference, deferrable
-table("usage_aggregates", { schema: "zeroship" }).addForeignKey("usage_aggregates_metric_fkey", {
+// The same selector form — composite, non-id target, cross-schema reference, deferrable
+table("usage_aggregates", { schema: "zeroship" }).foreignKey("usage_aggregates_metric_fkey").add({
   columns: ["metric"],
   references: { table: "billing_metrics", columns: ["metric"], schema: "zeroship" },
   deferrable: true,
   initiallyDeferred: true,
 });
 
-table("line_items").addForeignKey("line_items_order_fkey", {
+table("line_items").foreignKey("line_items_order_fkey").add({
   columns: ["order_id", "tenant_id"],                       // composite
   references: { table: "orders", columns: ["id", "tenant_id"] },
   onDelete: "restrict",
