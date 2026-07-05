@@ -3552,7 +3552,7 @@
           ]
         },
         {
-          "description": "A searched `CASE` (`c.case({ when: [{ when, then }], else? })`). Each branch is\n`(when, then)`; both halves are themselves closed-AST nodes.",
+          "description": "A searched `CASE` (`c.case({ branches: [{ when, then }], else? })`). Each branch is\n`(when, then)`; both halves are themselves closed-AST nodes.",
           "type": "object",
           "properties": {
             "branches": {
