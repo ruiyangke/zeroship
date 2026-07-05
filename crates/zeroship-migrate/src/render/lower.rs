@@ -2612,6 +2612,10 @@ impl IrAuthor {
                     "partition collapse mirror guard is only for SQLite/MySQL",
                 ));
             }
+            // SQLite can use INSERT...SELECT NULL into the NOT NULL partition key:
+            // the constraint is checked only for selected rows. MySQL's guard is
+            // a row-dependent JSON parse below instead, because a constant invalid
+            // JSON expression can be folded by the optimizer before WHERE filters.
             SqlDialect::Sqlite => format!(
                 "/* zeroship: partition collapse populated-default mirror guard */\n\
                  INSERT INTO {table_sql} ({key_sql}) \
@@ -2619,7 +2623,7 @@ impl IrAuthor {
             ),
             SqlDialect::Mysql => format!(
                 "/* zeroship: partition collapse populated-default mirror guard */\n\
-                 SELECT JSON_EXTRACT('zeroship_partition_mirror_guard', '$') \
+                 SELECT JSON_EXTRACT(CONCAT('!', {key_sql}), '$') \
                    FROM {table_sql} WHERE {predicate} LIMIT 1"
             ),
         };
