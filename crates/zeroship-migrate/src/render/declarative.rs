@@ -5838,6 +5838,30 @@ impl DeclarativeAuthor {
         ))
     }
 
+    /// §3.2 — render a stand-alone `ALTER TABLE … VALIDATE CONSTRAINT <name>` (the
+    /// second half of PostgreSQL online constraint adoption: a FK/CHECK added
+    /// `NOT VALID` is validated later under a weaker `SHARE UPDATE EXCLUSIVE` lock).
+    /// The scan can fail on a violating row, so it is `requires_approval` (like a
+    /// `SET NOT NULL` / constraint add). `down` is `None`: validation only
+    /// STRENGTHENS the existing constraint (there is no `DE-VALIDATE`), so there is
+    /// no structural reverse. PostgreSQL-only — the SQLite/MySQL legs are refused
+    /// fail-closed at validate + at the lower dispatch's capability gate.
+    pub(crate) fn lower_validate_constraint(&self, table: &str, name: &str) -> LoweredUnit {
+        let up = format!(
+            "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+            self.qualified(table),
+            quote_ident(name),
+        );
+        let flags = MigrationFlags { requires_approval: true, ..MigrationFlags::default() };
+        single_stmt(self.make(
+            &format!("validate_constraint_{table}_{name}"),
+            up,
+            None,
+            flags,
+            Vec::new(),
+        ))
+    }
+
     /// **VENDOR** — wrap a pre-rendered vendor statement
     /// ([`crate::render::vendor::VendorStatement`]) into a journaled [`LoweredUnit`]. The
     /// `up`/`down` SQL was structurally assembled by [`crate::render::vendor`] (identifiers

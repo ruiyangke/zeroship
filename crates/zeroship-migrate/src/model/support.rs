@@ -201,6 +201,7 @@ pub enum Feature {
     CompositeForeignKey,
     ForeignKeyNoLocalColumn,
     NonIdForeignKey,
+    ConstraintNotValid,
     ExclusionConstraint,
     NativeAlterColumn,
     AlterColumnUsing,
@@ -355,6 +356,11 @@ const PG_ONLY_COMPOSITE_FK: DialectSupport = DialectSupport::postgres_only(
 const PG_ONLY_NON_ID_FK: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
     "foreign keys referencing non-id columns are PostgreSQL-only in the current engine",
+);
+
+const PG_ONLY_CONSTRAINT_NOT_VALID: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "NOT VALID online constraint adoption (addForeignKey/addCheck { notValid }) is PostgreSQL-only; SQLite/MySQL have no NOT VALID / VALIDATE CONSTRAINT",
 );
 
 const PG_ONLY_SEQUENCE: DialectSupport = DialectSupport::postgres_only(
@@ -526,6 +532,7 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
     FeatureSupport::new(Feature::CompositeForeignKey, PG_ONLY_COMPOSITE_FK),
     FeatureSupport::new(Feature::NonIdForeignKey, PG_ONLY_NON_ID_FK),
+    FeatureSupport::new(Feature::ConstraintNotValid, PG_ONLY_CONSTRAINT_NOT_VALID),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
         Feature::ExclusionConstraint,

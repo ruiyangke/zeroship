@@ -1094,6 +1094,48 @@
           ]
         },
         {
+          "description": "`ALTER TABLE … VALIDATE CONSTRAINT …` — validate a previously\n`NOT VALID`-added FK/CHECK against existing rows under a weaker lock\n(PostgreSQL-only online constraint adoption). Refused fail-closed off\nPostgreSQL.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The name of the (previously `NOT VALID`) constraint to validate.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "validateConstraint"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "name"
+          ]
+        },
+        {
           "description": "`ALTER TABLE … DROP CONSTRAINT …`.",
           "type": "object",
           "properties": {
@@ -4212,6 +4254,13 @@
                 "null"
               ]
             },
+            "notValid": {
+              "description": "Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption).\nWhen `Some(true)`, the ADD CONSTRAINT body is rendered ` … NOT VALID`\nso existing rows are NOT scanned at add time; a later\n[`Op::ValidateConstraint`] validates them under a weaker lock.\nAdditive-optional: absent is checksum-neutral (`skip_serializing_if`),\nso a FK that sets no `NOT VALID` serializes byte-identically to the\npre-slice wire image. Refused fail-closed off PostgreSQL.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "kind": {
               "type": "string",
               "const": "fk"
@@ -4254,6 +4303,13 @@
             "expr": {
               "description": "The check expression (a boolean closed-AST node).",
               "$ref": "#/$defs/Expr"
+            },
+            "notValid": {
+              "description": "Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption);\nsee [`IrConstraintKind::Fk::not_valid`]. Additive-optional + checksum-\nneutral when absent. Refused fail-closed off PostgreSQL.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "kind": {
               "type": "string",

@@ -100,6 +100,7 @@ fn op_variant_names_from_schema() {
         "setTableOptions",
         "addConstraint",
         "dropConstraint",
+        "validateConstraint",
         "insert",
         "update",
         "delete",

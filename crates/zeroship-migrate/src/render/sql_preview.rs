@@ -534,6 +534,7 @@ fn op_subject(op: &Op) -> String {
         | Op::DropSequence { name, .. } => quote_dotted(&[name]),
         Op::AddConstraint { table, .. } => quote_dotted(&[table]),
         Op::DropConstraint { table, name, .. } => quote_dotted(&[table, name]),
+        Op::ValidateConstraint { table, name, .. } => quote_dotted(&[table, name]),
         Op::Insert { table, .. } | Op::Update { table, .. } | Op::Delete { table, .. } => {
             quote_dotted(&[table])
         }

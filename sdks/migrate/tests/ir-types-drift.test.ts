@@ -57,7 +57,7 @@ const TS = {
     "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "setColumnType", "setColumnNotNull", "dropColumnNotNull",
     "setColumnDefault", "dropColumnDefault", "renameColumn", "addConstraint",
-    "setTableOptions", "dropConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
+    "setTableOptions", "dropConstraint", "validateConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
     "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
     "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
@@ -154,6 +154,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   setTableOptions: ["options", "schema", "table"].sort(),
   addConstraint: ["constraint", "existenceGuard", "schema", "table"].sort(),
   dropConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
+  validateConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   // DML ops carry `schema` but NO `existenceGuard`.
   insert: ["columns", "onConflict", "rows", "schema", "table"].sort(),
   update: ["batch", "schema", "set", "table", "where"].sort(),

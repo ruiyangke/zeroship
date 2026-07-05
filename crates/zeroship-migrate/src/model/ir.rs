@@ -1367,6 +1367,15 @@ pub enum IrConstraintKind {
         /// Optional `INITIALLY DEFERRED` flag. Meaningful only when deferrable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initially_deferred: Option<bool>,
+        /// Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption).
+        /// When `Some(true)`, the ADD CONSTRAINT body is rendered ` … NOT VALID`
+        /// so existing rows are NOT scanned at add time; a later
+        /// [`Op::ValidateConstraint`] validates them under a weaker lock.
+        /// Additive-optional: absent is checksum-neutral (`skip_serializing_if`),
+        /// so a FK that sets no `NOT VALID` serializes byte-identically to the
+        /// pre-slice wire image. Refused fail-closed off PostgreSQL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_valid: Option<bool>,
     },
     /// UNIQUE over the named columns.
     Unique {
@@ -1377,6 +1386,11 @@ pub enum IrConstraintKind {
     Check {
         /// The check expression (a boolean closed-AST node).
         expr: Expr,
+        /// Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption);
+        /// see [`IrConstraintKind::Fk::not_valid`]. Additive-optional + checksum-
+        /// neutral when absent. Refused fail-closed off PostgreSQL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_valid: Option<bool>,
     },
     /// PostgreSQL exclusion constraint (`EXCLUDE USING …`). Operators and
     /// expression targets are closed tokens/ASTs, never raw SQL.
@@ -2761,6 +2775,22 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
+    /// `ALTER TABLE … VALIDATE CONSTRAINT …` — validate a previously
+    /// `NOT VALID`-added FK/CHECK against existing rows under a weaker lock
+    /// (PostgreSQL-only online constraint adoption). Refused fail-closed off
+    /// PostgreSQL.
+    ValidateConstraint {
+        /// Target table.
+        table: String,
+        /// The name of the (previously `NOT VALID`) constraint to validate.
+        name: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
     /// `ALTER TABLE … DROP CONSTRAINT …`.
     DropConstraint {
         /// Target table.
@@ -3437,6 +3467,7 @@ impl Op {
             | Op::DropColumnNotNull { .. }
             | Op::DropColumnDefault { .. }
             | Op::DropConstraint { .. }
+            | Op::ValidateConstraint { .. }
             | Op::AddConstraint { .. }
             | Op::SetColumnDefault { .. } => {
                 if sqlite_live {
@@ -3530,6 +3561,9 @@ impl Op {
                 "fkComposite" => "multi-column foreign keys are PostgreSQL-only in the current engine",
                 "fkNonId" => {
                     "foreign keys referencing non-id columns are PostgreSQL-only in the current engine"
+                }
+                "fkNotValid" => {
+                    "NOT VALID online constraint adoption (addForeignKey { notValid }) is PostgreSQL-only in the current engine"
                 }
                 _ => Self::NEVER_REFUSED,
             },
@@ -3817,6 +3851,7 @@ impl Op {
                 ("addConstraint", Self::add_constraint_variant(&constraint.kind))
             }
             Op::DropConstraint { .. } => ("dropConstraint", "base"),
+            Op::ValidateConstraint { .. } => ("validateConstraint", "base"),
             Op::Insert { on_conflict, .. } => (
                 "insert",
                 if on_conflict.is_some() {
@@ -4007,6 +4042,12 @@ impl Op {
             IrConstraintKind::Pk { .. } => "pk",
             IrConstraintKind::Fk { columns, .. } if columns.is_empty() => "fkNoLocalColumn",
             IrConstraintKind::Exclusion { .. } => "exclusion",
+            // `NOT VALID` online adoption is PostgreSQL-only. It takes precedence
+            // over the composite/non-id FK sub-shapes (all likewise PG-only), so a
+            // `notValid` FK reports the single PG-only `fkNotValid` variant — keeping
+            // the op-level `Support::decision()` PG-only (and thus == validate, like
+            // `fkComposite`), robust regardless of corpus sampling order.
+            IrConstraintKind::Fk { not_valid: Some(true), .. } => "fkNotValid",
             IrConstraintKind::Fk { columns, .. } if columns.len() != 1 => "fkComposite",
             IrConstraintKind::Fk {
                 references_columns, ..
@@ -4092,6 +4133,7 @@ impl Op {
             | Op::RenameColumn { .. }
             | Op::AddConstraint { .. }
             | Op::DropConstraint { .. }
+            | Op::ValidateConstraint { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
@@ -4183,6 +4225,7 @@ impl Op {
             | Op::RenameColumn { table, .. }
             | Op::AddConstraint { table, .. }
             | Op::DropConstraint { table, .. }
+            | Op::ValidateConstraint { table, .. }
             | Op::Insert { table, .. }
             | Op::Update { table, .. }
             | Op::Delete { table, .. }
@@ -4254,6 +4297,7 @@ impl Op {
             | Op::RenameColumn { schema, .. }
             | Op::AddConstraint { schema, .. }
             | Op::DropConstraint { schema, .. }
+            | Op::ValidateConstraint { schema, .. }
             | Op::Insert { schema, .. }
             | Op::Update { schema, .. }
             | Op::Delete { schema, .. }
@@ -4323,6 +4367,7 @@ impl Op {
             | Op::RenameColumn { existence_guard, .. }
             | Op::AddConstraint { existence_guard, .. }
             | Op::DropConstraint { existence_guard, .. }
+            | Op::ValidateConstraint { existence_guard, .. }
             | Op::DropView { existence_guard, .. }
             | Op::DropEnum { existence_guard, .. }
             | Op::DropDomain { existence_guard, .. }
@@ -4391,6 +4436,7 @@ impl Op {
             | Op::DropColumnDefault { .. }
             | Op::RenameColumn { .. }
             | Op::DropConstraint { .. }
+            | Op::ValidateConstraint { .. }
             | Op::DropView { .. }
             | Op::DropEnum { .. }
             | Op::DropDomain { .. }

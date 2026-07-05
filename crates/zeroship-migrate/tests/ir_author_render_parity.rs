@@ -719,6 +719,8 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -757,6 +759,8 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -788,6 +792,8 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -823,6 +829,8 @@ fn add_constraint_fk_renders_deferrable_tail_pg() {
                         on_update: None,
                         deferrable,
                         initially_deferred,
+                    
+                        not_valid: None,
                     },
                 },
                 schema: None,
@@ -875,6 +883,8 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
                     on_update: Some(RefAction::Restrict),
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -907,6 +917,8 @@ fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,

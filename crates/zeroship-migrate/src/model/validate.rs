@@ -460,7 +460,7 @@ pub fn validate_op_scoped(
     let check_constraint =
         |kind: &IrConstraintKind, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
             match kind {
-                IrConstraintKind::Check { expr } => {
+                IrConstraintKind::Check { expr, .. } => {
                     validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
                 }
                 IrConstraintKind::Exclusion { elements, where_predicate, .. } => {
@@ -871,6 +871,9 @@ pub fn validate_op_scoped(
         | Op::SetColumnDefault { .. }
         | Op::DropColumnDefault { .. }
         | Op::DropConstraint { .. }
+        // ValidateConstraint carries no embedded Expr; its PG-only dialect refusal
+        // runs in the op-level `error_from_decision` gate above.
+        | Op::ValidateConstraint { .. }
         | Op::CreateEnum { .. }
         | Op::DropEnum { .. }
         | Op::DropDomain { .. }
@@ -1119,6 +1122,14 @@ fn validate_op_support(
         with.as_ref().is_some_and(|params| !params.is_empty())
     }
 
+    fn constraint_kind_not_valid(kind: &IrConstraintKind) -> bool {
+        matches!(
+            kind,
+            IrConstraintKind::Fk { not_valid: Some(true), .. }
+                | IrConstraintKind::Check { not_valid: Some(true), .. }
+        )
+    }
+
     fn fk_features(
         columns: &[String],
         references_columns: &[String],
@@ -1195,6 +1206,25 @@ fn validate_op_support(
                 check(Feature::SequenceDefault)?;
             }
             for constraint in constraints {
+                // `NOT VALID` is meaningless at create-time (there are no existing
+                // rows to defer, and PostgreSQL rejects `NOT VALID` in `CREATE TABLE`).
+                // Refuse it fail-closed on the create-time inline constraint so a
+                // hand-crafted IR cannot smuggle it into a silently-dropped slot; it
+                // is only authorable via addForeignKey/addCheck (ALTER TABLE ADD
+                // CONSTRAINT).
+                if constraint_kind_not_valid(&constraint.kind) {
+                    return Err(AuthoringError {
+                        code: CODE_OP_INVALID.to_string(),
+                        kind: None,
+                        op_index,
+                        ts_location: ts_location.map(str::to_string),
+                        dialect: target_dialect,
+                        reason: "notValid is only valid on addForeignKey/addCheck (ALTER TABLE ADD CONSTRAINT); a create-time constraint cannot be NOT VALID".to_string(),
+                        suggested_fix: Some(
+                            "drop notValid from the create() constraint, or add the constraint after createTable via addForeignKey/addCheck with { notValid: true }".to_string(),
+                        ),
+                    });
+                }
                 match &constraint.kind {
                     IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
                     IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
@@ -1300,12 +1330,21 @@ fn validate_op_support(
                 references_columns,
                 deferrable,
                 initially_deferred,
+                not_valid,
                 ..
             } => {
                 fk_features(columns, references_columns, &mut check)?;
                 fk_deferrable_consistency(deferrable, initially_deferred)?;
+                if *not_valid == Some(true) {
+                    check(Feature::ConstraintNotValid)?;
+                }
             }
-            IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
+            IrConstraintKind::Check { not_valid, .. } => {
+                check(Feature::TableLevelCheck)?;
+                if *not_valid == Some(true) {
+                    check(Feature::ConstraintNotValid)?;
+                }
+            }
             IrConstraintKind::Exclusion { .. } => check(Feature::ExclusionConstraint)?,
             IrConstraintKind::Unique { .. } => {}
         },
@@ -3999,6 +4038,8 @@ mod tests {
                             ],
                         }),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],
@@ -4685,6 +4726,8 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("ghost")),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],
@@ -4720,6 +4763,8 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("ghost")),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],

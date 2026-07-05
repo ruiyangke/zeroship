@@ -64,6 +64,7 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "addConstraint", variant: "fkComposite", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "addConstraint", variant: "fkNoLocalColumn", postgres: Disposition::Unsupported, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "addConstraint", variant: "fkNonId", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
+    DispositionRow { kind: "addConstraint", variant: "fkNotValid", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "addConstraint", variant: "fkSimple", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "addConstraint", variant: "pk", postgres: Disposition::Unsupported, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "addConstraint", variant: "unique", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
@@ -145,6 +146,7 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "setColumnType", variant: "using", postgres: Disposition::Unsupported, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "setTableOptions", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "update", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
+    DispositionRow { kind: "validateConstraint", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
 ];
 
 /// Look up the row for an (op-kind, variant) token, if present.

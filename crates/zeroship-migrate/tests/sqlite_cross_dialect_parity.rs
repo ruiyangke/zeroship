@@ -677,6 +677,8 @@ fn table_check_constraints_are_pg_only_until_non_pg_renderers_land() {
                 lhs: Box::new(Expr::col("qty")),
                 rhs: Box::new(Expr::lit(IrScalar::Int(1))),
             },
+        
+            not_valid: None,
         },
     };
     let check_op = Op::CreateTable {
@@ -743,6 +745,8 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
                     on_update: Some(RefAction::Restrict),
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             }],
         indexes: Vec::new(),
