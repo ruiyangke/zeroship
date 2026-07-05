@@ -880,12 +880,9 @@ pub(crate) fn render_ir_default(default: &IrDefault, dialect: SqlDialect) -> Res
         IrDefault::Literal { value } => {
             crate::render::dml::inline_literal(value).map_err(IrLowerError::DmlAssemble)
         }
-        IrDefault::Fn { r#fn } => Ok(match r#fn {
-            crate::model::ir::SynthDefaultFn::Now => crate::render::renderer::renderer(dialect).synth_now(),
-            crate::model::ir::SynthDefaultFn::GenRandomUuid => {
-                crate::render::renderer::renderer(dialect).synth_uuid()
-            }
-        }),
+        IrDefault::Expr { expr } => {
+            crate::render::dml::render_expr_inline(expr, dialect).map_err(IrLowerError::DmlAssemble)
+        }
         IrDefault::Container { .. } => Err(IrLowerError::UnsupportedOp(
             "container defaults require a column type at render",
         )),
@@ -911,7 +908,7 @@ pub(crate) fn render_ir_default_for_type(
     match default {
         IrDefault::Container { kind } => render_container_default_for_col_type(*kind, ty),
         IrDefault::Json { value } => render_json_default_for_col_type(value, ty, dialect),
-        IrDefault::Literal { .. } | IrDefault::Fn { .. } | IrDefault::Nextval { .. } => {
+        IrDefault::Literal { .. } | IrDefault::Expr { .. } | IrDefault::Nextval { .. } => {
             render_ir_default(default, dialect)
         }
     }
@@ -2158,11 +2155,6 @@ impl IrAuthor {
             Op::SetColumnDefault { table, column, value, .. } => {
                 // Same SQLite rebuild constraint as setColumnType.
                 self.require_capability_for(Capability::NativeAlterColumn, "setColumnDefault")?;
-                if matches!(value, IrDefault::Fn { .. }) {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "validated setColumnDefault synth default reached lower",
-                    ));
-                }
                 let default_sql = match value {
                     IrDefault::Container { kind } => {
                         let data_type = live_schema
@@ -2201,7 +2193,7 @@ impl IrAuthor {
                         }
                         render_ir_default(value, self.dialect)?
                     }
-                    IrDefault::Literal { .. } | IrDefault::Fn { .. } => {
+                    IrDefault::Literal { .. } | IrDefault::Expr { .. } => {
                         render_ir_default(value, self.dialect)?
                     }
                 };
@@ -4997,7 +4989,7 @@ fn apply_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) =
+        let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) =
             source.default.as_ref()
         else {
             continue;
@@ -5020,7 +5012,7 @@ fn apply_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
+    let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
         return Ok(());
     };
     if col.name != column {
@@ -5056,7 +5048,7 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
                 Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
         }),
-        IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. } => None,
+        IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. } => None,
     }
 }
 
@@ -5361,6 +5353,15 @@ mod tests {
     }
 
     use crate::model::ir::{IrColumn as TIrColumn, IrFlagsOverride, IrJsonValue};
+
+    fn synth_default(r#fn: crate::model::expr::SynthFn) -> IrDefault {
+        IrDefault::Expr {
+            expr: Expr::FnSynth {
+                r#fn,
+                args: Vec::new(),
+            },
+        }
+    }
 
     fn platform_profile() -> crate::model::profile::PolicyProfile {
         crate::model::profile::PolicyProfile::platform()
@@ -6845,7 +6846,6 @@ mod tests {
     // on PG instead of being silently mapped away by the descriptor bridge.
     #[test]
     fn synth_default_on_user_column_renders_on_pg_not_silently_dropped() {
-        use crate::model::ir::SynthDefaultFn;
         use crate::model::validate::{validate_ir, Dialect};
 
         // createTable with a column whose default is a synth `now()`.
@@ -6859,7 +6859,7 @@ mod tests {
                     name: "at".into(),
                     ty: ColType::Timestamp,
                     nullable: None,
-                    default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
+                    default: Some(synth_default(crate::model::expr::SynthFn::Now)),
                     unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
                 primary_key: None,
                 constraints: vec![],
@@ -6898,7 +6898,7 @@ mod tests {
                 column: "token".into(),
                 ty: ColType::Uuid,
                 nullable: Some(false),
-                default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::GenRandomUuid }),
+                default: Some(synth_default(crate::model::expr::SynthFn::GenRandomUuid)),
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -6988,9 +6988,9 @@ mod tests {
     }
 
     #[test]
-    fn set_column_default_literal_renders_and_synth_validates_refused() {
-        use crate::model::ir::{IrScalar, SynthDefaultFn};
-        use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+    fn set_column_default_literal_and_synth_expr_render() {
+        use crate::model::ir::IrScalar;
+        use crate::model::validate::{validate_ir, Dialect};
 
         let literal_ir = MigrationIr {
             ir_version: 1,
@@ -7029,7 +7029,7 @@ mod tests {
             ops: vec![Op::SetColumnDefault {
                 table: "events".into(),
                 column: "at".into(),
-                value: IrDefault::Fn { r#fn: SynthDefaultFn::Now },
+                value: synth_default(crate::model::expr::SynthFn::Now),
                 schema: None,
                 existence_guard: None,
             }],
@@ -7039,11 +7039,15 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let err = validate_ir(&synth_ir, Dialect::Postgres, &[])
-            .expect_err("synth setColumnDefault must be validate-refused");
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert!(err.reason.contains("setColumnDefault synth defaults"));
+        validate_ir(&synth_ir, Dialect::Postgres, &[]).expect("synth expr setColumnDefault validates");
+        let migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&synth_ir, &LiveSchema::default())
+            .expect("synth expr setColumnDefault lowers");
+        assert!(
+            migrations[0].up.contains("ALTER COLUMN \"at\" SET DEFAULT now()"),
+            "synth expr default must render as SET DEFAULT, got {}",
+            migrations[0].up
+        );
     }
 
     // MED-1 (code-critic, this fix): the destructive/approval gate for a UNIQUE-index

@@ -294,7 +294,7 @@ fn math_random_symbol_records_as_fnsynth_gen_random_uuid() {
 }
 
 #[test]
-fn default_date_now_symbol_equals_default_fn_now() {
+fn removed_function_default_forms_fail_closed() {
     let symbol = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
@@ -307,7 +307,10 @@ fn default_date_now_symbol_equals_default_fn_now() {
             table("t").create({ columns: { at: t.timestamp().default({ fn: "now" }) } });
         }};
     "#;
-    assert_eq!(ops(&record(symbol, "default_date_now_symbol"))[0], ops(&record(explicit, "default_fn_now"))[0]);
+    let symbol_err = record_err(symbol, "default_date_now_symbol");
+    assert!(symbol_err.contains("bare native-symbol default forms are removed"), "{symbol_err}");
+    let explicit_err = record_err(explicit, "default_fn_now");
+    assert!(explicit_err.contains("old `{ fn: ... }"), "{explicit_err}");
 }
 
 #[test]
@@ -335,10 +338,13 @@ fn non_native_function_value_fails_closed_in_v8_recorder() {
             table("t").create({ columns: { v: t.int().default(() => 1) } });
         }};
     "#;
-    let err = record_err(default, "bad_fn_default");
-    assert!(
-        err.contains("function values are not valid here"),
-        "non-native function default must fail closed, got: {err}"
+    let ir = record(default, "literal_expr_default");
+    let cols = ops(&ir)[0].get("columns").and_then(|c| c.as_array()).unwrap();
+    let v = column_named(cols, "v");
+    assert_eq!(
+        v.get("default"),
+        Some(&json!({ "expr": { "node": "literal", "value": 1 } })),
+        "default callbacks record expression defaults"
     );
 }
 

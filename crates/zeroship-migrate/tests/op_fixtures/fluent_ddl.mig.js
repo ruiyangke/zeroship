@@ -7,7 +7,7 @@
 //
 // Covers EVERY t.* column type + EVERY modifier:
 //   t.id() (uuid PK + genRandomUuid default), t.text().notNull(), t.numeric(),
-//   t.timestamp().default({fn:"now"}), t.uuid(), t.bytes(), t.boolean().default,
+//   t.timestamp().default((c) => c.fn.now()), t.uuid(), t.bytes(), t.boolean().default,
 //   t.json(), t.ref(target), t.vector(n), t.geoPoint(), t.text() (was t.string —
 //   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
 //   t.double() (was t.float),
@@ -23,7 +23,7 @@ export default {
         id: t.id(), // uuid PK, default gen_random_uuid()
         email: t.text().notNull().unique(),
         balance: t.numeric(12, 2).notNull().default(decimal("0.00")),
-        authored_at: t.timestamp().notNull().default({ fn: "now" }),
+        authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),

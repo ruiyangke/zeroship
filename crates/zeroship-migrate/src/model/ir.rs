@@ -51,7 +51,7 @@ use base64::Engine as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::model::expr::{Expr, SynthFn};
+use crate::model::expr::Expr;
 #[allow(unused_imports)]
 use crate::model::migration::{Checksum, MigrationFlags, OnlinePhase};
 use crate::model::precondition::PreconditionCheck;
@@ -530,32 +530,6 @@ pub enum ColType {
     },
 }
 
-/// The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two
-/// NULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the
-/// full [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a
-/// non-nullary synth (`splitPart`/`concatWs`) as an unknown variant at
-/// DESERIALIZE, so a hand-crafted `.ir.json` carrying `{"fn":"splitPart"}` as a
-/// default cannot pass the loader and defer the blow-up to rendering. The wire
-/// tokens match [`SynthFn`]'s (`"now"`, `"genRandomUuid"`) so the on-disk bytes
-/// are unchanged from the pre-narrowing type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum SynthDefaultFn {
-    /// `now()` / current timestamp, evaluated at apply time.
-    Now,
-    /// `gen_random_uuid()`, evaluated at apply time.
-    GenRandomUuid,
-}
-
-impl From<SynthDefaultFn> for SynthFn {
-    fn from(d: SynthDefaultFn) -> Self {
-        match d {
-            SynthDefaultFn::Now => SynthFn::Now,
-            SynthDefaultFn::GenRandomUuid => SynthFn::GenRandomUuid,
-        }
-    }
-}
-
 /// Empty container defaults admitted as column DEFAULTs. This is intentionally
 /// EMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -697,13 +671,12 @@ pub struct SequenceRef {
     pub schema: Option<String>,
 }
 
-/// A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —
-/// either a typed scalar literal, an engine-synthesized apply-time scalar
-/// (`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array
-/// columns, a non-empty JSON value default for JSON columns, or a PostgreSQL
-/// sequence `nextval(...)` reference. NEVER a raw SQL string (property A); the
-/// per-dialect default clause is rendered by the shared snapshot-builder kernel
-/// from this structured value (§6.5).
+/// A column DEFAULT (§3.2 `t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —
+/// either a typed scalar literal, a closed expression AST, an EMPTY container
+/// default for JSON/text-array columns, a non-empty JSON value default for JSON
+/// columns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL
+/// string (property A); the per-dialect default clause is rendered by the shared
+/// snapshot-builder kernel from this structured value (§6.5).
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrDefault {
     /// A typed scalar literal default (constrained numeric domain — §2.5).
@@ -711,13 +684,12 @@ pub enum IrDefault {
         /// The literal value.
         value: IrScalar,
     },
-    /// An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),
-    /// rendered per dialect by the kernel (§4.3). Constrained at the TYPE level to
-    /// the two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is
-    /// rejected at deserialize, not at render.
-    Fn {
-        /// The synthesized function (`now` or `genRandomUuid`).
-        r#fn: SynthDefaultFn,
+    /// A closed expression default. The authoring SDK restricts default
+    /// expressions to column-free scalar expressions; the engine validates and
+    /// renders the same [`Expr`] AST used by DML/check predicates.
+    Expr {
+        /// The default expression.
+        expr: Expr,
     },
     /// An empty-container default. Non-empty JSON values use [`IrDefault::Json`].
     Container {
@@ -746,7 +718,7 @@ impl Serialize for IrDefault {
         let mut map = serializer.serialize_map(Some(1))?;
         match self {
             IrDefault::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
-            IrDefault::Fn { r#fn } => map.serialize_entry("fn", &serde_json::json!({ "fn": r#fn }))?,
+            IrDefault::Expr { expr } => map.serialize_entry("expr", expr)?,
             IrDefault::Container { kind } => map.serialize_entry("container", kind)?,
             IrDefault::Json { value } => map.serialize_entry("json", value)?,
             IrDefault::Nextval { sequence } => map.serialize_entry("nextval", sequence)?,
@@ -777,14 +749,9 @@ impl<'de> Deserialize<'de> for IrDefault {
             let wire: LiteralWire = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
             return Ok(IrDefault::Literal { value: wire.value });
         }
-        if let Some(v) = obj.get("fn") {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct FnWire {
-                r#fn: SynthDefaultFn,
-            }
-            let wire: FnWire = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
-            return Ok(IrDefault::Fn { r#fn: wire.r#fn });
+        if let Some(v) = obj.get("expr") {
+            let expr: Expr = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            return Ok(IrDefault::Expr { expr });
         }
         if let Some(v) = obj.get("container") {
             let kind: EmptyContainerKind =
@@ -802,7 +769,7 @@ impl<'de> Deserialize<'de> for IrDefault {
             return Ok(IrDefault::Nextval { sequence });
         }
         Err(D::Error::custom(
-            "IrDefault key must be one of \"literal\", \"fn\", \"container\", \"json\", or \"nextval\"",
+            "IrDefault key must be one of \"literal\", \"expr\", \"container\", \"json\", or \"nextval\"",
         ))
     }
 }
@@ -815,8 +782,8 @@ impl JsonSchema for IrDefault {
     fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let ir_scalar = serde_json::to_value(g.subschema_for::<IrScalar>())
             .expect("IrScalar schema ref serializes");
-        let synth_default_fn = serde_json::to_value(g.subschema_for::<SynthDefaultFn>())
-            .expect("SynthDefaultFn schema ref serializes");
+        let expr = serde_json::to_value(g.subschema_for::<Expr>())
+            .expect("Expr schema ref serializes");
         let empty_container_kind = serde_json::to_value(g.subschema_for::<EmptyContainerKind>())
             .expect("EmptyContainerKind schema ref serializes");
         let ir_json_value = serde_json::to_value(g.subschema_for::<IrJsonValue>())
@@ -824,7 +791,7 @@ impl JsonSchema for IrDefault {
         let sequence_ref = serde_json::to_value(g.subschema_for::<SequenceRef>())
             .expect("SequenceRef schema ref serializes");
         schemars::json_schema!({
-            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, a non-empty JSON value default for JSON columns, or a PostgreSQL\nsequence `nextval(...)` reference. NEVER a raw SQL string (property A); the\nper-dialect default clause is rendered by the shared snapshot-builder kernel\nfrom this structured value (§6.5).",
+            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value (§6.5).",
             "oneOf": [
                 {
                     "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -846,22 +813,14 @@ impl JsonSchema for IrDefault {
                     "additionalProperties": false
                 },
                 {
-                    "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Constrained at the TYPE level to\nthe two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is\nrejected at deserialize, not at render.",
+                    "description": "A closed expression default.",
                     "type": "object",
                     "properties": {
-                        "fn": {
-                            "type": "object",
-                            "properties": {
-                                "fn": {
-                                    "description": "The synthesized function (`now` or `genRandomUuid`).",
-                                    "$ref": synth_default_fn["$ref"].clone()
-                                }
-                            },
-                            "additionalProperties": false,
-                            "required": ["fn"]
+                        "expr": {
+                            "$ref": expr["$ref"].clone()
                         }
                     },
-                    "required": ["fn"],
+                    "required": ["expr"],
                     "additionalProperties": false
                 },
                 {
@@ -3572,9 +3531,6 @@ impl Op {
                 "setColumnType.using expression rendering is deferred in the current engine"
             }
             Op::SetColumnDefault { .. } => match variant {
-                "fn" => {
-                    "setColumnDefault synth defaults are deferred until the expression/default renderer lands"
-                }
                 "nextval" => Self::NEXTVAL_PG_ONLY,
                 _ => Self::NEVER_REFUSED,
             },
@@ -3863,7 +3819,6 @@ impl Op {
             Op::DropColumnNotNull { .. } => ("dropColumnNotNull", "base"),
             Op::SetColumnDefault { value, .. } => {
                 let variant = match value {
-                    IrDefault::Fn { .. } => "fn",
                     IrDefault::Container { .. } | IrDefault::Json { .. } => "containerOrJson",
                     IrDefault::Nextval { .. } => "nextval",
                     _ => "base",
@@ -5277,36 +5232,20 @@ mod tests {
         assert_eq!(t, back);
     }
 
-    // ---- IrDefault::Fn is fail-CLOSED to the two nullary synth scalars ----
-    // (code-critic MED). The doc says only now/genRandomUuid are admissible as a
-    // column default; a hand-crafted `.ir.json` carrying a non-nullary synth
-    // (`splitPart`/`concatWs`) MUST be rejected at DESERIALIZE, not deferred to a
-    // render-time blow-up. RED before SynthDefaultFn narrows the type.
+    // ---- IrDefault expression defaults replace the old `{fn}` carrier ----
 
     #[test]
-    fn ir_default_fn_rejects_split_part_at_deserialize() {
-        // A column whose default is the synth `splitPart` — splitPart is NOT a
-        // nullary apply-time scalar, so it is not a legal default. The
-        // externally-tagged `IrDefault::Fn` carries its inner synth in the `fn`
-        // field (`{"fn":{"fn":"splitPart"}}`).
-        let json = r#"{"name":"c","type":"text","default":{"fn":{"fn":"splitPart"}}}"#;
-        let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
-        assert!(
-            err.to_string().to_lowercase().contains("splitpart")
-                || err.to_string().contains("unknown variant"),
-            "splitPart must be rejected as a default at deserialize, got: {err}"
-        );
-    }
-
-    #[test]
-    fn ir_default_fn_rejects_concat_ws_at_deserialize() {
-        let json = r#"{"name":"c","type":"text","default":{"fn":{"fn":"concatWs"}}}"#;
-        let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
-        assert!(
-            err.to_string().to_lowercase().contains("concatws")
-                || err.to_string().contains("unknown variant"),
-            "concatWs must be rejected as a default at deserialize, got: {err}"
-        );
+    fn ir_default_rejects_removed_fn_key_at_deserialize() {
+        for json in [
+            r#"{"name":"c","type":"text","default":{"fn":{"fn":"now"}}}"#,
+            r#"{"name":"c","type":"text","default":{"fn":{"fn":"genRandomUuid"}}}"#,
+        ] {
+            let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("\"expr\"") || err.to_string().contains("IrDefault key"),
+                "removed {{fn}} default carrier must be rejected, got: {err}"
+            );
+        }
     }
 
     // ---- MED-2: the §2.4 advisory `checksum` hint deserializes + is NOT folded ----
@@ -5674,14 +5613,19 @@ mod tests {
     }
 
     #[test]
-    fn ir_default_fn_accepts_now_and_gen_random_uuid() {
+    fn ir_default_expr_accepts_now_and_gen_random_uuid() {
         for (wire, want) in [
-            (r#"{"fn":{"fn":"now"}}"#, SynthDefaultFn::Now),
-            (r#"{"fn":{"fn":"genRandomUuid"}}"#, SynthDefaultFn::GenRandomUuid),
+            (r#"{"expr":{"node":"fnSynth","fn":"now","args":[]}}"#, "now"),
+            (r#"{"expr":{"node":"fnSynth","fn":"genRandomUuid","args":[]}}"#, "genRandomUuid"),
         ] {
             let d: IrDefault = serde_json::from_str(wire).unwrap();
-            assert_eq!(d, IrDefault::Fn { r#fn: want });
-            // …and round-trips byte-identically (the wire shape is unchanged).
+            assert!(matches!(
+                &d,
+                IrDefault::Expr {
+                    expr: Expr::FnSynth { r#fn: _, args }
+                } if args.is_empty()
+            ));
+            assert_eq!(serde_json::to_value(&d).unwrap()["expr"]["fn"], want);
             assert_eq!(serde_json::to_string(&d).unwrap(), wire);
         }
     }

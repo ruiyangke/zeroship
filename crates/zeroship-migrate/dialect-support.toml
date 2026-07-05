@@ -460,8 +460,8 @@ pg = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
-# setColumnDefault — plain/container/json defaults are portable; synth `fn`
-# defaults are deferred everywhere; nextval defaults are PG-only.
+# setColumnDefault — plain/expression/container/json defaults are portable;
+# nextval defaults are PG-only.
 [[row]]
 kind = "setColumnDefault"
 variant = "base"
@@ -475,13 +475,6 @@ variant = "containerOrJson"
 pg = "portable"
 sqlite = "portable"
 mysql = "portable"
-
-[[row]]
-kind = "setColumnDefault"
-variant = "fn"
-pg = "unsupported"
-sqlite = "unsupported"
-mysql = "unsupported"
 
 [[row]]
 kind = "setColumnDefault"

@@ -48,7 +48,7 @@ export const name = "e2e_happy";
 export function up() {
   table("widgets").create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       label: t.text(),
     },
   });

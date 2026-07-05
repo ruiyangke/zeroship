@@ -1,7 +1,8 @@
 //! Resolve profile-managed table shape into explicit `createTable` IR.
 
+use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
-    ColType, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op, SynthDefaultFn,
+    ColType, IndexElement, IrColumn, IrDefault, IrIndex, MigrationIr, Op,
 };
 use crate::model::profile::{PolicyProfile, TablePrimaryKeyPolicy};
 
@@ -212,9 +213,7 @@ fn is_id_identity_replacement(column: &IrColumn) -> bool {
 fn validate_folded_id_prefix(table: &str, column: &IrColumn) -> Result<(), TableShapeError> {
     let has_unsupported_default = match column.default.as_ref() {
         None => false,
-        Some(IrDefault::Fn {
-            r#fn: SynthDefaultFn::GenRandomUuid,
-        }) => false,
+        Some(default) if is_gen_random_uuid_default(default) => false,
         Some(_) => true,
     };
     if column.unique.unwrap_or(false)
@@ -239,6 +238,28 @@ fn validate_folded_id_prefix(table: &str, column: &IrColumn) -> Result<(), Table
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn gen_random_uuid_default() -> IrDefault {
+    IrDefault::Expr {
+        expr: Expr::FnSynth {
+            r#fn: SynthFn::GenRandomUuid,
+            args: Vec::new(),
+        },
+    }
+}
+
+fn is_gen_random_uuid_default(default: &IrDefault) -> bool {
+    matches!(
+        default,
+        IrDefault::Expr {
+            expr: Expr::FnSynth {
+                r#fn: SynthFn::GenRandomUuid,
+                args,
+            },
+        } if args.is_empty()
+    )
 }
 
 fn validate_folded_id_identity(table: &str, column: &IrColumn) -> Result<(), TableShapeError> {
@@ -439,9 +460,7 @@ mod tests {
         let mut id = text_col("id");
         id.ty = ColType::Uuid;
         id.nullable = Some(false);
-        id.default = Some(IrDefault::Fn {
-            r#fn: SynthDefaultFn::GenRandomUuid,
-        });
+        id.default = Some(gen_random_uuid_default());
         id.id_prefix = Some("post".into());
         let resolved =
             resolve_create_table_policy(&ir(vec![id], Some(vec!["id".into()])), &PolicyProfile::confined())
