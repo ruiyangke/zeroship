@@ -22,6 +22,7 @@ import {
   fromDb,
   t,
   table,
+  view,
   check,
   and,
   or,
@@ -111,6 +112,18 @@ export function badOpShapes(): void {
 
   // @ts-expect-error — `.rename({ to })` has no `from` (that is the column-rename shape).
   table("users").rename({ from: "users", to: "people" });
+}
+
+export function viewGrammar(): void {
+  view("active_users").create({
+    as: (q) => q.from("users").select(["id", "email"]),
+  });
+  view("recent_users").create({
+    as: { raw: "SELECT id, email FROM users WHERE deleted_at IS NULL" },
+  });
+
+  // @ts-expect-error — deleted duplicate spelling; use `.create({ as: { raw } })`.
+  view("recent_users").createRaw({ sql: "SELECT id, email FROM users" });
 }
 
 export function partitionGrammar(): void {

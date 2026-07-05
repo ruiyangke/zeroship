@@ -805,7 +805,7 @@ export interface DropTablePolicyArgs {
 /** The options bag `view(name, opts?)` accepts. Carries the default
  *  `{ schema, columns }` every op the returned {@link ViewHandle} records is
  *  stamped with where applicable. Inline `create({ columns })` /
- *  `createRaw({ columns })` overrides the handle default. */
+ *  `create({ columns })` overrides the handle default. */
 export interface ViewOptions {
   schema?: string;
   columns?: string[];
@@ -827,15 +827,7 @@ export interface ViewQueryBuilder {
 }
 
 export interface CreateViewArgs {
-  as: ((q: ViewQueryBuilder) => ViewQueryBuilder | SelectAst) | ViewQueryBuilder | SelectAst;
-  columns?: string[];
-  replace?: boolean;
-  materialized?: boolean;
-  schema?: string;
-}
-
-export interface CreateRawViewArgs {
-  sql: string;
+  as: ((q: ViewQueryBuilder) => ViewQueryBuilder | SelectAst) | ViewQueryBuilder | SelectAst | { raw: string };
   columns?: string[];
   replace?: boolean;
   materialized?: boolean;
@@ -850,7 +842,6 @@ export interface DropViewArgs {
 
 export interface ViewHandle {
   create(args: CreateViewArgs): ViewHandle;
-  createRaw(args: CreateRawViewArgs): ViewHandle;
   drop(args?: DropViewArgs): ViewHandle;
   comment(text: string | null, args?: { schema?: string }): ViewHandle;
 }
