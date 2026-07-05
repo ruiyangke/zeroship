@@ -524,6 +524,18 @@ fn render_binop(op: BinaryOp, l: &str, r: &str, dialect: SqlDialect) -> String {
     }
 }
 
+/// Render the portable `distinctFrom` NULL-safe inequality node, **dialect-aware**.
+/// PG and SQLite both support the standard `IS DISTINCT FROM` operator directly.
+/// MySQL has NO `IS DISTINCT FROM`, so the engine owns the lowering to
+/// `NOT (<l> <=> <r>)` — `<=>` is MySQL's NULL-safe equality operator, so its
+/// negation is exactly the "distinct from" (NULL-aware inequality) predicate.
+fn render_distinct_from(l: &str, r: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Mysql => format!("(NOT ({l} <=> {r}))"),
+        SqlDialect::Postgres | SqlDialect::Sqlite => format!("({l} IS DISTINCT FROM {r})"),
+    }
+}
+
 /// The SQL spelling of an allow-listed named scalar function (§3.3.1.1(a)). These
 /// are the provably-identical cross-dialect scalars (same name + semantics on PG
 /// and SQLite), so the spelling is dialect-neutral.
@@ -723,6 +735,22 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let o = render_expr_bound(operand, ctx)?;
             format!("CAST({o} AS {})", cast_target_sql(*target, ctx.dialect))
         }
+        Expr::Between { operand, low, high } => {
+            let o = render_expr_bound(operand, ctx)?;
+            let lo = render_expr_bound(low, ctx)?;
+            let hi = render_expr_bound(high, ctx)?;
+            format!("({o} BETWEEN {lo} AND {hi})")
+        }
+        Expr::Like { operand, pattern } => {
+            let o = render_expr_bound(operand, ctx)?;
+            let p = render_expr_bound(pattern, ctx)?;
+            format!("({o} LIKE {p})")
+        }
+        Expr::DistinctFrom { left, right } => {
+            let l = render_expr_bound(left, ctx)?;
+            let r = render_expr_bound(right, ctx)?;
+            render_distinct_from(&l, &r, ctx.dialect)
+        }
         Expr::PgArrayMembership { expr, op, elems } => {
             let e = render_expr_bound(expr, ctx)?;
             render_pg_array_membership(&e, *op, elems, ctx.dialect)?
@@ -905,6 +933,22 @@ where
                 render_expr_inline_with_col(operand, dialect, col_ref)?,
                 cast_target_sql(*target, dialect)
             )
+        }
+        Expr::Between { operand, low, high } => {
+            let o = render_expr_inline_with_col(operand, dialect, col_ref)?;
+            let lo = render_expr_inline_with_col(low, dialect, col_ref)?;
+            let hi = render_expr_inline_with_col(high, dialect, col_ref)?;
+            format!("({o} BETWEEN {lo} AND {hi})")
+        }
+        Expr::Like { operand, pattern } => {
+            let o = render_expr_inline_with_col(operand, dialect, col_ref)?;
+            let p = render_expr_inline_with_col(pattern, dialect, col_ref)?;
+            format!("({o} LIKE {p})")
+        }
+        Expr::DistinctFrom { left, right } => {
+            let l = render_expr_inline_with_col(left, dialect, col_ref)?;
+            let r = render_expr_inline_with_col(right, dialect, col_ref)?;
+            render_distinct_from(&l, &r, dialect)
         }
         Expr::PgArrayMembership { expr, op, elems } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
@@ -1514,6 +1558,98 @@ mod tests {
                 "SQLite must rewrite `{std_frag}` to `{sqlite_expect}`: {sqlite}"
             );
         }
+    }
+
+    // ── portable predicate nodes: between / like / distinctFrom (§3.4) ───────
+
+    #[test]
+    fn between_renders_identically_on_all_three_dialects() {
+        // `(operand BETWEEN low AND high)` is standard SQL — IDENTICAL on PG,
+        // SQLite, and MySQL. The inline path binds no placeholders.
+        let expr = Expr::Between {
+            operand: Box::new(Expr::col("age")),
+            low: Box::new(lit_int(18)),
+            high: Box::new(lit_int(65)),
+        };
+        let expect_pg_sqlite = "(\"age\" BETWEEN 18 AND 65)";
+        let expect_mysql = "(`age` BETWEEN 18 AND 65)";
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), expect_pg_sqlite);
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), expect_pg_sqlite);
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), expect_mysql);
+
+        // Bound path: operand is an identifier; low/high become placeholders.
+        for (dialect, ident) in [
+            (SqlDialect::Postgres, "\"age\""),
+            (SqlDialect::Sqlite, "\"age\""),
+            (SqlDialect::Mysql, "`age`"),
+        ] {
+            let mut ctx = BindCtx::new(dialect);
+            let sql = render_expr_bound(&expr, &mut ctx).unwrap();
+            assert!(
+                sql.starts_with(&format!("({ident} BETWEEN ")) && sql.contains(" AND "),
+                "BETWEEN keeps its shape on {dialect:?}: {sql}"
+            );
+            assert_eq!(ctx.binds.len(), 2, "low + high bind on {dialect:?}");
+        }
+    }
+
+    #[test]
+    fn like_renders_same_syntax_on_all_three_dialects() {
+        // `(operand LIKE pattern)` — same syntax on PG, SQLite, MySQL. (Per-dialect
+        // case-sensitivity semantics differ; the parity PROOF is a Phase-4 claim,
+        // not this slice — see the Expr::Like doc comment.)
+        let expr = Expr::Like {
+            operand: Box::new(Expr::col("name")),
+            pattern: Box::new(Expr::lit(IrScalar::Str("A%".to_string()))),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"name\" LIKE 'A%')"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"name\" LIKE 'A%')"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`name` LIKE 'A%')"
+        );
+    }
+
+    #[test]
+    fn distinct_from_diverges_pg_sqlite_vs_mysql() {
+        // The whole point of the node: PG + SQLite support `IS DISTINCT FROM`
+        // directly; MySQL has no such operator, so the engine lowers it to
+        // `NOT (x <=> y)` (`<=>` is MySQL's NULL-safe equality).
+        let expr = Expr::DistinctFrom {
+            left: Box::new(Expr::col("a")),
+            right: Box::new(Expr::col("b")),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"a\" IS DISTINCT FROM \"b\")",
+            "PG uses IS DISTINCT FROM"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"a\" IS DISTINCT FROM \"b\")",
+            "SQLite uses IS DISTINCT FROM"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(NOT (`a` <=> `b`))",
+            "MySQL lowers to NOT (a <=> b) — no IS DISTINCT FROM operator"
+        );
+
+        // Bound path renders the same divergent spellings.
+        assert_eq!(
+            render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "(\"a\" IS DISTINCT FROM \"b\")"
+        );
+        assert_eq!(
+            render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
+            "(NOT (`a` <=> `b`))"
+        );
     }
 
     // ── identifier safety ───────────────────────────────────────────────────

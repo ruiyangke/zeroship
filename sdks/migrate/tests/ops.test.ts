@@ -786,6 +786,38 @@ test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
   });
 });
 
+test("portable between/like/distinctFrom chain builders record the right nodes", () => {
+  // §3.4 portable predicate nodes. `between`/`like` render identical syntax on
+  // all three dialects; `distinctFrom` is portably named but per-dialect rendered
+  // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
+  const ops = record(() =>
+    table("t").update({
+      set: {
+        b: (c) => c("age").between(18, 65),
+        l: (c) => c("name").like("A%"),
+        d: (c) => c("a").distinctFrom(c("b")),
+      },
+    }),
+  );
+  const set = ops[0].set;
+  assert.deepEqual(set.b, {
+    node: "between",
+    operand: { node: "colRef", name: "age" },
+    low: { node: "literal", value: 18 },
+    high: { node: "literal", value: 65 },
+  });
+  assert.deepEqual(set.l, {
+    node: "like",
+    operand: { node: "colRef", name: "name" },
+    pattern: { node: "literal", value: "A%" },
+  });
+  assert.deepEqual(set.d, {
+    node: "distinctFrom",
+    left: { node: "colRef", name: "a" },
+    right: { node: "colRef", name: "b" },
+  });
+});
+
 test("check helper and expression helpers build the frozen Expr IR nodes", () => {
   const ops = record(() => {
     table("expr_checks").create({

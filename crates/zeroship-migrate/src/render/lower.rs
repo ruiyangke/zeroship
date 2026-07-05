@@ -5155,6 +5155,19 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             | Expr::Extract { expr, .. } => {
                 collect_col_refs(expr, out);
             }
+            Expr::Between { operand, low, high } => {
+                collect_col_refs(operand, out);
+                collect_col_refs(low, out);
+                collect_col_refs(high, out);
+            }
+            Expr::Like { operand, pattern } => {
+                collect_col_refs(operand, out);
+                collect_col_refs(pattern, out);
+            }
+            Expr::DistinctFrom { left, right } => {
+                collect_col_refs(left, out);
+                collect_col_refs(right, out);
+            }
             Expr::PgIntervalLiteral { .. } => {}
         }
     }
