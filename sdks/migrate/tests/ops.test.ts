@@ -23,8 +23,6 @@ import {
   and,
   or,
   not,
-  membership,
-  notMembership,
   lit,
   decimal,
   byteValue,
@@ -66,7 +64,8 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   const imported = await import("@zeroship/migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
-  assert.equal(typeof imported.membership, "function");
+  assert.equal((imported as any).membership, undefined);
+  assert.equal((imported as any).notMembership, undefined);
   assert.equal(typeof imported.interval, "function");
   assert.equal((imported as any).pgEnum, undefined);
   assert.equal((imported as any).pgDomain, undefined);
@@ -940,7 +939,7 @@ test("the two-arg c('table','col') records a qualified colRef; one-arg stays unq
   assert.equal("table" in set.u, false);
 });
 
-test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
+test("c.pg builds PG-only regex and pg_column_size nodes", () => {
   const ops = record(() =>
     table("t").create({
       columns: {
@@ -949,8 +948,6 @@ test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
         data: t.json().notNull(),
       },
       checks: [
-        { name: "status_any", expr: (c) => c.pg.eqAnyArray(c("status"), ["a", "b"]) },
-        { name: "status_ne_all", expr: (c) => c.pg.neAllArray(c("status"), ["x"]) },
         { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
         { name: "data_size", expr: (c) => c.pg.columnSize(c("data")).le(8192) },
       ],
@@ -958,23 +955,11 @@ test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
   );
   const checks = ops[0].constraints.map((c: any) => c.kind.expr);
   assert.deepEqual(checks[0], {
-    node: "pgArrayMembership",
-    expr: { node: "colRef", name: "status" },
-    op: "eq",
-    elems: ["a", "b"],
-  });
-  assert.deepEqual(checks[1], {
-    node: "pgArrayMembership",
-    expr: { node: "colRef", name: "status" },
-    op: "ne",
-    elems: ["x"],
-  });
-  assert.deepEqual(checks[2], {
     node: "pgRegexMatch",
     expr: { node: "colRef", name: "name" },
     pattern: "^[a-z]+$",
   });
-  assert.deepEqual(checks[3], {
+  assert.deepEqual(checks[1], {
     node: "binOp",
     op: "le",
     lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
@@ -982,15 +967,19 @@ test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
   });
 });
 
-test("portable between/like/distinctFrom chain builders record the right nodes", () => {
+test("portable between/like/in/notIn/distinctFrom chain builders record the right nodes", () => {
   // §3.4 portable predicate nodes. `between`/`like` render identical syntax on
-  // all three dialects; `distinctFrom` is portably named but per-dialect rendered
+  // all three dialects; `in`/`notIn` are portably named while preserving PG's
+  // ANY/ALL render; `distinctFrom` is portably named but per-dialect rendered
   // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
   const ops = record(() =>
     table("t").update({
       set: {
         b: (c) => c("age").between(18, 65),
         l: (c) => c("name").like("A%"),
+        i: (c) => c("status").in(["a", "b"]),
+        ni: (c) => c("status").notIn(["x"]),
+        empty: (c) => c("status").in([]),
         d: (c) => c("a").distinctFrom(c("b")),
       },
     }),
@@ -1006,6 +995,24 @@ test("portable between/like/distinctFrom chain builders record the right nodes",
     node: "like",
     operand: { node: "colRef", name: "name" },
     pattern: { node: "literal", value: "A%" },
+  });
+  assert.deepEqual(set.i, {
+    node: "inList",
+    expr: { node: "colRef", name: "status" },
+    elems: ["a", "b"],
+    negated: false,
+  });
+  assert.deepEqual(set.ni, {
+    node: "inList",
+    expr: { node: "colRef", name: "status" },
+    elems: ["x"],
+    negated: true,
+  });
+  assert.deepEqual(set.empty, {
+    node: "inList",
+    expr: { node: "colRef", name: "status" },
+    elems: [],
+    negated: false,
   });
   assert.deepEqual(set.d, {
     node: "distinctFrom",
@@ -1102,14 +1109,14 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       checks: [
         check("pkce_method_check", (c) => c("pkce_method").eq("S256")),
         check("user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
-        check("kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
+        check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
         check("data_size", (c) => c("data").columnSize().lt(262144)),
         check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
         check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
         check("enabled_and_visible", (c) => and(c("enabled"), c("visible"))),
         check("expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
         check("not_archived", (c) => not(c("kind").eq(lit("archived")))),
-        check("kind_not_reserved", (c) => notMembership(c("kind"), ["x", "y"])),
+        check("kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
       ],
     });
     table("expr_checks").check("score_nonnegative").add({ expr: (c) => c("total_cents").ge(0) });
@@ -1128,10 +1135,10 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
     pattern: "^usr_[0-9A-Za-z]{20,40}$",
   });
   assert.deepEqual(checks[2], {
-    node: "pgArrayMembership",
+    node: "inList",
     expr: { node: "colRef", name: "kind" },
-    op: "eq",
     elems: ["a", "b", "c"],
+    negated: false,
   });
   assert.deepEqual(checks[3], {
     node: "binOp",
@@ -1189,10 +1196,10 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
     },
   });
   assert.deepEqual(checks[9], {
-    node: "pgArrayMembership",
+    node: "inList",
     expr: { node: "colRef", name: "kind" },
-    op: "ne",
     elems: ["x", "y"],
+    negated: true,
   });
   assert.deepEqual(ops[1], {
     op: "addConstraint",
@@ -1251,17 +1258,14 @@ test("c.pg builds PG-only extract and interval literal nodes", () => {
   });
 });
 
-test("c.pg rejects malformed text arrays and regex patterns", () => {
+test("inList rejects malformed text arrays and c.pg rejects regex patterns", () => {
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.eqAnyArray(c("x"), []) } })),
-    (e: any) => e.code === "OP_INVALID" && /non-empty string\[\]/.test(e.message),
+    () => record(() => table("t").update({ set: { x: (c) => c("x").in(["ok", 7 as any]) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be a string/.test(e.message),
   );
   assert.throws(
-    () =>
-      record(() =>
-        table("t").update({ set: { x: (c) => c.pg.neAllArray(c("x"), ["ok", 7 as any]) } }),
-      ),
-    (e: any) => e.code === "OP_INVALID" && /must be a string/.test(e.message),
+    () => record(() => table("t").update({ set: { x: (c) => c("x").notIn([""]) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be non-empty/.test(e.message),
   );
   assert.throws(
     () => record(() => table("t").update({ set: { x: (c) => c.pg.regex(c("x"), "") } })),

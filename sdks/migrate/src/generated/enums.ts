@@ -93,13 +93,6 @@ export type EmptyContainerKind = "object" | "array";
 export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uuid";
 
 /**
- * **PG-ONLY** membership operator over a literal text array. The closed variants
- * intentionally encode the two Postgres idioms the platform's dumped CHECK/domain
- * predicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.
- */
-export type PgArrayMembershipOp = "eq" | "ne";
-
-/**
  * CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
  *
  * P1 admits only the platform `day` marker. Add more fields only with a concrete

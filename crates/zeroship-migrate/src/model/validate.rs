@@ -42,7 +42,7 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
-use crate::model::expr::{CaseBranch, Expr, PgArrayMembershipOp, ScalarFn, SynthFn};
+use crate::model::expr::{CaseBranch, Expr, ScalarFn, SynthFn};
 use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
@@ -2916,9 +2916,7 @@ impl Ctx<'_> {
                 Some(e) => self.walk_depth(e, d),
                 None => Ok(()),
             },
-            Expr::PgArrayMembership { expr, op, elems } => {
-                self.check_pg_array_membership(expr, *op, elems, d)
-            }
+            Expr::InList { expr, elems, negated: _ } => self.check_in_list(expr, elems, d),
             Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
             Expr::PgColumnSize { expr } => {
                 self.check_pg_only_expr("pg_column_size")?;
@@ -3263,28 +3261,15 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    fn check_pg_array_membership(
+    fn check_in_list(
         &self,
         expr: &Expr,
-        _op: PgArrayMembershipOp,
         elems: &[String],
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        self.check_pg_only_expr("PG ARRAY membership")?;
         self.walk_depth(expr, depth)?;
-        if elems.is_empty() {
-            return Err(self.err(
-                CODE_UNSUPPORTED,
-                Some(UnsupportedKind::Expr),
-                self.target_dialect,
-                "PG ARRAY membership requires at least one text element; empty \
-                 ARRAY[] has no inferred element type"
-                    .to_string(),
-                Some("pass one or more string literals in the membership array".to_string()),
-            ));
-        }
         for elem in elems {
-            self.check_pg_text_literal(elem, "PG ARRAY membership element")?;
+            self.check_pg_text_literal(elem, "inList element")?;
         }
         Ok(())
     }
@@ -3439,9 +3424,7 @@ fn is_safe_pg_interval_literal(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::expr::{
-        BinaryOp, CastTarget, Expr, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
-    };
+    use crate::model::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn, UnaryOp};
     use crate::model::ir::{IndexElement, IrScalar};
 
     fn cols() -> Vec<String> {
@@ -3566,19 +3549,19 @@ mod tests {
         assert!(validate_expr(&case, Dialect::Postgres, &sc, 1, None).is_ok());
     }
 
-    fn pg_any(expr: Expr, elems: Vec<&str>) -> Expr {
-        Expr::PgArrayMembership {
+    fn in_list(expr: Expr, elems: Vec<&str>) -> Expr {
+        Expr::InList {
             expr: Box::new(expr),
-            op: PgArrayMembershipOp::Eq,
             elems: elems.into_iter().map(str::to_string).collect(),
+            negated: false,
         }
     }
 
-    fn pg_ne_all(expr: Expr, elems: Vec<&str>) -> Expr {
-        Expr::PgArrayMembership {
+    fn not_in_list(expr: Expr, elems: Vec<&str>) -> Expr {
+        Expr::InList {
             expr: Box::new(expr),
-            op: PgArrayMembershipOp::Ne,
             elems: elems.into_iter().map(str::to_string).collect(),
+            negated: true,
         }
     }
 
@@ -3587,8 +3570,6 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            pg_any(Expr::col("name"), vec!["active", "past_due"]),
-            pg_ne_all(Expr::col("name"), vec!["suspended"]),
             Expr::PgRegexMatch {
                 expr: Box::new(Expr::col("name")),
                 pattern: "^[a-z]+$".to_string(),
@@ -3606,10 +3587,10 @@ mod tests {
 
     #[test]
     fn portable_predicate_nodes_validate_on_all_three_dialects() {
-        // between / like / distinctFrom are PORTABLE (§3.4): they render on all
-        // three dialects (the engine owns distinctFrom's per-dialect lowering), so
-        // the walk accepts them with NO dialect gate — including on SQLite/MySQL,
-        // exactly where the PG-only nodes are refused.
+        // between / like / distinctFrom / inList are PORTABLE (§3.4): they render
+        // on all three dialects (the engine owns distinctFrom's per-dialect
+        // lowering), so the walk accepts them with NO dialect gate — including on
+        // SQLite/MySQL, exactly where the PG-only nodes are refused.
         let c = cols();
         let sc = scope("users", &c);
         let nodes = [
@@ -3626,6 +3607,9 @@ mod tests {
                 left: Box::new(Expr::col("first")),
                 right: Box::new(Expr::col("last")),
             },
+            in_list(Expr::col("name"), vec!["active", "past_due"]),
+            not_in_list(Expr::col("name"), vec!["suspended"]),
+            in_list(Expr::col("name"), vec![]),
         ];
         for e in &nodes {
             for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
@@ -3727,7 +3711,6 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            pg_any(Expr::col("name"), vec!["active"]),
             Expr::PgRegexMatch {
                 expr: Box::new(Expr::col("name")),
                 pattern: "^[a-z]+$".to_string(),
@@ -3746,20 +3729,16 @@ mod tests {
     }
 
     #[test]
-    fn pg_only_expr_literal_shapes_are_checked() {
+    fn text_literal_shapes_are_checked() {
         let c = cols();
         let sc = scope("users", &c);
-        let empty_membership = Expr::PgArrayMembership {
-            expr: Box::new(Expr::col("name")),
-            op: PgArrayMembershipOp::Eq,
-            elems: vec![],
-        };
-        let err = validate_expr(&empty_membership, Dialect::Postgres, &sc, 0, None).unwrap_err();
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert!(err.reason.contains("at least one"));
+        let empty_membership = in_list(Expr::col("name"), vec![]);
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_expr(&empty_membership, d, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("empty inList must validate on {d:?}: {err}"));
+        }
 
-        let nul_elem = pg_any(Expr::col("name"), vec!["ok", "bad\0value"]);
+        let nul_elem = in_list(Expr::col("name"), vec!["ok", "bad\0value"]);
         let err = validate_expr(&nul_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("NUL"));

@@ -1184,9 +1184,6 @@ function textLiteralArray(values: unknown, what: string): string[] {
   if (!Array.isArray(values)) {
     throw structuredError("OP_INVALID", `${what} must be a string[]`);
   }
-  if (values.length === 0) {
-    throw structuredError("OP_INVALID", `${what} must be a non-empty string[]`);
-  }
   return values.map((v, i) => {
     if (typeof v !== "string") {
       throw structuredError("OP_INVALID", `${what}[${i}] must be a string; got ${typeof v}`);
@@ -1298,6 +1295,22 @@ class ExprChainImpl implements ExprChainType {
   like(pattern: unknown) {
     return chain({ node: "like", operand: this.__node, pattern: exprArg(pattern) });
   }
+  "in"(values: readonly string[]) {
+    return chain({
+      node: "inList",
+      expr: this.__node,
+      elems: textLiteralArray(values, ".in(values)"),
+      negated: false,
+    });
+  }
+  notIn(values: readonly string[]) {
+    return chain({
+      node: "inList",
+      expr: this.__node,
+      elems: textLiteralArray(values, ".notIn(values)"),
+      negated: true,
+    });
+  }
   distinctFrom(x: unknown) {
     return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
   }
@@ -1332,24 +1345,6 @@ export function or(...exprs: unknown[]): ExprChainType {
 
 export function not(expr: unknown): ExprChainType {
   return chain({ node: "unaryOp", op: "not", operand: exprArg(expr) });
-}
-
-export function membership(expr: unknown, values: readonly string[]): ExprChainType {
-  return chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "eq",
-    elems: textLiteralArray(values, "membership(values)"),
-  });
-}
-
-export function notMembership(expr: unknown, values: readonly string[]): ExprChainType {
-  return chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "ne",
-    elems: textLiteralArray(values, "notMembership(values)"),
-  });
 }
 
 export function lit(value: ScalarValue): ExprChainType {
@@ -1477,18 +1472,6 @@ const agg: AggNamespace = {
 };
 
 const pgExpr: PgExprNamespace = {
-  eqAnyArray: (expr, elems) => chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "eq",
-    elems: textLiteralArray(elems, "c.pg.eqAnyArray(elems)"),
-  }),
-  neAllArray: (expr, elems) => chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "ne",
-    elems: textLiteralArray(elems, "c.pg.neAllArray(elems)"),
-  }),
   regex: (expr, pattern) => chain({
     node: "pgRegexMatch",
     expr: exprArg(expr),
@@ -1565,7 +1548,7 @@ function makeBuilder(): ExprBuilder {
 }
 
 // The standalone `c.case` / `c.fn` / `c.pg` builders surfaced at a value position
-// (`cCase(...)`, `cFn.now()`, `cPg.eqAnyArray(...)`) — the SAME objects installed on the
+// (`cCase(...)`, `cFn.now()`, `cPg.regex(...)`) — the SAME objects installed on the
 // `(c) => Expr` builder above. These are exported for the engine-embedded
 // recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
 // which requires the full engine-consumed surface. Not re-exported through the

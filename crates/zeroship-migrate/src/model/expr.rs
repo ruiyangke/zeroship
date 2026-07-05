@@ -11,7 +11,7 @@
 //! The variants are exactly:
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
-//! Cast | Between | Like | DistinctFrom | Agg | PgArrayMembership | PgRegexMatch |
+//! Cast | Between | Like | DistinctFrom | Agg | InList | PgRegexMatch |
 //! PgColumnSize | Extract | PgInterval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
@@ -181,18 +181,6 @@ pub enum CastTarget {
     /// faithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,
     /// not a `::text` substitute (vendor spec §2.10 / §5.3).
     Uuid,
-}
-
-/// **PG-ONLY** membership operator over a literal text array. The closed variants
-/// intentionally encode the two Postgres idioms the platform's dumped CHECK/domain
-/// predicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum PgArrayMembershipOp {
-    /// `<expr> = ANY (ARRAY[...])`
-    Eq,
-    /// `<expr> <> ALL (ARRAY[...])`
-    Ne,
 }
 
 /// CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
@@ -373,17 +361,20 @@ pub enum Expr {
         #[serde(default, skip_serializing_if = "is_false")]
         distinct: bool,
     },
-    /// **PG-ONLY** text-array membership rendered exactly as
-    /// `(<expr> = ANY (ARRAY['a'::text, ...]))` or
-    /// `(<expr> <> ALL (ARRAY['a'::text, ...]))`.
-    PgArrayMembership {
-        /// The expression tested against the literal text array.
+    /// A **portable** text-list membership predicate (`c("x").in([...])` /
+    /// `c("x").notIn([...])`). PostgreSQL renders in the pg_dump-faithful
+    /// `= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite
+    /// and MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:
+    /// `IN []` renders false, `NOT IN []` renders true.
+    InList {
+        /// The expression tested against the literal text list.
         expr: Box<Expr>,
-        /// Which membership idiom to render.
-        op: PgArrayMembershipOp,
-        /// Text array elements. Rendered as safe string literals with an explicit
-        /// `::text` cast on every element to match pg_dump's CHECK/domain shape.
+        /// Text elements. PostgreSQL renders each as a safe string literal with an
+        /// explicit `::text` cast to match pg_dump's CHECK/domain shape.
         elems: Vec<String>,
+        /// `false` => membership (`IN` / `= ANY`); `true` => non-membership
+        /// (`NOT IN` / `<> ALL`).
+        negated: bool,
     },
     /// **PG-ONLY** regex match rendered exactly as
     /// `(<expr> ~ '<pattern>'::text)`.

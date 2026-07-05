@@ -245,6 +245,88 @@ async fn ir_authored_insert_update_delete_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
+#[compio::test]
+async fn in_list_predicates_apply_identically_on_pg() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    setup(&conn, &cfg).await;
+    let s = q(&cfg.project_schema);
+
+    let create = r#"{"ir_version":1,"name":"create_inlist_rows","ops":[
+        {"op":"createTable","name":"inlist_rows","columns":[
+            {"name":"status","type":"text","nullable":false},
+            {"name":"in_match","type":"text","nullable":false},
+            {"name":"not_in_match","type":"text","nullable":false},
+            {"name":"empty_in_match","type":"text","nullable":false},
+            {"name":"empty_not_in_match","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, create, &registry(&[]), Approval::None).await;
+
+    let seed = r#"{"ir_version":1,"name":"seed_inlist_rows","ops":[
+        {"op":"insert","table":"inlist_rows",
+         "columns":["id","created_at","updated_at","version","status","in_match","not_in_match","empty_in_match","empty_not_in_match"],
+         "rows":[
+            ["r1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"active","no","no","no","no"],
+            ["r2","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"trial","no","no","no","no"],
+            ["r3","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"deleted","no","no","no","no"],
+            ["r4","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"archived","no","no","no","no"]
+         ]}
+    ]}"#;
+    author_and_apply(&conn, &cfg, seed, &registry(&[("inlist_rows", APP)]), Approval::None).await;
+
+    let updates = r#"{"ir_version":1,"name":"update_inlist_rows","ops":[
+        {"op":"update","table":"inlist_rows",
+         "set":{"in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["active","trial"],"negated":false}},
+        {"op":"update","table":"inlist_rows",
+         "set":{"not_in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["deleted","archived"],"negated":true}},
+        {"op":"update","table":"inlist_rows",
+         "set":{"empty_in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":false}},
+        {"op":"update","table":"inlist_rows",
+         "set":{"empty_not_in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":true}}
+    ]}"#;
+    author_and_apply(&conn, &cfg, updates, &registry(&[("inlist_rows", APP)]), Approval::None).await;
+
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT status, in_match, not_in_match, empty_in_match, empty_not_in_match \
+                 FROM {s}.inlist_rows ORDER BY status"
+            ),
+            &[],
+        )
+        .await
+        .expect("read inList proof rows");
+    let got = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+                row.get::<_, String>(3),
+                row.get::<_, String>(4),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        got,
+        vec![
+            ("active".into(), "yes".into(), "yes".into(), "no".into(), "yes".into()),
+            ("archived".into(), "no".into(), "no".into(), "no".into(), "yes".into()),
+            ("deleted".into(), "no".into(), "no".into(), "no".into(), "yes".into()),
+            ("trial".into(), "yes".into(), "yes".into(), "no".into(), "yes".into()),
+        ],
+        "PG inList/notIn/empty-list predicate matrix"
+    );
+
+    teardown(&conn, &cfg).await;
+}
+
 /// Bind-safety on real PG: a metacharacter-laden insert value is stored verbatim
 /// (native `$n` bind) — the table survives and the value is byte-identical.
 #[compio::test]

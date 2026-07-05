@@ -3774,35 +3774,35 @@
           ]
         },
         {
-          "description": "**PG-ONLY** text-array membership rendered exactly as\n`(<expr> = ANY (ARRAY['a'::text, ...]))` or\n`(<expr> <> ALL (ARRAY['a'::text, ...]))`.",
+          "description": "A **portable** text-list membership predicate (`c(\"x\").in([...])` /\n`c(\"x\").notIn([...])`). PostgreSQL renders in the pg_dump-faithful\n`= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite\nand MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:\n`IN []` renders false, `NOT IN []` renders true.",
           "type": "object",
           "properties": {
             "expr": {
-              "description": "The expression tested against the literal text array.",
+              "description": "The expression tested against the literal text list.",
               "$ref": "#/$defs/Expr"
             },
-            "op": {
-              "description": "Which membership idiom to render.",
-              "$ref": "#/$defs/PgArrayMembershipOp"
-            },
             "elems": {
-              "description": "Text array elements. Rendered as safe string literals with an explicit\n`::text` cast on every element to match pg_dump's CHECK/domain shape.",
+              "description": "Text elements. PostgreSQL renders each as a safe string literal with an\nexplicit `::text` cast to match pg_dump's CHECK/domain shape.",
               "type": "array",
               "items": {
                 "type": "string"
               }
             },
+            "negated": {
+              "description": "`false` => membership (`IN` / `= ANY`); `true` => non-membership\n(`NOT IN` / `<> ALL`).",
+              "type": "boolean"
+            },
             "node": {
               "type": "string",
-              "const": "pgArrayMembership"
+              "const": "inList"
             }
           },
           "additionalProperties": false,
           "required": [
             "node",
             "expr",
-            "op",
-            "elems"
+            "elems",
+            "negated"
           ]
         },
         {
@@ -4237,21 +4237,6 @@
           "description": "`max(<arg>)`.",
           "type": "string",
           "const": "max"
-        }
-      ]
-    },
-    "PgArrayMembershipOp": {
-      "description": "**PG-ONLY** membership operator over a literal text array. The closed variants\nintentionally encode the two Postgres idioms the platform's dumped CHECK/domain\npredicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.",
-      "oneOf": [
-        {
-          "description": "`<expr> = ANY (ARRAY[...])`",
-          "type": "string",
-          "const": "eq"
-        },
-        {
-          "description": "`<expr> <> ALL (ARRAY[...])`",
-          "type": "string",
-          "const": "ne"
         }
       ]
     },

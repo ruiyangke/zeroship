@@ -69,7 +69,7 @@ const TS = {
   Expr: [
     "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
     "between", "like", "distinctFrom", "agg",
-    "pgArrayMembership", "pgRegexMatch", "pgColumnSize", "extract", "pgInterval",
+    "inList", "pgRegexMatch", "pgColumnSize", "extract", "pgInterval",
     "dialect",
   ].sort(),
   // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted
@@ -97,7 +97,6 @@ const TS = {
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
   SynthDefaultFn: ["now", "genRandomUuid"].sort(),
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
-  PgArrayMembershipOp: ["eq", "ne"].sort(),
   ExtractField: ["day"].sort(),
   AggFunc: ["count", "sum", "avg", "min", "max"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
@@ -286,7 +285,6 @@ test("closed string-enum tokens match the schema", () => {
     "SynthFn",
     "SynthDefaultFn",
     "CastTarget",
-    "PgArrayMembershipOp",
     "ExtractField",
     "AggFunc",
     "IndexSortOrder",
