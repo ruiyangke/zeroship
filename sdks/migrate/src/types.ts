@@ -348,6 +348,7 @@ export interface SequenceHandle {
 // ── Scalars / rows ──
 
 declare const decimalValueBrand: unique symbol;
+declare const bytesValueBrand: unique symbol;
 
 /** A branded decimal value produced by the top-level `decimal("...")`
  *  constructor. The recorder normalizes it to the IR `{ decimal: "..." }`
@@ -357,16 +358,26 @@ export interface DecimalValue {
   readonly decimal: string;
 }
 
+/** A branded bytes value produced by the top-level `byteValue(...)`
+ *  constructor. The recorder normalizes it to the IR `{ bytes: "<base64>" }`
+ *  scalar carrier; raw `Uint8Array` values remain accepted. */
+export interface BytesValue {
+  readonly [bytesValueBrand]: "bytes";
+  readonly bytes: string;
+}
+
 /** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
- *  carry (§3.5 numeric domain). The builder normalizes a branded `decimal(...)`
- *  into the `{ decimal }` IR carrier and a `Uint8Array` into the `{ bytes:
- *  base64 }` carrier before recording. */
+ *  carry (§3.5 numeric / bytes domain). The builder normalizes a branded
+ *  `decimal(...)` into the `{ decimal }` IR carrier, a branded `byteValue(...)`
+ *  into the `{ bytes }` carrier, and a `Uint8Array` into the `{ bytes: base64 }`
+ *  carrier before recording. */
 export type ScalarValue =
   | string
   | number
   | boolean
   | null
   | DecimalValue
+  | BytesValue
   | Uint8Array;
 
 declare const dbSynthSymbolBrand: unique symbol;

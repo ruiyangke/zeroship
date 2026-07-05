@@ -27,6 +27,7 @@ import {
   notMembership,
   lit,
   decimal,
+  byteValue,
   interval,
   dialect,
 } from "../src/index.js";
@@ -45,6 +46,7 @@ import {
   table as engTable,
   nextval as engNextval,
   decimal as engDecimal,
+  byteValue as engByteValue,
 } from "../dist/embedded-recorder.js";
 
 /** Record one phase's ops via the ambient recorder. */
@@ -54,9 +56,9 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any }) => void): any[] {
+function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any; byteValue: any }) => void): any[] {
   engBegin();
-  up({ table: engTable, t: engT, nextval: engNextval, decimal: engDecimal });
+  up({ table: engTable, t: engT, nextval: engNextval, decimal: engDecimal, byteValue: engByteValue });
   return engDrain();
 }
 
@@ -496,6 +498,37 @@ test("decimal() validates decimal strings and records byte-identical IR", () => 
   );
 });
 
+test("byteValue() validates bytes inputs and records byte-identical IR", () => {
+  const ops = record(() => {
+    table("t").insert({
+      rows: [
+        {
+          raw: new Uint8Array([1, 2, 3]),
+          fromBytes: byteValue(new Uint8Array([1, 2, 3])),
+          fromString: byteValue("AQID"),
+        },
+      ],
+    });
+    table("t").create({ columns: { raw: t.bytes().default(byteValue("AQID")) } });
+    table("t").insert({
+      rows: [{ id: 1 }],
+      onConflict: { columns: ["id"], doUpdate: { raw: byteValue(new Uint8Array([1, 2, 3])) } as any },
+    });
+    table("t").check("raw_chk").add({ expr: (c) => c("raw").eq(byteValue("AQID")) });
+    lit(byteValue("AQID"));
+  });
+
+  assert.deepEqual(ops[0].rows, [[{ bytes: "AQID" }, { bytes: "AQID" }, { bytes: "AQID" }]]);
+  assert.deepEqual(ops[1].columns[0].default, { literal: { value: { bytes: "AQID" } } });
+  assert.deepEqual(ops[2].onConflict.doUpdate, { raw: { bytes: "AQID" } });
+  assert.deepEqual(ops[3].constraint.kind.expr.rhs.value, { bytes: "AQID" });
+
+  assert.throws(
+    () => byteValue("not base64?"),
+    (e: any) => e.code === "OP_INVALID" && /well-formed base64 string/.test(e.message) && /byteValue/.test(e.message),
+  );
+});
+
 test("public and engine recorders match for decimal() scalar values", () => {
   const pub = record(() => {
     table("t").insert({ rows: [{ price: decimal("0.00") }] });
@@ -504,6 +537,18 @@ test("public and engine recorders match for decimal() scalar values", () => {
   const eng = recordEngine(({ table, t, decimal }) => {
     table("t").insert({ rows: [{ price: decimal("0.00") }] });
     table("t").create({ columns: { price: t.numeric(12, 2).default(decimal("0.00")) } });
+  });
+  assert.deepEqual(pub, eng);
+});
+
+test("public and engine recorders match for byteValue() scalar values", () => {
+  const pub = record(() => {
+    table("t").insert({ rows: [{ raw: byteValue("AQID") }] });
+    table("t").create({ columns: { raw: t.bytes().default(byteValue(new Uint8Array([1, 2, 3]))) } });
+  });
+  const eng = recordEngine(({ table, t, byteValue }) => {
+    table("t").insert({ rows: [{ raw: byteValue("AQID") }] });
+    table("t").create({ columns: { raw: t.bytes().default(byteValue(new Uint8Array([1, 2, 3]))) } });
   });
   assert.deepEqual(pub, eng);
 });
