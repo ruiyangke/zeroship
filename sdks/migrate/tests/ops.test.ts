@@ -702,7 +702,7 @@ test("the (c) => Expr builder constructs the closed AST", () => {
       set: {
         a: (c) => c("x").add(1).mul(2).cast("integer"),
         b: (c) => c.fn.concatWs(" ", c("p"), c("q")),
-        d: (c) => c.fn.case([[c("x").lt(0), c("y")]], c("z")),
+        d: (c) => c.case({ when: [{ when: c("x").lt(0), then: c("y") }], else: c("z") }),
       },
       where: (c) => c("x").gt(0).and(c("y").isNotNull()),
     }),
@@ -715,6 +715,29 @@ test("the (c) => Expr builder constructs the closed AST", () => {
   assert.equal(set.b.fn, "concatWs");
   assert.equal(set.d.node, "case");
   assert.equal(ops[0].where.op, "and");
+});
+
+test("c.case validates the object branch shape", () => {
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").update({
+          set: { x: (c) => c.case({ when: [] }) },
+          where: (c) => c("id").isNotNull(),
+        }),
+      ),
+    /c\.case\(\{ when: \[\{ when, then \}\], else\? \}\): when must be a non-empty array/,
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").update({
+          set: { x: (c) => c.case({ when: [[c("a"), c("b")]] as any }) },
+          where: (c) => c("id").isNotNull(),
+        }),
+      ),
+    /c\.case\(\{ when: \[\{ when, then \}\], else\? \}\): when\[0\] must be an object with when and then/,
+  );
 });
 
 test("the two-arg c('table','col') records a qualified colRef; one-arg stays unqualified", () => {

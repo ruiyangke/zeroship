@@ -1358,22 +1358,6 @@ const fn: FnNamespace = {
     }),
   currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
   concatWs: (sep, ...parts) => chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
-  case: (branches, elseVal) => {
-    if (!Array.isArray(branches)) {
-      throw structuredError("OP_INVALID", "c.fn.case(branches, else?): branches must be an array of [cond, result]");
-    }
-    const node: Node = {
-      node: "case",
-      branches: branches.map((b) => {
-        if (!Array.isArray(b) || b.length !== 2) {
-          throw structuredError("OP_INVALID", "c.fn.case branch must be a [condition, result] pair");
-        }
-        return { condition: exprArg(b[0]), result: exprArg(b[1]) };
-      }),
-    };
-    if (elseVal !== undefined) node.else = exprArg(elseVal);
-    return chain(node);
-  },
   splitPart: (col, delim, n) => {
     splitPartGrammarLint(delim, n);
     return chain({
@@ -1437,6 +1421,43 @@ const pgExpr: PgExprNamespace = {
   }),
 };
 
+type CaseExprArgs = {
+  when: Array<{ when: unknown; then: unknown }>;
+  else?: unknown;
+};
+
+function caseExpr(args: CaseExprArgs): ExprChainType {
+  const shape = "c.case({ when: [{ when, then }], else? })";
+  if (!isPlainObject(args)) {
+    throw structuredError("OP_INVALID", `${shape}: args must be an object`);
+  }
+  const branches = args.when;
+  if (!Array.isArray(branches) || branches.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${shape}: when must be a non-empty array of { when, then } objects`,
+    );
+  }
+  const node: Node = {
+    node: "case",
+    branches: branches.map((branch, i) => {
+      if (
+        !isPlainObject(branch) ||
+        !Object.prototype.hasOwnProperty.call(branch, "when") ||
+        !Object.prototype.hasOwnProperty.call(branch, "then")
+      ) {
+        throw structuredError(
+          "OP_INVALID",
+          `${shape}: when[${i}] must be an object with when and then`,
+        );
+      }
+      return { when: exprArg(branch.when), then: exprArg(branch.then) };
+    }),
+  };
+  if (args.else !== undefined) node.else = exprArg(args.else);
+  return chain(node);
+}
+
 function makeBuilder(): ExprBuilder {
   // One-arg `c("col")` → unqualified colRef (byte-identical to the pre-
   // qualification wire shape). Two-arg `c("table", "col")` → qualified colRef
@@ -1451,19 +1472,21 @@ function makeBuilder(): ExprBuilder {
     return chain({ node: "colRef", table: first, name: second });
   }) as unknown as ExprBuilder;
   c.col = c;
+  c.case = caseExpr;
   c.fn = fn;
   c.agg = agg;
   c.pg = pgExpr;
   return c;
 }
 
-// The standalone `c.fn` / `c.pg` namespaces surfaced at a value position
-// (`cFn.now()`, `cPg.eqAnyArray(...)`) — the SAME objects installed on the
+// The standalone `c.case` / `c.fn` / `c.pg` builders surfaced at a value position
+// (`cCase(...)`, `cFn.now()`, `cPg.eqAnyArray(...)`) — the SAME objects installed on the
 // `(c) => Expr` builder above. These are exported for the engine-embedded
 // recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
 // which requires the full engine-consumed surface. Not re-exported through the
 // SDK public `.` entry (`index.ts`); a value-position namespace is a Phase-2
 // surface decision.
+export const cCase = caseExpr;
 export const cFn = fn;
 export const cAgg = agg;
 export const cPg = pgExpr;

@@ -782,8 +782,8 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
             for b in branches {
-                let c = render_expr_bound(&b.condition, ctx)?;
-                let r = render_expr_bound(&b.result, ctx)?;
+                let c = render_expr_bound(&b.when, ctx)?;
+                let r = render_expr_bound(&b.then, ctx)?;
                 s.push_str(&format!(" WHEN {c} THEN {r}"));
             }
             if let Some(e) = r#else {
@@ -963,8 +963,8 @@ where
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
             for b in branches {
-                let c = render_expr_inline_with_col(&b.condition, dialect, col_ref)?;
-                let r = render_expr_inline_with_col(&b.result, dialect, col_ref)?;
+                let c = render_expr_inline_with_col(&b.when, dialect, col_ref)?;
+                let r = render_expr_inline_with_col(&b.then, dialect, col_ref)?;
                 s.push_str(&format!(" WHEN {c} THEN {r}"));
             }
             if let Some(e) = r#else {

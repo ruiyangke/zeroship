@@ -3552,11 +3552,11 @@
           ]
         },
         {
-          "description": "A searched `CASE` (`c.fn.case([[cond, val], …], else?)`). Each branch is\n`(condition, result)`; both halves are themselves closed-AST nodes.",
+          "description": "A searched `CASE` (`c.case({ when: [{ when, then }], else? })`). Each branch is\n`(when, then)`; both halves are themselves closed-AST nodes.",
           "type": "object",
           "properties": {
             "branches": {
-              "description": "`(condition, result)` branches, in order.",
+              "description": "`(when, then)` branches, in order.",
               "type": "array",
               "items": {
                 "$ref": "#/$defs/CaseBranch"
@@ -4052,22 +4052,22 @@
       ]
     },
     "CaseBranch": {
-      "description": "One `(condition, result)` branch of a [`Expr::Case`].",
+      "description": "One `(when, then)` branch of a [`Expr::Case`].",
       "type": "object",
       "properties": {
-        "condition": {
-          "description": "The branch condition (a boolean closed-AST node).",
+        "when": {
+          "description": "The `WHEN` predicate (a boolean closed-AST node).",
           "$ref": "#/$defs/Expr"
         },
-        "result": {
-          "description": "The branch result.",
+        "then": {
+          "description": "The `THEN` result.",
           "$ref": "#/$defs/Expr"
         }
       },
       "additionalProperties": false,
       "required": [
-        "condition",
-        "result"
+        "when",
+        "then"
       ]
     },
     "ScalarFn": {

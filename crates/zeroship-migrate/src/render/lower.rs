@@ -5206,8 +5206,8 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             }
             Expr::Case { branches, r#else } => {
                 for branch in branches {
-                    collect_col_refs(&branch.condition, out);
-                    collect_col_refs(&branch.result, out);
+                    collect_col_refs(&branch.when, out);
+                    collect_col_refs(&branch.then, out);
                 }
                 if let Some(expr) = r#else {
                     collect_col_refs(expr, out);

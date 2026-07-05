@@ -479,8 +479,6 @@ export interface FnNamespace {
   currentUser(): ExprChain;
   /** NULL-skipping safe-join (renders byte-identically on PG/SQLite). */
   concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
-  /** The searched `CASE` form. */
-  case(branches: [unknown, unknown][], elseVal?: unknown): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
   splitPart(col: unknown, delim: string, n: number): ExprChain;
   /** DB-evaluated apply-time scalars, equivalent to the supported bare native
@@ -533,6 +531,8 @@ export interface ExprBuilder {
   (table: string, name: string): ExprChain;
   col(name: string): ExprChain;
   col(table: string, name: string): ExprChain;
+  /** The searched `CASE` form: `c.case({ when: [{ when, then }], else? })`. */
+  case(args: { when: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
   fn: FnNamespace;
   agg: AggNamespace;
   pg: PgExprNamespace;

@@ -2862,9 +2862,9 @@ impl Ctx<'_> {
             }
             Expr::UnaryOp { operand, .. } => self.walk_depth(operand, d),
             Expr::Case { branches, r#else } => {
-                for CaseBranch { condition, result } in branches {
-                    self.walk_depth(condition, d)?;
-                    self.walk_depth(result, d)?;
+                for CaseBranch { when, then } in branches {
+                    self.walk_depth(when, d)?;
+                    self.walk_depth(then, d)?;
                 }
                 if let Some(e) = r#else {
                     self.walk_depth(e, d)?;
@@ -3552,11 +3552,11 @@ mod tests {
         // Case + FnCall(coalesce) + concat.
         let case = Expr::Case {
             branches: vec![CaseBranch {
-                condition: Expr::UnaryOp {
+                when: Expr::UnaryOp {
                     op: UnaryOp::IsNull,
                     operand: Box::new(Expr::col("first")),
                 },
-                result: Expr::lit(IrScalar::Str("none".into())),
+                then: Expr::lit(IrScalar::Str("none".into())),
             }],
             r#else: Some(Box::new(Expr::FnCall {
                 r#fn: ScalarFn::Coalesce,
