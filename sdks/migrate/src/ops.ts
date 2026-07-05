@@ -2004,14 +2004,19 @@ function partitionSpecToIr(spec: PartitionByInput | undefined, what: string): No
   if (!spec || typeof spec !== "object") {
     throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
   }
-  const shape = spec as { range?: unknown; list?: unknown; hash?: unknown };
+  const shape = spec as { range?: unknown; list?: unknown; hash?: unknown; whenUnsupported?: unknown };
   const variants = (shape.range !== undefined ? 1 : 0) + (shape.list !== undefined ? 1 : 0) + (shape.hash !== undefined ? 1 : 0);
   if (variants !== 1) {
     throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
   }
-  if (shape.range !== undefined) return { kind: "range", columns: stringArray(shape.range, `${what}.range`) };
-  if (shape.list !== undefined) return { kind: "list", columns: stringArray(shape.list, `${what}.list`) };
-  return { kind: "hash", columns: stringArray(shape.hash, `${what}.hash`) };
+  const collapse = shape.whenUnsupported === undefined ? undefined : shape.whenUnsupported;
+  if (collapse !== undefined && collapse !== "collapse") {
+    throw structuredError("OP_INVALID", `${what}.whenUnsupported must be "collapse" when present`);
+  }
+  const affirmation = { collapse: collapse === "collapse" };
+  if (shape.range !== undefined) return { kind: "range", columns: stringArray(shape.range, `${what}.range`), ...affirmation };
+  if (shape.list !== undefined) return { kind: "list", columns: stringArray(shape.list, `${what}.list`), ...affirmation };
+  return { kind: "hash", columns: stringArray(shape.hash, `${what}.hash`), ...affirmation };
 }
 
 function requireU32(v: unknown, what: string): number | undefined {

@@ -270,8 +270,12 @@ pub use model::expr::{
 pub use model::validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
     AuthoringError, Dialect as ValidatorDialect, TargetScope, UnsupportedKind,
-    CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE,
-    CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
+    CODE_COLLAPSE_DROP_NOT_YET_REALIZED, CODE_COLUMN_FACET_CONFLICT,
+    CODE_DIALECT_SCOPE_PGONLY, CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE,
+    CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED,
+    CODE_PARTITION_BOUNDS_NOT_TOTAL, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
+    CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
+    CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
 };
 // The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`, unchanged): these are the net-new ordered

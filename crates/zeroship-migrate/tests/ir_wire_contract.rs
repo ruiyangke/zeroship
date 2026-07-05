@@ -918,6 +918,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
         indexes: vec![],
         partition_by: Some(PartitionSpec::Range {
             columns: vec!["created_at".into()],
+            collapse: false,
         }),
         runtime_options: None,
         schema: None,
@@ -926,6 +927,14 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     let value = serde_json::to_value(&parent).unwrap();
     assert!(value.get("partitionBy").is_some(), "partition key must be camelCase: {value}");
     assert!(value.get("partition_by").is_none(), "snake_case partition key must not serialize: {value}");
+    assert_eq!(
+        value
+            .get("partitionBy")
+            .and_then(|partition| partition.get("collapse"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "partitionBy.collapse must serialize explicitly on the wire: {value}"
+    );
     let back: Op = serde_json::from_value(value).unwrap();
     assert_eq!(parent, back);
 

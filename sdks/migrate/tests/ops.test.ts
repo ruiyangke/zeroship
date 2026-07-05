@@ -1551,6 +1551,10 @@ test("partitionBy records range/list/hash specs on createTable", () => {
       columns: { tenant_id: t.text() },
       partitionBy: { hash: ["tenant_id"] },
     });
+    table("events_collapse").create({
+      columns: { ts: t.timestamp() },
+      partitionBy: { range: ["ts"], whenUnsupported: "collapse" },
+    });
   });
 
   assert.deepEqual(ops, [
@@ -1558,21 +1562,40 @@ test("partitionBy records range/list/hash specs on createTable", () => {
       op: "createTable",
       name: "events_range",
       columns: [{ name: "ts", type: "timestamp" }],
-      partitionBy: { kind: "range", columns: ["ts"] },
+      partitionBy: { kind: "range", columns: ["ts"], collapse: false },
     },
     {
       op: "createTable",
       name: "events_list",
       columns: [{ name: "region", type: "text" }],
-      partitionBy: { kind: "list", columns: ["region"] },
+      partitionBy: { kind: "list", columns: ["region"], collapse: false },
     },
     {
       op: "createTable",
       name: "events_hash",
       columns: [{ name: "tenant_id", type: "text" }],
-      partitionBy: { kind: "hash", columns: ["tenant_id"] },
+      partitionBy: { kind: "hash", columns: ["tenant_id"], collapse: false },
+    },
+    {
+      op: "createTable",
+      name: "events_collapse",
+      columns: [{ name: "ts", type: "timestamp" }],
+      partitionBy: { kind: "range", columns: ["ts"], collapse: true },
     },
   ]);
+});
+
+test("partitionBy rejects unknown whenUnsupported affirmations", () => {
+  assert.throws(
+    () =>
+      record(() => {
+        table("events").create({
+          columns: { ts: t.timestamp() },
+          partitionBy: { range: ["ts"], whenUnsupported: "skip" } as any,
+        });
+      }),
+    (e: any) => e.code === "OP_INVALID" && /whenUnsupported/.test(e.message),
+  );
 });
 
 test("table().partition().create records range and default createPartition ops", () => {

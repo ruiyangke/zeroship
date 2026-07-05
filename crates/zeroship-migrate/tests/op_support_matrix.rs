@@ -7,7 +7,7 @@ use zeroship_migrate::model::ir::{
     IrDefault, Op, PartitionBounds, PartitionSpec, SequenceRef, TriggerAction, ViewQuery,
 };
 use zeroship_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
-use zeroship_migrate::model::validate::{validate_ir_scoped, CODE_UNSUPPORTED};
+use zeroship_migrate::model::validate::{validate_ir_scoped, CODE_DIALECT_UNSUPPORTED};
 use zeroship_migrate::{
     IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, PolicyProfile, SchemaScope, SqlDialect,
     CURRENT_IR_VERSION,
@@ -346,6 +346,7 @@ fn partitioned_create_table() -> Op {
         indexes: vec![],
         partition_by: Some(PartitionSpec::Range {
             columns: vec!["created_at".into()],
+            collapse: false,
         }),
         runtime_options: None,
         schema: None,
@@ -542,6 +543,9 @@ fn identity_always_ops() -> Vec<Op> {
 #[test]
 fn partition_ops_and_partition_index_features_are_pg_only() {
     for op in partition_feature_ops() {
+        if matches!(op, Op::CreatePartition { .. }) {
+            continue;
+        }
         let tag = op_tag(&op);
         let support = op.support();
         for dialect in DIALECTS {
@@ -577,9 +581,9 @@ fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
             &PolicyProfile::platform(),
         )
         .expect_err("partitioned createTable must fail closed off PostgreSQL");
-        assert_eq!(err.code, CODE_UNSUPPORTED, "{dialect:?}: {err}");
+        assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "{dialect:?}: {err}");
         assert!(
-            err.reason.contains("partitioned tables are PostgreSQL-only"),
+            err.reason.contains("partitionBy.whenUnsupported"),
             "{dialect:?}: {err}"
         );
     }
