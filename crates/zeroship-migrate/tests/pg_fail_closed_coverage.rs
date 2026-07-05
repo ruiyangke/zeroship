@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zeroship_migrate::model::expr::{Expr, PgExtractField, ScalarFn};
 use zeroship_migrate::model::ir::{
-    FuncLanguage, GrantTarget, IrScalar, IrValue, MigrationIr, Op, PolicyCmd, Privilege, SelectAst,
-    TableRef, ViewQuery, CURRENT_IR_VERSION,
+    FuncLanguage, GrantTarget, IrScalar, IrValue, MigrationIr, Op, PartitionBounds, PolicyCmd,
+    Privilege, SelectAst, TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
 use zeroship_migrate::model::validate::{
     validate_expr, validate_ir_scoped, Dialect, TargetScope, CODE_UNSUPPORTED,
@@ -23,13 +23,13 @@ const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
 
 const EXPECTED_PG_VENDOR_OP_KINDS: &[&str] = &[
     "AlterRole",
+    "AttachPartition",
     "CreateExtension",
     "CreateFunction",
     "CreatePolicy",
     "CreateRole",
     "CreateSchema",
     "CreateView::Materialized",
-    "DisableRls",
     "DropExtension",
     "DropFunction",
     "DropOwnedBy",
@@ -37,12 +37,10 @@ const EXPECTED_PG_VENDOR_OP_KINDS: &[&str] = &[
     "DropRole",
     "DropSchema",
     "DropView::Materialized",
-    "EnableRls",
-    "ForceRls",
     "Grant",
-    "NoForceRls",
     "PgRaw",
     "Revoke",
+    "SetRls",
 ];
 
 fn lit_str(value: &str) -> Expr {
@@ -257,10 +255,8 @@ fn pg_vendor_op_kind(op: &Op) -> Option<&'static str> {
         Op::DropOwnedBy { .. } => Some("DropOwnedBy"),
         Op::Grant { .. } => Some("Grant"),
         Op::Revoke { .. } => Some("Revoke"),
-        Op::EnableRls { .. } => Some("EnableRls"),
-        Op::ForceRls { .. } => Some("ForceRls"),
-        Op::DisableRls { .. } => Some("DisableRls"),
-        Op::NoForceRls { .. } => Some("NoForceRls"),
+        Op::AttachPartition { .. } => Some("AttachPartition"),
+        Op::SetRls { .. } => Some("SetRls"),
         Op::CreatePolicy { .. } => Some("CreatePolicy"),
         Op::DropPolicy { .. } => Some("DropPolicy"),
         Op::CreateFunction { .. } => Some("CreateFunction"),
@@ -331,21 +327,17 @@ fn pg_vendor_op_samples() -> Vec<Op> {
             },
             from: vec!["app_reader".to_string()],
         },
-        Op::EnableRls {
-            table: "users".to_string(),
+        Op::AttachPartition {
+            parent: "events".to_string(),
+            name: "events_2026_11".to_string(),
+            bound: PartitionBounds::Default,
             schema: None,
         },
-        Op::ForceRls {
+        Op::SetRls {
             table: "users".to_string(),
             schema: None,
-        },
-        Op::DisableRls {
-            table: "users".to_string(),
-            schema: None,
-        },
-        Op::NoForceRls {
-            table: "users".to_string(),
-            schema: None,
+            enabled: Some(true),
+            forced: Some(true),
         },
         Op::CreatePolicy {
             name: "tenant_isolation".to_string(),

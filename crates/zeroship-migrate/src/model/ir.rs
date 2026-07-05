@@ -2474,6 +2474,18 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
+    /// `ALTER TABLE <parent> ATTACH PARTITION <name> FOR VALUES ...`.
+    AttachPartition {
+        /// Parent partitioned table.
+        parent: String,
+        /// Partition table name.
+        name: String,
+        /// Partition bounds.
+        bound: PartitionBounds,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
     /// `ALTER TABLE <parent> DETACH PARTITION <name> [CONCURRENTLY]`.
     DetachPartition {
         /// Parent partitioned table.
@@ -3245,37 +3257,19 @@ pub enum Op {
         /// The roles to revoke from (`"public"` is the reserved `PUBLIC` sentinel).
         from: Vec<String>,
     },
-    /// **VENDOR** — `ALTER TABLE … ENABLE ROW LEVEL SECURITY`.
-    EnableRls {
+    /// **VENDOR** — `ALTER TABLE … {ENABLE|DISABLE|FORCE|NO FORCE} ROW LEVEL SECURITY`.
+    SetRls {
         /// The target table.
         table: String,
         /// The schema qualifier.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
-    },
-    /// **VENDOR** — `ALTER TABLE … FORCE ROW LEVEL SECURITY`.
-    ForceRls {
-        /// The target table.
-        table: String,
-        /// The schema qualifier.
+        /// Optional enabled-state patch (`true` = ENABLE, `false` = DISABLE).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
-    },
-    /// **VENDOR** — `ALTER TABLE … DISABLE ROW LEVEL SECURITY` (down-file).
-    DisableRls {
-        /// The target table.
-        table: String,
-        /// The schema qualifier.
+        enabled: Option<bool>,
+        /// Optional force-state patch (`true` = FORCE, `false` = NO FORCE).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
-    },
-    /// **VENDOR** — `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` (down-file).
-    NoForceRls {
-        /// The target table.
-        table: String,
-        /// The schema qualifier.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
+        forced: Option<bool>,
     },
     /// **VENDOR** — `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING
     /// (<using>) [WITH CHECK (<with_check>)]`. The predicate is a CLOSED `Expr`
@@ -3533,9 +3527,10 @@ impl Op {
                 "nonportableByDefaultIdentity" => Self::BY_DEFAULT_IDENTITY_SINGLE_PK,
                 _ => Self::NEVER_REFUSED,
             },
-            Op::CreatePartition { .. } | Op::DetachPartition { .. } | Op::DropPartition { .. } => {
-                "partition lifecycle operations are PostgreSQL-only"
-            }
+            Op::CreatePartition { .. }
+            | Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. } => "partition lifecycle operations are PostgreSQL-only",
             Op::AddColumn { .. } => match variant {
                 "identity" => {
                     "addColumn identity is PostgreSQL-only; SQLite/MySQL auto-increment \
@@ -3622,10 +3617,7 @@ impl Op {
                 "role vendor primitives are PostgreSQL-only"
             }
             Op::Grant { .. } | Op::Revoke { .. } => "grant vendor primitives are PostgreSQL-only",
-            Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. } => "RLS vendor primitives are PostgreSQL-only",
+            Op::SetRls { .. } => "RLS vendor primitives are PostgreSQL-only",
             Op::CreatePolicy { .. } | Op::DropPolicy { .. } => {
                 "policy vendor primitives are PostgreSQL-only"
             }
@@ -3720,7 +3712,7 @@ impl Op {
     fn support_tier(&self) -> crate::model::support::SupportTier {
         use crate::model::support::{
             SupportTier, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT, CAP_MATERIALIZED_VIEW, CAP_POLICY,
-            CAP_RAW_MATERIALIZED_VIEW, CAP_RAW_SQL, CAP_RLS, CAP_ROLE, CAP_SCHEMA,
+            CAP_PARTITION, CAP_RAW_MATERIALIZED_VIEW, CAP_RAW_SQL, CAP_RLS, CAP_ROLE, CAP_SCHEMA,
         };
         match self {
             Op::CreateSchema { .. } | Op::DropSchema { .. } => SupportTier::Vendor(CAP_SCHEMA),
@@ -3732,10 +3724,8 @@ impl Op {
             | Op::DropRole { .. }
             | Op::DropOwnedBy { .. } => SupportTier::Vendor(CAP_ROLE),
             Op::Grant { .. } | Op::Revoke { .. } => SupportTier::Vendor(CAP_GRANT),
-            Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. } => SupportTier::Vendor(CAP_RLS),
+            Op::AttachPartition { .. } => SupportTier::Vendor(CAP_PARTITION),
+            Op::SetRls { .. } => SupportTier::Vendor(CAP_RLS),
             Op::CreatePolicy { .. } | Op::DropPolicy { .. } => SupportTier::Vendor(CAP_POLICY),
             Op::CreateFunction { .. } | Op::DropFunction { .. } => SupportTier::Vendor(CAP_FUNCTION),
             Op::PgRaw { .. } => SupportTier::Vendor(CAP_RAW_SQL),
@@ -3768,9 +3758,10 @@ impl Op {
         };
         match self {
             Op::CreateTable { .. } => CREATE_TABLE_FEATURES,
-            Op::CreatePartition { .. } | Op::DetachPartition { .. } | Op::DropPartition { .. } => {
-                PARTITION_FEATURES
-            }
+            Op::CreatePartition { .. }
+            | Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. } => PARTITION_FEATURES,
             Op::AddColumn { .. } => ADD_COLUMN_FEATURES,
             Op::CreateIndex { .. } => CREATE_INDEX_FEATURES,
             Op::Comment { .. } => COMMENT_FEATURES,
@@ -3810,6 +3801,7 @@ impl Op {
                 Self::create_table_variant(columns, primary_key.as_deref(), partition_by, indexes),
             ),
             Op::CreatePartition { .. } => ("createPartition", "base"),
+            Op::AttachPartition { .. } => ("attachPartition", "base"),
             Op::DetachPartition { .. } => ("detachPartition", "base"),
             Op::DropPartition { .. } => ("dropPartition", "base"),
             Op::DropTable { .. } => ("dropTable", "base"),
@@ -3962,10 +3954,7 @@ impl Op {
             Op::DropOwnedBy { .. } => ("dropOwnedBy", "base"),
             Op::Grant { .. } => ("grant", "base"),
             Op::Revoke { .. } => ("revoke", "base"),
-            Op::EnableRls { .. } => ("enableRls", "base"),
-            Op::ForceRls { .. } => ("forceRls", "base"),
-            Op::DisableRls { .. } => ("disableRls", "base"),
-            Op::NoForceRls { .. } => ("noForceRls", "base"),
+            Op::SetRls { .. } => ("setRls", "base"),
             Op::CreatePolicy { .. } => ("createPolicy", "base"),
             Op::DropPolicy { .. } => ("dropPolicy", "base"),
             Op::CreateFunction { .. } => ("createFunction", "base"),
@@ -4212,10 +4201,8 @@ impl Op {
             | Op::DropRole { .. }
             | Op::DropOwnedBy { .. } => vec![C::Role],
             Op::Grant { .. } | Op::Revoke { .. } => vec![C::Grant],
-            Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. } => vec![C::Rls],
+            Op::AttachPartition { .. } => vec![C::Partition],
+            Op::SetRls { .. } => vec![C::Rls],
             Op::CreatePolicy { .. } | Op::DropPolicy { .. } => vec![C::Policy],
             Op::CreateFunction { .. } | Op::DropFunction { .. } => vec![C::Function],
             Op::PgRaw { .. } => vec![C::RawSql],
@@ -4237,6 +4224,7 @@ impl Op {
         match self {
             Op::CreateTable { name, .. } => Some(name.as_str()),
             Op::CreatePartition { name, .. }
+            | Op::AttachPartition { name, .. }
             | Op::DetachPartition { name, .. }
             | Op::DropPartition { name, .. } => Some(name.as_str()),
             Op::SetTableOptions { table, .. } => Some(table.as_str()),
@@ -4276,10 +4264,7 @@ impl Op {
             Op::DropIndex { table, .. } => table.as_deref(),
             // VENDOR — table-scoped vendor ops (RLS / policy / trigger) touch their
             // table; the database-/role-/schema-level ones touch no table.
-            Op::EnableRls { table, .. }
-            | Op::ForceRls { table, .. }
-            | Op::DisableRls { table, .. }
-            | Op::NoForceRls { table, .. }
+            Op::SetRls { table, .. }
             | Op::CreatePolicy { table, .. }
             | Op::DropPolicy { table, .. }
             | Op::CreateTrigger { table, .. }
@@ -4310,6 +4295,7 @@ impl Op {
         match self {
             Op::CreateTable { schema, .. }
             | Op::CreatePartition { schema, .. }
+            | Op::AttachPartition { schema, .. }
             | Op::DetachPartition { schema, .. }
             | Op::DropPartition { schema, .. }
             | Op::SetTableOptions { schema, .. }
@@ -4345,10 +4331,7 @@ impl Op {
             // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
             Op::CreateExtension { schema, .. }
-            | Op::EnableRls { schema, .. }
-            | Op::ForceRls { schema, .. }
-            | Op::DisableRls { schema, .. }
-            | Op::NoForceRls { schema, .. }
+            | Op::SetRls { schema, .. }
             | Op::CreatePolicy { schema, .. }
             | Op::DropPolicy { schema, .. }
             | Op::CreateTrigger { schema, .. }
@@ -4402,7 +4385,8 @@ impl Op {
             | Op::DropEnum { existence_guard, .. }
             | Op::DropDomain { existence_guard, .. }
             | Op::DropSequence { existence_guard, .. } => *existence_guard,
-            Op::DetachPartition { .. }
+            Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
             | Op::SetTableOptions { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
@@ -4427,10 +4411,7 @@ impl Op {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateTrigger { .. }
@@ -4471,7 +4452,8 @@ impl Op {
             | Op::DropEnum { .. }
             | Op::DropDomain { .. }
             | Op::DropSequence { .. } => Some(ExistenceGuard::IfExists),
-            Op::DetachPartition { .. }
+            Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
             | Op::SetTableOptions { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
@@ -4494,10 +4476,7 @@ impl Op {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateTrigger { .. }

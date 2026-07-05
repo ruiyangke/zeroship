@@ -568,11 +568,9 @@ view("legacy_report").create({
 ```ts
 import { pgTable } from "@zeroship/migrate/pg";
 
-// Table-scoped RLS toggles
-pgTable("apps", { schema: "zeroship" }).enableRowLevelSecurity();
-pgTable("apps", { schema: "zeroship" }).forceRowLevelSecurity();
-pgTable("apps", { schema: "zeroship" }).disableRowLevelSecurity();
-pgTable("apps", { schema: "zeroship" }).noForceRowLevelSecurity();
+// Table-scoped RLS state
+pgTable("apps", { schema: "zeroship" }).setRls({ enabled: true, forced: true });
+pgTable("apps", { schema: "zeroship" }).setRls({ enabled: false, forced: false });
 
 // Policy via the table handle
 pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").create({

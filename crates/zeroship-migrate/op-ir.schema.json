@@ -215,6 +215,42 @@
           ]
         },
         {
+          "description": "`ALTER TABLE <parent> ATTACH PARTITION <name> FOR VALUES ...`.",
+          "type": "object",
+          "properties": {
+            "parent": {
+              "description": "Parent partitioned table.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Partition table name.",
+              "type": "string"
+            },
+            "bound": {
+              "description": "Partition bounds.",
+              "$ref": "#/$defs/PartitionBounds"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "attachPartition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "parent",
+            "name",
+            "bound"
+          ]
+        },
+        {
           "description": "`ALTER TABLE <parent> DETACH PARTITION <name> [CONCURRENTLY]`.",
           "type": "object",
           "properties": {
@@ -2291,7 +2327,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — `ALTER TABLE … ENABLE ROW LEVEL SECURITY`.",
+          "description": "**VENDOR** — `ALTER TABLE … {ENABLE|DISABLE|FORCE|NO FORCE} ROW LEVEL SECURITY`.",
           "type": "object",
           "properties": {
             "table": {
@@ -2305,87 +2341,23 @@
                 "null"
               ]
             },
-            "op": {
-              "type": "string",
-              "const": "enableRls"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "op",
-            "table"
-          ]
-        },
-        {
-          "description": "**VENDOR** — `ALTER TABLE … FORCE ROW LEVEL SECURITY`.",
-          "type": "object",
-          "properties": {
-            "table": {
-              "description": "The target table.",
-              "type": "string"
-            },
-            "schema": {
-              "description": "The schema qualifier.",
+            "enabled": {
+              "description": "Optional enabled-state patch (`true` = ENABLE, `false` = DISABLE).",
               "type": [
-                "string",
+                "boolean",
+                "null"
+              ]
+            },
+            "forced": {
+              "description": "Optional force-state patch (`true` = FORCE, `false` = NO FORCE).",
+              "type": [
+                "boolean",
                 "null"
               ]
             },
             "op": {
               "type": "string",
-              "const": "forceRls"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "op",
-            "table"
-          ]
-        },
-        {
-          "description": "**VENDOR** — `ALTER TABLE … DISABLE ROW LEVEL SECURITY` (down-file).",
-          "type": "object",
-          "properties": {
-            "table": {
-              "description": "The target table.",
-              "type": "string"
-            },
-            "schema": {
-              "description": "The schema qualifier.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "op": {
-              "type": "string",
-              "const": "disableRls"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "op",
-            "table"
-          ]
-        },
-        {
-          "description": "**VENDOR** — `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` (down-file).",
-          "type": "object",
-          "properties": {
-            "table": {
-              "description": "The target table.",
-              "type": "string"
-            },
-            "schema": {
-              "description": "The schema qualifier.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "op": {
-              "type": "string",
-              "const": "noForceRls"
+              "const": "setRls"
             }
           },
           "additionalProperties": false,

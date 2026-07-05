@@ -132,6 +132,7 @@ export type {
   CreatePartitionOptions,
   DropPartitionArgs,
   DetachPartitionArgs,
+  AttachPartitionArgs,
   ExclusionMethod,
   ExclusionOperator,
   RefAction,

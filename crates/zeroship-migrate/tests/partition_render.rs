@@ -4,7 +4,7 @@ use zeroship_migrate::model::ir::{
 };
 use zeroship_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, IrFlagsOverride, LiveSchema, LockMode,
-    MigrationEngine, SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
+    MigrationEngine, PolicyProfile, SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
 };
 
 fn col(name: &str, ty: ColType) -> IrColumn {
@@ -103,6 +103,18 @@ fn create_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBo
         },
         schema: None,
         existence_guard: None,
+    }
+}
+
+fn attach_range_partition(name: &str, from: PartitionBoundValue, to: PartitionBoundValue) -> Op {
+    Op::AttachPartition {
+        parent: "events".into(),
+        name: name.into(),
+        bound: PartitionBounds::Range {
+            from: vec![from],
+            to: vec![to],
+        },
+        schema: None,
     }
 }
 
@@ -753,6 +765,50 @@ fn render_detach_partition_pg() {
         sql.contains("ALTER TABLE \"app\".\"events\" DETACH PARTITION \"app\".\"events_default\" CONCURRENTLY"),
         "detach SQL was:\n{sql}"
     );
+}
+
+#[test]
+fn render_attach_partition_pg() {
+    let sql = pg_sql(attach_range_partition(
+        "events_100_200",
+        int_bound(100),
+        int_bound(200),
+    ))
+    .join("\n");
+
+    assert!(
+        sql.contains(
+            "ALTER TABLE \"app\".\"events\" ATTACH PARTITION \"app\".\"events_100_200\" FOR VALUES FROM (100) TO (200)"
+        ),
+        "attach SQL was:\n{sql}"
+    );
+}
+
+#[test]
+fn attach_partition_refused_fail_closed_off_pg() {
+    use zeroship_migrate::model::validate::{
+        validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
+    };
+
+    let migration = ir(attach_range_partition(
+        "events_100_200",
+        int_bound(100),
+        int_bound(200),
+    ));
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir_scoped(
+            &migration,
+            dialect,
+            &[],
+            None,
+            &PolicyProfile::platform(),
+        )
+        .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
+        assert!(
+            matches!(err.code.as_str(), CODE_UNSUPPORTED | CODE_VENDOR_OP_DENIED),
+            "attachPartition on {dialect:?} must fail closed as PG-only/vendor, got {err:?}"
+        );
+    }
 }
 
 #[test]

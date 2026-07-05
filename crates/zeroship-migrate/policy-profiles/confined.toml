@@ -23,6 +23,7 @@ schema = false
 role = { allow = false, attrs = [] }
 grant = false
 rls = false
+partition = false
 policy = false
 function = false
 raw_sql = false

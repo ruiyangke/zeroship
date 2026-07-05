@@ -53,7 +53,7 @@ function opFieldsByTag(def: any, tagField: string): Record<string, string[]> {
 const TS = {
   // Op variant tags (the `delete()` fn records `"delete"`).
   Op: [
-    "createTable", "createPartition", "detachPartition", "dropPartition",
+    "createTable", "createPartition", "attachPartition", "detachPartition", "dropPartition",
     "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "setColumnType", "setColumnNotNull", "dropColumnNotNull",
     "setColumnDefault", "dropColumnDefault", "renameColumn", "addConstraint",
@@ -61,8 +61,8 @@ const TS = {
     "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
     "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
-    "alterRole", "dropRole", "dropOwnedBy", "grant", "revoke", "enableRls", "forceRls",
-    "disableRls", "noForceRls", "createPolicy", "dropPolicy", "createFunction",
+    "alterRole", "dropRole", "dropOwnedBy", "grant", "revoke", "setRls",
+    "createPolicy", "dropPolicy", "createFunction",
     "dropFunction", "comment", "pgRaw",
   ].sort(),
   // Expr node tags.
@@ -140,6 +140,7 @@ const TS = {
 const TS_OP_FIELDS: Record<string, string[]> = {
   createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "partitionBy", "primaryKey", "runtimeOptions", "schema"].sort(),
   createPartition: ["bounds", "existenceGuard", "name", "of", "schema"].sort(),
+  attachPartition: ["bound", "name", "parent", "schema"].sort(),
   detachPartition: ["concurrently", "name", "parent", "schema"].sort(),
   dropPartition: ["cascade", "existenceGuard", "name", "parent", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
@@ -189,10 +190,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   dropOwnedBy: ["roles"].sort(),
   grant: ["on", "privileges", "to", "withGrantOption"].sort(),
   revoke: ["from", "on", "privileges"].sort(),
-  enableRls: ["schema", "table"].sort(),
-  forceRls: ["schema", "table"].sort(),
-  disableRls: ["schema", "table"].sort(),
-  noForceRls: ["schema", "table"].sort(),
+  setRls: ["enabled", "forced", "schema", "table"].sort(),
   createPolicy: ["forCmd", "name", "schema", "table", "to", "using", "withCheck"].sort(),
   dropPolicy: ["ifExists", "name", "schema", "table"].sort(),
   createFunction: ["args", "body", "language", "name", "replace", "returns", "schema", "volatility"].sort(),

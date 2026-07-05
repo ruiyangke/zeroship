@@ -673,6 +673,7 @@ export type PartitionBoundArgs =
 
 export interface PartitionRef {
   create(bound: PartitionBoundArgs, args?: CreatePartitionOptions): TableHandle;
+  attach(bound: PartitionBoundArgs, args?: AttachPartitionArgs): PgTableHandle;
   drop(args?: DropPartitionArgs): TableHandle;
   detach(args?: DetachPartitionArgs): PgTableHandle;
 }
@@ -686,6 +687,10 @@ export interface DropPartitionArgs {
 export interface DetachPartitionArgs {
   schema?: string;
   concurrently?: boolean;
+}
+
+export interface AttachPartitionArgs {
+  schema?: string;
 }
 
 export type IndexStorageParamsArg = IndexStorageParams;
@@ -1216,10 +1221,7 @@ export interface PgTableHandle extends TableHandle {
   constraint(name: string): PgConstraintRef;
   index(name: string): PgIndexRef;
   exclusion(name: string): ExclusionRef;
-  enableRowLevelSecurity(): PgTableHandle;
-  forceRowLevelSecurity(): PgTableHandle;
-  disableRowLevelSecurity(): PgTableHandle;
-  noForceRowLevelSecurity(): PgTableHandle;
+  setRls(args: { enabled?: boolean; forced?: boolean }): PgTableHandle;
   policy(name: string): PolicyRef;
 }
 

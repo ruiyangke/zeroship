@@ -2042,6 +2042,20 @@ impl IrAuthor {
                 partition_state.insert_child(of, name, bounds.clone());
                 vec![decl.lower_create_partition(name, of, bounds)]
             }
+            Op::AttachPartition {
+                parent,
+                name,
+                bound,
+                ..
+            } => {
+                if !matches!(self.dialect, SqlDialect::Postgres) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "attachPartition is PostgreSQL-only",
+                    ));
+                }
+                partition_state.insert_child(parent, name, bound.clone());
+                vec![decl.lower_attach_partition(parent, name, bound)]
+            }
             Op::DetachPartition {
                 parent,
                 name,
@@ -2520,10 +2534,7 @@ impl IrAuthor {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateFunction { .. }
@@ -5028,6 +5039,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
     match op {
         Op::CreateTable { .. } => "createTable",
         Op::CreatePartition { .. } => "createPartition",
+        Op::AttachPartition { .. } => "attachPartition",
         Op::DetachPartition { .. } => "detachPartition",
         Op::DropPartition { .. } => "dropPartition",
         Op::SetTableOptions { .. } => "setTableOptions",
@@ -5071,10 +5083,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::DropOwnedBy { .. } => "dropOwnedBy",
         Op::Grant { .. } => "grant",
         Op::Revoke { .. } => "revoke",
-        Op::EnableRls { .. } => "enableRls",
-        Op::ForceRls { .. } => "forceRls",
-        Op::DisableRls { .. } => "disableRls",
-        Op::NoForceRls { .. } => "noForceRls",
+        Op::SetRls { .. } => "setRls",
         Op::CreatePolicy { .. } => "createPolicy",
         Op::DropPolicy { .. } => "dropPolicy",
         Op::CreateTrigger { .. } => "createTrigger",
@@ -7784,8 +7793,7 @@ mod tests {
             {"op":"createIndex","table":"platform_registry","schema":"zeroship",
                 "name":"platform_registry_target_idx",
                 "columns":[{"kind":"column","name":"target"}]},
-            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
-            {"op":"forceRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true,"forced":true},
             {"op":"createPolicy","name":"tenant_isolation","table":"platform_registry",
                 "schema":"zeroship","forCmd":"all",
                 "using":{"node":"literal","value":true}},
@@ -7881,7 +7889,7 @@ mod tests {
             ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]}
         ]}"#;
         let attach = r#"{"ir_version":1,"name":"platform_attach_later","ops":[
-            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true},
             {"op":"comment","target":{"kind":"table","schema":"zeroship",
                 "name":"platform_registry"},"comment":"Platform route registry"}
         ]}"#;

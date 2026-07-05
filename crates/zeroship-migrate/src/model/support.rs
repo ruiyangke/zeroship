@@ -309,6 +309,7 @@ pub(crate) const CAP_SCHEMA: &[VendorCapability] = &[VendorCapability::Schema];
 pub(crate) const CAP_ROLE: &[VendorCapability] = &[VendorCapability::Role];
 pub(crate) const CAP_GRANT: &[VendorCapability] = &[VendorCapability::Grant];
 pub(crate) const CAP_RLS: &[VendorCapability] = &[VendorCapability::Rls];
+pub(crate) const CAP_PARTITION: &[VendorCapability] = &[VendorCapability::Partition];
 pub(crate) const CAP_POLICY: &[VendorCapability] = &[VendorCapability::Policy];
 pub(crate) const CAP_FUNCTION: &[VendorCapability] = &[VendorCapability::Function];
 pub(crate) const CAP_RAW_SQL: &[VendorCapability] = &[VendorCapability::RawSql];

@@ -90,14 +90,11 @@ const PLATFORM_VENDOR_IR: &str = r#"{
       ]
     },
     {
-      "op": "enableRls",
+      "op": "setRls",
       "table": "ir_accounts",
-      "schema": "zeroship"
-    },
-    {
-      "op": "forceRls",
-      "table": "ir_accounts",
-      "schema": "zeroship"
+      "schema": "zeroship",
+      "enabled": true,
+      "forced": true
     },
     {
       "op": "createPolicy",
@@ -252,8 +249,7 @@ export function up() {
     expr: (c) => c("status").in(["active", "paused"]),
   });
   registry.index("platform_registry_target_idx").add({ on: ["target"] });
-  registry.enableRowLevelSecurity();
-  registry.forceRowLevelSecurity();
+  registry.setRls({ enabled: true, forced: true });
   registry.policy("tenant_isolation").create({
     for: "all",
     using: (c) => c("app_id").isNotNull(),
@@ -1481,7 +1477,7 @@ async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg(
     assert_eq!(
         relation_rls(&conn, "zeroship", "platform_registry").await,
         (true, true),
-        "enableRls + forceRls attached to the platform-exact table"
+        "setRls attached to the platform-exact table"
     );
     assert!(
         policy_exists(&conn, "zeroship", "platform_registry", "tenant_isolation").await,

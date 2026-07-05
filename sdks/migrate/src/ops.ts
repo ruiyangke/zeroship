@@ -404,6 +404,7 @@ const emitDropSequence = defineOp("dropSequence");
 const emitComment = defineOp("comment");
 const emitCreateTable = defineOp("createTable");
 const emitCreatePartition = defineOp("createPartition");
+const emitAttachPartition = defineOp("attachPartition");
 const emitDetachPartition = defineOp("detachPartition");
 const emitDropPartition = defineOp("dropPartition");
 const emitSetTableOptions = defineOp("setTableOptions");
@@ -432,10 +433,7 @@ const emitDelete = defineOp("delete");
 const emitBackfill = defineOp("backfill");
 const emitCreateView = defineOp("createView", "view.create");
 const emitDropView = defineOp("dropView");
-const emitEnableRls = defineOp("enableRls");
-const emitForceRls = defineOp("forceRls");
-const emitDisableRls = defineOp("disableRls");
-const emitNoForceRls = defineOp("noForceRls");
+const emitSetRls = defineOp("setRls");
 const emitCreatePolicy = defineOp("createPolicy");
 const emitDropPolicy = defineOp("dropPolicy");
 const emitCreateTrigger = defineOp("createTrigger");
@@ -2456,6 +2454,20 @@ function recordCreatePartition(
   });
 }
 
+function recordAttachPartition(
+  parent: string,
+  name: string,
+  bound: Node,
+  args: { schema?: string },
+): void {
+  emitAttachPartition({
+    parent,
+    name,
+    bound,
+    schema: args.schema,
+  });
+}
+
 function recordDetachPartition(
   parent: string,
   name: string,
@@ -2491,6 +2503,23 @@ function recordSetTableOptions(
     table,
     options: runtimeOptionsPatchFromArgs(args),
     schema: args.schema,
+  });
+}
+
+function recordSetRls(
+  table: string,
+  args: { enabled?: boolean; forced?: boolean; schema?: string },
+): void {
+  const enabled = requireOptionalBoolean(args.enabled, ".setRls({ enabled })");
+  const forced = requireOptionalBoolean(args.forced, ".setRls({ forced })");
+  if (enabled === undefined && forced === undefined) {
+    throw structuredError("OP_INVALID", ".setRls needs at least one of { enabled, forced }");
+  }
+  emitSetRls({
+    table,
+    schema: args.schema,
+    enabled,
+    forced,
   });
 }
 
@@ -3427,6 +3456,13 @@ export function __makeTableHandle(
           });
           return handle;
         },
+        attach(bound, args = {}) {
+          terminateSelector(id);
+          recordAttachPartition(name, partitionName, partitionBoundToIr(bound), {
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
         drop(args = {}) {
           terminateSelector(id);
           recordDropPartition(name, partitionName, {
@@ -3625,20 +3661,8 @@ export function __makeTableHandle(
     },
 
     // `@zeroship/migrate/pg` — table-scoped privileged primitives.
-    enableRowLevelSecurity() {
-      emitEnableRls({ table: name, schema: dflt });
-      return handle;
-    },
-    forceRowLevelSecurity() {
-      emitForceRls({ table: name, schema: dflt });
-      return handle;
-    },
-    disableRowLevelSecurity() {
-      emitDisableRls({ table: name, schema: dflt });
-      return handle;
-    },
-    noForceRowLevelSecurity() {
-      emitNoForceRls({ table: name, schema: dflt });
+    setRls(args) {
+      recordSetRls(name, { ...args, schema: dflt });
       return handle;
     },
     policy(policyName) {

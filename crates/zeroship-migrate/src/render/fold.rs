@@ -584,6 +584,32 @@ pub fn fold_ops(
                     },
                 );
             }
+            Op::AttachPartition {
+                parent,
+                name,
+                bound,
+                ..
+            } => {
+                let parent_snap = tables
+                    .get(parent)
+                    .ok_or_else(|| FoldError::MissingTable(parent.clone()))?;
+                if parent_snap.partition_by.is_none() {
+                    return Err(FoldError::Unsupported(
+                        "attachPartition parent table is not partitioned",
+                    ));
+                }
+                if partitions.contains_key(name) {
+                    return Err(FoldError::DuplicateTable(name.clone()));
+                }
+                tables.remove(name);
+                partitions.insert(
+                    name.clone(),
+                    PartitionSnapshot {
+                        of: parent.clone(),
+                        bounds: bound.clone(),
+                    },
+                );
+            }
             Op::DetachPartition { parent, name, .. } => {
                 let parent_snap = tables
                     .get(parent)
@@ -1209,10 +1235,7 @@ pub fn fold_ops(
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateTrigger { .. }

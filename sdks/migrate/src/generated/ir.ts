@@ -466,6 +466,7 @@ export type GrantTarget =
 export type Op =
   | { op: "createTable"; name: string; columns: IrColumn[]; primaryKey: string[] | null; constraints?: IrConstraint[]; indexes?: IrIndex[]; partitionBy?: PartitionSpec | null; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "createPartition"; name: string; of: string; bounds: PartitionBounds; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "attachPartition"; parent: string; name: string; bound: PartitionBounds; schema?: string | null }
   | { op: "detachPartition"; parent: string; name: string; schema?: string | null; concurrently?: boolean | null }
   | { op: "dropPartition"; parent: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
@@ -570,10 +571,7 @@ export type Op =
   | { op: "dropOwnedBy"; roles: string[] }
   | { op: "grant"; privileges: Privilege[]; on: GrantTarget; to: string[]; withGrantOption?: boolean | null }
   | { op: "revoke"; privileges: Privilege[]; on: GrantTarget; from: string[] }
-  | { op: "enableRls"; table: string; schema?: string | null }
-  | { op: "forceRls"; table: string; schema?: string | null }
-  | { op: "disableRls"; table: string; schema?: string | null }
-  | { op: "noForceRls"; table: string; schema?: string | null }
+  | { op: "setRls"; table: string; schema?: string | null; enabled?: boolean | null; forced?: boolean | null }
   | {
       op: "createPolicy";
       name: string;

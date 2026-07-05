@@ -214,22 +214,19 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
   ]);
 });
 
-test("table-scoped pg methods record RLS and legacy policy op payloads", () => {
+test("table-scoped pg methods record setRls and legacy policy op payloads", () => {
   const ops = record(() => {
     pgTable("secrets", { schema: "zs" })
-      .enableRowLevelSecurity()
-      .forceRowLevelSecurity()
+      .setRls({ enabled: true, forced: true })
       .policy("tenant_only").create({
         using: (c) => c("tenant_id").eq(c.pg.currentSetting("tenant.id", true)),
       })
       .policy("tenant_only").drop({ ifExists: true })
-      .disableRowLevelSecurity()
-      .noForceRowLevelSecurity();
+      .setRls({ enabled: false, forced: false });
   });
 
   assert.deepEqual(ops, [
-    { op: "enableRls", table: "secrets", schema: "zs" },
-    { op: "forceRls", table: "secrets", schema: "zs" },
+    { op: "setRls", table: "secrets", schema: "zs", enabled: true, forced: true },
     {
       op: "createPolicy",
       name: "tenant_only",
@@ -251,9 +248,19 @@ test("table-scoped pg methods record RLS and legacy policy op payloads", () => {
       },
     },
     { op: "dropPolicy", name: "tenant_only", table: "secrets", schema: "zs", ifExists: true },
-    { op: "disableRls", table: "secrets", schema: "zs" },
-    { op: "noForceRls", table: "secrets", schema: "zs" },
+    { op: "setRls", table: "secrets", schema: "zs", enabled: false, forced: false },
   ]);
+});
+
+test("setRls omits absent fields and rejects empty patches", () => {
+  assert.deepEqual(
+    record(() => pgTable("secrets", { schema: "zs" }).setRls({ enabled: true })),
+    [{ op: "setRls", table: "secrets", schema: "zs", enabled: true }],
+  );
+  assert.throws(
+    () => record(() => pgTable("secrets", { schema: "zs" }).setRls({})),
+    (e: any) => e.code === "OP_INVALID" && /\.setRls needs at least one/.test(e.message),
+  );
 });
 
 test("raw requires reason and never records binds", () => {

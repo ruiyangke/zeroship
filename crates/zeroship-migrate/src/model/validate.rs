@@ -659,6 +659,22 @@ fn validate_partition_recording(
                     ));
                 }
             }
+            Op::AttachPartition { parent, name, bound, .. } => {
+                if let Some(parent) = parents.get_mut(parent) {
+                    parent.children.insert(name.clone(), (op_index, bound.clone()));
+                } else if !matches!(target_dialect, Dialect::Postgres) {
+                    return Err(partition_error(
+                        CODE_DIALECT_UNSUPPORTED,
+                        op_index,
+                        ts_locations,
+                        target_dialect,
+                        format!(
+                            "attachPartition {name:?} targets parent {parent:?}, but attachPartition is PostgreSQL-only"
+                        ),
+                        "target Postgres for native partition attach",
+                    ));
+                }
+            }
             Op::DropPartition { parent, name, .. } => {
                 if let Some(parent_state) = parents.get(parent) {
                     if parent_state.spec.collapse()
@@ -1539,8 +1555,22 @@ pub fn validate_op_scoped(
             }
             Ok(())
         }
+        Op::SetRls { enabled, forced, .. } if enabled.is_none() && forced.is_none() => {
+            Err(AuthoringError {
+                code: CODE_OP_INVALID.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: "setRls needs at least one of { enabled, forced }".to_string(),
+                suggested_fix: Some(
+                    "set enabled, forced, or both on the setRls op".to_string(),
+                ),
+            })
+        }
         Op::DropTable { .. }
         | Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
         | Op::DetachPartition { .. }
         | Op::DropPartition { .. }
         | Op::RenameTable { .. }
@@ -1569,10 +1599,7 @@ pub fn validate_op_scoped(
         | Op::DropOwnedBy { .. }
         | Op::Grant { .. }
         | Op::Revoke { .. }
-        | Op::EnableRls { .. }
-        | Op::ForceRls { .. }
-        | Op::DisableRls { .. }
-        | Op::NoForceRls { .. }
+        | Op::SetRls { .. }
         | Op::DropPolicy { .. }
         | Op::DropTrigger { .. }
         | Op::DropView { .. }
@@ -1973,9 +2000,10 @@ fn validate_op_support(
                 }
             }
         }
-        Op::CreatePartition { .. } | Op::DetachPartition { .. } | Op::DropPartition { .. } => {
-            check(Feature::PartitionDdl)?;
-        }
+        Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. } => check(Feature::PartitionDdl)?,
         Op::AddColumn { default, .. } => {
             if default_is_nextval(default.as_ref()) {
                 check(Feature::SequenceDefault)?;
@@ -2184,7 +2212,7 @@ fn validate_vendor_op(
             (
                 format!(
                     "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
-                     roles/grants/RLS/policies/triggers/functions/extensions/schemas/pgRaw have \
+                     roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/pgRaw have \
                      no SQLite analogue (PgOnly)",
                     cap.as_token()
                 ),

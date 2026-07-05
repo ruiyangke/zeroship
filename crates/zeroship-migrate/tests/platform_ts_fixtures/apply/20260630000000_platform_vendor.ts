@@ -29,8 +29,7 @@ export function up() {
   });
 
   const accounts = pgTable("ts_accounts", { schema: "zeroship" });
-  accounts.enableRowLevelSecurity();
-  accounts.forceRowLevelSecurity();
+  accounts.setRls({ enabled: true, forced: true });
   accounts.policy("tenant_isolation").create({
     for: "all",
     using: (c) =>

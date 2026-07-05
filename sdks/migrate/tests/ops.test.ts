@@ -1906,6 +1906,29 @@ test("table().partition().create records list and hash createPartition ops", () 
   ]);
 });
 
+test("pgTable().partition().attach records attachPartition with range bounds", () => {
+  const ops = record(() => {
+    pgTable("events", { schema: "app" }).partition("events_2026_06").attach({
+      from: ["2026-06-01T00:00:00Z"],
+      to: ["2026-07-01T00:00:00Z"],
+    });
+  });
+
+  assert.deepEqual(ops, [
+    {
+      op: "attachPartition",
+      parent: "events",
+      name: "events_2026_06",
+      bound: {
+        kind: "range",
+        from: [{ kind: "string", value: "2026-06-01T00:00:00Z" }],
+        to: [{ kind: "string", value: "2026-07-01T00:00:00Z" }],
+      },
+      schema: "app",
+    },
+  ]);
+});
+
 test("table().trigger().create/drop record legacy trigger op payloads", () => {
   const ops = record(() =>
     table("audit_events", { schema: "zs" })
