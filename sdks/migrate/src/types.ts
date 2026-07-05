@@ -489,6 +489,24 @@ export interface FnNamespace {
   genRandomUuid(): ExprChain;
 }
 
+/** The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count`/`sum`/`avg`/
+ *  `min`/`max` render identically on PG, SQLite, and MySQL (only identifier
+ *  quoting differs), so there is no dialect gate. `count()` (no arg) is
+ *  `COUNT(*)`; the optional `{ distinct: true }` inserts `DISTINCT`. Reachable
+ *  from a SELECT/HAVING context (the position check is a Phase-2 obligation). */
+export interface AggNamespace {
+  /** `count(*)` (no arg) or `count(<expr>)` / `count(DISTINCT <expr>)`. */
+  count(expr?: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `sum(<expr>)` / `sum(DISTINCT <expr>)`. */
+  sum(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `avg(<expr>)` / `avg(DISTINCT <expr>)`. */
+  avg(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `min(<expr>)` / `min(DISTINCT <expr>)`. */
+  min(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `max(<expr>)` / `max(DISTINCT <expr>)`. */
+  max(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+}
+
 /** PostgreSQL-only expression nodes. These methods intentionally live under
  *  `c.pg.*` so the portable chain surface stays dialect-neutral; the Rust
  *  validator rejects these nodes on SQLite/MySQL. */
@@ -516,6 +534,7 @@ export interface ExprBuilder {
   col(name: string): ExprChain;
   col(table: string, name: string): ExprChain;
   fn: FnNamespace;
+  agg: AggNamespace;
   pg: PgExprNamespace;
 }
 

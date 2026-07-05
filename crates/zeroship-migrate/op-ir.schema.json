@@ -3733,6 +3733,40 @@
           ]
         },
         {
+          "description": "A **PORTABLE** aggregate function application (`c.agg.count()`,\n`c.agg.sum(e)`, `c.agg.count(e, { distinct: true })` — design §3.4/§3.6).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and\nMySQL (only identifier quoting differs), so there is NO dialect gate. `arg:\nNone` with `func: Count` is `COUNT(*)`; a present `arg` renders\n`<func>(<arg>)`, and `distinct` inserts `DISTINCT`\n(`count(DISTINCT <arg>)`).\n\nNB: the \"an aggregate is only legal in a grouped/SELECT context\" check is\ncoupled with the Phase-2 view/select builder (`AGG_POSITION_INVALID`) — this\nadditive slice accepts the node STRUCTURALLY only (design §3.4/§5 item 6).",
+          "type": "object",
+          "properties": {
+            "func": {
+              "description": "The aggregate function.",
+              "$ref": "#/$defs/AggFunc"
+            },
+            "arg": {
+              "description": "The single argument expression. `None` + `func: Count` = `COUNT(*)`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "distinct": {
+              "description": "`DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the\nwire when `false` so the node serializes byte-minimally.",
+              "type": "boolean"
+            },
+            "node": {
+              "type": "string",
+              "const": "agg"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "func"
+          ]
+        },
+        {
           "description": "**PG-ONLY** text-array membership rendered exactly as\n`(<expr> = ANY (ARRAY['a'::text, ...]))` or\n`(<expr> <> ALL (ARRAY['a'::text, ...]))`.",
           "type": "object",
           "properties": {
@@ -4108,6 +4142,36 @@
           "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — the 0025 tenant-isolation\npolicy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
           "type": "string",
           "const": "uuid"
+        }
+      ]
+    },
+    "AggFunc": {
+      "description": "The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,\nSQLite, and MySQL (only the surrounding identifier quoting differs), so there\nis NO dialect gate — an [`Expr::Agg`] validates and renders on all three.",
+      "oneOf": [
+        {
+          "description": "`count(...)` (or `count(*)` when the [`Expr::Agg`] `arg` is `None`).",
+          "type": "string",
+          "const": "count"
+        },
+        {
+          "description": "`sum(<arg>)`.",
+          "type": "string",
+          "const": "sum"
+        },
+        {
+          "description": "`avg(<arg>)`.",
+          "type": "string",
+          "const": "avg"
+        },
+        {
+          "description": "`min(<arg>)`.",
+          "type": "string",
+          "const": "min"
+        },
+        {
+          "description": "`max(<arg>)`.",
+          "type": "string",
+          "const": "max"
         }
       ]
     },

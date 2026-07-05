@@ -2882,6 +2882,16 @@ impl Ctx<'_> {
                 self.walk_depth(left, d)?;
                 self.walk_depth(right, d)
             }
+            // Portable aggregate node (§3.4/§3.6): count/sum/avg/min/max render
+            // identically on all three dialects, so there is NO dialect gate. The
+            // "aggregate only valid in a grouped/SELECT context" check
+            // (`AGG_POSITION_INVALID`) is coupled with the Phase-2 view/select
+            // builder — this additive slice accepts the node STRUCTURALLY, just
+            // recursing into the optional argument (`count(*)` has none).
+            Expr::Agg { func: _, arg, distinct: _ } => match arg {
+                Some(e) => self.walk_depth(e, d),
+                None => Ok(()),
+            },
             Expr::PgArrayMembership { expr, op, elems } => {
                 self.check_pg_array_membership(expr, *op, elems, d)
             }
@@ -3526,6 +3536,46 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn portable_aggregate_nodes_validate_on_all_three_dialects() {
+        use crate::model::expr::AggFunc;
+        // count(*) / count(DISTINCT col) / sum/avg/min/max(col) are PORTABLE (§3.4/
+        // §3.6): byte-identical SQL on PG/SQLite/MySQL, so the walk accepts them with
+        // NO dialect gate. (The grouped/SELECT position check is a Phase-2 concern;
+        // this slice accepts the node structurally, recursing into the arg.)
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::Agg { func: AggFunc::Count, arg: None, distinct: false },
+            Expr::Agg {
+                func: AggFunc::Count,
+                arg: Some(Box::new(Expr::col("total"))),
+                distinct: true,
+            },
+            Expr::Agg { func: AggFunc::Sum, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg { func: AggFunc::Avg, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg { func: AggFunc::Min, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg { func: AggFunc::Max, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+        ];
+        for e in &nodes {
+            for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+                validate_expr(e, d, &sc, 0, None)
+                    .unwrap_or_else(|err| panic!("portable aggregate must validate on {d:?}: {err}"));
+            }
+        }
+        // A bogus column inside the aggregate arg is still caught by the recursive
+        // colref check (the node isn't a blind accept).
+        let bad = Expr::Agg {
+            func: AggFunc::Sum,
+            arg: Some(Box::new(Expr::col("does_not_exist"))),
+            distinct: false,
+        };
+        assert!(
+            validate_expr(&bad, Dialect::Postgres, &sc, 0, None).is_err(),
+            "aggregate must still validate its argument's column ref"
+        );
     }
 
     #[test]

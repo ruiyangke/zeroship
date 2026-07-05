@@ -75,7 +75,7 @@ use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
 use crate::model::expr::{
-    BinaryOp, Expr, ExtractField, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
+    AggFunc, BinaryOp, Expr, ExtractField, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
 };
 use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
@@ -587,6 +587,31 @@ fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> S
     }
 }
 
+/// The lower-cased SQL name of a PORTABLE [`AggFunc`]. Identical spelling on PG,
+/// SQLite, and MySQL (§3.4).
+fn agg_fn_sql(f: AggFunc) -> &'static str {
+    match f {
+        AggFunc::Count => "count",
+        AggFunc::Sum => "sum",
+        AggFunc::Avg => "avg",
+        AggFunc::Min => "min",
+        AggFunc::Max => "max",
+    }
+}
+
+/// Render a PORTABLE aggregate application from its already-rendered argument
+/// fragment (§3.4/§3.6). `arg = None` (only `Count`) → `count(*)`; a present arg
+/// → `<func>([DISTINCT ]<arg>)`. Byte-identical on all three dialects — only the
+/// identifier quoting inside `arg_sql` differs.
+fn render_agg(f: AggFunc, arg_sql: Option<&str>, distinct: bool) -> String {
+    let name = agg_fn_sql(f);
+    match arg_sql {
+        None => format!("{name}(*)"),
+        Some(a) if distinct => format!("{name}(DISTINCT {a})"),
+        Some(a) => format!("{name}({a})"),
+    }
+}
+
 /// The portable cast-target SQL type per dialect (§3.3.1). `blob` is `BYTEA` on
 /// PG / `BLOB` on SQLite; the rest share spelling.
 fn cast_target_sql(target: crate::model::expr::CastTarget, dialect: SqlDialect) -> &'static str {
@@ -765,6 +790,13 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let l = render_expr_bound(left, ctx)?;
             let r = render_expr_bound(right, ctx)?;
             render_distinct_from(&l, &r, ctx.dialect)
+        }
+        Expr::Agg { func, arg, distinct } => {
+            let a = match arg {
+                Some(e) => Some(render_expr_bound(e, ctx)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), *distinct)
         }
         Expr::PgArrayMembership { expr, op, elems } => {
             let e = render_expr_bound(expr, ctx)?;
@@ -964,6 +996,13 @@ where
             let l = render_expr_inline_with_col(left, dialect, col_ref)?;
             let r = render_expr_inline_with_col(right, dialect, col_ref)?;
             render_distinct_from(&l, &r, dialect)
+        }
+        Expr::Agg { func, arg, distinct } => {
+            let a = match arg {
+                Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), *distinct)
         }
         Expr::PgArrayMembership { expr, op, elems } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
@@ -1759,6 +1798,56 @@ mod tests {
         assert_eq!(
             render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
             "(NOT (`a` <=> `b`))"
+        );
+    }
+
+    // ── portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT (§3.4) ──
+
+    #[test]
+    fn agg_renders_identically_on_all_three_dialects() {
+        use crate::model::expr::AggFunc;
+
+        // count(*) — no arg — is byte-identical everywhere (no identifier at all).
+        let count_star = Expr::Agg { func: AggFunc::Count, arg: None, distinct: false };
+        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            assert_eq!(
+                render_expr_inline(&count_star, d).unwrap(),
+                "count(*)",
+                "count(*) is identical on {d:?}"
+            );
+        }
+
+        // count(DISTINCT <col>) — only the identifier quoting differs (MySQL backticks).
+        let count_distinct = Expr::Agg {
+            func: AggFunc::Count,
+            arg: Some(Box::new(Expr::col("x"))),
+            distinct: true,
+        };
+        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Postgres).unwrap(), "count(DISTINCT \"x\")");
+        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Sqlite).unwrap(), "count(DISTINCT \"x\")");
+        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Mysql).unwrap(), "count(DISTINCT `x`)");
+
+        // sum/avg/min/max(<col>) — identical spelling, only quoting differs.
+        for (func, name) in [
+            (AggFunc::Sum, "sum"),
+            (AggFunc::Avg, "avg"),
+            (AggFunc::Min, "min"),
+            (AggFunc::Max, "max"),
+        ] {
+            let e = Expr::Agg { func, arg: Some(Box::new(Expr::col("x"))), distinct: false };
+            assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), format!("{name}(\"x\")"));
+            assert_eq!(render_expr_inline(&e, SqlDialect::Sqlite).unwrap(), format!("{name}(\"x\")"));
+            assert_eq!(render_expr_inline(&e, SqlDialect::Mysql).unwrap(), format!("{name}(`x`)"));
+        }
+
+        // The bound path renders the aggregate identically and binds no placeholders
+        // (a ColRef arg is an identifier, not a bind).
+        let mut ctx = BindCtx::new(SqlDialect::Postgres);
+        assert_eq!(render_expr_bound(&count_distinct, &mut ctx).unwrap(), "count(DISTINCT \"x\")");
+        assert_eq!(ctx.binds.len(), 0, "a ColRef aggregate arg is not a bind");
+        assert_eq!(
+            render_expr_bound(&count_star, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
+            "count(*)"
         );
     }
 

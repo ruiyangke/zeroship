@@ -18,6 +18,7 @@
 // + the `Checksum::of_ir` round-trip are the contract source of truth (§4.3/PR3).
 
 import type {
+  AggFunc,
   BinaryOp,
   CastTarget,
   CmpOp,
@@ -51,6 +52,7 @@ import type {
 } from "./enums.js";
 
 export type {
+  AggFunc,
   BinaryOp,
   CastTarget,
   CmpOp,
@@ -196,6 +198,7 @@ export type Expr =
   | { node: "between"; operand: Expr; low: Expr; high: Expr }
   | { node: "like"; operand: Expr; pattern: Expr }
   | { node: "distinctFrom"; left: Expr; right: Expr }
+  | { node: "agg"; func: AggFunc; arg?: Expr | null; distinct?: boolean }
   | { node: "pgArrayMembership"; expr: Expr; op: PgArrayMembershipOp; elems: string[] }
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
   | { node: "pgColumnSize"; expr: Expr }

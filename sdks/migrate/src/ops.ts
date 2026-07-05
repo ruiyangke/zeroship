@@ -29,6 +29,7 @@
 // throws a structured `OP_OUTSIDE_RECORDER`.
 
 import type {
+  AggNamespace,
   BackfillArgs,
   CheckDef,
   CheckRef,
@@ -1330,6 +1331,27 @@ const fn: FnNamespace = {
   genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
 };
 
+// The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count()` (no arg)
+// records `count(*)`; a present arg records `<func>(<arg>)`. The optional
+// `{ distinct: true }` sets the `distinct` flag (skipped on the wire when false).
+// count/sum/avg/min/max are byte-identical SQL on PG/SQLite/MySQL — no dialect
+// gate. The "aggregate only valid in a grouped/SELECT context" check is a
+// Phase-2 obligation; the recorder builds the node structurally here.
+function aggNode(func: "count" | "sum" | "avg" | "min" | "max", expr: unknown, opts?: { distinct?: boolean }): ExprChainType {
+  const node: Node = { node: "agg", func };
+  if (expr !== undefined) node.arg = exprArg(expr);
+  if (opts && opts.distinct === true) node.distinct = true;
+  return chain(node);
+}
+
+const agg: AggNamespace = {
+  count: (expr, opts) => aggNode("count", expr, opts),
+  sum: (expr, opts) => aggNode("sum", expr, opts),
+  avg: (expr, opts) => aggNode("avg", expr, opts),
+  min: (expr, opts) => aggNode("min", expr, opts),
+  max: (expr, opts) => aggNode("max", expr, opts),
+};
+
 const pgExpr: PgExprNamespace = {
   eqAnyArray: (expr, elems) => chain({
     node: "pgArrayMembership",
@@ -1375,6 +1397,7 @@ function makeBuilder(): ExprBuilder {
   }) as unknown as ExprBuilder;
   c.col = c;
   c.fn = fn;
+  c.agg = agg;
   c.pg = pgExpr;
   return c;
 }
@@ -1387,6 +1410,7 @@ function makeBuilder(): ExprBuilder {
 // SDK public `.` entry (`index.ts`); a value-position namespace is a Phase-2
 // surface decision.
 export const cFn = fn;
+export const cAgg = agg;
 export const cPg = pgExpr;
 
 function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {

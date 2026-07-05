@@ -64,6 +64,7 @@ export type {
   ExprFn,
   CheckDef,
   FnNamespace,
+  AggNamespace,
   ScalarValue,
   EmptyContainerDefault,
   JsonDefaultValue,
