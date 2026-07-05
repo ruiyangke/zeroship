@@ -24,10 +24,9 @@
 //!     human-reviewed `dialect-support.toml` row-for-row (the same drift the TS
 //!     `dialect-table-drift` test byte-checks; here checked Rust-side, node-free).
 //!
-//! The disposition vocabulary (S0.1/S0.2 have no `TransparentDegradable` source —
-//! the current engine produces only Supported/Unsupported, so that disposition is
-//! reserved for the redesign and appears in zero rows): portable / vendor (both
-//! supported cells) and unsupported.
+//! The disposition vocabulary is portable / vendor (both supported cells),
+//! transparentDegradable (reserved for explicit P12-style collapses), and
+//! unsupported.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -710,6 +709,25 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             indexes: vec![],
             partition_by: Some(PartitionSpec::Range {
                 columns: vec!["id".into()],
+                collapse: false,
+            }),
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        },
+    ));
+    c.push((
+        "createTable",
+        "partitionedCollapse",
+        Op::CreateTable {
+            name: "t".into(),
+            columns: vec![column("id", ColType::BigInt, None, None)],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: Some(PartitionSpec::Range {
+                columns: vec!["id".into()],
+                collapse: true,
             }),
             runtime_options: None,
             schema: None,
@@ -1136,14 +1154,23 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
          `pnpm --filter @zeroship/migrate gen:dialect-table`"
     );
 
-    // No S0.1 row is TransparentDegradable — the current engine produces only
-    // Supported/Unsupported, so that disposition is reserved for the redesign.
-    assert!(
-        DIALECT_TABLE.iter().all(|row| {
-            row.postgres != Disposition::TransparentDegradable
-                && row.sqlite != Disposition::TransparentDegradable
-                && row.mysql != Disposition::TransparentDegradable
-        }),
-        "no S0.1 row may be TransparentDegradable (the current engine never degrades)"
+    // TransparentDegradable is not a general escape hatch. It is currently
+    // reserved for the explicit partition-collapse affirmation path only.
+    let transparent_rows: BTreeSet<(&str, &str)> = DIALECT_TABLE
+        .iter()
+        .filter(|row| {
+            row.postgres == Disposition::TransparentDegradable
+                || row.sqlite == Disposition::TransparentDegradable
+                || row.mysql == Disposition::TransparentDegradable
+        })
+        .map(|row| (row.kind, row.variant))
+        .collect();
+    assert_eq!(
+        transparent_rows,
+        BTreeSet::from([
+            ("createPartition", "base"),
+            ("createTable", "partitionedCollapse"),
+        ]),
+        "transparent-degradable rows must stay limited to explicit partition collapse"
     );
 }

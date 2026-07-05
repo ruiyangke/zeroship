@@ -1,16 +1,22 @@
 use zeroship_migrate::model::ir::{
     ColType, IndexElement, IndexMethod, IndexStorageParams, IrColumn, MigrationIr, Op,
-    PartitionBoundValue, PartitionBounds, PartitionSpec,
+    PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
 };
-use zeroship_migrate::{
-    IrAuthor, IrFlagsOverride, LiveSchema, SqlDialect, CURRENT_IR_VERSION,
-};
+use zeroship_migrate::{IrAuthor, IrFlagsOverride, LiveSchema, SqlDialect, SqliteBackend, CURRENT_IR_VERSION};
 
 fn col(name: &str, ty: ColType) -> IrColumn {
+    col_with_nullability(name, ty, None)
+}
+
+fn not_null_col(name: &str, ty: ColType) -> IrColumn {
+    col_with_nullability(name, ty, Some(false))
+}
+
+fn col_with_nullability(name: &str, ty: ColType, nullable: Option<bool>) -> IrColumn {
     IrColumn {
         name: name.into(),
         ty,
-        nullable: None,
+        nullable,
         default: None,
         unique: None,
         id_prefix: None,
@@ -32,11 +38,15 @@ fn idx_col(name: &str) -> IndexElement {
 }
 
 fn ir(op: Op) -> MigrationIr {
+    ir_ops(vec![op])
+}
+
+fn ir_ops(ops: Vec<Op>) -> MigrationIr {
     MigrationIr {
         ir_version: CURRENT_IR_VERSION,
         name: "partition_render".into(),
         owner_app: "app_partition".into(),
-        ops: vec![op],
+        ops,
         flags: IrFlagsOverride::default(),
         depends_on: vec![],
         supersedes: vec![],
@@ -52,6 +62,51 @@ fn pg_sql(op: Op) -> Vec<String> {
         .into_iter()
         .map(|m| m.up)
         .collect()
+}
+
+fn int_bound(value: i64) -> PartitionBoundValue {
+    PartitionBoundValue::Int {
+        value: SafeI64::new(value).expect("test partition bound is JS-safe"),
+    }
+}
+
+fn collapse_events_ops() -> Vec<Op> {
+    vec![
+        Op::CreateTable {
+            name: "events".into(),
+            columns: vec![
+                not_null_col("bucket", ColType::Int),
+                not_null_col("payload", ColType::Text),
+            ],
+            primary_key: None,
+            constraints: vec![],
+            indexes: vec![],
+            partition_by: Some(PartitionSpec::Range {
+                columns: vec!["bucket".into()],
+                collapse: true,
+            }),
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreatePartition {
+            name: "events_0".into(),
+            of: "events".into(),
+            bounds: PartitionBounds::Range {
+                from: vec![int_bound(0)],
+                to: vec![int_bound(100)],
+            },
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreatePartition {
+            name: "events_default".into(),
+            of: "events".into(),
+            bounds: PartitionBounds::Default,
+            schema: None,
+            existence_guard: None,
+        },
+    ]
 }
 
 fn create_index(
@@ -87,6 +142,7 @@ fn render_partitioned_parent_create_table_pg() {
         indexes: vec![],
         partition_by: Some(PartitionSpec::Range {
             columns: vec!["created_at".into()],
+            collapse: false,
         }),
         runtime_options: None,
         schema: None,
@@ -98,6 +154,86 @@ fn render_partitioned_parent_create_table_pg() {
         sql.contains("PARTITION BY RANGE (\"created_at\")"),
         "partition clause missing from SQL:\n{sql}"
     );
+}
+
+#[compio::test]
+async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
+    use zeroship_migrate::apply::backend::sqlite::Mode;
+    use zeroship_migrate::model::validate::{validate_ir_scoped, Dialect};
+    use zeroship_migrate::PolicyProfile;
+
+    let ops = collapse_events_ops();
+    let migration_ir = ir_ops(ops);
+    validate_ir_scoped(
+        &migration_ir,
+        Dialect::Sqlite,
+        &[],
+        None,
+        &PolicyProfile::platform(),
+    )
+    .expect("collapse-affirmed partition recording validates on SQLite");
+
+    let migrations = IrAuthor::new("prj_demo", "app_partition", SqlDialect::Sqlite)
+        .lower(&migration_ir, &LiveSchema::default())
+        .expect("lower collapse-affirmed partition recording on SQLite");
+    assert_eq!(
+        migrations.len(),
+        1,
+        "child createPartition ops must lower to no DDL on SQLite"
+    );
+    let sql = &migrations[0].up;
+    assert!(
+        sql.contains("partitionBy collapsed to a plain table"),
+        "degraded leg should be visible in plan output:\n{sql}"
+    );
+    assert!(sql.contains("CREATE TABLE"), "parent table DDL missing:\n{sql}");
+    assert!(
+        !sql.contains("PARTITION BY") && !sql.contains("PARTITION OF"),
+        "SQLite collapse must not emit native partition syntax:\n{sql}"
+    );
+    assert!(
+        !sql.contains("events_0") && !sql.contains("events_default"),
+        "SQLite collapse must not emit child table DDL:\n{sql}"
+    );
+
+    let dir = tempfile::tempdir().expect("sqlite tempdir");
+    let app = dir.path().join("collapse.sqlite");
+    let journal = dir.path().join("collapse.migrations.sqlite");
+    let backend = SqliteBackend::open(&app, &journal).expect("open sqlite backend");
+    backend
+        .apply_one_additive(&migrations[0], "tester")
+        .await
+        .expect("apply collapsed parent table on SQLite");
+    backend
+        .actor()
+        .set_mode(Mode::CreatorUp)
+        .await
+        .expect("creator mode");
+    backend
+        .actor()
+        .exec("INSERT INTO events (bucket, payload) VALUES (42, 'range'), (250, 'default')")
+        .await
+        .expect("insert rows into collapsed table");
+    let rows = backend
+        .actor()
+        .query("SELECT bucket, payload FROM events ORDER BY bucket")
+        .await
+        .expect("read collapsed table rows");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Some("42".to_string()), Some("range".to_string())],
+            vec![Some("250".to_string()), Some("default".to_string())],
+        ]
+    );
+    let children = backend
+        .actor()
+        .query(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('events_0','events_default')",
+        )
+        .await
+        .expect("check child tables");
+    assert!(children.is_empty(), "collapse child partitions must be no-DDL");
 }
 
 #[test]

@@ -43,9 +43,9 @@ use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
     ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn,
     IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr,
-    Op, OrderDir, OrderItem, RaiseLevel, RefAction, SafeI64, SelectAst, SelectItem,
-    SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerStmt,
-    VectorMetric, ViewQuery,
+    Op, OrderDir, OrderItem, PartitionSpec, RaiseLevel, RefAction, SafeI64, SelectAst,
+    SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent,
+    TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
@@ -1487,6 +1487,7 @@ impl IrAuthor {
     ) -> Result<Vec<PlanStep>, IrLowerError> {
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut partition_parents: BTreeMap<String, PartitionSpec> = BTreeMap::new();
         let mut named_types = NamedTypeRegistry::default();
         for (op_index, op) in ir.ops.iter().enumerate() {
             // The whole-up step lowering discards the structural statement list (it
@@ -1494,7 +1495,14 @@ impl IrAuthor {
             // guarded path ([`lower_guarded`]) consumes the list to guard true
             // statements. `op_index` is the plan position the DML-step version folds
             // in (so two byte-identical DML ops get distinct journal ids).
-            match self.lower_one_op(op_index, op, &mut live_tables, live, &mut named_types)? {
+            match self.lower_one_op(
+                op_index,
+                op,
+                &mut live_tables,
+                &mut partition_parents,
+                live,
+                &mut named_types,
+            )? {
                 LoweredOp::Ddl(units) => {
                     out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
                 }
@@ -1525,6 +1533,7 @@ impl IrAuthor {
         op_index: usize,
         op: &Op,
         live_tables: &mut BTreeSet<String>,
+        partition_parents: &mut BTreeMap<String, PartitionSpec>,
         live_schema: &LiveSchema,
         named_types: &mut NamedTypeRegistry,
     ) -> Result<LoweredOp, IrLowerError> {
@@ -1773,15 +1782,33 @@ impl IrAuthor {
                 // a re-run stays idempotent unit-by-unit. We pass the guard direction in
                 // and DO NOT build/stamp a single shared probe here (the bottom-of-fn
                 // generic stamp is skipped for CreateTable).
-                let migs = decl.lower_create_table(
+                let mut migs = decl.lower_create_table(
                     name,
                     &snap,
                     &sqlite_schema,
                     live,
                     guard.map(Into::into),
                 )?;
+                if partition_by.as_ref().is_some_and(PartitionSpec::collapse)
+                    && !matches!(self.dialect, SqlDialect::Postgres)
+                {
+                    if let Some((mig, statements)) = migs.first_mut() {
+                        let note =
+                            "/* zeroship: partitionBy collapsed to a plain table on this dialect */\n";
+                        if let Some(first) = statements.first_mut() {
+                            first.insert_str(0, note);
+                        }
+                        mig.up = statements.join(";\n");
+                        mig.recompute_checksum();
+                    }
+                }
                 // The just-created table is now live for any later intra-IR FK.
                 live.insert(name.clone());
+                if let Some(spec) = partition_by {
+                    partition_parents.insert(name.clone(), spec.clone());
+                } else {
+                    partition_parents.remove(name);
+                }
                 migs
             }
             Op::SetTableOptions { .. } => Vec::new(),
@@ -1905,8 +1932,14 @@ impl IrAuthor {
                 ..
             } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
+                    if partition_parents
+                        .get(of)
+                        .is_some_and(PartitionSpec::collapse)
+                    {
+                        return Ok(LoweredOp::Ddl(Vec::new()));
+                    }
                     return Err(IrLowerError::UnsupportedOp(
-                        "createPartition is PostgreSQL-only",
+                        "createPartition needs a collapse-affirmed parent on SQLite/MySQL",
                     ));
                 }
                 if let Some(g) = guard {
@@ -1962,6 +1995,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
+                partition_parents.remove(table);
                 vec![decl.lower_drop_table(table)]
             }
             Op::RenameTable { table, to, .. } => {
@@ -1982,6 +2016,9 @@ impl IrAuthor {
                         direction: g.into(),
                         expect_columns: Vec::new(),
                     });
+                }
+                if let Some(spec) = partition_parents.remove(table) {
+                    partition_parents.insert(to.clone(), spec);
                 }
                 vec![decl.lower_rename_table(table, to)]
             }
@@ -2755,6 +2792,7 @@ impl IrAuthor {
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut partition_parents: BTreeMap<String, PartitionSpec> = BTreeMap::new();
         let mut named_types = NamedTypeRegistry::default();
 
         crate::guard::check_ir_data_security_policy(guard_cfg, ir).map_err(|err| {
@@ -2781,6 +2819,7 @@ impl IrAuthor {
                 op_index,
                 op,
                 &mut live_tables,
+                &mut partition_parents,
                 live,
                 &mut named_types,
             )? {

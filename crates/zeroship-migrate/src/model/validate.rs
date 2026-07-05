@@ -118,6 +118,25 @@ pub const CODE_PGRAW_REASON_REQUIRED: &str = "PGRAW_REASON_REQUIRED";
 pub const CODE_PRIMARY_KEY_INVALID: &str = "PRIMARY_KEY_INVALID";
 /// A resolved `createTable` violates the active profile's table-shape policy.
 pub const CODE_TABLE_SHAPE_POLICY: &str = "TABLE_SHAPE_POLICY";
+/// A dialect target cannot realize an authored construct and no P12 affirmation
+/// authorizes a transparent-degradable leg.
+pub const CODE_DIALECT_UNSUPPORTED: &str = "DIALECT_UNSUPPORTED";
+/// Partition rule 1: unique-enforcing entries on a partitioned table must cover
+/// all partition key columns.
+pub const CODE_PARTITION_KEY_COVERAGE: &str = "PARTITION_KEY_COVERAGE";
+/// Partition rule 2: collapse-affirmed bound sets must be total.
+pub const CODE_PARTITION_BOUNDS_NOT_TOTAL: &str = "PARTITION_BOUNDS_NOT_TOTAL";
+/// Partition rule 2: v1 range collapse only supports a single partition key.
+pub const CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED: &str =
+    "PARTITION_COMPOSITE_KEY_UNSUPPORTED";
+/// Partition rule 2: collapse predicates require two-valued, non-null keys.
+pub const CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE: &str =
+    "PARTITION_KEY_NULLABLE_UNDER_COLLAPSE";
+/// Partition rule 3: sibling bounds must be PG-well-formed.
+pub const CODE_PARTITION_BOUNDS_ILL_FORMED: &str = "PARTITION_BOUNDS_ILL_FORMED";
+/// Partition rule 4 realization is intentionally deferred to #234b for collapse
+/// targets.
+pub const CODE_COLLAPSE_DROP_NOT_YET_REALIZED: &str = "COLLAPSE_DROP_NOT_YET_REALIZED";
 
 /// The MAX byte length a `t.id({prefix})` prefix may carry (P2a §4). Mirrors the
 /// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
@@ -387,6 +406,649 @@ pub fn validate_ir_scoped(
             schema_scope,
             policy_profile,
         )?;
+    }
+    validate_partition_recording(ir, target_dialect, ts_locations)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PartitionUniqueEntry {
+    op_index: usize,
+    label: &'static str,
+    columns: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionParentFold {
+    op_index: usize,
+    spec: crate::model::ir::PartitionSpec,
+    not_null_columns: std::collections::BTreeSet<String>,
+    unique_entries: Vec<PartitionUniqueEntry>,
+    children: std::collections::BTreeMap<String, (usize, crate::model::ir::PartitionBounds)>,
+}
+
+fn partition_error(
+    code: &'static str,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    dialect: Dialect,
+    reason: impl Into<String>,
+    suggested_fix: impl Into<String>,
+) -> AuthoringError {
+    AuthoringError {
+        code: code.to_string(),
+        kind: None,
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect,
+        reason: reason.into(),
+        suggested_fix: Some(suggested_fix.into()),
+    }
+}
+
+fn partition_spec_label(spec: &crate::model::ir::PartitionSpec) -> &'static str {
+    match spec {
+        crate::model::ir::PartitionSpec::Range { .. } => "range",
+        crate::model::ir::PartitionSpec::List { .. } => "list",
+        crate::model::ir::PartitionSpec::Hash { .. } => "hash",
+    }
+}
+
+fn index_column_names(index_columns: &[crate::model::ir::IndexElement]) -> Vec<String> {
+    index_columns
+        .iter()
+        .filter_map(|element| match element {
+            crate::model::ir::IndexElement::Column { name, .. } => Some(name.clone()),
+            crate::model::ir::IndexElement::Expr { .. } => None,
+        })
+        .collect()
+}
+
+fn exclusion_column_names(elements: &[crate::model::ir::ExclusionElement]) -> Vec<String> {
+    elements
+        .iter()
+        .filter_map(|element| match &element.target {
+            crate::model::ir::ColumnOrExpr::Column { name } => Some(name.clone()),
+            crate::model::ir::ColumnOrExpr::Expr { .. } => None,
+        })
+        .collect()
+}
+
+fn partition_bound_key(value: &crate::model::ir::PartitionBoundValue) -> String {
+    match value {
+        crate::model::ir::PartitionBoundValue::String { value } => format!("s:{value}"),
+        crate::model::ir::PartitionBoundValue::Int { value } => format!("i:{}", value.get()),
+        crate::model::ir::PartitionBoundValue::MinValue => "min".to_string(),
+        crate::model::ir::PartitionBoundValue::MaxValue => "max".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PartitionComparableBound<'a> {
+    Min,
+    Int(i64),
+    String(&'a str),
+    Max,
+}
+
+fn comparable_bound(
+    value: &crate::model::ir::PartitionBoundValue,
+) -> PartitionComparableBound<'_> {
+    match value {
+        crate::model::ir::PartitionBoundValue::String { value } => {
+            PartitionComparableBound::String(value)
+        }
+        crate::model::ir::PartitionBoundValue::Int { value } => {
+            PartitionComparableBound::Int(value.get())
+        }
+        crate::model::ir::PartitionBoundValue::MinValue => PartitionComparableBound::Min,
+        crate::model::ir::PartitionBoundValue::MaxValue => PartitionComparableBound::Max,
+    }
+}
+
+fn compare_bound_tuple(
+    lhs: &[crate::model::ir::PartitionBoundValue],
+    rhs: &[crate::model::ir::PartitionBoundValue],
+) -> Option<std::cmp::Ordering> {
+    if lhs.len() != rhs.len() {
+        return None;
+    }
+    for (l, r) in lhs.iter().zip(rhs) {
+        let l = comparable_bound(l);
+        let r = comparable_bound(r);
+        match (l, r) {
+            (PartitionComparableBound::Int(_), PartitionComparableBound::String(_))
+            | (PartitionComparableBound::String(_), PartitionComparableBound::Int(_)) => {
+                return None;
+            }
+            _ => {}
+        }
+        let ord = l.cmp(&r);
+        if !ord.is_eq() {
+            return Some(ord);
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
+fn hash_gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn hash_lcm(a: u128, b: u128) -> Option<u128> {
+    if a == 0 || b == 0 {
+        return None;
+    }
+    a.checked_div(hash_gcd(a, b))?.checked_mul(b)
+}
+
+fn validate_partition_recording(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{IrConstraintKind, Op, PartitionSpec};
+
+    let mut parents: std::collections::BTreeMap<String, PartitionParentFold> =
+        std::collections::BTreeMap::new();
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        match op {
+            Op::CreateTable {
+                name,
+                columns,
+                primary_key,
+                constraints,
+                indexes,
+                partition_by: Some(spec),
+                ..
+            } => {
+                let mut not_null_columns = std::collections::BTreeSet::new();
+                for column in columns {
+                    if column.nullable == Some(false) {
+                        not_null_columns.insert(column.name.clone());
+                    }
+                }
+                let mut unique_entries = Vec::new();
+                if let Some(pk) = primary_key {
+                    for column in pk {
+                        not_null_columns.insert(column.clone());
+                    }
+                    unique_entries.push(PartitionUniqueEntry {
+                        op_index,
+                        label: "primary key",
+                        columns: pk.clone(),
+                    });
+                }
+                for column in columns {
+                    if column.unique.unwrap_or(false) {
+                        unique_entries.push(PartitionUniqueEntry {
+                            op_index,
+                            label: "column unique",
+                            columns: vec![column.name.clone()],
+                        });
+                    }
+                }
+                for constraint in constraints {
+                    match &constraint.kind {
+                        IrConstraintKind::Unique { columns } => {
+                            unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "unique constraint",
+                                columns: columns.clone(),
+                            });
+                        }
+                        IrConstraintKind::Exclusion { elements, .. } => {
+                            unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "exclusion constraint",
+                                columns: exclusion_column_names(elements),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                for index in indexes {
+                    if index.unique.unwrap_or(false) {
+                        unique_entries.push(PartitionUniqueEntry {
+                            op_index,
+                            label: "unique index",
+                            columns: index_column_names(&index.columns),
+                        });
+                    }
+                }
+                parents.insert(
+                    name.clone(),
+                    PartitionParentFold {
+                        op_index,
+                        spec: spec.clone(),
+                        not_null_columns,
+                        unique_entries,
+                        children: std::collections::BTreeMap::new(),
+                    },
+                );
+            }
+            Op::CreateTable { name, .. } => {
+                parents.remove(name);
+            }
+            Op::DropTable { table, .. } => {
+                parents.remove(table);
+            }
+            Op::RenameTable { table, to, .. } => {
+                if let Some(parent) = parents.remove(table) {
+                    parents.insert(to.clone(), parent);
+                }
+            }
+            Op::CreatePartition { name, of, bounds, .. } => {
+                if let Some(parent) = parents.get_mut(of) {
+                    parent.children.insert(name.clone(), (op_index, bounds.clone()));
+                } else if !matches!(target_dialect, Dialect::Postgres) {
+                    return Err(partition_error(
+                        CODE_DIALECT_UNSUPPORTED,
+                        op_index,
+                        ts_locations,
+                        target_dialect,
+                        format!(
+                            "createPartition {name:?} targets parent {of:?}, but this recording does not contain a collapse-affirmed partitioned parent to authorize the no-DDL leg"
+                        ),
+                        "record the partitioned parent with partitionBy.whenUnsupported: \"collapse\" in the same fold, or target Postgres for native partition DDL",
+                    ));
+                }
+            }
+            Op::DropPartition { parent, name, .. } => {
+                if !matches!(target_dialect, Dialect::Postgres) {
+                    return Err(partition_error(
+                        CODE_COLLAPSE_DROP_NOT_YET_REALIZED,
+                        op_index,
+                        ts_locations,
+                        target_dialect,
+                        format!(
+                            "dropping partition {name:?} from parent {parent:?} on a collapse target needs the bounded DELETE realization, which is #234b"
+                        ),
+                        "defer partition child drops on SQLite/MySQL until #234b, or target Postgres for native DROP TABLE of the child partition",
+                    ));
+                }
+                if let Some(parent) = parents.get_mut(parent) {
+                    parent.children.remove(name);
+                }
+            }
+            Op::SetColumnNotNull { table, column, .. } => {
+                if let Some(parent) = parents.get_mut(table) {
+                    parent.not_null_columns.insert(column.clone());
+                }
+            }
+            Op::DropColumnNotNull { table, column, .. } => {
+                if let Some(parent) = parents.get_mut(table) {
+                    parent.not_null_columns.remove(column);
+                }
+            }
+            Op::AddConstraint { table, constraint, .. } => {
+                if let Some(parent) = parents.get_mut(table) {
+                    match &constraint.kind {
+                        IrConstraintKind::Unique { columns } => {
+                            parent.unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "unique constraint",
+                                columns: columns.clone(),
+                            });
+                        }
+                        IrConstraintKind::Exclusion { elements, .. } => {
+                            parent.unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "exclusion constraint",
+                                columns: exclusion_column_names(elements),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Op::CreateIndex {
+                table,
+                columns,
+                unique,
+                ..
+            } if unique.unwrap_or(false) => {
+                if let Some(parent) = parents.get_mut(table) {
+                    parent.unique_entries.push(PartitionUniqueEntry {
+                        op_index,
+                        label: "unique index",
+                        columns: index_column_names(columns),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (table, parent) in &parents {
+        let key_columns = parent.spec.columns();
+        for entry in &parent.unique_entries {
+            let cols: std::collections::BTreeSet<&str> =
+                entry.columns.iter().map(String::as_str).collect();
+            if let Some(missing) = key_columns.iter().find(|key| !cols.contains(key.as_str())) {
+                return Err(partition_error(
+                    CODE_PARTITION_KEY_COVERAGE,
+                    entry.op_index,
+                    ts_locations,
+                    target_dialect,
+                    format!(
+                        "partitioned table {table:?} has a {} that does not include partition key column {missing:?}",
+                        entry.label
+                    ),
+                    "include every partition key column in each primary key, unique constraint, unique index, and exclusion constraint on the partitioned table",
+                ));
+            }
+        }
+
+        validate_partition_bounds_well_formed(table, parent, target_dialect, ts_locations)?;
+
+        if parent.spec.collapse() {
+            if matches!(parent.spec, PartitionSpec::Range { .. }) && key_columns.len() != 1 {
+                return Err(partition_error(
+                    CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
+                    parent.op_index,
+                    ts_locations,
+                    target_dialect,
+                    format!(
+                        "collapse-affirmed range partitioning on table {table:?} has {} partition key columns; v1 collapse supports exactly one",
+                        key_columns.len()
+                    ),
+                    "use a single range partition key for collapse, or omit whenUnsupported and target Postgres only",
+                ));
+            }
+            for key in key_columns {
+                if !parent.not_null_columns.contains(key) {
+                    return Err(partition_error(
+                        CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
+                        parent.op_index,
+                        ts_locations,
+                        target_dialect,
+                        format!(
+                            "collapse-affirmed partitioned table {table:?} has nullable partition key column {key:?}"
+                        ),
+                        "mark every partition key column notNull, or omit whenUnsupported and target Postgres only",
+                    ));
+                }
+            }
+            validate_partition_bounds_total(table, parent, target_dialect, ts_locations)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_partition_bounds_well_formed(
+    table: &str,
+    parent: &PartitionParentFold,
+    dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{PartitionBounds, PartitionSpec};
+
+    match &parent.spec {
+        PartitionSpec::Range { columns, .. } => {
+            let mut ranges: Vec<(
+                usize,
+                &[crate::model::ir::PartitionBoundValue],
+                &[crate::model::ir::PartitionBoundValue],
+            )> = Vec::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                match bounds {
+                    PartitionBounds::Range { from, to } => {
+                        if from.len() != columns.len() || to.len() != columns.len() {
+                            return Err(partition_error(
+                                CODE_PARTITION_BOUNDS_ILL_FORMED,
+                                *op_index,
+                                ts_locations,
+                                dialect,
+                                format!(
+                                    "range partition child on table {table:?} has bound arity from={} to={} for {} partition key columns",
+                                    from.len(),
+                                    to.len(),
+                                    columns.len()
+                                ),
+                                "make each range bound tuple match the partition key arity",
+                            ));
+                        }
+                        if !matches!(
+                            compare_bound_tuple(from, to),
+                            Some(std::cmp::Ordering::Less)
+                        ) {
+                            return Err(partition_error(
+                                CODE_PARTITION_BOUNDS_ILL_FORMED,
+                                *op_index,
+                                ts_locations,
+                                dialect,
+                                format!(
+                                    "range partition child on table {table:?} has an empty, reversed, or incomparable FROM/TO bound"
+                                ),
+                                "use non-empty range bounds with comparable value kinds and FROM < TO",
+                            ));
+                        }
+                        ranges.push((*op_index, from, to));
+                    }
+                    PartitionBounds::Default => {}
+                    _ => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("range partitioned table {table:?} has a non-range child bound"),
+                            "use range bounds or a default child under a range-partitioned parent",
+                        ));
+                    }
+                }
+            }
+            for i in 0..ranges.len() {
+                for j in (i + 1)..ranges.len() {
+                    let (_, a_from, a_to) = ranges[i];
+                    let (b_op, b_from, b_to) = ranges[j];
+                    let overlaps = matches!(
+                        compare_bound_tuple(a_from, b_to),
+                        Some(std::cmp::Ordering::Less)
+                    ) && matches!(
+                        compare_bound_tuple(b_from, a_to),
+                        Some(std::cmp::Ordering::Less)
+                    );
+                    if overlaps {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            b_op,
+                            ts_locations,
+                            dialect,
+                            format!("range partition bounds on table {table:?} overlap"),
+                            "make sibling range partition bounds pairwise non-overlapping",
+                        ));
+                    }
+                }
+            }
+        }
+        PartitionSpec::List { .. } => {
+            let mut seen = std::collections::BTreeSet::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                match bounds {
+                    PartitionBounds::List { values } => {
+                        for value in values {
+                            let key = partition_bound_key(value);
+                            if !seen.insert(key) {
+                                return Err(partition_error(
+                                    CODE_PARTITION_BOUNDS_ILL_FORMED,
+                                    *op_index,
+                                    ts_locations,
+                                    dialect,
+                                    format!(
+                                        "list partition value {} appears more than once on table {table:?}",
+                                        partition_bound_key(value)
+                                    ),
+                                    "ensure each list-bound value appears at most once across all sibling partitions",
+                                ));
+                            }
+                        }
+                    }
+                    PartitionBounds::Default => {}
+                    _ => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("list partitioned table {table:?} has a non-list child bound"),
+                            "use list bounds or a default child under a list-partitioned parent",
+                        ));
+                    }
+                }
+            }
+        }
+        PartitionSpec::Hash { .. } => {
+            let mut classes = Vec::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                match bounds {
+                    PartitionBounds::Default => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("hash partitioned table {table:?} cannot have a default child"),
+                            "remove the default child from hash partitioning and use modulus/remainder bounds",
+                        ));
+                    }
+                    PartitionBounds::Hash { modulus, remainder } => {
+                    if *modulus == 0 || *remainder >= *modulus {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition on table {table:?} has modulus {modulus} and remainder {remainder}; remainder must be less than a non-zero modulus"
+                            ),
+                            "use hash bounds with modulus > 0 and remainder < modulus",
+                        ));
+                    }
+                    classes.push((*op_index, u128::from(*modulus), u128::from(*remainder)));
+                    }
+                    _ => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("hash partitioned table {table:?} has a non-hash child bound"),
+                            "use modulus/remainder bounds under a hash-partitioned parent",
+                        ));
+                    }
+                }
+            }
+            for i in 0..classes.len() {
+                for j in (i + 1)..classes.len() {
+                    let (op_index, m1, r1) = classes[i];
+                    let (op_index2, m2, r2) = classes[j];
+                    let (small_m, small_r, large_m, large_r, err_op) = if m1 <= m2 {
+                        (m1, r1, m2, r2, op_index2)
+                    } else {
+                        (m2, r2, m1, r1, op_index)
+                    };
+                    if large_m % small_m != 0 {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            err_op,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition moduli {m1} and {m2} on table {table:?} are not comparable by divisibility"
+                            ),
+                            "use hash partition moduli where every pair is comparable by divisibility",
+                        ));
+                    }
+                    if large_r % small_m == small_r {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            err_op,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition congruence classes ({m1},{r1}) and ({m2},{r2}) overlap on table {table:?}"
+                            ),
+                            "use non-overlapping hash remainder classes",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_partition_bounds_total(
+    table: &str,
+    parent: &PartitionParentFold,
+    dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{PartitionBounds, PartitionSpec};
+
+    match &parent.spec {
+        PartitionSpec::Range { .. } | PartitionSpec::List { .. } => {
+            if !parent
+                .children
+                .values()
+                .any(|(_, bounds)| matches!(bounds, PartitionBounds::Default))
+            {
+                return Err(partition_error(
+                    CODE_PARTITION_BOUNDS_NOT_TOTAL,
+                    parent.op_index,
+                    ts_locations,
+                    dialect,
+                    format!(
+                        "collapse-affirmed {} partitioned table {table:?} has no default child",
+                        partition_spec_label(&parent.spec)
+                    ),
+                    "add a .partition(...).create({ default: true }) child, or omit whenUnsupported and target Postgres only",
+                ));
+            }
+        }
+        PartitionSpec::Hash { .. } => {
+            let mut lcm = 1_u128;
+            let mut classes = Vec::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                if let PartitionBounds::Hash { modulus, remainder } = bounds {
+                    lcm = hash_lcm(lcm, u128::from(*modulus)).ok_or_else(|| {
+                        partition_error(
+                            CODE_PARTITION_BOUNDS_NOT_TOTAL,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition modulus set on table {table:?} overflows the validator's exact lcm arithmetic"
+                            ),
+                            "use smaller hash moduli or avoid collapse affirmation for this hash partition set",
+                        )
+                    })?;
+                    classes.push((u128::from(*modulus), u128::from(*remainder)));
+                }
+            }
+            let covered: u128 = classes.iter().map(|(m, _)| lcm / *m).sum();
+            if covered != lcm {
+                return Err(partition_error(
+                    CODE_PARTITION_BOUNDS_NOT_TOTAL,
+                    parent.op_index,
+                    ts_locations,
+                    dialect,
+                    format!(
+                        "collapse-affirmed hash partitioned table {table:?} covers {covered} of {lcm} residue classes"
+                    ),
+                    "declare hash children whose modulus/remainder classes cover every residue in 0..lcm(moduli)-1",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1176,6 +1838,47 @@ fn validate_op_support(
         };
 
     let support = op.support();
+    match op {
+        Op::CreateTable {
+            name,
+            partition_by: Some(partition_by),
+            ..
+        } if !matches!(target_dialect, Dialect::Postgres) && !partition_by.collapse() => {
+            return Err(AuthoringError {
+                code: CODE_DIALECT_UNSUPPORTED.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: format!(
+                    "partitioned table {name:?} is native only on Postgres unless partitionBy.whenUnsupported is affirmed as \"collapse\""
+                ),
+                suggested_fix: Some(
+                    "add partitionBy.whenUnsupported: \"collapse\" and satisfy the partition collapse validation rules, or target Postgres only"
+                        .to_string(),
+                ),
+            });
+        }
+        Op::DropPartition { name, parent, .. }
+            if !matches!(target_dialect, Dialect::Postgres) =>
+        {
+            return Err(AuthoringError {
+                code: CODE_COLLAPSE_DROP_NOT_YET_REALIZED.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: format!(
+                    "dropping partition {name:?} from parent {parent:?} on a collapse target needs the bounded DELETE realization, which is #234b"
+                ),
+                suggested_fix: Some(
+                    "defer partition child drops on SQLite/MySQL until #234b, or target Postgres for native DROP TABLE of the child partition"
+                        .to_string(),
+                ),
+            });
+        }
+        _ => {}
+    }
     if let Some(err) = error_from_decision(
         support.decision(target_dialect),
         op_kind(op),
@@ -2773,6 +3476,7 @@ pub fn validate_ir_resolved(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_resolved(op, target_dialect, live_columns, op_index, ts)?;
     }
+    validate_partition_recording(ir, target_dialect, ts_locations)?;
     Ok(())
 }
 
@@ -4443,6 +5147,7 @@ mod tests {
 
     use crate::model::ir::{
         ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr, Op,
+        PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
     };
     use std::collections::BTreeMap;
 
@@ -4469,6 +5174,404 @@ mod tests {
         dialect: Dialect,
     ) -> Result<(), AuthoringError> {
         validate_ir_scoped(ir, dialect, &[], None, &PolicyProfile::platform())
+    }
+
+    fn part_col(name: &str, ty: ColType, not_null: bool) -> IrColumn {
+        IrColumn {
+            name: name.into(),
+            ty,
+            nullable: not_null.then_some(false),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }
+    }
+
+    fn idx_col(name: &str) -> IndexElement {
+        IndexElement::Column {
+            name: name.into(),
+            order: None,
+            opclass: None,
+            collation: None,
+        }
+    }
+
+    fn unique_idx(columns: &[&str]) -> IrIndex {
+        IrIndex {
+            name: None,
+            columns: columns.iter().map(|name| idx_col(name)).collect(),
+            unique: Some(true),
+            using: None,
+            r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+        }
+    }
+
+    fn safe_i(value: i64) -> PartitionBoundValue {
+        PartitionBoundValue::Int {
+            value: SafeI64::new(value).expect("test partition bound is JS-safe"),
+        }
+    }
+
+    fn str_b(value: &str) -> PartitionBoundValue {
+        PartitionBoundValue::String { value: value.into() }
+    }
+
+    fn create_parent(
+        name: &str,
+        spec: PartitionSpec,
+        columns: Vec<IrColumn>,
+        primary_key: Option<&[&str]>,
+        constraints: Vec<IrConstraint>,
+        indexes: Vec<IrIndex>,
+    ) -> Op {
+        Op::CreateTable {
+            name: name.into(),
+            columns,
+            primary_key: primary_key.map(|cols| cols.iter().map(|col| (*col).into()).collect()),
+            constraints,
+            indexes,
+            partition_by: Some(spec),
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn create_part(name: &str, of: &str, bounds: PartitionBounds) -> Op {
+        Op::CreatePartition {
+            name: name.into(),
+            of: of.into(),
+            bounds,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    #[test]
+    fn partitioned_table_without_collapse_is_dialect_unsupported_off_postgres() {
+        let ir = ir_with(vec![create_parent(
+            "events",
+            PartitionSpec::Range { columns: vec!["ts".into()], collapse: false },
+            vec![part_col("ts", ColType::Timestamp, true)],
+            None,
+            vec![],
+            vec![],
+        )]);
+
+        assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
+        let err = validate_ir_platform(&ir, Dialect::Sqlite)
+            .expect_err("non-affirmed partitioning must fail closed off Postgres");
+        assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "got: {err}");
+    }
+
+    #[test]
+    fn partition_key_coverage_refuses_non_covering_unique_and_accepts_covering() {
+        let base_cols = || {
+            vec![
+                part_col("tenant_id", ColType::Uuid, true),
+                part_col("ts", ColType::Timestamp, true),
+            ]
+        };
+        let spec = || PartitionSpec::Range { columns: vec!["ts".into()], collapse: false };
+
+        let bad = ir_with(vec![create_parent(
+            "events",
+            spec(),
+            base_cols(),
+            None,
+            vec![],
+            vec![unique_idx(&["tenant_id"])],
+        )]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("unique indexes on partitioned parents must cover the key");
+        assert_eq!(err.code, CODE_PARTITION_KEY_COVERAGE, "got: {err}");
+
+        let ok = ir_with(vec![create_parent(
+            "events",
+            spec(),
+            base_cols(),
+            None,
+            vec![],
+            vec![unique_idx(&["tenant_id", "ts"])],
+        )]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn collapse_requires_total_range_list_and_hash_bounds() {
+        let range_missing_default = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                vec![part_col("ts", ColType::Timestamp, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "events_0",
+                "events",
+                PartitionBounds::Range {
+                    from: vec![safe_i(0)],
+                    to: vec![safe_i(10)],
+                },
+            ),
+        ]);
+        let err = validate_ir_platform(&range_missing_default, Dialect::Postgres)
+            .expect_err("collapse range without default must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
+
+        let list_missing_default = ir_with(vec![
+            create_parent(
+                "orders",
+                PartitionSpec::List { columns: vec!["region".into()], collapse: true },
+                vec![part_col("region", ColType::Text, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "orders_us",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("US")] },
+            ),
+        ]);
+        let err = validate_ir_platform(&list_missing_default, Dialect::Postgres)
+            .expect_err("collapse list without default must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
+
+        let hash_partial = ir_with(vec![
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: true },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "sessions_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+        ]);
+        let err = validate_ir_platform(&hash_partial, Dialect::Postgres)
+            .expect_err("collapse hash must cover every residue");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
+
+        let hash_total = ir_with(vec![
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: true },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "sessions_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+            create_part(
+                "sessions_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 1 },
+            ),
+        ]);
+        assert!(validate_ir_platform(&hash_total, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn collapse_refuses_composite_range_key() {
+        let ir = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range {
+                    columns: vec!["tenant_id".into(), "ts".into()],
+                    collapse: true,
+                },
+                vec![
+                    part_col("tenant_id", ColType::Uuid, true),
+                    part_col("ts", ColType::Timestamp, true),
+                ],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part("events_default", "events", PartitionBounds::Default),
+        ]);
+
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("range collapse v1 supports one key column");
+        assert_eq!(err.code, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, "got: {err}");
+    }
+
+    #[test]
+    fn collapse_refuses_nullable_key_and_later_drop_not_null() {
+        let nullable = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                vec![part_col("ts", ColType::Timestamp, false)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part("events_default", "events", PartitionBounds::Default),
+        ]);
+        let err = validate_ir_platform(&nullable, Dialect::Postgres)
+            .expect_err("collapse partition keys must be not null");
+        assert_eq!(err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, "got: {err}");
+
+        let dropped_later = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                vec![part_col("ts", ColType::Timestamp, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part("events_default", "events", PartitionBounds::Default),
+            Op::DropColumnNotNull {
+                table: "events".into(),
+                column: "ts".into(),
+                schema: None,
+                existence_guard: None,
+            },
+        ]);
+        let err = validate_ir_platform(&dropped_later, Dialect::Postgres)
+            .expect_err("later dropNotNull on a collapse key must refuse");
+        assert_eq!(err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, "got: {err}");
+    }
+
+    #[test]
+    fn partition_bounds_refuse_overlapping_range_and_accept_disjoint() {
+        let parent = || {
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["bucket".into()], collapse: false },
+                vec![part_col("bucket", ColType::Int, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+        let range = |name: &str, from: i64, to: i64| {
+            create_part(
+                name,
+                "events",
+                PartitionBounds::Range {
+                    from: vec![safe_i(from)],
+                    to: vec![safe_i(to)],
+                },
+            )
+        };
+
+        let bad = ir_with(vec![parent(), range("events_a", 0, 10), range("events_b", 5, 20)]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("overlapping range siblings must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
+
+        let ok = ir_with(vec![parent(), range("events_a", 0, 10), range("events_b", 10, 20)]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn partition_bounds_refuse_duplicate_list_value_and_accept_unique() {
+        let parent = || {
+            create_parent(
+                "orders",
+                PartitionSpec::List { columns: vec!["region".into()], collapse: false },
+                vec![part_col("region", ColType::Text, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+
+        let bad = ir_with(vec![
+            parent(),
+            create_part(
+                "orders_a",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("US"), str_b("US")] },
+            ),
+        ]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("duplicate list values must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
+
+        let ok = ir_with(vec![
+            parent(),
+            create_part(
+                "orders_us",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("US")] },
+            ),
+            create_part(
+                "orders_eu",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("EU")] },
+            ),
+        ]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn partition_bounds_refuse_non_factor_chain_hash_and_accept_factor_chain() {
+        let parent = || {
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: false },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+
+        let bad = ir_with(vec![
+            parent(),
+            create_part(
+                "sessions_2_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+            create_part(
+                "sessions_3_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 3, remainder: 1 },
+            ),
+        ]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("hash moduli must be comparable by divisibility");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
+
+        let ok = ir_with(vec![
+            parent(),
+            create_part(
+                "sessions_2_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+            create_part(
+                "sessions_4_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 4, remainder: 1 },
+            ),
+        ]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
     }
 
     // ── PR10: schema confinement + guard direction + schema-ident safety ────────

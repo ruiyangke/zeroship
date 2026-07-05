@@ -165,8 +165,8 @@ mysql = "unsupported"
 kind = "createPartition"
 variant = "base"
 pg = "portable"
-sqlite = "unsupported"
-mysql = "unsupported"
+sqlite = "transparentDegradable"
+mysql = "transparentDegradable"
 
 [[row]]
 kind = "detachPartition"
@@ -363,6 +363,13 @@ variant = "partitioned"
 pg = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
+
+[[row]]
+kind = "createTable"
+variant = "partitionedCollapse"
+pg = "portable"
+sqlite = "transparentDegradable"
+mysql = "transparentDegradable"
 
 [[row]]
 kind = "createTable"

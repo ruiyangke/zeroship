@@ -1510,17 +1510,51 @@ pub enum PartitionSpec {
     Range {
         /// Partition key columns.
         columns: Vec<String>,
+        /// P12 affirmation: collapse to a plain table where native partitioning
+        /// is unsupported.
+        #[serde(default)]
+        collapse: bool,
     },
     /// `PARTITION BY LIST (...)`.
     List {
         /// Partition key columns.
         columns: Vec<String>,
+        /// P12 affirmation: collapse to a plain table where native partitioning
+        /// is unsupported.
+        #[serde(default)]
+        collapse: bool,
     },
     /// `PARTITION BY HASH (...)`.
     Hash {
         /// Partition key columns.
         columns: Vec<String>,
+        /// P12 affirmation: collapse to a plain table where native partitioning
+        /// is unsupported.
+        #[serde(default)]
+        collapse: bool,
     },
+}
+
+impl PartitionSpec {
+    /// Partition key columns.
+    #[must_use]
+    pub fn columns(&self) -> &[String] {
+        match self {
+            Self::Range { columns, .. } | Self::List { columns, .. } | Self::Hash { columns, .. } => {
+                columns
+            }
+        }
+    }
+
+    /// Whether the author affirmed P12 collapse for unsupported dialects.
+    #[must_use]
+    pub const fn collapse(&self) -> bool {
+        match self {
+            Self::Range { collapse, .. }
+            | Self::List { collapse, .. }
+            | Self::Hash { collapse, .. } => *collapse,
+        }
+    }
 }
 
 /// Closed partition-bound literal. Never raw SQL.
@@ -3974,8 +4008,12 @@ impl Op {
             matches!(column.identity, Some(identity) if !identity.always)
                 && !matches!(pk_cols, Some(cols) if cols.len() == 1 && cols[0] == column.name)
         });
-        if partition_by.is_some() {
-            "partitioned"
+        if let Some(spec) = partition_by {
+            if spec.collapse() {
+                "partitionedCollapse"
+            } else {
+                "partitioned"
+            }
         } else if has_pg_only_index_feature {
             "pgOnlyIndexFeature"
         } else if has_nextval_default {

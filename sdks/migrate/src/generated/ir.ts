@@ -333,9 +333,9 @@ export interface IrIndex {
 
 /** Partitioning strategy for a partitioned table parent. */
 export type PartitionSpec =
-  | { kind: "range"; columns: string[] }
-  | { kind: "list"; columns: string[] }
-  | { kind: "hash"; columns: string[] };
+  | { kind: "range"; columns: string[]; collapse?: boolean }
+  | { kind: "list"; columns: string[]; collapse?: boolean }
+  | { kind: "hash"; columns: string[]; collapse?: boolean };
 
 /** Closed partition-bound literal. Never raw SQL. */
 export type PartitionBoundValue =

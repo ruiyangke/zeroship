@@ -7,8 +7,9 @@ use zeroship_migrate::{
     apply, diff_snapshots, fold_ops, snapshot_schema, Approval, ColType, ExecutorConfig, Expr,
     IndexElement, IndexMethod, IndexStorageParams, IrAuthor, IrColumn, IrFlagsOverride,
     LiveSchema, MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec,
-    SchemaScope, SqlDialect, UnaryOp, CURRENT_IR_VERSION,
+    PolicyProfile, SafeI64, SchemaScope, SqlDialect, UnaryOp, CURRENT_IR_VERSION,
 };
+use zeroship_migrate::model::validate::{validate_ir_scoped, Dialect};
 
 const DEFAULT_DSN: &str =
     "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_migrate_test";
@@ -118,6 +119,12 @@ fn ts_bound(value: &str) -> PartitionBoundValue {
     }
 }
 
+fn int_bound(value: i64) -> PartitionBoundValue {
+    PartitionBoundValue::Int {
+        value: SafeI64::new(value).expect("test partition bound is JS-safe"),
+    }
+}
+
 fn user_id_is_present() -> Expr {
     Expr::UnaryOp {
         op: UnaryOp::IsNotNull,
@@ -143,6 +150,7 @@ fn partition_ops() -> Vec<Op> {
             indexes: Vec::new(),
             partition_by: Some(PartitionSpec::Range {
                 columns: vec!["ts".to_string()],
+                collapse: false,
             }),
             runtime_options: None,
             schema: None,
@@ -205,6 +213,45 @@ fn partition_ops() -> Vec<Op> {
     ]
 }
 
+fn collapse_events_ops() -> Vec<Op> {
+    vec![
+        Op::CreateTable {
+            name: "events".to_string(),
+            columns: vec![
+                ir_col("bucket", ColType::Int, false),
+                ir_col("payload", ColType::Text, false),
+            ],
+            primary_key: None,
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            partition_by: Some(PartitionSpec::Range {
+                columns: vec!["bucket".to_string()],
+                collapse: true,
+            }),
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreatePartition {
+            name: "events_0".to_string(),
+            of: "events".to_string(),
+            bounds: PartitionBounds::Range {
+                from: vec![int_bound(0)],
+                to: vec![int_bound(100)],
+            },
+            schema: None,
+            existence_guard: None,
+        },
+        Op::CreatePartition {
+            name: "events_default".to_string(),
+            of: "events".to_string(),
+            bounds: PartitionBounds::Default,
+            schema: None,
+            existence_guard: None,
+        },
+    ]
+}
+
 #[compio::test]
 async fn partitioned_table_drift_round_trips_without_spurious_children_or_index_facets() {
     let conn = pg().await;
@@ -239,6 +286,80 @@ async fn partitioned_table_drift_round_trips_without_spurious_children_or_index_
     assert!(
         drift.is_clean(),
         "partitioned table fold and live catalog must agree without child-table or index-facet drift: {drift:#?}"
+    );
+
+    drop_schemas(&conn, &cfg).await;
+}
+
+#[compio::test]
+async fn collapse_affirmed_events_apply_natively_on_postgres() {
+    let conn = pg().await;
+    let cfg = cfg_for(&token());
+    drop_schemas(&conn, &cfg).await;
+    ensure_project_schema(&conn, &cfg).await;
+
+    let ops = collapse_events_ops();
+    let ir = ir_doc("partition_collapse_pg", ops.clone());
+    validate_ir_scoped(
+        &ir,
+        Dialect::Postgres,
+        &[],
+        None,
+        &PolicyProfile::platform(),
+    )
+    .expect("collapse-affirmed partition recording validates on Postgres");
+    let migrations = lower_ir_migrations(&cfg.project_schema, "partition_collapse_pg", &ops);
+    let rendered = migrations
+        .iter()
+        .map(|m| m.up.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("PARTITION BY RANGE"),
+        "Postgres leg must keep native partitioning:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("PARTITION OF"),
+        "Postgres leg must render child partitions:\n{rendered}"
+    );
+
+    apply(&conn, &cfg, &migrations, Approval::None, "actor")
+        .await
+        .expect("apply collapse-affirmed partition ops on Postgres");
+    conn.batch_execute(&format!(
+        "INSERT INTO \"{}\".\"events\" (bucket, payload) VALUES (42, 'range'), (250, 'default')",
+        cfg.project_schema
+    ))
+    .await
+    .expect("insert through partitioned parent");
+
+    let rows = conn
+        .query(
+            &format!(
+                "SELECT bucket, payload, tableoid::regclass::text \
+                   FROM \"{}\".\"events\" ORDER BY bucket",
+                cfg.project_schema
+            ),
+            &[],
+        )
+        .await
+        .expect("read partitioned parent rows");
+    let got = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<_, i32>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(got.len(), 2, "both rows read through parent: {got:?}");
+    assert_eq!((got[0].0, got[0].1.as_str()), (42, "range"));
+    assert_eq!((got[1].0, got[1].1.as_str()), (250, "default"));
+    assert!(
+        got[0].2.ends_with("events_0") && got[1].2.ends_with("events_default"),
+        "rows must physically land in native child partitions: {got:?}"
     );
 
     drop_schemas(&conn, &cfg).await;

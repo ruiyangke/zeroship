@@ -4847,6 +4847,11 @@
                 "type": "string"
               }
             },
+            "collapse": {
+              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "type": "boolean",
+              "default": false
+            },
             "kind": {
               "type": "string",
               "const": "range"
@@ -4869,6 +4874,11 @@
                 "type": "string"
               }
             },
+            "collapse": {
+              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "type": "boolean",
+              "default": false
+            },
             "kind": {
               "type": "string",
               "const": "list"
@@ -4890,6 +4900,11 @@
               "items": {
                 "type": "string"
               }
+            },
+            "collapse": {
+              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "type": "boolean",
+              "default": false
             },
             "kind": {
               "type": "string",

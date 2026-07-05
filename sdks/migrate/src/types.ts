@@ -658,9 +658,9 @@ export interface PartitionBoundSentinel {
 export type PartitionBoundInput = string | number | PartitionBoundSentinel;
 
 export type PartitionByInput =
-  | { range: readonly string[] }
-  | { list: readonly string[] }
-  | { hash: readonly string[] };
+  | { range: readonly string[]; whenUnsupported?: "collapse" }
+  | { list: readonly string[]; whenUnsupported?: "collapse" }
+  | { hash: readonly string[]; whenUnsupported?: "collapse" };
 
 export interface CreatePartitionOptions {
   schema?: string;

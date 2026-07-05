@@ -160,7 +160,7 @@ export function viewGrammar(): void {
 export function partitionGrammar(): void {
   table("events").create({
     columns: { created_at: t.timestamp() },
-    partitionBy: { range: ["created_at"] },
+    partitionBy: { range: ["created_at"], whenUnsupported: "collapse" },
   });
   table("events").partition("events_2026").create({
     from: ["2026-01-01"],
@@ -168,6 +168,12 @@ export function partitionGrammar(): void {
   });
   table("events").partition("events_default").create({ default: true });
   table("events").partition("events_2026").drop({ ifExists: true, cascade: true });
+
+  // @ts-expect-error - whenUnsupported is an explicit P12 affirmation and only accepts "collapse".
+  table("bad").create({ columns: { created_at: t.timestamp() }, partitionBy: { range: ["created_at"], whenUnsupported: "skip" } });
+
+  // @ts-expect-error - null list bounds are outside the closed partition-bound value type.
+  table("bad").partition("bad_null").create({ in: [null] });
 
   // @ts-expect-error - deleted `p` builder namespace; use `partitionBy: { range: [...] }`.
   table("bad").create({ columns: { created_at: t.timestamp() }, partitionBy: migrate.p.range(["created_at"]) });
