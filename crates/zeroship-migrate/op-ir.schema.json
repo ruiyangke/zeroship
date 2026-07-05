@@ -654,6 +654,13 @@
                 "null"
               ]
             },
+            "nullsNotDistinct": {
+              "description": "PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "schema": {
               "description": "**PR10** — the schema qualifier (§2.7).",
               "type": [
@@ -4663,6 +4670,13 @@
             "boolean",
             "null"
           ]
+        },
+        "nulls_not_distinct": {
+          "description": "PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index (treat NULLs as\nequal for the uniqueness check). PG-vendor: fails closed on SQLite/MySQL.\n`None` serializes identically to the pre-`nullsNotDistinct` wire shape\n(byte-neutral when absent).",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -4690,6 +4704,20 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "opclass": {
+              "description": "PostgreSQL per-column operator class (e.g. `text_pattern_ops`).\nPG-vendor: fails closed on SQLite/MySQL. `None` serializes identically\nto the pre-opclass wire shape (byte-neutral when absent).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "collation": {
+              "description": "PostgreSQL per-column collation (e.g. `\"C\"`). PG-vendor: fails closed\non SQLite/MySQL. `None` serializes identically to the pre-collation\nwire shape (byte-neutral when absent).",
+              "type": [
+                "string",
+                "null"
               ]
             },
             "kind": {

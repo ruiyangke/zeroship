@@ -1093,6 +1093,48 @@ test("index column order records DESC and omits ASC/default order", () => {
   );
 });
 
+test("index records PG-vendor nullsNotDistinct + per-element opclass/collation", () => {
+  const ops = record(() =>
+    table("accounts").index("accounts_email_uq").add({
+      columns: [{ kind: "column", name: "email", opclass: "text_pattern_ops", collation: "C" }],
+      unique: true,
+      nullsNotDistinct: true,
+    }),
+  );
+  assert.equal(ops[0].nullsNotDistinct, true);
+  assert.deepEqual(ops[0].columns, [
+    { kind: "column", name: "email", opclass: "text_pattern_ops", collation: "C" },
+  ]);
+});
+
+test("index omits nullsNotDistinct/opclass/collation when absent (byte-neutral)", () => {
+  const ops = record(() =>
+    table("accounts").index("accounts_email_idx").add({ columns: ["email"] }),
+  );
+  assert.equal("nullsNotDistinct" in ops[0], false);
+  assert.deepEqual(ops[0].columns, [{ kind: "column", name: "email" }]);
+});
+
+test("createTable inline index carries nullsNotDistinct + element facets", () => {
+  const ops = record(() =>
+    table("accounts").create({
+      columns: { email: t.text() },
+      indexes: [
+        {
+          name: "accounts_email_uq",
+          columns: [{ kind: "column", name: "email", opclass: "text_pattern_ops" }],
+          unique: true,
+          nullsNotDistinct: true,
+        },
+      ],
+    }),
+  );
+  assert.equal(ops[0].indexes[0].nullsNotDistinct, true);
+  assert.deepEqual(ops[0].indexes[0].columns, [
+    { kind: "column", name: "email", opclass: "text_pattern_ops" },
+  ]);
+});
+
 test("partitionBy records range/list/hash specs on createTable", () => {
   const ops = record(() => {
     table("events_range").create({

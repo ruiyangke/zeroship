@@ -193,6 +193,9 @@ pub enum Feature {
     IndexInclude,
     IndexStorageParams,
     IndexOnly,
+    IndexNullsNotDistinct,
+    IndexOpclass,
+    IndexCollation,
     ExpressionIndex,
     NonBtreeIndexMethod,
     TableLevelForeignKey,
@@ -403,6 +406,21 @@ const PG_ONLY_INDEX_ONLY: DialectSupport = DialectSupport::postgres_only(
     "CREATE INDEX ON ONLY is PostgreSQL-only",
 );
 
+const PG_ONLY_INDEX_NULLS_NOT_DISTINCT: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "UNIQUE INDEX NULLS NOT DISTINCT is PostgreSQL-only (PG 15+)",
+);
+
+const PG_ONLY_INDEX_OPCLASS: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "per-column index operator classes are PostgreSQL-only",
+);
+
+const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "per-column index collations are PostgreSQL-only",
+);
+
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
     FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
@@ -459,6 +477,9 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::IndexInclude, PG_ONLY_INDEX_INCLUDE),
     FeatureSupport::new(Feature::IndexStorageParams, PG_ONLY_INDEX_STORAGE_PARAMS),
     FeatureSupport::new(Feature::IndexOnly, PG_ONLY_INDEX_ONLY),
+    FeatureSupport::new(Feature::IndexNullsNotDistinct, PG_ONLY_INDEX_NULLS_NOT_DISTINCT),
+    FeatureSupport::new(Feature::IndexOpclass, PG_ONLY_INDEX_OPCLASS),
+    FeatureSupport::new(Feature::IndexCollation, PG_ONLY_INDEX_COLLATION),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
         DialectSupport::postgres_only(
@@ -499,6 +520,9 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::IndexInclude, PG_ONLY_INDEX_INCLUDE),
     FeatureSupport::new(Feature::IndexStorageParams, PG_ONLY_INDEX_STORAGE_PARAMS),
     FeatureSupport::new(Feature::IndexOnly, PG_ONLY_INDEX_ONLY),
+    FeatureSupport::new(Feature::IndexNullsNotDistinct, PG_ONLY_INDEX_NULLS_NOT_DISTINCT),
+    FeatureSupport::new(Feature::IndexOpclass, PG_ONLY_INDEX_OPCLASS),
+    FeatureSupport::new(Feature::IndexCollation, PG_ONLY_INDEX_COLLATION),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
         DialectSupport::postgres_only(

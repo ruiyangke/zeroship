@@ -221,10 +221,14 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
                 IndexElement::Column {
                     name: "author_id".into(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
                 IndexElement::Column {
                     name: "status".into(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             name: Some("posts_author_status_idx".into()),
@@ -238,6 +242,7 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
         concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ];
     let artifacts = render_artifacts(&ops, "public").expect("render");
@@ -322,10 +327,14 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
                 IndexElement::Column {
                     name: owner.clone(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
                 IndexElement::Column {
                     name: status.clone(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             name: None,
@@ -339,6 +348,7 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
         concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ];
 

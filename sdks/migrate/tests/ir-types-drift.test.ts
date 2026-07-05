@@ -144,7 +144,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
   addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
-  createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
+  createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "nullsNotDistinct", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),
   setColumnType: ["column", "existenceGuard", "schema", "table", "toType", "using"].sort(),
   setColumnNotNull: ["column", "existenceGuard", "schema", "table"].sort(),
