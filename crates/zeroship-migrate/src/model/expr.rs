@@ -281,10 +281,10 @@ pub enum Expr {
         /// The operand.
         operand: Box<Expr>,
     },
-    /// A searched `CASE` (`c.fn.case([[cond, val], …], else?)`). Each branch is
-    /// `(condition, result)`; both halves are themselves closed-AST nodes.
+    /// A searched `CASE` (`c.case({ when: [{ when, then }], else? })`). Each branch is
+    /// `(when, then)`; both halves are themselves closed-AST nodes.
     Case {
-        /// `(condition, result)` branches, in order.
+        /// `(when, then)` branches, in order.
         branches: Vec<CaseBranch>,
         /// Optional `ELSE` result.
         #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
@@ -458,14 +458,14 @@ pub enum Expr {
     },
 }
 
-/// One `(condition, result)` branch of a [`Expr::Case`].
+/// One `(when, then)` branch of a [`Expr::Case`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CaseBranch {
-    /// The branch condition (a boolean closed-AST node).
-    pub condition: Expr,
-    /// The branch result.
-    pub result: Expr,
+    /// The `WHEN` predicate (a boolean closed-AST node).
+    pub when: Expr,
+    /// The `THEN` result.
+    pub then: Expr,
 }
 
 impl Expr {

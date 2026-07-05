@@ -53,8 +53,8 @@ export default {
           .or(c("label").isNull())
           .or(c("active").isFalse())
           .and(
-            c.fn
-              .case([[c("code").lt(100), c("code").isNull()]], c("label").isNull())
+            c
+              .case({ when: [{ when: c("code").lt(100), then: c("code").isNull() }], else: c("label").isNull() })
               .isTrue(),
           ),
       limit: 100,

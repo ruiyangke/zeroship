@@ -282,7 +282,7 @@
             "node": "case",
             "branches": [
               {
-                "condition": {
+                "when": {
                   "node": "binOp",
                   "op": "lt",
                   "lhs": {
@@ -294,7 +294,7 @@
                     "value": 100
                   }
                 },
-                "result": {
+                "then": {
                   "node": "unaryOp",
                   "op": "isNull",
                   "operand": {

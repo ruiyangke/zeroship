@@ -213,10 +213,10 @@ export type Expr =
  *  literal or a closed expression AST such as `fnSynth(now)`. */
 export type IrValue = IrScalar | Expr;
 
-/** One `(condition, result)` branch of an `Expr` `case`. */
+/** One `(when, then)` branch of an `Expr` `case`. */
 export interface CaseBranch {
-  condition: Expr;
-  result: Expr;
+  when: Expr;
+  then: Expr;
 }
 
 /** A generated/computed column facet. `expr` is the closed expression AST; `stored`

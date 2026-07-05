@@ -817,7 +817,7 @@ interpolated):
   for joining first+last name. Engine-synthesized to be byte-identical across PG
   (`concat_ws`) and SQLite (a proven `coalesce`-folded `||`). For empty-string
   join use `c.fn.concatWs("", …)`.
-- `c.fn.case([[cond, val], …], elseVal?)` — the searched `CASE` form
+- `c.case({ when: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
 - `c.fn.splitPart(e, delim, n)` — the engine-synthesized portable split helper,
   within its pinned envelope (see below)
 - `c.fn.now()`, `c.fn.genRandomUuid()` — DB-evaluated apply-time scalars
@@ -869,7 +869,7 @@ transform only through the closed fluent AST, never raw SQL.
 - `del` with a `where`.
 - One-shot `update` / `backfill` whose `set` / `where` use only the closed
   fluent AST: column refs, auto-wrapped literals, arithmetic,
-  comparison/boolean operators, `c.fn.case`, the allow-listed
+  comparison/boolean operators, `c.case`, the allow-listed
   provably-identical scalars (`coalesce`, `nullif`, `lower`, `upper`, `trim`,
   `length`, `abs`, `.cast(<portable type>)`, `.concat`), and `c.fn.concatWs`.
 - The engine-synthesized `c.fn.splitPart` helper **within its pinned envelope**.
