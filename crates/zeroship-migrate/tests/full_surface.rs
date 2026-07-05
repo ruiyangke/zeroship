@@ -1431,11 +1431,11 @@ fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() 
                 id: t.bigInt().identity({ always: true }).primaryKey(),
                 qty: t.int(),
                 unit_cents: t.int(),
-                total_cents: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents"))),
-                virtual_total: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents")), { virtual: true }),
+                total_cents: t.int().generated((c) => c("qty").mul(c("unit_cents"))),
+                virtual_total: t.int().generated((c) => c("qty").mul(c("unit_cents")), { virtual: true }),
             }});
             table("line_items").column("added_total").add({
-                type: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents"))),
+                type: t.int().generated((c) => c("qty").mul(c("unit_cents"))),
             });
             table("line_items").column("seq").add({ type: t.bigInt().identity() });
         }};
