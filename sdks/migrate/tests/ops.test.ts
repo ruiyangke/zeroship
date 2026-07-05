@@ -1081,7 +1081,7 @@ test("c.pg rejects malformed text arrays and regex patterns", () => {
 test("index columns normalize to closed column/expression elements", () => {
   const ops = record(() =>
     table("users").index("users_email_lower_idx").add({
-      columns: ["email", { kind: "expr", expr: (c) => c.fn.lower(c("email")) }],
+      on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
       where: (c) => c("active").isTrue(),
     }),
   );
@@ -1102,9 +1102,9 @@ test("index columns normalize to closed column/expression elements", () => {
 test("index column order records DESC and omits ASC/default order", () => {
   const ops = record(() =>
     table("events").index("events_created_desc_idx").add({
-      columns: [
-        { kind: "column", name: "tenant_id", order: "asc" },
-        { kind: "column", name: "created_at", order: "desc" },
+      on: [
+        { column: "tenant_id", order: "asc" },
+        { column: "created_at", order: "desc" },
       ],
     }),
   );
@@ -1116,7 +1116,7 @@ test("index column order records DESC and omits ASC/default order", () => {
     () =>
       record(() =>
         table("events").index("events_bad_order_idx").add({
-          columns: [{ kind: "column", name: "created_at", order: "latest" as any }],
+          on: [{ column: "created_at", order: "latest" as any }],
         }),
       ),
     (e: any) => e.code === "OP_INVALID" && /order must be "asc" or "desc"/.test(e.message),
@@ -1126,7 +1126,7 @@ test("index column order records DESC and omits ASC/default order", () => {
 test("index records PG-vendor nullsNotDistinct + per-element opclass/collation", () => {
   const ops = record(() =>
     table("accounts").index("accounts_email_uq").add({
-      columns: [{ kind: "column", name: "email", opclass: "text_pattern_ops", collation: "C" }],
+      on: [{ column: "email", opclass: "text_pattern_ops", collation: "C" }],
       unique: true,
       nullsNotDistinct: true,
     }),
@@ -1139,7 +1139,7 @@ test("index records PG-vendor nullsNotDistinct + per-element opclass/collation",
 
 test("index omits nullsNotDistinct/opclass/collation when absent (byte-neutral)", () => {
   const ops = record(() =>
-    table("accounts").index("accounts_email_idx").add({ columns: ["email"] }),
+    table("accounts").index("accounts_email_idx").add({ on: ["email"] }),
   );
   assert.equal("nullsNotDistinct" in ops[0], false);
   assert.deepEqual(ops[0].columns, [{ kind: "column", name: "email" }]);
@@ -1152,7 +1152,7 @@ test("createTable inline index carries nullsNotDistinct + element facets", () =>
       indexes: [
         {
           name: "accounts_email_uq",
-          columns: [{ kind: "column", name: "email", opclass: "text_pattern_ops" }],
+          on: [{ column: "email", opclass: "text_pattern_ops" }],
           unique: true,
           nullsNotDistinct: true,
         },
@@ -1306,13 +1306,13 @@ test("dropPartition records child-subject dropPartition", () => {
 
 test("index builder records include/with/brin/only", () => {
   const ops = record(() =>
-    table("events")
-      .index("events_ts_brin_idx")
-      .using("brin")
-      .include(["tenant_id"])
-      .with({ pagesPerRange: 32 })
-      .only()
-      .add({ columns: ["ts"] }),
+    table("events").index("events_ts_brin_idx").add({
+      on: ["ts"],
+      using: "brin",
+      include: ["tenant_id"],
+      with: { pagesPerRange: 32 },
+      only: true,
+    }),
   );
 
   assert.deepEqual(ops, [

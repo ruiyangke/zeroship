@@ -291,38 +291,41 @@ table("orders").constraint("orders_pkey").comment("surrogate key");
 
 ## 7. Indexes
 
-Select with `.index(name)`, chain optional modifiers, then `.add({…})`.
+Select with `.index(name)`, then pass the target elements and optional modifiers
+in `.add({…})`.
 
 ```ts
 // Basic
-table("app_members").index("app_members_user_idx").add({ columns: ["user_id"] });
+table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 
 // Composite + partial (WHERE predicate is the (c) => Expr builder)
 table("app_session_anchors").index("app_session_anchors_user_idx")
-  .add({ columns: ["app_id", "global_user_id"], where: (c) => c("revoked_at").isNull() });
+  .add({ on: ["app_id", "global_user_id"], where: (c) => c("revoked_at").isNull() });
 
 // Unique
-table("users").index("users_email_uq").add({ columns: ["email"], unique: true });
+table("users").index("users_email_uq").add({ on: ["email"], unique: true });
 
 // Access method
-table("docs").index("docs_body_fts").add({ columns: ["body"], using: "gin" });
-table("events").index("events_ts_brin").add({ columns: ["occurred_at"], using: "brin" });
-table("embeddings").index("embeddings_vec").add({ columns: ["vec"], using: "hnsw" });
+table("docs").index("docs_body_fts").add({ on: ["body"], using: "gin" });
+table("events").index("events_ts_brin").add({ on: ["occurred_at"], using: "brin" });
+table("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
 
 // Per-column ASC/DESC ordering (IndexElementArg)
 table("posts").index("posts_created_desc")
-  .add({ columns: [{ kind: "column", name: "created_at", order: "desc" }] });
+  .add({ on: [{ column: "created_at", order: "desc" }] });
 
 // Expression column
 table("users").index("users_lower_email")
-  .add({ columns: [{ kind: "expr", expr: (c) => c.fn.lower(c("email")) }] });
+  .add({ on: [{ expr: (c) => c.fn.lower(c("email")) }] });
 
 // Covering (INCLUDE) + storage params + ONLY (don't recurse into partitions)
 table("orders").index("orders_customer_idx")
-  .include(["total", "status"])
-  .with({ fillfactor: 90 })
-  .only()
-  .add({ columns: ["customer_id"] });
+  .add({
+    on: ["customer_id"],
+    include: ["total", "status"],
+    with: { fillfactor: 90 },
+    only: true,
+  });
 
 // Drop / comment
 table("orders").index("orders_customer_idx").drop({ ifExists: true });

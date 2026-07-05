@@ -18,6 +18,6 @@ export function up() {
       note: t.text(),
     },
   });
-  table("orders").index("orders_total_idx").add({ columns: ["total"] });
+  table("orders").index("orders_total_idx").add({ on: ["total"] });
   table("orders").column("status").add({ type: t.text().notNull().default("new") });
 }

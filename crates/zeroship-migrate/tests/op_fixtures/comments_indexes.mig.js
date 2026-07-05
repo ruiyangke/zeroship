@@ -23,7 +23,7 @@ export function up() {
   });
 
   table("users").index("users_email_lower_idx").add({
-    columns: ["email", { kind: "expr", expr: (c) => c.fn.lower(c("email")) }],
+    on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
     where: (c) => c("active").isTrue(),
   });
 

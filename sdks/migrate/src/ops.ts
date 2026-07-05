@@ -1823,10 +1823,13 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
     );
   }
   for (const idx of args.indexes ?? []) {
+    if (!Array.isArray(idx.on)) {
+      throw structuredError("OP_INVALID", "create({ indexes }) index needs { on: IndexElementArg[] }");
+    }
     indexes.push(
       compact({
         name: idx.name,
-        columns: idx.columns.map(indexElementToIr),
+        columns: idx.on.map(indexElementToIr),
         unique: idx.unique,
         using: idx.using,
         where: resolveExpr(idx.where),
@@ -2210,9 +2213,9 @@ function indexElementToIr(element: IndexElementArg): Node {
     requireString(element, "index element column");
     return { kind: "column", name: element };
   }
-  if (element && typeof element === "object" && "kind" in element) {
-    if (element.kind === "column") {
-      requireString((element as { name?: unknown }).name, "index column element name");
+  if (element && typeof element === "object") {
+    if ("column" in element) {
+      requireString((element as { column?: unknown }).column, "index column element column");
       const order = indexColumnOrderToIr((element as { order?: unknown }).order);
       // PG-vendor per-column facets: carried through when present, elided when
       // absent (byte-neutral wire shape). Validate gates them fail-closed off PG.
@@ -2220,25 +2223,22 @@ function indexElementToIr(element: IndexElementArg): Node {
       const collation = indexElementFacet((element as { collation?: unknown }).collation, "index column collation");
       return compact({
         kind: "column",
-        name: (element as { name: string }).name,
+        name: (element as { column: string }).column,
         order: order === "desc" ? order : undefined,
         opclass,
         collation,
       }) as Node;
     }
-    if (element.kind === "expr") {
+    if ("expr" in element) {
+      indexColumnOrderToIr((element as { order?: unknown }).order);
       const expr = resolveExpr((element as { expr?: ExprFn | ExprChainType | Node }).expr);
       if (!expr) {
-        throw structuredError("OP_INVALID", "index expr element needs { kind: \"expr\", expr }");
+        throw structuredError("OP_INVALID", "index expr element needs { expr }");
       }
       return { kind: "expr", expr };
     }
   }
-  const expr = resolveExpr(element as ExprFn | ExprChainType | Node | undefined);
-  if (!expr) {
-    throw structuredError("OP_INVALID", "index element must be a column name or expression");
-  }
-  return { kind: "expr", expr };
+  throw structuredError("OP_INVALID", "index element must be a column name, { column }, or { expr }");
 }
 
 function indexColumnOrderToIr(order: unknown): "desc" | undefined {
@@ -2281,7 +2281,7 @@ function recordCreateIndex(
   table: string,
   name: string,
   args: {
-    columns: IndexElementArg[];
+    on: IndexElementArg[];
     unique?: boolean;
     using?: import("./types.js").IndexMethod;
     where?: ExprFn;
@@ -2293,12 +2293,12 @@ function recordCreateIndex(
     schema?: string;
   },
 ): void {
-  if (!Array.isArray(args.columns)) {
-    throw structuredError("OP_INVALID", ".index(name).add needs { columns: IndexElementArg[] }");
+  if (!Array.isArray(args.on)) {
+    throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
   }
   emitCreateIndex({
     table,
-    columns: args.columns.map(indexElementToIr),
+    columns: args.on.map(indexElementToIr),
     name,
     unique: args.unique,
     using: args.using,
@@ -2990,32 +2990,10 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     index(idxName): IndexRef {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
-      const indexDraft: {
-        using?: import("./types.js").IndexMethod;
-        include?: readonly string[];
-        with?: IndexStorageParamsArg;
-        only?: boolean;
-      } = {};
       const indexRef: IndexRef = {
-        using(method) {
-          indexDraft.using = method;
-          return indexRef;
-        },
-        include(columns) {
-          indexDraft.include = columns;
-          return indexRef;
-        },
-        with(params) {
-          indexDraft.with = params;
-          return indexRef;
-        },
-        only(enabled = true) {
-          indexDraft.only = enabled;
-          return indexRef;
-        },
         add(args) {
           terminateSelector(id);
-          recordCreateIndex(name, idxName, { ...indexDraft, ...args, schema: pickSchema(args, dflt) });
+          recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });
           return handle;
         },
         drop(args = {}) {

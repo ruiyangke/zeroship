@@ -109,6 +109,47 @@ export function badOpShapes(): void {
   table("users").rename({ from: "users", to: "people" });
 }
 
+export function indexGrammar(): void {
+  table("users").index("users_email_idx").add({
+    on: [
+      "email",
+      { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C" },
+      { expr: (c) => c.fn.lower(c("email")) },
+    ],
+    using: "btree",
+    include: ["id"],
+    with: { fillfactor: 90 },
+    only: true,
+    unique: true,
+    nullsNotDistinct: true,
+  });
+
+  table("users").create({
+    columns: { email: t.text(), created_at: t.timestamp() },
+    indexes: [{ name: "users_email_idx", on: ["email"] }],
+  });
+
+  const oldColumnsArgs = { ["columns"]: ["email"] };
+  // @ts-expect-error — `.index().add()` uses `on`, not `columns`.
+  table("users").index("bad_columns").add(oldColumnsArgs);
+
+  const indexRef = table("users").index("bad_chain");
+  // @ts-expect-error — index modifiers live in `.add({ ... })`, not chain methods.
+  indexRef.using;
+
+  const oldKindKey = "kind";
+  const oldExprKind = "expr";
+  // @ts-expect-error — tagged expression elements are not part of the authored grammar.
+  table("users").index("bad_tagged_expr").add({ on: [{ [oldKindKey]: oldExprKind, expr: (c) => c("email") }] });
+
+  // @ts-expect-error — bare expression elements must be wrapped as `{ expr }`.
+  table("users").index("bad_bare_expr").add({ on: [(c) => c("email")] });
+
+  const oldColumnKind = "column";
+  // @ts-expect-error — column object elements use `{ column }`, not `{ kind, name }`.
+  table("users").index("bad_tagged_column").add({ on: [{ [oldKindKey]: oldColumnKind, name: "email" }] });
+}
+
 // The table-level `.rename({ to })` now type-checks (the renameTable op shipped):
 // a bare rename and a schema+ifExists rename, both returning the chainable handle.
 export function goodTableRename(): void {

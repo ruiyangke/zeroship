@@ -25,9 +25,11 @@ export function up() {
 
   table("events")
     .index("events_ts_brin_idx")
-    .using("brin")
-    .include(["tenant_id"])
-    .with({ pagesPerRange: 32 })
-    .only()
-    .add({ columns: ["ts"] });
+    .add({
+      on: ["ts"],
+      using: "brin",
+      include: ["tenant_id"],
+      with: { pagesPerRange: 32 },
+      only: true,
+    });
 }

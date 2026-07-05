@@ -146,7 +146,7 @@ test("SELECTOR: a terminated selector records its op; all selectors terminated â
     u.foreignKey("fk").add({ columns: ["a"], references: { table: "o", columns: ["id"] } });
     u.unique("uq").add({ columns: ["a"] });
     u.check("ck").add({ expr: (c) => c("a").isNotNull() });
-    u.index("ix").add({ columns: ["a"] });
+    u.index("ix").add({ on: ["a"] });
     u.constraint("cn").drop();
   });
   assert.deepEqual(
@@ -223,7 +223,7 @@ test("SCHEMA: the table() default propagates onto every recorded op", () => {
     const u = table("users", { schema: "app2" });
     u.column("a").add({ type: t.int() });
     u.column("b").drop();
-    u.index("ix_a").add({ columns: ["a"] });
+    u.index("ix_a").add({ on: ["a"] });
     u.index("ix_b").drop();
     u.insert({ rows: [{ a: 1 }] });
     u.update({ set: { a: (c) => c("a") } });
@@ -237,7 +237,7 @@ test("SCHEMA: a per-op schema OVERRIDES the table default", () => {
   const ops = record(() => {
     const u = table("users", { schema: "app2" });
     u.column("a").add({ type: t.int(), schema: "other" });
-    u.index("ix_a").add({ columns: ["a"], schema: "idx_schema" });
+    u.index("ix_a").add({ on: ["a"], schema: "idx_schema" });
     u.insert({ rows: [{ a: 1 }], schema: "dml_schema" });
   });
   assert.equal(ops[0].schema, "other");
@@ -269,7 +269,7 @@ test("GUARD: ifNotExists / ifExists pass through to existenceGuard", () => {
     u.column("b").drop({ ifExists: true });
     u.create({ columns: { id: t.id() }, ifNotExists: true });
     u.drop({ ifExists: true });
-    u.index("ix_a").add({ columns: ["a"], ifNotExists: true });
+    u.index("ix_a").add({ on: ["a"], ifNotExists: true });
     u.index("ix_b").drop({ ifExists: true });
   });
   assert.equal(ops[0].existenceGuard, "ifNotExists");

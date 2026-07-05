@@ -50,7 +50,7 @@ export default {
           references: { table: "accounts", columns: ["id"] },
         },
       ],
-      indexes: [{ name: "memberships_account_idx", columns: ["account_id"] }],
+      indexes: [{ name: "memberships_account_idx", on: ["account_id"] }],
     });
 
     table("accounts").column("status").add({ type: t.text().notNull().default("new") });
@@ -69,7 +69,7 @@ export default {
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
 
     table("accounts").index("accounts_active_email_idx").add({
-      columns: ["email"],
+      on: ["email"],
       unique: true,
       where: (c) => c("active").isTrue(),
     });

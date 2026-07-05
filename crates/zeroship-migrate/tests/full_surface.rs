@@ -1154,7 +1154,7 @@ fn twin_create_index_carries_schema_and_guard() {
     let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").index("idx_t_a").add({ columns: ["a"], schema: "app2", ifNotExists: true });
+            table("t").index("idx_t_a").add({ on: ["a"], schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "create_index_schema_guard");
@@ -1241,7 +1241,7 @@ fn twin_table_surface_records_full_expected_op_sequence() {
             u.unique("u_email_uq").add({ columns: ["email"] });
             u.check("u_status_chk").add({ expr: (c) => c("status").isNotNull() });
             u.constraint("u_legacy_chk").drop({ ifExists: true });
-            u.index("u_email_idx").add({ columns: ["email"], unique: true });
+            u.index("u_email_idx").add({ on: ["email"], unique: true });
             u.index("u_old_idx").drop({ ifExists: true });
             u.insert({ rows: [{ email: "a@b.c", status: "new" }] });
             u.update({ set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull() });
@@ -1297,7 +1297,7 @@ fn twin_table_create_with_table_level_specs_carries_schema_and_guard() {
                     team: t.text().notNull(),
                 },
                 uniques: [{ name: "m_team_uq", columns: ["team"] }],
-                indexes: [{ name: "m_account_idx", columns: ["account_id"] }],
+                indexes: [{ name: "m_account_idx", on: ["account_id"] }],
                 ifNotExists: true,
             });
         }};
