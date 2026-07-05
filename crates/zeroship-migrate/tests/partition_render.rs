@@ -26,6 +26,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.into(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -68,6 +70,7 @@ fn create_index(
         include,
         with,
         only,
+        nulls_not_distinct: None,
         concurrently: None,
         schema: None,
         existence_guard: None,
@@ -121,6 +124,158 @@ fn render_create_partition_range_pg_dump_timestamptz_bounds() {
         ),
         "range partition SQL was:\n{sql}"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PG-vendor index enrichments: NULLS NOT DISTINCT + per-element opclass/collation
+// (additive, PG-only; fail-closed off PostgreSQL).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A createIndex over a single column carrying the given per-element facets +
+/// index-level flags. `name` fixes the index name so the SQL is deterministic.
+fn create_index_enriched(
+    name: &str,
+    element: IndexElement,
+    unique: Option<bool>,
+    nulls_not_distinct: Option<bool>,
+) -> Op {
+    Op::CreateIndex {
+        table: "events".into(),
+        columns: vec![element],
+        name: Some(name.into()),
+        unique,
+        using: None,
+        r#where: None,
+        include: Vec::new(),
+        with: None,
+        only: None,
+        nulls_not_distinct,
+        concurrently: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
+fn col_opclass(name: &str, opclass: Option<&str>, collation: Option<&str>) -> IndexElement {
+    IndexElement::Column {
+        name: name.into(),
+        order: None,
+        opclass: opclass.map(str::to_string),
+        collation: collation.map(str::to_string),
+    }
+}
+
+#[test]
+fn render_unique_index_nulls_not_distinct_pg() {
+    let sql = pg_sql(create_index_enriched(
+        "events_email_uq",
+        col_opclass("email", None, None),
+        Some(true),
+        Some(true),
+    ))
+    .join("\n");
+    assert!(
+        sql.contains(
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"events_email_uq\" ON \"app\".\"events\" (\"email\") NULLS NOT DISTINCT"
+        ),
+        "NULLS NOT DISTINCT unique index SQL was:\n{sql}"
+    );
+}
+
+#[test]
+fn render_index_element_opclass_pg() {
+    let sql = pg_sql(create_index_enriched(
+        "events_email_pat",
+        col_opclass("email", Some("text_pattern_ops"), None),
+        None,
+        None,
+    ))
+    .join("\n");
+    assert!(
+        sql.contains("(\"email\" text_pattern_ops)"),
+        "per-element opclass SQL was:\n{sql}"
+    );
+}
+
+#[test]
+fn render_index_element_collation_pg() {
+    let sql = pg_sql(create_index_enriched(
+        "events_email_coll",
+        col_opclass("email", None, Some("C")),
+        None,
+        None,
+    ))
+    .join("\n");
+    assert!(
+        sql.contains("(\"email\" COLLATE \"C\")"),
+        "per-element collation SQL was:\n{sql}"
+    );
+}
+
+#[test]
+fn render_index_element_collation_precedes_opclass_pg() {
+    // PG index-element grammar: `<col> COLLATE "<c>" <opclass>`.
+    let sql = pg_sql(create_index_enriched(
+        "events_email_both",
+        col_opclass("email", Some("text_pattern_ops"), Some("C")),
+        None,
+        None,
+    ))
+    .join("\n");
+    assert!(
+        sql.contains("(\"email\" COLLATE \"C\" text_pattern_ops)"),
+        "COLLATE must precede opclass; SQL was:\n{sql}"
+    );
+}
+
+#[test]
+fn pg_vendor_index_features_refused_fail_closed_off_pg() {
+    use zeroship_migrate::model::validate::{validate_ir, Dialect, CODE_UNSUPPORTED};
+
+    let cases: Vec<(&str, Op)> = vec![
+        (
+            "nullsNotDistinct",
+            create_index_enriched(
+                "events_email_uq",
+                col_opclass("email", None, None),
+                Some(true),
+                Some(true),
+            ),
+        ),
+        (
+            "opclass",
+            create_index_enriched(
+                "events_email_pat",
+                col_opclass("email", Some("text_pattern_ops"), None),
+                None,
+                None,
+            ),
+        ),
+        (
+            "collation",
+            create_index_enriched(
+                "events_email_coll",
+                col_opclass("email", None, Some("C")),
+                None,
+                None,
+            ),
+        ),
+    ];
+
+    for (label, op) in cases {
+        let migration = ir(op);
+        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_ir(&migration, dialect, &[None])
+                .expect_err(&format!("{label} must be refused on {dialect:?}"));
+            assert_eq!(
+                err.code, CODE_UNSUPPORTED,
+                "{label} on {dialect:?} must fail closed as UNSUPPORTED, got {err:?}"
+            );
+        }
+        // The same op validates cleanly on PostgreSQL.
+        validate_ir(&migration, Dialect::Postgres, &[None])
+            .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
+    }
 }
 
 #[test]

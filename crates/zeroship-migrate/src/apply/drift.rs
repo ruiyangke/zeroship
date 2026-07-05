@@ -924,6 +924,7 @@ pub async fn snapshot_schema(
                 only: false,
                 // Emission-only; never recovered from the catalog.
                 opclass: None,
+                nulls_not_distinct: false,
                 comment: r.try_get("comment").ok().flatten(),
             });
         }
@@ -1620,7 +1621,7 @@ fn diff_attrs(
         elements
             .iter()
             .map(|element| match element {
-                IndexElementSnapshot::Column { name, order } => {
+                IndexElementSnapshot::Column { name, order, .. } => {
                     match canonical_index_sort_order(*order) {
                         Some(IndexSortOrder::Desc) => format!("col:{name} desc"),
                         Some(IndexSortOrder::Asc) | None => format!("col:{name}"),

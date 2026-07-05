@@ -1261,12 +1261,41 @@ pub enum IndexElement {
         /// serializes identically to the pre-order wire shape.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order: Option<IndexSortOrder>,
+        /// PostgreSQL per-column operator class (e.g. `text_pattern_ops`).
+        /// PG-vendor: fails closed on SQLite/MySQL. `None` serializes identically
+        /// to the pre-opclass wire shape (byte-neutral when absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opclass: Option<String>,
+        /// PostgreSQL per-column collation (e.g. `"C"`). PG-vendor: fails closed
+        /// on SQLite/MySQL. `None` serializes identically to the pre-collation
+        /// wire shape (byte-neutral when absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collation: Option<String>,
     },
     /// A closed expression key.
     Expr {
         /// Expression AST.
         expr: Expr,
     },
+}
+
+/// True when any index element carries a PG-vendor per-column `opclass` or
+/// `collation`. Drives the `pgOnlyMethodOrFeature`/`pgOnlyIndexFeature` variant
+/// selection (fail-closed off PostgreSQL).
+#[must_use]
+pub(crate) fn index_has_element_opclass_or_collation(columns: &[IndexElement]) -> bool {
+    columns.iter().any(|element| {
+        matches!(
+            element,
+            IndexElement::Column {
+                opclass: Some(_),
+                ..
+            } | IndexElement::Column {
+                collation: Some(_),
+                ..
+            }
+        )
+    })
 }
 
 /// CLOSED per-column index sort-order set. Omitted means the SQL default
@@ -1511,6 +1540,12 @@ pub struct IrIndex {
     /// PostgreSQL `ON ONLY` for partitioned parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<bool>,
+    /// PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index (treat NULLs as
+    /// equal for the uniqueness check). PG-vendor: fails closed on SQLite/MySQL.
+    /// `None` serializes identically to the pre-`nullsNotDistinct` wire shape
+    /// (byte-neutral when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nulls_not_distinct: Option<bool>,
 }
 
 /// Partitioning strategy for a partitioned table parent.
@@ -2626,6 +2661,9 @@ pub enum Op {
         /// PostgreSQL `ON ONLY` for partitioned parents.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         only: Option<bool>,
+        /// PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nulls_not_distinct: Option<bool>,
         /// **PR10** — the schema qualifier (§2.7).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
@@ -3814,10 +3852,19 @@ impl Op {
                 include,
                 with,
                 only,
+                nulls_not_distinct,
                 ..
             } => (
                 "createIndex",
-                Self::create_index_variant(columns, using, r#where, include, with, *only),
+                Self::create_index_variant(
+                    columns,
+                    using,
+                    r#where,
+                    include,
+                    with,
+                    *only,
+                    *nulls_not_distinct,
+                ),
             ),
             Op::DropIndex { .. } => ("dropIndex", "base"),
             Op::SetColumnType { using, .. } => (
@@ -3969,6 +4016,8 @@ impl Op {
                 || !index.include.is_empty()
                 || index.with.as_ref().is_some_and(|params| !params.is_empty())
                 || index.only.unwrap_or(false)
+                || index.nulls_not_distinct.unwrap_or(false)
+                || index_has_element_opclass_or_collation(&index.columns)
         });
         let has_nextval_default = columns
             .iter()
@@ -4008,6 +4057,7 @@ impl Op {
         include: &[String],
         with: &Option<IndexStorageParams>,
         only: Option<bool>,
+        nulls_not_distinct: Option<bool>,
     ) -> &'static str {
         let method_or_feature = matches!(
             using,
@@ -4021,7 +4071,9 @@ impl Op {
             )
         ) || !include.is_empty()
             || with.as_ref().is_some_and(|params| !params.is_empty())
-            || only.unwrap_or(false);
+            || only.unwrap_or(false)
+            || nulls_not_distinct.unwrap_or(false)
+            || index_has_element_opclass_or_collation(columns);
         if method_or_feature {
             "pgOnlyMethodOrFeature"
         } else if columns

@@ -320,6 +320,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.into(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -357,6 +359,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "events".into(),
@@ -371,6 +374,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "events".into(),
@@ -388,6 +392,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "events".into(),
@@ -402,6 +407,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ]
 }

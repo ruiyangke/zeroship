@@ -1122,6 +1122,18 @@ fn validate_op_support(
         with.as_ref().is_some_and(|params| !params.is_empty())
     }
 
+    fn index_elements_have_opclass(columns: &[IndexElement]) -> bool {
+        columns.iter().any(|element| {
+            matches!(element, IndexElement::Column { opclass: Some(_), .. })
+        })
+    }
+
+    fn index_elements_have_collation(columns: &[IndexElement]) -> bool {
+        columns.iter().any(|element| {
+            matches!(element, IndexElement::Column { collation: Some(_), .. })
+        })
+    }
+
     fn constraint_kind_not_valid(kind: &IrConstraintKind) -> bool {
         matches!(
             kind,
@@ -1263,6 +1275,15 @@ fn validate_op_support(
                 if index.only.unwrap_or(false) {
                     check(Feature::IndexOnly)?;
                 }
+                if index.nulls_not_distinct.unwrap_or(false) {
+                    check(Feature::IndexNullsNotDistinct)?;
+                }
+                if index_elements_have_opclass(&index.columns) {
+                    check(Feature::IndexOpclass)?;
+                }
+                if index_elements_have_collation(&index.columns) {
+                    check(Feature::IndexCollation)?;
+                }
                 if non_btree_index_method(index.using) {
                     check(Feature::NonBtreeIndexMethod)?;
                 }
@@ -1295,6 +1316,7 @@ fn validate_op_support(
             include,
             with,
             only,
+            nulls_not_distinct,
             ..
         } => {
             if columns
@@ -1314,6 +1336,15 @@ fn validate_op_support(
             }
             if only.unwrap_or(false) {
                 check(Feature::IndexOnly)?;
+            }
+            if nulls_not_distinct.unwrap_or(false) {
+                check(Feature::IndexNullsNotDistinct)?;
+            }
+            if index_elements_have_opclass(columns) {
+                check(Feature::IndexOpclass)?;
+            }
+            if index_elements_have_collation(columns) {
+                check(Feature::IndexCollation)?;
             }
             if non_btree_index_method(*using) {
                 check(Feature::NonBtreeIndexMethod)?;
@@ -4601,6 +4632,8 @@ mod tests {
                     columns: vec![IndexElement::Column {
                         name: "first".into(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     }],
                     unique: None,
                     using: None,
@@ -4611,6 +4644,7 @@ mod tests {
                 include: Vec::new(),
                 with: None,
                 only: None,
+                nulls_not_distinct: None,
                 }],
 
             partition_by: None,
@@ -4722,6 +4756,8 @@ mod tests {
                 columns: vec![IndexElement::Column {
                     name: "first".into(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 }],
                 unique: Some(true),
                 using: None,
@@ -4733,6 +4769,7 @@ mod tests {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             }],
 
         partition_by: None,
@@ -4862,6 +4899,8 @@ mod tests {
             columns: vec![IndexElement::Column {
                 name: "a".into(),
                 order: None,
+                opclass: None,
+                collation: None,
             }],
             name: None,
             unique: None,
@@ -4871,6 +4910,7 @@ mod tests {
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: None,
         concurrently: None,
             schema: None,
             existence_guard: None,

@@ -282,6 +282,8 @@ async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
                     == &vec![IndexElement::Column {
                         name: "email".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     }]
         )),
         "the unique-field index must be synthesized as a createIndex op; ops: {:?}",
