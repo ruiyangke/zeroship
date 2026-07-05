@@ -1,4 +1,4 @@
-import { nextval, or, table, t } from "@zeroship/migrate";
+import { nextval, table, t } from "@zeroship/migrate";
 import { pgTable, sequence } from "@zeroship/migrate/pg";
 
 export const name = "auth_oauth_tables";
@@ -254,7 +254,7 @@ export function up() {
     },
     primaryKey: ["client_id"],
   });
-  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_brokered_requires_secret_basic").add({ expr: (c) => or(c("brokered").eq(false), c("token_endpoint_auth_method").eq("client_secret_basic")) });
+  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_brokered_requires_secret_basic").add({ expr: (c) => c("brokered").eq(false).or(c("token_endpoint_auth_method").eq("client_secret_basic")) });
   table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_token_endpoint_auth_method_check").add({ expr: (c) => c("token_endpoint_auth_method").in(["none", "client_secret_basic", "client_secret_post"]) });
   table("oauth_grants", { schema: "zeroship" }).create({
     columns: {

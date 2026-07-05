@@ -1,4 +1,4 @@
-import { and, or, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 
 export const name = "billing_metering_invoice_tables";
@@ -12,7 +12,7 @@ export function up() {
     },
     primaryKey: ["app_id"],
   });
-  table("app_spend_limit", { schema: "zeroship" }).check("app_spend_limit_spend_limit_cents_check").add({ expr: (c) => or(c("spend_limit_cents").isNull(), c("spend_limit_cents").ge(0)) });
+  table("app_spend_limit", { schema: "zeroship" }).check("app_spend_limit_spend_limit_cents_check").add({ expr: (c) => c("spend_limit_cents").isNull().or(c("spend_limit_cents").ge(0)) });
   table("app_spend_state", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),
@@ -175,11 +175,11 @@ export function up() {
     },
     primaryKey: ["creator_id"],
   });
-  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_cap_nonneg").add({ expr: (c) => or(c("cap_cents").isNull(), c("cap_cents").ge(0)) });
-  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_floor_le_cap").add({ expr: (c) => or(c("floor_cents").isNull(), c("cap_cents").isNull(), c("floor_cents").le(c("cap_cents"))) });
-  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_floor_nonneg").add({ expr: (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0)) });
+  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_cap_nonneg").add({ expr: (c) => c("cap_cents").isNull().or(c("cap_cents").ge(0)) });
+  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_floor_le_cap").add({ expr: (c) => c("floor_cents").isNull().or(c("cap_cents").isNull(), c("floor_cents").le(c("cap_cents"))) });
+  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_floor_nonneg").add({ expr: (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0)) });
   table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_kind_check").add({ expr: (c) => c("kind").in(["fixed", "percent"]) });
-  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_shape").add({ expr: (c) => or(and(c("kind").eq("fixed"), c("amount_cents").isNotNull(), c("amount_cents").ge(0)), and(c("kind").eq("percent"), c("percent_bps").isNotNull(), and(c("percent_bps").ge(0), c("percent_bps").le(10000)))) });
+  table("creator_fee_policy", { schema: "zeroship" }).check("creator_fee_policy_shape").add({ expr: (c) => c("kind").eq("fixed").and(c("amount_cents").isNotNull(), c("amount_cents").ge(0)).or(c("kind").eq("percent").and(c("percent_bps").isNotNull(), c("percent_bps").ge(0).and(c("percent_bps").le(10000)))) });
   table("credit_ledger", { schema: "zeroship" }).create({
     columns: {
       id: t.text().notNull(),
@@ -199,8 +199,8 @@ export function up() {
   });
   table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_amount_cents_check").add({ expr: (c) => c("amount_cents").ne(0) });
   pgTable("credit_ledger", { schema: "zeroship" }).check("credit_ledger_currency_check").add({ expr: (c) => c.pg.regex(c("currency"), "^[a-z]{3}$") });
-  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_grant_ref").add({ expr: (c) => or(and(c("kind").cast("text").in(["consumed", "void_reversal", "refund_clawback"]), c("consumed_from_grant_id").isNotNull()), and(c("kind").cast("text").notIn(["consumed", "void_reversal", "refund_clawback"]), c("consumed_from_grant_id").isNull())) });
-  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_kind_sign").add({ expr: (c) => or(and(c("kind").cast("text").in(["consumed", "refund_clawback"]), c("amount_cents").lt(0)), and(c("kind").cast("text").notIn(["consumed", "refund_clawback"]), c("amount_cents").gt(0))) });
+  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_grant_ref").add({ expr: (c) => c("kind").cast("text").in(["consumed", "void_reversal", "refund_clawback"]).and(c("consumed_from_grant_id").isNotNull()).or(c("kind").cast("text").notIn(["consumed", "void_reversal", "refund_clawback"]).and(c("consumed_from_grant_id").isNull())) });
+  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_kind_sign").add({ expr: (c) => c("kind").cast("text").in(["consumed", "refund_clawback"]).and(c("amount_cents").lt(0)).or(c("kind").cast("text").notIn(["consumed", "refund_clawback"]).and(c("amount_cents").gt(0))) });
   table("invoice_lines", { schema: "zeroship" }).create({
     columns: {
       invoice_id: t.text().notNull(),
@@ -316,7 +316,7 @@ export function up() {
     primaryKey: ["provider_dispute_id"],
   });
   table("pending_disputes", { schema: "zeroship" }).check("pending_disputes_amount_cents_check").add({ expr: (c) => c("amount_cents").gt(0) });
-  table("pending_disputes", { schema: "zeroship" }).check("pending_disputes_check").add({ expr: (c) => or(c("payment_intent").isNotNull(), c("charge").isNotNull()) });
+  table("pending_disputes", { schema: "zeroship" }).check("pending_disputes_check").add({ expr: (c) => c("payment_intent").isNotNull().or(c("charge").isNotNull()) });
   pgTable("pending_disputes", { schema: "zeroship" }).check("pending_disputes_currency_check").add({ expr: (c) => c.pg.regex(c("currency"), "^[a-z]{3}$") });
   table("plan_change_events", { schema: "zeroship" }).create({
     columns: {
@@ -349,7 +349,7 @@ export function up() {
     primaryKey: ["id"],
   });
   table("plans", { schema: "zeroship" }).check("plans_base_fee_cents_check").add({ expr: (c) => c("base_fee_cents").ge(0) });
-  table("plans", { schema: "zeroship" }).check("plans_fx_pico_cents_per_unit_check").add({ expr: (c) => or(c("fx_pico_cents_per_unit").isNull(), c("fx_pico_cents_per_unit").ge(1000)) });
+  table("plans", { schema: "zeroship" }).check("plans_fx_pico_cents_per_unit_check").add({ expr: (c) => c("fx_pico_cents_per_unit").isNull().or(c("fx_pico_cents_per_unit").ge(1000)) });
   table("plans", { schema: "zeroship" }).check("plans_included_units_check").add({ expr: (c) => c("included_units").ge(0) });
   table("plans", { schema: "zeroship" }).check("plans_spend_limit_default_cents_check").add({ expr: (c) => c("spend_limit_default_cents").ge(0) });
   table("pricing_config", { schema: "zeroship" }).create({
@@ -409,7 +409,7 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  table("spend_state_history", { schema: "zeroship" }).check("spend_state_history_limit_cents_check").add({ expr: (c) => or(c("limit_cents").isNull(), c("limit_cents").ge(0)) });
+  table("spend_state_history", { schema: "zeroship" }).check("spend_state_history_limit_cents_check").add({ expr: (c) => c("limit_cents").isNull().or(c("limit_cents").ge(0)) });
   table("spend_state_history", { schema: "zeroship" }).check("spend_state_history_spend_cents_check").add({ expr: (c) => c("spend_cents").ge(0) });
   table("stripe_events_seen", { schema: "zeroship" }).create({
     columns: {

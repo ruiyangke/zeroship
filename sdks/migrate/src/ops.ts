@@ -703,10 +703,6 @@ class ColumnDefImpl implements ColumnDefType {
   default(value: DefaultValue | DefaultExprFn): ColumnDefImpl {
     return this.with({ default: toIrDefault(value) });
   }
-  ref(targetTable: string): ColumnDefImpl {
-    requireString(targetTable, "t.*.ref(target)");
-    return this.with({ type: { ref: { references: targetTable } } as ColType });
-  }
   primaryKey(): ColumnDefImpl {
     return this.with({ primaryKey: true, nullable: false });
   }
@@ -1499,8 +1495,16 @@ class ExprChainImpl implements ExprChainType {
   le(x: unknown) { return this.bin("le", x); }
   gt(x: unknown) { return this.bin("gt", x); }
   ge(x: unknown) { return this.bin("ge", x); }
-  and(e: unknown) { return this.bin("and", e); }
-  or(e: unknown) { return this.bin("or", e); }
+  and(...es: unknown[]) {
+    let acc = this.__node;
+    for (const e of es) acc = { node: "binOp", op: "and", lhs: acc, rhs: exprArg(e) };
+    return chain(acc);
+  }
+  or(...es: unknown[]) {
+    let acc = this.__node;
+    for (const e of es) acc = { node: "binOp", op: "or", lhs: acc, rhs: exprArg(e) };
+    return chain(acc);
+  }
   not() { return chain({ node: "unaryOp", op: "not", operand: this.__node }); }
   add(x: unknown) { return this.bin("add", x); }
   sub(x: unknown) { return this.bin("sub", x); }
@@ -1548,35 +1552,12 @@ class ExprChainImpl implements ExprChainType {
   }
 }
 
-function foldExprs(op: "and" | "or", exprs: readonly unknown[], what: string): ExprChainImpl {
-  if (!Array.isArray(exprs) || exprs.length === 0) {
-    throw structuredError("OP_INVALID", `${what} requires at least one expression`);
-  }
-  let acc = exprArg(exprs[0]);
-  for (const expr of exprs.slice(1)) {
-    acc = { node: "binOp", op, lhs: acc, rhs: exprArg(expr) };
-  }
-  return chain(acc);
-}
-
 export function check(name: string, expr: CheckExprFn): CheckDef {
   requireString(name, "check(name, expr)");
   if (typeof expr !== "function") {
     throw structuredError("OP_INVALID", "check(name, expr): expr must be a (c) => Expr callback");
   }
   return { name, expr };
-}
-
-export function and(...exprs: unknown[]): ExprChainType {
-  return foldExprs("and", exprs, "and(...)");
-}
-
-export function or(...exprs: unknown[]): ExprChainType {
-  return foldExprs("or", exprs, "or(...)");
-}
-
-export function not(expr: unknown): ExprChainType {
-  return chain({ node: "unaryOp", op: "not", operand: exprArg(expr) });
 }
 
 export function lit(value: ScalarValue): ExprChainType {
@@ -1825,7 +1806,6 @@ function domainValueBuilder(): DomainValueBuilder {
 
 function makeBuilder(): ExprBuilder {
   const c = makeColumnAccessor() as unknown as ExprBuilder;
-  c.col = c;
   c.case = caseExpr;
   c.fn = fn;
   c.agg = agg;

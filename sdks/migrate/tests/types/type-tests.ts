@@ -15,6 +15,8 @@
 //     existence is an apply-time check, the anti-rot guarantee).
 
 import { t as dbT } from "@zeroship/db";
+// @ts-expect-error — free boolean combinators are no longer exported from the public package.
+import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
 
 import * as migrate from "../../src/index.js";
 import {
@@ -24,9 +26,6 @@ import {
   table,
   view,
   check,
-  and,
-  or,
-  not,
   lit,
   decimal,
   byteValue,
@@ -36,6 +35,8 @@ import {
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
+// @ts-expect-error — free boolean combinators are no longer exported; use chain `.and`/`.or`/`.not`.
+import { and as removedAnd, or as removedOr, not as removedNot } from "../../src/index.js";
 import { domain, pgTable } from "../../src/pg.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
@@ -326,8 +327,8 @@ export function badColTypes(): void {
   // @ts-expect-error — `.notNull()` takes no argument.
   t.text().notNull("yes");
 
-  // @ts-expect-error — `.ref(target)` requires a string target table.
-  t.text().ref(123);
+  // @ts-expect-error — `.ref(target)` is not a ColumnDef facet; use `t.ref(target)` from the start.
+  t.text().ref("users");
 
   // @ts-expect-error — there is no `.frobnicate()` chain modifier.
   t.text().frobnicate();
@@ -390,8 +391,8 @@ export function checkExpressionSurfaceTypechecks(): void {
     checks: [
       pkceCheck,
       check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-      check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(lit(0)))),
-      check("visible_when_active", (c) => and(c("active"), not(c("visible").isNull()))),
+      check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(lit(0)))),
+      check("visible_when_active", (c) => c("active").and(c("visible").isNull().not())),
     ],
   });
 
@@ -443,6 +444,9 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
 
   // @ts-expect-error — current_user is PG-vendor and lives under `c.pg`.
   table("exprs").update({ set: { x: (c) => c.fn["currentUser"]() } });
+
+  // @ts-expect-error — the expression builder is callable; `c.col(...)` is removed.
+  table("exprs").update({ set: { x: (c) => c.col("x") } });
 }
 
 export function domainValueCheckSurfaceTypechecks(): void {

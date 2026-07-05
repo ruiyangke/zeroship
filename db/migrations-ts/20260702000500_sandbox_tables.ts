@@ -1,4 +1,4 @@
-import { and, or, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 
 export const name = "sandbox_tables";
@@ -98,10 +98,8 @@ export function up() {
   pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_project_id_check").add({ expr: (c) => c.pg.regex(c("project_id"), "^prj_[0-9A-Za-z]{20,40}$") });
   pgTable("sandboxes", { schema: "zeroship" }).check("sandboxes_sandbox_id_check").add({ expr: (c) => c.pg.regex(c("sandbox_id"), "^sbx_[0-9A-Za-z]{20,40}$") });
   table("sandboxes", { schema: "zeroship" }).check("sandboxes_snapshot_artifact_consistency").add({ expr: (c) =>
-    or(
-      c("status").notIn(["snapshotted", "snapshotted_suspect"]),
-      and(
-        c("snapshot_artifact_path").isNotNull(),
+    c("status").notIn(["snapshotted", "snapshotted_suspect"]).or(
+      c("snapshot_artifact_path").isNotNull().and(
         c("snapshot_sha256").isNotNull(),
         c("snapshot_ch_version").isNotNull(),
       ),
@@ -126,9 +124,9 @@ export function up() {
     primaryKey: ["token_id"],
   });
   table("shares", { schema: "zeroship" }).check("shares_check").add({ expr: (c) => c("expires_at").gt(c("issued_at")) });
-  table("shares", { schema: "zeroship" }).check("shares_check1").add({ expr: (c) => or(c("revoked_at").isNull(), c("revoked_at").ge(c("issued_at"))) });
-  pgTable("shares", { schema: "zeroship" }).check("shares_iss_check").add({ expr: (c) => or(c("iss").isNull(), c.pg.regex(c("iss"), "^usr_[0-9A-Za-z]{20,40}$")) });
-  table("shares", { schema: "zeroship" }).check("shares_port_check").add({ expr: (c) => and(c("port").ge(1), c("port").le(65535)) });
+  table("shares", { schema: "zeroship" }).check("shares_check1").add({ expr: (c) => c("revoked_at").isNull().or(c("revoked_at").ge(c("issued_at"))) });
+  pgTable("shares", { schema: "zeroship" }).check("shares_iss_check").add({ expr: (c) => c("iss").isNull().or(c.pg.regex(c("iss"), "^usr_[0-9A-Za-z]{20,40}$")) });
+  table("shares", { schema: "zeroship" }).check("shares_port_check").add({ expr: (c) => c("port").ge(1).and(c("port").le(65535)) });
   table("shares", { schema: "zeroship" }).check("shares_scope_check").add({ expr: (c) => c("scope").in(["ro", "rw"]) });
   table("shares", { schema: "zeroship" }).check("shares_secret_version_check").add({ expr: (c) => c("secret_version").ge(1) });
   pgTable("shares", { schema: "zeroship" }).check("shares_token_id_check").add({ expr: (c) => c.pg.regex(c("token_id"), "^tok_[A-Za-z0-9_-]{20,40}$") });
@@ -148,8 +146,8 @@ export function up() {
     },
     primaryKey: ["wake_id"],
   });
-  pgTable("wake_jobs", { schema: "zeroship" }).check("wake_jobs_agent_url_chk").add({ expr: (c) => or(c("agent_url").isNull(), c.pg.regex(c("agent_url"), "^https?://[a-zA-Z0-9._:/-]+$")) });
-  table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_error_code_check").add({ expr: (c) => or(c("error_code").isNull(), c("error_code").in(["slot_unavailable", "source_teardown_timeout", "restore_failed", "livez_timeout", "clock_resync_failed", "register_failed", "internal", "wake_worker_aborted", "staging_path_missing", "agent_version_mismatch"])) });
+  pgTable("wake_jobs", { schema: "zeroship" }).check("wake_jobs_agent_url_chk").add({ expr: (c) => c("agent_url").isNull().or(c.pg.regex(c("agent_url"), "^https?://[a-zA-Z0-9._:/-]+$")) });
+  table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_error_code_check").add({ expr: (c) => c("error_code").isNull().or(c("error_code").in(["slot_unavailable", "source_teardown_timeout", "restore_failed", "livez_timeout", "clock_resync_failed", "register_failed", "internal", "wake_worker_aborted", "staging_path_missing", "agent_version_mismatch"])) });
   pgTable("wake_jobs", { schema: "zeroship" }).check("wake_jobs_sandbox_id_check").add({ expr: (c) => c.pg.regex(c("sandbox_id"), "^sbx_[0-9A-Za-z]{20,40}$") });
   table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_state_check").add({ expr: (c) => c("state").in(["pending", "reserving_slot", "restoring", "livez_polling", "clock_resyncing", "registering", "ok", "failed"]) });
 }

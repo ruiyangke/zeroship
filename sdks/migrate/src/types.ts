@@ -83,27 +83,9 @@ export type {
   ViewQuery,
 };
 
-/**
- * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
- * `ifNotExists` existence guard (the create/add family) is honored by an
- * engine-synthesized catalog probe at apply time: probe the live catalog under the
- * held advisory lock + the open per-step transaction, then `decide` — run the op
- * bare if the object is absent, journal a satisfied no-op if it is already present
- * with the DECLARED shape, or FAIL CLOSED if it is present with a shape that
- * diverges from (or cannot be proven equal to) the declared one. Never a silent
- * skip over a divergence. The option is therefore a plain `boolean`. See
- * `docs/reference/migrate-op-dsl.md` (existence-guard section).
- */
-export type IfNotExistsGuard = boolean;
-
-/**
- * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
- * `ifExists` existence guard (the drop/rename/alter family) is honored by the same
- * probe-under-lock flow: run the drop/alter if the source object is PRESENT,
- * journal a satisfied no-op if it is already absent (a drop has no shape to verify
- * — presence alone governs). A plain `boolean`. See {@link IfNotExistsGuard}.
- */
-export type IfExistsGuard = boolean;
+// Existence guards (`ifNotExists` / `ifExists`) are inline boolean options on the
+// relevant op specs. The executor honors them via catalog probes under lock; see
+// `docs/reference/migrate-op-dsl.md` (existence-guard section).
 
 // ── Sensitive-data column facets (#173/#174) ──
 //
@@ -167,8 +149,8 @@ export interface NextvalDefault {
 
 /**
  * A chainable column definition produced by the fluent `t.*` lexicon (§4).
- * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.ref(target)`/`.primaryKey()`
- * /`.unique()` opt in. ONE column-type representation — every column-type
+ * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.primaryKey()`/`.unique()`
+ * opt in. ONE column-type representation — every column-type
  * position (`create.columns`/`.column().add()`/`.column().rename()`/
  * `.column().setType()`) takes a `ColumnDef`.
  *
@@ -184,9 +166,6 @@ export interface ColumnDef {
    *  a narrow expression callback `(c) => c.fn.*`. NEVER raw SQL (property A).
    *  Returns a fresh def. */
   default(value: DefaultValue | DefaultExprFn): ColumnDef;
-  /** Re-target as a foreign-key reference (a plain-string target table). Returns
-   *  a fresh def. */
-  ref(targetTable: string): ColumnDef;
   /** Mark as the table primary key (implies `NOT NULL`). Returns a fresh def. */
   primaryKey(): ColumnDef;
   /** Add a single-column `UNIQUE`. Returns a fresh def. */
@@ -453,8 +432,8 @@ export interface ExprChain {
   gt(x: unknown): ExprChain;
   ge(x: unknown): ExprChain;
   // boolean
-  and(e: ExprChain): ExprChain;
-  or(e: ExprChain): ExprChain;
+  and(...es: ExprChain[]): ExprChain;
+  or(...es: ExprChain[]): ExprChain;
   not(): ExprChain;
   // arithmetic
   add(x: unknown): ExprChain;
@@ -615,13 +594,11 @@ export interface PgExprNamespace {
 }
 
 /** The single injected builder handle: a column-accessor function `c("name")`
- *  (or `c.col("name")`) carrying the `c.fn.*` namespace. A two-arg form
+ *  carrying the `c.fn.*` namespace. A two-arg form
  *  `c("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
 export interface ExprBuilder {
   (name: string): ExprChain;
   (table: string, name: string): ExprChain;
-  col(name: string): ExprChain;
-  col(table: string, name: string): ExprChain;
   /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
   fn: FnNamespace;

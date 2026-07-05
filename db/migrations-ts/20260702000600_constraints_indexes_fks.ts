@@ -1,4 +1,4 @@
-import { and, table } from "@zeroship/migrate";
+import { table } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 
 export const name = "constraints_indexes_fks";
@@ -24,13 +24,13 @@ export function up() {
   table("app_net_grants", { schema: "zeroship" }).index("app_net_grants_app_id_idx").add({ on: ["app_id"] });
   pgTable("app_session_anchors", { schema: "zeroship" }).index("app_session_anchors_user_idx").add({ on: ["app_id", "global_user_id"], where: (c) => c("revoked_at").isNull() });
   table("app_user_identities", { schema: "zeroship" }).index("app_user_identities_pairwise_sub_idx").add({ on: ["pairwise_sub"] });
-  pgTable("app_user_identities", { schema: "zeroship" }).index("app_user_identities_relay_active_idx").add({ on: ["relay_email"], unique: true, where: (c) => and(c("relay_email").isNotNull(), c("revoked_at").isNull()) });
+  pgTable("app_user_identities", { schema: "zeroship" }).index("app_user_identities_relay_active_idx").add({ on: ["relay_email"], unique: true, where: (c) => c("relay_email").isNotNull().and(c("revoked_at").isNull()) });
   table("apps", { schema: "zeroship" }).index("apps_plan_id_idx").add({ on: ["plan_id"] });
   table("audit_events", { schema: "zeroship" }).index("auth_audit_event_idx").add({ on: ["event_type", "occurred_at"] });
   table("audit_events", { schema: "zeroship" }).index("auth_audit_user_idx").add({ on: ["actor_user_id", "occurred_at"] });
   table("dpop_jti", { schema: "zeroship" }).index("auth_dpop_jti_inserted_idx").add({ on: ["inserted_at"] });
   table("gateway_sessions", { schema: "zeroship" }).index("auth_gateway_sessions_app_idx").add({ on: ["app_id", "user_id"] });
-  pgTable("gateway_sessions", { schema: "zeroship" }).index("auth_gateway_sessions_app_sid_idx").add({ on: ["app_id", "sid"], where: (c) => and(c("sid").isNotNull(), c("revoked_at").isNull()) });
+  pgTable("gateway_sessions", { schema: "zeroship" }).index("auth_gateway_sessions_app_sid_idx").add({ on: ["app_id", "sid"], where: (c) => c("sid").isNotNull().and(c("revoked_at").isNull()) });
   pgTable("gateway_sessions", { schema: "zeroship" }).index("auth_gateway_sessions_idle_idx").add({ on: ["idle_expires_at"], where: (c) => c("revoked_at").isNull() });
   pgTable("magic_completions", { schema: "zeroship" }).index("auth_magic_completions_expires_idx").add({ on: ["expires_at"], where: (c) => c("consumed_at").isNull() });
   table("magic_links", { schema: "zeroship" }).index("auth_magic_email_idx").add({ on: ["email"] });
@@ -38,7 +38,7 @@ export function up() {
   table("rate_limits", { schema: "zeroship" }).index("auth_rate_limits_updated_at_idx").add({ on: ["updated_at"] });
   table("token_revocations", { schema: "zeroship" }).index("auth_token_revocations_revoked_after_idx").add({ on: ["revoked_after"] });
   table("totp_backup_codes", { schema: "zeroship" }).index("auth_totp_backup_codes_user_idx").add({ on: ["user_id"] });
-  pgTable("users", { schema: "zeroship" }).index("auth_users_deletion_due_idx").add({ on: ["deletion_scheduled_for"], where: (c) => and(c("deletion_scheduled_for").isNotNull(), c("anonymized_at").isNull()) });
+  pgTable("users", { schema: "zeroship" }).index("auth_users_deletion_due_idx").add({ on: ["deletion_scheduled_for"], where: (c) => c("deletion_scheduled_for").isNotNull().and(c("anonymized_at").isNull()) });
   table("authz_decisions", { schema: "zeroship" }).index("authz_decisions_occurred_idx").add({ on: [{ column: "occurred_at", order: "desc" }] });
   pgTable("authz_decisions", { schema: "zeroship" }).index("authz_decisions_user_idx").add({ on: ["actor_user_id"], where: (c) => c("actor_user_id").isNotNull() });
   table("billing_disputes", { schema: "zeroship" }).index("billing_disputes_invoice_idx").add({ on: ["invoice_id"] });
@@ -70,13 +70,13 @@ export function up() {
   table("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_user_id_ts").add({ on: ["user_id", "ts"] });
   pgTable("sandbox_events", { schema: "zeroship" }).index("idx_sandbox_events_metering")
     .add({ on: ["ts"], where: (c) => c("kind").in(["compute_seconds", "share.used", "preview_egress"]), include: ["sandbox_id", "user_id", "data"] });
-  pgTable("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_active_user_project").add({ on: ["user_id", "project_id"], unique: true, where: (c) => and(c("deleted_at").isNull(), c("status").in(["starting", "running", "recreating"])) });
+  pgTable("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_active_user_project").add({ on: ["user_id", "project_id"], unique: true, where: (c) => c("deleted_at").isNull().and(c("status").in(["starting", "running", "recreating"])) });
   table("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_created_at").add({ on: ["created_at"] });
   pgTable("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_host_id_status").add({ on: ["host_id", "status"], where: (c) => c("deleted_at").isNull() });
   pgTable("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_status_last_used").add({ on: ["status", "last_used_at"], where: (c) => c("deleted_at").isNull() });
   pgTable("sandboxes", { schema: "zeroship" }).index("idx_sandboxes_user_id").add({ on: ["user_id"], where: (c) => c("deleted_at").isNull() });
-  pgTable("shares", { schema: "zeroship" }).index("idx_shares_expires_at").add({ on: ["expires_at"], where: (c) => and(c("deleted_at").isNull(), c("revoked_at").isNull()) });
-  pgTable("shares", { schema: "zeroship" }).index("idx_shares_iss_issued_at").add({ on: ["iss", "issued_at"], where: (c) => and(c("deleted_at").isNull(), c("iss").isNotNull()) });
+  pgTable("shares", { schema: "zeroship" }).index("idx_shares_expires_at").add({ on: ["expires_at"], where: (c) => c("deleted_at").isNull().and(c("revoked_at").isNull()) });
+  pgTable("shares", { schema: "zeroship" }).index("idx_shares_iss_issued_at").add({ on: ["iss", "issued_at"], where: (c) => c("deleted_at").isNull().and(c("iss").isNotNull()) });
   pgTable("shares", { schema: "zeroship" }).index("idx_shares_sandbox_id_port").add({ on: ["sandbox_id", "port"], where: (c) => c("deleted_at").isNull() });
   table("spend_state_history", { schema: "zeroship" }).index("idx_spend_state_history_app_at").add({ on: ["app_id", { column: "at", order: "desc" }] });
   table("spend_state_history", { schema: "zeroship" }).index("idx_spend_state_history_period").add({ on: ["period"] });
@@ -93,7 +93,7 @@ export function up() {
   table("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_expires_at_idx").add({ on: ["expires_at"] });
   table("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_family_idx").add({ on: ["refresh_family_id", "client_id", "user_id"] });
   pgTable("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_idem_reap_idx").add({ on: ["idem_expires_at"], where: (c) => c("idem_response_enc").isNotNull() });
-  pgTable("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_one_active_per_family").add({ on: ["refresh_family_id"], unique: true, where: (c) => and(c("rotated_at").isNull(), c("revoked_at").isNull()) });
+  pgTable("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_one_active_per_family").add({ on: ["refresh_family_id"], unique: true, where: (c) => c("rotated_at").isNull().and(c("revoked_at").isNull()) });
   table("oauth_refresh_tokens", { schema: "zeroship" }).index("oauth_refresh_tokens_user_idx").add({ on: ["user_id"] });
   table("oidc_session_clients", { schema: "zeroship" }).index("oidc_session_clients_client_idx").add({ on: ["client_id"] });
   table("oidc_session_clients", { schema: "zeroship" }).index("oidc_session_clients_user_idx").add({ on: ["user_id", "idp_session_id"] });
@@ -104,7 +104,7 @@ export function up() {
   pgTable("permission_tokens", { schema: "zeroship" }).index("permission_tokens_policies_gin_idx").add({ on: ["policies"], using: "gin" });
   table("plan_change_events", { schema: "zeroship" }).index("plan_change_events_app_period_idx").add({ on: ["app_id", "period"] });
   table("refunds", { schema: "zeroship" }).index("refunds_invoice_idx").add({ on: ["invoice_id"] });
-  pgTable("sandboxes", { schema: "zeroship" }).index("sandboxes_idle_snapshot_idx").add({ on: ["last_used_at"], where: (c) => and(c("status").eq("running"), c("idle_snapshot_opted_in")) });
+  pgTable("sandboxes", { schema: "zeroship" }).index("sandboxes_idle_snapshot_idx").add({ on: ["last_used_at"], where: (c) => c("status").eq("running").and(c("idle_snapshot_opted_in")) });
   pgTable("sandboxes", { schema: "zeroship" }).index("sandboxes_status_lessee_idx").add({ on: ["status", "lessee_updated_at"], where: (c) => c("status").in(["snapshotting", "restoring", "restoring_cold"]) });
   table("signing_keys", { schema: "zeroship" }).index("signing_keys_status_idx").add({ on: ["status"] });
   table("usage_aggregates", { schema: "zeroship" }).index("usage_aggregates_period_idx").add({ on: ["period", "app_id"] });

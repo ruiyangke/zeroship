@@ -361,11 +361,10 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c("enabled").isTrue()
 (c) => c("archived").isFalse()
 
-// Logical composition (also free functions: and / or / not)
-import { and, or, not } from "@zeroship/migrate";
-(c) => and(c("qty").gt(0), c("price").ge(0))
-(c) => or(c("a").isNotNull(), c("b").isNotNull())
-(c) => not(c("blocked").isTrue())
+// Logical composition
+(c) => c("qty").gt(0).and(c("price").ge(0))
+(c) => c("a").isNotNull().or(c("b").isNotNull())
+(c) => c("blocked").isTrue().not()
 
 // Set membership
 (c) => c("status").in(["active", "past_due", "suspended"])

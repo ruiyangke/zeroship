@@ -20,9 +20,6 @@ import {
   lintDeterminism,
   enumType,
   check,
-  and,
-  or,
-  not,
   lit,
   decimal,
   byteValue,
@@ -80,6 +77,9 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   assert.equal((imported as any).dropPartition, undefined);
   assert.equal((imported as any).membership, undefined);
   assert.equal((imported as any).notMembership, undefined);
+  assert.equal((imported as any).and, undefined);
+  assert.equal((imported as any).or, undefined);
+  assert.equal((imported as any).not, undefined);
   assert.equal(typeof imported.interval, "function");
   assert.equal((imported as any).pgEnum, undefined);
   assert.equal((imported as any).pgDomain, undefined);
@@ -999,17 +999,52 @@ test("the two-arg c('table','col') records a qualified colRef; one-arg stays unq
         q: (c) => c("orders", "customer_id"),
         // one-arg form is untouched
         u: (c) => c("id"),
-        // c.col two-arg mirror
-        cq: (c) => c.col("users", "id"),
+        // the callable two-arg spelling replaces the old c.col("table", "col")
+        cq: (c) => c("users", "id"),
+        tx: (c) => c("t", "x"),
       },
     }),
   );
   const set = ops[0].set;
   assert.deepEqual(set.q, { node: "colRef", table: "orders", name: "customer_id" });
   assert.deepEqual(set.cq, { node: "colRef", table: "users", name: "id" });
+  assert.deepEqual(set.tx, { node: "colRef", table: "t", name: "x" });
   // Unqualified: no `table` property is emitted (compact wire shape).
   assert.deepEqual(set.u, { node: "colRef", name: "id" });
   assert.equal("table" in set.u, false);
+});
+
+test("variadic boolean chains record the old free-combinator left fold", () => {
+  const ops = record(() =>
+    table("t").check("wide_bool").add({
+      expr: (c) =>
+        c("a").eq(1)
+          .and(c("b").eq(2), c("c").eq(3))
+          .or(c("d").eq(4), c("e").eq(5)),
+    }),
+  );
+
+  assert.deepEqual(ops[0].constraint.kind.expr, {
+    node: "binOp",
+    op: "or",
+    lhs: {
+      node: "binOp",
+      op: "or",
+      lhs: {
+        node: "binOp",
+        op: "and",
+        lhs: {
+          node: "binOp",
+          op: "and",
+          lhs: { node: "binOp", op: "eq", lhs: { node: "colRef", name: "a" }, rhs: { node: "literal", value: 1 } },
+          rhs: { node: "binOp", op: "eq", lhs: { node: "colRef", name: "b" }, rhs: { node: "literal", value: 2 } },
+        },
+        rhs: { node: "binOp", op: "eq", lhs: { node: "colRef", name: "c" }, rhs: { node: "literal", value: 3 } },
+      },
+      rhs: { node: "binOp", op: "eq", lhs: { node: "colRef", name: "d" }, rhs: { node: "literal", value: 4 } },
+    },
+    rhs: { node: "binOp", op: "eq", lhs: { node: "colRef", name: "e" }, rhs: { node: "literal", value: 5 } },
+  });
 });
 
 test("c.pg builds PG-only regex, pg_column_size, and RLS scalar nodes", () => {
@@ -1268,10 +1303,10 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
         { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).lt(262144) },
         check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
-        check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
-        check("enabled_and_visible", (c) => and(c("enabled"), c("visible"))),
+        check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
+        check("enabled_and_visible", (c) => c("enabled").and(c("visible"))),
         check("expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
-        check("not_archived", (c) => not(c("kind").eq(lit("archived")))),
+        check("not_archived", (c) => c("kind").eq(lit("archived")).not()),
         check("kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
       ],
     });
