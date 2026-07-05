@@ -31,8 +31,9 @@
 import type {
   AggNamespace,
   BackfillArgs,
+  CheckBuilderWithPg,
   CheckDef,
-  CheckRef,
+  CheckExprFn,
   ColType,
   ColumnDef as ColumnDefType,
   ColumnRef,
@@ -93,6 +94,8 @@ import type {
   PartitionBoundInput,
   PartitionBoundSentinel,
   PartitionByInput,
+  PgCheckExprFn,
+  PgCheckRef,
   PgExprNamespace,
   PgIndexAdd,
   PgIndexDropArgs,
@@ -1512,7 +1515,7 @@ function foldExprs(op: "and" | "or", exprs: readonly unknown[], what: string): E
   return chain(acc);
 }
 
-export function check(name: string, expr: ExprFn): CheckDef {
+export function check(name: string, expr: CheckExprFn): CheckDef {
   requireString(name, "check(name, expr)");
   if (typeof expr !== "function") {
     throw structuredError("OP_INVALID", "check(name, expr): expr must be a (c) => Expr callback");
@@ -1680,7 +1683,7 @@ const pgExpr: PgExprNamespace = {
     expr: exprArg(expr),
     pattern: pgRegexPattern(pattern),
   }),
-  columnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
+  pgColumnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
   extract: (field, expr) => chain({
     node: "extract",
     field: pgExtractField(field),
@@ -1751,6 +1754,14 @@ function immutableExprBuilder(): IndexExprBuilder {
   return Object.freeze(c);
 }
 
+function checkWithPgBuilder(): CheckBuilderWithPg {
+  const c = makeColumnAccessor() as unknown as CheckBuilderWithPg;
+  c.case = caseExpr;
+  c.fn = immutableFn;
+  c.pg = pgExpr;
+  return Object.freeze(c);
+}
+
 function makeBuilder(): ExprBuilder {
   const c = makeColumnAccessor() as unknown as ExprBuilder;
   c.col = c;
@@ -1781,7 +1792,7 @@ function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | un
   throw structuredError("OP_INVALID", "expression slot must be a (c) => Expr callback or a built expression");
 }
 
-type ImmutableExprSlot = IndexExprFn | GeneratedColumnExprFn | ExprChainType | Node | undefined;
+type ImmutableExprSlot = IndexExprFn | GeneratedColumnExprFn | CheckExprFn | ExprChainType | Node | undefined;
 
 function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
@@ -1799,6 +1810,34 @@ function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node |
   return resolved;
 }
 
+function resolveCheckWithPg(
+  slot: PgCheckExprFn | ExprChainType | Node | undefined,
+  position: string,
+): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (c: CheckBuilderWithPg) => unknown)(checkWithPgBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position, { allowPgImmutable: true });
+  return resolved;
+}
+
+type CheckExprSlot = CheckExprFn | PgCheckExprFn | ExprChainType | Node | undefined;
+type CheckExprResolver = (slot: CheckExprSlot, position: string) => Node | undefined;
+
+const resolveCoreCheckExpr: CheckExprResolver = (slot, position) =>
+  resolveImmutableExpr(slot as CheckExprFn | ExprChainType | Node | undefined, position);
+
+const resolvePgCheckExpr: CheckExprResolver = (slot, position) =>
+  resolveCheckWithPg(slot as PgCheckExprFn | ExprChainType | Node | undefined, position);
+
 function rejectImmutableExpr(position: string, reason: string): never {
   throw structuredError(
     "OP_INVALID",
@@ -1807,7 +1846,10 @@ function rejectImmutableExpr(position: string, reason: string): never {
   );
 }
 
-function validateImmutableExpr(expr: Node, position: string): void {
+function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmutable?: boolean } = {}): void {
+  const rejectPgNode = (nodeName: string): void => {
+    rejectImmutableExpr(position, `${nodeName} is PG-vendor and non-portable`);
+  };
   const walk = (node: unknown): void => {
     if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
       rejectImmutableExpr(position, "found a non-expression value");
@@ -1884,6 +1926,30 @@ function validateImmutableExpr(expr: Node, position: string): void {
         return;
       case "inList":
         walk(n.expr);
+        return;
+      case "pgRegexMatch":
+        if (!opts.allowPgImmutable) rejectPgNode("pgRegexMatch");
+        walk(n.expr);
+        if (typeof n.pattern !== "string") {
+          rejectImmutableExpr(position, "pgRegexMatch pattern must be a string");
+        }
+        return;
+      case "pgColumnSize":
+        if (!opts.allowPgImmutable) rejectPgNode("pgColumnSize");
+        walk(n.expr);
+        return;
+      case "extract":
+        if (!opts.allowPgImmutable) rejectPgNode("extract");
+        if (n.field !== "day") {
+          rejectImmutableExpr(position, `extract field ${JSON.stringify(n.field)} is not immutable here`);
+        }
+        walk(n.from);
+        return;
+      case "pgInterval":
+        if (!opts.allowPgImmutable) rejectPgNode("pgInterval");
+        if (typeof n.duration !== "string") {
+          rejectImmutableExpr(position, "pgInterval duration must be a string");
+        }
         return;
       case "dialect":
         for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
@@ -2197,7 +2263,11 @@ function commentTargetToIr(target: CommentTargetArg): Node {
 // recorder twin emit (byte-identical IR except the C1 FK-actions delta). They are
 // internal — only the fluent `table()` handle calls them.
 
-function recordCreateTable(name: string, args: CreateTableArgs): void {
+function recordCreateTable(
+  name: string,
+  args: CreateTableArgs,
+  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+): void {
   const cols: Node[] = [];
   const constraints: Node[] = [];
   const indexes: Node[] = [];
@@ -2219,7 +2289,10 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
     constraints.push(compact({ name: uq.name, kind: { kind: "unique", columns: uq.columns } }));
   }
   for (const ck of args.checks ?? []) {
-    constraints.push(compact({ name: ck.name, kind: { kind: "check", expr: resolveExpr(ck.expr) } }));
+    constraints.push(compact({
+      name: ck.name,
+      kind: { kind: "check", expr: checkExprResolver(ck.expr as CheckExprSlot, "check constraint") },
+    }));
   }
   for (const exclusion of args.exclusions ?? []) {
     constraints.push(exclusionConstraintFromSpec(exclusion));
@@ -2545,7 +2618,8 @@ function recordAddUnique(
 function recordAddCheck(
   table: string,
   name: string,
-  args: { expr: ExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
+  args: { expr: CheckExprFn | PgCheckExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
+  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
 ): void {
   if (!args || args.expr === undefined) {
     throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
@@ -2556,7 +2630,11 @@ function recordAddCheck(
       name,
       // `notValid` is PG-only online constraint adoption; compacted out when absent
       // so an ordinary CHECK is byte-identical to the pre-slice wire image.
-      kind: compact({ kind: "check", expr: resolveExpr(args.expr), notValid: args.notValid }),
+      kind: compact({
+        kind: "check",
+        expr: checkExprResolver(args.expr as CheckExprSlot, "check constraint"),
+        notValid: args.notValid,
+      }),
     }),
     schema: args.schema,
     existenceGuard: ifNotExistsGuard(args.ifNotExists),
@@ -3185,14 +3263,22 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
   return __makeTableHandle(name, opts);
 }
 
-export function __makeTableHandle(name: string, opts: TableOptions = {}): PgTableHandle {
+export function __makePgTableHandle(name: string, opts: TableOptions = {}): PgTableHandle {
+  return __makeTableHandle(name, opts, resolvePgCheckExpr);
+}
+
+export function __makeTableHandle(
+  name: string,
+  opts: TableOptions = {},
+  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+): PgTableHandle {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
 
   const handle: PgTableHandle = {
     // §3.1 — the table itself
     create(args) {
-      recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) });
+      recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
       return handle;
     },
     drop(args = {}) {
@@ -3349,13 +3435,13 @@ export function __makeTableHandle(name: string, opts: TableOptions = {}): PgTabl
         },
       };
     },
-    check(ckName): CheckRef {
+    check(ckName): PgCheckRef {
       requireString(ckName, ".check(name)");
       const id = registerSelector("check", ckName);
       return {
         add(args) {
           terminateSelector(id);
-          recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) });
+          recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
           return handle;
         },
       };

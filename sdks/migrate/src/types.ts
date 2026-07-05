@@ -565,8 +565,13 @@ export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
  *  `IndexExprBuilder` today but remains distinct so the slots can diverge. */
 export interface GeneratedColumnBuilder extends ImmutableExprBuilderBase {}
 
+/** Builder for portable table CHECK expressions. CHECKs must be immutable and
+ *  non-aggregate; PostgreSQL-vendor helpers live on `pgTable().check()`. */
+export interface CheckBuilder extends ImmutableExprBuilderBase {}
+
 export type IndexExprFn = (c: IndexExprBuilder) => ExprChain | Expr;
 export type GeneratedColumnExprFn = (c: GeneratedColumnBuilder) => ExprChain | Expr;
+export type CheckExprFn = (c: CheckBuilder) => ExprChain | Expr;
 
 /** The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count`/`sum`/`avg`/
  *  `min`/`max` render identically on PG, SQLite, and MySQL (only identifier
@@ -593,7 +598,7 @@ export interface PgExprNamespace {
   /** Renders `<expr> ~ '<pattern>'::text` on PostgreSQL. */
   regex(expr: unknown, pattern: string): ExprChain;
   /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
-  columnSize(expr: unknown): ExprChain;
+  pgColumnSize(expr: unknown): ExprChain;
   /** Renders `EXTRACT(day FROM <expr>)` on PostgreSQL. */
   extract(field: "day", expr: unknown): ExprChain;
   /** Renders `'<safe>'::interval` on PostgreSQL. Accepts strict `HH:MM:SS[.ffffff]`. */
@@ -622,7 +627,19 @@ export type ExprFn = (c: ExprBuilder) => ExprChain;
 /** A named table-level CHECK constraint authored inside `table().create({ checks })`. */
 export interface CheckDef {
   name: string;
-  expr: ExprFn;
+  expr: CheckExprFn;
+}
+
+/** PostgreSQL-vendor CHECK builder: immutable core plus PG immutable value nodes. */
+export interface CheckBuilderWithPg extends CheckBuilder {
+  pg: PgExprNamespace;
+}
+
+export type PgCheckExprFn = (c: CheckBuilderWithPg) => ExprChain | Expr;
+
+export interface PgCheckDef {
+  name: string;
+  expr: PgCheckExprFn;
 }
 
 // ── Shared op-arg fragments (§3) ──
@@ -1044,13 +1061,24 @@ export interface UniqueRef {
 /** The `.check(name)` selector sub-handle (§3.3). */
 export interface CheckRef {
   add(args: {
-    expr: ExprFn;
+    expr: CheckExprFn;
     /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
      *  `.validateConstraint(name)` later. Refused off PG. */
     notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   }): TableHandle;
+}
+
+export interface PgCheckRef extends CheckRef {
+  add(args: {
+    expr: PgCheckExprFn;
+    /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
+     *  `.validateConstraint(name)` later. Refused off PG. */
+    notValid?: boolean;
+    ifNotExists?: boolean;
+    schema?: string;
+  }): PgTableHandle;
 }
 
 /** The `.exclusion(name)` selector sub-handle (§3.3). PostgreSQL renders native
@@ -1174,6 +1202,7 @@ export interface TableHandle {
  *  It is the same runtime object as `table()`, with table-scoped PG vendor
  *  methods made reachable only from the `/pg` type surface. */
 export interface PgTableHandle extends TableHandle {
+  check(name: string): PgCheckRef;
   index(name: string): PgIndexRef;
   detachPartition(name: string, args?: DetachPartitionArgs): PgTableHandle;
   /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
