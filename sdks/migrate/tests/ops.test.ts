@@ -26,7 +26,7 @@ import {
   interval,
   dialect,
 } from "../src/index.js";
-import { domain, sequence } from "../src/pg.js";
+import { domain, pgTable, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 // The engine-embedded recorder is now the COMPILED artifact
@@ -1377,7 +1377,7 @@ test("immutable-only slots reject forced volatile, aggregate, and vendor nodes a
   assert.throws(
     () =>
       record(() =>
-        table("bookings").exclusion("bookings_bad_excl").add({
+        pgTable("bookings").exclusion("bookings_bad_excl").add({
           using: "gist",
           elements: [{ target: "room", operator: "=" }],
           where: { node: "fnCall", fn: "currentUser", args: [] } as any,
@@ -1558,9 +1558,9 @@ test("table().partition().create records list and hash createPartition ops", () 
   ]);
 });
 
-test("table().detachPartition records parent-subject detachPartition", () => {
+test("pgTable().detachPartition records parent-subject detachPartition", () => {
   const ops = record(() =>
-    table("events", { schema: "app" }).detachPartition("events_2026_05", {
+    pgTable("events", { schema: "app" }).detachPartition("events_2026_05", {
       concurrently: true,
     }),
   );

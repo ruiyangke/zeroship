@@ -7,7 +7,7 @@ import {
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
-import { sequence as pubSequence } from "../src/pg.js";
+import { pgTable as pubPgTable, sequence as pubSequence } from "../src/pg.js";
 // Artifact-identity oracle: the engine-embedded recorder is now the COMPILED
 // `dist/embedded-recorder.js` (the same build output the `zeroship-migrate` crate
 // `include_str!`s), not the deleted `migrate_ops.js` twin.
@@ -15,6 +15,7 @@ import {
   __begin as engBegin,
   __drain as engDrain,
   __pgSequence as engSequence,
+  pgTable as engPgTable,
   t as engT,
   table as engTable,
 } from "../dist/embedded-recorder.js";
@@ -22,6 +23,7 @@ import {
 type Rec = {
   begin: () => void;
   drain: () => any[];
+  pgTable: any;
   sequence: any;
   t: any;
   table: any;
@@ -30,6 +32,7 @@ type Rec = {
 const PUBLIC: Rec = {
   begin: pubBegin,
   drain: pubDrain,
+  pgTable: pubPgTable,
   sequence: pubSequence,
   t: pubT,
   table: pubTable,
@@ -38,12 +41,13 @@ const PUBLIC: Rec = {
 const ENGINE: Rec = {
   begin: engBegin,
   drain: engDrain,
+  pgTable: engPgTable,
   sequence: engSequence,
   t: engT,
   table: engTable,
 };
 
-function authorWith({ begin, drain, sequence, t, table }: Rec): any[] {
+function authorWith({ begin, drain, pgTable, sequence, t, table }: Rec): any[] {
   begin();
   sequence("invoice_seq").create({
     as: t.bigInt(),
@@ -83,7 +87,7 @@ function authorWith({ begin, drain, sequence, t, table }: Rec): any[] {
       deferrable: true,
     }],
   });
-  table("bookings", { schema: "app" }).exclusion("bookings_no_overlap").add({
+  pgTable("bookings", { schema: "app" }).exclusion("bookings_no_overlap").add({
     using: "gist",
     elements: [
       { target: "room", operator: "=" },

@@ -1,5 +1,5 @@
 import { table, t } from "@zeroship/migrate";
-import { extension, grant, role, schema } from "@zeroship/migrate/pg";
+import { extension, grant, pgTable, role, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_ts_vendor";
 
@@ -28,7 +28,7 @@ export function up() {
     to: ["zeroship_ts_test_app"],
   });
 
-  const accounts = table("ts_accounts", { schema: "zeroship" });
+  const accounts = pgTable("ts_accounts", { schema: "zeroship" });
   accounts.enableRowLevelSecurity();
   accounts.forceRowLevelSecurity();
   accounts.createPolicy({

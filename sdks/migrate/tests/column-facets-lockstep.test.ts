@@ -25,6 +25,7 @@ import {
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
+import { pgTable as pubPgTable } from "../src/pg.js";
 // The COMPILED engine-embedded recorder artifact (the file the Rust runtime
 // include_str!s into V8). Importing it directly makes this an oracle against the
 // real shipped engine recording, not a self-referential restatement of the source.
@@ -33,6 +34,7 @@ import {
   __drain as engDrain,
   maxValue as engMaxValue,
   minValue as engMinValue,
+  pgTable as engPgTable,
   t as engT,
   table as engTable,
 } from "../dist/embedded-recorder.js";
@@ -40,6 +42,7 @@ import {
 type Rec = {
   begin: () => void;
   drain: () => any[];
+  pgTable: any;
   t: any;
   table: any;
   minValue: any;
@@ -49,6 +52,7 @@ type Rec = {
 const PUBLIC: Rec = {
   begin: pubBegin,
   drain: pubDrain,
+  pgTable: pubPgTable,
   t: pubT,
   table: pubTable,
   minValue: pubMinValue,
@@ -57,6 +61,7 @@ const PUBLIC: Rec = {
 const ENGINE: Rec = {
   begin: engBegin,
   drain: engDrain,
+  pgTable: engPgTable,
   t: engT,
   table: engTable,
   minValue: engMinValue,
@@ -159,6 +164,7 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 function authorPartitionWith({
   begin,
   drain,
+  pgTable,
   t,
   table,
   minValue,
@@ -186,7 +192,7 @@ function authorPartitionWith({
       with: { pagesPerRange: 32 },
       only: true,
     });
-  table("events", { schema: "app" }).detachPartition("events_2026_05", { concurrently: true });
+  pgTable("events", { schema: "app" }).detachPartition("events_2026_05", { concurrently: true });
   table("events", { schema: "app" }).partition("events_2026_05").drop({ ifExists: true, cascade: true });
   return drain();
 }

@@ -94,6 +94,7 @@ import type {
   PartitionBoundSentinel,
   PartitionByInput,
   PgExprNamespace,
+  PgTableHandle,
   RefAction,
   Row,
   ScalarValue,
@@ -3189,10 +3190,14 @@ export function comment(target: CommentTargetArg, text: string | null): void {
 }
 
 export function table(name: string, opts: TableOptions = {}): TableHandle {
+  return __makeTableHandle(name, opts);
+}
+
+export function __makeTableHandle(name: string, opts: TableOptions = {}): PgTableHandle {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
 
-  const handle: TableHandle = {
+  const handle: PgTableHandle = {
     // §3.1 — the table itself
     create(args) {
       recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) });

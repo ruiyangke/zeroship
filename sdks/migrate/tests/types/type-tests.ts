@@ -37,6 +37,7 @@ import {
   type DecimalValue,
   type BytesValue,
 } from "../../src/index.js";
+import { pgTable } from "../../src/pg.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
 import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
@@ -112,6 +113,37 @@ export function badOpShapes(): void {
 
   // @ts-expect-error — `.rename({ to })` has no `from` (that is the column-rename shape).
   table("users").rename({ from: "users", to: "people" });
+}
+
+export function pgTableBoundary(): void {
+  // @ts-expect-error — PG table policies are only reachable through `pgTable()`.
+  table("secrets").createPolicy({ name: "tenant_only", using: (c) => c("tenant_id").isNotNull() });
+
+  // @ts-expect-error — RLS is a PG table method and is not on portable `table()`.
+  table("secrets").enableRowLevelSecurity();
+
+  // @ts-expect-error — exclusion constraints are a PG table method and are not on portable `table()`.
+  table("bookings").exclusion("bookings_no_overlap");
+
+  // @ts-expect-error — constraint validation is a PG table method and is not on portable `table()`.
+  table("line_items").validateConstraint("line_items_order_fkey");
+
+  // @ts-expect-error — partition detach is a PG table method and is not on portable `table()`.
+  table("events").detachPartition("events_2026_05");
+
+  pgTable("secrets")
+    .enableRowLevelSecurity()
+    .forceRowLevelSecurity()
+    .createPolicy({ name: "tenant_only", using: (c) => c("tenant_id").isNotNull() })
+    .dropPolicy({ name: "tenant_only", ifExists: true })
+    .disableRowLevelSecurity()
+    .noForceRowLevelSecurity();
+  pgTable("bookings").exclusion("bookings_no_overlap").add({
+    using: "gist",
+    elements: [{ target: "room_id", operator: "=" }],
+  });
+  pgTable("line_items").validateConstraint("line_items_order_fkey");
+  pgTable("events").detachPartition("events_2026_05", { concurrently: true });
 }
 
 export function viewGrammar(): void {
