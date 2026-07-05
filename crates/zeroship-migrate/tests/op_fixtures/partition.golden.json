@@ -124,6 +124,7 @@
     },
     {
       "op": "dropPartition",
+      "parent": "events",
       "name": "events_2026_05",
       "cascade": true
     },

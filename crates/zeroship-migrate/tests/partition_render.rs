@@ -314,6 +314,7 @@ fn render_detach_partition_pg() {
 #[test]
 fn render_drop_partition_pg() {
     let sql = pg_sql(Op::DropPartition {
+        parent: "events".into(),
         name: "events_default".into(),
         schema: None,
         existence_guard: None,

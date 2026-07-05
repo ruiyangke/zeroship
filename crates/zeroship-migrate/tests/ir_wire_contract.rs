@@ -975,6 +975,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
         concurrently: Some(true),
     };
     let drop = Op::DropPartition {
+        parent: "events".into(),
         name: "events_2026_05".into(),
         schema: None,
         existence_guard: None,

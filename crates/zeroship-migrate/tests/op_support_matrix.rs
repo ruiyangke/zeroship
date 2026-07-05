@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use zeroship_migrate::model::capability::VendorCapability;
 use zeroship_migrate::model::ir::{
     ColType, IdentityCol, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraintKind,
-    IrDefault, Op, PartitionBounds, SequenceRef, TriggerAction, ViewQuery,
+    IrDefault, Op, PartitionBounds, PartitionSpec, SequenceRef, TriggerAction, ViewQuery,
 };
 use zeroship_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
-use zeroship_migrate::model::validate::validate_ir_scoped;
+use zeroship_migrate::model::validate::{validate_ir_scoped, CODE_UNSUPPORTED};
 use zeroship_migrate::{
     IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, PolicyProfile, SchemaScope, SqlDialect,
     CURRENT_IR_VERSION,
@@ -325,6 +325,34 @@ fn idx_col(name: &str) -> IndexElement {
     }
 }
 
+fn partitioned_create_table() -> Op {
+    Op::CreateTable {
+        name: "events".into(),
+        columns: vec![IrColumn {
+            name: "created_at".into(),
+            ty: ColType::Timestamp,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: Some(PartitionSpec::Range {
+            columns: vec!["created_at".into()],
+        }),
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
 fn partition_feature_ops() -> Vec<Op> {
     vec![
         Op::CreatePartition {
@@ -341,6 +369,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
         },
         Op::DropPartition {
+            parent: "events".into(),
             name: "events_default".into(),
             schema: None,
             existence_guard: None,
@@ -528,6 +557,31 @@ fn partition_ops_and_partition_index_features_are_pg_only() {
                 "{tag} {dialect:?}: partition DSL slice is PostgreSQL-only"
             );
         }
+    }
+}
+
+#[test]
+fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
+    let op = partitioned_create_table();
+    assert!(
+        validate_current(&op, Dialect::Postgres),
+        "partitioned createTable must validate on PostgreSQL"
+    );
+
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir_scoped(
+            &one_op_ir(op.clone()),
+            dialect,
+            &[],
+            Some(&SchemaScope::Unconfined),
+            &PolicyProfile::platform(),
+        )
+        .expect_err("partitioned createTable must fail closed off PostgreSQL");
+        assert_eq!(err.code, CODE_UNSUPPORTED, "{dialect:?}: {err}");
+        assert!(
+            err.reason.contains("partitioned tables are PostgreSQL-only"),
+            "{dialect:?}: {err}"
+        );
     }
 }
 

@@ -150,12 +150,13 @@ pub(crate) fn op_created_table(op: &Op) -> Option<&str> {
 fn op_target_table(op: &Op) -> Option<&str> {
     match op {
         Op::CreateTable { name, .. } => Some(name),
-        Op::CreatePartition { of, .. } | Op::DetachPartition { parent: of, .. } => Some(of),
+        Op::CreatePartition { of, .. }
+        | Op::DetachPartition { parent: of, .. }
+        | Op::DropPartition { parent: of, .. } => Some(of),
         Op::SetTableOptions { table, .. } => Some(table),
         // The ownership gate checks the EXISTING (old) table — a rename of a table
         // the deploying app does not own is refused on the source name.
         Op::DropTable { table, .. }
-        | Op::DropPartition { name: table, .. }
         | Op::RenameTable { table, .. }
         | Op::AddColumn { table, .. }
         | Op::DropColumn { table, .. }

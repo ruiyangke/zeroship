@@ -406,10 +406,10 @@ import { and, or, not } from "@zeroship/migrate";
 ### Literals & helpers
 
 ```ts
-import { lit, interval, p, minValue, maxValue, nextval } from "@zeroship/migrate";
+import { lit, interval, minValue, maxValue, nextval } from "@zeroship/migrate";
 lit(42)                       // an explicit literal node
 interval("72:00:00")          // an interval literal — HH:MM:SS form only (not "7 days")
-p                             // the partition-bound builder namespace (see §12)
+minValue / maxValue           // partition-bound sentinels (see §12)
 ```
 
 ---
@@ -476,40 +476,40 @@ table("orders", { schema: "zeroship" }).create({
 
 ## 12. Partitioning (PG)
 
-A partition is a first-class relation authored with the **child-subject** grammar
-`partition(child).of(parent)`. Range/list/hash are declared on the parent's `partitionBy`.
+A partition is authored from the parent table handle:
+`table(parent).partition(child)`. Range/list/hash are declared structurally on
+the parent's `partitionBy`.
 
 ```ts
-import { table, partition, dropPartition, p } from "@zeroship/migrate";
+import { table, t, minValue, maxValue } from "@zeroship/migrate";
 
 // 1) Parent declares the partition strategy at create()
 table("sandbox_events", { schema: "zeroship" }).create({
   columns: { id: t.uuid().notNull(), occurred_at: t.timestamp().notNull(), /* … */ },
   primaryKey: ["id", "occurred_at"],
-  partitionBy: p.range(["occurred_at"]),      // p.range | p.list | p.hash
+  partitionBy: { range: ["occurred_at"] },    // { range } | { list } | { hash }
 });
 
-// 2) Attach partitions (child-subject). RANGE bounds:
-partition("sandbox_events_2026_05", { schema: "zeroship" }).of("sandbox_events")
-  .forValues({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
+// 2) Create partitions (parent-subject). RANGE bounds:
+table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05")
+  .create({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
 
 // LIST bounds:
-partition("events_eu", { schema: "zeroship" }).of("events").forValues({ in: ["de", "fr", "es"] });
+table("events", { schema: "zeroship" }).partition("events_eu").create({ in: ["de", "fr", "es"] });
 
 // HASH bounds:
-partition("events_h0", { schema: "zeroship" }).of("events").forValues({ modulus: 4, remainder: 0 });
+table("events", { schema: "zeroship" }).partition("events_h0").create({ modulus: 4, remainder: 0 });
 
 // DEFAULT partition (catch-all):
-partition("sandbox_events_default", { schema: "zeroship" }).of("sandbox_events").asDefault();
+table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_default").create({ default: true });
 
 // Unbounded range ends use the sentinels:
-import { minValue, maxValue } from "@zeroship/migrate";
-partition("events_head").of("events").forValues({ from: [minValue], to: ["2026-01-01"] });
-partition("events_tail").of("events").forValues({ from: ["2027-01-01"], to: [maxValue] });
+table("events").partition("events_head").create({ from: [minValue], to: ["2026-01-01"] });
+table("events").partition("events_tail").create({ from: ["2027-01-01"], to: [maxValue] });
 
-// Lifecycle: detach (parent-subject) and drop (child-subject)
+// Lifecycle: detach and drop (both parent-subject)
 table("sandbox_events", { schema: "zeroship" }).detachPartition("sandbox_events_2026_05");
-dropPartition("sandbox_events_2026_05", { schema: "zeroship" });
+table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").drop();
 ```
 
 **Faithfulness note:** create indexes on the *parent* (no `ONLY`) — PG auto-propagates and

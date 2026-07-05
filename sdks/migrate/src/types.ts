@@ -639,33 +639,25 @@ export interface PartitionBoundSentinel {
 
 export type PartitionBoundInput = string | number | PartitionBoundSentinel;
 
-export interface PartitionBuilder {
-  range(columns: readonly string[]): PartitionSpec;
-  list(columns: readonly string[]): PartitionSpec;
-  hash(columns: readonly string[]): PartitionSpec;
-}
-
-export interface PartitionOptions {
-  schema?: string;
-}
+export type PartitionByInput =
+  | { range: readonly string[] }
+  | { list: readonly string[] }
+  | { hash: readonly string[] };
 
 export interface CreatePartitionOptions {
   schema?: string;
   ifNotExists?: boolean;
 }
 
-export type PartitionForValuesArgs =
+export type PartitionBoundArgs =
   | { from: readonly PartitionBoundInput[]; to: readonly PartitionBoundInput[] }
   | { in: readonly PartitionBoundInput[] }
-  | { modulus: number; remainder: number };
+  | { modulus: number; remainder: number }
+  | { default: true };
 
-export interface PartitionOfHandle {
-  forValues(bounds: PartitionForValuesArgs, args?: CreatePartitionOptions): void;
-  asDefault(args?: CreatePartitionOptions): void;
-}
-
-export interface PartitionHandle {
-  of(parent: string): PartitionOfHandle;
+export interface PartitionRef {
+  create(bound: PartitionBoundArgs, args?: CreatePartitionOptions): TableHandle;
+  drop(args?: DropPartitionArgs): TableHandle;
 }
 
 export interface DropPartitionArgs {
@@ -1003,7 +995,7 @@ export interface CreateTableArgs {
      *  validate on SQLite/MySQL. */
     nullsNotDistinct?: boolean;
   }>;
-  partitionBy?: PartitionSpec;
+  partitionBy?: PartitionByInput;
   ifNotExists?: boolean;
   /** Overrides the handle default schema. */
   schema?: string;
@@ -1130,6 +1122,7 @@ export interface TableHandle {
   withVersioning(args?: { enabled?: boolean; schema?: string }): TableHandle;
   strictness(level: TableStrictness, args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
+  partition(name: string): PartitionRef;
   detachPartition(name: string, args?: DetachPartitionArgs): TableHandle;
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects

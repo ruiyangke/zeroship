@@ -603,7 +603,15 @@ pub fn fold_ops(
                 }
                 partitions.remove(name);
             }
-            Op::DropPartition { name, .. } => {
+            Op::DropPartition { parent, name, .. } => {
+                let partition = partitions
+                    .get(name)
+                    .ok_or_else(|| FoldError::MissingTable(name.clone()))?;
+                if &partition.of != parent {
+                    return Err(FoldError::Unsupported(
+                        "dropPartition child belongs to a different parent",
+                    ));
+                }
                 if partitions.remove(name).is_none() {
                     return Err(FoldError::MissingTable(name.clone()));
                 }

@@ -2453,6 +2453,8 @@ pub enum Op {
     },
     /// `DROP TABLE <partition> [CASCADE]`.
     DropPartition {
+        /// Parent partitioned table.
+        parent: String,
         /// Partition table name.
         name: String,
         /// **PR10** — the schema qualifier (§2.7).
