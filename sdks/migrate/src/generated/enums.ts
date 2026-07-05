@@ -108,6 +108,15 @@ export type PgArrayMembershipOp = "eq" | "ne";
 export type ExtractField = "day";
 
 /**
+ * The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).
+ *
+ * `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,
+ * SQLite, and MySQL (only the surrounding identifier quoting differs), so there
+ * is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
+ */
+export type AggFunc = "count" | "sum" | "avg" | "min" | "max";
+
+/**
  * CLOSED per-column index sort-order set. Omitted means the SQL default
  * (`ASC`); renderers spell only `DESC` so default ASC stays byte-identical to
  * the pre-order SQL.

@@ -68,7 +68,7 @@ const TS = {
   // Expr node tags.
   Expr: [
     "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
-    "between", "like", "distinctFrom",
+    "between", "like", "distinctFrom", "agg",
     "pgArrayMembership", "pgRegexMatch", "pgColumnSize", "extract", "pgIntervalLiteral",
   ].sort(),
   // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted
@@ -98,6 +98,7 @@ const TS = {
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
   PgArrayMembershipOp: ["eq", "ne"].sort(),
   ExtractField: ["day"].sort(),
+  AggFunc: ["count", "sum", "avg", "min", "max"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
   IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
   PartitionSpec: ["hash", "list", "range"].sort(),
@@ -286,6 +287,7 @@ test("closed string-enum tokens match the schema", () => {
     "CastTarget",
     "PgArrayMembershipOp",
     "ExtractField",
+    "AggFunc",
     "IndexSortOrder",
     "IndexMethod",
     "ExclusionMethod",

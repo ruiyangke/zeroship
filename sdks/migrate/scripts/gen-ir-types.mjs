@@ -47,6 +47,9 @@ const ENUM_DEFS = [
   "CastTarget",
   "PgArrayMembershipOp",
   "ExtractField",
+  // Portable aggregate function tokens (`c.agg.*`, §3.4/§3.6): count/sum/avg/
+  // min/max — the closed `AggFunc` enum consumed by the `agg` Expr node.
+  "AggFunc",
   "IndexSortOrder",
   "IndexMethod",
   "CmpOp",

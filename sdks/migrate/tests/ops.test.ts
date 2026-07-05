@@ -818,6 +818,41 @@ test("portable between/like/distinctFrom chain builders record the right nodes",
   });
 });
 
+test("c.agg builders record the portable aggregate node (count(*)/sum/distinct)", () => {
+  // §3.4/§3.6 portable aggregate nodes. count()/sum/avg/min/max render identically
+  // on all three dialects; count() (no arg) is COUNT(*); { distinct: true } sets the
+  // flag. `distinct` is skipped on the wire when false (byte-minimal).
+  const ops = record(() =>
+    table("t").update({
+      set: {
+        n: (c) => c.agg.count(),
+        s: (c) => c.agg.sum(c("x")),
+        d: (c) => c.agg.count(c("x"), { distinct: true }),
+        a: (c) => c.agg.avg(c("x")),
+      },
+    }),
+  );
+  const set = ops[0].set;
+  // count(*) — no arg, no distinct key (skip-if-false).
+  assert.deepEqual(set.n, { node: "agg", func: "count" });
+  assert.deepEqual(set.s, {
+    node: "agg",
+    func: "sum",
+    arg: { node: "colRef", name: "x" },
+  });
+  assert.deepEqual(set.d, {
+    node: "agg",
+    func: "count",
+    arg: { node: "colRef", name: "x" },
+    distinct: true,
+  });
+  assert.deepEqual(set.a, {
+    node: "agg",
+    func: "avg",
+    arg: { node: "colRef", name: "x" },
+  });
+});
+
 test("check helper and expression helpers build the frozen Expr IR nodes", () => {
   const ops = record(() => {
     table("expr_checks").create({
