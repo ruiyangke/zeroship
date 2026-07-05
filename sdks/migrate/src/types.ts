@@ -281,7 +281,7 @@ export interface EnumHandle {
 
 export interface CreateDomainArgs {
   as: ColumnDef | ColType;
-  check?: ExprFn | ExprChain | Expr;
+  check?: DomainCheckFn | ExprChain | Expr;
   default?: ScalarValue | DefaultExprFn;
   notNull?: boolean;
   schema?: string;
@@ -653,6 +653,18 @@ export interface PgCheckDef {
   name: string;
   expr: PgCheckExprFn;
 }
+
+/** Builder for PostgreSQL domain CHECK expressions. The handle itself is the
+ *  domain VALUE expression; there is no general column accessor because a domain
+ *  CHECK can only refer to the value being constrained. */
+export interface DomainValueBuilder extends ExprChain {
+  fn: ImmutableFnNamespace;
+  /** The searched `CASE` form: `v.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
+  pg: PgExprNamespace;
+}
+
+export type DomainCheckFn = (v: DomainValueBuilder) => ExprChain | Expr;
 
 // ── Shared op-arg fragments (§3) ──
 

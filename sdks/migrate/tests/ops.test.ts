@@ -5,7 +5,10 @@
 // reusable public entry `table()`.
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   t,
@@ -49,6 +52,17 @@ function record(up: () => void): any[] {
   __begin();
   up();
   return __drain();
+}
+
+async function importPlatformCorpusMigration(relativePath: string): Promise<{ up(): void }> {
+  const sourcePath = resolve(process.cwd(), "../..", relativePath);
+  const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
+  const pgUrl = pathToFileURL(resolve(process.cwd(), "src/pg.js")).href;
+  const source = (await readFile(sourcePath, "utf8"))
+    .replaceAll(`from "@zeroship/migrate"`, `from "${indexUrl}"`)
+    .replaceAll(`from "@zeroship/migrate/pg"`, `from "${pgUrl}"`);
+  const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
+  return import(dataUrl) as Promise<{ up(): void }>;
 }
 
 function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any; byteValue: any }) => void): any[] {
@@ -1336,11 +1350,118 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
   });
 });
 
+test("domain check value builder records the VALUE colRef shape", () => {
+  const ops = record(() => {
+    domain("d").create({
+      as: t.text(),
+      check: (v) => v.in(["a", "b"]),
+    });
+  });
+  assert.deepEqual(ops, [
+    {
+      op: "createDomain",
+      name: "d",
+      as: "text",
+      check: {
+        node: "inList",
+        expr: { node: "colRef", name: "VALUE" },
+        elems: ["a", "b"],
+        negated: false,
+      },
+    },
+  ]);
+});
+
+test("platform corpus domain checks record byte-identical VALUE colRef ops", async () => {
+  const migration = await importPlatformCorpusMigration("db/migrations-ts/20260702000100_schema_roles_extensions.ts");
+  const ops = record(() => migration.up());
+  const domainOps = ops.filter((op) => op.op === "createDomain");
+  const inDomain = (name: string, elems: string[]) => ({
+    op: "createDomain",
+    name,
+    schema: "zeroship",
+    as: "text",
+    check: { node: "inList", expr: { node: "colRef", name: "VALUE" }, elems, negated: false },
+  });
+  const expected = [
+    inDomain("account_state", ["active", "past_due", "suspended"]),
+    inDomain("billing_notification_kind", [
+      "payment_failed",
+      "past_due",
+      "suspended",
+      "recovered",
+      "invoice_finalized",
+      "refunded",
+      "disputed",
+      "payout_failed",
+      "checkout_failed",
+      "spend_warn",
+      "spend_degrade",
+      "spend_block",
+    ]),
+    {
+      op: "createDomain",
+      name: "billing_period",
+      schema: "zeroship",
+      as: "date",
+      check: {
+        node: "binOp",
+        op: "eq",
+        lhs: { node: "extract", field: "day", from: { node: "colRef", name: "VALUE" } },
+        rhs: { node: "literal", value: 1 },
+      },
+    },
+    inDomain("credit_entry_kind", [
+      "grant",
+      "promo",
+      "goodwill",
+      "refund_to_credit",
+      "consumed",
+      "void_reversal",
+      "refund_clawback",
+    ]),
+    inDomain("dispute_status", ["open", "won", "lost"]),
+    inDomain("invoice_payment_kind", ["charge", "dispute_debit", "dispute_reversal"]),
+    inDomain("invoice_status", ["draft", "finalized", "void"]),
+    inDomain("metric_kind", ["platform", "primitive", "custom"]),
+    inDomain("notification_status", ["pending", "sent"]),
+    inDomain("reconciliation_finding_kind", [
+      "missed_invoice_payment",
+      "invoice_status_drift",
+      "refund_status_drift",
+      "dispute_status_drift",
+      "missing_dispute",
+    ]),
+    inDomain("reconciliation_finding_severity", ["low", "medium", "high"]),
+    inDomain("refund_destination", ["cash", "credit"]),
+    inDomain("refund_status", ["pending", "issued", "failed", "canceled"]),
+    inDomain("spend_state", ["allow", "warn", "degrade", "block"]),
+  ];
+  assert.equal(JSON.stringify(domainOps), JSON.stringify(expected));
+});
+
+test("domain check validation rejects smuggled volatile functions and aggregates", () => {
+  assert.throws(
+    () => record(() => domain("bad_now").create({
+      as: t.timestamp(),
+      check: { node: "fnSynth", fn: "now", args: [] } as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /now is volatile/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => domain("bad_agg").create({
+      as: t.int(),
+      check: { node: "agg", func: "count" } as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /aggregates are not allowed/.test(e.message),
+  );
+});
+
 test("c.fn and c.pg build portable extract, pgExtract, and interval literal nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
       as: t.date(),
-      check: (c) => c.pg.extract("day", c("VALUE")).eq(1),
+      check: (v) => v.pg.extract("day", v).eq(1),
     });
     table("events").update({
       set: {
