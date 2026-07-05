@@ -369,11 +369,6 @@ const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::postgres_on
     "exclusion constraints are PostgreSQL-only in the current engine",
 );
 
-const PG_ONLY_PARTITION_DDL: DialectSupport = DialectSupport::postgres_only(
-    RenderMode::Offline,
-    "partitioned table DDL is PostgreSQL-only",
-);
-
 const PG_ONLY_INDEX_INCLUDE: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
     "index INCLUDE columns are PostgreSQL-only",
@@ -511,8 +506,10 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const PARTITION_FEATURES: &[FeatureSupport] =
-    &[FeatureSupport::new(Feature::PartitionDdl, PG_ONLY_PARTITION_DDL)];
+pub(crate) const PARTITION_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
+    Feature::PartitionDdl,
+    DialectSupport::all_supported(RenderMode::Offline),
+)];
 
 pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::AlterColumnUsing,

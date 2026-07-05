@@ -540,6 +540,52 @@ fn fixture_ir() -> MigrationIr {
     .expect("fixture IR is valid")
 }
 
+fn partition_collapse_ir() -> MigrationIr {
+    serde_json::from_value(json!({
+        "ir_version": CURRENT_IR_VERSION,
+        "name": "mysql_partition_collapse",
+        "owner_app": OWNER,
+        "ops": [
+            {
+                "op": "createTable",
+                "name": "events",
+                "existenceGuard": "ifNotExists",
+                "columns": [
+                    { "name": "bucket", "type": "int", "nullable": false },
+                    { "name": "payload", "type": "text", "nullable": false }
+                ],
+                "primaryKey": null,
+                "partitionBy": {
+                    "kind": "range",
+                    "columns": ["bucket"],
+                    "collapse": true
+                }
+            },
+            {
+                "op": "createPartition",
+                "name": "events_0",
+                "of": "events",
+                "bounds": {
+                    "kind": "range",
+                    "from": [{ "kind": "int", "value": 0 }],
+                    "to": [{ "kind": "int", "value": 100 }]
+                }
+            },
+            {
+                "op": "createPartition",
+                "name": "events_default",
+                "of": "events",
+                "bounds": { "kind": "default" }
+            }
+        ],
+        "flags": {},
+        "depends_on": [],
+        "supersedes": [],
+        "preconditions": []
+    }))
+    .expect("partition collapse IR is valid")
+}
+
 fn fixture_migrations(schema: &str) -> (MigrationIr, Vec<Migration>) {
     let ir = fixture_ir();
     let migrations = lower_mysql_migrations(schema, &ir, "fixture");
@@ -1413,6 +1459,86 @@ fn live_apply_creates_table_and_index_over_mysql2_node_net() {
         assert_eq!(rows_len(&table_rows), 1, "users table must exist");
         assert_eq!(rows_len(&index_rows), 1, "users_email_idx must exist");
         println!("mysql_jsdriver_e2e apply assertions ran on real information_schema");
+    }));
+}
+
+#[test]
+fn live_partition_collapse_applies_as_plain_table_over_mysql2_node_net() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "partitioncollapse", |backend, cfg, _account| Box::pin(async move {
+        let ir = partition_collapse_ir();
+        zeroship_migrate::model::validate::validate_ir_scoped(
+            &ir,
+            zeroship_migrate::model::validate::Dialect::Mysql,
+            &[],
+            None,
+            &zeroship_migrate::PolicyProfile::platform(),
+        )
+        .expect("collapse-affirmed partition recording validates on MySQL");
+        let migrations = lower_mysql_migrations(&cfg.project_schema, &ir, "partition_collapse");
+        assert_eq!(
+            migrations.len(),
+            1,
+            "child createPartition ops must lower to no DDL on MySQL"
+        );
+        let rendered = migrations
+            .iter()
+            .map(|m| m.up.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("partitionBy collapsed to a plain table"),
+            "degraded leg should be visible in MySQL plan output:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("PARTITION BY") && !rendered.contains("PARTITION OF"),
+            "MySQL collapse must not emit native partition syntax:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("events_0") && !rendered.contains("events_default"),
+            "MySQL collapse must not emit child table DDL:\n{rendered}"
+        );
+
+        apply_fixture(backend, cfg, &migrations).await;
+        backend
+            .exec(&format!(
+                "INSERT INTO {}.{} (bucket, payload) VALUES (42, 'range'), (250, 'default')",
+                qi(&cfg.project_schema),
+                qi("events")
+            ))
+            .await
+            .expect("insert rows into collapsed MySQL table");
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT bucket, payload FROM {}.{} ORDER BY bucket",
+                qi(&cfg.project_schema),
+                qi("events")
+            ),
+            &[],
+        )
+        .await;
+        assert_eq!(rows_len(&rows), 2, "both rows must read from collapsed table");
+        assert_eq!(value_as_i64(field(&rows.rows[0], "bucket")), 42);
+        assert_eq!(value_as_string(rows.rows[0].get("payload")), "range");
+        assert_eq!(value_as_i64(field(&rows.rows[1], "bucket")), 250);
+        assert_eq!(value_as_string(rows.rows[1].get("payload")), "default");
+
+        let child_tables = query(
+            backend,
+            "SELECT TABLE_NAME FROM information_schema.TABLES
+              WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('events_0', 'events_default')",
+            &[BindValue::Text(cfg.project_schema.clone())],
+        )
+        .await;
+        assert_eq!(
+            rows_len(&child_tables),
+            0,
+            "collapse child partitions must be no-DDL on MySQL"
+        );
     }));
 }
 

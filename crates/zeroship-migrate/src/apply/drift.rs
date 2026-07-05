@@ -687,9 +687,9 @@ pub async fn snapshot_schema(
         let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
         let partstrat: i8 = r.get("partstrat");
         t.partition_by = match u8::try_from(partstrat).ok().map(char::from) {
-            Some('r') => Some(PartitionSpec::Range { columns }),
-            Some('l') => Some(PartitionSpec::List { columns }),
-            Some('h') => Some(PartitionSpec::Hash { columns }),
+            Some('r') => Some(PartitionSpec::Range { columns, collapse: false }),
+            Some('l') => Some(PartitionSpec::List { columns, collapse: false }),
+            Some('h') => Some(PartitionSpec::Hash { columns, collapse: false }),
             _ => None,
         };
     }

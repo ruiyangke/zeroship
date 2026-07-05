@@ -418,9 +418,9 @@ fn render_ident_list_pg(cols: &[String]) -> String {
 
 fn render_partition_spec_pg(spec: &PartitionSpec) -> String {
     let (kind, columns) = match spec {
-        PartitionSpec::Range { columns } => ("RANGE", columns),
-        PartitionSpec::List { columns } => ("LIST", columns),
-        PartitionSpec::Hash { columns } => ("HASH", columns),
+        PartitionSpec::Range { columns, .. } => ("RANGE", columns),
+        PartitionSpec::List { columns, .. } => ("LIST", columns),
+        PartitionSpec::Hash { columns, .. } => ("HASH", columns),
     };
     format!(" PARTITION BY {kind} ({})", render_ident_list_pg(columns))
 }
