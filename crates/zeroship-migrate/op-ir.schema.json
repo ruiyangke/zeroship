@@ -3856,7 +3856,7 @@
               "description": "Closed EXTRACT field.",
               "$ref": "#/$defs/ExtractField"
             },
-            "expr": {
+            "from": {
               "description": "Source expression.",
               "$ref": "#/$defs/Expr"
             },
@@ -3869,26 +3869,26 @@
           "required": [
             "node",
             "field",
-            "expr"
+            "from"
           ]
         },
         {
           "description": "**PG-ONLY** interval literal rendered as `'<safe>'::interval`.",
           "type": "object",
           "properties": {
-            "value": {
+            "duration": {
               "description": "A strictly-validated interval literal. P1 admits only time-like\n`HH:MM:SS[.ffffff]` values such as `00:01:00`.",
               "type": "string"
             },
             "node": {
               "type": "string",
-              "const": "pgIntervalLiteral"
+              "const": "pgInterval"
             }
           },
           "additionalProperties": false,
           "required": [
             "node",
-            "value"
+            "duration"
           ]
         },
         {

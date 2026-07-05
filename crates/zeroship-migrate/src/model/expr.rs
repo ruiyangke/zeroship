@@ -12,7 +12,7 @@
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
 //! Cast | Between | Like | DistinctFrom | Agg | PgArrayMembership | PgRegexMatch |
-//! PgColumnSize | Extract | PgIntervalLiteral | Dialectal`.
+//! PgColumnSize | Extract | PgInterval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -404,13 +404,13 @@ pub enum Expr {
         /// Closed EXTRACT field.
         field: ExtractField,
         /// Source expression.
-        expr: Box<Expr>,
+        from: Box<Expr>,
     },
     /// **PG-ONLY** interval literal rendered as `'<safe>'::interval`.
-    PgIntervalLiteral {
+    PgInterval {
         /// A strictly-validated interval literal. P1 admits only time-like
         /// `HH:MM:SS[.ffffff]` values such as `00:01:00`.
-        value: String,
+        duration: String,
     },
     /// **The one Layer-2 portability escape (design §3.4 / §6.4)** — a
     /// per-dialect VALUE divergence. Each present leg is a full [`Expr`]; the

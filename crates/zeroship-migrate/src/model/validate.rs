@@ -2924,13 +2924,13 @@ impl Ctx<'_> {
                 self.check_pg_only_expr("pg_column_size")?;
                 self.walk_depth(expr, d)
             }
-            Expr::Extract { field: _, expr } => {
+            Expr::Extract { field: _, from } => {
                 self.check_pg_only_expr("EXTRACT")?;
-                self.walk_depth(expr, d)
+                self.walk_depth(from, d)
             }
-            Expr::PgIntervalLiteral { value } => {
+            Expr::PgInterval { duration } => {
                 self.check_pg_only_expr("PG interval literal")?;
-                self.check_pg_interval_literal(value)
+                self.check_pg_interval_literal(duration)
             }
             // The one Layer-2 portability escape (§3.4): a per-dialect value
             // divergence. Structurally validate EVERY present leg (dialect-
