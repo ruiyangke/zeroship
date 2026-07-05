@@ -519,12 +519,7 @@ pub fn validate_op_scoped(
             for c in constraints {
                 check_constraint(&c.kind, &scope)?;
             }
-            let pk_cols = primary_key.as_deref().or_else(|| {
-                constraints.iter().find_map(|c| match &c.kind {
-                    IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
-                    _ => None,
-                })
-            });
+            let pk_cols = primary_key.as_deref();
             // **Migration-first P2a (§4)** — the per-column declared-only facets
             // (`id_prefix` / `vector_metric`) carry validate-time bounds: the IR's
             // threat model is a hand-crafted `.ir.json`, so a malformed/reserved
@@ -1238,7 +1233,6 @@ fn validate_op_support(
                     });
                 }
                 match &constraint.kind {
-                    IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
                     IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
                     IrConstraintKind::Fk {
                         columns,
@@ -1355,7 +1349,6 @@ fn validate_op_support(
             ..
         } => check(Feature::RenameColumnGuard)?,
         Op::AddConstraint { constraint, .. } => match &constraint.kind {
-            IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
             IrConstraintKind::Fk {
                 columns,
                 references_columns,

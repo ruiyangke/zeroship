@@ -1675,12 +1675,6 @@ fn fold_create_table_specs(
 ) -> Result<(), FoldError> {
     for c in constraints {
         match &c.kind {
-            IrConstraintKind::Pk { .. } => {
-                // `createTable` primary keys fold from the resolved top-level
-                // `primary_key` field. Validation owns rejection of constraint-form
-                // PKs; the fold must not re-apply a platform-owned-id policy.
-                continue;
-            }
             IrConstraintKind::Check { expr, .. } => {
                 if !matches!(dialect, SqlDialect::Postgres) {
                     return Err(FoldError::Unsupported(
@@ -1948,19 +1942,6 @@ fn add_constraint_snapshot(
                 str::to_string,
             );
             Ok(unique_constraint(&cname, columns))
-        }
-        IrConstraintKind::Pk { .. } => {
-            // Byte-for-byte parity with the createTable Pk refusal
-            // (`fold_create_table_specs`): the platform owns the synthetic
-            // `<table>_pkey` PK, so a SECOND user PK — NAMED or derived — is never
-            // satisfiable. PG errors `multiple primary keys for table not allowed`
-            // at apply, so a two-PK snapshot is UNREACHABLE by introspection;
-            // accepting it would be fail-OPEN relative to apply (a named user PK
-            // would otherwise slip past the DuplicateConstraint net the derived
-            // `<table>_pkey` incidentally trips).
-            Err(FoldError::Unsupported(
-                "validated addConstraint user PRIMARY KEY reached fold",
-            ))
         }
         IrConstraintKind::Check { expr, .. } => {
             if !matches!(dialect, SqlDialect::Postgres) {
@@ -3924,31 +3905,6 @@ mod tests {
     }
 
     #[test]
-    fn add_constraint_user_pk_is_validate_refused() {
-        for name in [Some("my_custom_pk"), None] {
-            let pk = IrConstraint {
-                name: name.map(ToString::to_string),
-                kind: IrConstraintKind::Pk { columns: vec!["a".to_string()] },
-            };
-            let err = validate_ops(
-                vec![
-                create("t", vec![col("a", ColType::Text, false)]),
-                Op::AddConstraint {
-                    table: "t".to_string(),
-                    constraint: pk,
-                    schema: None,
-                    existence_guard: None,
-                },
-                ],
-                Dialect::Postgres,
-            );
-            assert_eq!(err.code, CODE_UNSUPPORTED);
-            assert_eq!(err.kind, Some(UnsupportedKind::Op));
-            assert!(err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"));
-        }
-    }
-
-    #[test]
     fn drop_missing_constraint_errors() {
         let err = fold(&[
             create("users", vec![col("handle", ColType::Text, false)]),
@@ -4325,32 +4281,6 @@ mod tests {
         let snap = fold_ops(&ops, SqlDialect::Postgres, SCHEMA)
             .expect("fold runs with no DB connection or async runtime");
         assert!(snap.tables.contains_key("a"));
-    }
-
-    #[test]
-    fn create_table_constraint_form_pk_is_validate_refused() {
-        let pk = IrConstraint {
-            name: None,
-            kind: IrConstraintKind::Pk { columns: vec!["a".to_string(), "b".to_string()] },
-        };
-        let op = Op::CreateTable {
-            name: "t".to_string(),
-            columns: vec![col("a", ColType::Text, false), col("b", ColType::Text, false)],
-            primary_key: None,
-            constraints: vec![pk],
-            indexes: Vec::new(),
-            partition_by: None,
-            runtime_options: None,
-            schema: None,
-            existence_guard: None,
-        };
-        let err = validate_ops(vec![op], Dialect::Postgres);
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Op));
-        assert!(
-            err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"),
-            "constraint-form createTable PK must be refused by validation: {err:?}"
-        );
     }
 
     // -----------------------------------------------------------------------

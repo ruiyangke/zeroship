@@ -969,34 +969,6 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
         "stand-alone UNIQUE add renders the canonical ADD CONSTRAINT"
     );
 
-    let pk_ir = MigrationIr {
-        ir_version: 1,
-        name: "m".into(),
-        owner_app: OWNER.into(),
-        ops: vec![Op::AddConstraint {
-            table: "widgets".into(),
-            constraint: IrConstraint {
-                name: Some("widgets_pkey".into()),
-                kind: IrConstraintKind::Pk { columns: vec!["a".into(), "b".into()] },
-            },
-            schema: None,
-            existence_guard: None,
-        }],
-        flags: Default::default(),
-        depends_on: vec![],
-        supersedes: vec![],
-        preconditions: vec![],
-        checksum: None,
-    };
-    let pk_err = validate_ir(&pk_ir, Dialect::Postgres, &[])
-        .expect_err("stand-alone user PK add is validate-refused");
-    assert_eq!(pk_err.code, CODE_UNSUPPORTED);
-    assert_eq!(pk_err.kind, Some(UnsupportedKind::Op));
-    assert!(
-        pk_err.reason.contains("PRIMARY KEY") || pk_err.reason.contains("primary key"),
-        "PK refusal should explain platform-owned PK, got: {pk_err}"
-    );
-
     let drop = sql_pairs(&ir_lower_one(
         Op::DropConstraint {
             table: "widgets".into(),

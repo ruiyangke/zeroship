@@ -2993,12 +2993,6 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         for c in constraints {
             match &c.kind {
-                IrConstraintKind::Pk { .. } => {
-                    // `createTable` renders primary keys from the resolved top-level
-                    // `primary_key` field. Constraint-form PKs are a validation concern;
-                    // lower must not re-apply the old platform-owned-id policy here.
-                    continue;
-                }
                 IrConstraintKind::Check { expr, not_valid } => {
                     if not_valid.is_some() {
                         // NOT VALID is meaningless in CREATE TABLE (validate refuses
@@ -3696,11 +3690,6 @@ impl IrAuthor {
                 // A UNIQUE add on an existing table scans + locks and can fail on
                 // existing duplicates — gated (requires_approval), like SET NOT NULL.
                 decl.lower_add_constraint(table, &cname, &body, true)
-            }
-            IrConstraintKind::Pk { .. } => {
-                return Err(IrLowerError::UnsupportedOp(
-                    "validated addConstraint user PRIMARY KEY reached lower",
-                ));
             }
             IrConstraintKind::Check { expr, not_valid } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
@@ -5316,10 +5305,6 @@ fn ir_constraint_name_and_kind(
         IrConstraintKind::Unique { columns } => (
             explicit.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string),
             "UNIQUE".to_string(),
-        ),
-        IrConstraintKind::Pk { columns } => (
-            explicit.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string),
-            "PRIMARY KEY".to_string(),
         ),
         IrConstraintKind::Check { expr, .. } => (
             explicit.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string),

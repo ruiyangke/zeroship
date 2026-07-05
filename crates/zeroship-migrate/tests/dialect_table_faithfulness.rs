@@ -903,11 +903,6 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             not_valid: Some(true),
         }),
     ));
-    c.push((
-        "addConstraint",
-        "pk",
-        add_constraint(IrConstraintKind::Pk { columns: vec!["a".into()] }),
-    ));
     c.push(("addConstraint", "fkNoLocalColumn", add_constraint(fk(vec![], vec!["id"]))));
 
     // ── insert ───────────────────────────────────────────────────────────────

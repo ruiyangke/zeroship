@@ -335,7 +335,7 @@ fn unknown_per_op_key_is_rejected() {
 #[test]
 fn unknown_constraint_key_is_rejected() {
     let json = r#"{"op":"addConstraint","table":"t","constraint":{
-        "kind":{"kind":"pk","columns":["id"]},"bogus":true}}"#;
+        "kind":{"kind":"unique","columns":["id"]},"bogus":true}}"#;
     let err = serde_json::from_str::<Op>(json).unwrap_err();
     assert!(
         err.to_string().contains("bogus") || err.to_string().contains("unknown field"),
@@ -883,7 +883,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
     // IrConstraint.name absent.
     let con = IrConstraint {
         name: None,
-        kind: IrConstraintKind::Pk { columns: vec!["id".into()] },
+        kind: IrConstraintKind::Unique { columns: vec!["id".into()] },
     };
     let conv = serde_json::to_value(&con).unwrap();
     assert!(
