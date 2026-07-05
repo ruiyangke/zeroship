@@ -69,7 +69,7 @@ const TS = {
   Expr: [
     "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
     "between", "like", "distinctFrom", "agg",
-    "inList", "pgRegexMatch", "pgColumnSize", "extract", "pgInterval",
+    "inList", "pgRegexMatch", "pgColumnSize", "extract", "pgExtract", "pgInterval",
     "dialect",
   ].sort(),
   // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted
@@ -96,7 +96,12 @@ const TS = {
   ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
-  ExtractField: ["day"].sort(),
+  ExtractField: ["year", "month", "day", "hour", "minute", "dow"].sort(),
+  PgExtractField: [
+    "second", "doy", "epoch", "quarter", "week", "isodow", "isoyear",
+    "century", "decade", "millennium", "microseconds", "milliseconds",
+    "timezone", "timezone_hour", "timezone_minute",
+  ].sort(),
   AggFunc: ["count", "sum", "avg", "min", "max"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
   IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
@@ -284,6 +289,7 @@ test("closed string-enum tokens match the schema", () => {
     "SynthFn",
     "CastTarget",
     "ExtractField",
+    "PgExtractField",
     "AggFunc",
     "IndexSortOrder",
     "IndexMethod",

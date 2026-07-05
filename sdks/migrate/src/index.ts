@@ -60,6 +60,7 @@ export type {
   ExprBuilder,
   ExprChain,
   ExprFn,
+  ExtractField,
   CheckBuilder,
   CheckDef,
   CheckExprFn,

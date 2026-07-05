@@ -18,6 +18,7 @@ import type {
   FuncVolatility,
   GrantTarget,
   PolicyCmd,
+  PgExtractField,
   Privilege,
 } from "./generated/ir.js";
 import { __makePgTableHandle, __pgDomain, __pgPush, __pgResolveExpr, __pgSequence } from "./ops.js";
@@ -31,6 +32,7 @@ export type {
   FuncVolatility,
   GrantTarget,
   PolicyCmd,
+  PgExtractField,
   Privilege,
 } from "./generated/ir.js";
 

@@ -81,12 +81,36 @@ export type EmptyContainerKind = "object" | "array";
 export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uuid";
 
 /**
- * CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
+ * CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
  *
- * P1 admits only the platform `day` marker. Add more fields only with a concrete
- * golden needing them and matching renderer/validation coverage.
+ * Each admitted field has a live three-dialect proof and a faithful renderer on
+ * PostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in
+ * [`PgExtractField`] instead.
  */
-export type ExtractField = "day";
+export type ExtractField = "year" | "month" | "day" | "hour" | "minute" | "dow";
+
+/**
+ * CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.
+ *
+ * These fields either have no portable SQLite/MySQL analogue or have semantics
+ * that diverge under the mandated portable renderers.
+ */
+export type PgExtractField =
+  | "second"
+  | "doy"
+  | "epoch"
+  | "quarter"
+  | "week"
+  | "isodow"
+  | "isoyear"
+  | "century"
+  | "decade"
+  | "millennium"
+  | "microseconds"
+  | "milliseconds"
+  | "timezone"
+  | "timezone_hour"
+  | "timezone_minute";
 
 /**
  * The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).
