@@ -975,7 +975,7 @@ test("the two-arg c('table','col') records a qualified colRef; one-arg stays unq
 
 test("c.pg builds PG-only regex and pg_column_size nodes", () => {
   const ops = record(() =>
-    table("t").create({
+    pgTable("t").create({
       columns: {
         status: t.text().notNull(),
         name: t.text().notNull(),
@@ -983,7 +983,7 @@ test("c.pg builds PG-only regex and pg_column_size nodes", () => {
       },
       checks: [
         { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
-        { name: "data_size", expr: (c) => c.pg.columnSize(c("data")).le(8192) },
+        { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).le(8192) },
       ],
     }),
   );
@@ -999,6 +999,74 @@ test("c.pg builds PG-only regex and pg_column_size nodes", () => {
     lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
     rhs: { node: "literal", value: 8192 },
   });
+});
+
+test("core CHECK expressions reject vendor, aggregate, and volatile nodes at record time", () => {
+  assert.throws(
+    () => record(() => table("t").check("no_pg").add({
+      expr: (() => ({ node: "pgColumnSize", expr: { node: "colRef", name: "data" } })) as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /PG-vendor/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").check("no_agg").add({
+      expr: (() => ({ node: "agg", func: "count" })) as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /aggregates/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").check("no_now").add({
+      expr: (() => ({ node: "fnSynth", fn: "now", args: [] })) as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /volatile/.test(e.message),
+  );
+});
+
+test("pgTable CHECK expressions allow immutable PG nodes and reject agg/volatile nodes", () => {
+  const ops = record(() =>
+    pgTable("t").check("data_small").add({
+      expr: (c) => c.pg.pgColumnSize(c("data")).lt(1000),
+    }),
+  );
+  assert.deepEqual(ops[0], {
+    op: "addConstraint",
+    table: "t",
+    constraint: {
+      name: "data_small",
+      kind: {
+        kind: "check",
+        expr: {
+          node: "binOp",
+          op: "lt",
+          lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
+          rhs: { node: "literal", value: 1000 },
+        },
+      },
+    },
+  });
+
+  assert.throws(
+    () => record(() => pgTable("t").check("no_agg").add({
+      expr: (() => ({ node: "agg", func: "count" })) as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /aggregates/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => pgTable("t").check("no_now").add({
+      expr: (() => ({ node: "fnSynth", fn: "now", args: [] })) as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /volatile/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => pgTable("t").check("no_current_setting").add({
+      expr: (() => ({
+        node: "fnCall",
+        fn: "currentSetting",
+        args: [{ node: "literal", value: "zeroship.tenant_app" }],
+      })) as any,
+    })),
+    (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /currentSetting/.test(e.message),
+  );
 });
 
 test("portable between/like/in/notIn/distinctFrom chain builders record the right nodes", () => {
@@ -1125,7 +1193,7 @@ test("c.agg builders record the portable aggregate node (count(*)/sum/distinct)"
 
 test("check helper and expression helpers build the frozen Expr IR nodes", () => {
   const ops = record(() => {
-    table("expr_checks").create({
+    pgTable("expr_checks").create({
       columns: {
         pkce_method: t.text().notNull(),
         user_id: t.text().notNull(),
@@ -1259,7 +1327,7 @@ test("c.pg builds PG-only extract and interval literal nodes", () => {
       as: t.date(),
       check: (c) => c.pg.extract("day", c("VALUE")).eq(1),
     });
-    table("oauth_device_codes").create({
+    pgTable("oauth_device_codes").create({
       columns: {
         issued_at: t.timestamp().notNull(),
         expires_at: t.timestamp().notNull(),

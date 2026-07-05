@@ -30,7 +30,6 @@ import {
   lit,
   decimal,
   byteValue,
-  interval,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
@@ -384,13 +383,29 @@ export function checkExpressionSurfaceTypechecks(): void {
     },
     checks: [
       pkceCheck,
-      check("max_ttl", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
-      check("user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
       check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-      check("data_size", (c) => c("data").columnSize().lt(262144)),
       check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(lit(0)))),
       check("visible_when_active", (c) => and(c("active"), not(c("visible").isNull()))),
     ],
+  });
+
+  // @ts-expect-error — core CHECK builders do not expose aggregates.
+  table("oauth_authorization_codes").check("no_agg").add({ expr: (c) => c.agg.count().gt(0) });
+
+  // @ts-expect-error — core CHECK builders expose only immutable c.fn helpers.
+  table("oauth_authorization_codes").check("no_now").add({ expr: (c) => c.fn.now().isNotNull() });
+
+  // @ts-expect-error — core CHECK builders do not expose PostgreSQL vendor helpers.
+  table("oauth_authorization_codes").check("no_pg").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_") });
+
+  pgTable("oauth_authorization_codes").check("max_ttl").add({
+    expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))),
+  });
+  pgTable("oauth_authorization_codes").check("user_id_fmt").add({
+    expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$"),
+  });
+  pgTable("oauth_authorization_codes").check("data_size").add({
+    expr: (c) => c.pg.pgColumnSize(c("data")).lt(1000),
   });
   table("oauth_authorization_codes").check("active_is_bool").add({
     expr: (c) => c("active").isNotNull(),

@@ -20,7 +20,7 @@ import type {
   PolicyCmd,
   Privilege,
 } from "./generated/ir.js";
-import { __makeTableHandle, __pgDomain, __pgPush, __pgResolveExpr, __pgSequence } from "./ops.js";
+import { __makePgTableHandle, __pgDomain, __pgPush, __pgResolveExpr, __pgSequence } from "./ops.js";
 
 type Node = Record<string, unknown>;
 
@@ -41,6 +41,10 @@ export type {
   DomainHandle,
   DropDomainArgs,
   DropSequenceArgs,
+  CheckBuilderWithPg,
+  PgCheckDef,
+  PgCheckExprFn,
+  PgCheckRef,
   PgIndexAdd,
   PgIndexDropArgs,
   PgIndexElement,
@@ -183,7 +187,7 @@ export const domain = __pgDomain;
 export const sequence = __pgSequence;
 
 export function pgTable(name: string, opts?: TableOptions): PgTableHandle {
-  return __makeTableHandle(name, opts);
+  return __makePgTableHandle(name, opts);
 }
 
 export function schema(args: CreateSchemaArgs): Node {

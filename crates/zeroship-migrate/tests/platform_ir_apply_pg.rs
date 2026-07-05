@@ -371,7 +371,7 @@ export const name = "platform_expr_surface";
 export function up() {
   schema({ name: "zeroship", ifNotExists: true });
 
-  table("expr_surface", { schema: "zeroship" }).create({
+  pgTable("expr_surface", { schema: "zeroship" }).create({
     columns: {
       pkce_method: t.text().notNull(),
       amount_cents: t.int().notNull(),

@@ -378,9 +378,11 @@ import { and, or, not } from "@zeroship/migrate";
 (c) => c("num").div(c("den"))
 (c) => c("first").concat(c("last"))
 
-// Pattern match / size / cast
-(c) => c("email").matches("^[^@]+@[^@]+$")     // regex
-(c) => c("payload").columnSize().lt(1048576)   // pg_column_size < 1MiB
+// PG pattern match / size (available from pgTable().check())
+(c) => c.pg.regex(c("email"), "^[^@]+@[^@]+$")       // regex
+(c) => c.pg.pgColumnSize(c("payload")).lt(1048576)   // pg_column_size < 1MiB
+
+// Cast
 (c) => c("app_id").cast("uuid")
 ```
 
