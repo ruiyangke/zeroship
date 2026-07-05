@@ -1270,6 +1270,50 @@ test("c.fn.splitPart grammar lint rejects an empty delimiter / non-positive n", 
   assert.equal(ops[0].set.x.fn, "splitPart");
 });
 
+test("c.fn.{mod,round,floor,ceil,substr,replace} record the right portable fnCall node", () => {
+  const ops = record(() =>
+    table("t").update({
+      set: {
+        m: (c) => c.fn.mod(c("n"), 3),
+        r1: (c) => c.fn.round(c("x")),
+        r2: (c) => c.fn.round(c("x"), 2),
+        fl: (c) => c.fn.floor(c("x")),
+        ce: (c) => c.fn.ceil(c("x")),
+        s2: (c) => c.fn.substr(c("s"), 1),
+        s3: (c) => c.fn.substr(c("s"), 1, 3),
+        rp: (c) => c.fn.replace(c("s"), "a", "b"),
+      },
+    }),
+  );
+  const set = ops[0].set;
+  // Every one is a portable `fnCall` node (NOT `fnSynth`).
+  assert.deepEqual(set.m, {
+    node: "fnCall",
+    fn: "mod",
+    args: [{ node: "colRef", name: "n" }, { node: "literal", value: 3 }],
+  });
+  assert.equal(set.r1.node, "fnCall");
+  assert.equal(set.r1.fn, "round");
+  assert.equal(set.r1.args.length, 1);
+  // Optional precision arg is recorded only when supplied.
+  assert.equal(set.r2.args.length, 2);
+  assert.deepEqual(set.r2.args[1], { node: "literal", value: 2 });
+  assert.equal(set.fl.fn, "floor");
+  assert.equal(set.ce.fn, "ceil");
+  assert.equal(set.s2.fn, "substr");
+  assert.equal(set.s2.args.length, 2);
+  assert.equal(set.s3.args.length, 3);
+  assert.deepEqual(set.rp, {
+    node: "fnCall",
+    fn: "replace",
+    args: [
+      { node: "colRef", name: "s" },
+      { node: "literal", value: "a" },
+      { node: "literal", value: "b" },
+    ],
+  });
+});
+
 test("authoring outside a recorder throws OP_OUTSIDE_RECORDER", () => {
   __begin();
   __drain(); // close the recorder

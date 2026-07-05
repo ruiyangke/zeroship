@@ -34,13 +34,15 @@ fn registry() -> std::collections::BTreeMap<String, String> {
     [("t".to_string(), APP.to_string())].into_iter().collect()
 }
 
-/// A raw author-named `instr` / `substr` / `split_part` `fnCall` is NOT in the
+/// A raw author-named `instr` / `split_part` `fnCall` is NOT in the
 /// portable-expression grammar (the closed `ScalarFn` enum) — it fails to load on
 /// EITHER dialect. There is no raw escape: an author cannot name `instr` even
-/// though the engine's own lowering uses it (the two lists are distinct).
+/// though the engine's own lowering uses it (the two lists are distinct). NB:
+/// `substr`/`replace` are NO LONGER in this list — they are now first-class
+/// portable `ScalarFn`s (§3.4), so a `fnCall` naming them loads fine.
 #[test]
 fn raw_split_funcs_rejected_at_load_both_dialects() {
-    for raw_fn in ["instr", "substr", "split_part", "replace"] {
+    for raw_fn in ["instr", "split_part"] {
         let ir = format!(
             r#"{{"ir_version":1,"name":"raw","ops":[
                 {{"op":"update","table":"t",

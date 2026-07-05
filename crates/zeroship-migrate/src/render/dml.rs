@@ -548,6 +548,15 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
         ScalarFn::Trim => "trim",
         ScalarFn::Length => "length",
         ScalarFn::Abs => "abs",
+        // Portable scalar fns — identical spelling on PG/SQLite/MySQL (§3.4).
+        // `Mod` renders as the `%` OPERATOR, special-cased in `render_scalar_fn_call`
+        // (SQLite has no `mod()` fn); this fallback name is never reached for it.
+        ScalarFn::Mod => "mod",
+        ScalarFn::Round => "round",
+        ScalarFn::Floor => "floor",
+        ScalarFn::Ceil => "ceil",
+        ScalarFn::Substr => "substr",
+        ScalarFn::Replace => "replace",
         // VENDOR scalars (vendor spec §2.10). `current_user` is a reserved keyword
         // rendered WITHOUT parens — the FnCall render arms special-case it; this
         // spelling is the fallback name.
@@ -562,6 +571,12 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
 fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> String {
     match f {
         ScalarFn::CurrentUser => "current_user".to_string(),
+        // `mod` renders as the `%` OPERATOR — NOT a `mod(...)` call — because
+        // SQLite has no `mod()` SQL function (`%` is universal on PG/SQLite/MySQL).
+        // `args.join(" % ")` wrapped in parens is byte-identical to `(<a> % <b>)`
+        // for the 2-arg case the builder produces, and never index-panics on a
+        // malformed hand-crafted arity.
+        ScalarFn::Mod => format!("({})", args.join(" % ")),
         // The portable `length()` intent is CHARACTER length (PG + SQLite
         // `length(text)`). MySQL's `LENGTH()` is *byte* length — wrong for any
         // multibyte string — so MySQL must use `CHAR_LENGTH()`.
@@ -1536,6 +1551,101 @@ mod tests {
         assert!(
             mysql.starts_with("char_length("),
             "MySQL length() must render as CHAR_LENGTH (LENGTH is byte length): got {mysql}"
+        );
+    }
+
+    /// Portable scalar fns (§3.4): `round`/`floor`/`ceil`/`substr`/`replace` all
+    /// spell IDENTICALLY on PG, SQLite, and MySQL, so they render byte-identically
+    /// on every dialect via the neutral `<name>(<args>)` path.
+    #[test]
+    fn portable_scalar_fns_render_identically_on_all_three() {
+        let cases: &[(Expr, &str)] = &[
+            (
+                Expr::FnCall { r#fn: ScalarFn::Round, args: vec![Expr::col("x")] },
+                "round(\"x\")",
+            ),
+            (
+                Expr::FnCall {
+                    r#fn: ScalarFn::Round,
+                    args: vec![Expr::col("x"), Expr::lit(IrScalar::Int(2))],
+                },
+                "round(\"x\", 2)",
+            ),
+            (
+                Expr::FnCall { r#fn: ScalarFn::Floor, args: vec![Expr::col("x")] },
+                "floor(\"x\")",
+            ),
+            (
+                Expr::FnCall { r#fn: ScalarFn::Ceil, args: vec![Expr::col("x")] },
+                "ceil(\"x\")",
+            ),
+            (
+                Expr::FnCall {
+                    r#fn: ScalarFn::Substr,
+                    args: vec![Expr::col("s"), Expr::lit(IrScalar::Int(1)), Expr::lit(IrScalar::Int(3))],
+                },
+                "substr(\"s\", 1, 3)",
+            ),
+            (
+                Expr::FnCall {
+                    r#fn: ScalarFn::Replace,
+                    args: vec![
+                        Expr::col("s"),
+                        Expr::lit(IrScalar::Str("a".into())),
+                        Expr::lit(IrScalar::Str("b".into())),
+                    ],
+                },
+                "replace(\"s\", 'a', 'b')",
+            ),
+        ];
+        for (expr, pg_sqlite_expect) in cases {
+            // PG and SQLite quote identifiers with `"`; the fn spelling is identical.
+            assert_eq!(
+                &render_expr_inline(expr, SqlDialect::Postgres).unwrap(),
+                pg_sqlite_expect,
+                "PG render mismatch"
+            );
+            assert_eq!(
+                &render_expr_inline(expr, SqlDialect::Sqlite).unwrap(),
+                pg_sqlite_expect,
+                "SQLite render mismatch"
+            );
+            // MySQL differs ONLY in identifier quoting (backticks); the fn name +
+            // arg shape are identical (CEIL/SUBSTR are MySQL aliases).
+            let mysql_expect = pg_sqlite_expect.replace('"', "`");
+            assert_eq!(
+                render_expr_inline(expr, SqlDialect::Mysql).unwrap(),
+                mysql_expect,
+                "MySQL render mismatch"
+            );
+        }
+    }
+
+    /// `c.fn.mod(a, b)` renders as the `%` OPERATOR — NOT `mod(...)` — on all three
+    /// dialects. This is the one portable arithmetic fn whose spelling is an
+    /// operator (SQLite has no `mod()` SQL function; `%` is universal).
+    #[test]
+    fn mod_renders_as_percent_operator_on_all_three() {
+        let expr = Expr::FnCall {
+            r#fn: ScalarFn::Mod,
+            args: vec![Expr::col("n"), Expr::lit(IrScalar::Int(3))],
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"n\" % 3)"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"n\" % 3)"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`n` % 3)"
+        );
+        // The bound (parameterized) path lowers identically (operator form).
+        assert_eq!(
+            render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "(\"n\" % $1)"
         );
     }
 

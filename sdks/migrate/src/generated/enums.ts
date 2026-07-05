@@ -49,6 +49,12 @@ export type ScalarFn =
   | "trim"
   | "length"
   | "abs"
+  | "mod"
+  | "round"
+  | "floor"
+  | "ceil"
+  | "substr"
+  | "replace"
   | "currentSetting"
   | "currentUser";
 
