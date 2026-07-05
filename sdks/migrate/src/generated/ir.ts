@@ -185,7 +185,7 @@ export type IrDefault =
 
 /** The CLOSED expression AST node (§3.3.1), internally tagged on `node`. */
 export type Expr =
-  | { node: "colRef"; name: string }
+  | { node: "colRef"; name: string; table?: string | null }
   | { node: "literal"; value: IrScalar }
   | { node: "binOp"; op: BinaryOp; lhs: Expr; rhs: Expr }
   | { node: "unaryOp"; op: UnaryOp; operand: Expr }

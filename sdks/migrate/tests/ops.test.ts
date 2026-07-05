@@ -720,6 +720,30 @@ test("the (c) => Expr builder constructs the closed AST", () => {
   assert.equal(ops[0].where.op, "and");
 });
 
+test("the two-arg c('table','col') records a qualified colRef; one-arg stays unqualified", () => {
+  // §3.4 the join-ON fix: `c("orders", "customer_id")` records a colRef carrying
+  // an optional `table`; `c("id")` records the pre-qualification unqualified shape
+  // (no `table` key at all — byte-identical to today).
+  const ops = record(() =>
+    table("t").update({
+      set: {
+        // qualified two-arg form on both sides of the predicate-shaped value
+        q: (c) => c("orders", "customer_id"),
+        // one-arg form is untouched
+        u: (c) => c("id"),
+        // c.col two-arg mirror
+        cq: (c) => c.col("users", "id"),
+      },
+    }),
+  );
+  const set = ops[0].set;
+  assert.deepEqual(set.q, { node: "colRef", table: "orders", name: "customer_id" });
+  assert.deepEqual(set.cq, { node: "colRef", table: "users", name: "id" });
+  // Unqualified: no `table` property is emitted (compact wire shape).
+  assert.deepEqual(set.u, { node: "colRef", name: "id" });
+  assert.equal("table" in set.u, false);
+});
+
 test("c.pg builds PG-only membership regex and pg_column_size nodes", () => {
   const ops = record(() =>
     table("t").create({

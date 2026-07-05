@@ -677,7 +677,16 @@ impl BindCtx {
 /// statement structure is fixed by the AST shape, never by a literal's content.
 fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError> {
     Ok(match expr {
-        Expr::ColRef { name } => quote_ident_for_dialect("column", name, ctx.dialect)?,
+        Expr::ColRef { name, table } => match table {
+            // Qualified ref (`c("orders", "id")`, §3.4): `<quoted table>.<quoted col>`,
+            // both halves through the same per-dialect identifier quoting.
+            Some(t) => format!(
+                "{}.{}",
+                quote_ident_for_dialect("table", t, ctx.dialect)?,
+                quote_ident_for_dialect("column", name, ctx.dialect)?
+            ),
+            None => quote_ident_for_dialect("column", name, ctx.dialect)?,
+        },
         Expr::Literal { value } => ctx.push_bind(scalar_to_bind(value)),
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_bound(lhs, ctx)?;
@@ -821,7 +830,16 @@ where
     F: Fn(&str) -> Result<String, DmlError>,
 {
     Ok(match expr {
-        Expr::ColRef { name } => col_ref(name)?,
+        Expr::ColRef { name, table } => match table {
+            // Qualified ref (§3.4): quote the table via the per-dialect identifier
+            // quoter; delegate the column to the caller-supplied `col_ref` closure.
+            Some(t) => format!(
+                "{}.{}",
+                quote_ident_for_dialect("table", t, dialect)?,
+                col_ref(name)?
+            ),
+            None => col_ref(name)?,
+        },
         Expr::Literal { value } => inline_literal(value)?,
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_inline_with_col(lhs, dialect, col_ref)?;
@@ -1409,6 +1427,51 @@ mod tests {
         assert!(
             mysql.starts_with("CONCAT(") && !mysql.contains("||"),
             "MySQL MUST render Concat as CONCAT(...), never `||` (logical OR): got {mysql}"
+        );
+    }
+
+    // ── Qualified column refs (§3.4, the join-ON fix) ────────────────────────
+
+    /// A qualified `ColRef { table, name }` renders `<table>.<col>` with the SAME
+    /// per-dialect identifier quoting as an unqualified ref: PG/SQLite double-quote
+    /// each half, MySQL backticks each half. An unqualified ref is unchanged.
+    #[test]
+    fn qualified_colref_renders_dotted_per_dialect() {
+        let qualified = Expr::col_qualified("users", "id");
+        assert_eq!(
+            render_expr_inline(&qualified, SqlDialect::Postgres).unwrap(),
+            "\"users\".\"id\"",
+            "PG qualifies with double-quoted table.col"
+        );
+        assert_eq!(
+            render_expr_inline(&qualified, SqlDialect::Sqlite).unwrap(),
+            "\"users\".\"id\"",
+            "SQLite qualifies with double-quoted table.col"
+        );
+        assert_eq!(
+            render_expr_inline(&qualified, SqlDialect::Mysql).unwrap(),
+            "`users`.`id`",
+            "MySQL qualifies with backtick-quoted table.col"
+        );
+
+        // Unqualified stays exactly as today — no table segment, no dot.
+        let plain = Expr::col("id");
+        assert_eq!(render_expr_inline(&plain, SqlDialect::Postgres).unwrap(), "\"id\"");
+        assert_eq!(render_expr_inline(&plain, SqlDialect::Sqlite).unwrap(), "\"id\"");
+        assert_eq!(render_expr_inline(&plain, SqlDialect::Mysql).unwrap(), "`id`");
+
+        // The parameterized (bind) path mirrors the inline path for the ColRef arm.
+        assert_eq!(
+            render_expr_bound(&qualified, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "\"users\".\"id\""
+        );
+        assert_eq!(
+            render_expr_bound(&qualified, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
+            "`users`.`id`"
+        );
+        assert_eq!(
+            render_expr_bound(&plain, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "\"id\""
         );
     }
 
@@ -2081,8 +2144,8 @@ mod tests {
         let bad = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
             args: vec![
-                Expr::ColRef { name: "name".into() },
-                Expr::ColRef { name: "name".into() },
+                Expr::ColRef { name: "name".into(), table: None },
+                Expr::ColRef { name: "name".into(), table: None },
                 lit_int(1),
             ],
         };

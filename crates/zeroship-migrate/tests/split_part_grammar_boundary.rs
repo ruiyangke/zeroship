@@ -23,7 +23,7 @@ fn split(col: &str, delim: &str, n: i64) -> Expr {
     Expr::FnSynth {
         r#fn: SynthFn::SplitPart,
         args: vec![
-            Expr::ColRef { name: col.into() },
+            Expr::ColRef { name: col.into(), table: None },
             Expr::Literal { value: IrScalar::Str(delim.into()) },
             Expr::Literal { value: IrScalar::Int(n) },
         ],
