@@ -1,19 +1,19 @@
-import { interval, membership, nextval, or, table, t } from "@zeroship/migrate";
-import { raw, sequence } from "@zeroship/migrate/pg";
+import { nextval, or, table, t } from "@zeroship/migrate";
+import { pgTable, sequence } from "@zeroship/migrate/pg";
 
 export const name = "auth_oauth_tables";
 
 export function up() {
   table("app_session_anchors", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       app_id: t.uuid().notNull(),
       client_id: t.text().notNull(),
       global_user_id: t.uuid().notNull(),
       refresh_token_enc: t.bytes().notNull(),
       refresh_family_id: t.text().notNull(),
       granted_scopes: t.textArray().notNull().default([]),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
     },
@@ -25,7 +25,7 @@ export function up() {
       global_user_id: t.uuid().notNull(),
       pairwise_sub: t.text().notNull(),
       relay_email: t.text(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
       revoked_at: t.timestamp(),
     },
     primaryKey: ["app_client_id", "global_user_id"],
@@ -33,7 +33,7 @@ export function up() {
   table("audit_events", { schema: "zeroship" }).create({
     columns: {
       id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
-      occurred_at: t.timestamp().notNull().default({ fn: "now" }),
+      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
       event_type: t.text().notNull(),
       outcome: t.text().notNull(),
       actor_user_id: t.uuid(),
@@ -49,8 +49,8 @@ export function up() {
   sequence("audit_events_id_seq").alter({ schema: "zeroship", ownedBy: { table: "audit_events", column: "id" } });
   table("authz_decisions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      occurred_at: t.timestamp().notNull().default({ fn: "now" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
       actor_user_id: t.uuid(),
       token_id: t.uuid(),
       action: t.text().notNull(),
@@ -63,11 +63,11 @@ export function up() {
     },
     primaryKey: ["id"],
   });
-  table("authz_decisions", { schema: "zeroship" }).addCheck("authz_decisions_decision_check", (c) => membership(c("decision"), ["allow", "deny"]));
+  table("authz_decisions", { schema: "zeroship" }).check("authz_decisions_decision_check").add({ expr: (c) => c("decision").in(["allow", "deny"]) });
   table("cron_state", { schema: "zeroship" }).create({
     columns: {
       key: t.text().notNull(),
-      last_rotated_at: t.timestamp().notNull().default({ fn: "now" }),
+      last_rotated_at: t.timestamp().notNull().default((c) => c.fn.now()),
       notes: t.text(),
     },
     primaryKey: ["key"],
@@ -81,22 +81,22 @@ export function up() {
       platform_access_token_enc: t.bytes(),
       provider: t.text().notNull(),
       scope: t.text(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
       expires_at: t.timestamp().notNull(),
       last_polled_at: t.timestamp(),
       auth_credential_version: t.bigInt().notNull().default(0),
       client_id: t.text(),
       sid: t.text(),
-      poll_interval_secs: t.integer().notNull().default(5),
+      poll_interval_secs: t.int().notNull().default(5),
     },
     primaryKey: ["device_code_hash"],
   });
-  table("device_grants", { schema: "zeroship" }).addCheck("device_grants_poll_interval_secs_check", (c) => c("poll_interval_secs").gt(0));
-  table("device_grants", { schema: "zeroship" }).addCheck("device_grants_status_check", (c) => membership(c("status"), ["pending", "approved", "denied"]));
+  table("device_grants", { schema: "zeroship" }).check("device_grants_poll_interval_secs_check").add({ expr: (c) => c("poll_interval_secs").gt(0) });
+  table("device_grants", { schema: "zeroship" }).check("device_grants_status_check").add({ expr: (c) => c("status").in(["pending", "approved", "denied"]) });
   table("dpop_jti", { schema: "zeroship" }).create({
     columns: {
       jti: t.text().notNull(),
-      inserted_at: t.timestamp().notNull().default({ fn: "now" }),
+      inserted_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["jti"],
   });
@@ -104,7 +104,7 @@ export function up() {
     columns: {
       email: t.text({ caseSensitive: false }).notNull(),
       reason: t.text().notNull(),
-      suppressed_at: t.timestamp().notNull().default({ fn: "now" }),
+      suppressed_at: t.timestamp().notNull().default((c) => c.fn.now()),
       provider_msg: t.text(),
     },
     primaryKey: ["email"],
@@ -114,7 +114,7 @@ export function up() {
       token_hash: t.bytes().notNull(),
       user_id: t.uuid().notNull(),
       email: t.text({ caseSensitive: false }).notNull(),
-      issued_at: t.timestamp().notNull().default({ fn: "now" }),
+      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
       expires_at: t.timestamp().notNull(),
       consumed_at: t.timestamp(),
     },
@@ -122,26 +122,26 @@ export function up() {
   });
   table("federated_identities", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       user_id: t.uuid().notNull(),
       provider: t.text().notNull(),
       subject: t.text().notNull(),
       email_at_link: t.text({ caseSensitive: false }),
       raw_profile: t.json(),
-      linked_at: t.timestamp().notNull().default({ fn: "now" }),
+      linked_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["id"],
   });
   table("gateway_sessions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       user_id: t.uuid().notNull(),
       app_id: t.uuid().notNull(),
       email: t.text({ caseSensitive: false }),
       name: t.text(),
       avatar_url: t.text(),
       email_verified: t.boolean().notNull().default(false),
-      issued_at: t.timestamp().notNull().default({ fn: "now" }),
+      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
       idle_expires_at: t.timestamp().notNull(),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
@@ -158,18 +158,18 @@ export function up() {
       provider: t.text().notNull(),
       provider_subject: t.text().notNull(),
       email: t.text(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["provider", "provider_subject"],
   });
   table("idp_sessions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       user_id: t.uuid().notNull(),
       auth_method: t.text().notNull(),
       amr: t.textArray().notNull(),
       acr: t.text(),
-      auth_time: t.timestamp().notNull().default({ fn: "now" }),
+      auth_time: t.timestamp().notNull().default((c) => c.fn.now()),
       credential_version: t.bigInt().notNull().default(0),
       idle_expires_at: t.timestamp().notNull(),
       abs_expires_at: t.timestamp().notNull(),
@@ -181,7 +181,7 @@ export function up() {
     columns: {
       set_name: t.text().notNull(),
       kid: t.text().notNull(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["set_name", "kid"],
   });
@@ -206,7 +206,7 @@ export function up() {
       purpose: t.text().notNull(),
       request_ip: t.inet(),
       request_ua: t.text(),
-      issued_at: t.timestamp().notNull().default({ fn: "now" }),
+      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
       expires_at: t.timestamp().notNull(),
       consumed_pending_at: t.timestamp(),
       consumed_at: t.timestamp(),
@@ -225,7 +225,7 @@ export function up() {
       granted_scopes: t.textArray().notNull(),
       nonce: t.text(),
       user_id: t.uuid().notNull(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
       expires_at: t.timestamp().notNull(),
       consumed_at: t.timestamp(),
       auth_credential_version: t.bigInt().notNull().default(0),
@@ -233,8 +233,8 @@ export function up() {
     },
     primaryKey: ["code_hash"],
   });
-  table("oauth_authorization_codes", { schema: "zeroship" }).addCheck("oauth_authorization_codes_max_ttl", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00"))));
-  table("oauth_authorization_codes", { schema: "zeroship" }).addCheck("oauth_authorization_codes_pkce_method_check", (c) => c("pkce_method").eq("S256"));
+  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))) });
+  table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_pkce_method_check").add({ expr: (c) => c("pkce_method").eq("S256") });
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {
       client_id: t.text().notNull(),
@@ -244,7 +244,7 @@ export function up() {
       redirect_uris: t.textArray().notNull(),
       scopes: t.textArray().notNull(),
       skip_consent: t.boolean().notNull().default(false),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
       created_by: t.uuid(),
       client_secret_hash: t.text(),
       refresh_allowed: t.boolean().notNull().default(false),
@@ -254,15 +254,15 @@ export function up() {
     },
     primaryKey: ["client_id"],
   });
-  table("oauth_clients", { schema: "zeroship" }).addCheck("oauth_clients_brokered_requires_secret_basic", (c) => or(c("brokered").eq(false), c("token_endpoint_auth_method").eq("client_secret_basic")));
-  table("oauth_clients", { schema: "zeroship" }).addCheck("oauth_clients_token_endpoint_auth_method_check", (c) => membership(c("token_endpoint_auth_method"), ["none", "client_secret_basic", "client_secret_post"]));
+  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_brokered_requires_secret_basic").add({ expr: (c) => or(c("brokered").eq(false), c("token_endpoint_auth_method").eq("client_secret_basic")) });
+  table("oauth_clients", { schema: "zeroship" }).check("oauth_clients_token_endpoint_auth_method_check").add({ expr: (c) => c("token_endpoint_auth_method").in(["none", "client_secret_basic", "client_secret_post"]) });
   table("oauth_grants", { schema: "zeroship" }).create({
     columns: {
       user_id: t.uuid().notNull(),
       client_id: t.text().notNull(),
       granted_scopes: t.textArray().notNull(),
-      granted_at: t.timestamp().notNull().default({ fn: "now" }),
-      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+      granted_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
       last_used_at: t.timestamp(),
     },
     primaryKey: ["user_id", "client_id"],
@@ -278,7 +278,7 @@ export function up() {
       sub: t.text().notNull(),
       granted_scopes: t.textArray().notNull(),
       family_granted_scopes: t.textArray().notNull(),
-      issued_at: t.timestamp().notNull().default({ fn: "now" }),
+      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
       expires_at: t.timestamp().notNull(),
       family_absolute_expires_at: t.timestamp().notNull(),
       consumed_at: t.timestamp(),
@@ -290,7 +290,7 @@ export function up() {
     },
     primaryKey: ["token_hash"],
   });
-  table("oauth_refresh_tokens", { schema: "zeroship" }).addCheck("oauth_refresh_tokens_idle_le_ceiling", (c) => c("expires_at").le(c("family_absolute_expires_at")));
+  table("oauth_refresh_tokens", { schema: "zeroship" }).check("oauth_refresh_tokens_idle_le_ceiling").add({ expr: (c) => c("expires_at").le(c("family_absolute_expires_at")) });
   table("oidc_session_clients", { schema: "zeroship" }).create({
     columns: {
       idp_session_id: t.uuid().notNull(),
@@ -298,8 +298,8 @@ export function up() {
       client_id: t.text().notNull(),
       sid: t.text().notNull(),
       sub: t.text().notNull(),
-      first_seen_at: t.timestamp().notNull().default({ fn: "now" }),
-      last_seen_at: t.timestamp().notNull().default({ fn: "now" }),
+      first_seen_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      last_seen_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["idp_session_id", "client_id"],
   });
@@ -324,20 +324,20 @@ export function up() {
       alg: t.text().notNull(),
       public_jwk: t.json().notNull(),
       status: t.text().notNull(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
       activated_at: t.timestamp(),
       retiring_at: t.timestamp(),
       retired_at: t.timestamp(),
     },
     primaryKey: ["kid"],
   });
-  table("signing_keys", { schema: "zeroship" }).addCheck("signing_keys_alg_check", (c) => c("alg").eq("EdDSA"));
-  table("signing_keys", { schema: "zeroship" }).addCheck("signing_keys_status_check", (c) => membership(c("status"), ["active", "next", "retiring"]));
+  table("signing_keys", { schema: "zeroship" }).check("signing_keys_alg_check").add({ expr: (c) => c("alg").eq("EdDSA") });
+  table("signing_keys", { schema: "zeroship" }).check("signing_keys_status_check").add({ expr: (c) => c("status").in(["active", "next", "retiring"]) });
   table("token_revocations", { schema: "zeroship" }).create({
     columns: {
       client_id: t.text().notNull(),
       sub: t.text().notNull(),
-      revoked_after: t.timestamp().notNull().default({ fn: "now" }),
+      revoked_after: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["client_id", "sub"],
   });
@@ -347,7 +347,7 @@ export function up() {
       user_id: t.uuid().notNull(),
       code_hash: t.text().notNull(),
       used_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["id"],
   });
@@ -356,13 +356,13 @@ export function up() {
       user_id: t.uuid().notNull(),
       encrypted_secret: t.bytes().notNull(),
       confirmed_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["user_id"],
   });
   table("users", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       email: t.text({ caseSensitive: false }).notNull(),
       email_verified_at: t.timestamp(),
       name: t.text().notNull(),
@@ -371,10 +371,10 @@ export function up() {
       credential_version: t.bigInt().notNull().default(0),
       locked_until: t.timestamp(),
       disabled_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
-      updated_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
       last_login_at: t.timestamp(),
-      failed_login_count: t.integer().notNull().default(0),
+      failed_login_count: t.int().notNull().default(0),
       deletion_requested_at: t.timestamp(),
       deletion_scheduled_for: t.timestamp(),
       anonymized_at: t.timestamp(),
