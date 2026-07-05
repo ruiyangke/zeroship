@@ -972,11 +972,10 @@ export const t: TypeLexicon = {
   },
   geoPoint: () => new ColumnDefImpl("geoPoint"),
   smallInt: () => new ColumnDefImpl("smallInt"),
-  integer: () => new ColumnDefImpl("int"),
   int: () => new ColumnDefImpl("int"),
   bigInt: () => new ColumnDefImpl("bigInt"),
   real: () => new ColumnDefImpl("real"),
-  float: () => new ColumnDefImpl("double"),
+  double: () => new ColumnDefImpl("double"),
   inet: () => new ColumnDefImpl("inet"),
   enum: (name) => {
     const n = typeof name === "string" ? name : name.name;
@@ -2391,7 +2390,7 @@ function recordUpdate(table: string, args: UpdateArgs): void {
 
 function recordDel(table: string, args: DelArgs): void {
   if (args.where === undefined || args.where === null) {
-    throw structuredError("OP_INVALID", "del({ where }): where is mandatory (no unfiltered delete)");
+    throw structuredError("OP_INVALID", "delete({ where }): where is mandatory (no unfiltered delete)");
   }
   emitDelete({
     table,
@@ -2690,13 +2689,13 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
         schema: args.schema,
       }) as TriggerStmt;
     },
-    del(args) {
+    delete(args) {
       if (!args || typeof args !== "object") {
-        throw structuredError("OP_INVALID", "b.del({ table, where, limit?, schema? }) needs an object");
+        throw structuredError("OP_INVALID", "b.delete({ table, where, limit?, schema? }) needs an object");
       }
-      requireString(args.table, "b.del({ table })");
+      requireString(args.table, "b.delete({ table })");
       if (args.where === undefined || args.where === null) {
-        throw structuredError("OP_INVALID", "b.del({ where }): where is mandatory (no unfiltered delete)");
+        throw structuredError("OP_INVALID", "b.delete({ where }): where is mandatory (no unfiltered delete)");
       }
       return compact({
         stmt: "delete",
@@ -3057,7 +3056,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       recordUpdate(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
-    del(args) {
+    delete(args) {
       recordDel(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },

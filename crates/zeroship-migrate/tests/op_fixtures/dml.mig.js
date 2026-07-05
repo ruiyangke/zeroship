@@ -23,7 +23,7 @@ export function up() {
   });
 
   // DELETE FROM status_codes WHERE code is null  (mandatory where)
-  sc.del({ where: (c) => c("code").isNull(), limit: 100 });
+  sc.delete({ where: (c) => c("code").isNull(), limit: 100 });
 
   // A resumable backfill paging over `code`, filtered, with a synth concatWs set.
   sc.backfill({

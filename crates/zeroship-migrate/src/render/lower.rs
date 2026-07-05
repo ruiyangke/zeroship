@@ -5761,7 +5761,7 @@ mod tests {
     /// `DEFAULT n`, an out-of-f64-range bigint default, and a decimal column's
     /// `DEFAULT 0.5` MUST all appear in the rendered CREATE TABLE DDL.
     /// `field_default_expr` had only a `"number"` arm matching via `as_f64()`:
-    ///   - an `int`-token column (`t.integer()`/`t.bigInt()`) fell through to
+    ///   - an `int`-token column (`t.int()`/`t.bigInt()`) fell through to
     ///     `None` → its `DEFAULT` was silently dropped;
     ///   - a decimal default is carried as a validated numeric STRING by
     ///     `IrScalar::Decimal` (and a bigint default ≥ 2^53 likewise, since a

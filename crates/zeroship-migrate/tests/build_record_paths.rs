@@ -37,7 +37,7 @@ export function up() {
       title: t.text().notNull(),
     },
   });
-  table("widgets").column("qty").add({ type: t.integer() });
+  table("widgets").column("qty").add({ type: t.int() });
 }
 "#;
 

@@ -69,7 +69,7 @@ test("IMMUTABLE: a hoisted t.* type var does not alias across columns", () => {
 
 test("IMMUTABLE: each modifier returns a fresh ColumnDef (no receiver mutation)", () => {
   const ops = record(() => {
-    const c1 = t.integer();
+    const c1 = t.int();
     const c2 = c1.notNull();
     const c3 = c2.default(0);
     table("u").create({ columns: { a: c1, b: c2, c: c3 } });
@@ -221,13 +221,13 @@ test("COLUMN ALTER: per-intent terminals replace the old alter bag", () => {
 test("SCHEMA: the table() default propagates onto every recorded op", () => {
   const ops = record(() => {
     const u = table("users", { schema: "app2" });
-    u.column("a").add({ type: t.integer() });
+    u.column("a").add({ type: t.int() });
     u.column("b").drop();
     u.index("ix_a").add({ columns: ["a"] });
     u.index("ix_b").drop();
     u.insert({ rows: [{ a: 1 }] });
     u.update({ set: { a: (c) => c("a") } });
-    u.del({ where: (c) => c("a").gt(0) });
+    u.delete({ where: (c) => c("a").gt(0) });
     u.backfill({ set: { a: (c) => c("a") } });
   });
   for (const op of ops) assert.equal(op.schema, "app2", `op ${op.op} must carry the table default schema`);
@@ -236,7 +236,7 @@ test("SCHEMA: the table() default propagates onto every recorded op", () => {
 test("SCHEMA: a per-op schema OVERRIDES the table default", () => {
   const ops = record(() => {
     const u = table("users", { schema: "app2" });
-    u.column("a").add({ type: t.integer(), schema: "other" });
+    u.column("a").add({ type: t.int(), schema: "other" });
     u.index("ix_a").add({ columns: ["a"], schema: "idx_schema" });
     u.insert({ rows: [{ a: 1 }], schema: "dml_schema" });
   });
@@ -248,7 +248,7 @@ test("SCHEMA: a per-op schema OVERRIDES the table default", () => {
 test("SCHEMA: a per-op args bag WITHOUT a schema key keeps the table default", () => {
   const ops = record(() => {
     const u = table("users", { schema: "app2" });
-    u.column("a").add({ type: t.integer(), ifNotExists: true }); // guard only, no schema
+    u.column("a").add({ type: t.int(), ifNotExists: true }); // guard only, no schema
     u.column("b").drop({ ifExists: true });
   });
   assert.equal(ops[0].schema, "app2", "guard-only args must not wipe the table default");
@@ -256,7 +256,7 @@ test("SCHEMA: a per-op args bag WITHOUT a schema key keeps the table default", (
 });
 
 test("SCHEMA: table() with no schema records ops with NO schema key", () => {
-  const ops = record(() => table("users").column("a").add({ type: t.integer() }));
+  const ops = record(() => table("users").column("a").add({ type: t.int() }));
   assert.ok(!("schema" in ops[0]), "no schema default ⇒ schema key omitted");
 });
 
@@ -265,7 +265,7 @@ test("SCHEMA: table() with no schema records ops with NO schema key", () => {
 test("GUARD: ifNotExists / ifExists pass through to existenceGuard", () => {
   const ops = record(() => {
     const u = table("users");
-    u.column("a").add({ type: t.integer(), ifNotExists: true });
+    u.column("a").add({ type: t.int(), ifNotExists: true });
     u.column("b").drop({ ifExists: true });
     u.create({ columns: { id: t.id() }, ifNotExists: true });
     u.drop({ ifExists: true });
@@ -281,7 +281,7 @@ test("GUARD: ifNotExists / ifExists pass through to existenceGuard", () => {
 });
 
 test("GUARD: no guard option ⇒ existenceGuard omitted", () => {
-  const ops = record(() => table("users").column("a").add({ type: t.integer() }));
+  const ops = record(() => table("users").column("a").add({ type: t.int() }));
   assert.ok(!("existenceGuard" in ops[0]), "absent guard ⇒ existenceGuard key omitted");
 });
 
@@ -289,7 +289,7 @@ test("GUARD: no guard option ⇒ existenceGuard omitted", () => {
 
 test("EAGER: a single terminal records immediately — the terminal IS the recording", () => {
   const ops = record(() => {
-    table("users").column("age").add({ type: t.integer() });
+    table("users").column("age").add({ type: t.int() });
   });
   assert.equal(ops.length, 1);
   assert.equal(ops[0].op, "addColumn");

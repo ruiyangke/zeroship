@@ -51,7 +51,7 @@ function opFieldsByTag(def: any, tagField: string): Record<string, string[]> {
 // ── The token sets the hand-authored `ir.ts` declares (kept in lockstep). ──
 
 const TS = {
-  // Op variant tags (the `del()` fn records `"delete"`).
+  // Op variant tags (the `delete()` fn records `"delete"`).
   Op: [
     "createTable", "createPartition", "detachPartition", "dropPartition",
     "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
