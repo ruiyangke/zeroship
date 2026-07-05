@@ -249,7 +249,7 @@ export function up() {
     references: { table: "platform_apps", columns: ["id"] },
   });
   registry.check("platform_registry_status_check").add({
-    expr: (c) => c.pg.eqAnyArray(c("status"), ["active", "paused"]),
+    expr: (c) => c("status").in(["active", "paused"]),
   });
   registry.index("platform_registry_target_idx").add({ on: ["target"] });
   registry.enableRowLevelSecurity();
@@ -362,8 +362,6 @@ import {
   check,
   and,
   or,
-  membership,
-  notMembership,
   interval,
 } from "@zeroship/migrate";
 import { schema } from "@zeroship/migrate/pg";
@@ -396,18 +394,18 @@ export function up() {
     checks: [
       check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
       check("expr_user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
-      check("expr_kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
-      check("expr_kind_not_reserved", (c) => notMembership(c("kind"), ["x", "y"])),
+      check("expr_kind_ok", (c) => c("kind").in(["a", "b", "c"])),
+      check("expr_kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
       check("expr_data_size", (c) => c("data").columnSize().lt(262144)),
       check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
       check("expr_floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
       check("expr_active_visible", (c) => and(c("active"), c("visible"))),
       check("expr_expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
       // Mirrors the platform sandboxes_snapshot_artifact_consistency marker:
-      // a <> ALL negated-membership OR'd with a 3-way IS NOT NULL AND chain.
+      // a <> ALL negated inList OR'd with a 3-way IS NOT NULL AND chain.
       check("expr_snapshot_consistency", (c) =>
         or(
-          notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]),
+          c("status").notIn(["snapshotted", "snapshotted_suspect"]),
           and(
             c("snapshot_artifact_path").isNotNull(),
             c("snapshot_sha256").isNotNull(),
@@ -421,11 +419,11 @@ export function up() {
     expr: (c) => c("amount_cents").ge(0),
   });
 
-  // Partial index whose predicate is a notMembership (<> ALL) — mirrors the
+  // Partial index whose predicate is a notIn (<> ALL on PG) — mirrors the
   // platform wake_jobs partial indexes.
   table("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
-    .add({ on: ["status"], where: (c) => notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]) });
+    .add({ on: ["status"], where: (c) => c("status").notIn(["snapshotted", "snapshotted_suspect"]) });
 
   table("expr_surface", { schema: "zeroship" })
     .index("expr_created_desc_idx")
@@ -459,7 +457,7 @@ export function up() {
 }
 "#;
 const PLATFORM_DOMAIN_COLUMN_TS: &str = r#"
-import { membership, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 import { domain, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_domain_column";
@@ -470,7 +468,7 @@ export function up() {
   domain("myd").create({
     schema: "zeroship",
     as: t.text(),
-    check: (c) => membership(c("VALUE"), ["a", "b"]),
+    check: (c) => c("VALUE").in(["a", "b"]),
   });
 
   table("domain_surface", { schema: "zeroship" }).create({
@@ -1215,7 +1213,7 @@ async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
         Some(
             "CREATE INDEX expr_status_partial_idx ON zeroship.expr_surface USING btree (status) WHERE (status <> ALL (ARRAY['snapshotted'::text, 'snapshotted_suspect'::text]))"
         ),
-        "notMembership partial-index predicate round-trips through pg_get_indexdef"
+        "notIn partial-index predicate round-trips through pg_get_indexdef"
     );
     assert_eq!(
         index_definition(&conn, "zeroship", "expr_created_desc_idx")

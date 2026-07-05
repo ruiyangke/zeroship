@@ -358,14 +358,14 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c("archived").isFalse()
 
 // Logical composition (also free functions: and / or / not)
-import { and, or, not, membership, notMembership } from "@zeroship/migrate";
+import { and, or, not } from "@zeroship/migrate";
 (c) => and(c("qty").gt(0), c("price").ge(0))
 (c) => or(c("a").isNotNull(), c("b").isNotNull())
 (c) => not(c("blocked").isTrue())
 
-// Set membership  (= ANY / <> ALL)
-(c) => membership(c("status"), ["active", "past_due", "suspended"])
-(c) => notMembership(c("state"), ["deleted", "purged"])
+// Set membership
+(c) => c("status").in(["active", "past_due", "suspended"])
+(c) => c("state").notIn(["deleted", "purged"])
 
 // Arithmetic + string
 (c) => c("a").add(c("b"))
@@ -433,13 +433,13 @@ table("orders").create({ columns: { status: t.enum("order_status").notNull() }, 
 
 ```ts
 import { domain } from "@zeroship/migrate/pg";
-import { t, membership } from "@zeroship/migrate";
+import { t } from "@zeroship/migrate";
 
 // A domain = base type + CHECK. The (c) => Expr uses the VALUE placeholder.
 domain("account_state").create({
   schema: "zeroship",
   as: t.text(),
-  check: (c) => membership(c("VALUE"), ["active", "past_due", "suspended"]),
+  check: (c) => c("VALUE").in(["active", "past_due", "suspended"]),
 });
 
 domain("billing_period").create({ schema: "zeroship", as: t.date() });

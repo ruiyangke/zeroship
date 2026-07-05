@@ -15,7 +15,7 @@ export function up() {
   });
   accountState.create({
     as: t.text(),
-    check: (c) => c.pg.eqAnyArray(c("VALUE"), ["active", "past_due"]),
+    check: (c) => c("VALUE").in(["active", "past_due"]),
   });
 
   table("subscriptions").create({
@@ -32,7 +32,7 @@ export function up() {
       data: t.json().notNull(),
     },
     checks: [
-      { name: "status_ne_all", expr: (c) => c.pg.neAllArray(c("status"), ["x"]) },
+      { name: "status_ne_all", expr: (c) => c("status").notIn(["x"]) },
       { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
       { name: "data_size", expr: (c) => c.pg.columnSize(c("data")).le(8192) },
     ],

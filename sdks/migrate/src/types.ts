@@ -461,10 +461,13 @@ export interface ExprChain {
   // cast (the closed portable target set only)
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
   // portable predicates (§3.4): `between`/`like` render identical syntax on all
-  // three dialects; `distinctFrom` is portably named but per-dialect rendered
-  // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
+  // three dialects; `in`/`notIn` are portably named but keep PG's pg_dump-faithful
+  // `ANY/ALL ARRAY[...]::text` render; `distinctFrom` is portably named but
+  // per-dialect rendered (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
   between(low: unknown, high: unknown): ExprChain;
   like(pattern: unknown): ExprChain;
+  "in"(values: readonly string[]): ExprChain;
+  notIn(values: readonly string[]): ExprChain;
   distinctFrom(x: unknown): ExprChain;
 }
 
@@ -527,10 +530,6 @@ export interface AggNamespace {
  *  `c.pg.*` so the portable chain surface stays dialect-neutral; the Rust
  *  validator rejects these nodes on SQLite/MySQL. */
 export interface PgExprNamespace {
-  /** Renders `<expr> = ANY (ARRAY['...'::text, ...])` on PostgreSQL. */
-  eqAnyArray(expr: unknown, elems: readonly string[]): ExprChain;
-  /** Renders `<expr> <> ALL (ARRAY['...'::text, ...])` on PostgreSQL. */
-  neAllArray(expr: unknown, elems: readonly string[]): ExprChain;
   /** Renders `<expr> ~ '<pattern>'::text` on PostgreSQL. */
   regex(expr: unknown, pattern: string): ExprChain;
   /** Renders `pg_column_size(<expr>)` on PostgreSQL. */

@@ -40,8 +40,6 @@ export {
   and,
   or,
   not,
-  membership,
-  notMembership,
   lit,
   decimal,
   byteValue,

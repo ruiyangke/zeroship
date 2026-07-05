@@ -74,9 +74,7 @@ use std::collections::BTreeMap;
 use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
-use crate::model::expr::{
-    AggFunc, BinaryOp, Expr, ExtractField, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
-};
+use crate::model::expr::{AggFunc, BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
 use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
 
@@ -380,32 +378,34 @@ fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
-fn render_pg_array_membership(
+fn render_in_list(
     expr: &str,
-    op: PgArrayMembershipOp,
     elems: &[String],
+    negated: bool,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    if !matches!(dialect, SqlDialect::Postgres) {
-        return Err(DmlError::UnrenderableExpr(
-            "PG ARRAY membership is PostgreSQL-only".to_string(),
-        ));
-    }
     if elems.is_empty() {
-        return Err(DmlError::UnrenderableExpr(
-            "PG ARRAY membership requires at least one element".to_string(),
-        ));
+        return Ok(if negated { "TRUE" } else { "FALSE" }.to_string());
     }
-    let rendered: Result<Vec<_>, _> =
-        elems.iter().map(|elem| pg_text_literal(elem, "PG ARRAY membership element")).collect();
-    let (cmp, quantifier) = match op {
-        PgArrayMembershipOp::Eq => ("=", "ANY"),
-        PgArrayMembershipOp::Ne => ("<>", "ALL"),
-    };
-    Ok(format!(
-        "({expr} {cmp} {quantifier} (ARRAY[{}]))",
-        rendered?.join(", ")
-    ))
+    match dialect {
+        SqlDialect::Postgres => {
+            let rendered: Result<Vec<_>, _> =
+                elems.iter().map(|elem| pg_text_literal(elem, "inList element")).collect();
+            let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
+            Ok(format!(
+                "({expr} {cmp} {quantifier} (ARRAY[{}]))",
+                rendered?.join(", ")
+            ))
+        }
+        SqlDialect::Sqlite | SqlDialect::Mysql => {
+            let rendered = elems
+                .iter()
+                .map(|elem| sql_string_literal(elem))
+                .collect::<Vec<_>>();
+            let op = if negated { "NOT IN" } else { "IN" };
+            Ok(format!("({expr} {op} ({}))", rendered.join(", ")))
+        }
+    }
 }
 
 fn render_pg_regex_match(
@@ -828,9 +828,9 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             };
             render_agg(*func, a.as_deref(), *distinct)
         }
-        Expr::PgArrayMembership { expr, op, elems } => {
+        Expr::InList { expr, elems, negated } => {
             let e = render_expr_bound(expr, ctx)?;
-            render_pg_array_membership(&e, *op, elems, ctx.dialect)?
+            render_in_list(&e, elems, *negated, ctx.dialect)?
         }
         Expr::PgRegexMatch { expr, pattern } => {
             let e = render_expr_bound(expr, ctx)?;
@@ -1038,9 +1038,9 @@ where
             };
             render_agg(*func, a.as_deref(), *distinct)
         }
-        Expr::PgArrayMembership { expr, op, elems } => {
+        Expr::InList { expr, elems, negated } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
-            render_pg_array_membership(&e, *op, elems, dialect)?
+            render_in_list(&e, elems, *negated, dialect)?
         }
         Expr::PgRegexMatch { expr, pattern } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
@@ -1800,6 +1800,92 @@ mod tests {
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
             "(`name` LIKE 'A%')"
+        );
+    }
+
+    #[test]
+    fn in_list_renders_pg_any_all_and_sql_in_not_in_on_all_three_dialects() {
+        let includes = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec!["a".into(), "b".into()],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&includes, SqlDialect::Postgres).unwrap(),
+            "(\"status\" = ANY (ARRAY['a'::text, 'b'::text]))"
+        );
+        assert_eq!(
+            render_expr_inline(&includes, SqlDialect::Sqlite).unwrap(),
+            "(\"status\" IN ('a', 'b'))"
+        );
+        assert_eq!(
+            render_expr_inline(&includes, SqlDialect::Mysql).unwrap(),
+            "(`status` IN ('a', 'b'))"
+        );
+
+        let excludes = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec!["x".into(), "y".into()],
+            negated: true,
+        };
+        assert_eq!(
+            render_expr_inline(&excludes, SqlDialect::Postgres).unwrap(),
+            "(\"status\" <> ALL (ARRAY['x'::text, 'y'::text]))"
+        );
+        assert_eq!(
+            render_expr_inline(&excludes, SqlDialect::Sqlite).unwrap(),
+            "(\"status\" NOT IN ('x', 'y'))"
+        );
+        assert_eq!(
+            render_expr_inline(&excludes, SqlDialect::Mysql).unwrap(),
+            "(`status` NOT IN ('x', 'y'))"
+        );
+    }
+
+    #[test]
+    fn in_list_empty_list_renders_boolean_constants() {
+        let includes_empty = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec![],
+            negated: false,
+        };
+        let excludes_empty = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec![],
+            negated: true,
+        };
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            assert_eq!(render_expr_inline(&includes_empty, dialect).unwrap(), "FALSE");
+            assert_eq!(render_expr_inline(&excludes_empty, dialect).unwrap(), "TRUE");
+            assert_eq!(
+                render_expr_bound(&includes_empty, &mut BindCtx::new(dialect)).unwrap(),
+                "FALSE"
+            );
+            assert_eq!(
+                render_expr_bound(&excludes_empty, &mut BindCtx::new(dialect)).unwrap(),
+                "TRUE"
+            );
+        }
+    }
+
+    #[test]
+    fn in_list_escapes_text_elements() {
+        let expr = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec!["a'b".into()],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"status\" = ANY (ARRAY['a''b'::text]))"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"status\" IN ('a''b'))"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`status` IN ('a''b'))"
         );
     }
 

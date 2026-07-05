@@ -528,8 +528,8 @@ async fn table_level_checks_render_and_apply_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// Slice B: PG-only expression nodes for text-array membership, regex, and
-/// pg_column_size render in the platform pg_dump idiom and apply as live CHECKs.
+/// Slice B: expression nodes for portable text-list membership plus PG-only regex
+/// and pg_column_size render in the platform pg_dump idiom and apply as live CHECKs.
 #[compio::test]
 async fn pg_only_expr_nodes_render_and_apply_on_pg() {
     let conn = pg().await;
@@ -545,15 +545,15 @@ async fn pg_only_expr_nodes_render_and_apply_on_pg() {
         ],
         "constraints":[
             {"name":"status_any_check","kind":{"kind":"check","expr":{
-                "node":"pgArrayMembership",
+                "node":"inList",
                 "expr":{"node":"colRef","name":"status"},
-                "op":"eq",
-                "elems":["a","b"]}}},
+                "elems":["a","b"],
+                "negated":false}}},
             {"name":"status_ne_all_check","kind":{"kind":"check","expr":{
-                "node":"pgArrayMembership",
+                "node":"inList",
                 "expr":{"node":"colRef","name":"status"},
-                "op":"ne",
-                "elems":["x"]}}},
+                "elems":["x"],
+                "negated":true}}},
             {"name":"name_regex_check","kind":{"kind":"check","expr":{
                 "node":"pgRegexMatch",
                 "expr":{"node":"colRef","name":"name"},
