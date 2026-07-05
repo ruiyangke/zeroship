@@ -43,17 +43,18 @@ use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
     ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn,
     IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr,
-    Op, OrderDir, OrderItem, PartitionSpec, RaiseLevel, RefAction, SafeI64, SelectAst,
-    SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent,
-    TriggerStmt, VectorMetric, ViewQuery,
+    Op, OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RaiseLevel,
+    RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
+    TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, TableSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, PartitionSnapshot,
+    TableSnapshot,
 };
 use crate::render::plan::AppliedPlan;
-use crate::render::step::{PlanStep, RenameStep};
+use crate::render::step::{BindValue, PlanStep, RenameStep};
 use zeroship_schema::query::SqlDialect;
 
 /// The result of lowering ONE IR op (§2.0 / §2.6.1). A DDL op lowers to a list of
@@ -116,6 +117,68 @@ pub(crate) struct DomainDef {
     pub(crate) not_null: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PartitionLowerState {
+    parents: BTreeMap<String, PartitionLowerParent>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionLowerParent {
+    spec: PartitionSpec,
+    children: BTreeMap<String, PartitionBounds>,
+}
+
+impl PartitionLowerState {
+    fn from_live(live: &LiveSchema) -> Self {
+        let mut state = Self::default();
+        for (table, snapshot) in &live.table_snapshots {
+            if let Some(spec) = snapshot.partition_by.clone() {
+                state.create_parent(table, spec);
+            }
+        }
+        for (child, partition) in &live.partitions {
+            state.insert_child(&partition.of, child, partition.bounds.clone());
+        }
+        state
+    }
+
+    fn create_parent(&mut self, name: &str, spec: PartitionSpec) {
+        self.parents.insert(
+            name.to_string(),
+            PartitionLowerParent {
+                spec,
+                children: BTreeMap::new(),
+            },
+        );
+    }
+
+    fn remove_parent(&mut self, name: &str) {
+        self.parents.remove(name);
+    }
+
+    fn rename_parent(&mut self, from: &str, to: &str) {
+        if let Some(parent) = self.parents.remove(from) {
+            self.parents.insert(to.to_string(), parent);
+        }
+    }
+
+    fn parent(&self, name: &str) -> Option<&PartitionLowerParent> {
+        self.parents.get(name)
+    }
+
+    fn insert_child(&mut self, parent: &str, name: &str, bounds: PartitionBounds) {
+        if let Some(parent) = self.parents.get_mut(parent) {
+            parent.children.insert(name.to_string(), bounds);
+        }
+    }
+
+    fn remove_child(&mut self, parent: &str, name: &str) {
+        if let Some(parent) = self.parents.get_mut(parent) {
+            parent.children.remove(name);
+        }
+    }
+}
+
 /// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
 /// the full [`crate::model::snapshot::SchemaSnapshot`] the differ diffs against.
 ///
@@ -176,6 +239,10 @@ pub struct LiveSchema {
     /// IR-load gate's registry check). Empty ⇒ a SQLite rename fails closed on the
     /// ownership confirmation.
     pub table_ownership: std::collections::BTreeMap<String, String>,
+    /// Child partitions already present in the folded live schema. Collapse child
+    /// drops need the child bound even when the drop is authored in a later
+    /// migration than the createPartition op that established it.
+    pub partitions: std::collections::BTreeMap<String, PartitionSnapshot>,
 }
 
 impl LiveSchema {
@@ -191,6 +258,7 @@ impl LiveSchema {
             table_snapshots: std::collections::BTreeMap::new(),
             sqlite_schemas: std::collections::BTreeMap::new(),
             table_ownership: std::collections::BTreeMap::new(),
+            partitions: std::collections::BTreeMap::new(),
         }
     }
 
@@ -262,6 +330,7 @@ impl LiveSchema {
             table_snapshots: desired.snapshot.tables.clone(),
             sqlite_schemas: desired.sqlite_schemas.clone(),
             table_ownership,
+            partitions: desired.snapshot.partitions.clone(),
         })
     }
 
@@ -335,6 +404,7 @@ impl LiveSchema {
             table_snapshots: live.tables.clone(),
             sqlite_schemas,
             table_ownership,
+            partitions: live.partitions.clone(),
         })
     }
 
@@ -1471,7 +1541,8 @@ impl IrAuthor {
     /// `diff`); `live.unique_indexes` is the authoritative set of live UNIQUE-index
     /// names that drives the `dropIndex` destructive/approval gate (OR-ed with the
     /// IR's advisory `unique` hint); `live.table_snapshots` + `live.sqlite_schemas`
-    /// carry the full live table structure the SQLite `renameColumn` rebuild needs.
+    /// carry the full live table structure the SQLite `renameColumn` rebuild needs;
+    /// `live.partitions` carries child bounds for collapse DELETE derivation.
     /// Tables created EARLIER in the same IR are added to the working live-table set
     /// as lowering proceeds, so an intra-migration FK inlines correctly.
     ///
@@ -1487,7 +1558,7 @@ impl IrAuthor {
     ) -> Result<Vec<PlanStep>, IrLowerError> {
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
-        let mut partition_parents: BTreeMap<String, PartitionSpec> = BTreeMap::new();
+        let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
         for (op_index, op) in ir.ops.iter().enumerate() {
             // The whole-up step lowering discards the structural statement list (it
@@ -1499,7 +1570,7 @@ impl IrAuthor {
                 op_index,
                 op,
                 &mut live_tables,
-                &mut partition_parents,
+                &mut partition_state,
                 live,
                 &mut named_types,
             )? {
@@ -1533,7 +1604,7 @@ impl IrAuthor {
         op_index: usize,
         op: &Op,
         live_tables: &mut BTreeSet<String>,
-        partition_parents: &mut BTreeMap<String, PartitionSpec>,
+        partition_state: &mut PartitionLowerState,
         live_schema: &LiveSchema,
         named_types: &mut NamedTypeRegistry,
     ) -> Result<LoweredOp, IrLowerError> {
@@ -1805,9 +1876,9 @@ impl IrAuthor {
                 // The just-created table is now live for any later intra-IR FK.
                 live.insert(name.clone());
                 if let Some(spec) = partition_by {
-                    partition_parents.insert(name.clone(), spec.clone());
+                    partition_state.create_parent(name, spec.clone());
                 } else {
-                    partition_parents.remove(name);
+                    partition_state.remove_parent(name);
                 }
                 migs
             }
@@ -1932,15 +2003,33 @@ impl IrAuthor {
                 ..
             } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
-                    if partition_parents
-                        .get(of)
-                        .is_some_and(PartitionSpec::collapse)
-                    {
-                        return Ok(LoweredOp::Ddl(Vec::new()));
-                    }
-                    return Err(IrLowerError::UnsupportedOp(
-                        "createPartition needs a collapse-affirmed parent on SQLite/MySQL",
-                    ));
+                    let spec = partition_state
+                        .parent(of)
+                        .filter(|parent| parent.spec.collapse())
+                        .map(|parent| parent.spec.clone())
+                        .ok_or(IrLowerError::UnsupportedOp(
+                            "createPartition needs a collapse-affirmed parent on SQLite/MySQL",
+                        ))?;
+                    let step = if !matches!(
+                        bounds,
+                        PartitionBounds::Default | PartitionBounds::Hash { .. }
+                    ) {
+                        let guard_sql =
+                            self.render_partition_collapse_mirror_guard(&eff_schema, of, &spec, bounds)?;
+                        Some(self.partition_collapse_dml_step(
+                            op_index,
+                            &format!("partition_collapse_guard_{of}_{name}"),
+                            guard_sql,
+                            false,
+                        ))
+                    } else {
+                        None
+                    };
+                    partition_state.insert_child(of, name, bounds.clone());
+                    return Ok(match step {
+                        Some(step) => LoweredOp::Dml(step),
+                        None => LoweredOp::Ddl(Vec::new()),
+                    });
                 }
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::Table {
@@ -1950,6 +2039,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
+                partition_state.insert_child(of, name, bounds.clone());
                 vec![decl.lower_create_partition(name, of, bounds)]
             }
             Op::DetachPartition {
@@ -1963,17 +2053,33 @@ impl IrAuthor {
                         "detachPartition is PostgreSQL-only",
                     ));
                 }
+                partition_state.remove_child(parent, name);
                 vec![decl.lower_detach_partition(
                     parent,
                     name,
                     concurrently.unwrap_or(false),
                 )]
             }
-            Op::DropPartition { name, cascade, .. } => {
+            Op::DropPartition {
+                parent,
+                name,
+                cascade,
+                ..
+            } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "dropPartition is PostgreSQL-only",
-                    ));
+                    let delete_sql = self.render_partition_collapse_delete(
+                        &eff_schema,
+                        partition_state,
+                        parent,
+                        name,
+                    )?;
+                    partition_state.remove_child(parent, name);
+                    return Ok(LoweredOp::Dml(self.partition_collapse_dml_step(
+                        op_index,
+                        &format!("drop_partition_{parent}_{name}_collapsed"),
+                        delete_sql,
+                        true,
+                    )));
                 }
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::Table {
@@ -1983,6 +2089,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
+                partition_state.remove_child(parent, name);
                 vec![decl.lower_drop_partition(name, cascade.unwrap_or(false))]
             }
             Op::DropTable { table, .. } => {
@@ -1995,7 +2102,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
-                partition_parents.remove(table);
+                partition_state.remove_parent(table);
                 vec![decl.lower_drop_table(table)]
             }
             Op::RenameTable { table, to, .. } => {
@@ -2017,9 +2124,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
-                if let Some(spec) = partition_parents.remove(table) {
-                    partition_parents.insert(to.clone(), spec);
-                }
+                partition_state.rename_parent(table, to);
                 vec![decl.lower_rename_table(table, to)]
             }
             Op::DropColumn { table, column, .. } => {
@@ -2491,6 +2596,198 @@ impl IrAuthor {
         Ok(LoweredOp::Ddl(migs))
     }
 
+    fn render_partition_collapse_mirror_guard(
+        &self,
+        eff_schema: &str,
+        parent: &str,
+        spec: &PartitionSpec,
+        bounds: &PartitionBounds,
+    ) -> Result<String, IrLowerError> {
+        let table_sql = self.render_partition_parent_ref(eff_schema, parent)?;
+        let key_sql = self.render_partition_key(spec)?;
+        let predicate = self.render_partition_bound_predicate(spec, bounds)?;
+        let statement = match self.dialect {
+            SqlDialect::Postgres => {
+                return Err(IrLowerError::UnsupportedOp(
+                    "partition collapse mirror guard is only for SQLite/MySQL",
+                ));
+            }
+            SqlDialect::Sqlite => format!(
+                "/* zeroship: partition collapse populated-default mirror guard */\n\
+                 INSERT INTO {table_sql} ({key_sql}) \
+                 SELECT NULL FROM {table_sql} WHERE {predicate} LIMIT 1"
+            ),
+            SqlDialect::Mysql => format!(
+                "/* zeroship: partition collapse populated-default mirror guard */\n\
+                 SELECT JSON_EXTRACT('zeroship_partition_mirror_guard', '$') \
+                   FROM {table_sql} WHERE {predicate} LIMIT 1"
+            ),
+        };
+        Ok(statement)
+    }
+
+    fn render_partition_collapse_delete(
+        &self,
+        eff_schema: &str,
+        state: &PartitionLowerState,
+        parent: &str,
+        child: &str,
+    ) -> Result<String, IrLowerError> {
+        let parent_state = state
+            .parent(parent)
+            .filter(|parent| parent.spec.collapse())
+            .ok_or(IrLowerError::UnsupportedOp(
+                "dropPartition needs a collapse-affirmed parent on SQLite/MySQL",
+            ))?;
+        let bounds = parent_state
+            .children
+            .get(child)
+            .ok_or(IrLowerError::UnsupportedOp(
+                "dropPartition on a collapse target needs the child's recorded bound",
+            ))?;
+        if matches!(bounds, PartitionBounds::Hash { .. }) {
+            return Err(IrLowerError::UnsupportedOp(
+                "hash dropPartition has no collapse DELETE predicate",
+            ));
+        }
+
+        let predicate = match bounds {
+            PartitionBounds::Default => {
+                self.render_partition_default_residual_predicate(parent_state, child)?
+            }
+            _ => self.render_partition_bound_predicate(&parent_state.spec, bounds)?,
+        };
+        let table_sql = self.render_partition_parent_ref(eff_schema, parent)?;
+        Ok(format!(
+            "/* zeroship: partition child drop collapsed to DELETE FROM parent */\n\
+             DELETE FROM {table_sql} WHERE {predicate}"
+        ))
+    }
+
+    fn render_partition_default_residual_predicate(
+        &self,
+        parent: &PartitionLowerParent,
+        default_child: &str,
+    ) -> Result<String, IrLowerError> {
+        let mut terms = Vec::new();
+        for (sibling, bounds) in &parent.children {
+            if sibling == default_child || matches!(bounds, PartitionBounds::Default) {
+                continue;
+            }
+            if matches!(bounds, PartitionBounds::Hash { .. }) {
+                return Err(IrLowerError::UnsupportedOp(
+                    "hash sibling bound has no collapse residual predicate",
+                ));
+            }
+            let predicate = self.render_partition_bound_predicate(&parent.spec, bounds)?;
+            terms.push(format!("NOT ({predicate})"));
+        }
+        Ok(if terms.is_empty() {
+            "1 = 1".to_string()
+        } else {
+            terms.join(" AND ")
+        })
+    }
+
+    fn render_partition_bound_predicate(
+        &self,
+        spec: &PartitionSpec,
+        bounds: &PartitionBounds,
+    ) -> Result<String, IrLowerError> {
+        let key_sql = self.render_partition_key(spec)?;
+        match (spec, bounds) {
+            (PartitionSpec::Range { .. }, PartitionBounds::Range { from, to }) => {
+                self.render_partition_range_predicate(&key_sql, from, to)
+            }
+            (PartitionSpec::List { .. }, PartitionBounds::List { values }) => {
+                self.render_partition_list_predicate(&key_sql, values)
+            }
+            (_, PartitionBounds::Default) => Err(IrLowerError::UnsupportedOp(
+                "default partition bounds require residual sibling predicate",
+            )),
+            (_, PartitionBounds::Hash { .. }) => Err(IrLowerError::UnsupportedOp(
+                "hash partition bounds have no collapse predicate",
+            )),
+            _ => Err(IrLowerError::UnsupportedOp(
+                "partition child bound kind does not match parent partitionBy",
+            )),
+        }
+    }
+
+    fn render_partition_range_predicate(
+        &self,
+        key_sql: &str,
+        from: &[PartitionBoundValue],
+        to: &[PartitionBoundValue],
+    ) -> Result<String, IrLowerError> {
+        let [from] = from else {
+            return Err(partition_collapse_render_error(
+                "collapse range DELETE supports exactly one lower-bound value",
+            ));
+        };
+        let [to] = to else {
+            return Err(partition_collapse_render_error(
+                "collapse range DELETE supports exactly one upper-bound value",
+            ));
+        };
+
+        let mut terms = Vec::new();
+        if !matches!(from, PartitionBoundValue::MinValue) {
+            terms.push(format!("{key_sql} >= {}", render_partition_bound_literal(from)?));
+        }
+        if !matches!(to, PartitionBoundValue::MaxValue) {
+            terms.push(format!("{key_sql} < {}", render_partition_bound_literal(to)?));
+        }
+        Ok(if terms.is_empty() {
+            "1 = 1".to_string()
+        } else {
+            terms.join(" AND ")
+        })
+    }
+
+    fn render_partition_list_predicate(
+        &self,
+        key_sql: &str,
+        values: &[PartitionBoundValue],
+    ) -> Result<String, IrLowerError> {
+        if values.is_empty() {
+            return Err(partition_collapse_render_error(
+                "collapse list DELETE cannot render an empty IN bound",
+            ));
+        }
+        let values = values
+            .iter()
+            .map(render_partition_bound_literal)
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        Ok(format!("{key_sql} IN ({values})"))
+    }
+
+    fn render_partition_key(&self, spec: &PartitionSpec) -> Result<String, IrLowerError> {
+        let columns = spec.columns();
+        let [column] = columns else {
+            return Err(partition_collapse_render_error(
+                "collapse partition predicates support exactly one partition key column",
+            ));
+        };
+        crate::render::dml::quote_bare_ident_for_dialect(
+            "partition key column",
+            column,
+            self.dialect,
+        )
+        .map_err(IrLowerError::DmlAssemble)
+    }
+
+    fn render_partition_parent_ref(
+        &self,
+        eff_schema: &str,
+        parent: &str,
+    ) -> Result<String, IrLowerError> {
+        crate::render::renderer::renderer(self.dialect)
+            .qualify_table(eff_schema, parent)
+            .map_err(IrLowerError::DmlAssemble)
+    }
+
     fn lower_trigger_op(
         &self,
         op: &Op,
@@ -2681,6 +2978,27 @@ impl IrAuthor {
         }
     }
 
+    fn partition_collapse_dml_step(
+        &self,
+        op_index: usize,
+        name: &str,
+        template: String,
+        destructive: bool,
+    ) -> PlanStep {
+        let binds: Vec<BindValue> = Vec::new();
+        let owner = self.decl.owner_app().to_string();
+        let version = dml_step_version(op_index, &owner, name, &template, &binds);
+        PlanStep::Dml {
+            version,
+            name: name.to_string(),
+            template,
+            binds,
+            transactional: true,
+            destructive,
+            owner_app: owner,
+        }
+    }
+
     /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
     /// `set`/`filter` render to INLINE SQL strings ([`crate::render::dml::assemble_backfill_clauses`])
     /// the [`crate::model::backfill::BackfillSpec`] executor consumes (it guard-checks /
@@ -2792,7 +3110,7 @@ impl IrAuthor {
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
-        let mut partition_parents: BTreeMap<String, PartitionSpec> = BTreeMap::new();
+        let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
 
         crate::guard::check_ir_data_security_policy(guard_cfg, ir).map_err(|err| {
@@ -2819,7 +3137,7 @@ impl IrAuthor {
                 op_index,
                 op,
                 &mut live_tables,
-                &mut partition_parents,
+                &mut partition_state,
                 live,
                 &mut named_types,
             )? {
@@ -4632,6 +4950,45 @@ fn ddl_step_version(op_index: usize, kind: &str, up: &str) -> crate::model::migr
         h.update(field.as_bytes());
     }
     dml_id_from_seed("ddl", &h.finalize())
+}
+
+fn partition_collapse_render_error(reason: impl Into<String>) -> IrLowerError {
+    IrLowerError::DmlAssemble(crate::render::dml::DmlError::UnrenderableExpr(reason.into()))
+}
+
+fn normalize_partition_string_bound_literal(value: &str) -> String {
+    let mut out = value.to_string();
+    if out.len() >= 20
+        && out.as_bytes().get(4) == Some(&b'-')
+        && out.as_bytes().get(7) == Some(&b'-')
+        && out.as_bytes().get(10).is_some_and(|b| *b == b'T' || *b == b' ')
+    {
+        out = out.replace('T', " ");
+        if let Some(stripped) = out.strip_suffix('Z') {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix("+00:00") {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix(".000+00") {
+            out = format!("{stripped}+00");
+        }
+    }
+    out
+}
+
+fn render_partition_bound_literal(value: &PartitionBoundValue) -> Result<String, IrLowerError> {
+    match value {
+        PartitionBoundValue::String { value } => Ok(crate::render::dml::sql_string_literal(
+            &normalize_partition_string_bound_literal(value),
+        )),
+        PartitionBoundValue::Int { value } => Ok(value.get().to_string()),
+        PartitionBoundValue::MinValue | PartitionBoundValue::MaxValue => {
+            Err(partition_collapse_render_error(
+                "partition minValue/maxValue sentinels are only renderable as range edge omission",
+            ))
+        }
+    }
 }
 
 /// Build a deterministic [`MigrationId`] from a domain tag + a seed digest, using
