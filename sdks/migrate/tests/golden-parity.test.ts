@@ -29,6 +29,7 @@ import {
   dropSchema,
   extension,
   grant,
+  pgTable,
   raw,
   revoke,
   role,
@@ -271,7 +272,7 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
       from: ["public"],
     });
 
-    const secrets = table("app_secrets", { schema: "zeroship" });
+    const secrets = pgTable("app_secrets", { schema: "zeroship" });
     secrets.enableRowLevelSecurity();
     secrets.forceRowLevelSecurity();
     secrets.createPolicy({

@@ -15,6 +15,7 @@ import {
   dropSchema,
   extension,
   grant,
+  pgTable,
   raw,
   revoke,
   role,
@@ -56,7 +57,7 @@ export function up() {
   });
 
   // ── RLS + policies (0025) ──
-  const secrets = table("app_secrets", { schema: "zeroship" });
+  const secrets = pgTable("app_secrets", { schema: "zeroship" });
   secrets.enableRowLevelSecurity();
   secrets.forceRowLevelSecurity();
   secrets.createPolicy({

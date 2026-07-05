@@ -1,8 +1,7 @@
 // op.* migration fixture — standalone sequences and exclusion constraints.
 // Covers the resettable sequence fields where explicit null carries SQL meaning
 // (`OWNED BY NONE`) and the closed exclusion-operator set.
-import { table } from "@zeroship/migrate";
-import { sequence } from "@zeroship/migrate/pg";
+import { pgTable, sequence } from "@zeroship/migrate/pg";
 
 export const name = "sequences_exclusion";
 
@@ -25,7 +24,7 @@ export function up() {
   });
   sequence("old_invoice_seq").drop({ ifExists: true });
 
-  table("bookings").exclusion("bookings_no_overlap").add({
+  pgTable("bookings").exclusion("bookings_no_overlap").add({
     using: "gist",
     elements: [
       { target: "room", operator: "=" },

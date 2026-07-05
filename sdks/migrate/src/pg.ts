@@ -11,7 +11,7 @@
 // from `@zeroship/migrate`. Each method records the same op payload shape as the
 // engine-embedded recorder twin (`crates/zeroship-migrate/src/frontend/migrate_ops.js`).
 
-import type { Expr, ExprChain, ExprFn } from "./types.js";
+import type { Expr, ExprChain, ExprFn, PgTableHandle, TableOptions } from "./types.js";
 import type {
   FuncArg,
   FuncLanguage,
@@ -20,7 +20,7 @@ import type {
   PolicyCmd,
   Privilege,
 } from "./generated/ir.js";
-import { __pgDomain, __pgPush, __pgResolveExpr, __pgSequence } from "./ops.js";
+import { __makeTableHandle, __pgDomain, __pgPush, __pgResolveExpr, __pgSequence } from "./ops.js";
 
 type Node = Record<string, unknown>;
 
@@ -41,6 +41,7 @@ export type {
   DomainHandle,
   DropDomainArgs,
   DropSequenceArgs,
+  PgTableHandle,
   SequenceHandle,
   SequenceOwnedBy,
 } from "./types.js";
@@ -175,6 +176,10 @@ function record(op: Node): Node {
 
 export const domain = __pgDomain;
 export const sequence = __pgSequence;
+
+export function pgTable(name: string, opts?: TableOptions): PgTableHandle {
+  return __makeTableHandle(name, opts);
+}
 
 export function schema(args: CreateSchemaArgs): Node {
   requireString(args.name, "schema({ name })");

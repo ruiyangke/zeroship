@@ -214,7 +214,7 @@ const CONFINED_GRANT_IR: &str = r#"{
 "#;
 const PLATFORM_ATTACH_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { createFunction, schema } from "@zeroship/migrate/pg";
+import { createFunction, pgTable, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_attach";
 
@@ -243,7 +243,7 @@ export function up() {
     ],
   });
 
-  const registry = table("platform_registry", { schema: "zeroship" });
+  const registry = pgTable("platform_registry", { schema: "zeroship" });
   registry.foreignKey("platform_registry_app_fk").add({
     columns: ["app_id"],
     references: { table: "platform_apps", columns: ["id"] },

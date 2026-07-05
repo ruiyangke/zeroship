@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { table } from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 import {
   alterRole,
@@ -17,6 +16,7 @@ import {
   dropSchema,
   extension,
   grant,
+  pgTable,
   raw,
   revoke,
   role,
@@ -39,6 +39,7 @@ test("@zeroship/migrate/pg subpath resolves through package exports", async () =
   assert.equal(typeof imported.raw, "function");
   assert.equal(typeof imported.createFunction, "function");
   assert.equal(typeof imported.domain, "function");
+  assert.equal(typeof imported.pgTable, "function");
   assert.equal(typeof imported.sequence, "function");
   assert.equal(imported.sql, undefined);
 });
@@ -218,7 +219,7 @@ test("vendor named exports record every standalone vendor op shape", () => {
 
 test("table-scoped pg methods record RLS and policy op shapes", () => {
   const ops = record(() => {
-    table("secrets", { schema: "zs" })
+    pgTable("secrets", { schema: "zs" })
       .enableRowLevelSecurity()
       .forceRowLevelSecurity()
       .createPolicy({

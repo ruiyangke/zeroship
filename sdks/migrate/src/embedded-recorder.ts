@@ -68,6 +68,7 @@ export {
   dropOwnedBy,
   grant,
   revoke,
+  pgTable,
   createPolicy,
   dropPolicy,
   createFunction,

@@ -1048,7 +1048,7 @@ export interface CheckRef {
 /** The `.exclusion(name)` selector sub-handle (§3.3). PostgreSQL renders native
  *  `EXCLUDE`; SQLite/MySQL fail closed. */
 export interface ExclusionRef {
-  add(args: ExclusionAddArgs): TableHandle;
+  add(args: ExclusionAddArgs): PgTableHandle;
 }
 
 /** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic drop by
@@ -1114,7 +1114,6 @@ export interface TableHandle {
   strictness(level: TableStrictness, args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
   partition(name: string): PartitionRef;
-  detachPartition(name: string, args?: DetachPartitionArgs): TableHandle;
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects
   column(name: string): ColumnRef;
@@ -1125,10 +1124,6 @@ export interface TableHandle {
   foreignKey(name: string): ForeignKeyRef;
   unique(name: string): UniqueRef;
   check(name: string): CheckRef;
-  /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
-   *  rows under a weaker lock (records a `validateConstraint` Op). Refused off PG. */
-  validateConstraint(name: string, args?: { ifExists?: boolean; schema?: string }): TableHandle;
-  exclusion(name: string): ExclusionRef;
   constraint(name: string): ConstraintRef;
   index(name: string): IndexRef;
 
@@ -1138,17 +1133,26 @@ export interface TableHandle {
   delete(args: DelArgs): TableHandle;
   backfill(args: BackfillArgs): TableHandle;
 
-  // `@zeroship/migrate/pg` — table-scoped privileged primitives.
-  enableRowLevelSecurity(): TableHandle;
-  forceRowLevelSecurity(): TableHandle;
-  disableRowLevelSecurity(): TableHandle;
-  noForceRowLevelSecurity(): TableHandle;
-  createPolicy(args: CreateTablePolicyArgs): TableHandle;
-  dropPolicy(args: DropTablePolicyArgs): TableHandle;
-
   // §A2 — cross-dialect core triggers.
   createTrigger(args: CreateTriggerArgs): TableHandle;
   dropTrigger(args: DropTriggerArgs): TableHandle;
+}
+
+/** The widened table handle returned by `@zeroship/migrate/pg`'s `pgTable()`.
+ *  It is the same runtime object as `table()`, with table-scoped PG vendor
+ *  methods made reachable only from the `/pg` type surface. */
+export interface PgTableHandle extends TableHandle {
+  detachPartition(name: string, args?: DetachPartitionArgs): PgTableHandle;
+  /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
+   *  rows under a weaker lock (records a `validateConstraint` Op). */
+  validateConstraint(name: string, args?: { ifExists?: boolean; schema?: string }): PgTableHandle;
+  exclusion(name: string): ExclusionRef;
+  enableRowLevelSecurity(): PgTableHandle;
+  forceRowLevelSecurity(): PgTableHandle;
+  disableRowLevelSecurity(): PgTableHandle;
+  noForceRowLevelSecurity(): PgTableHandle;
+  createPolicy(args: CreateTablePolicyArgs): PgTableHandle;
+  dropPolicy(args: DropTablePolicyArgs): PgTableHandle;
 }
 
 /** One determinism-lint finding. */
