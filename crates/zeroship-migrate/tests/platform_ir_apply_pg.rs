@@ -251,7 +251,7 @@ export function up() {
   registry.check("platform_registry_status_check").add({
     expr: (c) => c.pg.eqAnyArray(c("status"), ["active", "paused"]),
   });
-  registry.index("platform_registry_target_idx").add({ columns: ["target"] });
+  registry.index("platform_registry_target_idx").add({ on: ["target"] });
   registry.enableRowLevelSecurity();
   registry.forceRowLevelSecurity();
   registry.createPolicy({
@@ -425,15 +425,15 @@ export function up() {
   // platform wake_jobs partial indexes.
   table("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
-    .add({ columns: ["status"], where: (c) => notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]) });
+    .add({ on: ["status"], where: (c) => notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]) });
 
   table("expr_surface", { schema: "zeroship" })
     .index("expr_created_desc_idx")
-    .add({ columns: [{ kind: "column", name: "created_at", order: "desc" }] });
+    .add({ on: [{ column: "created_at", order: "desc" }] });
 
   table("expr_surface", { schema: "zeroship" })
     .index("expr_user_created_desc_idx")
-    .add({ columns: ["user_id", { kind: "column", name: "created_at", order: "desc" }] });
+    .add({ on: ["user_id", { column: "created_at", order: "desc" }] });
 }
 "#;
 const PLATFORM_SCALAR_TYPES_TS: &str = r#"

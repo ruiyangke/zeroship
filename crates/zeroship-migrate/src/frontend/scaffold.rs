@@ -677,17 +677,17 @@ fn render_op_call(op: &Op) -> String {
                         order: Some(IndexSortOrder::Desc),
                         ..
                     } => format!(
-                        "{{ kind: \"column\", name: {}, order: \"desc\" }}",
+                        "{{ column: {}, order: \"desc\" }}",
                         js_str(name)
                     ),
                     IndexElement::Column { name, .. } => js_str(name),
                     IndexElement::Expr { expr } => format!(
-                        "{{ kind: \"expr\", expr: {} }}",
+                        "{{ expr: {} }}",
                         serde_json::to_string(expr).expect("Expr serializes")
                     ),
                 })
                 .collect();
-            // The index NAME is the selector argument (name-first); `columns`/`unique`
+            // The index NAME is the selector argument (name-first); `on`/`unique`
             // ride the args object. The synth path always names the index.
             let idx_name = name
                 .clone()
@@ -702,7 +702,7 @@ fn render_op_call(op: &Op) -> String {
                         .join("_");
                     format!("{table}_{parts}_idx")
                 });
-            let mut args = format!("columns: [{}]", cols.join(", "));
+            let mut args = format!("on: [{}]", cols.join(", "));
             if *unique == Some(true) {
                 args.push_str(", unique: true");
             }

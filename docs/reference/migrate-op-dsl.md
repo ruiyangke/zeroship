@@ -365,7 +365,7 @@ table("audit_log").create({
       onDelete: "cascade",
     },
   ],
-  indexes: [{ name: "members_org_idx", columns: ["org_id"] }],
+  indexes: [{ name: "members_org_idx", on: ["org_id"] }],
 });
 
 table("scratch").drop({ ifExists: true, cascade: true });
@@ -435,9 +435,9 @@ table("orders").constraint("orders_total_nonneg").drop({ ifExists: true }); // k
 
 ```ts
 const members = table("members");
-members.index("members_email_idx").add({ columns: ["email"], unique: true, using: "btree" });
+members.index("members_email_idx").add({ on: ["email"], unique: true, using: "btree" });
 members.index("members_created_idx").add({
-  columns: ["org_id", { kind: "column", name: "created_at", order: "desc" }],
+  on: ["org_id", { column: "created_at", order: "desc" }],
 });
 members.index("members_email_idx").drop({ unique: true });
 ```

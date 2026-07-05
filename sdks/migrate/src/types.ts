@@ -803,8 +803,7 @@ export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
 /** Column index element object form. Use `order: "desc"` to render `col DESC`;
  *  `order: "asc"` and omitted order serialize as the default ASC shape. */
 export interface IndexColumnElementArg {
-  kind: "column";
-  name: string;
+  column: string;
   order?: IndexSortOrder;
   /** PostgreSQL per-column operator class (e.g. `text_pattern_ops`). PG-vendor:
    *  fails closed at validate on SQLite/MySQL. */
@@ -814,13 +813,15 @@ export interface IndexColumnElementArg {
   collation?: string;
 }
 
+export interface IndexExprElementArg {
+  expr: ExprFn | ExprChain | Expr;
+  order?: IndexSortOrder;
+}
+
 export type IndexElementArg =
   | string
-  | ExprFn
-  | ExprChain
-  | Expr
   | IndexColumnElementArg
-  | { kind: "expr"; expr: ExprFn | ExprChain | Expr };
+  | IndexExprElementArg;
 
 export type CommentTargetArg =
   | { kind: "table"; name: string; schema?: string }
@@ -912,7 +913,7 @@ export interface CreateTableArgs {
   exclusions?: Array<{ name: string } & ExclusionConstraintArgs>;
   indexes?: Array<{
     name: string;
-    columns: IndexElementArg[];
+    on: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
     /** Partial-index predicate. Renders on PostgreSQL and SQLite; MySQL refuses
@@ -999,12 +1000,8 @@ export interface ConstraintRef {
 
 /** The `.index(name)` selector sub-handle (§3.4). */
 export interface IndexRef {
-  using(method: IndexMethod): IndexRef;
-  include(columns: readonly string[]): IndexRef;
-  with(params: IndexStorageParamsArg): IndexRef;
-  only(enabled?: boolean): IndexRef;
   add(args: {
-    columns: IndexElementArg[];
+    on: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
     where?: ExprFn;

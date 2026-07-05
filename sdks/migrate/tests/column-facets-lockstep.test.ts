@@ -197,11 +197,13 @@ function authorPartitionWith({
   partition("events_default").of("events").asDefault();
   table("events")
     .index("events_ts_brin_idx")
-    .using("brin")
-    .include(["tenant_id"])
-    .with({ pagesPerRange: 32 })
-    .only()
-    .add({ columns: ["ts"] });
+    .add({
+      on: ["ts"],
+      using: "brin",
+      include: ["tenant_id"],
+      with: { pagesPerRange: 32 },
+      only: true,
+    });
   table("events", { schema: "app" }).detachPartition("events_2026_05", { concurrently: true });
   dropPartition("events_2026_05", { schema: "app", ifExists: true, cascade: true });
   return drain();
