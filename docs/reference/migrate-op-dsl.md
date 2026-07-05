@@ -238,7 +238,7 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | Modifier | Effect |
 | --- | --- |
 | `.notNull()` | mark `NOT NULL` |
-| `.default(value)` | a typed scalar literal **or** a nullary synth scalar `{ fn: "now" \| "genRandomUuid" }` — never raw SQL |
+| `.default(value)` | a typed scalar literal **or** a function-expression callback `(c) => c.fn.now()` / `c.fn.genRandomUuid()` (the `{ fn: … }` carrier was deleted, P4) — never raw SQL |
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
 | `.ref(targetTable)` | re-target the column as a foreign-key reference (plain-string target) |
@@ -791,7 +791,7 @@ export default {
 
 ## The fluent expression surface
 
-Every expression position — a DML `set` value, a `where`, an `addCheck` body, a
+Every expression position — a DML `set` value, a `where`, a `check(name).add` body, a
 partial-index `where:` — is a callback `(c) => Expr` with a **single injected
 builder handle** `c`. It is never a raw string; it constructs a node of a closed
 AST via an all-strings fluent builder
@@ -1140,7 +1140,7 @@ runs.
 
 **What renders (the offline-renderable subset).** The DB-independent ops render
 their real SQL: `createTable` / `dropTable` / `addColumn` / `dropColumn` /
-`addForeignKey` / `addUnique` / `addCheck` / `dropConstraint` / `createIndex` /
+`addConstraint` (fk / unique / check / exclusion) / `dropConstraint` / `createIndex` /
 `dropIndex` / `createSequence` / `alterSequence` / `dropSequence` / `comment`;
 Postgres also renders native exclusion constraints, while SQLite/MySQL refuse
 them fail-closed. Partial indexes render on Postgres and SQLite; MySQL refuses
