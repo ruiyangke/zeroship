@@ -49,6 +49,7 @@ import type {
   CreateViewArgs,
   DbSynthSymbol,
   DecimalValue,
+  BytesValue,
   DefaultValue,
   DelArgs,
   DomainHandle,
@@ -164,9 +165,13 @@ const nativeCryptoRandomUUID =
     : undefined;
 const NEXTVAL_DEFAULT_MARKER = "__zeroshipMigrateNextvalDefault";
 const DECIMAL_VALUE_BRAND = Symbol.for("zeroship.migrate.decimal/v1");
+const BYTES_VALUE_BRAND = Symbol.for("zeroship.migrate.bytes/v1");
 const DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
+const BASE64_STRING_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
 const DECIMAL_VALUE_ERROR =
   'decimal(value) requires a well-formed decimal string; use decimal("<n>") or decimal("0.00")';
+const BYTES_VALUE_ERROR =
+  'byteValue(bytes) requires a Uint8Array or well-formed base64 string; use byteValue(new Uint8Array([...])) or byteValue("<base64>")';
 
 function requireDecimalString(value: unknown): string {
   if (typeof value !== "string" || !DECIMAL_STRING_RE.test(value)) {
@@ -180,6 +185,27 @@ export function decimal(value: string): DecimalValue {
     [DECIMAL_VALUE_BRAND]: true,
     decimal: requireDecimalString(value),
   }) as unknown as DecimalValue;
+}
+
+function requireBase64String(value: unknown): string {
+  if (typeof value !== "string" || !BASE64_STRING_RE.test(value)) {
+    throw structuredError("OP_INVALID", BYTES_VALUE_ERROR);
+  }
+  const padded = value + "=".repeat((4 - (value.length % 4)) % 4);
+  try {
+    const normalized = btoa(atob(padded));
+    if (normalized !== padded) throw new Error("non-canonical base64");
+    return normalized;
+  } catch {
+    throw structuredError("OP_INVALID", BYTES_VALUE_ERROR);
+  }
+}
+
+export function byteValue(bytes: Uint8Array | string): BytesValue {
+  return Object.freeze({
+    [BYTES_VALUE_BRAND]: true,
+    bytes: bytes instanceof Uint8Array ? bytesToBase64(bytes) : requireBase64String(bytes),
+  }) as unknown as BytesValue;
 }
 
 function nativeFnSynthName(value: unknown): "now" | "genRandomUuid" | undefined {
@@ -827,6 +853,15 @@ function isDecimalValue(value: unknown): value is DecimalValue {
   );
 }
 
+function isBytesValue(value: unknown): value is BytesValue {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[BYTES_VALUE_BRAND] === true &&
+    typeof (value as { bytes?: unknown }).bytes === "string"
+  );
+}
+
 function isRemovedDecimalCarrier(value: unknown): boolean {
   if (!isPlainObject(value) || isDecimalValue(value)) return false;
   const keys = Object.keys(value);
@@ -851,6 +886,7 @@ function rejectNestedFunctionValues(value: unknown): void {
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
  * shape is exactly what Rust's `IrScalar` deserializer accepts (§3.5):
  *  - a branded `decimal("...")` value → `{ decimal: "<v>" }`;
+ *  - a branded `byteValue(...)` value → `{ bytes: "<base64>" }`;
  *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
  *  - JSON containers are scanned so function values fail closed at any depth;
  *  - everything else passes through verbatim.
@@ -858,6 +894,7 @@ function rejectNestedFunctionValues(value: unknown): void {
 function toIrScalar(value: unknown): unknown {
   rejectNestedFunctionValues(value);
   if (isDecimalValue(value)) return { decimal: requireDecimalString(value.decimal) };
+  if (isBytesValue(value)) return { bytes: requireBase64String(value.bytes) };
   if (typeof value === "bigint") {
     throw structuredError("OP_INVALID", 'bigint is not a value — use decimal("<n>")');
   }
