@@ -252,9 +252,9 @@ export interface IrColumn {
 /** The kind of a table constraint (closed, internally tagged on `kind`). */
 export type IrConstraintKind =
   | { kind: "pk"; columns: string[] }
-  | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[]; onDelete?: RefAction | null; onUpdate?: RefAction | null }
+  | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[]; onDelete?: RefAction | null; onUpdate?: RefAction | null; notValid?: boolean | null }
   | { kind: "unique"; columns: string[] }
-  | { kind: "check"; expr: Expr }
+  | { kind: "check"; expr: Expr; notValid?: boolean | null }
   | {
       kind: "exclusion";
       usingMethod?: ExclusionMethod;
@@ -484,6 +484,7 @@ export type Op =
   | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "validateConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }
   | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }

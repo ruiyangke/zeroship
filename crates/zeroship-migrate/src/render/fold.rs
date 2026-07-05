@@ -1050,6 +1050,12 @@ pub fn fold_ops(
                     snap.indexes.retain(|i| &i.name != name);
                 }
             }
+            Op::ValidateConstraint { .. } => {
+                // Validating a previously NOT VALID constraint changes no structural
+                // schema state — the constraint already exists in the folded snapshot
+                // (added by its `ADD CONSTRAINT … NOT VALID`); VALIDATE only strengthens
+                // it. Fold-invisible (see the addConstraint NOT VALID note).
+            }
             Op::CreateIndex {
                 table,
                 columns,
@@ -1673,7 +1679,7 @@ fn fold_create_table_specs(
                 // PKs; the fold must not re-apply a platform-owned-id policy.
                 continue;
             }
-            IrConstraintKind::Check { expr } => {
+            IrConstraintKind::Check { expr, .. } => {
                 if !matches!(dialect, SqlDialect::Postgres) {
                     return Err(FoldError::Unsupported(
                         "createTable table-level CHECK is PostgreSQL-only",
@@ -1707,6 +1713,7 @@ fn fold_create_table_specs(
                 on_update,
                 deferrable,
                 initially_deferred,
+                not_valid: _,
             } => {
                 if !dialect.supports(Capability::TableLevelForeignKey) {
                     return Err(FoldError::Unsupported(
@@ -1908,6 +1915,10 @@ fn add_constraint_snapshot(
             on_update,
             deferrable,
             initially_deferred,
+            // NOT VALID is fold-invisible: the folded DESIRED schema is the
+            // eventual-validated constraint (a later VALIDATE CONSTRAINT is a
+            // fold no-op), matching the live catalog after validation.
+            not_valid: _,
         } => {
             if columns.is_empty() {
                 return Err(FoldError::Unsupported("addConstraint(fk) with no local column"));
@@ -1948,7 +1959,7 @@ fn add_constraint_snapshot(
                 "validated addConstraint user PRIMARY KEY reached fold",
             ))
         }
-        IrConstraintKind::Check { expr } => {
+        IrConstraintKind::Check { expr, .. } => {
             if !matches!(dialect, SqlDialect::Postgres) {
                 return Err(FoldError::Unsupported(
                     "addConstraint(check) is PostgreSQL-only",
@@ -2297,7 +2308,7 @@ pub fn fold_to_field_defs(
                 tables.insert(name.clone(), cols);
                 for c in constraints {
                     match &c.kind {
-                        IrConstraintKind::Check { expr } => {
+                        IrConstraintKind::Check { expr, .. } => {
                             if let Some(facet) = recover_check_facet(expr) {
                                 checks.entry(name.clone()).or_default().push(facet);
                             }
@@ -2406,7 +2417,7 @@ pub fn fold_to_field_defs(
                         fks.entry(table.clone()).or_default().push(recovered);
                     }
                 }
-                if let IrConstraintKind::Check { expr } = &constraint.kind {
+                if let IrConstraintKind::Check { expr, .. } = &constraint.kind {
                     if let Some(facet) = recover_check_facet(expr) {
                         checks.entry(table.clone()).or_default().push(facet);
                     }
@@ -2743,7 +2754,7 @@ fn facet_check_constraints(
     if let Some(expr) = range_expr {
         out.push(IrConstraint {
             name: Some(format!("{table}_{}_range_check", f.name)),
-            kind: IrConstraintKind::Check { expr },
+            kind: IrConstraintKind::Check { expr, not_valid: None },
         });
     }
 
@@ -2775,7 +2786,7 @@ fn facet_check_constraints(
             }
             out.push(IrConstraint {
                 name: Some(format!("{table}_{}_enum_check", f.name)),
-                kind: IrConstraintKind::Check { expr },
+                kind: IrConstraintKind::Check { expr, not_valid: None },
             });
         }
     }
@@ -2866,6 +2877,7 @@ pub fn descriptors_to_create_ops(
                             on_update: f.on_update.as_deref().and_then(parse_ref_action),
                             deferrable: None,
                             initially_deferred: None,
+                            not_valid: None,
                         },
                     });
                 }
@@ -3348,6 +3360,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let dropped = fold(&[
@@ -3587,6 +3601,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let snap = fold(&[
@@ -3639,6 +3655,8 @@ mod tests {
                         on_update: None,
                         deferrable: None,
                         initially_deferred: None,
+                    
+                        not_valid: None,
                     },
                 },
                 schema: None,
@@ -3673,6 +3691,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let snap = fold(&[
@@ -3949,12 +3969,16 @@ mod tests {
             name: Some("users_true".to_string()),
             kind: IrConstraintKind::Check {
                 expr: Expr::Literal { value: IrScalar::Bool(true) },
+            
+                not_valid: None,
             },
         };
         let add_chk = IrConstraint {
             name: Some("age_pos".to_string()),
             kind: IrConstraintKind::Check {
                 expr: Expr::Literal { value: IrScalar::Bool(true) },
+            
+                not_valid: None,
             },
         };
         let mut create_op = create("users", vec![col("age", ColType::Int, false)]);
@@ -4016,6 +4040,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let snap = fold(&[
@@ -4173,6 +4199,8 @@ mod tests {
                         on_update: None,
                         deferrable: None,
                         initially_deferred: None,
+                    
+                        not_valid: None,
                     },
                 },
             ],
@@ -4435,6 +4463,8 @@ mod tests {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             }],
             Vec::new(),
@@ -4458,6 +4488,8 @@ mod tests {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             }],
             Vec::new(),
@@ -5157,7 +5189,7 @@ mod tests {
         let mut recovered_range = false;
         let mut recovered_enum = false;
         for c in constraints {
-            if let IrConstraintKind::Check { expr } = &c.kind {
+            if let IrConstraintKind::Check { expr, .. } = &c.kind {
                 match recover_check_facet(expr) {
                     Some(RecoveredCheck::Range { column, min, max }) if column == "age" => {
                         assert_eq!(min, Some(0.0));

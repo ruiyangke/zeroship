@@ -203,6 +203,16 @@ pg = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"
 
+# validateConstraint — PostgreSQL-only online constraint adoption (the second
+# half of NOT VALID → VALIDATE CONSTRAINT). SQLite/MySQL have no VALIDATE
+# CONSTRAINT; fail-closed.
+[[row]]
+kind = "validateConstraint"
+variant = "base"
+pg = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Payload-independent — VENDOR-tier, PostgreSQL-only.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -538,6 +548,16 @@ mysql = "unsupported"
 [[row]]
 kind = "addConstraint"
 variant = "fkNonId"
+pg = "portable"
+sqlite = "unsupported"
+mysql = "unsupported"
+
+# fkNotValid — NOT VALID online constraint adoption on a FK; PG-only (SQLite/MySQL
+# have no NOT VALID). Composite/non-id notValid FKs collapse to this variant (all
+# PG-only), keeping op-level Support::decision() == validate.
+[[row]]
+kind = "addConstraint"
+variant = "fkNotValid"
 pg = "portable"
 sqlite = "unsupported"
 mysql = "unsupported"

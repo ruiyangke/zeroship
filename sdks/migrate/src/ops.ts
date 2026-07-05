@@ -367,6 +367,7 @@ const emitAddUnique = defineOp("addConstraint", "unique");
 const emitAddCheck = defineOp("addConstraint", "check");
 const emitAddExclusion = defineOp("addConstraint", "exclusion");
 const emitDropConstraint = defineOp("dropConstraint");
+const emitValidateConstraint = defineOp("validateConstraint");
 const emitCreateIndex = defineOp("createIndex");
 const emitDropIndex = defineOp("dropIndex");
 const emitInsert = defineOp("insert");
@@ -1968,6 +1969,7 @@ function fkConstraintFromSpec(spec: {
   onUpdate?: RefAction;
   deferrable?: boolean;
   initiallyDeferred?: boolean;
+  notValid?: boolean;
   schema?: string;
 }): Node {
   if (!spec || typeof spec !== "object" || !spec.references) {
@@ -1993,6 +1995,8 @@ function fkConstraintFromSpec(spec: {
       onUpdate: spec.onUpdate,
       deferrable: spec.deferrable,
       initiallyDeferred: spec.initiallyDeferred,
+      // PG-only online constraint adoption; refused off Postgres at validate.
+      notValid: spec.notValid,
     }),
   });
 }
@@ -2007,6 +2011,7 @@ function recordAddForeignKey(
     onUpdate?: RefAction;
     deferrable?: boolean;
     initiallyDeferred?: boolean;
+    notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   },
@@ -2021,6 +2026,7 @@ function recordAddForeignKey(
       onUpdate: args.onUpdate,
       deferrable: args.deferrable,
       initiallyDeferred: args.initiallyDeferred,
+      notValid: args.notValid,
       schema: args.schema,
     }),
     schema: args.schema,
@@ -2047,16 +2053,34 @@ function recordAddUnique(
 function recordAddCheck(
   table: string,
   name: string,
-  args: { expr: ExprFn; ifNotExists?: boolean; schema?: string },
+  args: { expr: ExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
 ): void {
   if (!args || args.expr === undefined) {
     throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
   }
   emitAddCheck({
     table,
-    constraint: compact({ name, kind: { kind: "check", expr: resolveExpr(args.expr) } }),
+    constraint: compact({
+      name,
+      // `notValid` is PG-only online constraint adoption; compacted out when absent
+      // so an ordinary CHECK is byte-identical to the pre-slice wire image.
+      kind: compact({ kind: "check", expr: resolveExpr(args.expr), notValid: args.notValid }),
+    }),
     schema: args.schema,
     existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordValidateConstraint(
+  table: string,
+  name: string,
+  args: { ifExists?: boolean; schema?: string },
+): void {
+  emitValidateConstraint({
+    table,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
   });
 }
 
@@ -2850,7 +2874,17 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     },
     addCheck(ckName, expr, args = {}) {
       requireString(ckName, ".addCheck(name, expr)");
-      recordAddCheck(name, ckName, { expr, ifNotExists: args.ifNotExists, schema: pickSchema(args, dflt) });
+      recordAddCheck(name, ckName, {
+        expr,
+        notValid: args.notValid,
+        ifNotExists: args.ifNotExists,
+        schema: pickSchema(args, dflt),
+      });
+      return handle;
+    },
+    validateConstraint(vcName, args = {}) {
+      requireString(vcName, ".validateConstraint(name)");
+      recordValidateConstraint(name, vcName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
       return handle;
     },
     exclusion(exName): ExclusionRef {

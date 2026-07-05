@@ -300,6 +300,8 @@ fn checksum_of_ir_includes_table_check_expr() {
                         lhs: Box::new(Expr::col("a")),
                         rhs: Box::new(Expr::lit(IrScalar::Int(rhs))),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],
@@ -563,6 +565,8 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
                     on_update,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,

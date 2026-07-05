@@ -931,6 +931,9 @@ export interface ForeignKeyRef {
     onUpdate?: RefAction;
     deferrable?: boolean;
     initiallyDeferred?: boolean;
+    /** PostgreSQL-only online constraint adoption — add `NOT VALID` (skip the
+     *  add-time scan), then `.validateConstraint(name)` later. Refused off PG. */
+    notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   }): TableHandle;
@@ -943,7 +946,14 @@ export interface UniqueRef {
 
 /** The `.check(name)` selector sub-handle (§3.3). */
 export interface CheckRef {
-  add(args: { expr: ExprFn; ifNotExists?: boolean; schema?: string }): TableHandle;
+  add(args: {
+    expr: ExprFn;
+    /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
+     *  `.validateConstraint(name)` later. Refused off PG. */
+    notValid?: boolean;
+    ifNotExists?: boolean;
+    schema?: string;
+  }): TableHandle;
 }
 
 /** The `.exclusion(name)` selector sub-handle (§3.3). PostgreSQL renders native
@@ -1029,13 +1039,23 @@ export interface TableHandle {
       onUpdate?: RefAction;
       deferrable?: boolean;
       initiallyDeferred?: boolean;
+      /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
+       *  `.validateConstraint(name)` later. Refused off PG. */
+      notValid?: boolean;
       ifNotExists?: boolean;
       schema?: string;
     },
   ): TableHandle;
   unique(name: string): UniqueRef;
   check(name: string): CheckRef;
-  addCheck(name: string, expr: ExprFn, args?: { ifNotExists?: boolean; schema?: string }): TableHandle;
+  addCheck(
+    name: string,
+    expr: ExprFn,
+    args?: { notValid?: boolean; ifNotExists?: boolean; schema?: string },
+  ): TableHandle;
+  /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
+   *  rows under a weaker lock (records a `validateConstraint` Op). Refused off PG. */
+  validateConstraint(name: string, args?: { ifExists?: boolean; schema?: string }): TableHandle;
   exclusion(name: string): ExclusionRef;
   constraint(name: string): ConstraintRef;
   index(name: string): IndexRef;

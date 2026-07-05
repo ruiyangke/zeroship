@@ -2306,6 +2306,27 @@ impl IrAuthor {
                 }
                 vec![decl.lower_drop_constraint(table, name)]
             }
+            Op::ValidateConstraint { table, name, .. } => {
+                // PostgreSQL-only online constraint adoption — SQLite/MySQL have no
+                // `VALIDATE CONSTRAINT` (validate refuses them; this is the fail-closed
+                // defense-in-depth gate for direct lower callers).
+                self.require_capability_for(
+                    Capability::AlterTableValidateConstraint,
+                    "validateConstraint",
+                )?;
+                // **PR10** — validateConstraint ifExists: presence-only on the name.
+                if let Some(g) = guard {
+                    probe = Some(crate::model::probe::GuardProbe::Constraint {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        name: name.clone(),
+                        direction: g.into(),
+                        expect_kind: None,
+                        expect_definition: None,
+                    });
+                }
+                vec![decl.lower_validate_constraint(table, name)]
+            }
             // §PR6a — the DML ops lower through the creator-DML assembler
             // (`crate::render::dml`) into a `PlanStep::Dml`/`PlanStep::Backfill`, NOT a DDL
             // `Migration`. Each returns early with a `LoweredOp::Dml`.
@@ -2976,7 +2997,14 @@ impl IrAuthor {
                     // lower must not re-apply the old platform-owned-id policy here.
                     continue;
                 }
-                IrConstraintKind::Check { expr } => {
+                IrConstraintKind::Check { expr, not_valid } => {
+                    if not_valid.is_some() {
+                        // NOT VALID is meaningless in CREATE TABLE (validate refuses
+                        // it at the create-time inline constraint); defense-in-depth.
+                        return Err(IrLowerError::UnsupportedOp(
+                            "validated createTable NOT VALID CHECK reached lower",
+                        ));
+                    }
                     if !matches!(self.dialect, SqlDialect::Postgres) {
                         return Err(IrLowerError::UnsupportedOp(
                             "validated non-Postgres createTable CHECK reached lower",
@@ -3002,7 +3030,15 @@ impl IrAuthor {
                     on_update,
                     deferrable,
                     initially_deferred,
+                    not_valid,
                 } => {
+                    if not_valid.is_some() {
+                        // NOT VALID is meaningless in CREATE TABLE (validate refuses
+                        // it at the create-time inline constraint); defense-in-depth.
+                        return Err(IrLowerError::UnsupportedOp(
+                            "validated createTable NOT VALID FOREIGN KEY reached lower",
+                        ));
+                    }
                     if !self.dialect.supports(Capability::TableLevelForeignKey) {
                         return Err(IrLowerError::UnsupportedOp(
                             "validated SQLite createTable table-level FOREIGN KEY reached lower",
@@ -3604,10 +3640,18 @@ impl IrAuthor {
                 on_update,
                 deferrable,
                 initially_deferred,
+                not_valid,
             } => {
                 if columns.is_empty() {
                     return Err(IrLowerError::UnsupportedOp(
                         "validated addConstraint(fk) with no local column reached lower",
+                    ));
+                }
+                if not_valid == &Some(true) && !matches!(self.dialect, SqlDialect::Postgres) {
+                    // NOT VALID is PostgreSQL-only (validate refuses it off PG);
+                    // defense-in-depth for direct lower callers.
+                    return Err(IrLowerError::UnsupportedOp(
+                        "validated non-Postgres addConstraint(fk) NOT VALID reached lower",
                     ));
                 }
                 // **PR10** — the FK references resolve in the SAME effective schema
@@ -3616,7 +3660,7 @@ impl IrAuthor {
                 // **C1** — thread the referential actions into the snapshot so the
                 // imperative `addConstraint(fk)` path renders `ON DELETE …` /
                 // `ON UPDATE …` (parity with the declarative `ref` path).
-                let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+                let mut fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
                     eff_schema,
                     name,
                     columns,
@@ -3628,6 +3672,14 @@ impl IrAuthor {
                     initially_deferred.unwrap_or(false),
                     self.dialect,
                 );
+                if not_valid == &Some(true) {
+                    // Online constraint adoption: append ` NOT VALID` to the FK body
+                    // so existing rows are not scanned at add time. The clause lives
+                    // at the tail of the constraint definition (after the policy
+                    // clauses), where `fk_policy_tail` carries it into the rendered
+                    // `ADD CONSTRAINT … FOREIGN KEY … NOT VALID` (PG only).
+                    fk.definition.push_str(" NOT VALID");
+                }
                 decl.lower_add_fk(table, &fk)
             }
             IrConstraintKind::Unique { columns } => {
@@ -3647,7 +3699,7 @@ impl IrAuthor {
                     "validated addConstraint user PRIMARY KEY reached lower",
                 ));
             }
-            IrConstraintKind::Check { expr } => {
+            IrConstraintKind::Check { expr, not_valid } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
                     return Err(IrLowerError::UnsupportedOp(
                         "validated non-Postgres addConstraint(check) reached lower",
@@ -3656,7 +3708,11 @@ impl IrAuthor {
                 let cname =
                     name.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
                 let rendered = crate::render::dml::render_expr_inline(expr, self.dialect)?;
-                let body = format!("CHECK ({rendered})");
+                let mut body = format!("CHECK ({rendered})");
+                if not_valid == &Some(true) {
+                    // Online constraint adoption (PG only): skip the add-time scan.
+                    body.push_str(" NOT VALID");
+                }
                 // Adding a CHECK validates existing rows and takes a table lock,
                 // so gate it like UNIQUE/PK-style constraint additions.
                 decl.lower_add_constraint(table, &cname, &body, true)
@@ -4605,6 +4661,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::RenameColumn { .. } => "renameColumn",
         Op::AddConstraint { .. } => "addConstraint",
         Op::DropConstraint { .. } => "dropConstraint",
+        Op::ValidateConstraint { .. } => "validateConstraint",
         Op::Insert { .. } => "insert",
         Op::Update { .. } => "update",
         Op::Delete { .. } => "delete",
@@ -5228,7 +5285,7 @@ fn ir_constraint_name_and_kind(
             explicit.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string),
             "PRIMARY KEY".to_string(),
         ),
-        IrConstraintKind::Check { expr } => (
+        IrConstraintKind::Check { expr, .. } => (
             explicit.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string),
             "CHECK".to_string(),
         ),
