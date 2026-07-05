@@ -5254,6 +5254,14 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                 }
             }
             Expr::PgIntervalLiteral { .. } => {}
+            // The Layer-2 dialect() escape (§3.4): collect refs from EVERY present
+            // leg so a derived CHECK name is stable regardless of which dialect the
+            // divergence resolves to at render time.
+            Expr::Dialectal { default, pg, sqlite, mysql } => {
+                for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+                    collect_col_refs(leg, out);
+                }
+            }
         }
     }
 

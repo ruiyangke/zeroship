@@ -35,6 +35,7 @@ export {
   notMembership,
   lit,
   interval,
+  dialect,
   p,
   minValue,
   maxValue,

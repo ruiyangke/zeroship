@@ -3890,6 +3890,64 @@
             "node",
             "value"
           ]
+        },
+        {
+          "description": "**The one Layer-2 portability escape (design §3.4 / §6.4)** — a\nper-dialect VALUE divergence. Each present leg is a full [`Expr`]; the\nengine renders the leg matching the render's TARGET dialect — the\ndialect's own leg if present, else `default`. This is `dialect({ default?,\npg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:\nc.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).\n\nThe node tag on the wire is `\"dialect\"` (`#[serde(rename)]`); the four\nlegs serialize in declaration order (`default, pg, sqlite, mysql`) — the\ncanonical leg order the checksum folds. A leg that is `None` is skipped on\nthe wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.\n\n**Scope math (validate, [`crate::model::validate`]).** The covered dialect\nset is `{legs present} ∪ {all dialects if default present}`; a target with\nNEITHER its own leg NOR a `default` is REFUSED fail-closed\n(`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing\nthe `sqlite` leg with no `default` is fine when targeting PG, refused when\ntargeting SQLite. At least one leg must be present — a legless `dialect({})`\nis malformed on every target (`UNSUPPORTED`), enforced at validate (all\nfour fields are `serde(default)` so an empty node deserializes, then the\nstructural gate refuses it).\n\n**RATCHET OBLIGATION (P11 / design §3.4).** The design counts each\n`dialect()` leg as one of the four ratcheted budget counters. That budget\n/ baseline mechanism is a LATER phase and is NOT YET BUILT (there is no\nbaseline file in-tree). When it lands, the per-leg count of this node must\nbe wired into it. Deferred by design — this additive slice does not gate\non it.",
+          "type": "object",
+          "properties": {
+            "default": {
+              "description": "The fallback leg, rendered for any target dialect that has no explicit\nown leg. Its presence makes the covered set ALL dialects.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pg": {
+              "description": "The PostgreSQL leg.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sqlite": {
+              "description": "The SQLite leg.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mysql": {
+              "description": "The MySQL leg.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "node": {
+              "type": "string",
+              "const": "dialect"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node"
+          ]
         }
       ]
     },

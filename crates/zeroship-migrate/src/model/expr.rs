@@ -11,8 +11,8 @@
 //! The variants are exactly:
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
-//! Cast | PgArrayMembership | PgRegexMatch | PgColumnSize | Extract |
-//! PgIntervalLiteral`.
+//! Cast | Between | Like | DistinctFrom | Agg | PgArrayMembership | PgRegexMatch |
+//! PgColumnSize | Extract | PgIntervalLiteral | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -411,6 +411,50 @@ pub enum Expr {
         /// A strictly-validated interval literal. P1 admits only time-like
         /// `HH:MM:SS[.ffffff]` values such as `00:01:00`.
         value: String,
+    },
+    /// **The one Layer-2 portability escape (design §3.4 / §6.4)** — a
+    /// per-dialect VALUE divergence. Each present leg is a full [`Expr`]; the
+    /// engine renders the leg matching the render's TARGET dialect — the
+    /// dialect's own leg if present, else `default`. This is `dialect({ default?,
+    /// pg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:
+    /// c.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).
+    ///
+    /// The node tag on the wire is `"dialect"` (`#[serde(rename)]`); the four
+    /// legs serialize in declaration order (`default, pg, sqlite, mysql`) — the
+    /// canonical leg order the checksum folds. A leg that is `None` is skipped on
+    /// the wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.
+    ///
+    /// **Scope math (validate, [`crate::model::validate`]).** The covered dialect
+    /// set is `{legs present} ∪ {all dialects if default present}`; a target with
+    /// NEITHER its own leg NOR a `default` is REFUSED fail-closed
+    /// (`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing
+    /// the `sqlite` leg with no `default` is fine when targeting PG, refused when
+    /// targeting SQLite. At least one leg must be present — a legless `dialect({})`
+    /// is malformed on every target (`UNSUPPORTED`), enforced at validate (all
+    /// four fields are `serde(default)` so an empty node deserializes, then the
+    /// structural gate refuses it).
+    ///
+    /// **RATCHET OBLIGATION (P11 / design §3.4).** The design counts each
+    /// `dialect()` leg as one of the four ratcheted budget counters. That budget
+    /// / baseline mechanism is a LATER phase and is NOT YET BUILT (there is no
+    /// baseline file in-tree). When it lands, the per-leg count of this node must
+    /// be wired into it. Deferred by design — this additive slice does not gate
+    /// on it.
+    #[serde(rename = "dialect")]
+    Dialectal {
+        /// The fallback leg, rendered for any target dialect that has no explicit
+        /// own leg. Its presence makes the covered set ALL dialects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Box<Expr>>,
+        /// The PostgreSQL leg.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pg: Option<Box<Expr>>,
+        /// The SQLite leg.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sqlite: Option<Box<Expr>>,
+        /// The MySQL leg.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mysql: Option<Box<Expr>>,
     },
 }
 
