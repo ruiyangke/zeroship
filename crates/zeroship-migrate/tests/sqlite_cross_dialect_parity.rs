@@ -167,15 +167,6 @@ fn identity_id() -> IrColumn {
     id
 }
 
-fn pk_id() -> IrConstraint {
-    IrConstraint {
-        name: None,
-        kind: IrConstraintKind::Pk {
-            columns: vec!["id".to_string()],
-        },
-    }
-}
-
 fn positive_value_check() -> Expr {
     Expr::BinOp {
         op: BinaryOp::Ge,
@@ -242,8 +233,8 @@ fn common_ops() -> Vec<Op> {
                     false,
                 ),
             ],
-            primary_key: None,
-            constraints: vec![pk_id()],
+            primary_key: Some(vec!["id".to_string()]),
+            constraints: Vec::new(),
             indexes: Vec::new(),
 
         partition_by: None,
@@ -269,8 +260,8 @@ fn common_ops() -> Vec<Op> {
                 total,
                 order_status,
             ],
-            primary_key: None,
-            constraints: vec![pk_id()],
+            primary_key: Some(vec!["id".to_string()]),
+            constraints: Vec::new(),
             indexes: vec![IrIndex {
                 name: Some("orders_account_status_active_idx".to_string()),
                 columns: vec![

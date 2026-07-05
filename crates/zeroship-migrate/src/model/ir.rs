@@ -1368,11 +1368,6 @@ pub struct ExclusionElement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum IrConstraintKind {
-    /// PRIMARY KEY over the named columns.
-    Pk {
-        /// The key columns.
-        columns: Vec<String>,
-    },
     /// FOREIGN KEY referencing `(referencesTable.referencesColumns)`.
     Fk {
         /// The referencing columns.
@@ -3813,19 +3808,12 @@ impl Op {
             Op::CreateTable {
                 columns,
                 primary_key,
-                constraints,
                 partition_by,
                 indexes,
                 ..
             } => (
                 "createTable",
-                Self::create_table_variant(
-                    columns,
-                    primary_key.as_deref(),
-                    constraints,
-                    partition_by,
-                    indexes,
-                ),
+                Self::create_table_variant(columns, primary_key.as_deref(), partition_by, indexes),
             ),
             Op::CreatePartition { .. } => ("createPartition", "base"),
             Op::DetachPartition { .. } => ("detachPartition", "base"),
@@ -4007,7 +3995,6 @@ impl Op {
     fn create_table_variant(
         columns: &[IrColumn],
         primary_key: Option<&[String]>,
-        constraints: &[IrConstraint],
         partition_by: &Option<PartitionSpec>,
         indexes: &[IrIndex],
     ) -> &'static str {
@@ -4025,12 +4012,7 @@ impl Op {
         let has_identity_always = columns
             .iter()
             .any(|column| matches!(column.identity, Some(identity) if identity.always));
-        let pk_cols = primary_key.or_else(|| {
-            constraints.iter().find_map(|constraint| match &constraint.kind {
-                IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
-                _ => None,
-            })
-        });
+        let pk_cols = primary_key;
         let has_nonportable_by_default_identity = columns.iter().any(|column| {
             matches!(column.identity, Some(identity) if !identity.always)
                 && !matches!(pk_cols, Some(cols) if cols.len() == 1 && cols[0] == column.name)
@@ -4091,7 +4073,6 @@ impl Op {
     fn add_constraint_variant(kind: &IrConstraintKind) -> &'static str {
         match kind {
             IrConstraintKind::Check { .. } => "check",
-            IrConstraintKind::Pk { .. } => "pk",
             IrConstraintKind::Fk { columns, .. } if columns.is_empty() => "fkNoLocalColumn",
             IrConstraintKind::Exclusion { .. } => "exclusion",
             // `NOT VALID` online adoption is PostgreSQL-only. It takes precedence

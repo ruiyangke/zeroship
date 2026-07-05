@@ -424,46 +424,6 @@ async fn platform_null_primary_key_lowers_and_applies_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// HIGH-fix fail-closed: a table-level PRIMARY KEY constraint is a HARD error,
-/// never a silent no-op. Top-level `primaryKey` is policy-gated separately.
-#[compio::test]
-async fn create_table_user_primary_key_is_hard_error_on_pg() {
-    let conn = pg().await;
-    let cfg = cfg_for(&token());
-    setup(&conn, &cfg).await;
-
-    let ir = r#"{"ir_version":1,"name":"create_pk","ops":[
-        {"op":"createTable","name":"pk_tbl","columns":[
-            {"name":"a","type":"text","nullable":false},
-            {"name":"b","type":"text","nullable":false}
-        ],
-        "constraints":[
-            {"kind":{"kind":"pk","columns":["a","b"]}}
-        ]}
-    ]}"#;
-    let policy = PolicyProfile::platform();
-    let err = zeroship_migrate::model::load::load_ir_document(
-        ir,
-        APP,
-        zeroship_migrate::model::validate::Dialect::Postgres,
-        &registry(&[]),
-        None,
-        Some(&policy),
-    )
-    .expect_err("a table-level PRIMARY KEY must validate-refuse, not silently no-op");
-    let IrLoadError::Validate(err) = err else {
-        panic!("expected validate error for user PRIMARY KEY, got {err:?}");
-    };
-    assert_eq!(err.code, CODE_UNSUPPORTED);
-    assert_eq!(err.kind, Some(UnsupportedKind::Op));
-    assert!(
-        err.reason.contains("primary key") || err.reason.contains("primary keys"),
-        "the error must name the unsupported PRIMARY KEY (got: {err:?})"
-    );
-
-    teardown(&conn, &cfg).await;
-}
-
 /// Slice A: current-AST table-level CHECK constraints render on PG both in
 /// createTable and stand-alone addConstraint, and apply to the live catalog.
 #[compio::test]

@@ -32,7 +32,6 @@ export const DIALECT_TABLE: readonly DispositionRow[] = [
   { kind: "addConstraint", variant: "fkNonId", postgres: "portable", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "addConstraint", variant: "fkNotValid", postgres: "portable", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "addConstraint", variant: "fkSimple", postgres: "portable", sqlite: "portable", mysql: "portable" },
-  { kind: "addConstraint", variant: "pk", postgres: "unsupported", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "addConstraint", variant: "unique", postgres: "portable", sqlite: "portable", mysql: "portable" },
   { kind: "alterRole", variant: "base", postgres: "vendor", sqlite: "unsupported", mysql: "unsupported" },
   { kind: "alterSequence", variant: "base", postgres: "portable", sqlite: "unsupported", mysql: "unsupported" },

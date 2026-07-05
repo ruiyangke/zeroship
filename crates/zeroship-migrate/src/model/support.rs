@@ -188,7 +188,6 @@ pub enum SupportTier {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
-    UserPrimaryKey,
     PartialIndex,
     IndexInclude,
     IndexStorageParams,
@@ -323,11 +322,6 @@ pub(crate) const CAP_RAW_MATERIALIZED_VIEW: &[VendorCapability] = &[
 
 const UNSUPPORTED: &str = crate::model::validate::CODE_UNSUPPORTED;
 
-const UNSUPPORTED_ALL_PRIMARY_KEY: DialectSupport = DialectSupport::unsupported_all(
-    UNSUPPORTED,
-    "standalone/table-level primary key constraints are deferred; createTable.primaryKey is validated by the active table-shape policy",
-);
-
 const PG_ONLY_TABLE_LEVEL_CHECK: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
     "table-level CHECK expression rendering is PostgreSQL-only in the current engine",
@@ -422,7 +416,6 @@ const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::postgres_only(
 );
 
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
     FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
     FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
@@ -552,7 +545,6 @@ pub(crate) const RENAME_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::n
 )];
 
 pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
     FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
     FeatureSupport::new(Feature::CompositeForeignKey, PG_ONLY_COMPOSITE_FK),
     FeatureSupport::new(Feature::NonIdForeignKey, PG_ONLY_NON_ID_FK),
