@@ -206,6 +206,34 @@ pub enum ExtractField {
     Day,
 }
 
+/// The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).
+///
+/// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,
+/// SQLite, and MySQL (only the surrounding identifier quoting differs), so there
+/// is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum AggFunc {
+    /// `count(...)` (or `count(*)` when the [`Expr::Agg`] `arg` is `None`).
+    Count,
+    /// `sum(<arg>)`.
+    Sum,
+    /// `avg(<arg>)`.
+    Avg,
+    /// `min(<arg>)`.
+    Min,
+    /// `max(<arg>)`.
+    Max,
+}
+
+/// `skip_serializing_if` predicate: a `false` bool emits NOTHING on the wire, so a
+/// non-`distinct` [`Expr::Agg`] serializes byte-minimally (design §5 item 6). The
+/// bool `default`s to `false` on deserialize, so the round-trip is faithful.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,
 /// camel-cased (`{"node":"colRef","name":"first"}`). NO `untagged`, NO `flatten`
 /// — same discipline as [`Op`](crate::model::ir::Op), so schemars derives a clean
@@ -321,6 +349,29 @@ pub enum Expr {
         left: Box<Expr>,
         /// Right operand.
         right: Box<Expr>,
+    },
+    /// A **PORTABLE** aggregate function application (`c.agg.count()`,
+    /// `c.agg.sum(e)`, `c.agg.count(e, { distinct: true })` — design §3.4/§3.6).
+    ///
+    /// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and
+    /// MySQL (only identifier quoting differs), so there is NO dialect gate. `arg:
+    /// None` with `func: Count` is `COUNT(*)`; a present `arg` renders
+    /// `<func>(<arg>)`, and `distinct` inserts `DISTINCT`
+    /// (`count(DISTINCT <arg>)`).
+    ///
+    /// NB: the "an aggregate is only legal in a grouped/SELECT context" check is
+    /// coupled with the Phase-2 view/select builder (`AGG_POSITION_INVALID`) — this
+    /// additive slice accepts the node STRUCTURALLY only (design §3.4/§5 item 6).
+    Agg {
+        /// The aggregate function.
+        func: AggFunc,
+        /// The single argument expression. `None` + `func: Count` = `COUNT(*)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arg: Option<Box<Expr>>,
+        /// `DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the
+        /// wire when `false` so the node serializes byte-minimally.
+        #[serde(default, skip_serializing_if = "is_false")]
+        distinct: bool,
     },
     /// **PG-ONLY** text-array membership rendered exactly as
     /// `(<expr> = ANY (ARRAY['a'::text, ...]))` or
