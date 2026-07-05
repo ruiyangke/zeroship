@@ -18,7 +18,7 @@ export function up() {
   });
 
   table("posts").index("posts_author_status_idx").add({
-    columns: ["author_id", "status"],
+    on: ["author_id", "status"],
   });
 
   table("posts").withVersioning(false);
