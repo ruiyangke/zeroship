@@ -93,14 +93,32 @@
       ]
     },
     {
-      "op": "enableRls",
-      "table": "app_secrets",
+      "op": "attachPartition",
+      "parent": "events",
+      "name": "events_2026_11",
+      "bound": {
+        "kind": "range",
+        "from": [
+          {
+            "kind": "string",
+            "value": "2026-11-01T00:00:00Z"
+          }
+        ],
+        "to": [
+          {
+            "kind": "string",
+            "value": "2026-12-01T00:00:00Z"
+          }
+        ]
+      },
       "schema": "zeroship"
     },
     {
-      "op": "forceRls",
+      "op": "setRls",
       "table": "app_secrets",
-      "schema": "zeroship"
+      "schema": "zeroship",
+      "enabled": true,
+      "forced": true
     },
     {
       "op": "createPolicy",
@@ -169,14 +187,11 @@
       "ifExists": true
     },
     {
-      "op": "disableRls",
+      "op": "setRls",
       "table": "app_secrets",
-      "schema": "zeroship"
-    },
-    {
-      "op": "noForceRls",
-      "table": "app_secrets",
-      "schema": "zeroship"
+      "schema": "zeroship",
+      "enabled": false,
+      "forced": false
     },
     {
       "op": "createFunction",

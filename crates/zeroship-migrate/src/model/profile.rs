@@ -349,6 +349,9 @@ pub struct PolicyCapabilities {
     /// RLS enable/force/disable/no-force.
     #[serde(default)]
     pub rls: bool,
+    /// PostgreSQL partition attach.
+    #[serde(default)]
+    pub partition: bool,
     /// `CREATE/DROP POLICY`.
     #[serde(default)]
     pub policy: bool,
@@ -394,6 +397,7 @@ impl PolicyCapabilities {
             },
             grant: caps.allow_grant,
             rls: caps.allow_rls,
+            partition: caps.allow_partition,
             policy: caps.allow_policy,
             function: caps.allow_function,
             raw_sql: caps.allow_raw_sql,
@@ -414,6 +418,7 @@ impl PolicyCapabilities {
             allow_role: self.role.allow,
             allow_grant: self.grant,
             allow_rls: self.rls,
+            allow_partition: self.partition,
             allow_policy: self.policy,
             allow_function: self.function,
             allow_raw_sql: self.raw_sql,
@@ -435,6 +440,11 @@ impl PolicyCapabilities {
             role: RoleCapabilityConfig::meet_ceiling_draft(&ceiling.role, &draft.role)?,
             grant: meet_bool_permission("capabilities.grant", ceiling.grant, draft.grant)?,
             rls: meet_bool_permission("capabilities.rls", ceiling.rls, draft.rls)?,
+            partition: meet_bool_permission(
+                "capabilities.partition",
+                ceiling.partition,
+                draft.partition,
+            )?,
             policy: meet_bool_permission("capabilities.policy", ceiling.policy, draft.policy)?,
             function: meet_bool_permission(
                 "capabilities.function",
@@ -952,6 +962,7 @@ const POLICY_KNOB_SEMANTICS: &[PolicyKnobSemantics] = &[
     PolicyKnobSemantics { key: "capabilities.role.attrs", polarity: PolicyPolarity::Permission, meet: PolicyMeet::Intersection },
     PolicyKnobSemantics { key: "capabilities.grant", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
     PolicyKnobSemantics { key: "capabilities.rls", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
+    PolicyKnobSemantics { key: "capabilities.partition", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
     PolicyKnobSemantics { key: "capabilities.policy", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
     PolicyKnobSemantics { key: "capabilities.function", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
     PolicyKnobSemantics { key: "capabilities.raw_sql", polarity: PolicyPolarity::Permission, meet: PolicyMeet::And },
@@ -1382,6 +1393,9 @@ impl SealedEffectiveProfile {
         }
         if caps.rls {
             return Some("rls");
+        }
+        if caps.partition {
+            return Some("partition");
         }
         if caps.policy {
             return Some("policy");

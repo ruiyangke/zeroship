@@ -491,6 +491,16 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         },
     ));
     c.push((
+        "attachPartition",
+        "base",
+        Op::AttachPartition {
+            parent: "t".into(),
+            name: "p".into(),
+            bound: PartitionBounds::Default,
+            schema: None,
+        },
+    ));
+    c.push((
         "detachPartition",
         "base",
         Op::DetachPartition {
@@ -637,10 +647,16 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             from: vec!["r".into()],
         },
     ));
-    c.push(("enableRls", "base", Op::EnableRls { table: "t".into(), schema: None }));
-    c.push(("forceRls", "base", Op::ForceRls { table: "t".into(), schema: None }));
-    c.push(("disableRls", "base", Op::DisableRls { table: "t".into(), schema: None }));
-    c.push(("noForceRls", "base", Op::NoForceRls { table: "t".into(), schema: None }));
+    c.push((
+        "setRls",
+        "base",
+        Op::SetRls {
+            table: "t".into(),
+            schema: None,
+            enabled: Some(true),
+            forced: Some(true),
+        },
+    ));
     c.push((
         "createPolicy",
         "base",
@@ -1081,13 +1097,13 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     let corpus = corpus();
 
     // 1. Exhaustiveness over op-KINDS: the corpus covers exactly the schema's Op
-    //    discriminants (the 55-op wire contract). No op silently uncovered.
+    //    discriminants (the 53-op wire contract). No op silently uncovered.
     let corpus_kinds: BTreeSet<String> = corpus.iter().map(|(k, _, _)| (*k).to_string()).collect();
     let schema_kinds = schema_op_tags();
     assert_eq!(
         schema_kinds.len(),
-        55,
-        "the wire contract must still carry the closed 55-op discriminant set"
+        53,
+        "the wire contract must still carry the closed 53-op discriminant set"
     );
     assert_eq!(
         corpus_kinds, schema_kinds,

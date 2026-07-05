@@ -346,7 +346,7 @@ fn runtime_metadata_from_ops(ops: &[Op]) -> BTreeMap<String, RuntimeCollectionMe
             Op::DropPartition { name, .. } => {
                 metadata.remove(name);
             }
-            Op::CreatePartition { .. } | Op::DetachPartition { .. } => {}
+            Op::CreatePartition { .. } | Op::AttachPartition { .. } | Op::DetachPartition { .. } => {}
             Op::RenameTable { table, to, .. } => {
                 if let Some(table_meta) = metadata.remove(table) {
                     metadata.insert(to.clone(), table_meta);

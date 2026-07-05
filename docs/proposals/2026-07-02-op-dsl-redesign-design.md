@@ -186,16 +186,16 @@ lowered IR op (a non-operator importing from `/pg` is refused at apply regardles
 // portable creator core — renders on PG + SQLite + MySQL
 import { table, view, index, enumType, foreignKey, check, unique, comment } from "@zeroship/migrate";
 // operator-only vendor layer (PostgreSQL depth)
-import { schema, role, domain, sequence, policy, enableRls, grant, createFunction, createTrigger, extension, raw } from "@zeroship/migrate/pg";
+import { schema, role, domain, sequence, policy, grant, createFunction, createTrigger, extension, raw } from "@zeroship/migrate/pg";
 ```
 
 - **`@zeroship/migrate` value exports (portable core):** `table`, `view`, `index`, `enumType`,
   `foreignKey`, `check`, `unique`, `comment`, plus the column-type lexicon `t` (the `fromDb`
   db-lexicon bridge) and `lintDeterminism`. Nothing else. There is no `op` object.
 - **`@zeroship/migrate/pg` value exports (operator vendor):** `schema`, `role`, `domain`,
-  `sequence`, `policy`, `enableRls`, `disableRls`, `grant`, `revoke`, `grantRole`, `revokeRole`,
-  `defaultPrivileges`, `createFunction`, `createTrigger`, `extension`, `raw`, `rawSelect`. There
-  is no `pg` object.
+  `sequence`, `policy`, `grant`, `revoke`, `grantRole`, `revokeRole`, `defaultPrivileges`,
+  `createFunction`, `createTrigger`, `extension`, `raw`, `rawSelect`. RLS is recorded through the
+  `pgTable(...).setRls(...)` handle method, not a free `/pg` export. There is no `pg` object.
 - **Two reserved-word renames** (the only cost of dropping the namespace): `enum` → **`enumType`**
   (core), `function` → **`createFunction`** (vendor). Every other kind imports as its bare noun.
 - The reference's export table, op inventory, and expression-node inventory are **generated
@@ -640,7 +640,7 @@ implicit.
 <!-- Revised 2026-07-02 (operator decision + design-critic pass): the TWO-LAYER model governs
      dialect-divergent VALUE positions (expressions, column types, defaults, index methods, storage
      options) — NOT whole ops. Op-level dialect availability stays the separate op-capability Tier
-     (§5.2 `Tier{Core,Vendor}`, unchanged): a whole PG-only op like `createPolicy`/`enableRls`/
+     (§5.2 `Tier{Core,Vendor}`, unchanged): a whole PG-only op like `createPolicy`/`setRls`/
      `grant`/`createFunction`/`domain` is not a "value with legs" and cannot be wrapped by `dialect`.
      The single-leg collapse below applies ONLY to PG-only VALUE nodes. The one combinator is
      `dialect({...})` (the earlier `.on()` fluent form was dropped — it and the map are isomorphic;

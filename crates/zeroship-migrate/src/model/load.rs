@@ -148,11 +148,12 @@ pub(crate) fn op_created_table(op: &Op) -> Option<&str> {
 /// checkable target rather than silently passing as an owned op.
 #[must_use]
 fn op_target_table(op: &Op) -> Option<&str> {
-    match op {
-        Op::CreateTable { name, .. } => Some(name),
-        Op::CreatePartition { of, .. }
-        | Op::DetachPartition { parent: of, .. }
-        | Op::DropPartition { parent: of, .. } => Some(of),
+        match op {
+            Op::CreateTable { name, .. } => Some(name),
+            Op::CreatePartition { of, .. }
+            | Op::AttachPartition { parent: of, .. }
+            | Op::DetachPartition { parent: of, .. }
+            | Op::DropPartition { parent: of, .. } => Some(of),
         Op::SetTableOptions { table, .. } => Some(table),
         // The ownership gate checks the EXISTING (old) table — a rename of a table
         // the deploying app does not own is refused on the source name.
@@ -180,10 +181,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         // against their table; the database-/role-/schema-level vendor ops have no
         // table to check (they are operator-gated by the capability gate, not the
         // per-table ownership pass).
-        Op::EnableRls { table, .. }
-        | Op::ForceRls { table, .. }
-        | Op::DisableRls { table, .. }
-        | Op::NoForceRls { table, .. }
+        Op::SetRls { table, .. }
         | Op::CreatePolicy { table, .. }
         | Op::DropPolicy { table, .. }
         | Op::CreateTrigger { table, .. }
@@ -686,8 +684,7 @@ mod tests {
                 {"name":"route","type":"text","nullable":false},
                 {"name":"target","type":"text","nullable":false}
             ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]},
-            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
-            {"op":"forceRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true,"forced":true},
             {"op":"createPolicy","name":"tenant_isolation","table":"platform_registry",
                 "schema":"zeroship","forCmd":"all",
                 "using":{"node":"literal","value":true}},
@@ -722,7 +719,7 @@ mod tests {
 
     #[test]
     fn load_refuses_unknown_table_structural_attach_fail_closed() {
-        let ops = r#"[{"op":"enableRls","table":"never_declared","schema":"zeroship"}]"#;
+        let ops = r#"[{"op":"setRls","table":"never_declared","schema":"zeroship","enabled":true}]"#;
         let bytes = ir_json(ops, "");
         let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zeroship".into()]);
         let profile = platform_profile();

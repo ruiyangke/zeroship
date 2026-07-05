@@ -500,7 +500,7 @@ fn op_subject(op: &Op) -> String {
         | Op::CreatePartition { name, .. }
         | Op::DropPartition { name, .. }
         | Op::DropTable { table: name, .. } => quote_dotted(&[name]),
-        Op::DetachPartition { parent, name, .. } => {
+        Op::AttachPartition { parent, name, .. } | Op::DetachPartition { parent, name, .. } => {
             format!("{} → {}", quote_dotted(&[parent]), quote_dotted(&[name]))
         }
         Op::SetTableOptions { table, .. } => quote_dotted(&[table]),
@@ -564,10 +564,7 @@ fn op_subject(op: &Op) -> String {
         | Op::DropFunction { name, .. } => quote_dotted(&[name]),
         Op::DropOwnedBy { roles } => quote_dotted(&[&roles.join(", ")]),
         Op::Grant { .. } | Op::Revoke { .. } => quote_dotted(&["<grant>"]),
-        Op::EnableRls { table, .. }
-        | Op::ForceRls { table, .. }
-        | Op::DisableRls { table, .. }
-        | Op::NoForceRls { table, .. } => quote_dotted(&[table]),
+        Op::SetRls { table, .. } => quote_dotted(&[table]),
         Op::CreatePolicy { name, table, .. }
         | Op::DropPolicy { name, table, .. }
         | Op::CreateTrigger { name, table, .. }

@@ -128,7 +128,7 @@ export function pgTableBoundary(): void {
   table("audit_events").dropTrigger({ name: "audit_events_trg", ifExists: true });
 
   // @ts-expect-error — RLS is a PG table method and is not on portable `table()`.
-  table("secrets").enableRowLevelSecurity();
+  table("secrets").setRls({ enabled: true });
 
   // @ts-expect-error — exclusion constraints are a PG table method and are not on portable `table()`.
   table("bookings").exclusion("bookings_no_overlap");
@@ -157,12 +157,18 @@ export function pgTableBoundary(): void {
   pgTable("secrets").dropPolicy({ name: "tenant_only", ifExists: true });
 
   pgTable("secrets")
-    .enableRowLevelSecurity()
-    .forceRowLevelSecurity()
+    .setRls({ enabled: true, forced: true })
     .policy("tenant_only").create({ using: (c) => c("tenant_id").isNotNull() })
     .policy("tenant_only").drop({ ifExists: true })
-    .disableRowLevelSecurity()
-    .noForceRowLevelSecurity();
+    .setRls({ enabled: false, forced: false });
+  // @ts-expect-error — deleted RLS method; use `.setRls({ enabled: true })`.
+  pgTable("secrets").enableRowLevelSecurity();
+  // @ts-expect-error — deleted RLS method; use `.setRls({ forced: true })`.
+  pgTable("secrets").forceRowLevelSecurity();
+  // @ts-expect-error — deleted RLS method; use `.setRls({ enabled: false })`.
+  pgTable("secrets").disableRowLevelSecurity();
+  // @ts-expect-error — deleted RLS method; use `.setRls({ forced: false })`.
+  pgTable("secrets").noForceRowLevelSecurity();
   pgTable("bookings").exclusion("bookings_no_overlap").add({
     using: "gist",
     elements: [{ target: "room_id", operator: "=" }],
@@ -173,6 +179,10 @@ export function pgTableBoundary(): void {
   // @ts-expect-error — deleted direct PG partition detach method; use `.partition(name).detach(...)`.
   pgTable("events").detachPartition("events_2026_05", { concurrently: true });
   pgTable("events").partition("events_2026_05").detach({ concurrently: true });
+  pgTable("events").partition("events_2026_06").attach({
+    from: ["2026-06-01T00:00:00Z"],
+    to: ["2026-07-01T00:00:00Z"],
+  });
 }
 
 export function viewGrammar(): void {
