@@ -705,6 +705,38 @@ async fn apply_fixture(
         .expect("live MySQL apply succeeds")
 }
 
+async fn lower_plan_and_apply_mysql(
+    backend: &MysqlBackend,
+    cfg: &ExecutorConfig,
+    ir: &str,
+    reg: &std::collections::BTreeMap<String, String>,
+) -> zeroship_migrate::engine::DeclarativeDeployOutcome {
+    let document = zeroship_migrate::model::load::load_ir_document(
+        ir,
+        OWNER,
+        zeroship_migrate::model::validate::Dialect::Mysql,
+        reg,
+        None,
+        None,
+    )
+    .expect("load gate");
+    let author = IrAuthor::new(cfg.project_schema.clone(), OWNER, SqlDialect::Mysql);
+    let plan = author
+        .lower_plan(&document, &LiveSchema::default())
+        .expect("lower the IR plan on MySQL");
+    MigrationEngine::new()
+        .apply_plan(
+            &plan.steps,
+            Approval::None,
+            backend,
+            cfg,
+            OWNER,
+            LockMode::Acquire,
+        )
+        .await
+        .expect("apply the authored DML plan on MySQL")
+}
+
 async fn query(
     backend: &MysqlBackend,
     sql: &str,
@@ -1450,6 +1482,95 @@ fn live_journal_records_completed_and_second_apply_skips() {
             "second apply must not re-journal/re-execute"
         );
         println!("mysql_jsdriver_e2e journal skip assertions ran");
+    }));
+}
+
+#[test]
+fn in_list_predicates_apply_identically_on_mysql() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "inlist", |backend, cfg, _account| Box::pin(async move {
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (\
+                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,\
+                    status VARCHAR(64) NOT NULL,\
+                    in_match VARCHAR(8) NOT NULL,\
+                    not_in_match VARCHAR(8) NOT NULL,\
+                    empty_in_match VARCHAR(8) NOT NULL,\
+                    empty_not_in_match VARCHAR(8) NOT NULL\
+                )",
+                qi(&cfg.project_schema),
+                qi("inlist_rows")
+            ))
+            .await
+            .expect("create MySQL inList proof table");
+
+        let reg = std::collections::BTreeMap::from([("inlist_rows".to_string(), OWNER.to_string())]);
+        let seed = r#"{"ir_version":1,"name":"seed_inlist_rows","ops":[
+            {"op":"insert","table":"inlist_rows",
+             "columns":["status","in_match","not_in_match","empty_in_match","empty_not_in_match"],
+             "rows":[
+                ["active","no","no","no","no"],
+                ["trial","no","no","no","no"],
+                ["deleted","no","no","no","no"],
+                ["archived","no","no","no","no"]
+             ]}
+        ]}"#;
+        lower_plan_and_apply_mysql(backend, cfg, seed, &reg).await;
+
+        let updates = r#"{"ir_version":1,"name":"update_inlist_rows","ops":[
+            {"op":"update","table":"inlist_rows",
+             "set":{"in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["active","trial"],"negated":false}},
+            {"op":"update","table":"inlist_rows",
+             "set":{"not_in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["deleted","archived"],"negated":true}},
+            {"op":"update","table":"inlist_rows",
+             "set":{"empty_in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":false}},
+            {"op":"update","table":"inlist_rows",
+             "set":{"empty_not_in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":true}}
+        ]}"#;
+        lower_plan_and_apply_mysql(backend, cfg, updates, &reg).await;
+
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT status, in_match, not_in_match, empty_in_match, empty_not_in_match \
+                 FROM {}.{} ORDER BY status",
+                qi(&cfg.project_schema),
+                qi("inlist_rows")
+            ),
+            &[],
+        )
+        .await;
+        let got = rows
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    value_as_string(row.get("status")),
+                    value_as_string(row.get("in_match")),
+                    value_as_string(row.get("not_in_match")),
+                    value_as_string(row.get("empty_in_match")),
+                    value_as_string(row.get("empty_not_in_match")),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                ("active".into(), "yes".into(), "yes".into(), "no".into(), "yes".into()),
+                ("archived".into(), "no".into(), "no".into(), "no".into(), "yes".into()),
+                ("deleted".into(), "no".into(), "no".into(), "no".into(), "yes".into()),
+                ("trial".into(), "yes".into(), "yes".into(), "no".into(), "yes".into()),
+            ],
+            "MySQL inList/notIn/empty-list predicate matrix"
+        );
     }));
 }
 
