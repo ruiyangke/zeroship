@@ -1060,30 +1060,13 @@ export interface TableHandle {
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects
   column(name: string): ColumnRef;
+  // §3.2 (P1: one grammar, one spelling) — the selector form is THE grammar for
+  // named constraints. The `addForeignKey`/`addCheck` verb twins are DELETED;
+  // `foreignKey(name).add(...)`/`check(name).add(...)` are the sole spelling
+  // (and the sole public writers of the `addConstraint` fk/check payload).
   foreignKey(name: string): ForeignKeyRef;
-  addForeignKey(
-    name: string,
-    args: {
-      columns: string[];
-      references: ForeignKeyReference;
-      onDelete?: RefAction;
-      onUpdate?: RefAction;
-      deferrable?: boolean;
-      initiallyDeferred?: boolean;
-      /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
-       *  `.validateConstraint(name)` later. Refused off PG. */
-      notValid?: boolean;
-      ifNotExists?: boolean;
-      schema?: string;
-    },
-  ): TableHandle;
   unique(name: string): UniqueRef;
   check(name: string): CheckRef;
-  addCheck(
-    name: string,
-    expr: ExprFn,
-    args?: { notValid?: boolean; ifNotExists?: boolean; schema?: string },
-  ): TableHandle;
   /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
    *  rows under a weaker lock (records a `validateConstraint` Op). Refused off PG. */
   validateConstraint(name: string, args?: { ifExists?: boolean; schema?: string }): TableHandle;

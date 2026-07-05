@@ -57,7 +57,7 @@ export function antiRotMigration(): void {
     columns: ["author_id"],
     references: { table: "another_missing_table", columns: ["id"] },
   });
-  table("nonexistent_table").addForeignKey("composite_fk", {
+  table("nonexistent_table").foreignKey("composite_fk").add({
     columns: ["tenant_id", "author_id"],
     references: { schema: "ghost", table: "another_missing_table", columns: ["tenant_id", "author_id"] },
   });
@@ -205,7 +205,8 @@ export function checkExpressionSurfaceTypechecks(): void {
       check("visible_when_active", (c) => and(c("active"), not(c("visible").isNull()))),
     ],
   });
-  table("oauth_authorization_codes").addCheck("active_is_bool", (c) => c("active").isNotNull(), {
+  table("oauth_authorization_codes").check("active_is_bool").add({
+    expr: (c) => c("active").isNotNull(),
     ifNotExists: true,
   });
 }

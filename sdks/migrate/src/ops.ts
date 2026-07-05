@@ -2914,7 +2914,12 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       };
     },
 
-    // §3.3 — constraints
+    // §3.2 — constraints. Selector form is THE grammar (P1: one grammar, one
+    // spelling). The `addForeignKey`/`addCheck` verb twins are DELETED — after
+    // this slice `foreignKey(name).add`/`check(name).add` are the SOLE public
+    // writers of the `addConstraint` fk/check payload (the P1 tier-2 dup —
+    // `addConstraint` once had two public writers per slot — is collapsed; the
+    // census assertions themselves are a later slice).
     foreignKey(fkName): ForeignKeyRef {
       requireString(fkName, ".foreignKey(name)");
       const id = registerSelector("foreignKey", fkName);
@@ -2925,11 +2930,6 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
           return handle;
         },
       };
-    },
-    addForeignKey(fkName, args) {
-      requireString(fkName, ".addForeignKey(name, args)");
-      recordAddForeignKey(name, fkName, { ...args, schema: pickSchema(args, dflt) });
-      return handle;
     },
     unique(uqName): UniqueRef {
       requireString(uqName, ".unique(name)");
@@ -2952,16 +2952,6 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
           return handle;
         },
       };
-    },
-    addCheck(ckName, expr, args = {}) {
-      requireString(ckName, ".addCheck(name, expr)");
-      recordAddCheck(name, ckName, {
-        expr,
-        notValid: args.notValid,
-        ifNotExists: args.ifNotExists,
-        schema: pickSchema(args, dflt),
-      });
-      return handle;
     },
     validateConstraint(vcName, args = {}) {
       requireString(vcName, ".validateConstraint(name)");

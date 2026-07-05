@@ -300,7 +300,7 @@ export function up() {
     },
     primaryKey: null,
   });
-  table("app_oauth_clients", { schema: "zeroship" }).addForeignKey("app_oauth_clients_client_id_fkey", {
+  table("app_oauth_clients", { schema: "zeroship" }).foreignKey("app_oauth_clients_client_id_fkey").add({
     columns: ["client_id"],
     references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" },
     onDelete: "cascade",
@@ -322,7 +322,7 @@ export function up() {
     },
     primaryKey: null,
   });
-  table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+  table("billing_line_provider_refs", { schema: "zeroship" }).foreignKey("billing_line_provider_refs_line_fk").add({
     columns: ["invoice_id", "app_id", "segment_no"],
     references: {
       table: "invoice_lines",
@@ -417,10 +417,9 @@ export function up() {
     ],
   });
 
-  table("expr_surface", { schema: "zeroship" }).addCheck(
-    "expr_amount_nonnegative",
-    (c) => c("amount_cents").ge(0),
-  );
+  table("expr_surface", { schema: "zeroship" }).check("expr_amount_nonnegative").add({
+    expr: (c) => c("amount_cents").ge(0),
+  });
 
   // Partial index whose predicate is a notMembership (<> ALL) — mirrors the
   // platform wake_jobs partial indexes.

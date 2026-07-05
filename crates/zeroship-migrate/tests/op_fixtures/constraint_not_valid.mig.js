@@ -1,6 +1,6 @@
 // op.* migration fixture — PostgreSQL online constraint adoption:
-// addForeignKey / addCheck with `notValid: true` (rendered `ADD CONSTRAINT …
-// NOT VALID`), then a later `validateConstraint(name)` (rendered `ALTER TABLE …
+// foreignKey().add / check().add with `notValid: true` (rendered `ADD CONSTRAINT
+// … NOT VALID`), then a later `validateConstraint(name)` (rendered `ALTER TABLE …
 // VALIDATE CONSTRAINT …`). Gates the new `not_valid` FK/CHECK facet + the new
 // `Op::ValidateConstraint` through the REAL recorder → frozen wire ops.
 import { table } from "@zeroship/migrate";
@@ -10,7 +10,7 @@ export const name = "constraint_not_valid";
 export function up() {
   const lineItems = table("line_items");
   // FK added NOT VALID — skip the add-time full-table scan.
-  lineItems.addForeignKey("line_items_order_fkey", {
+  lineItems.foreignKey("line_items_order_fkey").add({
     columns: ["order_id"],
     references: { table: "orders", columns: ["id"] },
     notValid: true,

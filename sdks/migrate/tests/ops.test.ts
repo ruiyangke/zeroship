@@ -341,9 +341,9 @@ test(".foreignKey().add() field order is irrelevant (named fields, not positiona
   assert.equal(a[0].constraint.kind.referencesTable, "customers");
 });
 
-test(".addForeignKey() records composite/non-id references without serializing reference schema", () => {
+test(".foreignKey().add() records composite/non-id references without serializing reference schema", () => {
   const ops = record(() =>
-    table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+    table("billing_line_provider_refs", { schema: "zeroship" }).foreignKey("billing_line_provider_refs_line_fk").add({
       columns: ["invoice_id", "app_id", "segment_no"],
       references: {
         schema: "zeroship",
@@ -387,9 +387,9 @@ test("C1 — .foreignKey().add({ onDelete }) emits onDelete/onUpdate; absent ⇒
   );
 });
 
-test("addForeignKey deferrable flags emit, omit when unset, and match engine recorder", () => {
+test("foreignKey().add deferrable flags emit, omit when unset, and match engine recorder", () => {
   const publicOps = record(() => {
-    table("orders").addForeignKey("orders_customer_fk", {
+    table("orders").foreignKey("orders_customer_fk").add({
       columns: ["customer_id"],
       references: { table: "customers", columns: ["id"] },
       deferrable: true,
@@ -406,13 +406,13 @@ test("addForeignKey deferrable flags emit, omit when unset, and match engine rec
         },
       ],
     });
-    table("orders").addForeignKey("orders_plain_fk", {
+    table("orders").foreignKey("orders_plain_fk").add({
       columns: ["plain_id"],
       references: { table: "plain", columns: ["id"] },
     });
   });
   const engineOps = recordEngine(({ table, t }) => {
-    table("orders").addForeignKey("orders_customer_fk", {
+    table("orders").foreignKey("orders_customer_fk").add({
       columns: ["customer_id"],
       references: { table: "customers", columns: ["id"] },
       deferrable: true,
@@ -429,7 +429,7 @@ test("addForeignKey deferrable flags emit, omit when unset, and match engine rec
         },
       ],
     });
-    table("orders").addForeignKey("orders_plain_fk", {
+    table("orders").foreignKey("orders_plain_fk").add({
       columns: ["plain_id"],
       references: { table: "plain", columns: ["id"] },
     });
@@ -913,7 +913,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         check("kind_not_reserved", (c) => notMembership(c("kind"), ["x", "y"])),
       ],
     });
-    table("expr_checks").addCheck("score_nonnegative", (c) => c("total_cents").ge(0));
+    table("expr_checks").check("score_nonnegative").add({ expr: (c) => c("total_cents").ge(0) });
   });
 
   const checks = ops[0].constraints.map((c: any) => c.kind.expr);
