@@ -74,7 +74,9 @@ use std::collections::BTreeMap;
 use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
-use crate::model::expr::{AggFunc, BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
+use crate::model::expr::{
+    AggFunc, BinaryOp, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
+};
 use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
 
@@ -426,17 +428,70 @@ fn render_pg_regex_match(
 
 fn render_extract_field(field: ExtractField) -> &'static str {
     match field {
+        ExtractField::Year => "year",
+        ExtractField::Month => "month",
         ExtractField::Day => "day",
+        ExtractField::Hour => "hour",
+        ExtractField::Minute => "minute",
+        ExtractField::Dow => "dow",
     }
 }
 
 fn render_extract(field: ExtractField, expr: &str, dialect: SqlDialect) -> Result<String, DmlError> {
+    Ok(match dialect {
+        SqlDialect::Postgres => format!("EXTRACT({} FROM {expr})", render_extract_field(field)),
+        SqlDialect::Sqlite => {
+            let fmt = match field {
+                ExtractField::Year => "%Y",
+                ExtractField::Month => "%m",
+                ExtractField::Day => "%d",
+                ExtractField::Hour => "%H",
+                ExtractField::Minute => "%M",
+                ExtractField::Dow => "%w",
+            };
+            format!("CAST(strftime('{fmt}', {expr}) AS INTEGER)")
+        }
+        SqlDialect::Mysql => match field {
+            ExtractField::Dow => format!("(DAYOFWEEK({expr}) - 1)"),
+            _ => format!(
+                "EXTRACT({} FROM {expr})",
+                render_extract_field(field).to_ascii_uppercase()
+            ),
+        },
+    })
+}
+
+fn render_pg_extract_field(field: PgExtractField) -> &'static str {
+    match field {
+        PgExtractField::Second => "second",
+        PgExtractField::Doy => "doy",
+        PgExtractField::Epoch => "epoch",
+        PgExtractField::Quarter => "quarter",
+        PgExtractField::Week => "week",
+        PgExtractField::Isodow => "isodow",
+        PgExtractField::Isoyear => "isoyear",
+        PgExtractField::Century => "century",
+        PgExtractField::Decade => "decade",
+        PgExtractField::Millennium => "millennium",
+        PgExtractField::Microseconds => "microseconds",
+        PgExtractField::Milliseconds => "milliseconds",
+        PgExtractField::Timezone => "timezone",
+        PgExtractField::TimezoneHour => "timezone_hour",
+        PgExtractField::TimezoneMinute => "timezone_minute",
+    }
+}
+
+fn render_pg_extract(
+    field: PgExtractField,
+    expr: &str,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
     if !matches!(dialect, SqlDialect::Postgres) {
         return Err(DmlError::UnrenderableExpr(
-            "EXTRACT is PostgreSQL-only in the P1 expression DSL".to_string(),
+            "PG EXTRACT is PostgreSQL-only".to_string(),
         ));
     }
-    Ok(format!("EXTRACT({} FROM {expr})", render_extract_field(field)))
+    Ok(format!("EXTRACT({} FROM {expr})", render_pg_extract_field(field)))
 }
 
 fn render_pg_interval_literal(value: &str, dialect: SqlDialect) -> Result<String, DmlError> {
@@ -849,6 +904,10 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let e = render_expr_bound(from, ctx)?;
             render_extract(*field, &e, ctx.dialect)?
         }
+        Expr::PgExtract { field, from } => {
+            let e = render_expr_bound(from, ctx)?;
+            render_pg_extract(*field, &e, ctx.dialect)?
+        }
         Expr::PgInterval { duration } => render_pg_interval_literal(duration, ctx.dialect)?,
         Expr::Dialectal { default, pg, sqlite, mysql } => {
             let leg = select_dialect_leg(ctx.dialect, default, pg, sqlite, mysql)?;
@@ -1057,6 +1116,10 @@ where
         Expr::Extract { field, from } => {
             let e = render_expr_inline_with_col(from, dialect, col_ref)?;
             render_extract(*field, &e, dialect)?
+        }
+        Expr::PgExtract { field, from } => {
+            let e = render_expr_inline_with_col(from, dialect, col_ref)?;
+            render_pg_extract(*field, &e, dialect)?
         }
         Expr::PgInterval { duration } => render_pg_interval_literal(duration, dialect)?,
         Expr::Dialectal { default, pg, sqlite, mysql } => {
@@ -1696,6 +1759,87 @@ mod tests {
                 "MySQL render mismatch"
             );
         }
+    }
+
+    #[test]
+    fn portable_extract_fields_render_equivalent_date_parts_on_all_three() {
+        let cases = [
+            (
+                ExtractField::Year,
+                "EXTRACT(year FROM \"ts\")",
+                "CAST(strftime('%Y', \"ts\") AS INTEGER)",
+                "EXTRACT(YEAR FROM `ts`)",
+            ),
+            (
+                ExtractField::Month,
+                "EXTRACT(month FROM \"ts\")",
+                "CAST(strftime('%m', \"ts\") AS INTEGER)",
+                "EXTRACT(MONTH FROM `ts`)",
+            ),
+            (
+                ExtractField::Day,
+                "EXTRACT(day FROM \"ts\")",
+                "CAST(strftime('%d', \"ts\") AS INTEGER)",
+                "EXTRACT(DAY FROM `ts`)",
+            ),
+            (
+                ExtractField::Hour,
+                "EXTRACT(hour FROM \"ts\")",
+                "CAST(strftime('%H', \"ts\") AS INTEGER)",
+                "EXTRACT(HOUR FROM `ts`)",
+            ),
+            (
+                ExtractField::Minute,
+                "EXTRACT(minute FROM \"ts\")",
+                "CAST(strftime('%M', \"ts\") AS INTEGER)",
+                "EXTRACT(MINUTE FROM `ts`)",
+            ),
+            (
+                ExtractField::Dow,
+                "EXTRACT(dow FROM \"ts\")",
+                "CAST(strftime('%w', \"ts\") AS INTEGER)",
+                "(DAYOFWEEK(`ts`) - 1)",
+            ),
+        ];
+
+        for (field, pg, sqlite, mysql) in cases {
+            let expr = Expr::Extract {
+                field,
+                from: Box::new(Expr::col("ts")),
+            };
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), sqlite);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
+        }
+    }
+
+    #[test]
+    fn pg_extract_renders_only_on_postgres() {
+        let expr = Expr::PgExtract {
+            field: PgExtractField::Epoch,
+            from: Box::new(Expr::col("ts")),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "EXTRACT(epoch FROM \"ts\")"
+        );
+        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+            let err = render_expr_inline(&expr, dialect).unwrap_err();
+            assert!(
+                err.to_string().contains("PostgreSQL-only"),
+                "pgExtract must refuse {dialect:?}: {err}"
+            );
+        }
+
+        let second = Expr::PgExtract {
+            field: PgExtractField::Second,
+            from: Box::new(Expr::col("ts")),
+        };
+        assert_eq!(
+            render_expr_inline(&second, SqlDialect::Postgres).unwrap(),
+            "EXTRACT(second FROM \"ts\")",
+            "second stays PG-only because PG preserves fractional seconds"
+        );
     }
 
     /// `c.fn.mod(a, b)` renders as the `%` OPERATOR — NOT `mod(...)` — on all three
