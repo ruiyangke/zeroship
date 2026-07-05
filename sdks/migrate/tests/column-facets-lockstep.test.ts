@@ -97,8 +97,8 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
       unit_cents: t.int(),
       ratio: t.real(),
       source_ip: t.inet(),
-      total_cents: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents"))),
-      virtual_total: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents")), { virtual: true }),
+      total_cents: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
+      virtual_total: t.int().generated((c: any) => c("qty").mul(c("unit_cents")), { virtual: true }),
       embedding: t.vector(1536, { metric: "cosine" }),
       // a standalone mask with an explicit classification
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
@@ -111,7 +111,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   table("documents").column("summary_vec").add({ type: t.vector(768, { metric: "innerProduct" }) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
-    type: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents"))),
+    type: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
   });
   table("documents").column("added_seq").add({ type: t.bigInt().identity() });
   return drain();
