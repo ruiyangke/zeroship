@@ -256,15 +256,27 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
         idx.columns
             .iter()
             .cloned()
-            .map(|name| IndexElement::Column { name, order: None })
+            .map(|name| IndexElement::Column {
+                name,
+                order: None,
+                opclass: None,
+                collation: None,
+            })
             .collect()
     } else {
         idx.elements
             .iter()
             .map(|element| match element {
-                IndexElementSnapshot::Column { name, order } => Ok(IndexElement::Column {
+                IndexElementSnapshot::Column {
+                    name,
+                    order,
+                    opclass,
+                    collation,
+                } => Ok(IndexElement::Column {
                     name: name.clone(),
                     order: *order,
+                    opclass: opclass.clone(),
+                    collation: collation.clone(),
                 }),
                 IndexElementSnapshot::Expr(_) => Err(ScaffoldError::UnsupportedIndex {
                     table: table.to_string(),
@@ -284,6 +296,7 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: if idx.nulls_not_distinct { Some(true) } else { None },
         concurrently: None,
         schema: None,
         existence_guard: None,
@@ -662,6 +675,7 @@ fn render_op_call(op: &Op) -> String {
                     IndexElement::Column {
                         name,
                         order: Some(IndexSortOrder::Desc),
+                        ..
                     } => format!(
                         "{{ kind: \"column\", name: {}, order: \"desc\" }}",
                         js_str(name)

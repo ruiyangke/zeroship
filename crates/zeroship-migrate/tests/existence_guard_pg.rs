@@ -569,6 +569,8 @@ async fn create_index_ifnotexists_present_unique_flip_fails_closed() {
         columns: vec![IndexElement::Column {
             name: "email".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         name: Some("t_email_idx".into()),
         unique: Some(true),
@@ -581,6 +583,7 @@ async fn create_index_ifnotexists_present_unique_flip_fails_closed() {
     concurrently: None,
         schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
+        nulls_not_distinct: None,
     });
     let err = apply(&conn, &cfg, &steps).await.expect_err("unique flip fails closed");
     let (_, field, _) = expect_drift(err);
@@ -637,6 +640,8 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
         columns: vec![IndexElement::Column {
             name: "email".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         name: Some("t_email_idx".into()),
         unique: Some(false),
@@ -649,6 +654,7 @@ async fn create_index_ifnotexists_invalid_concurrent_residue_recovers_not_noops(
     concurrently: Some(true),
         schema: None,
         existence_guard: Some(ExistenceGuard::IfNotExists),
+        nulls_not_distinct: None,
     });
     let (version, name, checksum) = match &mut steps[0] {
         PlanStep::Ddl(m) => {

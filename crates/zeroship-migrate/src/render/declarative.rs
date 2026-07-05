@@ -383,11 +383,29 @@ fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column { name, order } => format!(
-                "{}{opclass_suffix}{}",
-                quote_ident(name),
-                render_index_order_suffix(*order)
-            ),
+            IndexElementSnapshot::Column {
+                name,
+                order,
+                opclass,
+                collation,
+            } => {
+                // PG index-element grammar: `column [COLLATE "c"] [opclass] [ASC|DESC]`.
+                // A per-element opclass overrides the index-level `opclass_suffix`
+                // (the ANN metric opclass); COLLATE precedes the operator class.
+                let collate = collation
+                    .as_deref()
+                    .map(|c| format!(" COLLATE {}", quote_ident(c)))
+                    .unwrap_or_default();
+                let opclass = opclass
+                    .as_deref()
+                    .map(|oc| format!(" {oc}"))
+                    .unwrap_or_else(|| opclass_suffix.to_string());
+                format!(
+                    "{}{collate}{opclass}{}",
+                    quote_ident(name),
+                    render_index_order_suffix(*order)
+                )
+            }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
         })
         .collect::<Vec<_>>()
@@ -500,7 +518,9 @@ fn render_index_elements_sqlite(idx: &IndexSnapshot) -> String {
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column { name, order } => {
+            // opclass/collation are PG-only (refused at validate before lower), so
+            // the SQLite element render intentionally ignores them.
+            IndexElementSnapshot::Column { name, order, .. } => {
                 format!("{}{}", quote_ident(name), render_index_order_suffix(*order))
             }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
@@ -521,7 +541,9 @@ fn render_index_elements_mysql(idx: &IndexSnapshot) -> String {
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column { name, order } => {
+            // opclass/collation are PG-only (refused at validate before lower), so
+            // the MySQL element render intentionally ignores them.
+            IndexElementSnapshot::Column { name, order, .. } => {
                 format!("{}{}", mysql_quote_ident(name), render_index_order_suffix(*order))
             }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
@@ -2423,6 +2445,7 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         with: None,
         only: false,
         opclass: Some(vector_opclass(f.vector_metric.as_deref()).to_string()),
+        nulls_not_distinct: false,
         comment: None,
     })
 }
@@ -2452,6 +2475,7 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
         with: None,
         only: false,
         opclass: None,
+        nulls_not_distinct: false,
         comment: None,
     })
 }
@@ -2538,6 +2562,7 @@ fn fts_objects_pg(
         with: None,
         only: false,
         opclass: None,
+        nulls_not_distinct: false,
         comment: None,
     };
     Some((col, idx))
@@ -2592,6 +2617,7 @@ fn fts_index_snapshot_sqlite(
         with: None,
         only: false,
         opclass: None,
+        nulls_not_distinct: false,
         comment: None,
     })
 }
@@ -6076,6 +6102,13 @@ impl DdlEmitter for PgEmitter {
             .unwrap_or_default();
         let col_list = render_index_elements_pg(idx, &opclass_suffix);
         let include_clause = render_index_include_pg(&idx.include);
+        // PG 15+ `NULLS NOT DISTINCT` sits after INCLUDE and before WITH, and is
+        // only meaningful on a UNIQUE index. Absent ⇒ byte-identical to before.
+        let nulls_not_distinct_clause = if idx.nulls_not_distinct {
+            " NULLS NOT DISTINCT"
+        } else {
+            ""
+        };
         let with_clause = if let Some(params) = &idx.with {
             render_index_storage_params_pg(params)
         } else if idx.access_method == "ivfflat" {
@@ -6086,10 +6119,11 @@ impl DdlEmitter for PgEmitter {
         let only = if idx.only { "ONLY " } else { "" };
         (
             format!(
-                "CREATE {unique}INDEX IF NOT EXISTS {} ON {only}{}{using} ({col_list}){}{}{}",
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {only}{}{using} ({col_list}){}{}{}{}",
                 quote_ident(&idx.name),
                 self.qualified(table),
                 include_clause,
+                nulls_not_distinct_clause,
                 with_clause,
                 idx.predicate
                     .as_deref()

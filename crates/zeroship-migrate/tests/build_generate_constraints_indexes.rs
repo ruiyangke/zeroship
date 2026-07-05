@@ -102,6 +102,8 @@ fn generate_synthesizes_plain_user_index() {
         &vec![IndexElement::Column {
             name: "email".to_string(),
             order: None,
+            opclass: None,
+            collation: None,
         }]
     );
     assert_eq!(idx_name.as_deref(), Some("members_email_idx"));

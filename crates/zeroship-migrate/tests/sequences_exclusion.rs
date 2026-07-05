@@ -435,6 +435,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.to_string(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -462,6 +464,7 @@ fn postgres_and_sqlite_render_partial_index_where() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     };
     let live = BTreeSet::from(["users".to_string()]);
 
@@ -494,6 +497,7 @@ fn postgres_and_sqlite_render_expression_index_elements() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     };
     let live = BTreeSet::from(["users".to_string()]);
 
@@ -527,6 +531,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
             concurrently: None,
                 schema: None,
                 existence_guard: None,
+                nulls_not_distinct: None,
             }]),
         Dialect::Mysql,
         &[],
@@ -554,6 +559,7 @@ fn mysql_fail_closes_on_partial_index_predicate() {
             concurrently: None,
                 schema: None,
                 existence_guard: None,
+                nulls_not_distinct: None,
             }]),
         Dialect::Mysql,
         &[],

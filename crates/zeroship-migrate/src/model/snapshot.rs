@@ -157,6 +157,16 @@ pub enum IndexElementSnapshot {
         name: String,
         /// Optional per-column sort order. `None` is canonical ASC/default.
         order: Option<IndexSortOrder>,
+        /// **Emission-only** PG-vendor per-column operator class (e.g.
+        /// `text_pattern_ops`). Like the index-level ANN `opclass`, live
+        /// introspection cannot recover it cheaply, so it is EXCLUDED from
+        /// canonical equality / hashing (`index_elements_canonically_eq`) and is
+        /// spelled by the PG emitter only. `None` for every non-opclass element.
+        opclass: Option<String>,
+        /// **Emission-only** PG-vendor per-column collation (e.g. `"C"`).
+        /// Excluded from canonical equality / hashing for the same reason as
+        /// `opclass`. `None` for every non-collated element.
+        collation: Option<String>,
     },
     /// Expression key.
     Expr(String),
@@ -169,6 +179,8 @@ impl IndexElementSnapshot {
         Self::Column {
             name: name.into(),
             order: None,
+            opclass: None,
+            collation: None,
         }
     }
 
@@ -181,6 +193,8 @@ impl IndexElementSnapshot {
             IndexSortOrder::Desc => Self::Column {
                 name: name.into(),
                 order: Some(IndexSortOrder::Desc),
+                opclass: None,
+                collation: None,
             },
         }
     }
@@ -244,10 +258,13 @@ pub(crate) fn index_elements_canonically_eq(
                 IndexElementSnapshot::Column {
                     name: a,
                     order: order_a,
+                    // opclass/collation are emission-only — never a drift attribute.
+                    ..
                 },
                 IndexElementSnapshot::Column {
                     name: b,
                     order: order_b,
+                    ..
                 },
             ) => a == b && canonical_index_sort_order(*order_a) == canonical_index_sort_order(*order_b),
             (IndexElementSnapshot::Expr(a), IndexElementSnapshot::Expr(b)) => {
@@ -304,6 +321,11 @@ pub struct IndexSnapshot {
     /// index (`vector_cosine_ops`, `vector_l2_ops`, `vector_ip_ops`). `None` for
     /// every plain / GIN / GiST index. NOT a drift attribute.
     pub opclass: Option<String>,
+    /// **Emission-only** PG 15+ `NULLS NOT DISTINCT` flag on a UNIQUE index.
+    /// Like `opclass`, it is spelled by the PG emitter but EXCLUDED from drift
+    /// equality / hashing (live introspection recovery is out of scope for this
+    /// render-only enrichment). `false` for every ordinary index.
+    pub nulls_not_distinct: bool,
     /// User-authored catalog comment on this index.
     pub comment: Option<String>,
 }
@@ -333,7 +355,7 @@ impl std::hash::Hash for IndexSnapshot {
         self.columns.hash(state);
         for element in &self.elements {
             match element {
-                IndexElementSnapshot::Column { name, order } => {
+                IndexElementSnapshot::Column { name, order, .. } => {
                     0_u8.hash(state);
                     name.hash(state);
                     canonical_index_sort_order(*order).hash(state);
@@ -369,6 +391,7 @@ impl IndexSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         }
     }

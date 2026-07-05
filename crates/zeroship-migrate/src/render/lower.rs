@@ -1872,6 +1872,7 @@ impl IrAuthor {
                 include,
                 with,
                 only,
+                nulls_not_distinct,
                 ..
             } => {
                 let idx = create_index_snapshot(
@@ -1884,6 +1885,7 @@ impl IrAuthor {
                     include,
                     with.as_ref(),
                     *only,
+                    *nulls_not_distinct,
                     self.dialect,
                 )?;
                 // **PR10 Part B** — createIndex ifNotExists: verify (unique, columns)
@@ -3127,6 +3129,7 @@ impl IrAuthor {
                 &ix.include,
                 ix.with.as_ref(),
                 ix.only,
+                ix.nulls_not_distinct,
                 self.dialect,
             )?;
             snap_idx.access_method = access.to_string();
@@ -4717,6 +4720,7 @@ pub(crate) fn create_index_snapshot(
     include: &[String],
     with: Option<&IndexStorageParams>,
     only: Option<bool>,
+    nulls_not_distinct: Option<bool>,
     dialect: SqlDialect,
 ) -> Result<IndexSnapshot, IrLowerError> {
     if dialect == SqlDialect::Mysql && columns.iter().any(|e| matches!(e, IndexElement::Expr { .. }))
@@ -4735,12 +4739,30 @@ pub(crate) fn create_index_snapshot(
     let mut name_parts = Vec::with_capacity(columns.len());
     for element in columns {
         match element {
-            IndexElement::Column { name, order } => {
+            IndexElement::Column {
+                name,
+                order,
+                opclass,
+                collation,
+            } => {
                 plain_columns.push(name.clone());
-                elements.push(match order {
+                let mut snap_element = match order {
                     Some(order) => IndexElementSnapshot::column_ordered(name.clone(), *order),
                     None => IndexElementSnapshot::column(name.clone()),
-                });
+                };
+                // PG-vendor per-column opclass/collation ride on the snapshot
+                // element as EMISSION-ONLY facets (excluded from drift equality,
+                // like the index-level ANN `opclass`); the PG emitter spells them.
+                if let IndexElementSnapshot::Column {
+                    opclass: snap_opclass,
+                    collation: snap_collation,
+                    ..
+                } = &mut snap_element
+                {
+                    snap_opclass.clone_from(opclass);
+                    snap_collation.clone_from(collation);
+                }
+                elements.push(snap_element);
                 name_parts.push(name.clone());
             }
             IndexElement::Expr { expr } => {
@@ -4768,6 +4790,7 @@ pub(crate) fn create_index_snapshot(
     idx.include = include.to_vec();
     idx.with = with.cloned();
     idx.only = only.unwrap_or(false);
+    idx.nulls_not_distinct = nulls_not_distinct.unwrap_or(false);
     Ok(idx)
 }
 

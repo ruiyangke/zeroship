@@ -496,6 +496,8 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
         columns: vec![IndexElement::Column {
             name: "email".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         name: None,
         unique: Some(true),
@@ -508,6 +510,7 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     concurrently: Some(true),
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     }];
 
     // What a CORRECT IrAuthor does: compute the neutral flags ONCE and feed the

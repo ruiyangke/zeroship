@@ -222,6 +222,7 @@ fn create_index(elements: Vec<IndexElement>, using: Option<IndexMethod>, r#where
         include,
         with: None,
         only: None,
+        nulls_not_distinct: None,
         schema: None,
         existence_guard: None,
     }
@@ -231,6 +232,8 @@ fn column_element(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.into(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -729,6 +732,7 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
                 include: vec![],
                 with: None,
                 only: None,
+                nulls_not_distinct: None,
             }],
             partition_by: None,
             runtime_options: None,

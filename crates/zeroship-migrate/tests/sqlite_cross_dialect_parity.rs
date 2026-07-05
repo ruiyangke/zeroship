@@ -277,10 +277,14 @@ fn common_ops() -> Vec<Op> {
                     IndexElement::Column {
                         name: "account_id".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                     IndexElement::Column {
                         name: "status".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                 ],
                 unique: Some(false),
@@ -289,6 +293,7 @@ fn common_ops() -> Vec<Op> {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             }],
 
         partition_by: None,

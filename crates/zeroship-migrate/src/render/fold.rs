@@ -1066,6 +1066,7 @@ pub fn fold_ops(
                 include,
                 with,
                 only,
+                nulls_not_distinct,
                 ..
             } => {
                 let idx = create_index_snapshot(
@@ -1078,6 +1079,7 @@ pub fn fold_ops(
                     include,
                     with.as_ref(),
                     *only,
+                    *nulls_not_distinct,
                     dialect,
                 )
                 .map_err(fold_lower_error)?;
@@ -1801,6 +1803,7 @@ fn fold_create_table_specs(
             &ix.include,
             ix.with.as_ref(),
             ix.only,
+            ix.nulls_not_distinct,
             dialect,
         )
         .map_err(fold_lower_error)?;
@@ -4069,6 +4072,8 @@ mod tests {
                 .map(|col| IndexElement::Column {
                     name: (*col).to_string(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 })
                 .collect(),
             name: name.map(ToString::to_string),
@@ -4078,6 +4083,7 @@ mod tests {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             concurrently: None,
             schema: None,
             existence_guard: None,
@@ -4209,6 +4215,8 @@ mod tests {
                 columns: vec![IndexElement::Column {
                     name: "team_id".to_string(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 }],
                 unique: None,
                 using: None,
@@ -4216,6 +4224,7 @@ mod tests {
                 include: Vec::new(),
                 with: None,
                 only: None,
+                nulls_not_distinct: None,
             }],
             partition_by: None,
             runtime_options: Default::default(),
@@ -4256,10 +4265,14 @@ mod tests {
                     IndexElement::Column {
                         name: "author_id".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                     IndexElement::Column {
                         name: "status".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                 ],
                 name: Some("posts_author_status_idx".to_string()),
@@ -4269,6 +4282,7 @@ mod tests {
                 include: Vec::new(),
                 with: None,
                 only: None,
+                nulls_not_distinct: None,
                 concurrently: None,
                 schema: None,
                 existence_guard: None,
@@ -4526,6 +4540,8 @@ mod tests {
                 columns: vec![IndexElement::Column {
                     name: "doc".to_string(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 }],
                 unique: None,
                 using: Some(crate::model::ir::IndexMethod::Gin),
@@ -4533,6 +4549,7 @@ mod tests {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             }],
         );
         let err = validate_ops(vec![op], Dialect::Sqlite);

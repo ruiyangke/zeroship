@@ -272,9 +272,16 @@ export type ColumnOrExpr =
   | { kind: "column"; name: string }
   | { kind: "expr"; expr: Expr };
 
-/** Index target: a column name or a closed expression AST. */
+/** Index target: a column name or a closed expression AST. The `opclass` and
+ *  `collation` per-column facets are PG-vendor (fail-closed off PostgreSQL). */
 export type IndexElement =
-  | { kind: "column"; name: string; order?: IndexSortOrder | null }
+  | {
+      kind: "column";
+      name: string;
+      order?: IndexSortOrder | null;
+      opclass?: string | null;
+      collation?: string | null;
+    }
   | { kind: "expr"; expr: Expr };
 
 /** One `(target WITH operator)` element in an exclusion constraint. */
@@ -322,6 +329,8 @@ export interface IrIndex {
   include?: string[];
   with?: IndexStorageParams | null;
   only?: boolean | null;
+  /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor. */
+  nullsNotDistinct?: boolean | null;
 }
 
 /** Partitioning strategy for a partitioned table parent. */
@@ -474,6 +483,7 @@ export type Op =
       include?: string[];
       with?: IndexStorageParams | null;
       only?: boolean | null;
+      nullsNotDistinct?: boolean | null;
       schema?: string | null;
       existenceGuard?: ExistenceGuard | null;
     }

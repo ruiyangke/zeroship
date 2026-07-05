@@ -167,6 +167,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.to_string(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -950,6 +952,7 @@ async fn diff_reports_altered_index_uniqueness() {
                 only: false,
                 opclass: None,
                 comment: None,
+                nulls_not_distinct: false,
             }],
             constraints: Vec::new(),
             runtime_options: Default::default(),
@@ -1232,6 +1235,7 @@ async fn t12_btree_to_ivfflat_access_method_flip_is_reported() {
                 only: false,
                 opclass: Some("vector_cosine_ops".into()),
                 comment: None,
+                nulls_not_distinct: false,
             }],
             constraints: Vec::new(),
             runtime_options: Default::default(),
@@ -1347,6 +1351,7 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
         concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "users".into(),
@@ -1367,6 +1372,7 @@ async fn partial_and_expression_indexes_reintrospect_without_false_drift() {
         concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ];
     let migrations = lower_ir_migrations(sch, "partial_expression_indexes", &ops);

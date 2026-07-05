@@ -81,6 +81,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.to_string(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -179,6 +181,7 @@ fn partition_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "events".to_string(),
@@ -197,6 +200,7 @@ fn partition_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ]
 }

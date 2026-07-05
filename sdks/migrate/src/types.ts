@@ -806,6 +806,12 @@ export interface IndexColumnElementArg {
   kind: "column";
   name: string;
   order?: IndexSortOrder;
+  /** PostgreSQL per-column operator class (e.g. `text_pattern_ops`). PG-vendor:
+   *  fails closed at validate on SQLite/MySQL. */
+  opclass?: string;
+  /** PostgreSQL per-column collation (e.g. `"C"`). PG-vendor: fails closed at
+   *  validate on SQLite/MySQL. */
+  collation?: string;
 }
 
 export type IndexElementArg =
@@ -915,6 +921,9 @@ export interface CreateTableArgs {
     include?: readonly string[];
     with?: IndexStorageParamsArg;
     only?: boolean;
+    /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
+     *  validate on SQLite/MySQL. */
+    nullsNotDistinct?: boolean;
   }>;
   partitionBy?: PartitionSpec;
   ifNotExists?: boolean;
@@ -1002,6 +1011,9 @@ export interface IndexRef {
     include?: readonly string[];
     with?: IndexStorageParamsArg;
     only?: boolean;
+    /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
+     *  validate on SQLite/MySQL. */
+    nullsNotDistinct?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   }): TableHandle;

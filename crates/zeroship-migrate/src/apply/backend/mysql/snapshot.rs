@@ -111,6 +111,7 @@ pub fn rowsets_to_schema_snapshot(
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment,
         });
     }

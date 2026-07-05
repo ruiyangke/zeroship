@@ -812,6 +812,8 @@ fn create_index_omits_all_absent_optionals() {
         columns: vec![IndexElement::Column {
             name: "email".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         name: None,
         unique: None,
@@ -820,13 +822,14 @@ fn create_index_omits_all_absent_optionals() {
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: None,
         concurrently: None,
         schema: None,
         existence_guard: None,
     };
     let v = serde_json::to_value(&op).unwrap();
     let obj = v.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where", "include", "with", "only", "concurrently"] {
+    for absent in ["name", "unique", "using", "where", "include", "with", "only", "concurrently", "nullsNotDistinct"] {
         assert!(
             !obj.contains_key(absent),
             "absent `{absent}` must be OMITTED, not null: {v}"
@@ -856,6 +859,8 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         columns: vec![IndexElement::Column {
             name: "id".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         unique: None,
         using: None,
@@ -863,11 +868,17 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: None,
     };
     let iv = serde_json::to_value(&ix).unwrap();
     let iobj = iv.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where", "include", "with", "only"] {
+    for absent in ["name", "unique", "using", "where", "include", "with", "only", "nullsNotDistinct"] {
         assert!(!iobj.contains_key(absent), "IrIndex absent `{absent}` must be omitted: {iv}");
+    }
+    // The absent per-element opclass/collation must be omitted too (byte-neutral).
+    let elem = iv["columns"][0].as_object().unwrap();
+    for absent in ["opclass", "collation", "order"] {
+        assert!(!elem.contains_key(absent), "IndexElement absent `{absent}` must be omitted: {iv}");
     }
     // IrConstraint.name absent.
     let con = IrConstraint {

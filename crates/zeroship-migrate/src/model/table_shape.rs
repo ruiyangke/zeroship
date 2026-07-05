@@ -154,6 +154,8 @@ fn resolve_create_table(
             .map(|name| IndexElement::Column {
                 name: name.clone(),
                 order: None,
+                opclass: None,
+                collation: None,
             })
             .collect(),
         unique: None,
@@ -162,6 +164,7 @@ fn resolve_create_table(
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: None,
     }));
 
     Ok(())

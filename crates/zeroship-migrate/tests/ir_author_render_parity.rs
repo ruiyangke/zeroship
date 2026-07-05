@@ -47,6 +47,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.to_string(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -505,6 +507,7 @@ fn create_index_render_is_byte_identical_pg() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());
@@ -1473,6 +1476,7 @@ fn create_index_render_is_byte_identical_sqlite() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());

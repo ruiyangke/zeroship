@@ -441,6 +441,14 @@ function requireOptionalBoolean(v: unknown, what: string): boolean | undefined {
   return v;
 }
 
+function indexElementFacet(v: unknown, what: string): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string`);
+  }
+  return v;
+}
+
 function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
   const softDelete = requireOptionalBoolean(args.softDelete, "create({ softDelete })");
   const versioning = requireOptionalBoolean(args.versioning, "create({ versioning })");
@@ -1778,6 +1786,7 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
         include: indexIncludeToIr(idx.include),
         with: indexWithToIr(idx.with),
         only: requireOptionalBoolean(idx.only, "index only"),
+        nullsNotDistinct: requireOptionalBoolean(idx.nullsNotDistinct, "index nullsNotDistinct"),
       }),
     );
   }
@@ -2167,9 +2176,17 @@ function indexElementToIr(element: IndexElementArg): Node {
     if (element.kind === "column") {
       requireString((element as { name?: unknown }).name, "index column element name");
       const order = indexColumnOrderToIr((element as { order?: unknown }).order);
-      return order === "desc"
-        ? { kind: "column", name: (element as { name: string }).name, order }
-        : { kind: "column", name: (element as { name: string }).name };
+      // PG-vendor per-column facets: carried through when present, elided when
+      // absent (byte-neutral wire shape). Validate gates them fail-closed off PG.
+      const opclass = indexElementFacet((element as { opclass?: unknown }).opclass, "index column opclass");
+      const collation = indexElementFacet((element as { collation?: unknown }).collation, "index column collation");
+      return compact({
+        kind: "column",
+        name: (element as { name: string }).name,
+        order: order === "desc" ? order : undefined,
+        opclass,
+        collation,
+      }) as Node;
     }
     if (element.kind === "expr") {
       const expr = resolveExpr((element as { expr?: ExprFn | ExprChainType | Node }).expr);
@@ -2233,6 +2250,7 @@ function recordCreateIndex(
     include?: readonly string[];
     with?: IndexStorageParamsArg;
     only?: boolean;
+    nullsNotDistinct?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   },
@@ -2250,6 +2268,7 @@ function recordCreateIndex(
     include: indexIncludeToIr(args.include),
     with: indexWithToIr(args.with),
     only: requireOptionalBoolean(args.only, "index only"),
+    nullsNotDistinct: requireOptionalBoolean(args.nullsNotDistinct, "index nullsNotDistinct"),
     schema: args.schema,
     existenceGuard: ifNotExistsGuard(args.ifNotExists),
   });
