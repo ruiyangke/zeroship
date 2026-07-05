@@ -2,7 +2,7 @@
 // Covers expression index elements, partial-index predicates, and representative
 // comment targets through both fluent handles and the top-level closed target API.
 import { comment, enumType, table, t, view } from "@zeroship/migrate";
-import { sequence } from "@zeroship/migrate/pg";
+import { pgTable, sequence } from "@zeroship/migrate/pg";
 
 export const name = "comments_indexes";
 
@@ -22,7 +22,7 @@ export function up() {
     uniques: [{ name: "users_email_uq", columns: ["email"] }],
   });
 
-  table("users").index("users_email_lower_idx").add({
+  pgTable("users").index("users_email_lower_idx").add({
     on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
     where: (c) => c("active").isTrue(),
   });

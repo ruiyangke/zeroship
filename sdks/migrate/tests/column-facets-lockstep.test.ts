@@ -183,7 +183,7 @@ function authorPartitionWith({
     to: ["2026-06-01T00:00:00Z", maxValue],
   }, { ifNotExists: true });
   table("events").partition("events_default").create({ default: true });
-  table("events")
+  pgTable("events")
     .index("events_ts_brin_idx")
     .add({
       on: ["ts"],

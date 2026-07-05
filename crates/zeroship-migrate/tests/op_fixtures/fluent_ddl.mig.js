@@ -13,6 +13,7 @@
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
 import { table, t, decimal } from "@zeroship/migrate";
+import { pgTable } from "@zeroship/migrate/pg";
 
 export default {
   name: "fluent_ddl",
@@ -68,7 +69,7 @@ export default {
 
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
 
-    table("accounts").index("accounts_active_email_idx").add({
+    pgTable("accounts").index("accounts_active_email_idx").add({
       on: ["email"],
       unique: true,
       where: (c) => c("active").isTrue(),

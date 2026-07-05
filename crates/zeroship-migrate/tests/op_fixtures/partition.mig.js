@@ -24,7 +24,7 @@ export function up() {
   pgTable("events").detachPartition("events_2026_05", { concurrently: true });
   table("events").partition("events_2026_05").drop({ cascade: true });
 
-  table("events")
+  pgTable("events")
     .index("events_ts_brin_idx")
     .add({
       on: ["ts"],

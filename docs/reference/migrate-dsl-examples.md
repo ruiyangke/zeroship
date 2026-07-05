@@ -12,7 +12,7 @@ The DSL has **two roots**:
 | Import | Scope | Runs on |
 | --- | --- | --- |
 | `@zeroship/migrate` | Portable core — tables, columns, constraints, indexes, expressions, enums, views, partitions, triggers | PG · SQLite · MySQL |
-| `@zeroship/migrate/pg` | Postgres vendor — domains, sequences, schemas, extensions, roles, grants, functions, RLS policies, `raw` | PG only (fail-closed elsewhere) |
+| `@zeroship/migrate/pg` | Postgres vendor — domains, sequences, schemas, extensions, roles, grants, functions, RLS policies, vendor index options, `raw` | PG only (fail-closed elsewhere) |
 
 Confined creator deploys reject every `/pg` op with `VENDOR_OP_DENIED`; operator/platform callers
 pass an explicit trusted capability. The `/pg` subpath is not a security boundary — it is an
@@ -295,20 +295,22 @@ Select with `.index(name)`, then pass the target elements and optional modifiers
 in `.add({…})`.
 
 ```ts
+import { pgTable } from "@zeroship/migrate/pg";
+
 // Basic
 table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 
-// Composite + partial (WHERE predicate is the (c) => Expr builder)
-table("app_session_anchors").index("app_session_anchors_user_idx")
+// Composite + partial (WHERE predicate is the (c) => Expr builder, PG vendor)
+pgTable("app_session_anchors").index("app_session_anchors_user_idx")
   .add({ on: ["app_id", "global_user_id"], where: (c) => c("revoked_at").isNull() });
 
 // Unique
 table("users").index("users_email_uq").add({ on: ["email"], unique: true });
 
 // Access method
-table("docs").index("docs_body_fts").add({ on: ["body"], using: "gin" });
-table("events").index("events_ts_brin").add({ on: ["occurred_at"], using: "brin" });
-table("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
+pgTable("docs").index("docs_body_fts").add({ on: ["body"], using: "gin" });
+pgTable("events").index("events_ts_brin").add({ on: ["occurred_at"], using: "brin" });
+pgTable("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
 
 // Per-column ASC/DESC ordering (IndexElementArg)
 table("posts").index("posts_created_desc")
@@ -319,7 +321,7 @@ table("users").index("users_lower_email")
   .add({ on: [{ expr: (c) => c.fn.lower(c("email")) }] });
 
 // Covering (INCLUDE) + storage params + ONLY (don't recurse into partitions)
-table("orders").index("orders_customer_idx")
+pgTable("orders").index("orders_customer_idx")
   .add({
     on: ["customer_id"],
     include: ["total", "status"],
@@ -331,7 +333,9 @@ table("orders").index("orders_customer_idx")
 table("orders").index("orders_customer_idx").drop({ ifExists: true });
 ```
 
-`IndexMethod` = `btree | gin | gist | brin | ivfflat | hnsw | fts5` (`hash`/`spgist` not yet in the union).
+Portable `table().index()` accepts `on`, `unique`, `ifNotExists`, `schema`, and per-element
+`order`. Vendor options (`using`, `where`, `include`, `with`, `only`, `nullsNotDistinct`,
+per-element `opclass`/`collation`) live on `pgTable().index()`.
 
 ---
 

@@ -162,7 +162,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("accounts").column("balance").setType({ to: t.numeric(14, 2) });
     table("accounts").column("profile").setNotNull();
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
-    table("accounts").index("accounts_active_email_idx").add({
+    pgTable("accounts").index("accounts_active_email_idx").add({
       on: ["email"],
       unique: true,
       where: (c) => c("active").isTrue(),
