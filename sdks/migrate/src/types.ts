@@ -531,8 +531,8 @@ export interface ExprBuilder {
   (table: string, name: string): ExprChain;
   col(name: string): ExprChain;
   col(table: string, name: string): ExprChain;
-  /** The searched `CASE` form: `c.case({ when: [{ when, then }], else? })`. */
-  case(args: { when: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
+  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
   fn: FnNamespace;
   agg: AggNamespace;
   pg: PgExprNamespace;

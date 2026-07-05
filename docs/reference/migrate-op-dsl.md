@@ -817,7 +817,7 @@ interpolated):
   for joining first+last name. Engine-synthesized to be byte-identical across PG
   (`concat_ws`) and SQLite (a proven `coalesce`-folded `||`). For empty-string
   join use `c.fn.concatWs("", …)`.
-- `c.case({ when: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
+- `c.case({ branches: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
 - `c.fn.splitPart(e, delim, n)` — the engine-synthesized portable split helper,
   within its pinned envelope (see below)
 - `c.fn.now()`, `c.fn.genRandomUuid()` — DB-evaluated apply-time scalars

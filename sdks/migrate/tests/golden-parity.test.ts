@@ -205,7 +205,7 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
           .or(c("active").isFalse())
           .and(
             c
-              .case({ when: [{ when: c("code").lt(100), then: c("code").isNull() }], else: c("label").isNull() })
+              .case({ branches: [{ when: c("code").lt(100), then: c("code").isNull() }], else: c("label").isNull() })
               .isTrue(),
           ),
       limit: 100,

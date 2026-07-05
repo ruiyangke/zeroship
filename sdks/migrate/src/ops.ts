@@ -1422,20 +1422,20 @@ const pgExpr: PgExprNamespace = {
 };
 
 type CaseExprArgs = {
-  when: Array<{ when: unknown; then: unknown }>;
+  branches: Array<{ when: unknown; then: unknown }>;
   else?: unknown;
 };
 
 function caseExpr(args: CaseExprArgs): ExprChainType {
-  const shape = "c.case({ when: [{ when, then }], else? })";
+  const shape = "c.case({ branches: [{ when, then }], else? })";
   if (!isPlainObject(args)) {
     throw structuredError("OP_INVALID", `${shape}: args must be an object`);
   }
-  const branches = args.when;
+  const branches = args.branches;
   if (!Array.isArray(branches) || branches.length === 0) {
     throw structuredError(
       "OP_INVALID",
-      `${shape}: when must be a non-empty array of { when, then } objects`,
+      `${shape}: branches must be a non-empty array of { when, then } objects`,
     );
   }
   const node: Node = {
@@ -1448,7 +1448,7 @@ function caseExpr(args: CaseExprArgs): ExprChainType {
       ) {
         throw structuredError(
           "OP_INVALID",
-          `${shape}: when[${i}] must be an object with when and then`,
+          `${shape}: branches[${i}] must be an object with when and then`,
         );
       }
       return { when: exprArg(branch.when), then: exprArg(branch.then) };

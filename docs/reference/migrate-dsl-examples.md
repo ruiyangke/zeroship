@@ -396,7 +396,7 @@ import { and, or, not, membership, notMembership } from "@zeroship/migrate";
 (c) => c.fn.genRandomUuid()
 
 // CASE expression — explicit when/then branches, with an optional else
-(c) => c.case({ when: [{ when: c("n").gt(0), then: lit("pos") }], else: lit("nonpos") })
+(c) => c.case({ branches: [{ when: c("n").gt(0), then: lit("pos") }], else: lit("nonpos") })
 
 // PG-flavoured settings (used in RLS policies) — reachable via c.fn on the pg-aware builder
 (c) => c.fn.currentSetting("zeroship.tenant_app", true).cast("uuid")
