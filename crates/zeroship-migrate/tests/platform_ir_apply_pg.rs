@@ -360,8 +360,6 @@ import {
   table,
   t,
   check,
-  and,
-  or,
   interval,
 } from "@zeroship/migrate";
 import { pgTable, schema } from "@zeroship/migrate/pg";
@@ -398,19 +396,16 @@ export function up() {
       check("expr_kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
       check("expr_data_size", (c) => c.pg.pgColumnSize(c("data")).lt(262144)),
       check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
-      check("expr_floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
-      check("expr_active_visible", (c) => and(c("active"), c("visible"))),
+      check("expr_floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
+      check("expr_active_visible", (c) => c("active").and(c("visible"))),
       check("expr_expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
       // Mirrors the platform sandboxes_snapshot_artifact_consistency marker:
       // a <> ALL negated inList OR'd with a 3-way IS NOT NULL AND chain.
       check("expr_snapshot_consistency", (c) =>
-        or(
-          c("status").notIn(["snapshotted", "snapshotted_suspect"]),
-          and(
-            c("snapshot_artifact_path").isNotNull(),
-            c("snapshot_sha256").isNotNull(),
-            c("snapshot_ch_version").isNotNull(),
-          ),
+        c("status").notIn(["snapshotted", "snapshotted_suspect"]).or(
+          c("snapshot_artifact_path").isNotNull()
+            .and(c("snapshot_sha256").isNotNull())
+            .and(c("snapshot_ch_version").isNotNull()),
         )),
     ],
   });

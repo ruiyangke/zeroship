@@ -1,4 +1,4 @@
-import { and, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 export const name = "control_tables";
 
@@ -48,7 +48,7 @@ export function up() {
     },
     primaryKey: ["app_id", "host", "port"],
   });
-  table("app_net_grants", { schema: "zeroship" }).check("app_net_grants_port_check").add({ expr: (c) => and(c("port").ge(1), c("port").le(65535)) });
+  table("app_net_grants", { schema: "zeroship" }).check("app_net_grants_port_check").add({ expr: (c) => c("port").ge(1).and(c("port").le(65535)) });
   table("app_oauth_clients", { schema: "zeroship" }).create({
     columns: {
       app_id: t.uuid().notNull(),

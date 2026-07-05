@@ -181,7 +181,7 @@ No mature migration tool binds migration files to the live schema:
 - **Op argument shapes** — you cannot pass a number where a `ColumnDef`
   is expected, or omit a required field on a terminal's args object.
 - **The `t` column-type lexicon** — `t.text()` / `t.numeric()` and their
-  chainable modifiers (`.notNull()` / `.default()` / `.ref()`) are typed.
+  chainable modifiers (`.notNull()` / `.default()`) are typed.
 - **The fluent-expression node shapes** — `c`'s methods (`.eq` / `.concat` /
   `.gt` / `c.fn.splitPart` …) have typed arities and return an `Expr`; calling a
   non-existent operator method fails `tsc`. (Method *names* are the typed builder
@@ -241,7 +241,6 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | `.default(value)` | a typed scalar literal **or** a function-expression callback `(c) => c.fn.now()` / `c.fn.genRandomUuid()` (the `{ fn: … }` carrier was deleted, P4) — never raw SQL |
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
-| `.ref(targetTable)` | re-target the column as a foreign-key reference (plain-string target) |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
@@ -798,10 +797,9 @@ AST via an all-strings fluent builder
 (`sdks/migrate/src/ops.ts:281-366`, `sdks/migrate/src/types.ts:95-156`).
 
 **`c` is both a column accessor and the function namespace.** `c("first")`
-returns a `ColRef` chain; the argument is a plain string. `c` is scoped to the
-enclosing op's target table: `c("x")` resolves against that one table and
-nothing else — there is no `c("other.col")` and no second-table accessor
-(cross-table references are not expressible, see
+returns an unqualified `ColRef` chain; `c("table", "col")` returns a qualified
+`ColRef`. Arguments are plain strings; there is no dotted-string form like
+`c("other.col")` (cross-table references remain limited by
 [the portability boundary](#the-dml-portability-boundary)).
 
 **Chainable operator methods** (each builds one closed-AST node; a bare JS value
@@ -809,7 +807,7 @@ passed to a method auto-wraps to a `Literal` and is bound via `$n`/`?n`, never
 interpolated):
 
 - comparison: `.eq(x)`, `.ne(x)`, `.lt(x)`, `.le(x)`, `.gt(x)`, `.ge(x)`
-- boolean: `.and(e)`, `.or(e)`, `.not()`
+- boolean: `.and(...es)`, `.or(...es)`, `.not()`
 - arithmetic: `.add(x)`, `.sub(x)`, `.mul(x)`, `.div(x)`
 - string/value: `.concat(...parts)` (raw `||`, NULL-propagating). The
   NULL-skipping `concatWs` and `coalesce` live on `c.fn.*` only (they are not
