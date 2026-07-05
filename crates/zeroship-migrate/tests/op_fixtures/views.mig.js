@@ -10,8 +10,8 @@ export default {
         .where((c) => c("deleted_at").isNull()),
     });
 
-    view("recent_users").createRaw({
-      sql: "SELECT id, email FROM users WHERE deleted_at IS NULL",
+    view("recent_users").create({
+      as: { raw: "SELECT id, email FROM users WHERE deleted_at IS NULL" },
     });
 
     view("old_users", { schema: "app" }).drop({ ifExists: true });

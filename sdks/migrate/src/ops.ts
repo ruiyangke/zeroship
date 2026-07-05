@@ -38,7 +38,6 @@ import type {
   ColumnRef,
   ConstraintRef,
   CommentTargetArg,
-  CreateRawViewArgs,
   AlterSequenceArgs,
   CreateDomainArgs,
   CreateEnumArgs,
@@ -338,8 +337,8 @@ export function __pgPush(op: Node): Node {
 // byte-identical to the prior in-line `push(compact({ op: kind, … }))`. Each mint
 // APPENDS to `tier1Producers`, so the producer registry (op-kind → producer(s)) is
 // DERIVED from the mints, never self-reported. A later slice's census asserts
-// one-producer-per-op-kind over this data (which is why the multi-producer kinds
-// `addConstraint`/`createView` mint several distinct producers here). Mirrored 1:1
+// one-producer-per-op-kind over this data (which is why the multi-producer kind
+// `addConstraint` mints several distinct producers here). Mirrored 1:1
 // in the engine twin `migrate_ops.js`.
 
 /** One tier-1 op-emission producer, DERIVED from a `defineOp` mint call. */
@@ -385,8 +384,8 @@ export function opProducerRegistry(): ReadonlyMap<string, readonly OpProducer[]>
 }
 
 // The minted emitters — one per producer site. Multi-producer op-kinds
-// (`addConstraint`, `createView`) mint several, so the registry surfaces the
-// duplication as data.
+// (`addConstraint`) mint several, so the registry surfaces the duplication as
+// data.
 const emitCreateEnum = defineOp("createEnum", "createEnum", { deferrable: true });
 const emitDropEnum = defineOp("dropEnum");
 const emitCreateDomain = defineOp("createDomain", "createDomain", { deferrable: true });
@@ -424,7 +423,6 @@ const emitUpdate = defineOp("update");
 const emitDelete = defineOp("delete");
 const emitBackfill = defineOp("backfill");
 const emitCreateView = defineOp("createView", "view.create");
-const emitCreateRawView = defineOp("createView", "view.createRaw");
 const emitDropView = defineOp("dropView");
 const emitEnableRls = defineOp("enableRls");
 const emitForceRls = defineOp("forceRls");
@@ -3008,6 +3006,10 @@ function isSelectAst(x: unknown): x is SelectAst {
   return Boolean(x && typeof x === "object" && (x as SelectAst).from !== undefined);
 }
 
+function isRawViewQueryInput(x: unknown): x is { raw: string } {
+  return Boolean(x && typeof x === "object" && Object.prototype.hasOwnProperty.call(x, "raw"));
+}
+
 function resolveSelectAst(as: CreateViewArgs["as"]): SelectAst {
   if (typeof as === "function") {
     const q = viewQueryBuilder();
@@ -3022,28 +3024,25 @@ function resolveSelectAst(as: CreateViewArgs["as"]): SelectAst {
 
 function recordCreateView(name: string, args: CreateViewArgs & { schema?: string }): void {
   if (!args || args.as === undefined) {
-    throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder");
+    throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder or { raw }");
+  }
+  if (isRawViewQueryInput(args.as)) {
+    requireString(args.as.raw, "view(name).create({ as: { raw } })");
+    emitCreateView({
+      name,
+      schema: args.schema,
+      columns: args.columns,
+      query: { kind: "raw", sql: args.as.raw },
+      replace: args.replace,
+      materialized: args.materialized,
+    });
+    return;
   }
   emitCreateView({
     name,
     schema: args.schema,
     columns: args.columns,
     query: { kind: "structured", select: resolveSelectAst(args.as) },
-    replace: args.replace,
-    materialized: args.materialized,
-  });
-}
-
-function recordCreateRawView(name: string, args: CreateRawViewArgs & { schema?: string }): void {
-  if (!args || typeof args !== "object") {
-    throw structuredError("OP_INVALID", "view(name).createRaw({ sql }) needs an object");
-  }
-  requireString(args.sql, "view(name).createRaw({ sql })");
-  emitCreateRawView({
-    name,
-    schema: args.schema,
-    columns: args.columns,
-    query: { kind: "raw", sql: args.sql },
     replace: args.replace,
     materialized: args.materialized,
   });
@@ -3527,14 +3526,6 @@ export function view(name: string, opts: ViewOptions = {}): ViewHandle {
   const handle: ViewHandle = {
     create(args) {
       recordCreateView(name, {
-        ...args,
-        schema: pickSchema(args, dflt),
-        columns: pickViewColumns(args, dfltColumns),
-      });
-      return handle;
-    },
-    createRaw(args) {
-      recordCreateRawView(name, {
         ...args,
         schema: pickSchema(args, dflt),
         columns: pickViewColumns(args, dfltColumns),

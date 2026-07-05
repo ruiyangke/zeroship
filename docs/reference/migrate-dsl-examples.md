@@ -519,7 +519,7 @@ auto-attaches child indexes, reproducing a hand-decomposed `pg_dump` exactly.
 
 ## 13. Views
 
-Two forms: the portable structured `SelectAst` builder, and a PG `createRaw` escape.
+Two forms: the portable structured `SelectAst` builder, and a raw `{ as: { raw } }` escape.
 
 ```ts
 import { view } from "@zeroship/migrate";
@@ -537,8 +537,8 @@ view("active_users").create({
 // Joins; `materialized: true` makes it a matview.
 // ⚠️ Expressiveness cliff: the expression builder currently rejects table-qualified
 //    column refs (`c("orders.customer_id")` fails the strict identifier gate), so a
-//    join ON predicate is effectively unwritable structurally today — use createRaw for
-//    joined/aggregated views until the builder gains qualified refs.
+//    join ON predicate is effectively unwritable structurally today — use raw
+//    view bodies for joined/aggregated views until the builder gains qualified refs.
 view("order_totals").create({
   materialized: true,
   as: (q) => q.from("orders").select(["id", "total"]).where((c) => c("total").gt(0)),
@@ -547,9 +547,10 @@ view("order_totals").create({
 view("active_users").drop({ ifExists: true });
 view("active_users").comment("non-deleted users");
 
-// Raw view (PG escape). NOTE: createRaw takes { sql, columns?, materialized?, schema? } —
-// there is NO `reason` field on raw views (unlike pg.raw for DDL).
-view("legacy_report").createRaw({ sql: "SELECT a.id, count(b.*) FROM a JOIN b USING (id) GROUP BY 1" });
+// Raw view body.
+view("legacy_report").create({
+  as: { raw: "SELECT a.id, count(b.*) FROM a JOIN b USING (id) GROUP BY 1" },
+});
 ```
 
 `ViewQueryBuilder`: `from · select · join · innerJoin · leftJoin · where · orderBy · limit`.

@@ -27,8 +27,8 @@ platform schema. Ten findings, all verified against the repo:
 1. The public contract is internally inconsistent (docs say four exports and "`table()` is the
    sole entry"; `sdks/migrate/src/index.ts:21-37` exports nine value symbols plus ~50 types;
    `ops.ts:24` repeats the stale claim).
-2. The "no raw SQL" stance is false (three raw islands in `ir.rs:18`; core exports
-   `view.createRaw`; `pg.raw`/`pg.sql` at `pg.ts:143-160`).
+2. The "no raw SQL" stance is false (three raw islands in `ir.rs:18`; core exposes
+   a raw view selector; `pg.raw`/`pg.sql` at `pg.ts:143-160`).
 3. `pg.sql` records tagged-template binds (`pg.ts:374-384`) that `validate.rs:748` rejects
    unconditionally and `vendor.rs:583-585` has a dedicated error for — the advertised safe-raw
    API is unusable for its purpose.

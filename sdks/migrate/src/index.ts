@@ -111,7 +111,6 @@ export type {
   DelArgs,
   BackfillArgs,
   CreateViewArgs,
-  CreateRawViewArgs,
   DropViewArgs,
   ViewQueryBuilder,
   IndexMethod,
