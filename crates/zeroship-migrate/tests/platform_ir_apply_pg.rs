@@ -216,7 +216,7 @@ import { createFunction, pgTable, schema } from "@zeroship/migrate/pg";
 export const name = "platform_attach";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("platform_apps", { schema: "zeroship" }).create({
     columns: {
@@ -280,7 +280,7 @@ import { pgTable, schema } from "@zeroship/migrate/pg";
 export const name = "platform_composite_fk";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {
@@ -334,7 +334,7 @@ import { schema } from "@zeroship/migrate/pg";
 export const name = "platform_synth_defaults";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("platform_events", { schema: "zeroship" }).create({
     columns: {
@@ -361,7 +361,7 @@ import { pgTable, schema } from "@zeroship/migrate/pg";
 export const name = "platform_expr_surface";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   pgTable("expr_surface", { schema: "zeroship" }).create({
     columns: {
@@ -430,7 +430,7 @@ import { schema } from "@zeroship/migrate/pg";
 export const name = "platform_scalar_types";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("platform_scalar_types", { schema: "zeroship" }).create({
     columns: {
@@ -452,7 +452,7 @@ import { domain, schema } from "@zeroship/migrate/pg";
 export const name = "platform_domain_column";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   domain("myd").create({
     schema: "zeroship",

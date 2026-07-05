@@ -278,6 +278,74 @@ export interface DomainHandle {
   comment(text: string | null, args?: { schema?: string }): DomainHandle;
 }
 
+export interface SchemaCreateArgs {
+  ifNotExists?: boolean;
+  authorization?: string;
+}
+
+export interface SchemaDropArgs {
+  ifExists?: boolean;
+  cascade?: boolean;
+}
+
+export interface DroppedSchemaHandle {
+  readonly name: string;
+  create(args?: SchemaCreateArgs): SchemaHandle;
+}
+
+export interface SchemaHandle extends DroppedSchemaHandle {
+  drop(args?: SchemaDropArgs): DroppedSchemaHandle;
+}
+
+export interface ExtensionCreateArgs {
+  ifNotExists?: boolean;
+  schema?: string;
+}
+
+export interface ExtensionDropArgs {
+  ifExists?: boolean;
+}
+
+export interface DroppedExtensionHandle {
+  readonly name: string;
+  create(args?: ExtensionCreateArgs): ExtensionHandle;
+}
+
+export interface ExtensionHandle extends DroppedExtensionHandle {
+  drop(args?: ExtensionDropArgs): DroppedExtensionHandle;
+}
+
+export interface RoleCreateArgs {
+  login?: boolean;
+  password?: string;
+  bypassRls?: boolean;
+  createRole?: boolean;
+  createDb?: boolean;
+  superuser?: boolean;
+  inRole?: string[];
+  setSearchPath?: string[];
+  ifNotExists?: boolean;
+}
+
+export interface RoleSetOptionsArgs {
+  setSearchPath?: string[];
+  resetSearchPath?: boolean;
+}
+
+export interface RoleDropArgs {
+  ifExists?: boolean;
+}
+
+export interface DroppedRoleHandle {
+  readonly name: string;
+  create(args?: RoleCreateArgs): RoleHandle;
+}
+
+export interface RoleHandle extends DroppedRoleHandle {
+  setOptions(args: RoleSetOptionsArgs): RoleHandle;
+  drop(args?: RoleDropArgs): DroppedRoleHandle;
+}
+
 export interface SequenceOwnedBy {
   table: string;
   column: string;

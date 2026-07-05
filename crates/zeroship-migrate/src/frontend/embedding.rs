@@ -35,12 +35,8 @@ const MYSQL2_PROMISE_BUNDLE_JS: &str = include_str!("vendor/mysql2-3.14.1.bundle
 const MIGRATE_PG_SHIM_JS: &str = r#"
 export {
   schema,
-  dropSchema,
   extension,
-  dropExtension,
   role,
-  alterRole,
-  dropRole,
   dropOwnedBy,
   grant,
   revoke,

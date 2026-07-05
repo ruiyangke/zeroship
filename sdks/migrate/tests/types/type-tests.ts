@@ -19,6 +19,8 @@ import { t as dbT } from "@zeroship/db";
 import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
 // @ts-expect-error — free policy helpers were deleted; use pgTable(...).policy(name).create/drop().
 import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate/pg";
+// @ts-expect-error — flat named-object lifecycle helpers were deleted; use schema/extension/role handles.
+import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate/pg";
 
 import * as migrate from "../../src/index.js";
 import {

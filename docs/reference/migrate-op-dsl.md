@@ -1108,9 +1108,9 @@ for the build/watch wiring.
 
 > **Implemented: Postgres vendor primitives.** The `@zeroship/migrate/pg`
 > subpath exposes direct named exports, not a `pg` namespace object. The current
-> vendor value exports are `schema`, `dropSchema`, `extension`, `dropExtension`,
-> `role`, `alterRole`, `dropRole`, `dropOwnedBy`, `grant`, `revoke`,
-> `pgTable`, `createFunction`, `dropFunction`, `domain`, `sequence`, and `raw`.
+> vendor value exports are `schema`, `extension`, `role`, `dropOwnedBy`,
+> `grant`, `revoke`, `pgTable`, `createFunction`, `dropFunction`, `domain`,
+> `sequence`, and `raw`.
 > Table-scoped policies are authored as
 > `pgTable(table).policy(name).create/drop(...)`. These are Postgres-only and
 > operator-gated so the platform's own privileged DDL can be authored in the DSL.
