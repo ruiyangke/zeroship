@@ -1277,8 +1277,9 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
 }
 
 /// Assemble a one-shot `update` op (no `batch`) into a parameterized statement.
-/// `set` RHS + the optional `where` render through [`render_expr_bound`], so every
-/// literal is a native bind. Portable on both backends.
+/// `set` RHS values render through [`render_value_bound`] and the optional `where`
+/// renders through [`render_expr_bound`], so scalar set values and expression
+/// literals are native binds. Portable on both backends.
 ///
 /// # Errors
 /// [`DmlError`] on a malformed identifier / empty `set` / an unrenderable node.
@@ -1286,7 +1287,7 @@ pub fn assemble_update(
     project_schema: &str,
     dialect: SqlDialect,
     table: &str,
-    set: &BTreeMap<String, Expr>,
+    set: &BTreeMap<String, IrValue>,
     r#where: Option<&Expr>,
 ) -> Result<AssembledDml, DmlError> {
     if set.is_empty() {
@@ -1298,7 +1299,7 @@ pub fn assemble_update(
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
         let qc = quote_ident_for_dialect("column", col, dialect)?;
-        let r = render_expr_bound(rhs, &mut ctx)?;
+        let r = render_value_bound(rhs, &mut ctx)?;
         assigns.push(format!("{qc} = {r}"));
     }
     let mut template = format!("UPDATE {qtable} SET {}", assigns.join(", "));
@@ -1380,7 +1381,7 @@ pub struct BackfillClauses {
 pub fn assemble_backfill_clauses(
     dialect: SqlDialect,
     table: &str,
-    set: &BTreeMap<String, Expr>,
+    set: &BTreeMap<String, IrValue>,
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
     if set.is_empty() {
@@ -1390,7 +1391,7 @@ pub fn assemble_backfill_clauses(
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
         let qc = quote_ident_for_dialect("column", col, dialect)?;
-        let r = render_expr_inline(rhs, dialect)?;
+        let r = render_value_inline(rhs, dialect)?;
         assigns.push(format!("{qc} = {r}"));
     }
     let set_clause = assigns.join(", ");
@@ -1601,6 +1602,9 @@ mod tests {
     }
     fn val(s: IrScalar) -> IrValue {
         IrValue::Scalar(s)
+    }
+    fn dml_expr(e: Expr) -> IrValue {
+        IrValue::Expr(e)
     }
 
     // ── Concat is dialect-specific (regression: MySQL `||` is logical OR) ─────
@@ -2579,10 +2583,10 @@ mod tests {
     fn update_binds_literal_in_set_and_where() {
         let set = BTreeMap::from([(
             "label".to_string(),
-            Expr::FnCall {
+            dml_expr(Expr::FnCall {
                 r#fn: ScalarFn::Coalesce,
                 args: vec![Expr::col("label"), lit_str("unknown")],
-            },
+            }),
         )]);
         let pred = Expr::BinOp {
             op: BinaryOp::Gt,
@@ -2601,7 +2605,7 @@ mod tests {
 
     #[test]
     fn update_portable_on_sqlite() {
-        let set = BTreeMap::from([("a".to_string(), lit_int(5))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(lit_int(5)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Sqlite, "t", &set, None).unwrap();
         assert_eq!(a.template, "UPDATE \"t\" SET \"a\" = ?1");
         assert_eq!(a.binds, vec![BindValue::Int(5)]);
@@ -2667,11 +2671,11 @@ mod tests {
     fn backfill_renders_inline_set_and_filter() {
         let set = BTreeMap::from([(
             "label".to_string(),
-            Expr::BinOp {
+            dml_expr(Expr::BinOp {
                 op: BinaryOp::Concat,
                 lhs: Box::new(Expr::col("code")),
                 rhs: Box::new(lit_str("!")),
-            },
+            }),
         )]);
         let filter = Expr::BinOp {
             op: BinaryOp::Gt,
@@ -2687,7 +2691,7 @@ mod tests {
     /// downstream); the quote cannot break out of the literal.
     #[test]
     fn backfill_inline_string_is_quote_escaped() {
-        let set = BTreeMap::from([("a".to_string(), lit_str("O'Brien"))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(lit_str("O'Brien")))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = 'O''Brien'");
     }
@@ -2715,7 +2719,7 @@ mod tests {
     /// PG lowers splitPart to the native `split_part(col, 'd', n)` — verbatim.
     #[test]
     fn split_part_pg_native() {
-        let set = BTreeMap::from([("first".to_string(), split("name", " ", 1))]);
+        let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"first\" = split_part(\"name\", ' ', 1)");
     }
@@ -2724,7 +2728,7 @@ mod tests {
     /// case (no inner walk). The exact string is pinned to the §9 exhibit.
     #[test]
     fn split_part_sqlite_n1_unroll() {
-        let set = BTreeMap::from([("first".to_string(), split("name", " ", 1))]);
+        let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
         assert_eq!(
             c.set_clause,
@@ -2735,7 +2739,7 @@ mod tests {
     /// SQLite n=2 unrolls one boundary walk — pinned to the §9 exhibit.
     #[test]
     fn split_part_sqlite_n2_unroll() {
-        let set = BTreeMap::from([("last".to_string(), split("name", " ", 2))]);
+        let set = BTreeMap::from([("last".to_string(), dml_expr(split("name", " ", 2)))]);
         let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
         // cur1 = substr((name||' '), instr((name||' '), ' ') + 1)
         // result = substr(cur1, 1, instr(cur1, ' ') - 1)
@@ -2750,7 +2754,7 @@ mod tests {
     /// (binding nested literals); the delim/n are engine-pinned constants, NOT binds.
     #[test]
     fn split_part_one_shot_bound_pg() {
-        let set = BTreeMap::from([("first".to_string(), split("name", ",", 1))]);
+        let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", ",", 1)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(a.template, "UPDATE \"app_proj\".\"t\" SET \"first\" = split_part(\"name\", ',', 1)");
         assert!(a.binds.is_empty(), "delim/n are pinned constants, not binds");
@@ -2759,7 +2763,7 @@ mod tests {
     /// A single-quote delimiter is `''''`-escaped in the inline literal on both legs.
     #[test]
     fn split_part_quote_delim_escaped_sqlite() {
-        let set = BTreeMap::from([("a".to_string(), split("name", "'", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", "'", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
         assert_eq!(
             c.set_clause,
@@ -2772,10 +2776,10 @@ mod tests {
     /// mis-built.
     #[test]
     fn split_part_renderer_rejects_out_of_envelope() {
-        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
-        let set = BTreeMap::from([("a".to_string(), split("name", ",", 9))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 9)))]);
         let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
@@ -2789,17 +2793,17 @@ mod tests {
     #[test]
     fn split_part_out_of_envelope_renders_native_on_pg() {
         // multi-char delimiter — PG's split_part is multi-char-capable.
-        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ', ', 1)");
 
         // n beyond the SQLite unroll bound (9) — PG takes any positive n.
-        let set = BTreeMap::from([("a".to_string(), split("name", ",", 9))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 9)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ',', 9)");
 
         // and the one-shot (bound) PG path too — delim/n stay pinned constants.
-        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(a.template, "UPDATE \"app_proj\".\"t\" SET \"a\" = split_part(\"name\", ', ', 1)");
         assert!(a.binds.is_empty(), "delim/n are pinned constants, not binds");
@@ -2809,7 +2813,7 @@ mod tests {
     /// literal string); the single-ASCII byte gate is a SQLite-only envelope.
     #[test]
     fn split_part_non_ascii_delim_renders_on_pg() {
-        let set = BTreeMap::from([("a".to_string(), split("name", "→", 2))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", "→", 2)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", '→', 2)");
         // …but rejected on the SQLite leg (out of the byte-wise envelope).
@@ -2823,7 +2827,7 @@ mod tests {
     #[test]
     fn split_part_pg_still_rejects_malformed() {
         // n = 0 (not a positive part index) — invalid on PG too.
-        let set = BTreeMap::from([("a".to_string(), split("name", ",", 0))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 0)))]);
         let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
         // non-literal delim (a ColRef) — never renderable.
@@ -2835,7 +2839,7 @@ mod tests {
                 lit_int(1),
             ],
         };
-        let set = BTreeMap::from([("a".to_string(), bad)]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(bad))]);
         let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
