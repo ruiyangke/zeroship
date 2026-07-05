@@ -1211,8 +1211,18 @@ class ExprChainImpl implements ExprChainType {
   private bin(op: string, x: unknown): ExprChainImpl {
     return chain({ node: "binOp", op, lhs: this.__node, rhs: exprArg(x) });
   }
-  eq(x: unknown) { return this.bin("eq", x); }
-  ne(x: unknown) { return this.bin("ne", x); }
+  eq(x: unknown) {
+    if (x === null) {
+      throw structuredError("OP_INVALID", "eq(null) is always UNKNOWN in SQL — use isNull()");
+    }
+    return this.bin("eq", x);
+  }
+  ne(x: unknown) {
+    if (x === null) {
+      throw structuredError("OP_INVALID", "ne(null) is always UNKNOWN in SQL — use isNotNull()");
+    }
+    return this.bin("ne", x);
+  }
   lt(x: unknown) { return this.bin("lt", x); }
   le(x: unknown) { return this.bin("le", x); }
   gt(x: unknown) { return this.bin("gt", x); }
