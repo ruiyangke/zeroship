@@ -4304,28 +4304,6 @@
       "description": "The kind of a table constraint. CLOSED enum, internally tagged on `\"kind\"`.",
       "oneOf": [
         {
-          "description": "PRIMARY KEY over the named columns.",
-          "type": "object",
-          "properties": {
-            "columns": {
-              "description": "The key columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "kind": {
-              "type": "string",
-              "const": "pk"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "columns"
-          ]
-        },
-        {
           "description": "FOREIGN KEY referencing `(referencesTable.referencesColumns)`.",
           "type": "object",
           "properties": {

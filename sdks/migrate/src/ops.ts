@@ -355,7 +355,6 @@ const emitDropTable = defineOp("dropTable");
 const emitRenameTable = defineOp("renameTable");
 const emitAddColumn = defineOp("addColumn");
 const emitAddColumnUnique = defineOp("addConstraint", "addColumn.unique");
-const emitAddColumnPk = defineOp("addConstraint", "addColumn.pk");
 const emitDropColumn = defineOp("dropColumn");
 const emitRenameColumn = defineOp("renameColumn");
 const emitSetColumnType = defineOp("setColumnType");
@@ -1945,25 +1944,16 @@ function recordAddColumn(
   // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: emit a
   // follow-on unique constraint (mirroring the createTable per-column `.unique()`
   // image, which rides the column's `unique:true` field — but an ADD COLUMN has no
-  // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT). Likewise a
-  // `.primaryKey()` on an added column hoists a pk add.
+  // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT).
   //
-  // A PRIMARY KEY already IMPLIES uniqueness, so when BOTH are set the follow-on
-  // UNIQUE is redundant DDL (an extra index/constraint) — suppress it when
-  // `_primaryKey` is set, mirroring how the differ never emits a separate UNIQUE
-  // for the PK column. Only the pk add is recorded.
-  if (type._unique && !type._primaryKey) {
+  // There is NO add-column PRIMARY KEY follow-on: primary key is create-time only
+  // (`create({ primaryKey })` / the `.primaryKey()` facet on a create() column), so
+  // the always-refused user PK constraint shape is deleted — `.primaryKey()` on an
+  // added column records no pk op, and the `.unique()` follow-on is unconditional.
+  if (type._unique) {
     emitAddColumnUnique({
       table,
       constraint: { kind: { kind: "unique", columns: [column] } },
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    });
-  }
-  if (type._primaryKey) {
-    emitAddColumnPk({
-      table,
-      constraint: { kind: { kind: "pk", columns: [column] } },
       schema: args.schema,
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
     });

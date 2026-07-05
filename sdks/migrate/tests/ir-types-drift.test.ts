@@ -79,7 +79,7 @@ const TS = {
     "json", "timestamp", "date", "uuid", "inet", "textArray", "bytes", "geoPoint",
   ].sort(),
   // IrConstraintKind tags.
-  IrConstraintKind: ["pk", "fk", "unique", "check", "exclusion"].sort(),
+  IrConstraintKind: ["fk", "unique", "check", "exclusion"].sort(),
   // §A2 — trigger action/body tags.
   TriggerAction: ["executeFunction", "body"].sort(),
   TriggerStmt: ["insert", "update", "delete", "select", "raise"].sort(),

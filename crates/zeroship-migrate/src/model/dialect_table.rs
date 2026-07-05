@@ -66,7 +66,6 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "addConstraint", variant: "fkNonId", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "addConstraint", variant: "fkNotValid", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "addConstraint", variant: "fkSimple", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
-    DispositionRow { kind: "addConstraint", variant: "pk", postgres: Disposition::Unsupported, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "addConstraint", variant: "unique", postgres: Disposition::Portable, sqlite: Disposition::Portable, mysql: Disposition::Portable },
     DispositionRow { kind: "alterRole", variant: "base", postgres: Disposition::Vendor, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },
     DispositionRow { kind: "alterSequence", variant: "base", postgres: Disposition::Portable, sqlite: Disposition::Unsupported, mysql: Disposition::Unsupported },

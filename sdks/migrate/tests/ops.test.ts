@@ -300,31 +300,27 @@ test("C2 — .column().add({ type: t.text().unique() }) emits the column + a fol
   assert.deepEqual(ops[1].constraint, { kind: { kind: "unique", columns: ["email"] } });
 });
 
-test("C2 — .column().add({ type: t.uuid().primaryKey() }) emits the column + a follow-on pk", () => {
+test("C2 — primary key is create-time only: .column().add({ type: t.uuid().primaryKey() }) records NO pk follow-on", () => {
+  // The always-refused user PRIMARY KEY constraint shape is deleted; `.primaryKey()`
+  // on an added column records only the addColumn (no addConstraint(pk)). PKs are
+  // authored at create time via `create({ primaryKey })` / a create() column facet.
   const ops = record(() => table("u").column("id").add({ type: t.uuid().primaryKey() }));
-  assert.equal(ops.length, 2);
+  assert.equal(ops.length, 1, "an addColumn only — no pk follow-on");
   assert.equal(ops[0].op, "addColumn");
-  assert.equal(ops[0].nullable, false, "a PK column is NOT NULL");
-  assert.equal(ops[1].op, "addConstraint");
-  assert.deepEqual(ops[1].constraint, { kind: { kind: "pk", columns: ["id"] } });
+  assert.ok(
+    !ops.some((o) => o.op === "addConstraint"),
+    "no addConstraint(pk) is recorded for an added column",
+  );
 });
 
-test("C2 — .column().add({ type: t.text().unique().primaryKey() }) suppresses the redundant unique", () => {
-  // A PRIMARY KEY already implies uniqueness, so the follow-on UNIQUE is redundant
-  // DDL — only the pk add is recorded (no extra addConstraint(unique)).
+test("C2 — .column().add({ type: t.text().unique().primaryKey() }) records the unique follow-on (no pk shape)", () => {
+  // With the pk constraint shape gone, the `.unique()` follow-on is unconditional:
+  // the added column emits addColumn + addConstraint(unique).
   const ops = record(() => table("u").column("id").add({ type: t.text().unique().primaryKey() }));
-  assert.equal(ops.length, 2, "an addColumn + ONLY the pk add (no redundant unique)");
+  assert.equal(ops.length, 2, "an addColumn + the unique add");
   assert.equal(ops[0].op, "addColumn");
   assert.equal(ops[1].op, "addConstraint");
-  assert.deepEqual(
-    ops[1].constraint,
-    { kind: { kind: "pk", columns: ["id"] } },
-    "the single follow-on constraint is the pk, not a redundant unique",
-  );
-  // Order-independence: .primaryKey().unique() suppresses the unique too.
-  const ops2 = record(() => table("u").column("id").add({ type: t.text().primaryKey().unique() }));
-  assert.equal(ops2.length, 2, "order-independent: still no redundant unique");
-  assert.deepEqual(ops2[1].constraint, { kind: { kind: "pk", columns: ["id"] } });
+  assert.deepEqual(ops[1].constraint, { kind: { kind: "unique", columns: ["id"] } });
 });
 
 test(".foreignKey().add() field order is irrelevant (named fields, not positionals)", () => {

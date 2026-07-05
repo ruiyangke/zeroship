@@ -564,13 +564,6 @@ mysql = "unsupported"
 
 [[row]]
 kind = "addConstraint"
-variant = "pk"
-pg = "unsupported"
-sqlite = "unsupported"
-mysql = "unsupported"
-
-[[row]]
-kind = "addConstraint"
 variant = "fkNoLocalColumn"
 pg = "unsupported"
 sqlite = "unsupported"
