@@ -28,11 +28,13 @@ import {
   membership,
   lit,
   decimal,
+  byteValue,
   interval,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
   type DecimalValue,
+  type BytesValue,
 } from "../../src/index.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
@@ -322,6 +324,20 @@ export function decimalValueShapes(): void {
 
   // @ts-expect-error — bigint is not valid in expression literals.
   lit(9007199254740993n);
+}
+
+export function byteValueShapes(): void {
+  const fromString: BytesValue = byteValue("AQID");
+  const fromBytes: BytesValue = byteValue(new Uint8Array([1, 2, 3]));
+  table("files").insert({ rows: { raw: fromString } });
+  table("files").insert({ rows: { raw: fromBytes } });
+  table("files").insert({ rows: { raw: new Uint8Array([1, 2, 3]) } });
+  table("files").create({ columns: { raw: t.bytes().default(byteValue("AQID")) } });
+  table("files").insert({
+    rows: { id: 1, raw: byteValue("AQID") },
+    onConflict: { columns: ["id"], doUpdate: { raw: byteValue(new Uint8Array([1, 2, 3])) } },
+  });
+  lit(byteValue("AQID"));
 }
 
 // ───────────────────────────────────────────────────────────────────────────

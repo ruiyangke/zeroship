@@ -44,6 +44,7 @@ export {
   notMembership,
   lit,
   decimal,
+  byteValue,
   interval,
   nextval,
   p,
