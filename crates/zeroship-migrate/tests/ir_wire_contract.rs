@@ -998,11 +998,11 @@ fn expr_case_omits_absent_else() {
     use zeroship_migrate::model::expr::{CaseBranch, UnaryOp};
     let e = Expr::Case {
         branches: vec![CaseBranch {
-            condition: Expr::UnaryOp {
+            when: Expr::UnaryOp {
                 op: UnaryOp::IsNull,
                 operand: Box::new(Expr::col("a")),
             },
-            result: Expr::lit(IrScalar::Int(1)),
+            then: Expr::lit(IrScalar::Int(1)),
         }],
         r#else: None,
     };
