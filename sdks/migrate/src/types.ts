@@ -240,13 +240,13 @@ export interface TypeLexicon {
   geoPoint(): ColumnDef;
   /** 16-bit signed integer. */
   smallInt(): ColumnDef;
-  /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */
-  integer(): ColumnDef;
+  /** 32-bit signed integer (canonical; `t.integer` is deleted, P10). */
   int(): ColumnDef;
   bigInt(): ColumnDef;
-  /** Single-precision float. */
+  /** Single-precision float (float4). */
   real(): ColumnDef;
-  float(): ColumnDef;
+  /** Double-precision float (float8). */
+  double(): ColumnDef;
   /** IP network/address (`inet` on Postgres). */
   inet(): ColumnDef;
   /** A named enum reference declared with `enumType(name).create({ values })`. */
@@ -693,7 +693,7 @@ export interface TriggerBodyBuilder {
   raise(args: TriggerRaiseArgs): TriggerStmt;
   insert<R extends Row = Row>(args: TriggerInsertArgs<R>): TriggerStmt;
   update(args: TriggerUpdateArgs): TriggerStmt;
-  del(args: TriggerDeleteArgs): TriggerStmt;
+  delete(args: TriggerDeleteArgs): TriggerStmt;
   select(expr: ExprFn | ExprChain | Expr): TriggerStmt;
 }
 
@@ -1094,7 +1094,7 @@ export interface TableHandle {
   // §3.5 — table data (direct named DML; no existence guard — DML is unguardable)
   insert<R extends Row = Row>(args: InsertArgs<R>): TableHandle;
   update(args: UpdateArgs): TableHandle;
-  del(args: DelArgs): TableHandle;
+  delete(args: DelArgs): TableHandle;
   backfill(args: BackfillArgs): TableHandle;
 
   // `@zeroship/migrate/pg` — table-scoped privileged primitives.

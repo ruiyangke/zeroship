@@ -98,7 +98,7 @@ export function up() {
       status: t.text().notNull().default("new"),
     },
   });
-  table("widgets").column("qty").add({ type: t.integer() });
+  table("widgets").column("qty").add({ type: t.int() });
 }
 "#;
     fs::write(mig_dir.path().join(format!("{stem}.ts")), ts.as_bytes()).unwrap();

@@ -112,7 +112,7 @@ fn authoring_reject_is_422_not_retryable() {
     // surfaces an eval error -> 422, not retryable (an authoring bug, not a transient).
     let bad = r#"
         import { table, t } from "@zeroship/migrate";
-        table("oops").create({ columns: { id: t.integer().notNull() } }); // top-level call
+        table("oops").create({ columns: { id: t.int().notNull() } }); // top-level call
         export function up() {}
     "#;
     let req = RecordHttpRequest {

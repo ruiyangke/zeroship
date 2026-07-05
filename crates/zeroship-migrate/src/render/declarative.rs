@@ -1377,7 +1377,7 @@ fn field_default_expr(f: &FieldDescriptor, synth_json_defaults: bool) -> Option<
     if let Some(default) = &f.default {
         return match f.ty.as_str() {
             "string" | "char" | "inet" => default.as_str().map(sql_str),
-            // `int` (`t.integer()`/`t.bigInt()`) and `number` (`t.float()`/
+            // `int` (`t.int()`/`t.bigInt()`) and `number` (`t.double()`/
             // `t.numeric()`) share one precision-preserving renderer — without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
             // decimal/bigint carried as a numeric string dropped from BOTH.

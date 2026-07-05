@@ -14,7 +14,7 @@ export function up() {
   table("orders").create({
     columns: {
       id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      total: t.integer().notNull().default(0),
+      total: t.int().notNull().default(0),
       note: t.text(),
     },
   });

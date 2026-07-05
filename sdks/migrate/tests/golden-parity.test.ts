@@ -131,9 +131,9 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
         location: t.geoPoint(),
         // re-blessed string → text (t.string alias removed, §7).
         label: t.text(),
-        hits: t.integer().notNull().default(0),
+        hits: t.int().notNull().default(0),
         big_hits: t.bigInt(),
-        ratio: t.float(),
+        ratio: t.double(),
         secret: t.encrypted({ of: t.text() }),
       },
     });
@@ -195,7 +195,7 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
       },
       where: (c) => c("code").gt(0).and(c("label").isNotNull()),
     });
-    table("status_codes").del({
+    table("status_codes").delete({
       where: (c) =>
         c("code")
           .ne(0)

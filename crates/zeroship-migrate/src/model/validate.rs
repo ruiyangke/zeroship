@@ -2447,7 +2447,7 @@ fn validate_column_facets(
                  supported on smallInt/int/bigInt columns",
                 col.name
             ),
-            "declare the column as `t.smallInt().identity(...)`, `t.integer().identity(...)`, \
+            "declare the column as `t.smallInt().identity(...)`, `t.int().identity(...)`, \
              or `t.bigInt().identity(...)`"
                 .to_string(),
         ));

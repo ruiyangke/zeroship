@@ -8,7 +8,7 @@ const accountState = domain("account_state");
 export function up() {
   planTier.create({ values: ["free", "pro"] });
   billingPeriod.create({
-    as: t.integer(),
+    as: t.int(),
     check: (c) => c("VALUE").ge(1),
     default: 1,
     notNull: true,

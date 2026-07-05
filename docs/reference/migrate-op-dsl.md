@@ -214,9 +214,10 @@ The shipped factories (`sdks/migrate/src/ops.ts`):
 | --- | --- |
 | `t.id(opts?)` | a non-null `uuid` PK defaulting to `gen_random_uuid()`; `t.id({ prefix })` brands it as a typed id (`prefix_<base62>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.text()` | text |
-| `t.integer()` | 32-bit integer |
+| `t.int()` | 32-bit integer |
 | `t.bigInt()` | 64-bit integer |
-| `t.float()` | floating point |
+| `t.real()` | single-precision float (float4) |
+| `t.double()` | double-precision float (float8) |
 | `t.numeric(precision?, scale?)` | fixed-precision decimal (default `(38, 9)`) |
 | `t.boolean()` | boolean |
 | `t.timestamp()` | timestamp |
@@ -228,9 +229,9 @@ The shipped factories (`sdks/migrate/src/ops.ts`):
 | `t.ref(targetTable)` | a foreign-key reference (plain-string target) |
 | `t.encrypted({ of })` | an application-level encrypted column wrapping an inner type |
 
-> The `string`/`int` aliases and the `t.X({ notNull, default })` options-bag
-> overload are **removed**. Use the canonical `t.text()`/`t.integer()` and the
-> chain (`t.text().notNull().default("pending")`).
+> The `string`/`integer`/`float` aliases and the `t.X({ notNull, default })`
+> options-bag overload are **removed**. Use the canonical `t.text()`/`t.int()`
+> and the chain (`t.text().notNull().default("pending")`).
 
 Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnDef`:
 
@@ -469,7 +470,7 @@ table("orders").update({
   where: (c) => c("status").eq("pending"),
 });
 
-table("sessions").del({ where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
+table("sessions").delete({ where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
 
 table("orders").backfill({
   set: { total_norm: (c) => c.fn.coalesce(c("total"), 0) },

@@ -30,7 +30,7 @@ test("ONE lexicon: a @zeroship/db field reduces to the same ColType the migratio
   assert.deepEqual(colTypeFromDbField(dbT.bytes()), migrateColType(t.bytes()));
   assert.deepEqual(colTypeFromDbField(dbT.geoPoint()), migrateColType(t.geoPoint()));
   // `t.number()` (a db float) maps to the neutral `double` ColType.
-  assert.deepEqual(colTypeFromDbField(dbT.number()), migrateColType(t.float()));
+  assert.deepEqual(colTypeFromDbField(dbT.number()), migrateColType(t.double()));
   // `t.id(...)` reduces to the neutral `uuid` ColType (the typed_id PK candidate).
   assert.equal(colTypeFromDbField(dbT.id("post")), "uuid");
 });

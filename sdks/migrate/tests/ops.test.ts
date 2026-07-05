@@ -690,10 +690,10 @@ test("update accepts a batch knob (parity with the engine recorder)", () => {
 });
 
 test("del records the 'delete' wire tag and requires where", () => {
-  const ops = record(() => table("t").del({ where: (c) => c("code").isNull(), limit: 5 }));
+  const ops = record(() => table("t").delete({ where: (c) => c("code").isNull(), limit: 5 }));
   assert.equal(ops[0].op, "delete");
   assert.equal(ops[0].limit, 5);
-  assert.throws(() => record(() => table("t").del({} as any)), /where is mandatory/);
+  assert.throws(() => record(() => table("t").delete({} as any)), /where is mandatory/);
 });
 
 test("the (c) => Expr builder constructs the closed AST", () => {
@@ -891,10 +891,10 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         user_id: t.text().notNull(),
         kind: t.text().notNull(),
         data: t.json().notNull(),
-        subtotal_cents: t.integer().notNull(),
-        credit_cents: t.integer().notNull(),
-        total_cents: t.integer().notNull(),
-        floor_cents: t.integer(),
+        subtotal_cents: t.int().notNull(),
+        credit_cents: t.int().notNull(),
+        total_cents: t.int().notNull(),
+        floor_cents: t.int(),
         created_at: t.timestamp().notNull(),
         expires_at: t.timestamp().notNull(),
         enabled: t.boolean().notNull(),

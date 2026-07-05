@@ -290,7 +290,7 @@ fn rlimit_cpu_or_wall_bounds_an_infinite_loop() {
     // wall watchdog (SIGKILL) must bound it. Either way => BUILD_RECORDER_BUDGET_EXCEEDED.
     let loop_src = r#"
         import { table, t } from "@zeroship/migrate";
-        export function up() { table("t").create({ columns: { id: t.integer().notNull() } }); while (true) {} }
+        export function up() { table("t").create({ columns: { id: t.int().notNull() } }); while (true) {} }
     "#;
     let req = RecordRequest {
         ts_source: loop_src.to_string(),
@@ -594,7 +594,7 @@ fn concurrent_records_get_separate_sandbox_children() {
     let mk = |owner: &'static str, table: &'static str| {
         let src = format!(
             r#"import {{ table, t }} from "@zeroship/migrate";
-               export function up() {{ table("{table}").create({{ columns: {{ id: t.integer().notNull() }} }}); }}"#
+               export function up() {{ table("{table}").create({{ columns: {{ id: t.int().notNull() }} }}); }}"#
         );
         std::thread::spawn(move || {
             let req = RecordRequest {
@@ -644,7 +644,7 @@ fn untrusted_up_cannot_forge_owner_app() {
           // Attempt to forge the tenant-identifying owner via every reachable name.
           try { globalThis.__zsOwnerApp = "app_VICTIM"; } catch (_) {}
           try { __zsOwnerApp = "app_VICTIM"; } catch (_) {}
-          table("t").create({ columns: { id: t.integer().notNull() } });
+          table("t").create({ columns: { id: t.int().notNull() } });
         }
     "#;
     let req = RecordRequest {
@@ -697,7 +697,7 @@ fn large_migration_ir_exceeding_pipe_buffer_records() {
           for (let i = 0; i < 4000; i++) {
             table("tbl_" + i).create({
               columns: {
-                id: t.integer().notNull(),
+                id: t.int().notNull(),
                 label: t.text(),
               },
             });
@@ -1004,9 +1004,9 @@ fn recorder_process_stub_invariants_are_pinned() {
               typeof globalThis.module === "undefined" &&
               typeof globalThis.__dirname === "undefined" &&
               typeof globalThis.Buffer === "undefined";
-          table("env_empty_" + envIsEmpty).create({ columns: { id: t.integer().notNull() } });
-          table("exit_undef_" + exitUndefined).create({ columns: { id: t.integer().notNull() } });
-          table("no_node_" + noNodeBindings).create({ columns: { id: t.integer().notNull() } });
+          table("env_empty_" + envIsEmpty).create({ columns: { id: t.int().notNull() } });
+          table("exit_undef_" + exitUndefined).create({ columns: { id: t.int().notNull() } });
+          table("no_node_" + noNodeBindings).create({ columns: { id: t.int().notNull() } });
         }
     "#;
     let req = RecordRequest {

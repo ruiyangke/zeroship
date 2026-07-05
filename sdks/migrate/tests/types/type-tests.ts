@@ -65,7 +65,7 @@ export function antiRotMigration(): void {
     set: { legacy_col: (c) => c("a_column_no_schema_declares").concat(" suffix") },
     where: (c) => c("yet_another_missing_column").isNull(),
   });
-  table("nonexistent_table").del({ where: (c) => c("phantom_col").eq(1) });
+  table("nonexistent_table").delete({ where: (c) => c("phantom_col").eq(1) });
   table("nonexistent_table").backfill({
     set: { legacy_col: (c) => c.fn.splitPart(c("phantom_col"), " ", 1) },
     where: (c) => c("phantom_col").isNotNull(),
@@ -96,8 +96,8 @@ export function badOpShapes(): void {
   // @ts-expect-error — .foreignKey().add() needs `references`, not a bare columns list.
   table("orders").foreignKey("fk").add({ columns: ["user_id"] });
 
-  // @ts-expect-error — `del` requires a `where` predicate (mandatory).
-  table("users").del({});
+  // @ts-expect-error — `delete` requires a `where` predicate (mandatory).
+  table("users").delete({});
 
   // @ts-expect-error — `update.set` values must be (c) => Expr callbacks, not raw strings.
   table("users").update({ set: { name: "raw sql string" } });
@@ -189,7 +189,7 @@ export function checkExpressionSurfaceTypechecks(): void {
       user_id: t.text().notNull(),
       kind: t.text().notNull(),
       data: t.json().notNull(),
-      floor_cents: t.integer(),
+      floor_cents: t.int(),
       created_at: t.timestamp().notNull(),
       expires_at: t.timestamp().notNull(),
       active: t.boolean().notNull(),
@@ -240,7 +240,7 @@ export function insertValueShapes(): void {
   // TypeScript cannot distinguish this from Date.now; the runtime identity guard
   // rejects it. This line intentionally typechecks.
   table("users").insert({ rows: { count: () => 42 } });
-  table("users").create({ columns: { count: t.integer().default(() => 1) } });
+  table("users").create({ columns: { count: t.int().default(() => 1) } });
 
   // @ts-expect-error — a function returning an object is not a native-compatible synth symbol.
   table("users").insert({ rows: { bad: () => ({ nope: true }) } });
@@ -271,7 +271,7 @@ export function lexiconBridgeShapes(): void {
 // ───────────────────────────────────────────────────────────────────────────
 
 export function existenceGuardsTypecheck(): void {
-  table("t").create({ columns: { n: t.integer() }, ifNotExists: true });
+  table("t").create({ columns: { n: t.int() }, ifNotExists: true });
   table("t").column("email").add({ type: t.text(), ifNotExists: true });
   table("t").column("legacy").drop({ ifExists: true });
   table("t").column("a").setType({ to: t.bigInt() });
