@@ -33,9 +33,9 @@ export const name = "create_users";
 export function up() {
   table("users").create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       email: t.text().notNull(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["id"],
   });
@@ -97,10 +97,10 @@ t.textArray()                // text[] (PG native; SQLite TEXT; MySQL JSON)
 
 // Numbers
 t.smallInt()                 // int2
-t.integer()                  // int4  (t.int() is a true alias of this)
+t.int()                      // int4
 t.bigInt()                   // int8
 t.real()                     // float4
-t.float()                    // float8 / double precision — NOT an alias of t.real()
+t.double()                   // float8 / double precision — NOT an alias of t.real()
 t.numeric(12, 2)             // NUMERIC(precision, scale)
 
 // Temporal
@@ -156,9 +156,9 @@ t.bigInt().default(0)
 t.text().default("pending")
 t.boolean().default(true)
 
-// Function defaults (portable set)
-t.uuid().default({ fn: "genRandomUuid" })
-t.timestamp().default({ fn: "now" })
+// Function defaults are EXPRESSIONS (portable set) — the `{ fn: … }` carrier was deleted (P4)
+t.uuid().default((c) => c.fn.genRandomUuid())
+t.timestamp().default((c) => c.fn.now())
 
 // Empty-container defaults
 t.json().default({})                         // '{}'::jsonb
