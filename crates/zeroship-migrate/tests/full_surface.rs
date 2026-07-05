@@ -94,11 +94,11 @@ fn concatws_records_fnsynth_node() {
 /// FK op regardless of field order — the named-field (not transposable-positional)
 /// guarantee (§3.2 shaping convention 2).
 #[test]
-fn addforeignkey_field_order_independent() {
+fn foreignkey_add_field_order_independent() {
     let src_a = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("orders").addForeignKey("orders_customer_fk", {
+            table("orders").foreignKey("orders_customer_fk").add({
                 columns: ["customer_id"],
                 references: { table: "customers", columns: ["id"] },
             });
@@ -129,11 +129,11 @@ fn addforeignkey_field_order_independent() {
 }
 
 #[test]
-fn addforeignkey_records_composite_non_id_fk() {
+fn foreignkey_add_records_composite_non_id_fk() {
     let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+            table("billing_line_provider_refs", { schema: "zeroship" }).foreignKey("billing_line_provider_refs_line_fk").add({
                 columns: ["invoice_id", "app_id", "segment_no"],
                 references: {
                     schema: "zeroship",
