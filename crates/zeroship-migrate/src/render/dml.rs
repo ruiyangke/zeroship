@@ -845,11 +845,11 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let e = render_expr_bound(expr, ctx)?;
             format!("pg_column_size({e})")
         }
-        Expr::Extract { field, expr } => {
-            let e = render_expr_bound(expr, ctx)?;
+        Expr::Extract { field, from } => {
+            let e = render_expr_bound(from, ctx)?;
             render_extract(*field, &e, ctx.dialect)?
         }
-        Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, ctx.dialect)?,
+        Expr::PgInterval { duration } => render_pg_interval_literal(duration, ctx.dialect)?,
         Expr::Dialectal { default, pg, sqlite, mysql } => {
             let leg = select_dialect_leg(ctx.dialect, default, pg, sqlite, mysql)?;
             render_expr_bound(leg, ctx)?
@@ -1054,11 +1054,11 @@ where
             }
             format!("pg_column_size({})", render_expr_inline_with_col(expr, dialect, col_ref)?)
         }
-        Expr::Extract { field, expr } => {
-            let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
+        Expr::Extract { field, from } => {
+            let e = render_expr_inline_with_col(from, dialect, col_ref)?;
             render_extract(*field, &e, dialect)?
         }
-        Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, dialect)?,
+        Expr::PgInterval { duration } => render_pg_interval_literal(duration, dialect)?,
         Expr::Dialectal { default, pg, sqlite, mysql } => {
             let leg = select_dialect_leg(dialect, default, pg, sqlite, mysql)?;
             render_expr_inline_with_col(leg, dialect, col_ref)?

@@ -69,7 +69,7 @@ const TS = {
   Expr: [
     "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
     "between", "like", "distinctFrom", "agg",
-    "pgArrayMembership", "pgRegexMatch", "pgColumnSize", "extract", "pgIntervalLiteral",
+    "pgArrayMembership", "pgRegexMatch", "pgColumnSize", "extract", "pgInterval",
     "dialect",
   ].sort(),
   // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted

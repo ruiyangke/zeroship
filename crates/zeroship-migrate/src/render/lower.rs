@@ -5220,9 +5220,11 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             }
             Expr::PgArrayMembership { expr, .. }
             | Expr::PgRegexMatch { expr, .. }
-            | Expr::PgColumnSize { expr }
-            | Expr::Extract { expr, .. } => {
+            | Expr::PgColumnSize { expr } => {
                 collect_col_refs(expr, out);
+            }
+            Expr::Extract { from, .. } => {
+                collect_col_refs(from, out);
             }
             Expr::Between { operand, low, high } => {
                 collect_col_refs(operand, out);
@@ -5242,7 +5244,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                     collect_col_refs(arg, out);
                 }
             }
-            Expr::PgIntervalLiteral { .. } => {}
+            Expr::PgInterval { .. } => {}
             // The Layer-2 dialect() escape (§3.4): collect refs from EVERY present
             // leg so a derived CHECK name is stable regardless of which dialect the
             // divergence resolves to at render time.

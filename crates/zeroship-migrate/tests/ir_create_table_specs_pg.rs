@@ -18,7 +18,6 @@
 //! Requires `:5440` (the `*_pg` suite convention); run with `--test-threads=1`.
 
 use compio_postgres::Client;
-use zeroship_migrate::model::load::IrLoadError;
 use zeroship_migrate::model::validate::{UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::{
     apply::executor::LockMode,
@@ -658,7 +657,7 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
     let ir = r#"{"ir_version":1,"name":"pg_expr_slice_c","ops":[
         {"op":"createDomain","name":"billing_period","as":"date","check":{
             "node":"binOp","op":"eq",
-            "lhs":{"node":"extract","field":"day","expr":{"node":"colRef","name":"VALUE"}},
+            "lhs":{"node":"extract","field":"day","from":{"node":"colRef","name":"VALUE"}},
             "rhs":{"node":"literal","value":1}}},
         {"op":"createTable","name":"oauth_device_codes","columns":[
             {"name":"issued_at","type":"timestamp","nullable":false},
@@ -670,7 +669,7 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
                 "lhs":{"node":"colRef","name":"expires_at"},
                 "rhs":{"node":"binOp","op":"add",
                     "lhs":{"node":"colRef","name":"issued_at"},
-                    "rhs":{"node":"pgIntervalLiteral","value":"00:01:00"}}}}}
+                    "rhs":{"node":"pgInterval","duration":"00:01:00"}}}}}
         ]}
     ]}"#;
     let plan = author_and_apply(&conn, &cfg, ir, &registry(&[]), Approval::Approved).await;
@@ -757,10 +756,10 @@ fn pg_extract_and_interval_literal_validate_refuse_non_pg() {
     let cases = [
         r#"{"ir_version":1,"name":"extract_refuse","ops":[
             {"op":"update","table":"t","set":{"x":{
-                "node":"extract","field":"day","expr":{"node":"colRef","name":"x"}}}}
+                "node":"extract","field":"day","from":{"node":"colRef","name":"x"}}}}
         ]}"#,
         r#"{"ir_version":1,"name":"interval_refuse","ops":[
-            {"op":"update","table":"t","set":{"x":{"node":"pgIntervalLiteral","value":"00:01:00"}}}
+            {"op":"update","table":"t","set":{"x":{"node":"pgInterval","duration":"00:01:00"}}}
         ]}"#,
     ];
 
