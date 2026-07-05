@@ -89,6 +89,8 @@ export type {
   ExclusionRef,
   ConstraintRef,
   IndexRef,
+  IndexAddArgs,
+  IndexDropArgs,
   CreateTableArgs,
   TableRuntimeOptions,
   SetTableOptionsArgs,

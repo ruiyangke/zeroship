@@ -94,6 +94,9 @@ import type {
   PartitionBoundSentinel,
   PartitionByInput,
   PgExprNamespace,
+  PgIndexAdd,
+  PgIndexDropArgs,
+  PgIndexRef,
   PgTableHandle,
   RefAction,
   Row,
@@ -2701,18 +2704,7 @@ function recordDropConstraint(
 function recordCreateIndex(
   table: string,
   name: string,
-  args: {
-    on: IndexElementArg[];
-    unique?: boolean;
-    using?: import("./types.js").IndexMethod;
-    where?: IndexExprFn;
-    include?: readonly string[];
-    with?: IndexStorageParamsArg;
-    only?: boolean;
-    nullsNotDistinct?: boolean;
-    ifNotExists?: boolean;
-    schema?: string;
-  },
+  args: PgIndexAdd,
 ): void {
   if (!Array.isArray(args.on)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
@@ -2736,7 +2728,7 @@ function recordCreateIndex(
 function recordDropIndex(
   table: string,
   name: string,
-  args: { ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string },
+  args: PgIndexDropArgs,
 ): void {
   emitDropIndex({
     name,
@@ -3402,10 +3394,10 @@ export function __makeTableHandle(name: string, opts: TableOptions = {}): PgTabl
     },
 
     // §3.4 — indexes
-    index(idxName): IndexRef {
+    index(idxName): PgIndexRef {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
-      const indexRef: IndexRef = {
+      const indexRef: PgIndexRef = {
         add(args) {
           terminateSelector(id);
           recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });

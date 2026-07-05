@@ -435,17 +435,27 @@ table("orders").constraint("orders_total_nonneg").drop({ ifExists: true }); // k
 
 ```ts
 const members = table("members");
-members.index("members_email_idx").add({ on: ["email"], unique: true, using: "btree" });
+members.index("members_email_idx").add({ on: ["email"], unique: true });
 members.index("members_created_idx").add({
   on: ["org_id", { column: "created_at", order: "desc" }],
 });
 members.index("members_email_idx").drop({ unique: true });
+
+pgTable("members").index("members_active_email_idx").add({
+  on: ["email"],
+  where: (c) => c("active").isTrue(),
+  include: ["id"],
+  using: "btree",
+});
 ```
 
 Indexes are **name-first** (the selector name), so a later migration can drop them
 deterministically. `.index().drop({ unique: true })` carries `unique` because the
 engine gates a UNIQUE-index drop as destructive (it silently removes a
 data-integrity guarantee) — omit it for a plain, reversible drop.
+PostgreSQL-specific index options (`using`, `where`, `include`, `with`, `only`,
+`nullsNotDistinct`, per-element `opclass`/`collation`) are only on
+`pgTable(...).index(...)` from `@zeroship/migrate/pg`.
 
 ### Table data — direct named DML
 

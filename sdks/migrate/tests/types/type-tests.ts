@@ -184,10 +184,20 @@ export function indexGrammar(): void {
   table("users").index("users_email_idx").add({
     on: [
       "email",
-      { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C" },
+      { column: "created_at", order: "desc" },
       { expr: (c) => c.fn.lower(c("email")) },
     ],
-    using: "btree",
+    unique: true,
+  });
+
+  pgTable("users").index("users_email_idx").add({
+    on: [
+      "email",
+      { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C", nulls: "last" },
+      { expr: (c) => c.fn.lower(c("email")) },
+    ],
+    using: "gin",
+    where: (c) => c("active").isTrue(),
     include: ["id"],
     with: { fillfactor: 90 },
     only: true,
@@ -219,11 +229,35 @@ export function indexGrammar(): void {
   const oldColumnKind = "column";
   // @ts-expect-error — column object elements use `{ column }`, not `{ kind, name }`.
   table("users").index("bad_tagged_column").add({ on: [{ [oldKindKey]: oldColumnKind, name: "email" }] });
+
+  // @ts-expect-error — `using` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_using").add({ on: ["email"], using: "gin" });
+
+  // @ts-expect-error — partial-index `where` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_where").add({ on: ["email"], where: (c) => c("active").isTrue() });
+
+  // @ts-expect-error — covering `include` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_include").add({ on: ["email"], include: ["id"] });
+
+  // @ts-expect-error — storage params are PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_with").add({ on: ["email"], with: { fillfactor: 90 } });
+
+  // @ts-expect-error — partition-recursion `only` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_only").add({ on: ["email"], only: true });
+
+  // @ts-expect-error — `nullsNotDistinct` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_nulls_not_distinct").add({ on: ["email"], unique: true, nullsNotDistinct: true });
+
+  // @ts-expect-error — element `opclass` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_opclass").add({ on: [{ column: "email", opclass: "text_pattern_ops" }] });
+
+  // @ts-expect-error — element `collation` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_collation").add({ on: [{ column: "email", collation: "C" }] });
 }
 
 export function immutableOnlyBuilderSlots(): void {
   t.text().generated((c) => c.fn.lower(c("email")));
-  table("users").index("users_email_lower_idx").add({
+  pgTable("users").index("users_email_lower_idx").add({
     on: [{ expr: (c) => c.fn.lower(c("email")) }],
     where: (c) => c("active").isTrue(),
   });
@@ -235,7 +269,7 @@ export function immutableOnlyBuilderSlots(): void {
   table("users").index("bad_index_now").add({ on: [{ expr: (c) => c.fn.now() }] });
 
   // @ts-expect-error — partial-index predicates cannot use volatile c.fn.now().
-  table("users").index("bad_partial_now").add({ on: ["email"], where: (c) => c.fn.now() });
+  pgTable("users").index("bad_partial_now").add({ on: ["email"], where: (c) => c.fn.now() });
 
   // @ts-expect-error — generated column expressions cannot use aggregates.
   t.int().generated((c) => c.agg.count());
@@ -244,7 +278,7 @@ export function immutableOnlyBuilderSlots(): void {
   table("users").index("bad_index_agg").add({ on: [{ expr: (c) => c.agg.count() }] });
 
   // @ts-expect-error — partial-index predicates cannot use aggregates.
-  table("users").index("bad_partial_agg").add({ on: ["email"], where: (c) => c.agg.count() });
+  pgTable("users").index("bad_partial_agg").add({ on: ["email"], where: (c) => c.agg.count() });
 }
 
 // The table-level `.rename({ to })` now type-checks (the renameTable op shipped):

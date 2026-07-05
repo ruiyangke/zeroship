@@ -632,6 +632,7 @@ export interface CheckDef {
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
 export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
+export type PgIndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5";
 
 export interface PartitionBoundSentinel {
   readonly __zeroshipPartitionBound: "minValue" | "maxValue";
@@ -865,16 +866,10 @@ export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
 export interface IndexColumnElementArg {
   column: string;
   order?: IndexSortOrder;
-  /** PostgreSQL per-column operator class (e.g. `text_pattern_ops`). PG-vendor:
-   *  fails closed at validate on SQLite/MySQL. */
-  opclass?: string;
-  /** PostgreSQL per-column collation (e.g. `"C"`). PG-vendor: fails closed at
-   *  validate on SQLite/MySQL. */
-  collation?: string;
 }
 
 export interface IndexExprElementArg {
-  expr: IndexExprFn | ExprChain | Expr;
+  expr: IndexExprFn;
   order?: IndexSortOrder;
 }
 
@@ -882,6 +877,19 @@ export type IndexElementArg =
   | string
   | IndexColumnElementArg
   | IndexExprElementArg;
+
+export type PgIndexElement =
+  | string
+  | (IndexColumnElementArg & {
+    opclass?: string;
+    collation?: string;
+    nulls?: "first" | "last";
+  })
+  | (IndexExprElementArg & {
+    opclass?: string;
+    collation?: string;
+    nulls?: "first" | "last";
+  });
 
 export type CommentTargetArg =
   | { kind: "table"; name: string; schema?: string }
@@ -1059,21 +1067,40 @@ export interface ConstraintRef {
 }
 
 /** The `.index(name)` selector sub-handle (§3.4). */
+export interface IndexAddArgs {
+  on: IndexElementArg[];
+  unique?: boolean;
+  ifNotExists?: boolean;
+  schema?: string;
+}
+
+export interface PgIndexAdd extends IndexAddArgs {
+  on: PgIndexElement[];
+  using?: PgIndexMethod;
+  /** Partial-index predicate. PG-vendor: reachable through `pgTable().index()`. */
+  where?: IndexExprFn;
+  include?: readonly string[];
+  with?: IndexStorageParamsArg;
+  only?: boolean;
+  /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
+   *  validate on SQLite/MySQL. */
+  nullsNotDistinct?: boolean;
+}
+
+export interface IndexDropArgs {
+  ifExists?: boolean;
+  /** `unique` drives the destructive/approval gating at apply; absent/false is a
+   *  plain reversible index drop. */
+  unique?: boolean;
+  schema?: string;
+}
+
+export interface PgIndexDropArgs extends IndexDropArgs {
+  concurrently?: boolean;
+}
+
 export interface IndexRef {
-  add(args: {
-    on: IndexElementArg[];
-    unique?: boolean;
-    using?: IndexMethod;
-    where?: IndexExprFn;
-    include?: readonly string[];
-    with?: IndexStorageParamsArg;
-    only?: boolean;
-    /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
-     *  validate on SQLite/MySQL. */
-    nullsNotDistinct?: boolean;
-    ifNotExists?: boolean;
-    schema?: string;
-  }): TableHandle;
+  add(args: IndexAddArgs): TableHandle;
   /**
    * Drop the index. `unique` is NOT in the spec's literal §3.4 arg list, but the
    * IR `Op::DropIndex.unique` field DRIVES the destructive/approval gating at apply
@@ -1082,8 +1109,13 @@ export interface IndexRef {
    * apply-path safety signal (the brief's "apply path UNCHANGED"); absent/false ⇒
    * a plain, reversible drop.
    */
-  drop(args?: { ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string }): TableHandle;
+  drop(args?: IndexDropArgs): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
+}
+
+export interface PgIndexRef extends IndexRef {
+  add(args: PgIndexAdd): PgTableHandle;
+  drop(args?: PgIndexDropArgs): PgTableHandle;
 }
 
 /**
@@ -1142,6 +1174,7 @@ export interface TableHandle {
  *  It is the same runtime object as `table()`, with table-scoped PG vendor
  *  methods made reachable only from the `/pg` type surface. */
 export interface PgTableHandle extends TableHandle {
+  index(name: string): PgIndexRef;
   detachPartition(name: string, args?: DetachPartitionArgs): PgTableHandle;
   /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
    *  rows under a weaker lock (records a `validateConstraint` Op). */

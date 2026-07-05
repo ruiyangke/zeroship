@@ -281,7 +281,7 @@ export function up() {
 "#;
 const PLATFORM_COMPOSITE_FK_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { pgTable, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_composite_fk";
 
@@ -364,7 +364,7 @@ import {
   or,
   interval,
 } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { pgTable, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_expr_surface";
 
@@ -421,7 +421,7 @@ export function up() {
 
   // Partial index whose predicate is a notIn (<> ALL on PG) — mirrors the
   // platform wake_jobs partial indexes.
-  table("expr_surface", { schema: "zeroship" })
+  pgTable("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
     .add({ on: ["status"], where: (c) => c("status").notIn(["snapshotted", "snapshotted_suspect"]) });
 

@@ -1317,7 +1317,7 @@ test("inList rejects malformed text arrays and c.pg rejects regex patterns", () 
 
 test("index columns normalize to closed column/expression elements", () => {
   const ops = record(() =>
-    table("users").index("users_email_lower_idx").add({
+    pgTable("users").index("users_email_lower_idx").add({
       on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
       where: (c) => c("active").isTrue(),
     }),
@@ -1413,7 +1413,7 @@ test("index column order records DESC and omits ASC/default order", () => {
 
 test("index records PG-vendor nullsNotDistinct + per-element opclass/collation", () => {
   const ops = record(() =>
-    table("accounts").index("accounts_email_uq").add({
+    pgTable("accounts").index("accounts_email_uq").add({
       on: [{ column: "email", opclass: "text_pattern_ops", collation: "C" }],
       unique: true,
       nullsNotDistinct: true,
@@ -1423,6 +1423,22 @@ test("index records PG-vendor nullsNotDistinct + per-element opclass/collation",
   assert.deepEqual(ops[0].columns, [
     { kind: "column", name: "email", opclass: "text_pattern_ops", collation: "C" },
   ]);
+});
+
+test("pgTable index widening records the same createIndex op as the shared runtime selector", () => {
+  const args = {
+    on: [{ column: "email", opclass: "text_pattern_ops" }],
+    using: "gin",
+    where: (c: any) => c("active").isTrue(),
+    include: ["id"],
+    with: { fillfactor: 90 },
+    only: true,
+    unique: true,
+    nullsNotDistinct: true,
+  } as const;
+  const viaPgTable = record(() => pgTable("accounts").index("accounts_email_uq").add(args));
+  const viaSharedSelector = record(() => (table("accounts").index("accounts_email_uq") as any).add(args));
+  assert.deepEqual(viaPgTable, viaSharedSelector);
 });
 
 test("index omits nullsNotDistinct/opclass/collation when absent (byte-neutral)", () => {
@@ -1595,7 +1611,7 @@ test("table().partition().drop records parent-scoped dropPartition", () => {
 
 test("index builder records include/with/brin/only", () => {
   const ops = record(() =>
-    table("events").index("events_ts_brin_idx").add({
+    pgTable("events").index("events_ts_brin_idx").add({
       on: ["ts"],
       using: "brin",
       include: ["tenant_id"],
