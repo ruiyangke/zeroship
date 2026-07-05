@@ -9,7 +9,8 @@
 //   t.id() (uuid PK + genRandomUuid default), t.text().notNull(), t.numeric(),
 //   t.timestamp().default({fn:"now"}), t.uuid(), t.bytes(), t.boolean().default,
 //   t.json(), t.ref(target), t.vector(n), t.geoPoint(), t.text() (was t.string —
-//   alias removed), t.integer() (was t.int), t.bigInt(), t.float(),
+//   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
+//   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
 import { table, t } from "@zeroship/migrate";
 
@@ -31,9 +32,9 @@ export default {
         embedding: t.vector(1536),
         location: t.geoPoint(),
         label: t.text(), // was t.string() — the alias is removed (§7)
-        hits: t.integer().notNull().default(0),
+        hits: t.int().notNull().default(0),
         big_hits: t.bigInt(),
-        ratio: t.float(),
+        ratio: t.double(),
         secret: t.encrypted({ of: t.text() }),
       },
     });

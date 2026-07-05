@@ -332,7 +332,7 @@ fn non_native_function_value_fails_closed_in_v8_recorder() {
     let default = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").create({ columns: { v: t.integer().default(() => 1) } });
+            table("t").create({ columns: { v: t.int().default(() => 1) } });
         }};
     "#;
     let err = record_err(default, "bad_fn_default");
@@ -849,7 +849,7 @@ fn twin_create_table_carries_schema_and_guard() {
     let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").create({ columns: { qty: t.integer() }, schema: "app2", ifNotExists: true });
+            table("t").create({ columns: { qty: t.int() }, schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "create_schema_guard");
@@ -1070,7 +1070,7 @@ fn twin_add_column_carries_schema_and_guard() {
     let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").column("c").add({ type: t.integer(), schema: "app2", ifNotExists: true });
+            table("t").column("c").add({ type: t.int(), schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "add_column_schema_guard");
@@ -1203,7 +1203,7 @@ fn twin_dml_ops_carry_schema() {
     let del = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").del({ where: (c) => c("a").gt(0), schema: "app2" });
+            table("t").delete({ where: (c) => c("a").gt(0), schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(del, "delete_schema"), "delete"), "app2");
@@ -1245,7 +1245,7 @@ fn twin_table_surface_records_full_expected_op_sequence() {
             u.index("u_old_idx").drop({ ifExists: true });
             u.insert({ rows: [{ email: "a@b.c", status: "new" }] });
             u.update({ set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull() });
-            u.del({ where: (c) => c("status").isNull(), limit: 10 });
+            u.delete({ where: (c) => c("status").isNull(), limit: 10 });
             u.backfill({ set: { status: (c) => c.fn.coalesce(c("status"), "new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
         }};
     "#;
@@ -1320,9 +1320,9 @@ fn twin_table_per_method_schema_overrides_default() {
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
             const u = table("users", { schema: "app2" });
-            u.column("a").add({ type: t.integer() });                       // table default
-            u.column("b").add({ type: t.integer(), ifNotExists: true });     // guard-only → keeps default
-            u.column("c").add({ type: t.integer(), schema: "other" });       // override
+            u.column("a").add({ type: t.int() });                       // table default
+            u.column("b").add({ type: t.int(), ifNotExists: true });     // guard-only → keeps default
+            u.column("c").add({ type: t.int(), schema: "other" });       // override
         }};
     "#;
     let ir = record(src, "override");
@@ -1551,7 +1551,7 @@ fn twin_table_no_schema_omits_key() {
     let ir = record(
         r#"
         import { table, t } from "@zeroship/migrate";
-        export default { name: "n", up() { table("users").column("a").add({ type: t.integer() }); }};
+        export default { name: "n", up() { table("users").column("a").add({ type: t.int() }); }};
     "#,
         "facade_noschema",
     );

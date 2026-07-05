@@ -157,10 +157,10 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
     // on any one would drop / mis-spell it).
     for chain in [
         "t.text()",
-        "t.integer()",
+        "t.int()",
         "t.smallInt()",
         "t.bigInt()",
-        "t.float()",
+        "t.double()",
         "t.real()",
         "t.boolean()",
         "t.json()",
