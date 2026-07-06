@@ -1,9 +1,7 @@
-//! Durable-workflow engine scheduler (DW-04 walking skeleton).
+//! Durable-workflow engine scheduler.
 //!
 //! This cron owns only the control-plane scheduling core: due-run claiming,
 //! lease heartbeats, the dispatch seam, and the idempotent outcome apply txn.
-//! The real gateway -> worker replay transport lands in DW-05; until then the
-//! default dispatcher is an inert stub and tests inject a deterministic seam.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -15,6 +13,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compio_postgres::error::SqlState;
 use compio_postgres::GenericClient;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::typed_id;
@@ -25,6 +24,9 @@ use crate::{AppState, Registry};
 /// Default tick cadence. Workflow wake latency is intentionally a scheduler
 /// knob, not a correctness bound; DW-23 will measure and tune it.
 pub const DEFAULT_TICK_SECS: u64 = 1;
+const GATEWAY_WORKFLOW_DISPATCH_PATH: &str = "/__zeroship/internal/workflow-dispatch";
+const GATEWAY_DISPATCH_TIMEOUT: Duration = Duration::from_secs(35);
+const BACKPRESSURE_PARK_MS: i64 = 1_000;
 
 static INFLIGHT_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
 static OWNER_ID: OnceLock<String> = OnceLock::new();
@@ -68,7 +70,8 @@ impl Default for WorkflowEngineConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JournalStep {
     pub ordinal: i32,
     pub name: String,
@@ -78,17 +81,23 @@ pub struct JournalStep {
     pub error: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StepRequest {
     pub run_id: String,
     pub app_id: Uuid,
     pub workflow_name: String,
     pub deploy_id: String,
+    pub deploy_hash: String,
     pub dispatch_nonce: String,
+    #[serde(default)]
+    pub input: Option<Value>,
+    pub started_at: DateTime<Utc>,
     pub journal: Vec<JournalStep>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StepCheckpoint {
     pub ordinal: i32,
     pub name: String,
@@ -122,7 +131,8 @@ impl StepCheckpoint {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
 pub enum RunUpdate {
     Queued,
     Sleeping { wake_at: Option<DateTime<Utc>> },
@@ -167,7 +177,8 @@ impl RunUpdate {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StepResult {
     pub run_id: String,
     pub dispatch_nonce: String,
@@ -189,7 +200,27 @@ impl StepResult {
 
 #[async_trait(?Send)]
 pub trait StepDispatcher: Send + Sync {
-    async fn dispatch(&self, request: StepRequest) -> StepResult;
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome;
+}
+
+#[derive(Debug, Clone)]
+pub enum DispatchOutcome {
+    Completed(StepResult),
+    Backpressure {
+        run_id: String,
+        dispatch_nonce: String,
+        reason: String,
+    },
+}
+
+impl DispatchOutcome {
+    fn backpressure(request: &StepRequest, reason: impl Into<String>) -> Self {
+        Self::Backpressure {
+            run_id: request.run_id.clone(),
+            dispatch_nonce: request.dispatch_nonce.clone(),
+            reason: reason.into(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -197,8 +228,114 @@ pub struct StubStepDispatcher;
 
 #[async_trait(?Send)]
 impl StepDispatcher for StubStepDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> StepResult {
-        StepResult::requeue(request.run_id, request.dispatch_nonce)
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        DispatchOutcome::Completed(StepResult::requeue(request.run_id, request.dispatch_nonce))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GatewayStepDispatcher {
+    gateway_url: String,
+}
+
+impl GatewayStepDispatcher {
+    #[must_use]
+    pub fn new(gateway_url: impl Into<String>) -> Self {
+        Self {
+            gateway_url: gateway_url.into().trim_end_matches('/').to_string(),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for GatewayStepDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        if self.gateway_url.is_empty() {
+            return DispatchOutcome::backpressure(&request, "gateway URL is not configured");
+        }
+        let body = match serde_json::to_vec(&request) {
+            Ok(body) => body,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("serialize StepRequest: {e}"),
+                );
+            }
+        };
+        let url = format!("{}{}", self.gateway_url, GATEWAY_WORKFLOW_DISPATCH_PATH);
+        let client = cyper::Client::new();
+        let builder = match client.post(&url) {
+            Ok(builder) => builder,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("build gateway workflow dispatch request: {e}"),
+                );
+            }
+        };
+        let builder = match builder.header("content-type", "application/json") {
+            Ok(builder) => builder,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("set gateway workflow dispatch content-type: {e}"),
+                );
+            }
+        };
+        let response = match compio::time::timeout(
+            GATEWAY_DISPATCH_TIMEOUT,
+            builder.body(body).send(),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("gateway workflow dispatch transport: {e}"),
+                );
+            }
+            Err(_) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    "gateway workflow dispatch timeout",
+                );
+            }
+        };
+
+        let status = response.status().as_u16();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("read gateway workflow dispatch body: {e}"),
+                );
+            }
+        };
+
+        if status == 402 || status >= 500 {
+            let body_snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
+            return DispatchOutcome::backpressure(
+                &request,
+                format!("gateway workflow dispatch HTTP {status}: {body_snippet}"),
+            );
+        }
+        if !(200..300).contains(&status) {
+            let body_snippet: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
+            return DispatchOutcome::backpressure(
+                &request,
+                format!("gateway workflow dispatch rejected HTTP {status}: {body_snippet}"),
+            );
+        }
+
+        match serde_json::from_slice::<StepResult>(&bytes) {
+            Ok(result) => DispatchOutcome::Completed(result),
+            Err(e) => DispatchOutcome::backpressure(
+                &request,
+                format!("parse gateway StepResult: {e}"),
+            ),
+        }
     }
 }
 
@@ -221,7 +358,7 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     tick_with_dispatcher(
         state,
-        Arc::new(StubStepDispatcher),
+        Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone())),
         WorkflowEngineConfig::default(),
     )
     .await
@@ -261,6 +398,9 @@ struct CandidateRun {
     app_id: Uuid,
     workflow_name: String,
     deploy_id: String,
+    deploy_hash: String,
+    input: Option<Value>,
+    started_at: DateTime<Utc>,
     waiting_step_key: Option<String>,
 }
 
@@ -291,10 +431,11 @@ async fn claim_due_batch(
                 ORDER BY first_wake, app_id \
                 LIMIT $2 \
              ) \
-             SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, r.waiting_step_key \
+             SELECT r.id, r.app_id, r.workflow_name, r.deploy_id, d.deploy_hash, \
+                    r.input, r.started_at, r.waiting_step_key \
                FROM due_apps a \
                CROSS JOIN LATERAL ( \
-                 SELECT id, app_id, workflow_name, deploy_id, waiting_step_key, wake_at \
+                 SELECT id, app_id, workflow_name, deploy_id, input, started_at, waiting_step_key, wake_at \
                    FROM zeroship.workflow_runs \
                   WHERE app_id = a.app_id \
                     AND wake_at <= now() \
@@ -304,6 +445,7 @@ async fn claim_due_batch(
                   LIMIT $3 \
                   FOR UPDATE SKIP LOCKED \
                ) r \
+               JOIN zeroship.app_deploys d ON d.id = r.deploy_id \
               ORDER BY r.app_id, r.wake_at, r.id \
               LIMIT $4",
             &[
@@ -323,6 +465,9 @@ async fn claim_due_batch(
             app_id: row.get("app_id"),
             workflow_name: row.get("workflow_name"),
             deploy_id: row.get("deploy_id"),
+            deploy_hash: row.get("deploy_hash"),
+            input: row.get("input"),
+            started_at: row.get("started_at"),
             waiting_step_key: row.get("waiting_step_key"),
         };
 
@@ -423,7 +568,10 @@ where
             app_id: candidate.app_id,
             workflow_name: candidate.workflow_name,
             deploy_id: candidate.deploy_id,
+            deploy_hash: candidate.deploy_hash,
             dispatch_nonce,
+            input: candidate.input,
+            started_at: candidate.started_at,
             journal,
         },
     }))
@@ -643,20 +791,40 @@ fn spawn_dispatch<D>(
         Duration::from_millis(config.heartbeat_ms),
     );
     compio::runtime::spawn(async move {
-        let result = dispatcher.dispatch(claim.request).await;
+        let outcome = dispatcher.dispatch(claim.request).await;
         heartbeat.store(false, Ordering::SeqCst);
-        match apply_step_result_on_registry(&registry, &config.owner_id, result.clone()).await {
-            Ok(_) => {}
-            Err(ApplyError::Deadlock(msg)) => {
-                tracing::warn!(error = %msg, run_id = %result.run_id, "workflow_engine: apply deadlock, requeueing claim");
-                if let Err(e) =
-                    requeue_claim(&registry, &config.owner_id, &result.run_id, &result.dispatch_nonce).await
-                {
-                    tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: deadlock requeue failed");
+        match outcome {
+            DispatchOutcome::Completed(result) => {
+                match apply_step_result_on_registry(&registry, &config.owner_id, result.clone()).await {
+                    Ok(_) => {}
+                    Err(ApplyError::Deadlock(msg)) => {
+                        tracing::warn!(error = %msg, run_id = %result.run_id, "workflow_engine: apply deadlock, requeueing claim");
+                        if let Err(e) =
+                            requeue_claim(&registry, &config.owner_id, &result.run_id, &result.dispatch_nonce).await
+                        {
+                            tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: deadlock requeue failed");
+                        }
+                    }
+                    Err(ApplyError::Db(e)) => {
+                        tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: apply failed");
+                    }
                 }
             }
-            Err(ApplyError::Db(e)) => {
-                tracing::error!(error = %e, run_id = %result.run_id, "workflow_engine: apply failed");
+            DispatchOutcome::Backpressure {
+                run_id,
+                dispatch_nonce,
+                reason,
+            } => {
+                tracing::warn!(
+                    run_id = %run_id,
+                    reason = %reason,
+                    "workflow_engine: gateway backpressure, parking claim"
+                );
+                if let Err(e) =
+                    park_backpressure_claim(&registry, &config.owner_id, &run_id, &dispatch_nonce).await
+                {
+                    tracing::error!(error = %e, run_id = %run_id, "workflow_engine: backpressure park failed");
+                }
             }
         }
         INFLIGHT_DISPATCHES.fetch_sub(1, Ordering::SeqCst);
@@ -910,9 +1078,35 @@ async fn requeue_claim(
     Ok(())
 }
 
+async fn park_backpressure_claim(
+    registry: &Registry,
+    owner_id: &str,
+    run_id: &str,
+    dispatch_nonce: &str,
+) -> Result<(), RegistryError> {
+    let wake_at = Utc::now() + chrono::Duration::milliseconds(BACKPRESSURE_PARK_MS);
+    let conn = registry.conn().await?;
+    conn.execute(
+        "UPDATE zeroship.workflow_runs \
+            SET state = 'queued', \
+                wake_at = $1, \
+                claimed_by = NULL, \
+                claim_heartbeat_at = NULL, \
+                dispatch_nonce = NULL \
+          WHERE id = $2 \
+            AND claimed_by = $3 \
+            AND dispatch_nonce = $4",
+        &[&wake_at, &run_id, &owner_id, &dispatch_nonce],
+    )
+    .await
+    .map_err(RegistryError::from)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ntex::web::{self, test};
 
     #[test]
     fn default_tick_is_one_second() {
@@ -937,5 +1131,110 @@ mod tests {
                 max_signal_age_ms: Some(60_000)
             }
         );
+    }
+
+    fn test_step_request() -> StepRequest {
+        StepRequest {
+            run_id: "run_test".to_string(),
+            app_id: Uuid::new_v4(),
+            workflow_name: "Checkout".to_string(),
+            deploy_id: "dep_test".to_string(),
+            deploy_hash: "hash_test".to_string(),
+            dispatch_nonce: "wfd_test".to_string(),
+            input: Some(serde_json::json!({"orderId": "ord_1"})),
+            started_at: Utc::now(),
+            journal: Vec::new(),
+        }
+    }
+
+    async fn capture_step_request(
+        seen: web::types::State<Arc<std::sync::Mutex<Vec<Value>>>>,
+        body: ntex::util::Bytes,
+    ) -> web::HttpResponse {
+        let request: Value = serde_json::from_slice(body.as_ref()).expect("StepRequest json");
+        seen.lock().expect("seen lock").push(request.clone());
+        web::HttpResponse::Ok().json(&serde_json::json!({
+            "runId": request["runId"],
+            "dispatchNonce": request["dispatchNonce"],
+            "checkpoints": [{
+                "ordinal": 0,
+                "name": "done",
+                "nameOccurrence": 0,
+                "kind": "run",
+                "state": "completed",
+                "output": {"ok": true},
+                "error": null,
+                "wakeAt": null,
+                "signalType": null,
+                "maxSignalAgeMs": null,
+                "consumedSignalId": null
+            }],
+            "runUpdate": {
+                "state": "completed",
+                "output": {"ok": true}
+            }
+        }))
+    }
+
+    #[ntex::test]
+    async fn gateway_step_dispatcher_posts_and_parses_step_result() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let server_seen = Arc::clone(&seen);
+        let gateway = test::server(move || {
+            let seen = Arc::clone(&server_seen);
+            async move {
+                web::App::new().state(seen).service(
+                    web::resource(GATEWAY_WORKFLOW_DISPATCH_PATH)
+                        .route(web::post().to(capture_step_request)),
+                )
+            }
+        })
+        .await;
+
+        let request = test_step_request();
+        let dispatcher = GatewayStepDispatcher::new(gateway.url(""));
+        let outcome = dispatcher.dispatch(request.clone()).await;
+        let DispatchOutcome::Completed(result) = outcome else {
+            panic!("expected completed dispatch outcome");
+        };
+        assert_eq!(result.run_id, request.run_id);
+        assert_eq!(result.dispatch_nonce, request.dispatch_nonce);
+        assert_eq!(result.checkpoints.len(), 1);
+        assert_eq!(result.checkpoints[0].name, "done");
+
+        let seen = seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0]["runId"], request.run_id);
+        assert_eq!(seen[0]["appId"], request.app_id.to_string());
+        assert_eq!(seen[0]["deployHash"], request.deploy_hash);
+    }
+
+    #[ntex::test]
+    async fn gateway_step_dispatcher_maps_402_to_backpressure() {
+        let gateway = test::server(|| async {
+            web::App::new().service(
+                web::resource(GATEWAY_WORKFLOW_DISPATCH_PATH)
+                    .route(web::post().to(|| async {
+                        web::HttpResponse::PaymentRequired()
+                            .json(&serde_json::json!({"code": "SPEND_LIMIT"}))
+                    })),
+            )
+        })
+        .await;
+
+        let request = test_step_request();
+        let dispatcher = GatewayStepDispatcher::new(gateway.url(""));
+        let outcome = dispatcher.dispatch(request.clone()).await;
+        let DispatchOutcome::Backpressure {
+            run_id,
+            dispatch_nonce,
+            reason,
+        } = outcome
+        else {
+            panic!("expected backpressure dispatch outcome");
+        };
+        assert_eq!(run_id, request.run_id);
+        assert_eq!(dispatch_nonce, request.dispatch_nonce);
+        assert!(reason.contains("HTTP 402"));
     }
 }

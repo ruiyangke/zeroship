@@ -16,10 +16,11 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use compio_postgres::{connect, NoTls};
 use futures::channel::oneshot;
+use ntex::web::{self, test};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::workflow_engine::{
-    self, RunUpdate, StepCheckpoint, StepDispatcher, StepRequest, StepResult,
+    self, DispatchOutcome, RunUpdate, StepCheckpoint, StepDispatcher, StepRequest, StepResult,
     WorkflowEngineConfig,
 };
 use zeroship_control::{
@@ -71,6 +72,10 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 }
 
 async fn build_fixture(db_url: &str, label: &str) -> Fixture {
+    build_fixture_with_gateway(db_url, label, "http://127.0.0.1:9").await
+}
+
+async fn build_fixture_with_gateway(db_url: &str, label: &str, gateway_url: &str) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -93,6 +98,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
             stripe_webhook_secret: SecretString::new(String::new()),
             stripe_secret_key: SecretString::new(String::new()),
             stripe_base_url: "http://127.0.0.1:9".to_string(),
+            gateway_url: gateway_url.to_string(),
             worker_urls: Vec::new(),
             worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
@@ -130,6 +136,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         blob_root,
         deploy_tmp_dir,
     }
+}
+
+async fn spend_blocked_gateway() -> web::HttpResponse {
+    web::HttpResponse::PaymentRequired().json(&serde_json::json!({"code": "SPEND_LIMIT"}))
 }
 
 async fn ensure_engine_columns(pg: &compio_postgres::Client) {
@@ -266,7 +276,7 @@ impl BlockingDispatcher {
 
 #[async_trait(?Send)]
 impl StepDispatcher for BlockingDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> StepResult {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
         self.requests
             .lock()
             .expect("requests lock")
@@ -278,14 +288,14 @@ impl StepDispatcher for BlockingDispatcher {
             .pop_front()
             .expect("release receiver available");
         let _ = release.await;
-        StepResult {
+        DispatchOutcome::Completed(StepResult {
             run_id: request.run_id,
             dispatch_nonce: request.dispatch_nonce,
             checkpoints: Vec::new(),
             run_update: RunUpdate::Completed {
                 output: Some(serde_json::json!({"released": true})),
             },
-        }
+        })
     }
 }
 
@@ -294,8 +304,8 @@ struct CompleteDispatcher;
 
 #[async_trait(?Send)]
 impl StepDispatcher for CompleteDispatcher {
-    async fn dispatch(&self, request: StepRequest) -> StepResult {
-        StepResult {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        DispatchOutcome::Completed(StepResult {
             run_id: request.run_id,
             dispatch_nonce: request.dispatch_nonce,
             checkpoints: vec![StepCheckpoint::completed_run(
@@ -306,7 +316,7 @@ impl StepDispatcher for CompleteDispatcher {
             run_update: RunUpdate::Completed {
                 output: Some(serde_json::json!({"ok": true})),
             },
-        }
+        })
     }
 }
 
@@ -676,4 +686,77 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
         .map(|r| (r.get("id"), r.get("state"), r.get("claimed_by")))
         .collect();
     panic!("queued runs did not all complete under cap: {states:?}");
+}
+
+#[ntex::test]
+async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
+    let _gate = lock_tests();
+    let Some(url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return;
+    };
+    let gateway = test::server(|| async {
+        web::App::new().service(
+            web::resource("/__zeroship/internal/workflow-dispatch")
+                .route(web::post().to(spend_blocked_gateway)),
+        )
+    })
+    .await;
+    let fx = build_fixture_with_gateway(&url, "gw-402", &gateway.url("")).await;
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "gw-402").await;
+    let run_id = seed_run(
+        &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
+    )
+    .await;
+
+    let claimed = workflow_engine::tick(&fx.state).await.expect("tick");
+    assert_eq!(claimed, 1);
+
+    for _ in 0..100 {
+        let rows = fx
+            .pg
+            .query(
+                "SELECT state, claimed_by, dispatch_nonce \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("load run");
+        let state: String = rows[0].get("state");
+        let claimed_by: Option<String> = rows[0].get("claimed_by");
+        let dispatch_nonce: Option<String> = rows[0].get("dispatch_nonce");
+        if state == "queued" && claimed_by.is_none() && dispatch_nonce.is_none() {
+            let step_rows = fx
+                .pg
+                .query(
+                    "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1",
+                    &[&run_id],
+                )
+                .await
+                .expect("count workflow steps");
+            assert_eq!(
+                step_rows[0].get::<_, i64>("n"),
+                0,
+                "backpressure must park without inserting an attempt/no-reply step"
+            );
+            return;
+        }
+        compio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let rows = fx
+        .pg
+        .query(
+            "SELECT state, claimed_by, dispatch_nonce FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load final run state");
+    panic!(
+        "run did not park after gateway 402: state={:?} claimed_by={:?} dispatch_nonce={:?}",
+        rows[0].get::<_, String>("state"),
+        rows[0].get::<_, Option<String>>("claimed_by"),
+        rows[0].get::<_, Option<String>>("dispatch_nonce")
+    );
 }
