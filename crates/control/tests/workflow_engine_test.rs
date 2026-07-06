@@ -1,7 +1,10 @@
 //! Live-PG tests for the DW-04 workflow engine scheduler.
 //!
-//! Requires `CONTROL_TEST_DB` pointing at a migrated disposable database. Tests
-//! skip when it is unset, matching the rest of the control integration suite.
+//! Requires `CONTROL_TEST_DB` pointing at a migrated disposable database. Each
+//! test clones that migrated DB into its own throwaway database because the
+//! engine claims due workflow runs globally across the connected database.
+//! Tests skip when `CONTROL_TEST_DB` is unset, matching the rest of the control
+//! integration suite.
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
@@ -29,11 +32,7 @@ use zeroship_control::{
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-static TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
-    TEST_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+static DB_CLONE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
@@ -53,6 +52,7 @@ struct Fixture {
     pg: Arc<compio_postgres::Client>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
+    _db: TestDatabase,
 }
 
 impl Drop for Fixture {
@@ -62,20 +62,203 @@ impl Drop for Fixture {
     }
 }
 
+struct TestDatabase {
+    admin_url: String,
+    name: String,
+}
+
+impl Drop for TestDatabase {
+    fn drop(&mut self) {
+        if self.name.is_empty() {
+            return;
+        }
+        let admin_url = self.admin_url.clone();
+        let name = self.name.clone();
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = compio::runtime::Runtime::new() else {
+                return;
+            };
+            rt.block_on(async move {
+                let Ok(admin) = try_pg(&admin_url).await else {
+                    return;
+                };
+                let _ = admin
+                    .batch_execute(&format!(
+                        "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+                        quote_ident(&name)
+                    ))
+                    .await;
+            });
+        })
+        .join();
+    }
+}
+
 async fn pg(db_url: &str) -> compio_postgres::Client {
-    let (client, conn) = connect(db_url, NoTls).await.expect("pg connect");
+    try_pg(db_url).await.expect("pg connect")
+}
+
+async fn try_pg(
+    db_url: &str,
+) -> Result<compio_postgres::Client, compio_postgres::Error> {
+    let (client, conn) = connect(db_url, NoTls).await?;
     compio::runtime::spawn(async move {
         let _ = conn.run().await;
     })
     .detach();
-    client
+    Ok(client)
 }
 
-async fn build_fixture(db_url: &str, label: &str) -> Fixture {
-    build_fixture_with_gateway(db_url, label, "http://127.0.0.1:9").await
+async fn isolated_fixture(label: &str) -> Option<Fixture> {
+    isolated_fixture_with_gateway(label, "http://127.0.0.1:9").await
 }
 
-async fn build_fixture_with_gateway(db_url: &str, label: &str, gateway_url: &str) -> Fixture {
+async fn isolated_fixture_with_gateway(label: &str, gateway_url: &str) -> Option<Fixture> {
+    let Some(base_url) = db_url() else {
+        eprintln!("skip: CONTROL_TEST_DB not set");
+        return None;
+    };
+    Some(build_isolated_fixture_with_gateway(&base_url, label, gateway_url).await)
+}
+
+async fn build_isolated_fixture_with_gateway(
+    base_url: &str,
+    label: &str,
+    gateway_url: &str,
+) -> Fixture {
+    let source_db = db_name_from_dsn(base_url)
+        .unwrap_or_else(|| panic!("CONTROL_TEST_DB must include a database name: {base_url}"));
+    assert_ne!(
+        source_db, "postgres",
+        "CONTROL_TEST_DB must point at a migrated disposable DB, not the postgres maintenance DB"
+    );
+    let db_name = fresh_test_db_name(label);
+    let admin_url = dsn_for_db(base_url, "postgres");
+    let isolated_url = dsn_for_db(base_url, &db_name);
+
+    {
+        let _clone_gate = DB_CLONE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admin = pg(&admin_url).await;
+        admin
+            .batch_execute(&format!(
+                "DROP DATABASE IF EXISTS {} WITH (FORCE)",
+                quote_ident(&db_name),
+            ))
+            .await
+            .unwrap_or_else(|err| panic!("drop stale workflow engine test DB {db_name}: {err}"));
+        admin
+            .batch_execute(&format!(
+                "CREATE DATABASE {} WITH TEMPLATE {}",
+                quote_ident(&db_name),
+                quote_ident(&source_db),
+            ))
+            .await
+            .unwrap_or_else(|err| {
+                panic!("create isolated workflow engine test DB {db_name} from {source_db}: {err}")
+            });
+    }
+
+    let test_db = TestDatabase {
+        admin_url,
+        name: db_name,
+    };
+    let fx = build_fixture_with_gateway(&isolated_url, label, gateway_url, test_db).await;
+    scrub_cloned_fixture_data(&fx.pg).await;
+    fx
+}
+
+fn fresh_test_db_name(label: &str) -> String {
+    let label = label
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let label = label.trim_matches('_');
+    format!("zs_wf_engine_{}_{}", label, Uuid::new_v4().simple())
+}
+
+fn db_name_from_dsn(dsn: &str) -> Option<String> {
+    let trimmed = dsn.trim_start();
+    if trimmed.starts_with("postgres://") || trimmed.starts_with("postgresql://") {
+        let base = trimmed.split_once('?').map_or(trimmed, |(base, _)| base);
+        let scheme_end = base.find("://").map_or(0, |idx| idx + 3);
+        let path_start = base[scheme_end..].find('/')? + scheme_end;
+        let db = &base[path_start + 1..];
+        return (!db.is_empty()).then(|| db.to_string());
+    }
+
+    dsn.split_whitespace().find_map(|tok| {
+        let (key, value) = tok.split_once('=')?;
+        key.eq_ignore_ascii_case("dbname")
+            .then(|| value.trim_matches('\'').trim_matches('"').to_string())
+    })
+}
+
+fn dsn_for_db(dsn: &str, db: &str) -> String {
+    let trimmed = dsn.trim_start();
+    if trimmed.starts_with("postgres://") || trimmed.starts_with("postgresql://") {
+        let (base, query) = trimmed
+            .split_once('?')
+            .map_or((trimmed, None), |(base, query)| (base, Some(query)));
+        let scheme_end = base.find("://").map_or(0, |idx| idx + 3);
+        let new_base = base[scheme_end..].find('/').map_or_else(
+            || format!("{base}/{db}"),
+            |rel| {
+                let path_start = scheme_end + rel;
+                format!("{}/{}", &base[..path_start], db)
+            },
+        );
+        return match query {
+            Some(query) => format!("{new_base}?{query}"),
+            None => new_base,
+        };
+    }
+
+    let mut parts = Vec::new();
+    for tok in dsn.split_whitespace() {
+        if !tok
+            .split_once('=')
+            .is_some_and(|(key, _)| key.eq_ignore_ascii_case("dbname"))
+        {
+            parts.push(tok.to_string());
+        }
+    }
+    parts.push(format!("dbname={db}"));
+    parts.join(" ")
+}
+
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+async fn scrub_cloned_fixture_data(pg: &compio_postgres::Client) {
+    pg.batch_execute(
+        "TRUNCATE TABLE \
+             zeroship.workflow_steps, \
+             zeroship.workflow_runs, \
+             zeroship.workflow_signals, \
+             zeroship.workflow_subscriptions, \
+             zeroship.app_deploys, \
+             zeroship.apps \
+         CASCADE;",
+    )
+    .await
+    .expect("scrub cloned workflow fixture data");
+}
+
+async fn build_fixture_with_gateway(
+    db_url: &str,
+    label: &str,
+    gateway_url: &str,
+    test_db: TestDatabase,
+) -> Fixture {
     let blob_root = tmpdir(&format!("blob-{label}"));
     let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
     let registry = Registry::new(db_url).await.expect("registry");
@@ -135,6 +318,7 @@ async fn build_fixture_with_gateway(db_url: &str, label: &str, gateway_url: &str
         pg: control_pg,
         blob_root,
         deploy_tmp_dir,
+        _db: test_db,
     }
 }
 
@@ -361,12 +545,9 @@ async fn wait_for_completed(fx: &Fixture, run_ids: &[String]) {
 
 #[compio::test]
 async fn tick_claims_due_run_and_sets_owner_and_nonce() {
-    let _gate = lock_tests();
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
+    let Some(fx) = isolated_fixture("claim").await else {
         return;
     };
-    let fx = build_fixture(&url, "claim").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "claim").await;
     let run_id = seed_run(
         &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
@@ -407,12 +588,9 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
 
 #[compio::test]
 async fn concurrent_ticks_claim_disjoint_rows() {
-    let _gate = lock_tests();
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
+    let Some(fx) = isolated_fixture("concurrent").await else {
         return;
     };
-    let fx = build_fixture(&url, "concurrent").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "concurrent").await;
     for _ in 0..8 {
         seed_run(
@@ -455,12 +633,9 @@ async fn concurrent_ticks_claim_disjoint_rows() {
 
 #[compio::test]
 async fn stale_lease_is_taken_over_after_ttl() {
-    let _gate = lock_tests();
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
+    let Some(fx) = isolated_fixture("stale").await else {
         return;
     };
-    let fx = build_fixture(&url, "stale").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "stale").await;
     let run_id = seed_run(
         &fx,
@@ -507,12 +682,9 @@ async fn stale_lease_is_taken_over_after_ttl() {
 
 #[compio::test]
 async fn sleep_suspension_resolves_into_journal_row_at_wake() {
-    let _gate = lock_tests();
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
+    let Some(fx) = isolated_fixture("sleep").await else {
         return;
     };
-    let fx = build_fixture(&url, "sleep").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "sleep").await;
     let run_id = seed_run(
         &fx,
@@ -558,12 +730,9 @@ async fn sleep_suspension_resolves_into_journal_row_at_wake() {
 
 #[compio::test]
 async fn apply_outcome_checkpoints_idempotently() {
-    let _gate = lock_tests();
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
+    let Some(fx) = isolated_fixture("apply").await else {
         return;
     };
-    let fx = build_fixture(&url, "apply").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "apply").await;
     let run_id = seed_run(
         &fx,
@@ -630,12 +799,9 @@ async fn apply_outcome_checkpoints_idempotently() {
 
 #[compio::test]
 async fn per_app_cap_does_not_livelock_queued_runs() {
-    let _gate = lock_tests();
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
+    let Some(fx) = isolated_fixture("cap").await else {
         return;
     };
-    let fx = build_fixture(&url, "cap").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "cap").await;
     let mut run_ids = Vec::new();
     for _ in 0..6 {
@@ -688,11 +854,6 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
 
 #[ntex::test]
 async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
-    let _gate = lock_tests();
-    let Some(url) = db_url() else {
-        eprintln!("skip: CONTROL_TEST_DB not set");
-        return;
-    };
     let gateway = test::server(|| async {
         web::App::new().service(
             web::resource("/__zeroship/internal/workflow-dispatch")
@@ -700,7 +861,9 @@ async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
         )
     })
     .await;
-    let fx = build_fixture_with_gateway(&url, "gw-402", &gateway.url("")).await;
+    let Some(fx) = isolated_fixture_with_gateway("gw-402", &gateway.url("")).await else {
+        return;
+    };
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "gw-402").await;
     let run_id = seed_run(
         &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
