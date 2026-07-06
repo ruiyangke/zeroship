@@ -44,6 +44,7 @@ const VOCAB_PREAMBLE = `import {
   enumType,
   comment,
   t, fromDb, lintDeterminism,
+  now, genRandomUuid, currentSetting, currentUser, interval,
 } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 import { t as dbT } from "@zeroship/db";

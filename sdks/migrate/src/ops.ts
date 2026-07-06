@@ -43,6 +43,7 @@ import type {
   CreateDomainArgs,
   CreateEnumArgs,
   CreateSequenceArgs,
+  CurrentSettingOptions,
   CreateTableArgs,
   TriggerCreateArgs,
   CreateViewArgs,
@@ -176,7 +177,7 @@ if (typeof globalThis !== "undefined") {
       value: function randomUUID() {
         throw new Error(
           "crypto.randomUUID() is not available in the migration recorder; " +
-            "use the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()",
+            "use the crypto.randomUUID symbol (no parens) or genRandomUuid()",
         );
       },
       configurable: true,
@@ -742,7 +743,7 @@ class ColumnDefImpl implements ColumnDefType {
   notNull(): ColumnDefImpl {
     return this.with({ nullable: false });
   }
-  default(value: DefaultValue | DefaultExprFn): ColumnDefImpl {
+  default(value: DefaultValue | DefaultExprFn | ExprChainType | Expr): ColumnDefImpl {
     return this.with({ default: toIrDefault(value) });
   }
   primaryKey(): ColumnDefImpl {
@@ -1054,8 +1055,8 @@ function defaultBuilder(): DefaultBuilder {
 function defaultFunctionValueError(): Error {
   return structuredError(
     "OP_INVALID",
-    "function defaults must be authored as an expression callback, e.g. " +
-      "`.default((c) => c.fn.now())` or `.default((c) => c.fn.genRandomUuid())`; " +
+    "function defaults must be authored with top-level value constructors, e.g. " +
+      "`.default(now())` or `.default(genRandomUuid())`; " +
       "the old `{ fn: ... }` and bare native-symbol default forms are removed",
   );
 }
@@ -1070,13 +1071,18 @@ function rejectRemovedDefaultFunctionValue(value: unknown): void {
   }
 }
 
-function resolveDefaultExpr(slot: DefaultExprFn): Node {
+function isExprNode(value: unknown): value is Node {
+  return Boolean(value && typeof value === "object" && typeof (value as Node).node === "string");
+}
+
+function resolveDefaultExpr(slot: DefaultExprFn | ExprChainType | Node): Node {
   rejectRemovedDefaultFunctionValue(slot);
-  const resolved = slot(defaultBuilder());
+  const resolved =
+    typeof slot === "function"
+      ? slot(defaultBuilder())
+      : slot;
   if (resolved instanceof ExprChainImpl) return resolved.__node;
-  if (resolved && typeof resolved === "object" && typeof (resolved as Node).node === "string") {
-    return resolved as Node;
-  }
+  if (isExprNode(resolved)) return resolved;
   return exprArg(resolved);
 }
 
@@ -1174,14 +1180,16 @@ function validateDefaultExpr(expr: Node): void {
   walk(expr);
 }
 
-function defaultExprIr(slot: DefaultExprFn): Node {
+function defaultExprIr(slot: DefaultExprFn | ExprChainType | Node): Node {
   const expr = resolveDefaultExpr(slot);
   validateDefaultExpr(expr);
   return { expr };
 }
 
-function toIrDefault(value: DefaultValue | DefaultExprFn): Node {
-  if (typeof value === "function") return defaultExprIr(value);
+function toIrDefault(value: DefaultValue | DefaultExprFn | ExprChainType | Node): Node {
+  if (typeof value === "function" || value instanceof ExprChainImpl || isExprNode(value)) {
+    return defaultExprIr(value as DefaultExprFn | ExprChainType | Node);
+  }
   if (isNextvalDefault(value)) {
     return { nextval: compact({ name: value.name, schema: value.schema }) };
   }
@@ -1230,9 +1238,43 @@ export function nextval(name: string, opts: NextvalOptions = {}): NextvalDefault
   }) as unknown as NextvalDefault;
 }
 
+export function now(): ExprChainType {
+  return chain({ node: "fnSynth", fn: "now", args: [] });
+}
+
+export function genRandomUuid(): ExprChainType {
+  return chain({ node: "fnSynth", fn: "genRandomUuid", args: [] });
+}
+
+export function currentSetting(name: string, opts: CurrentSettingOptions = {}): ExprChainType {
+  requireString(name, "currentSetting(name)");
+  if (opts === null || typeof opts !== "object" || Array.isArray(opts)) {
+    throw structuredError("OP_INVALID", "currentSetting(name, opts): opts must be { missingOk?: boolean }");
+  }
+  const missingOk = requireOptionalBoolean(opts.missingOk, "currentSetting(name, { missingOk })");
+  return chain({
+    node: "fnCall",
+    fn: "currentSetting",
+    args: missingOk === undefined
+      ? [{ node: "literal", value: name }]
+      : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+  });
+}
+
+export function currentUser(): ExprChainType {
+  return chain({ node: "fnCall", fn: "currentUser", args: [] });
+}
+
+export function interval(duration: Duration): ExprChainType {
+  return chain({
+    node: "pgInterval",
+    duration: pgDuration(duration),
+  });
+}
+
 export const t: TypeLexicon = {
   id: (opts?: IdOptions) => {
-    let col = new ColumnDefImpl("uuid").primaryKey().default((c) => c.fn.genRandomUuid());
+    let col = new ColumnDefImpl("uuid").primaryKey().default(genRandomUuid());
     if (opts && opts.prefix !== undefined) {
       requireString(opts.prefix, "t.id({ prefix })");
       col = col.__withIdPrefix(opts.prefix);
@@ -1625,7 +1667,7 @@ const durationFields = ["years", "months", "days", "hours", "minutes", "seconds"
 
 function pgDuration(duration: unknown): Duration {
   if (!isPlainObject(duration)) {
-    throw structuredError("OP_INVALID", `c.pg.interval(duration): duration must be an object; got ${typeof duration}`);
+    throw structuredError("OP_INVALID", `interval(duration): duration must be an object; got ${typeof duration}`);
   }
 
   const normalized: Duration = {};
@@ -1635,7 +1677,7 @@ function pgDuration(duration: unknown): Duration {
     if (!Number.isInteger(value)) {
       throw structuredError(
         "OP_INVALID",
-        `c.pg.interval(duration): ${key} must be an integer; got ${JSON.stringify(value)}`,
+        `interval(duration): ${key} must be an integer; got ${JSON.stringify(value)}`,
       );
     }
     normalized[key] = value as number;
@@ -1645,13 +1687,13 @@ function pgDuration(duration: unknown): Duration {
     if (!(durationFields as readonly string[]).includes(key)) {
       throw structuredError(
         "OP_INVALID",
-        `c.pg.interval(duration): unknown duration field ${JSON.stringify(key)}`,
+        `interval(duration): unknown duration field ${JSON.stringify(key)}`,
       );
     }
   }
 
   if (Object.keys(normalized).length === 0) {
-    throw structuredError("OP_INVALID", "c.pg.interval(duration): at least one duration field is required");
+    throw structuredError("OP_INVALID", "interval(duration): at least one duration field is required");
   }
 
   return normalized;
@@ -1766,7 +1808,7 @@ export function lit(value: ScalarValue): ExprChainType {
  * present, else `default`:
  *
  * ```ts
- * default(dialect({ pg: c.fn.genRandomUuid(), sqlite: c.fn.now(), mysql: myUuid }))
+ * default(dialect({ pg: genRandomUuid(), sqlite: now(), mysql: myUuid }))
  * dialect({ default: lit(0), pg: c("n") })   // pg leg on PG, default(0) elsewhere
  * ```
  *
@@ -1845,8 +1887,6 @@ const fn: FnNamespace = {
       args: [exprArg(col), { node: "literal", value: delim }, { node: "literal", value: n }],
     });
   },
-  now: () => chain({ node: "fnSynth", fn: "now", args: [] }),
-  genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
 };
 
 const immutableFn: ImmutableFnNamespace = Object.freeze({
@@ -1890,15 +1930,6 @@ const agg: AggNamespace = {
 };
 
 const pgExpr: PgExprNamespace = {
-  currentSetting: (name, missingOk) =>
-    chain({
-      node: "fnCall",
-      fn: "currentSetting",
-      args: missingOk === undefined
-        ? [{ node: "literal", value: name }]
-        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
-    }),
-  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
   extract: (field, expr) => {
     const f = pgExtractField(field);
     return chain({
@@ -1907,10 +1938,6 @@ const pgExpr: PgExprNamespace = {
       from: exprArg(expr),
     });
   },
-  interval: (duration) => chain({
-    node: "pgInterval",
-    duration: pgDuration(duration),
-  }),
 };
 
 type CaseExprArgs = {
@@ -1998,7 +2025,7 @@ function makeBuilder(): ExprBuilder {
 }
 
 // The standalone `c.case` / `c.fn` / `c.pg` builders surfaced at a value position
-// (`cCase(...)`, `cFn.now()`, `cPg.regex(...)`) — the SAME objects installed on the
+// (`cCase(...)`, `cFn.splitPart(...)`, `cPg.extract(...)`) — the SAME objects installed on the
 // `(c) => Expr` builder above. These are exported for the engine-embedded
 // recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
 // which requires the full engine-consumed surface. Not re-exported through the
@@ -2909,7 +2936,7 @@ function recordDropColumnNotNull(table: string, name: string, args: { schema?: s
 function recordSetColumnDefault(
   table: string,
   name: string,
-  value: DefaultValue | DefaultExprFn,
+  value: DefaultValue | DefaultExprFn | ExprChainType | Expr,
   args: { schema?: string },
 ): void {
   emitSetColumnDefault({
@@ -4030,10 +4057,10 @@ export function view(name: string, opts: ViewOptions = {}): ViewHandle {
 // ── (C) Determinism lint ──
 
 const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
-  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or c.fn.now()" },
-  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or c.fn.genRandomUuid()" },
-  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()" },
-  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or c.fn.now()" },
+  { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "the Date.now symbol (no parens) or now()" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "the Math.random symbol (no parens) or genRandomUuid()" },
+  { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "the crypto.randomUUID symbol (no parens) or genRandomUuid()" },
+  { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "the Date.now symbol (no parens) or now()" },
 ];
 
 /**

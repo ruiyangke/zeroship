@@ -1,4 +1,4 @@
-import { table, t } from "@zeroship/migrate";
+import { table, t, now } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 
 export const name = "sandbox_tables";
@@ -8,7 +8,7 @@ export function up() {
     columns: {
       sandbox_id: t.text().notNull(),
       user_id: t.text().notNull(),
-      deleted_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      deleted_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["sandbox_id"],
   });
@@ -21,8 +21,8 @@ export function up() {
       hostname: t.text().notNull(),
       region: t.text().notNull(),
       backend: t.text().notNull(),
-      started_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      last_heartbeat: t.timestamp().notNull().default((c) => c.fn.now()),
+      started_at: t.timestamp().notNull().default(now()),
+      last_heartbeat: t.timestamp().notNull().default(now()),
       status: t.text().notNull().default("alive"),
       drain_started_at: t.timestamp(),
       version: t.text().notNull().default(""),
@@ -41,7 +41,7 @@ export function up() {
       sandbox_id: t.text(),
       user_id: t.text().notNull(),
       kind: t.text().notNull(),
-      ts: t.timestamp().notNull().default((c) => c.fn.now()),
+      ts: t.timestamp().notNull().default(now()),
       data: t.json().notNull().default({}),
     },
     primaryKey: ["ts", "event_id"],
@@ -70,10 +70,10 @@ export function up() {
       generation: t.bigInt().notNull().default(0),
       status: t.text().notNull().default("starting"),
       key_fp: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       started_at: t.timestamp(),
       stopped_at: t.timestamp(),
-      last_used_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      last_used_at: t.timestamp().notNull().default(now()),
       deleted_at: t.timestamp(),
       metadata: t.json().notNull().default({}),
       snapshot_artifact_path: t.text(),
@@ -113,7 +113,7 @@ export function up() {
       port: t.int().notNull(),
       scope: t.text().notNull(),
       secret_version: t.int().notNull(),
-      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      issued_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
       use_count: t.bigInt().notNull().default(0),
@@ -137,12 +137,12 @@ export function up() {
       state: t.text().notNull(),
       error_code: t.text(),
       error_message: t.text(),
-      started_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      started_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
       ready_at: t.timestamp(),
       agent_url: t.text(),
       lessee: t.text().notNull(),
-      lessee_updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      lessee_updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["wake_id"],
   });

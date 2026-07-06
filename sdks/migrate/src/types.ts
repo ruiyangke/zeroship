@@ -141,6 +141,10 @@ export interface Duration {
   seconds?: number;
 }
 
+export interface CurrentSettingOptions {
+  missingOk?: boolean;
+}
+
 /** Options for `.mask({ kind, classification? })` — a STANDALONE column mask.
  *  `kind` is REQUIRED (closed {@link MaskKind}); `classification` is optional and
  *  DEFAULTS to `"pii"` (closed {@link Classification}). `kind: "none"` is the
@@ -189,10 +193,11 @@ export interface NextvalDefault {
 export interface ColumnDef {
   /** Mark the column `NOT NULL` (the rarer, riskier opt-in). Returns a fresh def. */
   notNull(): ColumnDef;
-  /** A structured default — a typed scalar/container literal, `nextval(...)`, or
-   *  a narrow expression callback `(c) => c.fn.*`. NEVER raw SQL (property A).
+  /** A structured default — a typed scalar/container literal, `nextval(...)`, a
+   *  top-level value constructor (`now()`, `genRandomUuid()`), or a narrow
+   *  expression callback. NEVER raw SQL (property A).
    *  Returns a fresh def. */
-  default(value: DefaultValue | DefaultExprFn): ColumnDef;
+  default(value: DefaultValue | DefaultExprFn | ExprChain | Expr): ColumnDef;
   /** Mark as the table primary key (implies `NOT NULL`). Returns a fresh def. */
   primaryKey(): ColumnDef;
   /** Add a single-column `UNIQUE`. Returns a fresh def. */
@@ -509,6 +514,12 @@ export type DefaultValue =
   | EmptyContainerDefault
   | JsonDefaultValue;
 
+export declare function now(): ExprChain;
+export declare function genRandomUuid(): ExprChain;
+export declare function currentSetting(name: string, opts?: CurrentSettingOptions): ExprChain;
+export declare function currentUser(): ExprChain;
+export declare function interval(duration: Duration): ExprChain;
+
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
 export type Row = Record<string, DmlValue>;
@@ -595,10 +606,6 @@ export interface FnNamespace {
   concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
   splitPart(col: unknown, delim: string, n: number): ExprChain;
-  /** DB-evaluated apply-time scalars, equivalent to the supported bare native
-   *  symbols (`Date.now`, `Math.random`, `crypto.randomUUID`). */
-  now(): ExprChain;
-  genRandomUuid(): ExprChain;
 }
 
 /** The immutable-only scalar namespace for generated columns and index predicates.
@@ -625,9 +632,10 @@ export type ImmutableFnNamespace = Pick<
   | "splitPart"
 >;
 
-/** The deliberately narrow builder available in column default expressions.
- *  Defaults cannot reference columns, aggregates, vendor PG helpers, or trigger
- *  OLD/NEW state by construction. */
+/** The deliberately narrow builder available in column default expression
+ *  callbacks. Defaults cannot reference columns, aggregates, vendor PG helpers,
+ *  or trigger OLD/NEW state by construction. Receiver-less value constructors
+ *  are top-level imports (`now()`, `genRandomUuid()`). */
 export interface DefaultBuilder {
   fn: FnNamespace;
   /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
@@ -680,20 +688,13 @@ export interface AggNamespace {
   max(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
 }
 
-/** PostgreSQL vendor expression nodes still reached via `c.pg.*`. `regex` and
- *  `columnSize` moved to first-class chain methods on `ExprChain` (P0); the
- *  remaining members are pending flatten to imports (J3). The Rust validator
- *  fails closed on targets without a native form. */
+/** PostgreSQL vendor expression nodes still reached via `c.pg.*`. Receiver-less
+ *  value constructors are top-level imports under P0. The Rust validator fails
+ *  closed on targets without a native form. */
 export interface PgExprNamespace {
-  /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
-  currentSetting(name: string, missingOk?: boolean): ExprChain;
-  /** PG vendor scalar for RLS policies: current_user. */
-  currentUser(): ExprChain;
   /** Renders portable fields as `extract` and PG-only fields as `pgExtract`. */
   extract(field: ExtractField, expr: unknown): ExprChain;
   extract(field: PgExtractField, expr: unknown): ExprChain;
-  /** Renders a structured PostgreSQL interval literal. */
-  interval(duration: Duration): ExprChain;
 }
 
 /** The single injected builder handle: a column-accessor function `c("name")`
@@ -1130,7 +1131,7 @@ export interface ColumnRef {
   setType(args: { to: ColumnDef; using?: ExprFn; schema?: string }): TableHandle;
   setNotNull(args?: { schema?: string }): TableHandle;
   dropNotNull(args?: { schema?: string }): TableHandle;
-  setDefault(value: DefaultValue | DefaultExprFn, args?: { schema?: string }): TableHandle;
+  setDefault(value: DefaultValue | DefaultExprFn | ExprChain | Expr, args?: { schema?: string }): TableHandle;
   dropDefault(args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
