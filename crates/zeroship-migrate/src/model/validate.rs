@@ -4421,7 +4421,7 @@ mod tests {
                         r#fn: ScalarFn::Length,
                         args: vec![Expr::col("name")],
                     }),
-                    target: CastTarget::Integer,
+                    target: CastTarget::Int,
                 }),
                 rhs: Box::new(Expr::lit(IrScalar::Int(0))),
             }),

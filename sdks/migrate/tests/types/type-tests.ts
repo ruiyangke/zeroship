@@ -419,8 +419,13 @@ export function badExprShapes(): void {
   });
 
   table("users").update({
-    // @ts-expect-error — `.cast(...)` only accepts the closed portable target set.
-    set: { name: (c) => c("name").cast("jsonb") },
+    // @ts-expect-error — `.cast(...)` takes a named `{ to }` args object.
+    set: { name: (c) => c("name").cast("text") },
+  });
+
+  table("users").update({
+    // @ts-expect-error — `.cast({ to })` only accepts the closed scalar ColType target set.
+    set: { name: (c) => c("name").cast({ to: "blob" }) },
   });
 
   table("users").update({
@@ -512,7 +517,7 @@ export function checkExpressionSurfaceTypechecks(): void {
 
 export function vendorExprSurfaceBoundaryTypechecks(): void {
   pgTable("app_secrets").policy("tenant_only").create({
-    using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
+    using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })),
     withCheck: (c) => c("owner").eq(c.pg.currentUser()),
   });
 

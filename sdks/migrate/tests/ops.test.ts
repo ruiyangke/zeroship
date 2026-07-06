@@ -976,21 +976,36 @@ test("the (c) => Expr builder constructs the closed AST", () => {
   const ops = record(() =>
     table("t").update({
       set: {
-        a: (c) => c("x").add(1).mul(2).cast("integer"),
+        a: (c) => c("x").add(1).mul(2).cast({ to: "int" }),
         b: (c) => c.fn.concatWs(" ", c("p"), c("q")),
         d: (c) => c.case({ branches: [{ when: c("x").lt(0), then: c("y") }], else: c("z") }),
+        e: (c) => c("payload").cast({ to: "bytes" }),
+        f: (c) => c("label").cast({ to: "text" }),
       },
       where: (c) => c("x").gt(0).and(c("y").isNotNull()),
     }),
   );
   const set = ops[0].set;
   assert.equal(set.a.node, "cast");
-  assert.equal(set.a.target, "integer");
+  assert.equal(set.a.target, "int");
   assert.equal(set.a.operand.op, "mul");
   assert.equal(set.b.node, "fnSynth");
   assert.equal(set.b.fn, "concatWs");
   assert.equal(set.d.node, "case");
+  assert.equal(set.e.target, "bytes");
+  assert.equal(set.f.target, "text");
   assert.equal(ops[0].where.op, "and");
+});
+
+test("cast fails closed on positional calls and old affinity tokens", () => {
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c("x").cast("text" as any) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be \{ to \}/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c("x").cast({ to: "blob" } as any) } })),
+    (e: any) => e.code === "OP_INVALID" && /to must be one of/.test(e.message),
+  );
 });
 
 test("c.case validates the object branch shape", () => {

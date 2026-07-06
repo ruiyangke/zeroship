@@ -32,8 +32,8 @@ export function up() {
   accounts.policy("tenant_isolation").create({
     for: "all",
     using: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
     withCheck: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
   });
 }

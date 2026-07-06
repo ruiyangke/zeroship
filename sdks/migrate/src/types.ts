@@ -14,6 +14,7 @@
 
 import type {
   Classification,
+  CastTarget,
   ColType,
   CommentTarget,
   Expr,
@@ -50,6 +51,7 @@ import type {
 // Re-export the closed facet token unions from the wire layer (single source of
 // truth — the IR `ir.ts` mirrors the engine schema; the authoring surface re-exports).
 export type {
+  CastTarget,
   ColType,
   CommentTarget,
   Expr,
@@ -541,8 +543,8 @@ export interface ExprChain {
   isNotNull(): ExprChain;
   isTrue(): ExprChain;
   isFalse(): ExprChain;
-  // cast (the closed portable target set only)
-  cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
+  // cast (the closed scalar ColType target set only)
+  cast(args: { to: CastTarget }): ExprChain;
   // portable predicates (§3.4): `between`/`like` render identical syntax on all
   // three dialects; `in`/`notIn` are portably named but keep PG's pg_dump-faithful
   // `ANY/ALL ARRAY[...]` render for homogeneous scalar lists; `distinctFrom` is

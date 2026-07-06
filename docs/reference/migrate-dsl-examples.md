@@ -382,7 +382,7 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c.pg.pgColumnSize(c("payload")).lt(1048576)   // pg_column_size < 1MiB
 
 // Cast
-(c) => c("app_id").cast("uuid")
+(c) => c("app_id").cast({ to: "uuid" })
 ```
 
 ### Function namespace (`c.fn.*`)
@@ -404,7 +404,7 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c.case({ branches: [{ when: c("n").gt(0), then: lit("pos") }], else: lit("nonpos") })
 
 // PG-flavoured settings (used in RLS policies) — reachable via c.pg on the pg-aware builder
-(c) => c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")
+(c) => c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })
 (c) => c.pg.currentUser()
 (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ days: 3 })))
 ```
@@ -574,8 +574,8 @@ pgTable("apps", { schema: "zeroship" }).setRls({ enabled: false, forced: false }
 
 // Policy via the table handle
 pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").create({
-  using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
-  withCheck: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
+  using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })),
+  withCheck: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })),
 });
 pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").drop();
 ```

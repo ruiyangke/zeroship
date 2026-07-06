@@ -75,10 +75,10 @@ export type SynthFn = "concatWs" | "splitPart" | "now" | "genRandomUuid";
 export type EmptyContainerKind = "object" | "array";
 
 /**
- * The closed portable cast-target set (§3.3.1). A non-portable cast target is
- * rejected (`UNSUPPORTED { kind: "expr" }`).
+ * The closed cast-target set (§3.3.1), aligned to scalar `ColType` tokens. A
+ * non-portable cast target is rejected (`UNSUPPORTED { kind: "expr" }`).
  */
-export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uuid";
+export type CastTarget = "text" | "int" | "real" | "boolean" | "bytes" | "uuid";
 
 /**
  * CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.

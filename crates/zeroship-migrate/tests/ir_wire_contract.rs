@@ -658,7 +658,7 @@ fn alter_column_type_using_is_a_closed_expr_not_raw_sql() {
     // raw SQL — property A is binding everywhere a transform/predicate appears.
     let json = r#"{"op":"setColumnType","table":"t","column":"a","toType":"int",
         "using":{"node":"cast","operand":{"node":"colRef","name":"a"},
-                 "target":"integer"}}"#;
+                 "target":"int"}}"#;
     let op: Op = serde_json::from_str(json).unwrap();
     match op {
         Op::SetColumnType { using, .. } => {
@@ -666,7 +666,7 @@ fn alter_column_type_using_is_a_closed_expr_not_raw_sql() {
                 using,
                 Some(Expr::Cast {
                     operand: Box::new(Expr::col("a")),
-                    target: CastTarget::Integer,
+                    target: CastTarget::Int,
                 }),
                 "setColumnType.using must deserialize into a closed Expr AST node"
             );
