@@ -584,6 +584,32 @@ pub fn fold_ops(
                     },
                 );
             }
+            Op::AttachPartition {
+                parent,
+                name,
+                bound,
+                ..
+            } => {
+                let parent_snap = tables
+                    .get(parent)
+                    .ok_or_else(|| FoldError::MissingTable(parent.clone()))?;
+                if parent_snap.partition_by.is_none() {
+                    return Err(FoldError::Unsupported(
+                        "attachPartition parent table is not partitioned",
+                    ));
+                }
+                if partitions.contains_key(name) {
+                    return Err(FoldError::DuplicateTable(name.clone()));
+                }
+                tables.remove(name);
+                partitions.insert(
+                    name.clone(),
+                    PartitionSnapshot {
+                        of: parent.clone(),
+                        bounds: bound.clone(),
+                    },
+                );
+            }
             Op::DetachPartition { parent, name, .. } => {
                 let parent_snap = tables
                     .get(parent)
@@ -603,7 +629,15 @@ pub fn fold_ops(
                 }
                 partitions.remove(name);
             }
-            Op::DropPartition { name, .. } => {
+            Op::DropPartition { parent, name, .. } => {
+                let partition = partitions
+                    .get(name)
+                    .ok_or_else(|| FoldError::MissingTable(name.clone()))?;
+                if &partition.of != parent {
+                    return Err(FoldError::Unsupported(
+                        "dropPartition child belongs to a different parent",
+                    ));
+                }
                 if partitions.remove(name).is_none() {
                     return Err(FoldError::MissingTable(name.clone()));
                 }
@@ -871,7 +905,7 @@ pub fn fold_ops(
                 )?;
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
-                        ColType::Enum { name }
+                        ColType::Enum { name, .. }
                             if !dialect.supports(Capability::MaterializedEnumType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
@@ -880,7 +914,7 @@ pub fn fold_ops(
                                 reason: "unreachable use-site",
                             });
                         }
-                        ColType::Domain { name }
+                        ColType::Domain { name, .. }
                             if !dialect.supports(Capability::MaterializedDomainType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
@@ -974,10 +1008,8 @@ pub fn fold_ops(
                     IrDefault::Literal { .. } => {
                         render_ir_default(value, dialect).map_err(fold_named_type_error)?
                     }
-                    IrDefault::Fn { .. } => {
-                        return Err(FoldError::Unsupported(
-                            "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
-                        ));
+                    IrDefault::Expr { .. } => {
+                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
                     }
                     IrDefault::Container { kind } => {
                         render_container_default_for_data_type(*kind, &col.data_type)
@@ -1050,6 +1082,12 @@ pub fn fold_ops(
                     snap.indexes.retain(|i| &i.name != name);
                 }
             }
+            Op::ValidateConstraint { .. } => {
+                // Validating a previously NOT VALID constraint changes no structural
+                // schema state — the constraint already exists in the folded snapshot
+                // (added by its `ADD CONSTRAINT … NOT VALID`); VALIDATE only strengthens
+                // it. Fold-invisible (see the addConstraint NOT VALID note).
+            }
             Op::CreateIndex {
                 table,
                 columns,
@@ -1060,6 +1098,7 @@ pub fn fold_ops(
                 include,
                 with,
                 only,
+                nulls_not_distinct,
                 ..
             } => {
                 let idx = create_index_snapshot(
@@ -1072,6 +1111,7 @@ pub fn fold_ops(
                     include,
                     with.as_ref(),
                     *only,
+                    *nulls_not_distinct,
                     dialect,
                 )
                 .map_err(fold_lower_error)?;
@@ -1195,10 +1235,7 @@ pub fn fold_ops(
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateTrigger { .. }
@@ -1450,7 +1487,7 @@ fn apply_fold_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
     for source in columns {
-        let Some(IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. }) = source.default.as_ref() else {
+        let Some(IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. }) = source.default.as_ref() else {
             continue;
         };
         let col = snap
@@ -1481,7 +1518,7 @@ fn apply_fold_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), FoldError> {
-    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
+    let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
         return Ok(());
     };
     if col.name != column {
@@ -1537,7 +1574,7 @@ fn apply_fold_named_type_column_metadata(
     project_schema: &str,
 ) -> Result<(), FoldError> {
     match &source.ty {
-        ColType::Enum { name } => {
+        ColType::Enum { name, .. } => {
             match dialect {
                 SqlDialect::Postgres => {
                     let schema = named_types.enum_schema_or(name, project_schema);
@@ -1559,7 +1596,7 @@ fn apply_fold_named_type_column_metadata(
                 }
             }
         }
-        ColType::Domain { name } => {
+        ColType::Domain { name, .. } => {
             if matches!(dialect, SqlDialect::Postgres) {
                 let schema = named_types.domain_schema_or(name, project_schema);
                 col.data_type = pg_type_data_type(schema, name);
@@ -1667,13 +1704,7 @@ fn fold_create_table_specs(
 ) -> Result<(), FoldError> {
     for c in constraints {
         match &c.kind {
-            IrConstraintKind::Pk { .. } => {
-                // `createTable` primary keys fold from the resolved top-level
-                // `primary_key` field. Validation owns rejection of constraint-form
-                // PKs; the fold must not re-apply a platform-owned-id policy.
-                continue;
-            }
-            IrConstraintKind::Check { expr } => {
+            IrConstraintKind::Check { expr, .. } => {
                 if !matches!(dialect, SqlDialect::Postgres) {
                     return Err(FoldError::Unsupported(
                         "createTable table-level CHECK is PostgreSQL-only",
@@ -1707,6 +1738,7 @@ fn fold_create_table_specs(
                 on_update,
                 deferrable,
                 initially_deferred,
+                not_valid: _,
             } => {
                 if !dialect.supports(Capability::TableLevelForeignKey) {
                     return Err(FoldError::Unsupported(
@@ -1794,6 +1826,7 @@ fn fold_create_table_specs(
             &ix.include,
             ix.with.as_ref(),
             ix.only,
+            ix.nulls_not_distinct,
             dialect,
         )
         .map_err(fold_lower_error)?;
@@ -1908,6 +1941,10 @@ fn add_constraint_snapshot(
             on_update,
             deferrable,
             initially_deferred,
+            // NOT VALID is fold-invisible: the folded DESIRED schema is the
+            // eventual-validated constraint (a later VALIDATE CONSTRAINT is a
+            // fold no-op), matching the live catalog after validation.
+            not_valid: _,
         } => {
             if columns.is_empty() {
                 return Err(FoldError::Unsupported("addConstraint(fk) with no local column"));
@@ -1935,20 +1972,7 @@ fn add_constraint_snapshot(
             );
             Ok(unique_constraint(&cname, columns))
         }
-        IrConstraintKind::Pk { .. } => {
-            // Byte-for-byte parity with the createTable Pk refusal
-            // (`fold_create_table_specs`): the platform owns the synthetic
-            // `<table>_pkey` PK, so a SECOND user PK — NAMED or derived — is never
-            // satisfiable. PG errors `multiple primary keys for table not allowed`
-            // at apply, so a two-PK snapshot is UNREACHABLE by introspection;
-            // accepting it would be fail-OPEN relative to apply (a named user PK
-            // would otherwise slip past the DuplicateConstraint net the derived
-            // `<table>_pkey` incidentally trips).
-            Err(FoldError::Unsupported(
-                "validated addConstraint user PRIMARY KEY reached fold",
-            ))
-        }
-        IrConstraintKind::Check { expr } => {
+        IrConstraintKind::Check { expr, .. } => {
             if !matches!(dialect, SqlDialect::Postgres) {
                 return Err(FoldError::Unsupported(
                     "addConstraint(check) is PostgreSQL-only",
@@ -2092,7 +2116,9 @@ fn match_col_op_lit(
     use crate::model::expr::Expr;
     if let Expr::BinOp { op, lhs, rhs } = expr {
         if *op == want {
-            if let (Expr::ColRef { name }, Expr::Literal { value }) = (lhs.as_ref(), rhs.as_ref()) {
+            if let (Expr::ColRef { name, table: None }, Expr::Literal { value }) =
+                (lhs.as_ref(), rhs.as_ref())
+            {
                 return Some((name.as_str(), value));
             }
         }
@@ -2295,7 +2321,7 @@ pub fn fold_to_field_defs(
                 tables.insert(name.clone(), cols);
                 for c in constraints {
                     match &c.kind {
-                        IrConstraintKind::Check { expr } => {
+                        IrConstraintKind::Check { expr, .. } => {
                             if let Some(facet) = recover_check_facet(expr) {
                                 checks.entry(name.clone()).or_default().push(facet);
                             }
@@ -2404,7 +2430,7 @@ pub fn fold_to_field_defs(
                         fks.entry(table.clone()).or_default().push(recovered);
                     }
                 }
-                if let IrConstraintKind::Check { expr } = &constraint.kind {
+                if let IrConstraintKind::Check { expr, .. } = &constraint.kind {
                     if let Some(facet) = recover_check_facet(expr) {
                         checks.entry(table.clone()).or_default().push(facet);
                     }
@@ -2621,16 +2647,16 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             "int" | "integer" => ColType::Int,
             "smallInt" => ColType::SmallInt,
             "bigInt" => ColType::BigInt,
-            "number" | "float" => ColType::Float,
+            "number" | "float" => ColType::Double,
             "real" => ColType::Real,
-            "boolean" => ColType::Bool,
+            "boolean" => ColType::Boolean,
             "json" | "object" | "array" => ColType::Json,
             "date" | "timestamp" => ColType::Timestamp,
-            "bytes" => ColType::Bytea,
+            "bytes" => ColType::Bytes,
             "inet" => ColType::Inet,
             "textArray" => ColType::TextArray,
             "char" => ColType::Char {
-                len: u32::try_from(f.char_len?).ok().filter(|len| *len > 0)?,
+                length: u32::try_from(f.char_len?).ok().filter(|len| *len > 0)?,
             },
             "geoPoint" => ColType::GeoPoint,
             _ => return None,
@@ -2741,7 +2767,7 @@ fn facet_check_constraints(
     if let Some(expr) = range_expr {
         out.push(IrConstraint {
             name: Some(format!("{table}_{}_range_check", f.name)),
-            kind: IrConstraintKind::Check { expr },
+            kind: IrConstraintKind::Check { expr, not_valid: None },
         });
     }
 
@@ -2773,7 +2799,7 @@ fn facet_check_constraints(
             }
             out.push(IrConstraint {
                 name: Some(format!("{table}_{}_enum_check", f.name)),
-                kind: IrConstraintKind::Check { expr },
+                kind: IrConstraintKind::Check { expr, not_valid: None },
             });
         }
     }
@@ -2864,6 +2890,7 @@ pub fn descriptors_to_create_ops(
                             on_update: f.on_update.as_deref().and_then(parse_ref_action),
                             deferrable: None,
                             initially_deferred: None,
+                            not_valid: None,
                         },
                     });
                 }
@@ -3346,6 +3373,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let dropped = fold(&[
@@ -3585,6 +3614,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let snap = fold(&[
@@ -3637,6 +3668,8 @@ mod tests {
                         on_update: None,
                         deferrable: None,
                         initially_deferred: None,
+                    
+                        not_valid: None,
                     },
                 },
                 schema: None,
@@ -3671,6 +3704,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let snap = fold(&[
@@ -3899,31 +3934,6 @@ mod tests {
     }
 
     #[test]
-    fn add_constraint_user_pk_is_validate_refused() {
-        for name in [Some("my_custom_pk"), None] {
-            let pk = IrConstraint {
-                name: name.map(ToString::to_string),
-                kind: IrConstraintKind::Pk { columns: vec!["a".to_string()] },
-            };
-            let err = validate_ops(
-                vec![
-                create("t", vec![col("a", ColType::Text, false)]),
-                Op::AddConstraint {
-                    table: "t".to_string(),
-                    constraint: pk,
-                    schema: None,
-                    existence_guard: None,
-                },
-                ],
-                Dialect::Postgres,
-            );
-            assert_eq!(err.code, CODE_UNSUPPORTED);
-            assert_eq!(err.kind, Some(UnsupportedKind::Op));
-            assert!(err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"));
-        }
-    }
-
-    #[test]
     fn drop_missing_constraint_errors() {
         let err = fold(&[
             create("users", vec![col("handle", ColType::Text, false)]),
@@ -3947,12 +3957,16 @@ mod tests {
             name: Some("users_true".to_string()),
             kind: IrConstraintKind::Check {
                 expr: Expr::Literal { value: IrScalar::Bool(true) },
+            
+                not_valid: None,
             },
         };
         let add_chk = IrConstraint {
             name: Some("age_pos".to_string()),
             kind: IrConstraintKind::Check {
                 expr: Expr::Literal { value: IrScalar::Bool(true) },
+            
+                not_valid: None,
             },
         };
         let mut create_op = create("users", vec![col("age", ColType::Int, false)]);
@@ -4014,6 +4028,8 @@ mod tests {
                 on_update: None,
                 deferrable: None,
                 initially_deferred: None,
+            
+                not_valid: None,
             },
         };
         let snap = fold(&[
@@ -4041,6 +4057,8 @@ mod tests {
                 .map(|col| IndexElement::Column {
                     name: (*col).to_string(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 })
                 .collect(),
             name: name.map(ToString::to_string),
@@ -4050,6 +4068,7 @@ mod tests {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             concurrently: None,
             schema: None,
             existence_guard: None,
@@ -4171,6 +4190,8 @@ mod tests {
                         on_update: None,
                         deferrable: None,
                         initially_deferred: None,
+                    
+                        not_valid: None,
                     },
                 },
             ],
@@ -4179,6 +4200,8 @@ mod tests {
                 columns: vec![IndexElement::Column {
                     name: "team_id".to_string(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 }],
                 unique: None,
                 using: None,
@@ -4186,6 +4209,7 @@ mod tests {
                 include: Vec::new(),
                 with: None,
                 only: None,
+                nulls_not_distinct: None,
             }],
             partition_by: None,
             runtime_options: Default::default(),
@@ -4226,10 +4250,14 @@ mod tests {
                     IndexElement::Column {
                         name: "author_id".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                     IndexElement::Column {
                         name: "status".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                 ],
                 name: Some("posts_author_status_idx".to_string()),
@@ -4239,6 +4267,7 @@ mod tests {
                 include: Vec::new(),
                 with: None,
                 only: None,
+                nulls_not_distinct: None,
                 concurrently: None,
                 schema: None,
                 existence_guard: None,
@@ -4281,32 +4310,6 @@ mod tests {
         let snap = fold_ops(&ops, SqlDialect::Postgres, SCHEMA)
             .expect("fold runs with no DB connection or async runtime");
         assert!(snap.tables.contains_key("a"));
-    }
-
-    #[test]
-    fn create_table_constraint_form_pk_is_validate_refused() {
-        let pk = IrConstraint {
-            name: None,
-            kind: IrConstraintKind::Pk { columns: vec!["a".to_string(), "b".to_string()] },
-        };
-        let op = Op::CreateTable {
-            name: "t".to_string(),
-            columns: vec![col("a", ColType::Text, false), col("b", ColType::Text, false)],
-            primary_key: None,
-            constraints: vec![pk],
-            indexes: Vec::new(),
-            partition_by: None,
-            runtime_options: None,
-            schema: None,
-            existence_guard: None,
-        };
-        let err = validate_ops(vec![op], Dialect::Postgres);
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Op));
-        assert!(
-            err.reason.contains("PRIMARY KEY") || err.reason.contains("primary key"),
-            "constraint-form createTable PK must be refused by validation: {err:?}"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -4433,6 +4436,8 @@ mod tests {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             }],
             Vec::new(),
@@ -4456,6 +4461,8 @@ mod tests {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             }],
             Vec::new(),
@@ -4492,6 +4499,8 @@ mod tests {
                 columns: vec![IndexElement::Column {
                     name: "doc".to_string(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 }],
                 unique: None,
                 using: Some(crate::model::ir::IndexMethod::Gin),
@@ -4499,6 +4508,7 @@ mod tests {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             }],
         );
         let err = validate_ops(vec![op], Dialect::Sqlite);
@@ -5155,7 +5165,7 @@ mod tests {
         let mut recovered_range = false;
         let mut recovered_enum = false;
         for c in constraints {
-            if let IrConstraintKind::Check { expr } = &c.kind {
+            if let IrConstraintKind::Check { expr, .. } = &c.kind {
                 match recover_check_facet(expr) {
                     Some(RecoveredCheck::Range { column, min, max }) if column == "age" => {
                         assert_eq!(min, Some(0.0));

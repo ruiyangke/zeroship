@@ -15,23 +15,33 @@
 //     existence is an apply-time check, the anti-rot guarantee).
 
 import { t as dbT } from "@zeroship/db";
+// @ts-expect-error — free boolean combinators are no longer exported from the public package.
+import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
+// @ts-expect-error — free policy helpers were deleted; use pgTable(...).policy(name).create/drop().
+import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate/pg";
+// @ts-expect-error — flat named-object lifecycle helpers were deleted; use schema/extension/role handles.
+import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate/pg";
 
+import * as migrate from "../../src/index.js";
 import {
   colTypeFromDbField,
   fromDb,
   t,
   table,
+  view,
   check,
-  and,
-  or,
-  not,
-  membership,
   lit,
-  interval,
+  decimal,
+  byteValue,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
+  type DecimalValue,
+  type BytesValue,
 } from "../../src/index.js";
+// @ts-expect-error — free boolean combinators are no longer exported; use chain `.and`/`.or`/`.not`.
+import { and as removedAnd, or as removedOr, not as removedNot } from "../../src/index.js";
+import { domain, pgTable } from "../../src/pg.js";
 // The internal closed-set validation arrays (NOT part of the public `index.ts`
 // surface) — imported directly for the LOW-2 element-typing assertion below.
 import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.js";
@@ -57,7 +67,7 @@ export function antiRotMigration(): void {
     columns: ["author_id"],
     references: { table: "another_missing_table", columns: ["id"] },
   });
-  table("nonexistent_table").addForeignKey("composite_fk", {
+  table("nonexistent_table").foreignKey("composite_fk").add({
     columns: ["tenant_id", "author_id"],
     references: { schema: "ghost", table: "another_missing_table", columns: ["tenant_id", "author_id"] },
   });
@@ -65,7 +75,7 @@ export function antiRotMigration(): void {
     set: { legacy_col: (c) => c("a_column_no_schema_declares").concat(" suffix") },
     where: (c) => c("yet_another_missing_column").isNull(),
   });
-  table("nonexistent_table").del({ where: (c) => c("phantom_col").eq(1) });
+  table("nonexistent_table").delete({ where: (c) => c("phantom_col").eq(1) });
   table("nonexistent_table").backfill({
     set: { legacy_col: (c) => c.fn.splitPart(c("phantom_col"), " ", 1) },
     where: (c) => c("phantom_col").isNotNull(),
@@ -96,11 +106,11 @@ export function badOpShapes(): void {
   // @ts-expect-error — .foreignKey().add() needs `references`, not a bare columns list.
   table("orders").foreignKey("fk").add({ columns: ["user_id"] });
 
-  // @ts-expect-error — `del` requires a `where` predicate (mandatory).
-  table("users").del({});
+  // @ts-expect-error — `delete` requires a `where` predicate (mandatory).
+  table("users").delete({});
 
-  // @ts-expect-error — `update.set` values must be (c) => Expr callbacks, not raw strings.
-  table("users").update({ set: { name: "raw sql string" } });
+  // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").
+  table("users").update({ set: { name: 1n } });
 
   // @ts-expect-error — the table-level `.rename({ to })` REQUIRES a `to` string.
   table("users").rename({});
@@ -109,11 +119,243 @@ export function badOpShapes(): void {
   table("users").rename({ from: "users", to: "people" });
 }
 
+export function pgTableBoundary(): void {
+  // @ts-expect-error — PG table policies are only reachable through `pgTable()`.
+  table("secrets").policy("tenant_only").create({ using: (c) => c("tenant_id").isNotNull() });
+
+  // @ts-expect-error — deleted direct table trigger method; use `.trigger(name).create(...)`.
+  table("audit_events").createTrigger({ name: "audit_events_trg", timing: "before", events: ["insert"], forEach: "row", execute: "audit_events_fn" });
+
+  // @ts-expect-error — deleted direct table trigger method; use `.trigger(name).drop(...)`.
+  table("audit_events").dropTrigger({ name: "audit_events_trg", ifExists: true });
+
+  // @ts-expect-error — RLS is a PG table method and is not on portable `table()`.
+  table("secrets").setRls({ enabled: true });
+
+  // @ts-expect-error — exclusion constraints are a PG table method and are not on portable `table()`.
+  table("bookings").exclusion("bookings_no_overlap");
+
+  // @ts-expect-error — direct constraint validation method was deleted; use `pgTable(...).constraint(name).validate()`.
+  table("line_items").validateConstraint("line_items_order_fkey");
+
+  // @ts-expect-error — direct partition detach method was deleted; use `pgTable(...).partition(name).detach()`.
+  table("events").detachPartition("events_2026_05");
+
+  // @ts-expect-error — constraint validate is PG-only and only on the PG constraint ref.
+  table("line_items").constraint("line_items_order_fkey").validate();
+
+  table("audit_events").trigger("audit_events_trg").create({
+    timing: "before",
+    events: ["insert"],
+    forEach: "row",
+    execute: "audit_events_fn",
+  });
+  table("audit_events").trigger("audit_events_trg").drop({ ifExists: true });
+
+  // @ts-expect-error — deleted direct PG policy method; use `.policy(name).create(...)`.
+  pgTable("secrets").createPolicy({ name: "tenant_only", using: (c) => c("tenant_id").isNotNull() });
+
+  // @ts-expect-error — deleted direct PG policy method; use `.policy(name).drop(...)`.
+  pgTable("secrets").dropPolicy({ name: "tenant_only", ifExists: true });
+
+  pgTable("secrets")
+    .setRls({ enabled: true, forced: true })
+    .policy("tenant_only").create({ using: (c) => c("tenant_id").isNotNull() })
+    .policy("tenant_only").drop({ ifExists: true })
+    .setRls({ enabled: false, forced: false });
+  // @ts-expect-error — deleted RLS method; use `.setRls({ enabled: true })`.
+  pgTable("secrets").enableRowLevelSecurity();
+  // @ts-expect-error — deleted RLS method; use `.setRls({ forced: true })`.
+  pgTable("secrets").forceRowLevelSecurity();
+  // @ts-expect-error — deleted RLS method; use `.setRls({ enabled: false })`.
+  pgTable("secrets").disableRowLevelSecurity();
+  // @ts-expect-error — deleted RLS method; use `.setRls({ forced: false })`.
+  pgTable("secrets").noForceRowLevelSecurity();
+  pgTable("bookings").exclusion("bookings_no_overlap").add({
+    using: "gist",
+    elements: [{ target: "room_id", operator: "=" }],
+  });
+  // @ts-expect-error — deleted direct PG constraint validation method; use `.constraint(name).validate(...)`.
+  pgTable("line_items").validateConstraint("line_items_order_fkey");
+  pgTable("line_items").constraint("line_items_order_fkey").validate();
+  // @ts-expect-error — deleted direct PG partition detach method; use `.partition(name).detach(...)`.
+  pgTable("events").detachPartition("events_2026_05", { concurrently: true });
+  pgTable("events").partition("events_2026_05").detach({ concurrently: true });
+  pgTable("events").partition("events_2026_06").attach({
+    from: ["2026-06-01T00:00:00Z"],
+    to: ["2026-07-01T00:00:00Z"],
+  });
+}
+
+export function viewGrammar(): void {
+  view("active_users").create({
+    as: (q) => q.from("users").select(["id", "email"]),
+  });
+  view("recent_users").create({
+    as: { raw: "SELECT id, email FROM users WHERE deleted_at IS NULL" },
+  });
+
+  // @ts-expect-error — deleted duplicate spelling; use `.create({ as: { raw } })`.
+  view("recent_users").createRaw({ sql: "SELECT id, email FROM users" });
+}
+
+export function partitionGrammar(): void {
+  table("events").create({
+    columns: { created_at: t.timestamp() },
+    partitionBy: { range: ["created_at"], whenUnsupported: "collapse" },
+  });
+  table("events").partition("events_2026").create({
+    from: ["2026-01-01"],
+    to: ["2027-01-01"],
+  });
+  table("events").partition("events_default").create({ default: true });
+  table("events").partition("events_2026").drop({ ifExists: true, cascade: true });
+
+  // @ts-expect-error - whenUnsupported is an explicit P12 affirmation and only accepts "collapse".
+  table("bad").create({ columns: { created_at: t.timestamp() }, partitionBy: { range: ["created_at"], whenUnsupported: "skip" } });
+
+  // @ts-expect-error - null list bounds are outside the closed partition-bound value type.
+  table("bad").partition("bad_null").create({ in: [null] });
+
+  // @ts-expect-error - deleted `p` builder namespace; use `partitionBy: { range: [...] }`.
+  table("bad").create({ columns: { created_at: t.timestamp() }, partitionBy: migrate.p.range(["created_at"]) });
+
+  // @ts-expect-error - deleted free `partition(name).of(parent)` grammar; use `table(parent).partition(name)`.
+  migrate.partition("events_2026").of("events");
+
+  // @ts-expect-error - deleted free `dropPartition`; use `table(parent).partition(name).drop()`.
+  migrate.dropPartition("events_2026");
+}
+
+export function indexGrammar(): void {
+  table("users").index("users_email_idx").add({
+    on: [
+      "email",
+      { column: "created_at", order: "desc" },
+      { expr: (c) => c.fn.lower(c("email")) },
+    ],
+    unique: true,
+  });
+
+  pgTable("users").index("users_email_idx").add({
+    on: [
+      "email",
+      { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C", nulls: "last" },
+      { expr: (c) => c.fn.lower(c("email")) },
+    ],
+    using: "gin",
+    where: (c) => c("active").isTrue(),
+    include: ["id"],
+    with: { fillfactor: 90 },
+    only: true,
+    unique: true,
+    nullsNotDistinct: true,
+  });
+
+  table("users").create({
+    columns: { email: t.text(), created_at: t.timestamp() },
+    indexes: [{ name: "users_email_idx", on: ["email"] }],
+  });
+
+  const oldColumnsArgs = { ["columns"]: ["email"] };
+  // @ts-expect-error — `.index().add()` uses `on`, not `columns`.
+  table("users").index("bad_columns").add(oldColumnsArgs);
+
+  const indexRef = table("users").index("bad_chain");
+  // @ts-expect-error — index modifiers live in `.add({ ... })`, not chain methods.
+  indexRef.using;
+
+  const oldKindKey = "kind";
+  const oldExprKind = "expr";
+  // @ts-expect-error — tagged expression elements are not part of the authored grammar.
+  table("users").index("bad_tagged_expr").add({ on: [{ [oldKindKey]: oldExprKind, expr: (c) => c("email") }] });
+
+  // @ts-expect-error — bare expression elements must be wrapped as `{ expr }`.
+  table("users").index("bad_bare_expr").add({ on: [(c) => c("email")] });
+
+  const oldColumnKind = "column";
+  // @ts-expect-error — column object elements use `{ column }`, not `{ kind, name }`.
+  table("users").index("bad_tagged_column").add({ on: [{ [oldKindKey]: oldColumnKind, name: "email" }] });
+
+  // @ts-expect-error — `using` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_using").add({ on: ["email"], using: "gin" });
+
+  // @ts-expect-error — partial-index `where` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_where").add({ on: ["email"], where: (c) => c("active").isTrue() });
+
+  // @ts-expect-error — covering `include` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_include").add({ on: ["email"], include: ["id"] });
+
+  // @ts-expect-error — storage params are PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_with").add({ on: ["email"], with: { fillfactor: 90 } });
+
+  // @ts-expect-error — partition-recursion `only` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_only").add({ on: ["email"], only: true });
+
+  // @ts-expect-error — `nullsNotDistinct` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_nulls_not_distinct").add({ on: ["email"], unique: true, nullsNotDistinct: true });
+
+  // @ts-expect-error — element `opclass` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_opclass").add({ on: [{ column: "email", opclass: "text_pattern_ops" }] });
+
+  // @ts-expect-error — element `collation` is PG-vendor and only reachable through `pgTable().index()`.
+  table("users").index("bad_collation").add({ on: [{ column: "email", collation: "C" }] });
+}
+
+export function immutableOnlyBuilderSlots(): void {
+  t.text().generated((c) => c.fn.lower(c("email")));
+  pgTable("users").index("users_email_lower_idx").add({
+    on: [{ expr: (c) => c.fn.lower(c("email")) }],
+    where: (c) => c("active").isTrue(),
+  });
+
+  // @ts-expect-error — generated column expressions cannot use volatile c.fn.now().
+  t.timestamp().generated((c) => c.fn.now());
+
+  // @ts-expect-error — index expression elements cannot use volatile c.fn.now().
+  table("users").index("bad_index_now").add({ on: [{ expr: (c) => c.fn.now() }] });
+
+  // @ts-expect-error — partial-index predicates cannot use volatile c.fn.now().
+  pgTable("users").index("bad_partial_now").add({ on: ["email"], where: (c) => c.fn.now() });
+
+  // @ts-expect-error — generated column expressions cannot use aggregates.
+  t.int().generated((c) => c.agg.count());
+
+  // @ts-expect-error — index expression elements cannot use aggregates.
+  table("users").index("bad_index_agg").add({ on: [{ expr: (c) => c.agg.count() }] });
+
+  // @ts-expect-error — partial-index predicates cannot use aggregates.
+  pgTable("users").index("bad_partial_agg").add({ on: ["email"], where: (c) => c.agg.count() });
+}
+
 // The table-level `.rename({ to })` now type-checks (the renameTable op shipped):
 // a bare rename and a schema+ifExists rename, both returning the chainable handle.
 export function goodTableRename(): void {
   table("users").rename({ to: "people" });
   table("users").rename({ to: "people", ifExists: true, schema: "reporting" });
+}
+
+export function tableRuntimeOptionTerminals(): void {
+  table("posts").setOptions({ softDelete: true });
+  table("posts").setOptions({ softDelete: false });
+  table("posts", { schema: "archive" }).setOptions({ softDelete: true });
+  table("posts").setOptions({ versioning: true });
+  table("posts").setOptions({ versioning: false });
+  table("posts", { schema: "archive" }).setOptions({ versioning: true });
+  table("posts").setOptions({ strictness: "lenient" });
+  table("posts").create({ columns: { title: t.text() }, options: { softDelete: true, versioning: true, strictness: "off" } });
+
+  // @ts-expect-error — `.softDelete()` is no longer a TableHandle method.
+  table("posts").softDelete();
+
+  // @ts-expect-error — `.withVersioning()` is no longer a TableHandle method.
+  table("posts").withVersioning();
+
+  // @ts-expect-error — `.strictness()` is no longer a TableHandle method.
+  table("posts").strictness("strict");
+
+  // @ts-expect-error — create-time runtime options live under `options`.
+  table("posts").create({ columns: { title: t.text() }, softDelete: true });
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -134,14 +376,28 @@ export function badColTypes(): void {
   // @ts-expect-error — `.notNull()` takes no argument.
   t.text().notNull("yes");
 
-  // @ts-expect-error — `.ref(target)` requires a string target table.
-  t.text().ref(123);
+  // @ts-expect-error — `.ref(target)` is not a ColumnDef facet; use `t.ref(target)` from the start.
+  t.text().ref("users");
 
   // @ts-expect-error — there is no `.frobnicate()` chain modifier.
   t.text().frobnicate();
 
-  // @ts-expect-error — `t.vector(n)` requires a numeric dimension.
-  t.vector("not a number");
+  t.numeric({ precision: 12, scale: 2 });
+  t.numeric();
+  t.char({ length: 3 });
+  t.vector({ dimensions: 8, metric: "cosine" });
+
+  // @ts-expect-error — `t.numeric` now takes a named options bag.
+  t.numeric(12, 2);
+
+  // @ts-expect-error — `t.char` now takes a named length payload.
+  t.char(3);
+
+  // @ts-expect-error — `t.vector` now takes a named dimensions payload.
+  t.vector(8);
+
+  // @ts-expect-error — `t.vector({ dimensions })` requires a numeric dimension.
+  t.vector({ dimensions: "not a number" });
 
   // @ts-expect-error — the removed `{ notNull }` options-bag overload (§7).
   t.text({ notNull: true });
@@ -189,7 +445,7 @@ export function checkExpressionSurfaceTypechecks(): void {
       user_id: t.text().notNull(),
       kind: t.text().notNull(),
       data: t.json().notNull(),
-      floor_cents: t.integer(),
+      floor_cents: t.int(),
       created_at: t.timestamp().notNull(),
       expires_at: t.timestamp().notNull(),
       active: t.boolean().notNull(),
@@ -197,16 +453,104 @@ export function checkExpressionSurfaceTypechecks(): void {
     },
     checks: [
       pkceCheck,
-      check("max_ttl", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
-      check("user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
-      check("kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
-      check("data_size", (c) => c("data").columnSize().lt(262144)),
-      check("floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(lit(0)))),
-      check("visible_when_active", (c) => and(c("active"), not(c("visible").isNull()))),
+      check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
+      check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(lit(0)))),
+      check("visible_when_active", (c) => c("active").and(c("visible").isNull().not())),
     ],
   });
-  table("oauth_authorization_codes").addCheck("active_is_bool", (c) => c("active").isNotNull(), {
+
+  // @ts-expect-error — core CHECK builders do not expose aggregates.
+  table("oauth_authorization_codes").check("no_agg").add({ expr: (c) => c.agg.count().gt(0) });
+
+  // @ts-expect-error — core CHECK builders expose only immutable c.fn helpers.
+  table("oauth_authorization_codes").check("no_now").add({ expr: (c) => c.fn.now().isNotNull() });
+
+  // @ts-expect-error — core CHECK builders do not expose PostgreSQL vendor helpers.
+  table("oauth_authorization_codes").check("no_pg").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_") });
+
+  // @ts-expect-error — PG-only extract fields are not in the portable extract union.
+  table("oauth_authorization_codes").check("no_pg_extract_field").add({ expr: (c) => c.fn.extract("epoch", c("created_at")).gt(0) });
+
+  pgTable("oauth_authorization_codes").check("max_ttl").add({
+    expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))),
+  });
+  // @ts-expect-error — core interval was a leaked PG vendor spelling; use c.pg.interval.
+  table("oauth_authorization_codes").check("no_core_interval").add({ expr: (c) => c("expires_at").le(interval({ minutes: 1 })) });
+  // @ts-expect-error — c.pg.interval takes a structured Duration, not HH:MM:SS text.
+  pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))) });
+  pgTable("oauth_authorization_codes").check("epoch_positive").add({
+    expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
+  });
+  pgTable("oauth_authorization_codes").check("user_id_fmt").add({
+    expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$"),
+  });
+  pgTable("oauth_authorization_codes").check("data_size").add({
+    expr: (c) => c.pg.pgColumnSize(c("data")).lt(1000),
+  });
+  table("oauth_authorization_codes").check("active_is_bool").add({
+    expr: (c) => c("active").isNotNull(),
     ifNotExists: true,
+  });
+}
+
+export function vendorExprSurfaceBoundaryTypechecks(): void {
+  pgTable("app_secrets").policy("tenant_only").create({
+    using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")),
+    withCheck: (c) => c("owner").eq(c.pg.currentUser()),
+  });
+
+  // @ts-expect-error — dot-spelled PG regex is vendor-only; use `c.pg.regex(c("x"), pattern)`.
+  table("exprs").update({ set: { x: (c) => c("x")["matches"]("^a$") } });
+
+  // @ts-expect-error — dot-spelled PG column size is vendor-only; use `c.pg.pgColumnSize(c("x"))`.
+  table("exprs").update({ set: { x: (c) => c("x")["columnSize"]() } });
+
+  // @ts-expect-error — current_setting is PG-vendor and lives under `c.pg`.
+  table("exprs").update({ set: { x: (c) => c.fn["currentSetting"]("zeroship.tenant_app", true) } });
+
+  // @ts-expect-error — current_user is PG-vendor and lives under `c.pg`.
+  table("exprs").update({ set: { x: (c) => c.fn["currentUser"]() } });
+
+  // @ts-expect-error — the expression builder is callable; `c.col(...)` is removed.
+  table("exprs").update({ set: { x: (c) => c.col("x") } });
+}
+
+export function domainValueCheckSurfaceTypechecks(): void {
+  domain("account_state").create({
+    as: t.text(),
+    check: (v) => v.in(["active", "past_due"]).and(v.isNotNull()),
+  });
+  domain("billing_period").create({
+    as: t.date(),
+    check: (v) => v.pg.extract("day", v).eq(1),
+  });
+  domain("email_domain").create({
+    as: t.text(),
+    check: (v) => v.fn.lower(v).like("%@%"),
+  });
+
+  domain("bad_domain_call").create({
+    as: t.text(),
+    // @ts-expect-error — DomainValueBuilder is the value, not a callable column accessor.
+    check: (v) => v("other_column").eq("x"),
+  });
+
+  domain("bad_domain_col").create({
+    as: t.text(),
+    // @ts-expect-error — DomainValueBuilder exposes no general column accessor.
+    check: (v) => v.col("other_column").eq("x"),
+  });
+
+  domain("bad_domain_now").create({
+    as: t.timestamp(),
+    // @ts-expect-error — domain checks expose only immutable v.fn helpers.
+    check: (v) => v.fn.now().isNotNull(),
+  });
+
+  domain("bad_domain_agg").create({
+    as: t.text(),
+    // @ts-expect-error — DomainValueBuilder has no aggregate namespace.
+    check: (v) => v.agg.count().gt(0),
   });
 }
 
@@ -231,22 +575,87 @@ export function insertValueShapes(): void {
   });
   table("users").create({
     columns: {
-      created_at: t.timestamp().default(Date.now),
-      random_id: t.uuid().default(Math.random),
-      id: t.uuid().default(crypto.randomUUID),
+      created_at: t.timestamp().default((c) => c.fn.now()),
+      random_id: t.uuid().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().default((c) => c.fn.genRandomUuid()),
     },
   });
 
-  // TypeScript cannot distinguish this from Date.now; the runtime identity guard
-  // rejects it. This line intentionally typechecks.
+  // TypeScript cannot distinguish this from Date.now in DML values; the runtime
+  // identity guard rejects it. This line intentionally typechecks.
   table("users").insert({ rows: { count: () => 42 } });
-  table("users").create({ columns: { count: t.integer().default(() => 1) } });
+
+  // @ts-expect-error — native symbols are no longer valid in column default position.
+  table("users").create({ columns: { created_at: t.timestamp().default(Date.now) } });
+
+  // @ts-expect-error — native symbols are no longer valid in column default position.
+  table("users").create({ columns: { random_id: t.uuid().default(Math.random) } });
+
+  // @ts-expect-error — native symbols are no longer valid in column default position.
+  table("users").create({ columns: { id: t.uuid().default(crypto.randomUUID) } });
+
+  // @ts-expect-error — the removed `{ fn }` carrier is not a DefaultValue.
+  table("users").create({ columns: { created_at: t.timestamp().default({ fn: "now" }) } });
+
+  // @ts-expect-error — DefaultBuilder is not callable; defaults cannot reference columns.
+  table("users").create({ columns: { name_copy: t.text().default((c) => c("name")) } });
+
+  // @ts-expect-error — DefaultBuilder has no aggregate namespace.
+  table("users").create({ columns: { n: t.int().default((c) => c.agg.count()) } });
+
+  // @ts-expect-error — a default callback must return an expression, not a scalar.
+  table("users").create({ columns: { count: t.int().default(() => 1) } });
 
   // @ts-expect-error — a function returning an object is not a native-compatible synth symbol.
   table("users").insert({ rows: { bad: () => ({ nope: true }) } });
 
   // @ts-expect-error — column defaults reject clearly wrong function return shapes.
   table("users").create({ columns: { bad: t.json().default(() => ({ nope: true })) } });
+}
+
+export function decimalValueShapes(): void {
+  const cents: DecimalValue = decimal("9007199254740993");
+  table("ledger").insert({ rows: { amount: cents } });
+  table("ledger").create({ columns: { amount: t.numeric({ precision: 38, scale: 0 }).default(decimal("9007199254740993")) } });
+  table("ledger").insert({
+    rows: { id: 1, amount: decimal("0.00") },
+    onConflict: { columns: ["id"], doUpdate: { amount: decimal("1.25") } },
+  });
+  lit(decimal("0.00"));
+
+  // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").
+  table("ledger").insert({ rows: { amount: 9007199254740993n } });
+
+  // @ts-expect-error — bigint defaults are refused by the authored value union.
+  table("ledger").create({ columns: { amount: t.numeric({ precision: 38, scale: 0 }).default(9007199254740993n) } });
+
+  table("ledger").insert({
+    rows: { id: 1, amount: decimal("0.00") },
+    onConflict: {
+      columns: ["id"],
+      doUpdate: {
+        // @ts-expect-error — bigint is not valid in onConflict.doUpdate values.
+        amount: 9007199254740993n,
+      },
+    },
+  });
+
+  // @ts-expect-error — bigint is not valid in expression literals.
+  lit(9007199254740993n);
+}
+
+export function byteValueShapes(): void {
+  const fromString: BytesValue = byteValue("AQID");
+  const fromBytes: BytesValue = byteValue(new Uint8Array([1, 2, 3]));
+  table("files").insert({ rows: { raw: fromString } });
+  table("files").insert({ rows: { raw: fromBytes } });
+  table("files").insert({ rows: { raw: new Uint8Array([1, 2, 3]) } });
+  table("files").create({ columns: { raw: t.bytes().default(byteValue("AQID")) } });
+  table("files").insert({
+    rows: { id: 1, raw: byteValue("AQID") },
+    onConflict: { columns: ["id"], doUpdate: { raw: byteValue(new Uint8Array([1, 2, 3])) } },
+  });
+  lit(byteValue("AQID"));
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -271,7 +680,7 @@ export function lexiconBridgeShapes(): void {
 // ───────────────────────────────────────────────────────────────────────────
 
 export function existenceGuardsTypecheck(): void {
-  table("t").create({ columns: { n: t.integer() }, ifNotExists: true });
+  table("t").create({ columns: { n: t.int() }, ifNotExists: true });
   table("t").column("email").add({ type: t.text(), ifNotExists: true });
   table("t").column("legacy").drop({ ifExists: true });
   table("t").column("a").setType({ to: t.bigInt() });

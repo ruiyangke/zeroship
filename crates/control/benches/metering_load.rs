@@ -36,7 +36,7 @@
 //! ```bash
 //! # 1. create + migrate a dedicated DB (one time):
 //! createdb -h localhost -p 5440 -U postgres zeroship_metering_load
-//! zeroship-migrate migrate --dir db/migrations --profile platform --yes \
+//! zeroship-migrate migrate --dir db/migrations-ts --profile platform --yes \
 //!   --database-url postgres://postgres:zeroship@localhost:5440/zeroship_metering_load
 //!
 //! # 2. run (the env var both gates AND points the harness):

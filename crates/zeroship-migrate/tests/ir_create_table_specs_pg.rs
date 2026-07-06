@@ -18,7 +18,6 @@
 //! Requires `:5440` (the `*_pg` suite convention); run with `--test-threads=1`.
 
 use compio_postgres::Client;
-use zeroship_migrate::model::load::IrLoadError;
 use zeroship_migrate::model::validate::{UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::{
     apply::executor::LockMode,
@@ -424,46 +423,6 @@ async fn platform_null_primary_key_lowers_and_applies_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// HIGH-fix fail-closed: a table-level PRIMARY KEY constraint is a HARD error,
-/// never a silent no-op. Top-level `primaryKey` is policy-gated separately.
-#[compio::test]
-async fn create_table_user_primary_key_is_hard_error_on_pg() {
-    let conn = pg().await;
-    let cfg = cfg_for(&token());
-    setup(&conn, &cfg).await;
-
-    let ir = r#"{"ir_version":1,"name":"create_pk","ops":[
-        {"op":"createTable","name":"pk_tbl","columns":[
-            {"name":"a","type":"text","nullable":false},
-            {"name":"b","type":"text","nullable":false}
-        ],
-        "constraints":[
-            {"kind":{"kind":"pk","columns":["a","b"]}}
-        ]}
-    ]}"#;
-    let policy = PolicyProfile::platform();
-    let err = zeroship_migrate::model::load::load_ir_document(
-        ir,
-        APP,
-        zeroship_migrate::model::validate::Dialect::Postgres,
-        &registry(&[]),
-        None,
-        Some(&policy),
-    )
-    .expect_err("a table-level PRIMARY KEY must validate-refuse, not silently no-op");
-    let IrLoadError::Validate(err) = err else {
-        panic!("expected validate error for user PRIMARY KEY, got {err:?}");
-    };
-    assert_eq!(err.code, CODE_UNSUPPORTED);
-    assert_eq!(err.kind, Some(UnsupportedKind::Op));
-    assert!(
-        err.reason.contains("primary key") || err.reason.contains("primary keys"),
-        "the error must name the unsupported PRIMARY KEY (got: {err:?})"
-    );
-
-    teardown(&conn, &cfg).await;
-}
-
 /// Slice A: current-AST table-level CHECK constraints render on PG both in
 /// createTable and stand-alone addConstraint, and apply to the live catalog.
 #[compio::test]
@@ -569,8 +528,8 @@ async fn table_level_checks_render_and_apply_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// Slice B: PG-only expression nodes for text-array membership, regex, and
-/// pg_column_size render in the platform pg_dump idiom and apply as live CHECKs.
+/// Slice B: expression nodes for portable text-list membership plus PG-only regex
+/// and pg_column_size render in the platform pg_dump idiom and apply as live CHECKs.
 #[compio::test]
 async fn pg_only_expr_nodes_render_and_apply_on_pg() {
     let conn = pg().await;
@@ -586,15 +545,15 @@ async fn pg_only_expr_nodes_render_and_apply_on_pg() {
         ],
         "constraints":[
             {"name":"status_any_check","kind":{"kind":"check","expr":{
-                "node":"pgArrayMembership",
+                "node":"inList",
                 "expr":{"node":"colRef","name":"status"},
-                "op":"eq",
-                "elems":["a","b"]}}},
+                "elems":["a","b"],
+                "negated":false}}},
             {"name":"status_ne_all_check","kind":{"kind":"check","expr":{
-                "node":"pgArrayMembership",
+                "node":"inList",
                 "expr":{"node":"colRef","name":"status"},
-                "op":"ne",
-                "elems":["x"]}}},
+                "elems":["x"],
+                "negated":true}}},
             {"name":"name_regex_check","kind":{"kind":"check","expr":{
                 "node":"pgRegexMatch",
                 "expr":{"node":"colRef","name":"name"},
@@ -686,8 +645,9 @@ async fn pg_only_expr_nodes_render_and_apply_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// Slice C: PG-only EXTRACT(day FROM ...) and strict interval literal nodes render
-/// to the platform pg_dump idioms and apply as live CHECK constraints.
+/// Slice C: portable EXTRACT(day FROM ...), PG-only pgExtract(...), and strict
+/// interval literal nodes render to the platform pg_dump idioms and apply as
+/// live CHECK constraints.
 #[compio::test]
 async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
     let conn = pg().await;
@@ -698,8 +658,12 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
     let ir = r#"{"ir_version":1,"name":"pg_expr_slice_c","ops":[
         {"op":"createDomain","name":"billing_period","as":"date","check":{
             "node":"binOp","op":"eq",
-            "lhs":{"node":"extract","field":"day","expr":{"node":"colRef","name":"VALUE"}},
+            "lhs":{"node":"extract","field":"day","from":{"node":"colRef","name":"VALUE"}},
             "rhs":{"node":"literal","value":1}}},
+        {"op":"createDomain","name":"billing_epoch","as":"timestamp","check":{
+            "node":"binOp","op":"gt",
+            "lhs":{"node":"pgExtract","field":"epoch","from":{"node":"colRef","name":"VALUE"}},
+            "rhs":{"node":"literal","value":0}}},
         {"op":"createTable","name":"oauth_device_codes","columns":[
             {"name":"issued_at","type":"timestamp","nullable":false},
             {"name":"expires_at","type":"timestamp","nullable":false}
@@ -710,7 +674,7 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
                 "lhs":{"node":"colRef","name":"expires_at"},
                 "rhs":{"node":"binOp","op":"add",
                     "lhs":{"node":"colRef","name":"issued_at"},
-                    "rhs":{"node":"pgIntervalLiteral","value":"00:01:00"}}}}}
+                    "rhs":{"node":"pgInterval","duration":{"minutes":1}}}}}}
         ]}
     ]}"#;
     let plan = author_and_apply(&conn, &cfg, ir, &registry(&[]), Approval::Approved).await;
@@ -730,8 +694,13 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
         "missing rendered EXTRACT domain CHECK in:\n{rendered}"
     );
     assert!(
+        rendered.contains(&format!(r#"CREATE DOMAIN "{schema}"."billing_epoch""#))
+            && rendered.contains("CHECK ((EXTRACT(epoch FROM VALUE) > 0))"),
+        "missing rendered pgExtract domain CHECK in:\n{rendered}"
+    );
+    assert!(
         rendered.contains(
-            r#"CONSTRAINT "expires_window_check" CHECK (("expires_at" <= ("issued_at" + '00:01:00'::interval)))"#
+            r#"CONSTRAINT "expires_window_check" CHECK (("expires_at" <= ("issued_at" + INTERVAL '1 minute')))"#
         ),
         "missing rendered interval CHECK in:\n{rendered}"
     );
@@ -742,6 +711,13 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
             .as_deref()
             .is_some_and(|def| def.contains("EXTRACT(day FROM VALUE)")),
         "billing_period domain should have a live EXTRACT(day FROM VALUE) CHECK, got {domain_def:?}"
+    );
+    let epoch_domain_def = domain_constraint_definition(&conn, &schema, "billing_epoch").await;
+    assert!(
+        epoch_domain_def
+            .as_deref()
+            .is_some_and(|def| def.contains("EXTRACT(epoch FROM VALUE)")),
+        "billing_epoch domain should have a live pgExtract(epoch FROM VALUE) CHECK, got {epoch_domain_def:?}"
     );
     conn.batch_execute(&format!(
         r#"CREATE TABLE "{schema}".domain_probe (period "{schema}"."billing_period");
@@ -757,6 +733,12 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
         .is_err(),
         "non-first-of-month value should fail the EXTRACT domain check"
     );
+    conn.batch_execute(&format!(
+        r#"CREATE TABLE "{schema}".epoch_probe (ts "{schema}"."billing_epoch");
+           INSERT INTO "{schema}".epoch_probe (ts) VALUES (TIMESTAMP '2026-07-01 00:00:00');"#
+    ))
+    .await
+    .expect("positive epoch timestamp should satisfy the pgExtract check");
 
     assert_eq!(
         constraint_definition(&conn, &schema, "oauth_device_codes", "expires_window_check")
@@ -797,10 +779,10 @@ fn pg_extract_and_interval_literal_validate_refuse_non_pg() {
     let cases = [
         r#"{"ir_version":1,"name":"extract_refuse","ops":[
             {"op":"update","table":"t","set":{"x":{
-                "node":"extract","field":"day","expr":{"node":"colRef","name":"x"}}}}
+                "node":"pgExtract","field":"epoch","from":{"node":"colRef","name":"x"}}}}
         ]}"#,
         r#"{"ir_version":1,"name":"interval_refuse","ops":[
-            {"op":"update","table":"t","set":{"x":{"node":"pgIntervalLiteral","value":"00:01:00"}}}
+            {"op":"update","table":"t","set":{"x":{"node":"pgInterval","duration":{"minutes":1}}}}
         ]}"#,
     ];
 

@@ -455,14 +455,16 @@ start_postgres() {
 }
 
 apply_control_migrations() {
-  local f
-  for f in $(find "$ROOT/db/migrations" -maxdepth 1 -name 'V*.sql' ! -name '*.down.*' | sort); do
-    docker exec -i "$CONTROL_PG_CONTAINER" psql -U postgres -d zeroship \
-      -v ON_ERROR_STOP=1 -q <"$f" >"$WORK/control-migrate.log" 2>&1 || {
+  ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
+    "$BIN/zeroship-migrate" migrate \
+      --dir "$ROOT/db/migrations-ts" \
+      --database-url "$CONTROL_DB_URL" \
+      --profile platform \
+      --yes \
+      --no-dump-schema >"$WORK/control-migrate.log" 2>&1 || {
         tail -40 "$WORK/control-migrate.log" || true
-        fail "migration $(basename "$f") failed"
+        fail "control DB platform migrations failed"
       }
-  done
   docker exec "$CONTROL_PG_CONTAINER" psql -U postgres -d zeroship -tAc \
     "select to_regclass('zeroship.device_grants')" | grep -q device_grants \
     || fail "control DB missing device_grants after migrations"

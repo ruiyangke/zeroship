@@ -1,7 +1,7 @@
 //! `zeroship.email_suppressions` CRUD — the bounce/complaint blocklist that
 //! every `Mailer` impl consults before transport.
 //!
-//! Schema (owned by zeroship-migrate — `db/migrations`, applied by the compose
+//! Schema (owned by zeroship-migrate — `db/migrations-ts`, applied by the compose
 //! `migrate` service / `ops/db-migrate.sh`):
 //!
 //! ```sql

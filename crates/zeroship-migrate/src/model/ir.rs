@@ -51,7 +51,7 @@ use base64::Engine as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::model::expr::{Expr, SynthFn};
+use crate::model::expr::Expr;
 #[allow(unused_imports)]
 use crate::model::migration::{Checksum, MigrationFlags, OnlinePhase};
 use crate::model::precondition::PreconditionCheck;
@@ -459,12 +459,12 @@ pub enum ColType {
     SmallInt,
     /// 64-bit signed integer.
     BigInt,
-    /// Double-precision float.
-    Float,
+    /// Double-precision float (`float8` / `DOUBLE PRECISION`).
+    Double,
     /// Single-precision float.
     Real,
     /// Boolean.
-    Bool,
+    Boolean,
     /// JSON document (`JSONB` on PG).
     Json,
     /// Timestamp (with time zone on PG).
@@ -478,11 +478,11 @@ pub enum ColType {
     /// Text array (`text[]` on PG; JSON-encoded on non-PG backends).
     TextArray,
     /// Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).
-    Bytea,
+    Bytes,
     /// Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).
     Char {
         /// Fixed length in characters.
-        len: u32,
+        length: u32,
     },
     /// Foreign-key reference to another table (the referenced table name).
     Ref {
@@ -508,44 +508,26 @@ pub enum ColType {
     Enum {
         /// The enum type name.
         name: String,
+        /// Optional schema qualifier for the named enum type (§3.1). Absent =
+        /// the migration/op default schema. Additive optional field, skip-if-none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// Named domain type reference. Materialized as a Postgres `CREATE DOMAIN`
     /// ref, and inlined as base type + constraints on SQLite/MySQL.
     Domain {
         /// The domain type name.
         name: String,
+        /// Optional schema qualifier for the named domain type (§3.1). Absent =
+        /// the migration/op default schema. Additive optional field, skip-if-none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
     },
     /// Application-level encrypted column wrapping an inner type.
     Encrypted {
         /// The inner (plaintext) type.
         of: Box<ColType>,
     },
-}
-
-/// The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two
-/// NULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the
-/// full [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a
-/// non-nullary synth (`splitPart`/`concatWs`) as an unknown variant at
-/// DESERIALIZE, so a hand-crafted `.ir.json` carrying `{"fn":"splitPart"}` as a
-/// default cannot pass the loader and defer the blow-up to rendering. The wire
-/// tokens match [`SynthFn`]'s (`"now"`, `"genRandomUuid"`) so the on-disk bytes
-/// are unchanged from the pre-narrowing type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum SynthDefaultFn {
-    /// `now()` / current timestamp, evaluated at apply time.
-    Now,
-    /// `gen_random_uuid()`, evaluated at apply time.
-    GenRandomUuid,
-}
-
-impl From<SynthDefaultFn> for SynthFn {
-    fn from(d: SynthDefaultFn) -> Self {
-        match d {
-            SynthDefaultFn::Now => SynthFn::Now,
-            SynthDefaultFn::GenRandomUuid => SynthFn::GenRandomUuid,
-        }
-    }
 }
 
 /// Empty container defaults admitted as column DEFAULTs. This is intentionally
@@ -689,13 +671,14 @@ pub struct SequenceRef {
     pub schema: Option<String>,
 }
 
-/// A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —
-/// either a typed scalar literal, an engine-synthesized apply-time scalar
-/// (`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array
-/// columns, a non-empty JSON value default for JSON columns, or a PostgreSQL
-/// sequence `nextval(...)` reference. NEVER a raw SQL string (property A); the
-/// per-dialect default clause is rendered by the shared snapshot-builder kernel
-/// from this structured value (§6.5).
+/// A column DEFAULT (§3.2 `t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —
+/// either a typed scalar literal, a closed expression AST, an EMPTY container
+/// default for JSON/text-array columns, a non-empty JSON value default for JSON
+/// columns, or a PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL
+/// string (property A); the per-dialect default clause is rendered by the shared
+/// snapshot-builder kernel from this structured value (§6.5).
+/// Deliberately richer than the DML [`IrValue`] slot: container/json/nextval
+/// defaults carry real distinctions that are not scalar-or-expression values.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IrDefault {
     /// A typed scalar literal default (constrained numeric domain — §2.5).
@@ -703,13 +686,12 @@ pub enum IrDefault {
         /// The literal value.
         value: IrScalar,
     },
-    /// An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),
-    /// rendered per dialect by the kernel (§4.3). Constrained at the TYPE level to
-    /// the two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is
-    /// rejected at deserialize, not at render.
-    Fn {
-        /// The synthesized function (`now` or `genRandomUuid`).
-        r#fn: SynthDefaultFn,
+    /// A closed expression default. The authoring SDK restricts default
+    /// expressions to column-free scalar expressions; the engine validates and
+    /// renders the same [`Expr`] AST used by DML/check predicates.
+    Expr {
+        /// The default expression.
+        expr: Expr,
     },
     /// An empty-container default. Non-empty JSON values use [`IrDefault::Json`].
     Container {
@@ -738,7 +720,7 @@ impl Serialize for IrDefault {
         let mut map = serializer.serialize_map(Some(1))?;
         match self {
             IrDefault::Literal { value } => map.serialize_entry("literal", &serde_json::json!({ "value": value }))?,
-            IrDefault::Fn { r#fn } => map.serialize_entry("fn", &serde_json::json!({ "fn": r#fn }))?,
+            IrDefault::Expr { expr } => map.serialize_entry("expr", expr)?,
             IrDefault::Container { kind } => map.serialize_entry("container", kind)?,
             IrDefault::Json { value } => map.serialize_entry("json", value)?,
             IrDefault::Nextval { sequence } => map.serialize_entry("nextval", sequence)?,
@@ -769,14 +751,9 @@ impl<'de> Deserialize<'de> for IrDefault {
             let wire: LiteralWire = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
             return Ok(IrDefault::Literal { value: wire.value });
         }
-        if let Some(v) = obj.get("fn") {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct FnWire {
-                r#fn: SynthDefaultFn,
-            }
-            let wire: FnWire = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
-            return Ok(IrDefault::Fn { r#fn: wire.r#fn });
+        if let Some(v) = obj.get("expr") {
+            let expr: Expr = serde_json::from_value(v.clone()).map_err(D::Error::custom)?;
+            return Ok(IrDefault::Expr { expr });
         }
         if let Some(v) = obj.get("container") {
             let kind: EmptyContainerKind =
@@ -794,7 +771,7 @@ impl<'de> Deserialize<'de> for IrDefault {
             return Ok(IrDefault::Nextval { sequence });
         }
         Err(D::Error::custom(
-            "IrDefault key must be one of \"literal\", \"fn\", \"container\", \"json\", or \"nextval\"",
+            "IrDefault key must be one of \"literal\", \"expr\", \"container\", \"json\", or \"nextval\"",
         ))
     }
 }
@@ -807,8 +784,8 @@ impl JsonSchema for IrDefault {
     fn json_schema(g: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let ir_scalar = serde_json::to_value(g.subschema_for::<IrScalar>())
             .expect("IrScalar schema ref serializes");
-        let synth_default_fn = serde_json::to_value(g.subschema_for::<SynthDefaultFn>())
-            .expect("SynthDefaultFn schema ref serializes");
+        let expr = serde_json::to_value(g.subschema_for::<Expr>())
+            .expect("Expr schema ref serializes");
         let empty_container_kind = serde_json::to_value(g.subschema_for::<EmptyContainerKind>())
             .expect("EmptyContainerKind schema ref serializes");
         let ir_json_value = serde_json::to_value(g.subschema_for::<IrJsonValue>())
@@ -816,7 +793,7 @@ impl JsonSchema for IrDefault {
         let sequence_ref = serde_json::to_value(g.subschema_for::<SequenceRef>())
             .expect("SequenceRef schema ref serializes");
         schemars::json_schema!({
-            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, a non-empty JSON value default for JSON columns, or a PostgreSQL\nsequence `nextval(...)` reference. NEVER a raw SQL string (property A); the\nper-dialect default clause is rendered by the shared snapshot-builder kernel\nfrom this structured value (§6.5).",
+            "description": "A column DEFAULT (§3.2 `t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value (§6.5).",
             "oneOf": [
                 {
                     "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -838,22 +815,14 @@ impl JsonSchema for IrDefault {
                     "additionalProperties": false
                 },
                 {
-                    "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Constrained at the TYPE level to\nthe two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is\nrejected at deserialize, not at render.",
+                    "description": "A closed expression default.",
                     "type": "object",
                     "properties": {
-                        "fn": {
-                            "type": "object",
-                            "properties": {
-                                "fn": {
-                                    "description": "The synthesized function (`now` or `genRandomUuid`).",
-                                    "$ref": synth_default_fn["$ref"].clone()
-                                }
-                            },
-                            "additionalProperties": false,
-                            "required": ["fn"]
+                        "expr": {
+                            "$ref": expr["$ref"].clone()
                         }
                     },
-                    "required": ["fn"],
+                    "required": ["expr"],
                     "additionalProperties": false
                 },
                 {
@@ -1253,12 +1222,41 @@ pub enum IndexElement {
         /// serializes identically to the pre-order wire shape.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order: Option<IndexSortOrder>,
+        /// PostgreSQL per-column operator class (e.g. `text_pattern_ops`).
+        /// PG-vendor: fails closed on SQLite/MySQL. `None` serializes identically
+        /// to the pre-opclass wire shape (byte-neutral when absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opclass: Option<String>,
+        /// PostgreSQL per-column collation (e.g. `"C"`). PG-vendor: fails closed
+        /// on SQLite/MySQL. `None` serializes identically to the pre-collation
+        /// wire shape (byte-neutral when absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collation: Option<String>,
     },
     /// A closed expression key.
     Expr {
         /// Expression AST.
         expr: Expr,
     },
+}
+
+/// True when any index element carries a PG-vendor per-column `opclass` or
+/// `collation`. Drives the `pgOnlyMethodOrFeature`/`pgOnlyIndexFeature` variant
+/// selection (fail-closed off PostgreSQL).
+#[must_use]
+pub(crate) fn index_has_element_opclass_or_collation(columns: &[IndexElement]) -> bool {
+    columns.iter().any(|element| {
+        matches!(
+            element,
+            IndexElement::Column {
+                opclass: Some(_),
+                ..
+            } | IndexElement::Column {
+                collation: Some(_),
+                ..
+            }
+        )
+    })
 }
 
 /// CLOSED per-column index sort-order set. Omitted means the SQL default
@@ -1331,11 +1329,6 @@ pub struct ExclusionElement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase", deny_unknown_fields)]
 pub enum IrConstraintKind {
-    /// PRIMARY KEY over the named columns.
-    Pk {
-        /// The key columns.
-        columns: Vec<String>,
-    },
     /// FOREIGN KEY referencing `(referencesTable.referencesColumns)`.
     Fk {
         /// The referencing columns.
@@ -1359,6 +1352,15 @@ pub enum IrConstraintKind {
         /// Optional `INITIALLY DEFERRED` flag. Meaningful only when deferrable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         initially_deferred: Option<bool>,
+        /// Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption).
+        /// When `Some(true)`, the ADD CONSTRAINT body is rendered ` … NOT VALID`
+        /// so existing rows are NOT scanned at add time; a later
+        /// [`Op::ValidateConstraint`] validates them under a weaker lock.
+        /// Additive-optional: absent is checksum-neutral (`skip_serializing_if`),
+        /// so a FK that sets no `NOT VALID` serializes byte-identically to the
+        /// pre-slice wire image. Refused fail-closed off PostgreSQL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_valid: Option<bool>,
     },
     /// UNIQUE over the named columns.
     Unique {
@@ -1369,6 +1371,11 @@ pub enum IrConstraintKind {
     Check {
         /// The check expression (a boolean closed-AST node).
         expr: Expr,
+        /// Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption);
+        /// see [`IrConstraintKind::Fk::not_valid`]. Additive-optional + checksum-
+        /// neutral when absent. Refused fail-closed off PostgreSQL.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_valid: Option<bool>,
     },
     /// PostgreSQL exclusion constraint (`EXCLUDE USING …`). Operators and
     /// expression targets are closed tokens/ASTs, never raw SQL.
@@ -1489,6 +1496,12 @@ pub struct IrIndex {
     /// PostgreSQL `ON ONLY` for partitioned parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<bool>,
+    /// PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index (treat NULLs as
+    /// equal for the uniqueness check). PG-vendor: fails closed on SQLite/MySQL.
+    /// `None` serializes identically to the pre-`nullsNotDistinct` wire shape
+    /// (byte-neutral when absent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nulls_not_distinct: Option<bool>,
 }
 
 /// Partitioning strategy for a partitioned table parent.
@@ -1499,17 +1512,51 @@ pub enum PartitionSpec {
     Range {
         /// Partition key columns.
         columns: Vec<String>,
+        /// P12 affirmation: collapse to a plain table where native partitioning
+        /// is unsupported.
+        #[serde(default)]
+        collapse: bool,
     },
     /// `PARTITION BY LIST (...)`.
     List {
         /// Partition key columns.
         columns: Vec<String>,
+        /// P12 affirmation: collapse to a plain table where native partitioning
+        /// is unsupported.
+        #[serde(default)]
+        collapse: bool,
     },
     /// `PARTITION BY HASH (...)`.
     Hash {
         /// Partition key columns.
         columns: Vec<String>,
+        /// P12 affirmation: collapse to a plain table where native partitioning
+        /// is unsupported.
+        #[serde(default)]
+        collapse: bool,
     },
+}
+
+impl PartitionSpec {
+    /// Partition key columns.
+    #[must_use]
+    pub fn columns(&self) -> &[String] {
+        match self {
+            Self::Range { columns, .. } | Self::List { columns, .. } | Self::Hash { columns, .. } => {
+                columns
+            }
+        }
+    }
+
+    /// Whether the author affirmed P12 collapse for unsupported dialects.
+    #[must_use]
+    pub const fn collapse(&self) -> bool {
+        match self {
+            Self::Range { collapse, .. }
+            | Self::List { collapse, .. }
+            | Self::Hash { collapse, .. } => *collapse,
+        }
+    }
 }
 
 /// Closed partition-bound literal. Never raw SQL.
@@ -1935,8 +1982,8 @@ pub enum TriggerStmt {
     Update {
         /// Target table.
         table: String,
-        /// Column → closed-AST assignment.
-        set: BTreeMap<String, Expr>,
+        /// Column → typed scalar or closed-AST assignment.
+        set: BTreeMap<String, IrValue>,
         /// Optional WHERE predicate.
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
@@ -2427,6 +2474,18 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
+    /// `ALTER TABLE <parent> ATTACH PARTITION <name> FOR VALUES ...`.
+    AttachPartition {
+        /// Parent partitioned table.
+        parent: String,
+        /// Partition table name.
+        name: String,
+        /// Partition bounds.
+        bound: PartitionBounds,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+    },
     /// `ALTER TABLE <parent> DETACH PARTITION <name> [CONCURRENTLY]`.
     DetachPartition {
         /// Parent partitioned table.
@@ -2442,6 +2501,8 @@ pub enum Op {
     },
     /// `DROP TABLE <partition> [CASCADE]`.
     DropPartition {
+        /// Parent partitioned table.
+        parent: String,
         /// Partition table name.
         name: String,
         /// **PR10** — the schema qualifier (§2.7).
@@ -2604,6 +2665,9 @@ pub enum Op {
         /// PostgreSQL `ON ONLY` for partitioned parents.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         only: Option<bool>,
+        /// PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nulls_not_distinct: Option<bool>,
         /// **PR10** — the schema qualifier (§2.7).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
@@ -2753,6 +2817,22 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         existence_guard: Option<ExistenceGuard>,
     },
+    /// `ALTER TABLE … VALIDATE CONSTRAINT …` — validate a previously
+    /// `NOT VALID`-added FK/CHECK against existing rows under a weaker lock
+    /// (PostgreSQL-only online constraint adoption). Refused fail-closed off
+    /// PostgreSQL.
+    ValidateConstraint {
+        /// Target table.
+        table: String,
+        /// The name of the (previously `NOT VALID`) constraint to validate.
+        name: String,
+        /// **PR10** — the schema qualifier (§2.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<String>,
+        /// **PR10** — the existence guard (`ifExists` legal here).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        existence_guard: Option<ExistenceGuard>,
+    },
     /// `ALTER TABLE … DROP CONSTRAINT …`.
     DropConstraint {
         /// Target table.
@@ -2790,8 +2870,8 @@ pub enum Op {
     Update {
         /// Target table.
         table: String,
-        /// Column → closed-AST assignment (sorted map for canonicality).
-        set: BTreeMap<String, Expr>,
+        /// Column → typed scalar or closed-AST assignment (sorted map for canonicality).
+        set: BTreeMap<String, IrValue>,
         /// Optional WHERE predicate (closed AST).
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
@@ -2830,8 +2910,8 @@ pub enum Op {
         cursor_column: String,
         /// Rows per batch (JS-safe-integer bounded).
         batch_size: SafeU64,
-        /// Column → closed-AST assignment.
-        set: BTreeMap<String, Expr>,
+        /// Column → typed scalar or closed-AST assignment.
+        set: BTreeMap<String, IrValue>,
         /// Optional row filter (closed AST).
         #[serde(skip_serializing_if = "Option::is_none")]
         filter: Option<Expr>,
@@ -3177,37 +3257,19 @@ pub enum Op {
         /// The roles to revoke from (`"public"` is the reserved `PUBLIC` sentinel).
         from: Vec<String>,
     },
-    /// **VENDOR** — `ALTER TABLE … ENABLE ROW LEVEL SECURITY`.
-    EnableRls {
+    /// **VENDOR** — `ALTER TABLE … {ENABLE|DISABLE|FORCE|NO FORCE} ROW LEVEL SECURITY`.
+    SetRls {
         /// The target table.
         table: String,
         /// The schema qualifier.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
-    },
-    /// **VENDOR** — `ALTER TABLE … FORCE ROW LEVEL SECURITY`.
-    ForceRls {
-        /// The target table.
-        table: String,
-        /// The schema qualifier.
+        /// Optional enabled-state patch (`true` = ENABLE, `false` = DISABLE).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
-    },
-    /// **VENDOR** — `ALTER TABLE … DISABLE ROW LEVEL SECURITY` (down-file).
-    DisableRls {
-        /// The target table.
-        table: String,
-        /// The schema qualifier.
+        enabled: Option<bool>,
+        /// Optional force-state patch (`true` = FORCE, `false` = NO FORCE).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
-    },
-    /// **VENDOR** — `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` (down-file).
-    NoForceRls {
-        /// The target table.
-        table: String,
-        /// The schema qualifier.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        schema: Option<String>,
+        forced: Option<bool>,
     },
     /// **VENDOR** — `CREATE POLICY <name> ON <table> FOR <cmd> TO <roles> USING
     /// (<using>) [WITH CHECK (<with_check>)]`. The predicate is a CLOSED `Expr`
@@ -3351,431 +3413,218 @@ impl Op {
     /// and feature refusals before lowering.
     #[must_use]
     pub fn support(&self) -> crate::model::support::Support {
-        use crate::model::support::{
-            supported, unsupported, DialectSupport, RenderMode, Support, ADD_COLUMN_FEATURES,
-            ADD_CONSTRAINT_FEATURES, ALTER_COLUMN_TYPE_FEATURES, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT,
-            CAP_MATERIALIZED_VIEW, CAP_POLICY, CAP_RAW_MATERIALIZED_VIEW, CAP_RAW_SQL, CAP_RLS,
-            CAP_ROLE, CAP_SCHEMA, COMMENT_FEATURES, CREATE_INDEX_FEATURES, CREATE_TABLE_FEATURES,
-            CREATE_TRIGGER_FEATURES, CREATE_VIEW_FEATURES, INSERT_FEATURES, PARTITION_FEATURES,
-            PG_RAW_FEATURES, RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES,
-            SET_COLUMN_DEFAULT_FEATURES,
-        };
-        use crate::model::validate::CODE_UNSUPPORTED;
+        use crate::model::support::Support;
 
-        let all_offline = DialectSupport::all_supported(RenderMode::Offline);
-        let all_live_resolved = DialectSupport::all_supported(RenderMode::LiveResolved);
-        let all_unsupported = |reason: &'static str| {
-            DialectSupport::unsupported_all(CODE_UNSUPPORTED, reason)
-        };
-        let pg_only = |reason: &'static str| {
-            DialectSupport::postgres_only(RenderMode::Offline, reason)
-        };
-        let default_is_nextval = |default: &Option<IrDefault>| {
-            matches!(default, Some(IrDefault::Nextval { .. }))
-        };
-        let identity_always_pg_only =
-            "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support only \
-             identity({ always: false }) / autoIncrement() on the sole integer primary key";
-        let by_default_identity_requires_single_pk =
-            "identity({ always: false }) / autoIncrement() must be the sole primary-key \
-             column on SQLite/MySQL";
-        let index_uses_pg_only_feature = |include: &[String],
-                                          with: &Option<IndexStorageParams>,
-                                          only: Option<bool>| {
-            !include.is_empty()
-                || with.as_ref().is_some_and(|params| !params.is_empty())
-                || only.unwrap_or(false)
-        };
+        let (kind, variant) = self.op_kind_and_variant();
+        let row = crate::model::dialect_table::lookup(kind, variant).unwrap_or_else(|| {
+            panic!("dialect table has no row for op {kind}/{variant}")
+        });
+        let dialects = crate::model::support::DialectSupport::new(
+            self.support_cell(row.postgres, crate::model::support::Dialect::Postgres, variant),
+            self.support_cell(row.sqlite, crate::model::support::Dialect::Sqlite, variant),
+            self.support_cell(row.mysql, crate::model::support::Dialect::Mysql, variant),
+        );
+        Support::new(self.support_tier(), dialects, self.support_features())
+    }
 
+    /// The single per-op reason used where a supported cell has no refusal — it is
+    /// never surfaced (`support_cell` only asks for a reason on an `Unsupported`
+    /// disposition), but a non-empty placeholder keeps the well-formed invariant.
+    const NEVER_REFUSED: &'static str = "internal: supported cell has no refusal reason";
+    const NEXTVAL_PG_ONLY: &'static str =
+        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences";
+    const IDENTITY_ALWAYS_PG_ONLY: &'static str =
+        "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support only \
+         identity({ always: false }) / autoIncrement() on the sole integer primary key";
+    const BY_DEFAULT_IDENTITY_SINGLE_PK: &'static str =
+        "identity({ always: false }) / autoIncrement() must be the sole primary-key \
+         column on SQLite/MySQL";
+
+    /// Assemble one per-dialect [`SupportDecision`] from the generated dialect
+    /// table's disposition for this (op-kind, variant): an `Unsupported`
+    /// disposition becomes the engine-internal refusal reason; any supported
+    /// disposition (portable / vendor / transparent-degradable) becomes the op's
+    /// render mode on that dialect. The supported/unsupported/vendor GATE is thus
+    /// single-sourced from the generated table (`dialect_table.rs`, emitted from
+    /// the human-reviewed `dialect-support.toml`); only the render strategy and
+    /// diagnostic wording — which are NOT dialect truth — remain in Rust.
+    fn support_cell(
+        &self,
+        disposition: crate::model::dialect_table::Disposition,
+        dialect: crate::model::support::Dialect,
+        variant: &'static str,
+    ) -> crate::model::support::SupportDecision {
+        use crate::model::dialect_table::Disposition;
+        use crate::model::support::{supported, unsupported};
+        match disposition {
+            Disposition::Unsupported => unsupported(
+                crate::model::validate::CODE_UNSUPPORTED,
+                self.unsupported_reason(dialect, variant),
+            ),
+            Disposition::Portable
+            | Disposition::Vendor
+            | Disposition::TransparentDegradable => supported(self.render_mode(dialect, variant)),
+        }
+    }
+
+    /// The render mode a SUPPORTED cell of this op reports on `dialect`. This is a
+    /// render-strategy detail of the current engine (does the op lower fully
+    /// offline, or only once the live schema is resolved), NOT a dialect-support
+    /// decision — so it is derived here, not from the generated dialect table.
+    fn render_mode(
+        &self,
+        dialect: crate::model::support::Dialect,
+        variant: &'static str,
+    ) -> crate::model::support::RenderMode {
+        use crate::model::support::{Dialect, RenderMode};
+        let sqlite_live = matches!(dialect, Dialect::Sqlite);
         match self {
-            Op::CreateTable {
-                columns,
-                primary_key,
-                constraints,
-                partition_by,
-                indexes,
-                ..
-            } => {
-                let has_pg_only_index_feature = indexes.iter().any(|index| {
-                    matches!(index.using, Some(IndexMethod::Brin))
-                        || index_uses_pg_only_feature(&index.include, &index.with, index.only)
-                });
-                let has_nextval_default = columns
-                    .iter()
-                    .any(|column| default_is_nextval(&column.default));
-                let has_identity_always = columns
-                    .iter()
-                    .any(|column| matches!(column.identity, Some(identity) if identity.always));
-                let pk_cols = primary_key.as_deref().or_else(|| {
-                    constraints.iter().find_map(|constraint| match &constraint.kind {
-                        IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
-                        _ => None,
-                    })
-                });
-                let has_nonportable_by_default_identity = columns.iter().any(|column| {
-                    matches!(column.identity, Some(identity) if !identity.always)
-                        && !matches!(pk_cols, Some(cols) if cols.len() == 1 && cols[0] == column.name)
-                });
-                let dialects = if partition_by.is_some() {
-                    pg_only("partitioned tables are PostgreSQL-only")
-                } else if has_pg_only_index_feature {
-                    pg_only("createTable BRIN/INCLUDE/WITH/ONLY index features are PostgreSQL-only")
-                } else if has_nextval_default {
-                    pg_only(
-                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
-                    )
-                } else if has_identity_always {
-                    pg_only(identity_always_pg_only)
-                } else if has_nonportable_by_default_identity {
-                    DialectSupport::new(
-                        supported(RenderMode::Offline),
-                        unsupported(CODE_UNSUPPORTED, by_default_identity_requires_single_pk),
-                        unsupported(CODE_UNSUPPORTED, by_default_identity_requires_single_pk),
-                    )
-                } else {
-                    all_offline
-                };
-                Support::core(dialects, CREATE_TABLE_FEATURES)
-            }
-            Op::CreatePartition { .. }
-            | Op::DetachPartition { .. }
-            | Op::DropPartition { .. } => Support::core(
-                pg_only("partition lifecycle operations are PostgreSQL-only"),
-                PARTITION_FEATURES,
-            ),
-            Op::SetTableOptions { .. } => Support::core(all_offline, &[]),
-            Op::DropTable { .. } => Support::core(all_offline, &[]),
-            Op::RenameTable { .. } => Support::core(all_offline, &[]),
-            Op::AddColumn { default, identity, .. } => {
-                let dialects = if identity.is_some() {
-                    pg_only(
-                        "addColumn identity is PostgreSQL-only; SQLite/MySQL auto-increment \
-                         identity requires a createTable sole primary key",
-                    )
-                } else if default_is_nextval(default) {
-                    pg_only(
-                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
-                    )
-                } else {
-                    all_offline
-                };
-                Support::core(dialects, ADD_COLUMN_FEATURES)
-            }
-            Op::DropColumn { .. } => Support::core(all_offline, &[]),
-            Op::CreateIndex {
-                columns,
-                using,
-                r#where,
-                include,
-                with,
-                only,
-                ..
-            } => {
-                let sqlite = if matches!(
-                    using,
-                    Some(
-                        IndexMethod::Brin
-                            | IndexMethod::Gin
-                            | IndexMethod::Gist
-                            | IndexMethod::Ivfflat
-                            | IndexMethod::Hnsw
-                            | IndexMethod::Fts5
-                    )
-                ) || index_uses_pg_only_feature(include, with, *only)
-                {
-                    unsupported(
-                        CODE_UNSUPPORTED,
-                        "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on SQLite",
-                    )
-                } else {
-                    supported(RenderMode::Offline)
-                };
-                let mysql = if columns
-                    .iter()
-                    .any(|element| matches!(element, IndexElement::Expr { .. }))
-                {
-                    unsupported(
-                        CODE_UNSUPPORTED,
-                        "createIndex expression elements are not supported on MySQL",
-                    )
-                } else if r#where.is_some() {
-                    unsupported(
-                        CODE_UNSUPPORTED,
-                        "createIndex partial predicates require partial-index support; MySQL does not support partial indexes",
-                    )
-                } else if matches!(
-                    using,
-                    Some(
-                        IndexMethod::Brin
-                            | IndexMethod::Gin
-                            | IndexMethod::Gist
-                            | IndexMethod::Ivfflat
-                            | IndexMethod::Hnsw
-                            | IndexMethod::Fts5
-                    )
-                ) || index_uses_pg_only_feature(include, with, *only)
-                {
-                    unsupported(
-                        CODE_UNSUPPORTED,
-                        "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on MySQL",
-                    )
-                } else {
-                    supported(RenderMode::Offline)
-                };
-                Support::core(
-                    DialectSupport::new(supported(RenderMode::Offline), sqlite, mysql),
-                    CREATE_INDEX_FEATURES,
-                )
-            }
-            Op::Comment { .. } => Support::core(
-                pg_only("COMMENT ON is PostgreSQL-only in the current engine"),
-                COMMENT_FEATURES,
-            ),
-            Op::DropIndex { .. } => Support::core(all_offline, &[]),
-            Op::SetColumnType { using, .. } => {
-                let dialects = if using.is_some() {
-                    all_unsupported(
-                        "setColumnType.using expression rendering is deferred in the current engine",
-                    )
-                } else {
-                    DialectSupport::new(
-                        supported(RenderMode::Offline),
-                        supported(RenderMode::LiveResolved),
-                        supported(RenderMode::Offline),
-                    )
-                };
-                Support::core(dialects, ALTER_COLUMN_TYPE_FEATURES)
-            }
-            Op::SetColumnNotNull { .. }
+            // Backfill and column-rename are live-rendered on every supported
+            // dialect (they need the resolved live schema).
+            Op::Backfill { .. } | Op::RenameColumn { .. } => RenderMode::LiveResolved,
+            // Container / JSON column defaults are live-resolved on every dialect.
+            Op::SetColumnDefault { .. } if variant == "containerOrJson" => RenderMode::LiveResolved,
+            // ALTER-shaped column/constraint ops are live-resolved only on SQLite
+            // (which rebuilds the table from the live schema); offline elsewhere.
+            Op::SetColumnType { .. }
+            | Op::SetColumnNotNull { .. }
             | Op::DropColumnNotNull { .. }
-            | Op::DropColumnDefault { .. } => Support::core(
-                DialectSupport::new(
-                    supported(RenderMode::Offline),
-                    supported(RenderMode::LiveResolved),
-                    supported(RenderMode::Offline),
-                ),
-                &[],
-            ),
-            Op::SetColumnDefault { value, .. } => {
-                let dialects = if matches!(value, IrDefault::Fn { .. }) {
-                    all_unsupported(
-                        "setColumnDefault synth defaults are deferred until the expression/default renderer lands",
-                    )
-                } else if matches!(value, IrDefault::Container { .. } | IrDefault::Json { .. }) {
-                    all_live_resolved
-                } else if matches!(value, IrDefault::Nextval { .. }) {
-                    pg_only(
-                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
-                    )
+            | Op::DropColumnDefault { .. }
+            | Op::DropConstraint { .. }
+            | Op::ValidateConstraint { .. }
+            | Op::AddConstraint { .. }
+            | Op::SetColumnDefault { .. } => {
+                if sqlite_live {
+                    RenderMode::LiveResolved
                 } else {
-                    DialectSupport::new(
-                        supported(RenderMode::Offline),
-                        supported(RenderMode::LiveResolved),
-                        supported(RenderMode::Offline),
-                    )
-                };
-                Support::core(dialects, SET_COLUMN_DEFAULT_FEATURES)
+                    RenderMode::Offline
+                }
             }
-            Op::RenameColumn {
-                existence_guard, ..
-            } => {
-                let dialects = if existence_guard.is_some() {
-                    all_unsupported(
-                        "renameColumn ifExists guards cannot be attributed to a single migration unit today",
-                    )
-                } else {
-                    DialectSupport::new(
-                        supported(RenderMode::LiveResolved),
-                        supported(RenderMode::LiveResolved),
-                        unsupported(
-                            CODE_UNSUPPORTED,
-                            "renameColumn is not live-rendered for MySQL in render-only Phase 1",
-                        ),
-                    )
-                };
-                Support::core(dialects, RENAME_COLUMN_FEATURES)
-            }
-            Op::AddConstraint { constraint, .. } => {
-                let dialects = match &constraint.kind {
-                    IrConstraintKind::Check { .. } => pg_only(
-                        "addConstraint(check) expression rendering is PostgreSQL-only in the current engine",
-                    ),
-                    IrConstraintKind::Pk { .. } => all_unsupported(
-                        "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
-                    ),
-                    IrConstraintKind::Fk {
-                        columns,
-                        references_columns,
-                        ..
-                    } if columns.is_empty() => all_unsupported(
-                        "addConstraint(fk) with no local column is unsupported",
-                    ),
-                    IrConstraintKind::Exclusion { .. } => pg_only(
-                        "exclusion constraints are PostgreSQL-only in the current engine",
-                    ),
-                    // Multi-column and non-id-target FKs render only on Postgres
-                    // today. The support DECISION must reflect that (decision()
-                    // reads dialects, not features), so it stays consistent with
-                    // the CompositeForeignKey / NonIdForeignKey feature gates that
-                    // `validate` enforces.
-                    IrConstraintKind::Fk { columns, .. } if columns.len() != 1 => pg_only(
-                        "multi-column foreign keys are PostgreSQL-only in the current engine",
-                    ),
-                    IrConstraintKind::Fk {
-                        references_columns, ..
-                    } if !(references_columns.is_empty()
-                        || (references_columns.len() == 1 && references_columns[0] == "id")) =>
+            _ => RenderMode::Offline,
+        }
+    }
+
+    /// The refusal reason an UNSUPPORTED cell of this op reports on `dialect`. Only
+    /// consulted by [`Self::support_cell`] where the generated table records an
+    /// `Unsupported` disposition, so the fully-portable ops never reach it. The
+    /// reason wording (and, for `createIndex` / `createTrigger`, its per-dialect
+    /// divergence on combined payloads) mirrors the previous hand-written arms
+    /// exactly, preserving the author-facing diagnostics.
+    fn unsupported_reason(
+        &self,
+        dialect: crate::model::support::Dialect,
+        variant: &'static str,
+    ) -> &'static str {
+        use crate::model::support::Dialect;
+        match self {
+            Op::CreateTable { .. } => match variant {
+                "partitioned" => "partitioned tables are PostgreSQL-only",
+                "pgOnlyIndexFeature" => {
+                    "createTable BRIN/INCLUDE/WITH/ONLY index features are PostgreSQL-only"
+                }
+                "nextvalDefault" => Self::NEXTVAL_PG_ONLY,
+                "identityAlways" => Self::IDENTITY_ALWAYS_PG_ONLY,
+                "nonportableByDefaultIdentity" => Self::BY_DEFAULT_IDENTITY_SINGLE_PK,
+                _ => Self::NEVER_REFUSED,
+            },
+            Op::CreatePartition { .. }
+            | Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. } => "partition lifecycle operations are PostgreSQL-only",
+            Op::AddColumn { .. } => match variant {
+                "identity" => {
+                    "addColumn identity is PostgreSQL-only; SQLite/MySQL auto-increment \
+                     identity requires a createTable sole primary key"
+                }
+                "nextvalDefault" => Self::NEXTVAL_PG_ONLY,
+                _ => Self::NEVER_REFUSED,
+            },
+            Op::CreateIndex {
+                columns, r#where, ..
+            } => match dialect {
+                Dialect::Sqlite => {
+                    "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on SQLite"
+                }
+                Dialect::Mysql => {
+                    if columns
+                        .iter()
+                        .any(|element| matches!(element, IndexElement::Expr { .. }))
                     {
-                        pg_only(
-                            "foreign keys referencing non-id columns are PostgreSQL-only in the current engine",
-                        )
-                    }
-                    IrConstraintKind::Fk { .. } | IrConstraintKind::Unique { .. } => {
-                        DialectSupport::new(
-                            supported(RenderMode::Offline),
-                            supported(RenderMode::LiveResolved),
-                            supported(RenderMode::Offline),
-                        )
-                    }
-                };
-                Support::core(dialects, ADD_CONSTRAINT_FEATURES)
-            }
-            Op::DropConstraint { .. } => Support::core(
-                DialectSupport::new(
-                    supported(RenderMode::Offline),
-                    supported(RenderMode::LiveResolved),
-                    supported(RenderMode::Offline),
-                ),
-                &[],
-            ),
-            Op::Insert { on_conflict, .. } => {
-                let dialects = if on_conflict.is_some() {
-                    pg_only("insert onConflict is PostgreSQL-only in the current engine")
-                } else {
-                    all_offline
-                };
-                Support::core(dialects, INSERT_FEATURES)
-            }
-            Op::Update { .. } => Support::core(all_offline, &[]),
-            Op::Delete { .. } => Support::core(all_offline, &[]),
-            Op::Backfill { .. } => {
-                Support::core(DialectSupport::all_supported(RenderMode::LiveResolved), &[])
-            }
-            Op::CreateView {
-                query,
-                replace,
-                materialized,
-                ..
-            } => {
-                let materialized = materialized.unwrap_or(false);
-                let raw = matches!(query, ViewQuery::Raw { .. });
-                if materialized && replace.unwrap_or(false) {
-                    let caps = if raw {
-                        CAP_RAW_MATERIALIZED_VIEW
+                        "createIndex expression elements are not supported on MySQL"
+                    } else if r#where.is_some() {
+                        "createIndex partial predicates require partial-index support; MySQL does not support partial indexes"
                     } else {
-                        CAP_MATERIALIZED_VIEW
-                    };
-                    Support::vendor(
-                        caps,
-                        all_unsupported(
-                            "createView replace+materialized is unsupported in the current engine",
-                        ),
-                        CREATE_VIEW_FEATURES,
-                    )
-                } else if materialized {
-                    let caps = if raw {
-                        CAP_RAW_MATERIALIZED_VIEW
-                    } else {
-                        CAP_MATERIALIZED_VIEW
-                    };
-                    Support::vendor(
-                        caps,
-                        pg_only("materialized views are PostgreSQL-only in the current engine"),
-                        CREATE_VIEW_FEATURES,
-                    )
-                } else {
-                    Support::core(all_offline, CREATE_VIEW_FEATURES)
+                        "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on MySQL"
+                    }
                 }
+                Dialect::Postgres => Self::NEVER_REFUSED,
+            },
+            Op::Comment { .. } => "COMMENT ON is PostgreSQL-only in the current engine",
+            Op::SetColumnType { .. } => {
+                "setColumnType.using expression rendering is deferred in the current engine"
             }
-            Op::DropView { materialized, .. } => {
-                if materialized.unwrap_or(false) {
-                    Support::vendor(
-                        CAP_MATERIALIZED_VIEW,
-                        pg_only("materialized views are PostgreSQL-only in the current engine"),
-                        CREATE_VIEW_FEATURES,
-                    )
-                } else {
-                    Support::core(all_offline, &[])
+            Op::SetColumnDefault { .. } => match variant {
+                "nextval" => Self::NEXTVAL_PG_ONLY,
+                _ => Self::NEVER_REFUSED,
+            },
+            Op::RenameColumn { .. } => match variant {
+                "existenceGuard" => {
+                    "renameColumn ifExists guards cannot be attributed to a single migration unit today"
                 }
-            }
-            Op::CreateEnum { .. } => Support::core(all_offline, &[]),
-            Op::DropEnum { .. } => Support::core(all_offline, &[]),
-            Op::CreateDomain { default, .. } => {
-                let dialects = if default_is_nextval(default) {
-                    pg_only(
-                        "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
-                    )
-                } else {
-                    all_offline
-                };
-                Support::core(dialects, &[])
-            }
-            Op::DropDomain { .. } => Support::core(all_offline, &[]),
+                _ => "renameColumn is not live-rendered for MySQL in render-only Phase 1",
+            },
+            Op::AddConstraint { .. } => match variant {
+                "check" => {
+                    "addConstraint(check) expression rendering is PostgreSQL-only in the current engine"
+                }
+                "pk" => "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
+                "fkNoLocalColumn" => "addConstraint(fk) with no local column is unsupported",
+                "exclusion" => "exclusion constraints are PostgreSQL-only in the current engine",
+                "fkComposite" => "multi-column foreign keys are PostgreSQL-only in the current engine",
+                "fkNonId" => {
+                    "foreign keys referencing non-id columns are PostgreSQL-only in the current engine"
+                }
+                "fkNotValid" => {
+                    "NOT VALID online constraint adoption (addForeignKey { notValid }) is PostgreSQL-only in the current engine"
+                }
+                _ => Self::NEVER_REFUSED,
+            },
+            Op::Insert { .. } => "insert onConflict is PostgreSQL-only in the current engine",
+            Op::CreateView { .. } => match variant {
+                "materializedReplace" => {
+                    "createView replace+materialized is unsupported in the current engine"
+                }
+                _ => "materialized views are PostgreSQL-only in the current engine",
+            },
+            Op::DropView { .. } => "materialized views are PostgreSQL-only in the current engine",
+            Op::CreateDomain { .. } => Self::NEXTVAL_PG_ONLY,
             Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
-                Support::core(
-                    pg_only("standalone sequence objects are PostgreSQL-only in the current engine"),
-                    SEQUENCE_FEATURES,
-                )
+                "standalone sequence objects are PostgreSQL-only in the current engine"
             }
-            Op::CreateSchema { .. } | Op::DropSchema { .. } => Support::vendor(
-                CAP_SCHEMA,
-                pg_only("schema vendor primitives are PostgreSQL-only"),
-                &[],
-            ),
-            Op::CreateExtension { .. } | Op::DropExtension { .. } => Support::vendor(
-                CAP_EXTENSION,
-                pg_only("extension vendor primitives are PostgreSQL-only"),
-                &[],
-            ),
-            Op::CreateRole {
-                superuser,
-                if_not_exists,
-                ..
-            } => {
-                let dialects = if superuser.unwrap_or(false) && if_not_exists.unwrap_or(false) {
-                    all_unsupported(
-                        "createRole cannot combine superuser:true with ifNotExists:true",
-                    )
-                } else {
-                    pg_only("role vendor primitives are PostgreSQL-only")
-                };
-                Support::vendor(CAP_ROLE, dialects, &[])
+            Op::CreateSchema { .. } | Op::DropSchema { .. } => {
+                "schema vendor primitives are PostgreSQL-only"
             }
+            Op::CreateExtension { .. } | Op::DropExtension { .. } => {
+                "extension vendor primitives are PostgreSQL-only"
+            }
+            Op::CreateRole { .. } => match variant {
+                "superuserIfNotExists" => {
+                    "createRole cannot combine superuser:true with ifNotExists:true"
+                }
+                _ => "role vendor primitives are PostgreSQL-only",
+            },
             Op::AlterRole { .. } | Op::DropRole { .. } | Op::DropOwnedBy { .. } => {
-                Support::vendor(
-                    CAP_ROLE,
-                    pg_only("role vendor primitives are PostgreSQL-only"),
-                    &[],
-                )
+                "role vendor primitives are PostgreSQL-only"
             }
-            Op::Grant { .. } | Op::Revoke { .. } => Support::vendor(
-                CAP_GRANT,
-                pg_only("grant vendor primitives are PostgreSQL-only"),
-                &[],
-            ),
-            Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. } => Support::vendor(
-                CAP_RLS,
-                pg_only("RLS vendor primitives are PostgreSQL-only"),
-                &[],
-            ),
-            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => Support::vendor(
-                CAP_POLICY,
-                pg_only("policy vendor primitives are PostgreSQL-only"),
-                &[],
-            ),
+            Op::Grant { .. } | Op::Revoke { .. } => "grant vendor primitives are PostgreSQL-only",
+            Op::SetRls { .. } => "RLS vendor primitives are PostgreSQL-only",
+            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => {
+                "policy vendor primitives are PostgreSQL-only"
+            }
+            Op::CreateFunction { .. } | Op::DropFunction { .. } => {
+                "function vendor primitives are PostgreSQL-only"
+            }
+            Op::PgRaw { .. } => "pgRaw statements are PostgreSQL-only",
             Op::CreateTrigger {
                 timing,
                 events,
@@ -3783,44 +3632,57 @@ impl Op {
                 action,
                 when,
                 ..
-            } => {
-                let pg = match action {
-                    TriggerAction::Body { .. } => unsupported(
-                        CODE_UNSUPPORTED,
-                        "Postgres triggers must execute a named trigger function",
-                    ),
-                    TriggerAction::ExecuteFunction { .. } => supported(RenderMode::Offline),
-                };
-                let sqlite = if matches!(action, TriggerAction::ExecuteFunction { .. }) {
-                    unsupported(
-                        CODE_UNSUPPORTED,
-                        "SQLite has no CREATE TRIGGER EXECUTE FUNCTION form",
-                    )
-                } else if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
-                    unsupported(CODE_UNSUPPORTED, "SQLite has no TRUNCATE trigger event")
-                } else if matches!(for_each, ForEach::Statement) {
-                    unsupported(CODE_UNSUPPORTED, "SQLite triggers are row-level only")
+            } => Self::trigger_reason(dialect, timing, events, for_each, action, when),
+            // Every remaining op is portable on all three dialects, so no cell is
+            // ever `Unsupported` and this reason is never surfaced.
+            _ => Self::NEVER_REFUSED,
+        }
+    }
+
+    /// The per-dialect trigger refusal reason, computed from the payload with the
+    /// same priority the previous op-level trigger arms used (so a combined
+    /// trigger reports each dialect's own first-hit facet).
+    fn trigger_reason(
+        dialect: crate::model::support::Dialect,
+        timing: &TriggerTiming,
+        events: &[TriggerEvent],
+        for_each: &ForEach,
+        action: &TriggerAction,
+        when: &Option<Expr>,
+    ) -> &'static str {
+        use crate::model::support::Dialect;
+        match dialect {
+            Dialect::Postgres => {
+                if matches!(action, TriggerAction::Body { .. }) {
+                    "Postgres triggers must execute a named trigger function"
                 } else {
-                    supported(RenderMode::Offline)
-                };
-                let mysql = if matches!(action, TriggerAction::ExecuteFunction { .. }) {
-                    unsupported(
-                        CODE_UNSUPPORTED,
-                        "MySQL has no CREATE TRIGGER EXECUTE FUNCTION form",
-                    )
-                } else if events.len() != 1 {
-                    unsupported(
-                        CODE_UNSUPPORTED,
-                        "MySQL CREATE TRIGGER accepts exactly one trigger event",
-                    )
+                    Self::NEVER_REFUSED
+                }
+            }
+            Dialect::Sqlite => {
+                if matches!(action, TriggerAction::ExecuteFunction { .. }) {
+                    "SQLite has no CREATE TRIGGER EXECUTE FUNCTION form"
                 } else if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
-                    unsupported(CODE_UNSUPPORTED, "MySQL has no TRUNCATE trigger event")
-                } else if matches!(timing, TriggerTiming::InsteadOf) {
-                    unsupported(CODE_UNSUPPORTED, "MySQL does not support INSTEAD OF triggers")
+                    "SQLite has no TRUNCATE trigger event"
                 } else if matches!(for_each, ForEach::Statement) {
-                    unsupported(CODE_UNSUPPORTED, "MySQL triggers are row-level only")
+                    "SQLite triggers are row-level only"
+                } else {
+                    Self::NEVER_REFUSED
+                }
+            }
+            Dialect::Mysql => {
+                if matches!(action, TriggerAction::ExecuteFunction { .. }) {
+                    "MySQL has no CREATE TRIGGER EXECUTE FUNCTION form"
+                } else if events.len() != 1 {
+                    "MySQL CREATE TRIGGER accepts exactly one trigger event"
+                } else if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
+                    "MySQL has no TRUNCATE trigger event"
+                } else if matches!(timing, TriggerTiming::InsteadOf) {
+                    "MySQL does not support INSTEAD OF triggers"
+                } else if matches!(for_each, ForEach::Statement) {
+                    "MySQL triggers are row-level only"
                 } else if when.is_some() {
-                    unsupported(CODE_UNSUPPORTED, "MySQL triggers do not support WHEN predicates")
+                    "MySQL triggers do not support WHEN predicates"
                 } else if let TriggerAction::Body { statements } = action {
                     if statements.iter().any(|stmt| {
                         matches!(
@@ -3831,29 +3693,436 @@ impl Op {
                             }
                         )
                     }) {
-                        unsupported(CODE_UNSUPPORTED, "MySQL cannot render RAISE IGNORE")
+                        "MySQL cannot render RAISE IGNORE"
                     } else {
-                        supported(RenderMode::Offline)
+                        Self::NEVER_REFUSED
                     }
                 } else {
-                    unsupported(CODE_UNSUPPORTED, "unreachable trigger action")
-                };
-                Support::core(
-                    DialectSupport::new(pg, sqlite, mysql),
-                    CREATE_TRIGGER_FEATURES,
-                )
-            }
-            Op::DropTrigger { .. } => Support::core(all_offline, &[]),
-            Op::CreateFunction { .. } | Op::DropFunction { .. } => Support::vendor(
-                CAP_FUNCTION,
-                pg_only("function vendor primitives are PostgreSQL-only"),
-                &[],
-            ),
-            Op::PgRaw { .. } => {
-                let dialects = pg_only("pgRaw statements are PostgreSQL-only");
-                Support::vendor(CAP_RAW_SQL, dialects, PG_RAW_FEATURES)
+                    Self::NEVER_REFUSED
+                }
             }
         }
+    }
+
+    /// The support TIER (core vs vendor + its capabilities) for this op shape.
+    /// Tier cannot be read off the generated table's dispositions — a vendor op
+    /// can be unsupported on every dialect (e.g. `createRole` superuser+ifNotExists,
+    /// `createView` materialized+replace) — so it stays a per-op declaration, kept
+    /// in lock-step with [`Op::vendor_capabilities`] by `op_support_matrix`.
+    fn support_tier(&self) -> crate::model::support::SupportTier {
+        use crate::model::support::{
+            SupportTier, CAP_EXTENSION, CAP_FUNCTION, CAP_GRANT, CAP_MATERIALIZED_VIEW, CAP_POLICY,
+            CAP_PARTITION, CAP_RAW_MATERIALIZED_VIEW, CAP_RAW_SQL, CAP_RLS, CAP_ROLE, CAP_SCHEMA,
+        };
+        match self {
+            Op::CreateSchema { .. } | Op::DropSchema { .. } => SupportTier::Vendor(CAP_SCHEMA),
+            Op::CreateExtension { .. } | Op::DropExtension { .. } => {
+                SupportTier::Vendor(CAP_EXTENSION)
+            }
+            Op::CreateRole { .. }
+            | Op::AlterRole { .. }
+            | Op::DropRole { .. }
+            | Op::DropOwnedBy { .. } => SupportTier::Vendor(CAP_ROLE),
+            Op::Grant { .. } | Op::Revoke { .. } => SupportTier::Vendor(CAP_GRANT),
+            Op::AttachPartition { .. } => SupportTier::Vendor(CAP_PARTITION),
+            Op::SetRls { .. } => SupportTier::Vendor(CAP_RLS),
+            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => SupportTier::Vendor(CAP_POLICY),
+            Op::CreateFunction { .. } | Op::DropFunction { .. } => SupportTier::Vendor(CAP_FUNCTION),
+            Op::PgRaw { .. } => SupportTier::Vendor(CAP_RAW_SQL),
+            Op::CreateView {
+                query, materialized, ..
+            } if materialized.unwrap_or(false) => {
+                if matches!(query, ViewQuery::Raw { .. }) {
+                    SupportTier::Vendor(CAP_RAW_MATERIALIZED_VIEW)
+                } else {
+                    SupportTier::Vendor(CAP_MATERIALIZED_VIEW)
+                }
+            }
+            Op::DropView { materialized, .. } if materialized.unwrap_or(false) => {
+                SupportTier::Vendor(CAP_MATERIALIZED_VIEW)
+            }
+            _ => SupportTier::Core,
+        }
+    }
+
+    /// The static per-op feature-support declarations validation walks after the
+    /// op-level dialect decision. Feature gates are a finer, orthogonal refusal
+    /// dimension (not the op-level dialect gate the generated table drives), so
+    /// they remain hand-declared here.
+    fn support_features(&self) -> &'static [crate::model::support::FeatureSupport] {
+        use crate::model::support::{
+            ADD_COLUMN_FEATURES, ADD_CONSTRAINT_FEATURES, ALTER_COLUMN_TYPE_FEATURES,
+            COMMENT_FEATURES, CREATE_INDEX_FEATURES, CREATE_TABLE_FEATURES, CREATE_TRIGGER_FEATURES,
+            CREATE_VIEW_FEATURES, INSERT_FEATURES, PARTITION_FEATURES, PG_RAW_FEATURES,
+            RENAME_COLUMN_FEATURES, SEQUENCE_FEATURES, SET_COLUMN_DEFAULT_FEATURES,
+        };
+        match self {
+            Op::CreateTable { .. } => CREATE_TABLE_FEATURES,
+            Op::CreatePartition { .. }
+            | Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. } => PARTITION_FEATURES,
+            Op::AddColumn { .. } => ADD_COLUMN_FEATURES,
+            Op::CreateIndex { .. } => CREATE_INDEX_FEATURES,
+            Op::Comment { .. } => COMMENT_FEATURES,
+            Op::SetColumnType { .. } => ALTER_COLUMN_TYPE_FEATURES,
+            Op::SetColumnDefault { .. } => SET_COLUMN_DEFAULT_FEATURES,
+            Op::RenameColumn { .. } => RENAME_COLUMN_FEATURES,
+            Op::AddConstraint { .. } => ADD_CONSTRAINT_FEATURES,
+            Op::Insert { .. } => INSERT_FEATURES,
+            Op::CreateView { .. } => CREATE_VIEW_FEATURES,
+            Op::DropView { materialized, .. } if materialized.unwrap_or(false) => {
+                CREATE_VIEW_FEATURES
+            }
+            Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
+                SEQUENCE_FEATURES
+            }
+            Op::CreateTrigger { .. } => CREATE_TRIGGER_FEATURES,
+            Op::PgRaw { .. } => PG_RAW_FEATURES,
+            _ => &[],
+        }
+    }
+
+    /// The generated-dialect-table lookup key for this op: its wire kind token and
+    /// the variant that selects the payload-dependent support branch. The variant
+    /// derivation is the SINGLE source shared with `dialect_table_faithfulness`'s
+    /// corpus (via [`Op::op_variant`]) — the branch-selection that used to live in
+    /// the hand-written `support()` dialect arms.
+    fn op_kind_and_variant(&self) -> (&'static str, &'static str) {
+        match self {
+            Op::CreateTable {
+                columns,
+                primary_key,
+                partition_by,
+                indexes,
+                ..
+            } => (
+                "createTable",
+                Self::create_table_variant(columns, primary_key.as_deref(), partition_by, indexes),
+            ),
+            Op::CreatePartition { .. } => ("createPartition", "base"),
+            Op::AttachPartition { .. } => ("attachPartition", "base"),
+            Op::DetachPartition { .. } => ("detachPartition", "base"),
+            Op::DropPartition { .. } => ("dropPartition", "base"),
+            Op::DropTable { .. } => ("dropTable", "base"),
+            Op::RenameTable { .. } => ("renameTable", "base"),
+            Op::AddColumn {
+                default, identity, ..
+            } => {
+                let variant = if identity.is_some() {
+                    "identity"
+                } else if matches!(default, Some(IrDefault::Nextval { .. })) {
+                    "nextvalDefault"
+                } else {
+                    "base"
+                };
+                ("addColumn", variant)
+            }
+            Op::DropColumn { .. } => ("dropColumn", "base"),
+            Op::CreateIndex {
+                columns,
+                using,
+                r#where,
+                include,
+                with,
+                only,
+                nulls_not_distinct,
+                ..
+            } => (
+                "createIndex",
+                Self::create_index_variant(
+                    columns,
+                    using,
+                    r#where,
+                    include,
+                    with,
+                    *only,
+                    *nulls_not_distinct,
+                ),
+            ),
+            Op::DropIndex { .. } => ("dropIndex", "base"),
+            Op::SetColumnType { using, .. } => (
+                "setColumnType",
+                if using.is_some() { "using" } else { "base" },
+            ),
+            Op::SetColumnNotNull { .. } => ("setColumnNotNull", "base"),
+            Op::DropColumnNotNull { .. } => ("dropColumnNotNull", "base"),
+            Op::SetColumnDefault { value, .. } => {
+                let variant = match value {
+                    IrDefault::Container { .. } | IrDefault::Json { .. } => "containerOrJson",
+                    IrDefault::Nextval { .. } => "nextval",
+                    _ => "base",
+                };
+                ("setColumnDefault", variant)
+            }
+            Op::DropColumnDefault { .. } => ("dropColumnDefault", "base"),
+            Op::RenameColumn {
+                existence_guard, ..
+            } => (
+                "renameColumn",
+                if existence_guard.is_some() {
+                    "existenceGuard"
+                } else {
+                    "base"
+                },
+            ),
+            Op::SetTableOptions { .. } => ("setTableOptions", "base"),
+            Op::AddConstraint { constraint, .. } => {
+                ("addConstraint", Self::add_constraint_variant(&constraint.kind))
+            }
+            Op::DropConstraint { .. } => ("dropConstraint", "base"),
+            Op::ValidateConstraint { .. } => ("validateConstraint", "base"),
+            Op::Insert { on_conflict, .. } => (
+                "insert",
+                if on_conflict.is_some() {
+                    "onConflict"
+                } else {
+                    "base"
+                },
+            ),
+            Op::Update { .. } => ("update", "base"),
+            Op::Delete { .. } => ("delete", "base"),
+            Op::Backfill { .. } => ("backfill", "base"),
+            Op::Comment { .. } => ("comment", "base"),
+            Op::CreateView {
+                materialized,
+                replace,
+                ..
+            } => {
+                let materialized = materialized.unwrap_or(false);
+                let variant = if materialized && replace.unwrap_or(false) {
+                    "materializedReplace"
+                } else if materialized {
+                    "materialized"
+                } else {
+                    "base"
+                };
+                ("createView", variant)
+            }
+            Op::DropView { materialized, .. } => (
+                "dropView",
+                if materialized.unwrap_or(false) {
+                    "materialized"
+                } else {
+                    "base"
+                },
+            ),
+            Op::CreateEnum { .. } => ("createEnum", "base"),
+            Op::DropEnum { .. } => ("dropEnum", "base"),
+            Op::CreateDomain { default, .. } => (
+                "createDomain",
+                if matches!(default, Some(IrDefault::Nextval { .. })) {
+                    "nextvalDefault"
+                } else {
+                    "base"
+                },
+            ),
+            Op::DropDomain { .. } => ("dropDomain", "base"),
+            Op::CreateSequence { .. } => ("createSequence", "base"),
+            Op::AlterSequence { .. } => ("alterSequence", "base"),
+            Op::DropSequence { .. } => ("dropSequence", "base"),
+            Op::CreateTrigger {
+                timing,
+                events,
+                for_each,
+                action,
+                when,
+                ..
+            } => (
+                "createTrigger",
+                Self::create_trigger_variant(timing, events, for_each, action, when),
+            ),
+            Op::DropTrigger { .. } => ("dropTrigger", "base"),
+            Op::CreateSchema { .. } => ("createSchema", "base"),
+            Op::DropSchema { .. } => ("dropSchema", "base"),
+            Op::CreateExtension { .. } => ("createExtension", "base"),
+            Op::DropExtension { .. } => ("dropExtension", "base"),
+            Op::CreateRole {
+                superuser,
+                if_not_exists,
+                ..
+            } => (
+                "createRole",
+                if superuser.unwrap_or(false) && if_not_exists.unwrap_or(false) {
+                    "superuserIfNotExists"
+                } else {
+                    "base"
+                },
+            ),
+            Op::AlterRole { .. } => ("alterRole", "base"),
+            Op::DropRole { .. } => ("dropRole", "base"),
+            Op::DropOwnedBy { .. } => ("dropOwnedBy", "base"),
+            Op::Grant { .. } => ("grant", "base"),
+            Op::Revoke { .. } => ("revoke", "base"),
+            Op::SetRls { .. } => ("setRls", "base"),
+            Op::CreatePolicy { .. } => ("createPolicy", "base"),
+            Op::DropPolicy { .. } => ("dropPolicy", "base"),
+            Op::CreateFunction { .. } => ("createFunction", "base"),
+            Op::DropFunction { .. } => ("dropFunction", "base"),
+            Op::PgRaw { .. } => ("pgRaw", "base"),
+        }
+    }
+
+    /// The generated-dialect-table variant token for this op shape (the payload
+    /// branch its support decision turns on; `"base"` for payload-independent ops).
+    /// This is the ONE variant derivation, shared by `support()` (which looks the
+    /// disposition up in the table) and the `dialect_table_faithfulness` corpus
+    /// (which pins each representative op to its labelled variant) — so the two can
+    /// never drift.
+    #[must_use]
+    pub fn op_variant(&self) -> &'static str {
+        self.op_kind_and_variant().1
+    }
+
+    fn create_table_variant(
+        columns: &[IrColumn],
+        primary_key: Option<&[String]>,
+        partition_by: &Option<PartitionSpec>,
+        indexes: &[IrIndex],
+    ) -> &'static str {
+        let has_pg_only_index_feature = indexes.iter().any(|index| {
+            matches!(index.using, Some(IndexMethod::Brin))
+                || !index.include.is_empty()
+                || index.with.as_ref().is_some_and(|params| !params.is_empty())
+                || index.only.unwrap_or(false)
+                || index.nulls_not_distinct.unwrap_or(false)
+                || index_has_element_opclass_or_collation(&index.columns)
+        });
+        let has_nextval_default = columns
+            .iter()
+            .any(|column| matches!(column.default, Some(IrDefault::Nextval { .. })));
+        let has_identity_always = columns
+            .iter()
+            .any(|column| matches!(column.identity, Some(identity) if identity.always));
+        let pk_cols = primary_key;
+        let has_nonportable_by_default_identity = columns.iter().any(|column| {
+            matches!(column.identity, Some(identity) if !identity.always)
+                && !matches!(pk_cols, Some(cols) if cols.len() == 1 && cols[0] == column.name)
+        });
+        if let Some(spec) = partition_by {
+            if spec.collapse() {
+                "partitionedCollapse"
+            } else {
+                "partitioned"
+            }
+        } else if has_pg_only_index_feature {
+            "pgOnlyIndexFeature"
+        } else if has_nextval_default {
+            "nextvalDefault"
+        } else if has_identity_always {
+            "identityAlways"
+        } else if has_nonportable_by_default_identity {
+            "nonportableByDefaultIdentity"
+        } else {
+            "base"
+        }
+    }
+
+    fn create_index_variant(
+        columns: &[IndexElement],
+        using: &Option<IndexMethod>,
+        r#where: &Option<Expr>,
+        include: &[String],
+        with: &Option<IndexStorageParams>,
+        only: Option<bool>,
+        nulls_not_distinct: Option<bool>,
+    ) -> &'static str {
+        let method_or_feature = matches!(
+            using,
+            Some(
+                IndexMethod::Brin
+                    | IndexMethod::Gin
+                    | IndexMethod::Gist
+                    | IndexMethod::Ivfflat
+                    | IndexMethod::Hnsw
+                    | IndexMethod::Fts5
+            )
+        ) || !include.is_empty()
+            || with.as_ref().is_some_and(|params| !params.is_empty())
+            || only.unwrap_or(false)
+            || nulls_not_distinct.unwrap_or(false)
+            || index_has_element_opclass_or_collation(columns);
+        if method_or_feature {
+            "pgOnlyMethodOrFeature"
+        } else if columns
+            .iter()
+            .any(|element| matches!(element, IndexElement::Expr { .. }))
+        {
+            "exprElement"
+        } else if r#where.is_some() {
+            "partialWhere"
+        } else {
+            "base"
+        }
+    }
+
+    fn add_constraint_variant(kind: &IrConstraintKind) -> &'static str {
+        match kind {
+            IrConstraintKind::Check { .. } => "check",
+            IrConstraintKind::Fk { columns, .. } if columns.is_empty() => "fkNoLocalColumn",
+            IrConstraintKind::Exclusion { .. } => "exclusion",
+            // `NOT VALID` online adoption is PostgreSQL-only. It takes precedence
+            // over the composite/non-id FK sub-shapes (all likewise PG-only), so a
+            // `notValid` FK reports the single PG-only `fkNotValid` variant — keeping
+            // the op-level `Support::decision()` PG-only (and thus == validate, like
+            // `fkComposite`), robust regardless of corpus sampling order.
+            IrConstraintKind::Fk { not_valid: Some(true), .. } => "fkNotValid",
+            IrConstraintKind::Fk { columns, .. } if columns.len() != 1 => "fkComposite",
+            IrConstraintKind::Fk {
+                references_columns, ..
+            } if !(references_columns.is_empty()
+                || (references_columns.len() == 1 && references_columns[0] == "id")) =>
+            {
+                "fkNonId"
+            }
+            IrConstraintKind::Fk { .. } => "fkSimple",
+            IrConstraintKind::Unique { .. } => "unique",
+        }
+    }
+
+    fn create_trigger_variant(
+        timing: &TriggerTiming,
+        events: &[TriggerEvent],
+        for_each: &ForEach,
+        action: &TriggerAction,
+        when: &Option<Expr>,
+    ) -> &'static str {
+        if matches!(action, TriggerAction::ExecuteFunction { .. }) {
+            return "executeFunction";
+        }
+        // The remaining variants are trigger BODIES. A truncate event or a
+        // statement-level body is refused on every dialect; otherwise the body is
+        // portable on SQLite and classified by MySQL's own refusal priority (which
+        // is the strictest), so the chosen variant's disposition matches the op.
+        if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
+            return "bodyTruncateEvent";
+        }
+        if matches!(for_each, ForEach::Statement) {
+            return "bodyStatementLevel";
+        }
+        if events.len() != 1 {
+            return "bodyMultipleEvents";
+        }
+        if matches!(timing, TriggerTiming::InsteadOf) {
+            return "bodyInsteadOf";
+        }
+        if when.is_some() {
+            return "bodyWhen";
+        }
+        if let TriggerAction::Body { statements } = action {
+            if statements.iter().any(|stmt| {
+                matches!(
+                    stmt,
+                    TriggerStmt::Raise {
+                        level: RaiseLevel::Ignore,
+                        ..
+                    }
+                )
+            }) {
+                return "bodyRaiseIgnore";
+            }
+        }
+        "bodySimple"
     }
 
     /// All VENDOR capabilities this op requires. Most ops require at most one; a
@@ -3883,6 +4152,7 @@ impl Op {
             | Op::RenameColumn { .. }
             | Op::AddConstraint { .. }
             | Op::DropConstraint { .. }
+            | Op::ValidateConstraint { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
             | Op::Delete { .. }
@@ -3931,10 +4201,8 @@ impl Op {
             | Op::DropRole { .. }
             | Op::DropOwnedBy { .. } => vec![C::Role],
             Op::Grant { .. } | Op::Revoke { .. } => vec![C::Grant],
-            Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. } => vec![C::Rls],
+            Op::AttachPartition { .. } => vec![C::Partition],
+            Op::SetRls { .. } => vec![C::Rls],
             Op::CreatePolicy { .. } | Op::DropPolicy { .. } => vec![C::Policy],
             Op::CreateFunction { .. } | Op::DropFunction { .. } => vec![C::Function],
             Op::PgRaw { .. } => vec![C::RawSql],
@@ -3956,6 +4224,7 @@ impl Op {
         match self {
             Op::CreateTable { name, .. } => Some(name.as_str()),
             Op::CreatePartition { name, .. }
+            | Op::AttachPartition { name, .. }
             | Op::DetachPartition { name, .. }
             | Op::DropPartition { name, .. } => Some(name.as_str()),
             Op::SetTableOptions { table, .. } => Some(table.as_str()),
@@ -3974,6 +4243,7 @@ impl Op {
             | Op::RenameColumn { table, .. }
             | Op::AddConstraint { table, .. }
             | Op::DropConstraint { table, .. }
+            | Op::ValidateConstraint { table, .. }
             | Op::Insert { table, .. }
             | Op::Update { table, .. }
             | Op::Delete { table, .. }
@@ -3994,10 +4264,7 @@ impl Op {
             Op::DropIndex { table, .. } => table.as_deref(),
             // VENDOR — table-scoped vendor ops (RLS / policy / trigger) touch their
             // table; the database-/role-/schema-level ones touch no table.
-            Op::EnableRls { table, .. }
-            | Op::ForceRls { table, .. }
-            | Op::DisableRls { table, .. }
-            | Op::NoForceRls { table, .. }
+            Op::SetRls { table, .. }
             | Op::CreatePolicy { table, .. }
             | Op::DropPolicy { table, .. }
             | Op::CreateTrigger { table, .. }
@@ -4028,6 +4295,7 @@ impl Op {
         match self {
             Op::CreateTable { schema, .. }
             | Op::CreatePartition { schema, .. }
+            | Op::AttachPartition { schema, .. }
             | Op::DetachPartition { schema, .. }
             | Op::DropPartition { schema, .. }
             | Op::SetTableOptions { schema, .. }
@@ -4045,6 +4313,7 @@ impl Op {
             | Op::RenameColumn { schema, .. }
             | Op::AddConstraint { schema, .. }
             | Op::DropConstraint { schema, .. }
+            | Op::ValidateConstraint { schema, .. }
             | Op::Insert { schema, .. }
             | Op::Update { schema, .. }
             | Op::Delete { schema, .. }
@@ -4062,10 +4331,7 @@ impl Op {
             // VENDOR — ops carrying a schema QUALIFIER expose it for cross-schema
             // confinement + effective-schema resolution.
             Op::CreateExtension { schema, .. }
-            | Op::EnableRls { schema, .. }
-            | Op::ForceRls { schema, .. }
-            | Op::DisableRls { schema, .. }
-            | Op::NoForceRls { schema, .. }
+            | Op::SetRls { schema, .. }
             | Op::CreatePolicy { schema, .. }
             | Op::DropPolicy { schema, .. }
             | Op::CreateTrigger { schema, .. }
@@ -4114,11 +4380,13 @@ impl Op {
             | Op::RenameColumn { existence_guard, .. }
             | Op::AddConstraint { existence_guard, .. }
             | Op::DropConstraint { existence_guard, .. }
+            | Op::ValidateConstraint { existence_guard, .. }
             | Op::DropView { existence_guard, .. }
             | Op::DropEnum { existence_guard, .. }
             | Op::DropDomain { existence_guard, .. }
             | Op::DropSequence { existence_guard, .. } => *existence_guard,
-            Op::DetachPartition { .. }
+            Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
             | Op::SetTableOptions { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
@@ -4143,10 +4411,7 @@ impl Op {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateTrigger { .. }
@@ -4182,11 +4447,13 @@ impl Op {
             | Op::DropColumnDefault { .. }
             | Op::RenameColumn { .. }
             | Op::DropConstraint { .. }
+            | Op::ValidateConstraint { .. }
             | Op::DropView { .. }
             | Op::DropEnum { .. }
             | Op::DropDomain { .. }
             | Op::DropSequence { .. } => Some(ExistenceGuard::IfExists),
-            Op::DetachPartition { .. }
+            Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
             | Op::SetTableOptions { .. }
             | Op::Insert { .. }
             | Op::Update { .. }
@@ -4209,10 +4476,7 @@ impl Op {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateTrigger { .. }
@@ -4428,8 +4692,9 @@ impl JsonSchema for IrScalar {
     }
 }
 
-/// A DML value in an insert row or `onConflict.doUpdate`: either the existing typed
-/// scalar wire shape or a closed expression AST such as `FnSynth(now)`.
+/// A DML value in an insert row, `update.set`, `backfill.set`, trigger update
+/// `set`, or `onConflict.doUpdate`: either the existing typed scalar wire shape
+/// or a closed expression AST such as `FnSynth(now)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
 pub enum IrValue {
@@ -4989,36 +5254,20 @@ mod tests {
         assert_eq!(t, back);
     }
 
-    // ---- IrDefault::Fn is fail-CLOSED to the two nullary synth scalars ----
-    // (code-critic MED). The doc says only now/genRandomUuid are admissible as a
-    // column default; a hand-crafted `.ir.json` carrying a non-nullary synth
-    // (`splitPart`/`concatWs`) MUST be rejected at DESERIALIZE, not deferred to a
-    // render-time blow-up. RED before SynthDefaultFn narrows the type.
+    // ---- IrDefault expression defaults replace the old `{fn}` carrier ----
 
     #[test]
-    fn ir_default_fn_rejects_split_part_at_deserialize() {
-        // A column whose default is the synth `splitPart` — splitPart is NOT a
-        // nullary apply-time scalar, so it is not a legal default. The
-        // externally-tagged `IrDefault::Fn` carries its inner synth in the `fn`
-        // field (`{"fn":{"fn":"splitPart"}}`).
-        let json = r#"{"name":"c","type":"text","default":{"fn":{"fn":"splitPart"}}}"#;
-        let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
-        assert!(
-            err.to_string().to_lowercase().contains("splitpart")
-                || err.to_string().contains("unknown variant"),
-            "splitPart must be rejected as a default at deserialize, got: {err}"
-        );
-    }
-
-    #[test]
-    fn ir_default_fn_rejects_concat_ws_at_deserialize() {
-        let json = r#"{"name":"c","type":"text","default":{"fn":{"fn":"concatWs"}}}"#;
-        let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
-        assert!(
-            err.to_string().to_lowercase().contains("concatws")
-                || err.to_string().contains("unknown variant"),
-            "concatWs must be rejected as a default at deserialize, got: {err}"
-        );
+    fn ir_default_rejects_removed_fn_key_at_deserialize() {
+        for json in [
+            r#"{"name":"c","type":"text","default":{"fn":{"fn":"now"}}}"#,
+            r#"{"name":"c","type":"text","default":{"fn":{"fn":"genRandomUuid"}}}"#,
+        ] {
+            let err = serde_json::from_str::<IrColumn>(json).unwrap_err();
+            assert!(
+                err.to_string().contains("\"expr\"") || err.to_string().contains("IrDefault key"),
+                "removed {{fn}} default carrier must be rejected, got: {err}"
+            );
+        }
     }
 
     // ---- MED-2: the §2.4 advisory `checksum` hint deserializes + is NOT folded ----
@@ -5386,14 +5635,19 @@ mod tests {
     }
 
     #[test]
-    fn ir_default_fn_accepts_now_and_gen_random_uuid() {
+    fn ir_default_expr_accepts_now_and_gen_random_uuid() {
         for (wire, want) in [
-            (r#"{"fn":{"fn":"now"}}"#, SynthDefaultFn::Now),
-            (r#"{"fn":{"fn":"genRandomUuid"}}"#, SynthDefaultFn::GenRandomUuid),
+            (r#"{"expr":{"node":"fnSynth","fn":"now","args":[]}}"#, "now"),
+            (r#"{"expr":{"node":"fnSynth","fn":"genRandomUuid","args":[]}}"#, "genRandomUuid"),
         ] {
             let d: IrDefault = serde_json::from_str(wire).unwrap();
-            assert_eq!(d, IrDefault::Fn { r#fn: want });
-            // …and round-trips byte-identically (the wire shape is unchanged).
+            assert!(matches!(
+                &d,
+                IrDefault::Expr {
+                    expr: Expr::FnSynth { r#fn: _, args }
+                } if args.is_empty()
+            ));
+            assert_eq!(serde_json::to_value(&d).unwrap()["expr"]["fn"], want);
             assert_eq!(serde_json::to_string(&d).unwrap(), wire);
         }
     }

@@ -71,14 +71,14 @@ fn all_types_ops() -> Vec<Op> {
         col("c_int", ColType::Int),
         col("c_smallint", ColType::SmallInt),
         col("c_bigint", ColType::BigInt),
-        col("c_float", ColType::Float),
+        col("c_float", ColType::Double),
         col("c_real", ColType::Real),
-        col("c_bool", ColType::Bool),
+        col("c_bool", ColType::Boolean),
         col("c_json", ColType::Json),
         col("c_ts", ColType::Timestamp),
         col("c_inet", ColType::Inet),
         col("c_text_array", ColType::TextArray),
-        col("c_bytes", ColType::Bytea),
+        col("c_bytes", ColType::Bytes),
         col("c_num", ColType::Decimal { precision: 38, scale: 9 }),
         col("owner", ColType::Ref { references: "users".into() }),
         col("secret", ColType::Encrypted { of: Box::new(ColType::Text) }),
@@ -97,6 +97,8 @@ fn all_types_ops() -> Vec<Op> {
             on_update: None,
             deferrable: None,
             initially_deferred: None,
+        
+            not_valid: None,
         },
     };
     vec![Op::CreateTable {
@@ -219,10 +221,14 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
                 IndexElement::Column {
                     name: "author_id".into(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
                 IndexElement::Column {
                     name: "status".into(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             name: Some("posts_author_status_idx".into()),
@@ -236,6 +242,7 @@ fn runtime_descriptor_v1_carries_collection_options_and_compound_indexes() {
         concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ];
     let artifacts = render_artifacts(&ops, "public").expect("render");
@@ -320,10 +327,14 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
                 IndexElement::Column {
                     name: owner.clone(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
                 IndexElement::Column {
                     name: status.clone(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             name: None,
@@ -337,6 +348,7 @@ fn runtime_descriptor_generated_index_names_match_lowered_capped_names() {
         concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ];
 

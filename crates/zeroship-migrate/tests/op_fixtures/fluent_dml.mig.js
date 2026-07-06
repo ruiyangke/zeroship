@@ -1,6 +1,6 @@
 // op.* migration fixture — the FULL FLUENT DML + EXPRESSION surface, authored via
 // the SOLE public `table()` entry. Exercises the row-object `insert({ rows })`
-// form, `update`/`del`/`backfill` with the one `where` keyword, and the
+// form, `update`/`delete`/`backfill` with the one `where` keyword, and the
 // single-handle `(c) => Expr` builder (`c("name")` + the chainable operator methods
 // + the `c.fn.*` namespace).
 //
@@ -42,9 +42,9 @@ export default {
       where: (c) => c("code").gt(0).and(c("label").isNotNull()),
     });
 
-    // del({ where, limit }) — mandatory `where`; ne/le/ge/or/not + isNull/isFalse +
+    // delete({ where, limit }) — mandatory `where`; ne/le/ge/or/not + isNull/isFalse +
     // a searched CASE predicate.
-    sc.del({
+    sc.delete({
       where: (c) =>
         c("code")
           .ne(0)
@@ -53,8 +53,8 @@ export default {
           .or(c("label").isNull())
           .or(c("active").isFalse())
           .and(
-            c.fn
-              .case([[c("code").lt(100), c("code").isNull()]], c("label").isNull())
+            c
+              .case({ branches: [{ when: c("code").lt(100), then: c("code").isNull() }], else: c("label").isNull() })
               .isTrue(),
           ),
       limit: 100,

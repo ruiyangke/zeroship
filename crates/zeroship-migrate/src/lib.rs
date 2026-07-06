@@ -229,8 +229,8 @@ pub use model::ir::{
     IndexSortOrder, IndexStorageParams, IrBatch, IrClassification, IrColumn, IrConstraint,
     IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrJsonValue, IrMask, IrMaskKind,
     IrScalar, IrValue, IrVersionError, MigrationIr, Op, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, SynthDefaultFn,
-    TableRuntimeOptions, TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
+    PartitionSpec, RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions,
+    TableRuntimeOptionsPatch, TableStrictness, VectorMetric,
     CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
 };
 // The fail-closed `.ir.json` load gate (§5.2/§5.3/§8.6): deserialize →
@@ -263,15 +263,19 @@ pub use render::lower::{
 // The closed expression AST (§3.3.1) the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.
 pub use model::expr::{
-    BinaryOp, CaseBranch, CastTarget, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
+    BinaryOp, CaseBranch, CastTarget, Duration, Expr, ExtractField, PgExtractField, ScalarFn,
+    SynthFn, UnaryOp,
 };
 // The STRUCTURAL expression-AST validator + the structured-error envelope
 // (§3.3.1.1 / §8.8). No parser, no fuzzer — a pure allow-list walk.
 pub use model::validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
     AuthoringError, Dialect as ValidatorDialect, TargetScope, UnsupportedKind,
-    CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_SCOPE_PGONLY, CODE_EXPR_NOT_PORTABLE,
-    CODE_OP_OUTSIDE_RECORDER, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
+    CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_SCOPE_PGONLY, CODE_DIALECT_UNSUPPORTED,
+    CODE_EXPR_NOT_PORTABLE, CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED,
+    CODE_PARTITION_BOUNDS_NOT_TOTAL, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
+    CODE_PARTITION_HASH_DROP_UNDERIVABLE, CODE_PARTITION_KEY_COVERAGE,
+    CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, CODE_UNSUPPORTED, SPLIT_PART_MAX_N,
 };
 // The `op.*` DSL plan model (§2.0). Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`, unchanged): these are the net-new ordered

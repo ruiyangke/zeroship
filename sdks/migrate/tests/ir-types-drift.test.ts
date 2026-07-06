@@ -51,33 +51,35 @@ function opFieldsByTag(def: any, tagField: string): Record<string, string[]> {
 // ── The token sets the hand-authored `ir.ts` declares (kept in lockstep). ──
 
 const TS = {
-  // Op variant tags (the `del()` fn records `"delete"`).
+  // Op variant tags (the `delete()` fn records `"delete"`).
   Op: [
-    "createTable", "createPartition", "detachPartition", "dropPartition",
+    "createTable", "createPartition", "attachPartition", "detachPartition", "dropPartition",
     "dropTable", "renameTable", "addColumn", "dropColumn", "createIndex",
     "dropIndex", "setColumnType", "setColumnNotNull", "dropColumnNotNull",
     "setColumnDefault", "dropColumnDefault", "renameColumn", "addConstraint",
-    "setTableOptions", "dropConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
+    "setTableOptions", "dropConstraint", "validateConstraint", "insert", "update", "delete", "backfill", "createView", "dropView",
     "createEnum", "dropEnum", "createDomain", "dropDomain", "createSequence",
     "alterSequence", "dropSequence", "createTrigger", "dropTrigger",
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
-    "alterRole", "dropRole", "dropOwnedBy", "grant", "revoke", "enableRls", "forceRls",
-    "disableRls", "noForceRls", "createPolicy", "dropPolicy", "createFunction",
+    "alterRole", "dropRole", "dropOwnedBy", "grant", "revoke", "setRls",
+    "createPolicy", "dropPolicy", "createFunction",
     "dropFunction", "comment", "pgRaw",
   ].sort(),
   // Expr node tags.
   Expr: [
     "colRef", "literal", "binOp", "unaryOp", "case", "fnCall", "fnSynth", "cast",
-    "pgArrayMembership", "pgRegexMatch", "pgColumnSize", "extract", "pgIntervalLiteral",
+    "between", "like", "distinctFrom", "agg",
+    "inList", "pgRegexMatch", "pgColumnSize", "extract", "pgExtract", "pgInterval",
+    "dialect",
   ].sort(),
   // ColType string tokens (the object-variant arms — char/ref/vector/decimal/encrypted
   // — are not `const` and are checked structurally by the round-trip, not here).
   ColTypeStrings: [
-    "string", "text", "int", "smallInt", "bigInt", "float", "real", "bool",
-    "json", "timestamp", "date", "uuid", "inet", "textArray", "bytea", "geoPoint",
+    "string", "text", "int", "smallInt", "bigInt", "double", "real", "boolean",
+    "json", "timestamp", "date", "uuid", "inet", "textArray", "bytes", "geoPoint",
   ].sort(),
   // IrConstraintKind tags.
-  IrConstraintKind: ["pk", "fk", "unique", "check", "exclusion"].sort(),
+  IrConstraintKind: ["fk", "unique", "check", "exclusion"].sort(),
   // §A2 — trigger action/body tags.
   TriggerAction: ["executeFunction", "body"].sort(),
   TriggerStmt: ["insert", "update", "delete", "select", "raise"].sort(),
@@ -91,12 +93,16 @@ const TS = {
   // The closed string-enums (generated into enums.ts).
   BinaryOp: ["eq", "ne", "lt", "le", "gt", "ge", "and", "or", "add", "sub", "mul", "div", "concat"].sort(),
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
-  ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "currentSetting", "currentUser"].sort(),
+  ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
-  SynthDefaultFn: ["now", "genRandomUuid"].sort(),
   CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
-  PgArrayMembershipOp: ["eq", "ne"].sort(),
-  ExtractField: ["day"].sort(),
+  ExtractField: ["year", "month", "day", "hour", "minute", "dow"].sort(),
+  PgExtractField: [
+    "second", "doy", "epoch", "quarter", "week", "isodow", "isoyear",
+    "century", "decade", "millennium", "microseconds", "milliseconds",
+    "timezone", "timezone_hour", "timezone_minute",
+  ].sort(),
+  AggFunc: ["count", "sum", "avg", "min", "max"].sort(),
   IndexSortOrder: ["asc", "desc"].sort(),
   IndexMethod: ["btree", "brin", "gin", "gist", "ivfflat", "hnsw", "fts5"].sort(),
   PartitionSpec: ["hash", "list", "range"].sort(),
@@ -134,15 +140,16 @@ const TS = {
 const TS_OP_FIELDS: Record<string, string[]> = {
   createTable: ["columns", "constraints", "existenceGuard", "indexes", "name", "partitionBy", "primaryKey", "runtimeOptions", "schema"].sort(),
   createPartition: ["bounds", "existenceGuard", "name", "of", "schema"].sort(),
+  attachPartition: ["bound", "name", "parent", "schema"].sort(),
   detachPartition: ["concurrently", "name", "parent", "schema"].sort(),
-  dropPartition: ["cascade", "existenceGuard", "name", "schema"].sort(),
+  dropPartition: ["cascade", "existenceGuard", "name", "parent", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
   // #173/#174 + generated/identity — addColumn carries the column facets that are
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
   addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
-  createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
+  createIndex: ["columns", "concurrently", "existenceGuard", "include", "name", "nullsNotDistinct", "only", "schema", "table", "unique", "using", "where", "with"].sort(),
   dropIndex: ["concurrently", "existenceGuard", "name", "schema", "table", "unique"].sort(),
   setColumnType: ["column", "existenceGuard", "schema", "table", "toType", "using"].sort(),
   setColumnNotNull: ["column", "existenceGuard", "schema", "table"].sort(),
@@ -153,6 +160,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   setTableOptions: ["options", "schema", "table"].sort(),
   addConstraint: ["constraint", "existenceGuard", "schema", "table"].sort(),
   dropConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
+  validateConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   // DML ops carry `schema` but NO `existenceGuard`.
   insert: ["columns", "onConflict", "rows", "schema", "table"].sort(),
   update: ["batch", "schema", "set", "table", "where"].sort(),
@@ -182,10 +190,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   dropOwnedBy: ["roles"].sort(),
   grant: ["on", "privileges", "to", "withGrantOption"].sort(),
   revoke: ["from", "on", "privileges"].sort(),
-  enableRls: ["schema", "table"].sort(),
-  forceRls: ["schema", "table"].sort(),
-  disableRls: ["schema", "table"].sort(),
-  noForceRls: ["schema", "table"].sort(),
+  setRls: ["enabled", "forced", "schema", "table"].sort(),
   createPolicy: ["forCmd", "name", "schema", "table", "to", "using", "withCheck"].sort(),
   dropPolicy: ["ifExists", "name", "schema", "table"].sort(),
   createFunction: ["args", "body", "language", "name", "replace", "returns", "schema", "volatility"].sort(),
@@ -280,10 +285,10 @@ test("closed string-enum tokens match the schema", () => {
     "UnaryOp",
     "ScalarFn",
     "SynthFn",
-    "SynthDefaultFn",
     "CastTarget",
-    "PgArrayMembershipOp",
     "ExtractField",
+    "PgExtractField",
+    "AggFunc",
     "IndexSortOrder",
     "IndexMethod",
     "ExclusionMethod",

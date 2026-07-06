@@ -79,6 +79,8 @@ pub enum VendorCapability {
     Grant,
     /// RLS `ENABLE`/`FORCE`/`DISABLE`/`NO FORCE` ([`VendorCapabilities::allow_rls`]).
     Rls,
+    /// `ALTER TABLE ATTACH PARTITION` ([`VendorCapabilities::allow_partition`]).
+    Partition,
     /// `CREATE/DROP POLICY` ([`VendorCapabilities::allow_policy`]).
     Policy,
     /// `CREATE/DROP FUNCTION` ([`VendorCapabilities::allow_function`]).
@@ -102,6 +104,7 @@ impl VendorCapability {
             VendorCapability::Role => "role",
             VendorCapability::Grant => "grant",
             VendorCapability::Rls => "rls",
+            VendorCapability::Partition => "partition",
             VendorCapability::Policy => "policy",
             VendorCapability::Function => "function",
             VendorCapability::RawSql => "rawSql",
@@ -119,6 +122,7 @@ impl VendorCapability {
             VendorCapability::Role => "allowRole",
             VendorCapability::Grant => "allowGrant",
             VendorCapability::Rls => "allowRls",
+            VendorCapability::Partition => "allowPartition",
             VendorCapability::Policy => "allowPolicy",
             VendorCapability::Function => "allowFunction",
             VendorCapability::RawSql => "allowRawSql",
@@ -146,6 +150,8 @@ pub struct VendorCapabilities {
     pub allow_grant: bool,
     /// RLS enable/force/disable/no-force.
     pub allow_rls: bool,
+    /// PostgreSQL partition attach.
+    pub allow_partition: bool,
     /// `CREATE/DROP POLICY`.
     pub allow_policy: bool,
     /// `CREATE/DROP FUNCTION` (the raw body escape).
@@ -178,6 +184,7 @@ impl VendorCapabilities {
             allow_role: false,
             allow_grant: false,
             allow_rls: false,
+            allow_partition: false,
             allow_policy: false,
             allow_function: false,
             allow_raw_sql: false,
@@ -200,6 +207,7 @@ impl VendorCapabilities {
             allow_role: true,
             allow_grant: true,
             allow_rls: true,
+            allow_partition: true,
             allow_policy: true,
             allow_function: true,
             allow_raw_sql: true,
@@ -224,6 +232,7 @@ impl VendorCapabilities {
             allow_role: false,
             allow_grant: true,
             allow_rls: true,
+            allow_partition: true,
             allow_policy: true,
             allow_function: true,
             allow_raw_sql: false,
@@ -285,6 +294,7 @@ impl VendorCapabilities {
             VendorCapability::Role => self.allow_role,
             VendorCapability::Grant => self.allow_grant,
             VendorCapability::Rls => self.allow_rls,
+            VendorCapability::Partition => self.allow_partition,
             VendorCapability::Policy => self.allow_policy,
             VendorCapability::Function => self.allow_function,
             VendorCapability::RawSql => self.allow_raw_sql,
@@ -307,6 +317,7 @@ mod tests {
             VendorCapability::Role,
             VendorCapability::Grant,
             VendorCapability::Rls,
+            VendorCapability::Partition,
             VendorCapability::Policy,
             VendorCapability::Function,
             VendorCapability::RawSql,
@@ -326,6 +337,7 @@ mod tests {
             VendorCapability::Role,
             VendorCapability::Grant,
             VendorCapability::Rls,
+            VendorCapability::Partition,
             VendorCapability::Policy,
             VendorCapability::Function,
             VendorCapability::RawSql,
@@ -341,6 +353,7 @@ mod tests {
         let l = VendorCapabilities::local();
         assert!(l.grants(VendorCapability::Function));
         assert!(l.grants(VendorCapability::Policy));
+        assert!(l.grants(VendorCapability::Partition));
         assert!(l.grants(VendorCapability::MaterializedView));
         assert!(!l.grants(VendorCapability::Role), "local must not mint roles");
         assert!(!l.grants(VendorCapability::RawSql), "local must not allow the raw escape");

@@ -1,24 +1,18 @@
-// Lock-step parity for the column-level facets (#173/#174/#178 + generated/identity):
-// `t.id({ prefix })`, `t.vector(n, { metric })`, standalone
+// Artifact-identity parity for the column-level facets (#173/#174/#178 +
+// generated/identity): `t.id({ prefix })`, `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
-// These were added to the engine
-// recorder (`crates/zeroship-migrate/src/frontend/migrate_ops.js`) + the IR + fold +
-// gen-types FIRST, but never to the PUBLIC `@zeroship/migrate` authoring surface
-// (`src/ops.ts` / `src/types.ts`). #178 closes that gap.
 //
-// This is the byte-identity oracle for the facets: re-author the SAME migration
-// through BOTH the public `ops.ts` `table()`/`t.*` and the authoritative embedded
-// recorder `migrate_ops.js` `table()`/`t.*`, then assert the two recorded op lists
-// are byte-identical. Because the recorder twin is the source of truth the Rust
-// engine `include_str!`s into V8, this proves the public DSL records the EXACT
-// camelCase wire form (`idPrefix` / `vectorMetric` / `mask:{kind,classification}` /
-// `generated:{expr,stored}` / `identity:{always}`)
-// the engine deserializes.
-//
-// RED before #178: the public `t.id`/`t.vector` ignored their option bags and
-// `ColumnDef` had no `.mask`, so the public recording dropped every facet and the
-// deepEqual diverged (and the `.mask()` call was a TypeError at runtime + a tsc
-// error). GREEN after #178: the two recordings match.
+// S0.5 collapsed the recorder twin: there is no longer a hand-kept
+// `migrate_ops.js`. The SDK recorder (`src/ops.ts`) and the engine-embedded
+// recorder (`dist/embedded-recorder.js`, the `tsup` build output the
+// `zeroship-migrate` crate `include_str!`s into V8) are now the SAME source,
+// compiled two ways. This test is the design's "one-release parity tripwire →
+// artifact-identity assertion": re-author the SAME migration through BOTH the
+// `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
+// two recorded op lists are byte-identical — proving the shipped engine artifact
+// records the EXACT camelCase wire form (`idPrefix` / `vectorMetric` /
+// `mask:{kind,classification}` / `generated:{expr,stored}` / `identity:{always}`)
+// the source authors, with no compile-time drift.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -26,37 +20,31 @@ import { test } from "node:test";
 import {
   __begin as pubBegin,
   __drain as pubDrain,
-  dropPartition as pubDropPartition,
   maxValue as pubMaxValue,
   minValue as pubMinValue,
-  p as pubP,
-  partition as pubPartition,
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
-// The authoritative engine recorder twin (the file the Rust runtime include_str!s
-// into V8). Importing it directly makes this an oracle against the real engine
-// recording, not a self-referential restatement of the public surface.
+import { pgTable as pubPgTable } from "../src/pg.js";
+// The COMPILED engine-embedded recorder artifact (the file the Rust runtime
+// include_str!s into V8). Importing it directly makes this an oracle against the
+// real shipped engine recording, not a self-referential restatement of the source.
 import {
   __begin as engBegin,
   __drain as engDrain,
-  dropPartition as engDropPartition,
   maxValue as engMaxValue,
   minValue as engMinValue,
-  p as engP,
-  partition as engPartition,
+  pgTable as engPgTable,
   t as engT,
   table as engTable,
-} from "../../../crates/zeroship-migrate/src/frontend/migrate_ops.js";
+} from "../dist/embedded-recorder.js";
 
 type Rec = {
   begin: () => void;
   drain: () => any[];
+  pgTable: any;
   t: any;
   table: any;
-  p: any;
-  partition: any;
-  dropPartition: any;
   minValue: any;
   maxValue: any;
 };
@@ -64,22 +52,18 @@ type Rec = {
 const PUBLIC: Rec = {
   begin: pubBegin,
   drain: pubDrain,
+  pgTable: pubPgTable,
   t: pubT,
   table: pubTable,
-  p: pubP,
-  partition: pubPartition,
-  dropPartition: pubDropPartition,
   minValue: pubMinValue,
   maxValue: pubMaxValue,
 };
 const ENGINE: Rec = {
   begin: engBegin,
   drain: engDrain,
+  pgTable: engPgTable,
   t: engT,
   table: engTable,
-  p: engP,
-  partition: engPartition,
-  dropPartition: engDropPartition,
   minValue: engMinValue,
   maxValue: engMaxValue,
 };
@@ -90,7 +74,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   begin();
   // createTable carrying the column facets:
   //  - t.id({ prefix })            → IrColumn.idPrefix
-  //  - t.vector(n, { metric })     → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
+  //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
   //  - t.text().mask({ kind, classification }) → IrColumn.mask:{kind,classification}
   //  - t.int().generated(expr)     → IrColumn.generated:{expr,stored}
   //  - t.bigInt().identity(opts)   → IrColumn.identity:{always}
@@ -103,9 +87,9 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
       unit_cents: t.int(),
       ratio: t.real(),
       source_ip: t.inet(),
-      total_cents: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents"))),
-      virtual_total: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents")), { virtual: true }),
-      embedding: t.vector(1536, { metric: "cosine" }),
+      total_cents: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
+      virtual_total: t.int().generated((c: any) => c("qty").mul(c("unit_cents")), { virtual: true }),
+      embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
       // a standalone mask with an explicit classification
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
       // a standalone mask defaulting classification → "pii"
@@ -114,10 +98,10 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
     },
   });
   // addColumn carries vectorMetric + mask (NOT idPrefix — fail-closed on add):
-  table("documents").column("summary_vec").add({ type: t.vector(768, { metric: "innerProduct" }) });
+  table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
-    type: t.int().generated((c: any) => c.col("qty").mul(c.col("unit_cents"))),
+    type: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
   });
   table("documents").column("added_seq").add({ type: t.bigInt().identity() });
   return drain();
@@ -138,7 +122,7 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   // t.id({ prefix }) → idPrefix
   assert.equal(byName("id").idPrefix, "doc");
 
-  // t.vector(n, { metric }) → vectorMetric (closed token)
+  // t.vector({ dimensions, metric }) → vectorMetric (closed token)
   assert.equal(byName("embedding").vectorMetric, "cosine");
   assert.equal(byName("shard").type, "smallInt");
   assert.equal(byName("ratio").type, "real");
@@ -180,11 +164,9 @@ test("the recorded facets carry the exact camelCase wire form", () => {
 function authorPartitionWith({
   begin,
   drain,
+  pgTable,
   t,
   table,
-  p,
-  partition,
-  dropPartition,
   minValue,
   maxValue,
 }: Rec): any[] {
@@ -194,22 +176,24 @@ function authorPartitionWith({
       ts: t.timestamp(),
       tenant_id: t.text(),
     },
-    partitionBy: p.range(["ts"]),
+    partitionBy: { range: ["ts"] },
   });
-  partition("events_2026_05", { schema: "app" }).of("events").forValues({
+  table("events", { schema: "app" }).partition("events_2026_05").create({
     from: [minValue, "2026-05-01T00:00:00Z"],
     to: ["2026-06-01T00:00:00Z", maxValue],
   }, { ifNotExists: true });
-  partition("events_default").of("events").asDefault();
-  table("events")
+  table("events").partition("events_default").create({ default: true });
+  pgTable("events")
     .index("events_ts_brin_idx")
-    .using("brin")
-    .include(["tenant_id"])
-    .with({ pagesPerRange: 32 })
-    .only()
-    .add({ columns: ["ts"] });
-  table("events", { schema: "app" }).detachPartition("events_2026_05", { concurrently: true });
-  dropPartition("events_2026_05", { schema: "app", ifExists: true, cascade: true });
+    .add({
+      on: ["ts"],
+      using: "brin",
+      include: ["tenant_id"],
+      with: { pagesPerRange: 32 },
+      only: true,
+    });
+  pgTable("events", { schema: "app" }).partition("events_2026_05").detach({ concurrently: true });
+  table("events", { schema: "app" }).partition("events_2026_05").drop({ ifExists: true, cascade: true });
   return drain();
 }
 

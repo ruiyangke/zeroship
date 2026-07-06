@@ -181,7 +181,7 @@ No mature migration tool binds migration files to the live schema:
 - **Op argument shapes** — you cannot pass a number where a `ColumnDef`
   is expected, or omit a required field on a terminal's args object.
 - **The `t` column-type lexicon** — `t.text()` / `t.numeric()` and their
-  chainable modifiers (`.notNull()` / `.default()` / `.ref()`) are typed.
+  chainable modifiers (`.notNull()` / `.default()`) are typed.
 - **The fluent-expression node shapes** — `c`'s methods (`.eq` / `.concat` /
   `.gt` / `c.fn.splitPart` …) have typed arities and return an `Expr`; calling a
   non-existent operator method fails `tsc`. (Method *names* are the typed builder
@@ -214,33 +214,33 @@ The shipped factories (`sdks/migrate/src/ops.ts`):
 | --- | --- |
 | `t.id(opts?)` | a non-null `uuid` PK defaulting to `gen_random_uuid()`; `t.id({ prefix })` brands it as a typed id (`prefix_<base62>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.text()` | text |
-| `t.integer()` | 32-bit integer |
+| `t.int()` | 32-bit integer |
 | `t.bigInt()` | 64-bit integer |
-| `t.float()` | floating point |
-| `t.numeric(precision?, scale?)` | fixed-precision decimal (default `(38, 9)`) |
+| `t.real()` | single-precision float (float4) |
+| `t.double()` | double-precision float (float8) |
+| `t.numeric({ precision?, scale? })` | fixed-precision decimal (default `(38, 9)`) |
 | `t.boolean()` | boolean |
 | `t.timestamp()` | timestamp |
 | `t.uuid()` | uuid |
 | `t.bytes()` | byte array |
 | `t.json()` | json |
-| `t.vector(n, opts?)` | a pgvector column of dimensionality `n`; `t.vector(n, { metric })` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
+| `t.vector({ dimensions, metric? })` | a pgvector column; `metric` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.geoPoint()` | a geo point |
 | `t.ref(targetTable)` | a foreign-key reference (plain-string target) |
 | `t.encrypted({ of })` | an application-level encrypted column wrapping an inner type |
 
-> The `string`/`int` aliases and the `t.X({ notNull, default })` options-bag
-> overload are **removed**. Use the canonical `t.text()`/`t.integer()` and the
-> chain (`t.text().notNull().default("pending")`).
+> The `string`/`integer`/`float` aliases and the `t.X({ notNull, default })`
+> options-bag overload are **removed**. Use the canonical `t.text()`/`t.int()`
+> and the chain (`t.text().notNull().default("pending")`).
 
 Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnDef`:
 
 | Modifier | Effect |
 | --- | --- |
 | `.notNull()` | mark `NOT NULL` |
-| `.default(value)` | a typed scalar literal **or** a nullary synth scalar `{ fn: "now" \| "genRandomUuid" }` — never raw SQL |
+| `.default(value)` | a typed scalar literal **or** a function-expression callback `(c) => c.fn.now()` / `c.fn.genRandomUuid()` (the `{ fn: … }` carrier was deleted, P4) — never raw SQL |
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
-| `.ref(targetTable)` | re-target the column as a foreign-key reference (plain-string target) |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
@@ -251,7 +251,7 @@ export default {
     table("orders").create({
       columns: {
         id: t.id(),
-        total: t.numeric(12, 2).notNull().default(0),
+        total: t.numeric({ precision: 12, scale: 2 }).notNull().default(0),
         status: t.text().notNull().default("pending"),
         customer_id: t.ref("customers").notNull(),
       },
@@ -279,7 +279,7 @@ introspection cannot recover. It is valid **only in `create()`** — an added
 column is never the system PK, so `t.id({ prefix })` on `.column().add()` is a
 hard `OP_INVALID` (the prefix would otherwise be silently dropped).
 
-**`t.vector(n, { metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
+**`t.vector({ dimensions, metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
 operator class. Closed set: `cosine | l2 | innerProduct`. Declared-only (pgvector
 stores dimensions, not the search metric).
 
@@ -303,7 +303,7 @@ export default {
     table("documents").create({
       columns: {
         id: t.id({ prefix: "doc" }),
-        embedding: t.vector(1536, { metric: "cosine" }),
+        embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
         ssn: t.text().mask({ kind: "last4", classification: "pci" }),
         email: t.text().mask({ kind: "email" }), // classification defaults to "pii"
       },
@@ -364,7 +364,7 @@ table("audit_log").create({
       onDelete: "cascade",
     },
   ],
-  indexes: [{ name: "members_org_idx", columns: ["org_id"] }],
+  indexes: [{ name: "members_org_idx", on: ["org_id"] }],
 });
 
 table("scratch").drop({ ifExists: true, cascade: true });
@@ -403,7 +403,7 @@ const orders = table("orders");
 orders.column("status").add({ type: t.text().notNull().default("new") });
 orders.column("legacy").drop({ ifExists: true });
 orders.column("label").rename({ to: "display_label", type: t.text() }); // named ⇒ no swap
-orders.column("total").setType({ to: t.numeric(14, 2), using: (c) => c("total").cast("real") });
+orders.column("total").setType({ to: t.numeric({ precision: 14, scale: 2 }), using: (c) => c("total").cast("real") });
 orders.column("note").dropNotNull();
 orders.column("note").setDefault("memo");
 orders.column("note").dropDefault();
@@ -434,17 +434,27 @@ table("orders").constraint("orders_total_nonneg").drop({ ifExists: true }); // k
 
 ```ts
 const members = table("members");
-members.index("members_email_idx").add({ columns: ["email"], unique: true, using: "btree" });
+members.index("members_email_idx").add({ on: ["email"], unique: true });
 members.index("members_created_idx").add({
-  columns: ["org_id", { kind: "column", name: "created_at", order: "desc" }],
+  on: ["org_id", { column: "created_at", order: "desc" }],
 });
 members.index("members_email_idx").drop({ unique: true });
+
+pgTable("members").index("members_active_email_idx").add({
+  on: ["email"],
+  where: (c) => c("active").isTrue(),
+  include: ["id"],
+  using: "btree",
+});
 ```
 
 Indexes are **name-first** (the selector name), so a later migration can drop them
 deterministically. `.index().drop({ unique: true })` carries `unique` because the
 engine gates a UNIQUE-index drop as destructive (it silently removes a
 data-integrity guarantee) — omit it for a plain, reversible drop.
+PostgreSQL-specific index options (`using`, `where`, `include`, `with`, `only`,
+`nullsNotDistinct`, per-element `opclass`/`collation`) are only on
+`pgTable(...).index(...)` from `@zeroship/migrate/pg`.
 
 ### Table data — direct named DML
 
@@ -469,7 +479,7 @@ table("orders").update({
   where: (c) => c("status").eq("pending"),
 });
 
-table("sessions").del({ where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
+table("sessions").delete({ where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
 
 table("orders").backfill({
   set: { total_norm: (c) => c.fn.coalesce(c("total"), 0) },
@@ -486,11 +496,11 @@ table("orders").backfill({
   resumable loop that persists crash-safe cursor progress under the project
   lock. It runs on **both backends** (PG via the existing windowed executor;
   SQLite via the committed batched executor).
-- Row values may be a string / safe number / `bigint` / boolean / `null` /
-  `Uint8Array` / `{ decimal: "…" }`. A `bigint` (integers beyond 2^53) is
-  normalized to the `{ decimal }` carrier and a `Uint8Array` to a base64
-  `{ bytes }` carrier before recording, so the wire shape matches the engine's
-  scalar deserializer.
+- Row values may be a string / safe number / `decimal("…")` / boolean / `null`
+  / `Uint8Array`. Use `decimal("<n>")` for integers beyond 2^53 or fixed-scale
+  numeric values; it records the IR `{ decimal }` carrier. A `Uint8Array` is
+  normalized to a base64 `{ bytes }` carrier before recording, so the wire shape
+  matches the engine's scalar deserializer.
 - DML carries **no existence guard** (it is not guardable); `schema` rides on the
   args object.
 
@@ -780,17 +790,16 @@ export default {
 
 ## The fluent expression surface
 
-Every expression position — a DML `set` value, a `where`, an `addCheck` body, a
+Every expression position — a DML `set` value, a `where`, a `check(name).add` body, a
 partial-index `where:` — is a callback `(c) => Expr` with a **single injected
 builder handle** `c`. It is never a raw string; it constructs a node of a closed
 AST via an all-strings fluent builder
 (`sdks/migrate/src/ops.ts:281-366`, `sdks/migrate/src/types.ts:95-156`).
 
 **`c` is both a column accessor and the function namespace.** `c("first")`
-returns a `ColRef` chain; the argument is a plain string. `c` is scoped to the
-enclosing op's target table: `c("x")` resolves against that one table and
-nothing else — there is no `c("other.col")` and no second-table accessor
-(cross-table references are not expressible, see
+returns an unqualified `ColRef` chain; `c("table", "col")` returns a qualified
+`ColRef`. Arguments are plain strings; there is no dotted-string form like
+`c("other.col")` (cross-table references remain limited by
 [the portability boundary](#the-dml-portability-boundary)).
 
 **Chainable operator methods** (each builds one closed-AST node; a bare JS value
@@ -798,7 +807,7 @@ passed to a method auto-wraps to a `Literal` and is bound via `$n`/`?n`, never
 interpolated):
 
 - comparison: `.eq(x)`, `.ne(x)`, `.lt(x)`, `.le(x)`, `.gt(x)`, `.ge(x)`
-- boolean: `.and(e)`, `.or(e)`, `.not()`
+- boolean: `.and(...es)`, `.or(...es)`, `.not()`
 - arithmetic: `.add(x)`, `.sub(x)`, `.mul(x)`, `.div(x)`
 - string/value: `.concat(...parts)` (raw `||`, NULL-propagating). The
   NULL-skipping `concatWs` and `coalesce` live on `c.fn.*` only (they are not
@@ -816,7 +825,7 @@ interpolated):
   for joining first+last name. Engine-synthesized to be byte-identical across PG
   (`concat_ws`) and SQLite (a proven `coalesce`-folded `||`). For empty-string
   join use `c.fn.concatWs("", …)`.
-- `c.fn.case([[cond, val], …], elseVal?)` — the searched `CASE` form
+- `c.case({ branches: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
 - `c.fn.splitPart(e, delim, n)` — the engine-synthesized portable split helper,
   within its pinned envelope (see below)
 - `c.fn.now()`, `c.fn.genRandomUuid()` — DB-evaluated apply-time scalars
@@ -868,7 +877,7 @@ transform only through the closed fluent AST, never raw SQL.
 - `del` with a `where`.
 - One-shot `update` / `backfill` whose `set` / `where` use only the closed
   fluent AST: column refs, auto-wrapped literals, arithmetic,
-  comparison/boolean operators, `c.fn.case`, the allow-listed
+  comparison/boolean operators, `c.case`, the allow-listed
   provably-identical scalars (`coalesce`, `nullif`, `lower`, `upper`, `trim`,
   `length`, `abs`, `.cast(<portable type>)`, `.concat`), and `c.fn.concatWs`.
 - The engine-synthesized `c.fn.splitPart` helper **within its pinned envelope**.
@@ -1099,11 +1108,13 @@ for the build/watch wiring.
 
 > **Implemented: Postgres vendor primitives.** The `@zeroship/migrate/pg`
 > subpath exposes direct named exports, not a `pg` namespace object. The current
-> vendor value exports are `schema`, `dropSchema`, `extension`, `dropExtension`,
-> `role`, `alterRole`, `dropRole`, `dropOwnedBy`, `grant`, `revoke`,
-> `createPolicy`, `dropPolicy`, `createFunction`, `dropFunction`, `domain`,
-> `sequence`, and `raw`. These are Postgres-only and operator-gated so the
-> platform's own privileged DDL can be authored in the DSL. The engine lowers
+> vendor value exports are `schema`, `extension`, `role`, `dropOwnedBy`,
+> `grant`, `revoke`, `pgTable`, `createFunction`, `dropFunction`, `domain`,
+> `sequence`, and `raw`.
+> Table-scoped policies are authored as
+> `pgTable(table).policy(name).create/drop(...)`. These are Postgres-only and
+> operator-gated so the platform's own privileged DDL can be authored in the DSL.
+> The engine lowers
 > these vendor ops through the Postgres vendor renderer, hard-gated to the
 > Trusted/Platform profile and unreachable from a Confined creator migration by
 > construction.
@@ -1129,7 +1140,7 @@ runs.
 
 **What renders (the offline-renderable subset).** The DB-independent ops render
 their real SQL: `createTable` / `dropTable` / `addColumn` / `dropColumn` /
-`addForeignKey` / `addUnique` / `addCheck` / `dropConstraint` / `createIndex` /
+`addConstraint` (fk / unique / check / exclusion) / `dropConstraint` / `createIndex` /
 `dropIndex` / `createSequence` / `alterSequence` / `dropSequence` / `comment`;
 Postgres also renders native exclusion constraints, while SQLite/MySQL refuse
 them fail-closed. Partial indexes render on Postgres and SQLite; MySQL refuses

@@ -52,7 +52,7 @@ authoring surface*.
 schema.ts  (t.string / t.encrypted / t.vector / t.mask / t.ref(onDelete) / t.fts)
    │  zeroship-migrate generate   — diff schema.ts (desired) vs migration-state
    ▼
-db/migrations/V<ts>__<name>.sql   — versioned migration = SOURCE OF TRUTH (committed/reviewed)
+migrations/<ts>_<name>.ts         — versioned migration = SOURCE OF TRUTH (committed/reviewed)
    │  zeroship-migrate (deploy)   — applies (Confined, schema "<app_id>", provisions role/schema)
    ▼
 live DB  (+ sentinels: /* zsenc:… */, __zsmask:…, vector(N), geography)
@@ -175,7 +175,7 @@ CLI loses its clean-standalone-binary property. So:
 
 So `zeroship-migrate generate --schema schema.ts` is the platform/full build
 (carries the JS front-end, one self-contained tool — no separate Node/vite step);
-`zeroship-migrate migrate ./db/migrations` is the lean build (no JS). Both feed
+`zeroship-migrate migrate ./migrations` is the lean build (no JS). Both feed
 the same descriptor IR + diff/migrate. **No HCL** is needed: JS creators use
 `schema.ts`; everyone else uses SQL migrations; a future declarative format would
 just be another front-end emitting the same IR.

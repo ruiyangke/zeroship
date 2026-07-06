@@ -270,6 +270,50 @@ async fn one_shot_insert_update_delete_apply_on_sqlite() {
 }
 
 #[compio::test]
+async fn update_set_scalar_and_expr_apply_on_sqlite() {
+    let p = paths("mixed_set");
+    let be = backend(&p);
+
+    let create = r#"{"ir_version":1,"name":"create_mix","ops":[
+        {"op":"createTable","name":"mix","columns":[
+            {"name":"base","type":"int","nullable":false},
+            {"name":"scalar_val","type":"int","nullable":false},
+            {"name":"expr_val","type":"int","nullable":false}
+        ]}
+    ]}"#;
+    lower_and_apply(&be, create, &registry(&[]), Approval::None).await;
+
+    let seed = r#"{"ir_version":1,"name":"seed_mix","ops":[
+        {"op":"insert","table":"mix",
+         "columns":["id","created_at","updated_at","version","base","scalar_val","expr_val"],
+         "rows":[["m1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,5,0,0]]}
+    ]}"#;
+    lower_plan_and_apply(&be, seed, &registry(&[("mix", APP)]), Approval::None).await;
+
+    let update = r#"{"ir_version":1,"name":"update_mix","ops":[
+        {"op":"update","table":"mix",
+         "set":{"scalar_val":7,"expr_val":{"node":"binOp","op":"add",
+             "lhs":{"node":"colRef","name":"base"},
+             "rhs":{"node":"literal","value":1}}},
+         "where":{"node":"binOp","op":"eq",
+             "lhs":{"node":"colRef","name":"id"},
+             "rhs":{"node":"literal","value":"m1"}}}
+    ]}"#;
+    lower_plan_and_apply(&be, update, &registry(&[("mix", APP)]), Approval::None).await;
+
+    let rows = be
+        .actor()
+        .query("SELECT scalar_val, expr_val FROM mix WHERE id = 'm1'")
+        .await
+        .expect("read mixed set update proof row");
+    assert_eq!(
+        rows,
+        vec![vec![Some("7".into()), Some("6".into())]],
+        "SQLite update.set scalar and expression values apply identically"
+    );
+}
+
+#[compio::test]
 async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_sqlite() {
     let p = paths("fnsynth_symbol");
     let be = backend(&p);
@@ -601,6 +645,70 @@ async fn portable_cast_and_concat_apply_on_sqlite() {
     lower_plan_and_apply(&be, ir, &registry(&[("codes", APP)]), Approval::None).await;
     let rows = be.actor().query("SELECT label FROM codes WHERE code = 200").await.expect("probe");
     assert_eq!(rows[0], vec![None], "concat with a NULL operand propagates NULL on SQLite");
+}
+
+#[compio::test]
+async fn in_list_predicates_apply_identically_on_sqlite() {
+    let p = paths("inlist");
+    let be = backend(&p);
+
+    let create = r#"{"ir_version":1,"name":"create_inlist_rows","ops":[
+        {"op":"createTable","name":"inlist_rows","columns":[
+            {"name":"status","type":"text","nullable":false},
+            {"name":"in_match","type":"text","nullable":false},
+            {"name":"not_in_match","type":"text","nullable":false},
+            {"name":"empty_in_match","type":"text","nullable":false},
+            {"name":"empty_not_in_match","type":"text","nullable":false}
+        ]}
+    ]}"#;
+    lower_and_apply(&be, create, &registry(&[]), Approval::None).await;
+
+    let seed = r#"{"ir_version":1,"name":"seed_inlist_rows","ops":[
+        {"op":"insert","table":"inlist_rows",
+         "columns":["id","created_at","updated_at","version","status","in_match","not_in_match","empty_in_match","empty_not_in_match"],
+         "rows":[
+            ["r1","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"active","no","no","no","no"],
+            ["r2","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"trial","no","no","no","no"],
+            ["r3","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"deleted","no","no","no","no"],
+            ["r4","2026-01-01T00:00:00Z","2026-01-01T00:00:00Z",1,"archived","no","no","no","no"]
+         ]}
+    ]}"#;
+    lower_plan_and_apply(&be, seed, &registry(&[("inlist_rows", APP)]), Approval::None).await;
+
+    let updates = r#"{"ir_version":1,"name":"update_inlist_rows","ops":[
+        {"op":"update","table":"inlist_rows",
+         "set":{"in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["active","trial"],"negated":false}},
+        {"op":"update","table":"inlist_rows",
+         "set":{"not_in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["deleted","archived"],"negated":true}},
+        {"op":"update","table":"inlist_rows",
+         "set":{"empty_in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":false}},
+        {"op":"update","table":"inlist_rows",
+         "set":{"empty_not_in_match":{"node":"literal","value":"yes"}},
+         "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":true}}
+    ]}"#;
+    lower_plan_and_apply(&be, updates, &registry(&[("inlist_rows", APP)]), Approval::None).await;
+
+    let rows = be
+        .actor()
+        .query(
+            "SELECT status, in_match, not_in_match, empty_in_match, empty_not_in_match \
+             FROM inlist_rows ORDER BY status",
+        )
+        .await
+        .expect("read inList proof rows");
+    assert_eq!(
+        rows,
+        vec![
+            vec![Some("active".into()), Some("yes".into()), Some("yes".into()), Some("no".into()), Some("yes".into())],
+            vec![Some("archived".into()), Some("no".into()), Some("no".into()), Some("no".into()), Some("yes".into())],
+            vec![Some("deleted".into()), Some("no".into()), Some("no".into()), Some("no".into()), Some("yes".into())],
+            vec![Some("trial".into()), Some("yes".into()), Some("yes".into()), Some("no".into()), Some("yes".into())],
+        ],
+        "SQLite inList/notIn/empty-list predicate matrix"
+    );
 }
 
 /// **PR6a `c.fn.concatWs` SQLite lowering — faithful apply coverage (§9).** SQLite

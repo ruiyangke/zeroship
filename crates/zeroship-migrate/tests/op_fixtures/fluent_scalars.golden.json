@@ -61,7 +61,7 @@
         },
         {
           "name": "salt",
-          "type": "bytea",
+          "type": "bytes",
           "default": {
             "literal": {
               "value": {

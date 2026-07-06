@@ -167,15 +167,6 @@ fn identity_id() -> IrColumn {
     id
 }
 
-fn pk_id() -> IrConstraint {
-    IrConstraint {
-        name: None,
-        kind: IrConstraintKind::Pk {
-            columns: vec!["id".to_string()],
-        },
-    }
-}
-
 fn positive_value_check() -> Expr {
     Expr::BinOp {
         op: BinaryOp::Ge,
@@ -189,6 +180,7 @@ fn common_ops() -> Vec<Op> {
         "status",
         ColType::Enum {
             name: "app_status".to_string(),
+            schema: None,
         },
         false,
     );
@@ -236,12 +228,13 @@ fn common_ops() -> Vec<Op> {
                     "credit_cents",
                     ColType::Domain {
                         name: "positive_cents".to_string(),
+                        schema: None,
                     },
                     false,
                 ),
             ],
-            primary_key: None,
-            constraints: vec![pk_id()],
+            primary_key: Some(vec!["id".to_string()]),
+            constraints: Vec::new(),
             indexes: Vec::new(),
 
         partition_by: None,
@@ -260,24 +253,29 @@ fn common_ops() -> Vec<Op> {
                     "unit_cents",
                     ColType::Domain {
                         name: "positive_cents".to_string(),
+                        schema: None,
                     },
                     false,
                 ),
                 total,
                 order_status,
             ],
-            primary_key: None,
-            constraints: vec![pk_id()],
+            primary_key: Some(vec!["id".to_string()]),
+            constraints: Vec::new(),
             indexes: vec![IrIndex {
                 name: Some("orders_account_status_active_idx".to_string()),
                 columns: vec![
                     IndexElement::Column {
                         name: "account_id".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                     IndexElement::Column {
                         name: "status".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     },
                 ],
                 unique: Some(false),
@@ -286,6 +284,7 @@ fn common_ops() -> Vec<Op> {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             }],
 
         partition_by: None,
@@ -674,6 +673,8 @@ fn table_check_constraints_are_pg_only_until_non_pg_renderers_land() {
                 lhs: Box::new(Expr::col("qty")),
                 rhs: Box::new(Expr::lit(IrScalar::Int(1))),
             },
+        
+            not_valid: None,
         },
     };
     let check_op = Op::CreateTable {
@@ -740,6 +741,8 @@ fn sqlite_table_fk_and_unique_constraints_fail_closed_until_emitter_threads_them
                     on_update: Some(RefAction::Restrict),
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             }],
         indexes: Vec::new(),

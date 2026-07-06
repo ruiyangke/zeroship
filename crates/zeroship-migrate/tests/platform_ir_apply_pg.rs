@@ -90,14 +90,11 @@ const PLATFORM_VENDOR_IR: &str = r#"{
       ]
     },
     {
-      "op": "enableRls",
+      "op": "setRls",
       "table": "ir_accounts",
-      "schema": "zeroship"
-    },
-    {
-      "op": "forceRls",
-      "table": "ir_accounts",
-      "schema": "zeroship"
+      "schema": "zeroship",
+      "enabled": true,
+      "forced": true
     },
     {
       "op": "createPolicy",
@@ -214,17 +211,17 @@ const CONFINED_GRANT_IR: &str = r#"{
 "#;
 const PLATFORM_ATTACH_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { createFunction, schema } from "@zeroship/migrate/pg";
+import { createFunction, pgTable, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_attach";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("platform_apps", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["id"],
   });
@@ -235,7 +232,7 @@ export function up() {
       route: t.text().notNull(),
       target: t.text().notNull(),
       status: t.text().notNull(),
-      created_at: t.timestamp().notNull().default({ fn: "now" }),
+      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
     },
     primaryKey: ["app_id", "route"],
     checks: [
@@ -243,19 +240,17 @@ export function up() {
     ],
   });
 
-  const registry = table("platform_registry", { schema: "zeroship" });
+  const registry = pgTable("platform_registry", { schema: "zeroship" });
   registry.foreignKey("platform_registry_app_fk").add({
     columns: ["app_id"],
     references: { table: "platform_apps", columns: ["id"] },
   });
   registry.check("platform_registry_status_check").add({
-    expr: (c) => c.pg.eqAnyArray(c("status"), ["active", "paused"]),
+    expr: (c) => c("status").in(["active", "paused"]),
   });
-  registry.index("platform_registry_target_idx").add({ columns: ["target"] });
-  registry.enableRowLevelSecurity();
-  registry.forceRowLevelSecurity();
-  registry.createPolicy({
-    name: "tenant_isolation",
+  registry.index("platform_registry_target_idx").add({ on: ["target"] });
+  registry.setRls({ enabled: true, forced: true });
+  registry.policy("tenant_isolation").create({
     for: "all",
     using: (c) => c("app_id").isNotNull(),
     withCheck: (c) => c("app_id").isNotNull(),
@@ -270,8 +265,7 @@ export function up() {
     replace: true,
     body: "BEGIN RETURN NEW; END;",
   });
-  registry.createTrigger({
-    name: "platform_registry_touch_trg",
+  registry.trigger("platform_registry_touch_trg").create({
     timing: "before",
     events: ["update"],
     forEach: "row",
@@ -281,12 +275,12 @@ export function up() {
 "#;
 const PLATFORM_COMPOSITE_FK_TS: &str = r#"
 import { table, t } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { pgTable, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_composite_fk";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {
@@ -300,7 +294,7 @@ export function up() {
     },
     primaryKey: null,
   });
-  table("app_oauth_clients", { schema: "zeroship" }).addForeignKey("app_oauth_clients_client_id_fkey", {
+  table("app_oauth_clients", { schema: "zeroship" }).foreignKey("app_oauth_clients_client_id_fkey").add({
     columns: ["client_id"],
     references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" },
     onDelete: "cascade",
@@ -322,7 +316,7 @@ export function up() {
     },
     primaryKey: null,
   });
-  table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+  table("billing_line_provider_refs", { schema: "zeroship" }).foreignKey("billing_line_provider_refs_line_fk").add({
     columns: ["invoice_id", "app_id", "segment_no"],
     references: {
       table: "invoice_lines",
@@ -340,12 +334,12 @@ import { schema } from "@zeroship/migrate/pg";
 export const name = "platform_synth_defaults";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("platform_events", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      occurred_at: t.timestamp().notNull().default({ fn: "now" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
       kind: t.text().notNull(),
       payload: t.json().notNull(),
       items: t.json().notNull(),
@@ -360,30 +354,25 @@ import {
   table,
   t,
   check,
-  and,
-  or,
-  membership,
-  notMembership,
-  interval,
 } from "@zeroship/migrate";
-import { schema } from "@zeroship/migrate/pg";
+import { pgTable, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_expr_surface";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
-  table("expr_surface", { schema: "zeroship" }).create({
+  pgTable("expr_surface", { schema: "zeroship" }).create({
     columns: {
       pkce_method: t.text().notNull(),
-      amount_cents: t.integer().notNull(),
+      amount_cents: t.int().notNull(),
       user_id: t.text().notNull(),
       kind: t.text().notNull(),
       data: t.json().notNull(),
-      subtotal_cents: t.integer().notNull(),
-      credit_cents: t.integer().notNull(),
-      total_cents: t.integer().notNull(),
-      floor_cents: t.integer(),
+      subtotal_cents: t.int().notNull(),
+      credit_cents: t.int().notNull(),
+      total_cents: t.int().notNull(),
+      floor_cents: t.int(),
       created_at: t.timestamp().notNull(),
       expires_at: t.timestamp().notNull(),
       active: t.boolean().notNull(),
@@ -395,46 +384,42 @@ export function up() {
     },
     checks: [
       check("expr_pkce_method_check", (c) => c("pkce_method").eq("S256")),
-      check("expr_user_id_fmt", (c) => c("user_id").matches("^usr_[0-9A-Za-z]{20,40}$")),
-      check("expr_kind_ok", (c) => membership(c("kind"), ["a", "b", "c"])),
-      check("expr_kind_not_reserved", (c) => notMembership(c("kind"), ["x", "y"])),
-      check("expr_data_size", (c) => c("data").columnSize().lt(262144)),
+      check("expr_user_id_fmt", (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$")),
+      check("expr_kind_ok", (c) => c("kind").in(["a", "b", "c"])),
+      check("expr_kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
+      check("expr_data_size", (c) => c.pg.pgColumnSize(c("data")).lt(262144)),
       check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
-      check("expr_floor_nonneg_or_null", (c) => or(c("floor_cents").isNull(), c("floor_cents").ge(0))),
-      check("expr_active_visible", (c) => and(c("active"), c("visible"))),
-      check("expr_expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
+      check("expr_floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
+      check("expr_active_visible", (c) => c("active").and(c("visible"))),
+      { name: "expr_expires_window", expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) },
       // Mirrors the platform sandboxes_snapshot_artifact_consistency marker:
-      // a <> ALL negated-membership OR'd with a 3-way IS NOT NULL AND chain.
+      // a <> ALL negated inList OR'd with a 3-way IS NOT NULL AND chain.
       check("expr_snapshot_consistency", (c) =>
-        or(
-          notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]),
-          and(
-            c("snapshot_artifact_path").isNotNull(),
-            c("snapshot_sha256").isNotNull(),
-            c("snapshot_ch_version").isNotNull(),
-          ),
+        c("status").notIn(["snapshotted", "snapshotted_suspect"]).or(
+          c("snapshot_artifact_path").isNotNull()
+            .and(c("snapshot_sha256").isNotNull())
+            .and(c("snapshot_ch_version").isNotNull()),
         )),
     ],
   });
 
-  table("expr_surface", { schema: "zeroship" }).addCheck(
-    "expr_amount_nonnegative",
-    (c) => c("amount_cents").ge(0),
-  );
+  table("expr_surface", { schema: "zeroship" }).check("expr_amount_nonnegative").add({
+    expr: (c) => c("amount_cents").ge(0),
+  });
 
-  // Partial index whose predicate is a notMembership (<> ALL) — mirrors the
+  // Partial index whose predicate is a notIn (<> ALL on PG) — mirrors the
   // platform wake_jobs partial indexes.
-  table("expr_surface", { schema: "zeroship" })
+  pgTable("expr_surface", { schema: "zeroship" })
     .index("expr_status_partial_idx")
-    .add({ columns: ["status"], where: (c) => notMembership(c("status"), ["snapshotted", "snapshotted_suspect"]) });
+    .add({ on: ["status"], where: (c) => c("status").notIn(["snapshotted", "snapshotted_suspect"]) });
 
   table("expr_surface", { schema: "zeroship" })
     .index("expr_created_desc_idx")
-    .add({ columns: [{ kind: "column", name: "created_at", order: "desc" }] });
+    .add({ on: [{ column: "created_at", order: "desc" }] });
 
   table("expr_surface", { schema: "zeroship" })
     .index("expr_user_created_desc_idx")
-    .add({ columns: ["user_id", { kind: "column", name: "created_at", order: "desc" }] });
+    .add({ on: ["user_id", { column: "created_at", order: "desc" }] });
 }
 "#;
 const PLATFORM_SCALAR_TYPES_TS: &str = r#"
@@ -444,34 +429,34 @@ import { schema } from "@zeroship/migrate/pg";
 export const name = "platform_scalar_types";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   table("platform_scalar_types", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
       shard: t.smallInt().notNull(),
       ratio: t.real().notNull(),
       source_ip: t.inet(),
       scopes: t.textArray().notNull(),
-      currency: t.char(3).notNull().default("usd"),
+      currency: t.char({ length: 3 }).notNull().default("usd"),
     },
     primaryKey: ["id"],
   });
 }
 "#;
 const PLATFORM_DOMAIN_COLUMN_TS: &str = r#"
-import { membership, table, t } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 import { domain, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_domain_column";
 
 export function up() {
-  schema({ name: "zeroship", ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
 
   domain("myd").create({
     schema: "zeroship",
     as: t.text(),
-    check: (c) => membership(c("VALUE"), ["a", "b"]),
+    check: (v) => v.in(["a", "b"]),
   });
 
   table("domain_surface", { schema: "zeroship" }).create({
@@ -1216,7 +1201,7 @@ async fn platform_ts_check_expression_surface_round_trips_on_live_pg() {
         Some(
             "CREATE INDEX expr_status_partial_idx ON zeroship.expr_surface USING btree (status) WHERE (status <> ALL (ARRAY['snapshotted'::text, 'snapshotted_suspect'::text]))"
         ),
-        "notMembership partial-index predicate round-trips through pg_get_indexdef"
+        "notIn partial-index predicate round-trips through pg_get_indexdef"
     );
     assert_eq!(
         index_definition(&conn, "zeroship", "expr_created_desc_idx")
@@ -1295,20 +1280,20 @@ async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
             .await
             .as_deref(),
         Some("bpchar"),
-        "t.char(3) renders as Postgres bpchar"
+        "t.char({{ length: 3 }}) renders as Postgres bpchar"
     );
     assert_eq!(
         column_character_maximum_length(&conn, "zeroship", "platform_scalar_types", "currency")
             .await,
         Some(3),
-        "t.char(3) preserves character_maximum_length=3"
+        "t.char({{ length: 3 }}) preserves character_maximum_length=3"
     );
     assert_eq!(
         column_default_expr(&conn, "zeroship", "platform_scalar_types", "currency")
             .await
             .as_deref(),
         Some("'usd'::bpchar"),
-        "t.char(3).default(\"usd\") round-trips through pg_get_expr as bpchar"
+        "t.char({{ length: 3 }}).default(\"usd\") round-trips through pg_get_expr as bpchar"
     );
 
     reset(&conn, &meta).await;
@@ -1491,7 +1476,7 @@ async fn platform_ts_exact_create_table_structural_attachments_apply_on_live_pg(
     assert_eq!(
         relation_rls(&conn, "zeroship", "platform_registry").await,
         (true, true),
-        "enableRls + forceRls attached to the platform-exact table"
+        "setRls attached to the platform-exact table"
     );
     assert!(
         policy_exists(&conn, "zeroship", "platform_registry", "tenant_isolation").await,

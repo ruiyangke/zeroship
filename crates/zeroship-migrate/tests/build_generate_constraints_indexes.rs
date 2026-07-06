@@ -102,11 +102,13 @@ fn generate_synthesizes_plain_user_index() {
         &vec![IndexElement::Column {
             name: "email".to_string(),
             order: None,
+            opclass: None,
+            collation: None,
         }]
     );
     assert_eq!(idx_name.as_deref(), Some("members_email_idx"));
     // The emitted .ts mirrors the synthesized index via the fluent surface:
-    // `table("members").index("members_email_idx").add({ columns: ["email"] })`.
+    // `table("members").index("members_email_idx").add({ on: ["email"] })`.
     assert!(
         gen.ts_body.contains(".index(") && gen.ts_body.contains(".add({"),
         "the emitted .ts must mirror the synthesized index via .index().add(); got:\n{}",

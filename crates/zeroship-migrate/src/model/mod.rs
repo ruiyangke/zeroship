@@ -1,5 +1,6 @@
 pub mod backfill;
 pub mod capability;
+pub mod dialect_table;
 pub mod expr;
 pub mod ir;
 pub mod load;

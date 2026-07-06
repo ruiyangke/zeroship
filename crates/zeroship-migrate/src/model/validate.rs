@@ -42,7 +42,7 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
-use crate::model::expr::{CaseBranch, Expr, PgArrayMembershipOp, SynthFn};
+use crate::model::expr::{CaseBranch, Duration, Expr, ScalarFn, SynthFn};
 use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
@@ -118,6 +118,24 @@ pub const CODE_PGRAW_REASON_REQUIRED: &str = "PGRAW_REASON_REQUIRED";
 pub const CODE_PRIMARY_KEY_INVALID: &str = "PRIMARY_KEY_INVALID";
 /// A resolved `createTable` violates the active profile's table-shape policy.
 pub const CODE_TABLE_SHAPE_POLICY: &str = "TABLE_SHAPE_POLICY";
+/// A dialect target cannot realize an authored construct and no P12 affirmation
+/// authorizes a transparent-degradable leg.
+pub const CODE_DIALECT_UNSUPPORTED: &str = "DIALECT_UNSUPPORTED";
+/// Partition rule 1: unique-enforcing entries on a partitioned table must cover
+/// all partition key columns.
+pub const CODE_PARTITION_KEY_COVERAGE: &str = "PARTITION_KEY_COVERAGE";
+/// Partition rule 2: collapse-affirmed bound sets must be total.
+pub const CODE_PARTITION_BOUNDS_NOT_TOTAL: &str = "PARTITION_BOUNDS_NOT_TOTAL";
+/// Partition rule 2: v1 range collapse only supports a single partition key.
+pub const CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED: &str =
+    "PARTITION_COMPOSITE_KEY_UNSUPPORTED";
+/// Partition rule 2: collapse predicates require two-valued, non-null keys.
+pub const CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE: &str =
+    "PARTITION_KEY_NULLABLE_UNDER_COLLAPSE";
+/// Partition rule 3: sibling bounds must be PG-well-formed.
+pub const CODE_PARTITION_BOUNDS_ILL_FORMED: &str = "PARTITION_BOUNDS_ILL_FORMED";
+/// Partition tier split: hash child drops have no portable collapse predicate.
+pub const CODE_PARTITION_HASH_DROP_UNDERIVABLE: &str = "PARTITION_HASH_DROP_UNDERIVABLE";
 
 /// The MAX byte length a `t.id({prefix})` prefix may carry (P2a §4). Mirrors the
 /// typed_id convention (`crates/core/src/typed_id.rs`: `usr`/`app`/`ses` are 3
@@ -388,6 +406,672 @@ pub fn validate_ir_scoped(
             policy_profile,
         )?;
     }
+    validate_partition_recording(ir, target_dialect, ts_locations)?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PartitionUniqueEntry {
+    op_index: usize,
+    label: &'static str,
+    columns: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionParentFold {
+    op_index: usize,
+    spec: crate::model::ir::PartitionSpec,
+    not_null_columns: std::collections::BTreeSet<String>,
+    unique_entries: Vec<PartitionUniqueEntry>,
+    children: std::collections::BTreeMap<String, (usize, crate::model::ir::PartitionBounds)>,
+}
+
+fn partition_error(
+    code: &'static str,
+    op_index: usize,
+    ts_locations: &[Option<String>],
+    dialect: Dialect,
+    reason: impl Into<String>,
+    suggested_fix: impl Into<String>,
+) -> AuthoringError {
+    AuthoringError {
+        code: code.to_string(),
+        kind: None,
+        op_index,
+        ts_location: ts_locations.get(op_index).cloned().flatten(),
+        dialect,
+        reason: reason.into(),
+        suggested_fix: Some(suggested_fix.into()),
+    }
+}
+
+fn partition_spec_label(spec: &crate::model::ir::PartitionSpec) -> &'static str {
+    match spec {
+        crate::model::ir::PartitionSpec::Range { .. } => "range",
+        crate::model::ir::PartitionSpec::List { .. } => "list",
+        crate::model::ir::PartitionSpec::Hash { .. } => "hash",
+    }
+}
+
+fn index_column_names(index_columns: &[crate::model::ir::IndexElement]) -> Vec<String> {
+    index_columns
+        .iter()
+        .filter_map(|element| match element {
+            crate::model::ir::IndexElement::Column { name, .. } => Some(name.clone()),
+            crate::model::ir::IndexElement::Expr { .. } => None,
+        })
+        .collect()
+}
+
+fn exclusion_column_names(elements: &[crate::model::ir::ExclusionElement]) -> Vec<String> {
+    elements
+        .iter()
+        .filter_map(|element| match &element.target {
+            crate::model::ir::ColumnOrExpr::Column { name } => Some(name.clone()),
+            crate::model::ir::ColumnOrExpr::Expr { .. } => None,
+        })
+        .collect()
+}
+
+fn partition_bound_key(value: &crate::model::ir::PartitionBoundValue) -> String {
+    match value {
+        crate::model::ir::PartitionBoundValue::String { value } => format!("s:{value}"),
+        crate::model::ir::PartitionBoundValue::Int { value } => format!("i:{}", value.get()),
+        crate::model::ir::PartitionBoundValue::MinValue => "min".to_string(),
+        crate::model::ir::PartitionBoundValue::MaxValue => "max".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PartitionComparableBound<'a> {
+    Min,
+    Int(i64),
+    String(&'a str),
+    Max,
+}
+
+fn comparable_bound(
+    value: &crate::model::ir::PartitionBoundValue,
+) -> PartitionComparableBound<'_> {
+    match value {
+        crate::model::ir::PartitionBoundValue::String { value } => {
+            PartitionComparableBound::String(value)
+        }
+        crate::model::ir::PartitionBoundValue::Int { value } => {
+            PartitionComparableBound::Int(value.get())
+        }
+        crate::model::ir::PartitionBoundValue::MinValue => PartitionComparableBound::Min,
+        crate::model::ir::PartitionBoundValue::MaxValue => PartitionComparableBound::Max,
+    }
+}
+
+fn compare_bound_tuple(
+    lhs: &[crate::model::ir::PartitionBoundValue],
+    rhs: &[crate::model::ir::PartitionBoundValue],
+) -> Option<std::cmp::Ordering> {
+    if lhs.len() != rhs.len() {
+        return None;
+    }
+    for (l, r) in lhs.iter().zip(rhs) {
+        let l = comparable_bound(l);
+        let r = comparable_bound(r);
+        match (l, r) {
+            (PartitionComparableBound::Int(_), PartitionComparableBound::String(_))
+            | (PartitionComparableBound::String(_), PartitionComparableBound::Int(_)) => {
+                return None;
+            }
+            _ => {}
+        }
+        let ord = l.cmp(&r);
+        if !ord.is_eq() {
+            return Some(ord);
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
+}
+
+fn hash_gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn hash_lcm(a: u128, b: u128) -> Option<u128> {
+    if a == 0 || b == 0 {
+        return None;
+    }
+    a.checked_div(hash_gcd(a, b))?.checked_mul(b)
+}
+
+fn validate_partition_recording(
+    ir: &crate::model::ir::MigrationIr,
+    target_dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{IrConstraintKind, Op, PartitionSpec};
+
+    let mut parents: std::collections::BTreeMap<String, PartitionParentFold> =
+        std::collections::BTreeMap::new();
+
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        match op {
+            Op::CreateTable {
+                name,
+                columns,
+                primary_key,
+                constraints,
+                indexes,
+                partition_by: Some(spec),
+                ..
+            } => {
+                let mut not_null_columns = std::collections::BTreeSet::new();
+                for column in columns {
+                    if column.nullable == Some(false) {
+                        not_null_columns.insert(column.name.clone());
+                    }
+                }
+                let mut unique_entries = Vec::new();
+                if let Some(pk) = primary_key {
+                    for column in pk {
+                        not_null_columns.insert(column.clone());
+                    }
+                    unique_entries.push(PartitionUniqueEntry {
+                        op_index,
+                        label: "primary key",
+                        columns: pk.clone(),
+                    });
+                }
+                for column in columns {
+                    if column.unique.unwrap_or(false) {
+                        unique_entries.push(PartitionUniqueEntry {
+                            op_index,
+                            label: "column unique",
+                            columns: vec![column.name.clone()],
+                        });
+                    }
+                }
+                for constraint in constraints {
+                    match &constraint.kind {
+                        IrConstraintKind::Unique { columns } => {
+                            unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "unique constraint",
+                                columns: columns.clone(),
+                            });
+                        }
+                        IrConstraintKind::Exclusion { elements, .. } => {
+                            unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "exclusion constraint",
+                                columns: exclusion_column_names(elements),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                for index in indexes {
+                    if index.unique.unwrap_or(false) {
+                        unique_entries.push(PartitionUniqueEntry {
+                            op_index,
+                            label: "unique index",
+                            columns: index_column_names(&index.columns),
+                        });
+                    }
+                }
+                parents.insert(
+                    name.clone(),
+                    PartitionParentFold {
+                        op_index,
+                        spec: spec.clone(),
+                        not_null_columns,
+                        unique_entries,
+                        children: std::collections::BTreeMap::new(),
+                    },
+                );
+            }
+            Op::CreateTable { name, .. } => {
+                parents.remove(name);
+            }
+            Op::DropTable { table, .. } => {
+                parents.remove(table);
+            }
+            Op::RenameTable { table, to, .. } => {
+                if let Some(parent) = parents.remove(table) {
+                    parents.insert(to.clone(), parent);
+                }
+            }
+            Op::CreatePartition { name, of, bounds, .. } => {
+                if let Some(parent) = parents.get_mut(of) {
+                    parent.children.insert(name.clone(), (op_index, bounds.clone()));
+                } else if !matches!(target_dialect, Dialect::Postgres) {
+                    return Err(partition_error(
+                        CODE_DIALECT_UNSUPPORTED,
+                        op_index,
+                        ts_locations,
+                        target_dialect,
+                        format!(
+                            "createPartition {name:?} targets parent {of:?}, but this recording does not contain a collapse-affirmed partitioned parent to authorize the no-DDL leg"
+                        ),
+                        "record the partitioned parent with partitionBy.whenUnsupported: \"collapse\" in the same fold, or target Postgres for native partition DDL",
+                    ));
+                }
+            }
+            Op::AttachPartition { parent, name, bound, .. } => {
+                if let Some(parent) = parents.get_mut(parent) {
+                    parent.children.insert(name.clone(), (op_index, bound.clone()));
+                } else if !matches!(target_dialect, Dialect::Postgres) {
+                    return Err(partition_error(
+                        CODE_DIALECT_UNSUPPORTED,
+                        op_index,
+                        ts_locations,
+                        target_dialect,
+                        format!(
+                            "attachPartition {name:?} targets parent {parent:?}, but attachPartition is PostgreSQL-only"
+                        ),
+                        "target Postgres for native partition attach",
+                    ));
+                }
+            }
+            Op::DropPartition { parent, name, .. } => {
+                if let Some(parent_state) = parents.get(parent) {
+                    if parent_state.spec.collapse()
+                        && parent_state
+                            .children
+                            .get(name)
+                            .is_some_and(|(_, bounds)| matches!(bounds, crate::model::ir::PartitionBounds::Hash { .. }))
+                    {
+                        return Err(partition_error(
+                            CODE_PARTITION_HASH_DROP_UNDERIVABLE,
+                            op_index,
+                            ts_locations,
+                            target_dialect,
+                            format!(
+                                "dropping hash partition {name:?} from collapse-affirmed parent {parent:?} has no portable row predicate"
+                            ),
+                            "omit partitionBy.whenUnsupported for PG-only hash repartitioning, or avoid dropping hash children under collapse",
+                        ));
+                    }
+                }
+                if let Some(parent_state) = parents.get_mut(parent) {
+                    parent_state.children.remove(name);
+                }
+            }
+            Op::SetColumnNotNull { table, column, .. } => {
+                if let Some(parent) = parents.get_mut(table) {
+                    parent.not_null_columns.insert(column.clone());
+                }
+            }
+            Op::DropColumnNotNull { table, column, .. } => {
+                if let Some(parent) = parents.get_mut(table) {
+                    parent.not_null_columns.remove(column);
+                }
+            }
+            Op::AddConstraint { table, constraint, .. } => {
+                if let Some(parent) = parents.get_mut(table) {
+                    match &constraint.kind {
+                        IrConstraintKind::Unique { columns } => {
+                            parent.unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "unique constraint",
+                                columns: columns.clone(),
+                            });
+                        }
+                        IrConstraintKind::Exclusion { elements, .. } => {
+                            parent.unique_entries.push(PartitionUniqueEntry {
+                                op_index,
+                                label: "exclusion constraint",
+                                columns: exclusion_column_names(elements),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Op::CreateIndex {
+                table,
+                columns,
+                unique,
+                ..
+            } if unique.unwrap_or(false) => {
+                if let Some(parent) = parents.get_mut(table) {
+                    parent.unique_entries.push(PartitionUniqueEntry {
+                        op_index,
+                        label: "unique index",
+                        columns: index_column_names(columns),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (table, parent) in &parents {
+        let key_columns = parent.spec.columns();
+        for entry in &parent.unique_entries {
+            let cols: std::collections::BTreeSet<&str> =
+                entry.columns.iter().map(String::as_str).collect();
+            if let Some(missing) = key_columns.iter().find(|key| !cols.contains(key.as_str())) {
+                return Err(partition_error(
+                    CODE_PARTITION_KEY_COVERAGE,
+                    entry.op_index,
+                    ts_locations,
+                    target_dialect,
+                    format!(
+                        "partitioned table {table:?} has a {} that does not include partition key column {missing:?}",
+                        entry.label
+                    ),
+                    "include every partition key column in each primary key, unique constraint, unique index, and exclusion constraint on the partitioned table",
+                ));
+            }
+        }
+
+        validate_partition_bounds_well_formed(table, parent, target_dialect, ts_locations)?;
+
+        if parent.spec.collapse() {
+            if matches!(parent.spec, PartitionSpec::Range { .. }) && key_columns.len() != 1 {
+                return Err(partition_error(
+                    CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
+                    parent.op_index,
+                    ts_locations,
+                    target_dialect,
+                    format!(
+                        "collapse-affirmed range partitioning on table {table:?} has {} partition key columns; v1 collapse supports exactly one",
+                        key_columns.len()
+                    ),
+                    "use a single range partition key for collapse, or omit whenUnsupported and target Postgres only",
+                ));
+            }
+            for key in key_columns {
+                if !parent.not_null_columns.contains(key) {
+                    return Err(partition_error(
+                        CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
+                        parent.op_index,
+                        ts_locations,
+                        target_dialect,
+                        format!(
+                            "collapse-affirmed partitioned table {table:?} has nullable partition key column {key:?}"
+                        ),
+                        "mark every partition key column notNull, or omit whenUnsupported and target Postgres only",
+                    ));
+                }
+            }
+            validate_partition_bounds_total(table, parent, target_dialect, ts_locations)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_partition_bounds_well_formed(
+    table: &str,
+    parent: &PartitionParentFold,
+    dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{PartitionBounds, PartitionSpec};
+
+    match &parent.spec {
+        PartitionSpec::Range { columns, .. } => {
+            let mut ranges: Vec<(
+                usize,
+                &[crate::model::ir::PartitionBoundValue],
+                &[crate::model::ir::PartitionBoundValue],
+            )> = Vec::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                match bounds {
+                    PartitionBounds::Range { from, to } => {
+                        if from.len() != columns.len() || to.len() != columns.len() {
+                            return Err(partition_error(
+                                CODE_PARTITION_BOUNDS_ILL_FORMED,
+                                *op_index,
+                                ts_locations,
+                                dialect,
+                                format!(
+                                    "range partition child on table {table:?} has bound arity from={} to={} for {} partition key columns",
+                                    from.len(),
+                                    to.len(),
+                                    columns.len()
+                                ),
+                                "make each range bound tuple match the partition key arity",
+                            ));
+                        }
+                        if !matches!(
+                            compare_bound_tuple(from, to),
+                            Some(std::cmp::Ordering::Less)
+                        ) {
+                            return Err(partition_error(
+                                CODE_PARTITION_BOUNDS_ILL_FORMED,
+                                *op_index,
+                                ts_locations,
+                                dialect,
+                                format!(
+                                    "range partition child on table {table:?} has an empty, reversed, or incomparable FROM/TO bound"
+                                ),
+                                "use non-empty range bounds with comparable value kinds and FROM < TO",
+                            ));
+                        }
+                        ranges.push((*op_index, from, to));
+                    }
+                    PartitionBounds::Default => {}
+                    _ => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("range partitioned table {table:?} has a non-range child bound"),
+                            "use range bounds or a default child under a range-partitioned parent",
+                        ));
+                    }
+                }
+            }
+            for i in 0..ranges.len() {
+                for j in (i + 1)..ranges.len() {
+                    let (_, a_from, a_to) = ranges[i];
+                    let (b_op, b_from, b_to) = ranges[j];
+                    let overlaps = matches!(
+                        compare_bound_tuple(a_from, b_to),
+                        Some(std::cmp::Ordering::Less)
+                    ) && matches!(
+                        compare_bound_tuple(b_from, a_to),
+                        Some(std::cmp::Ordering::Less)
+                    );
+                    if overlaps {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            b_op,
+                            ts_locations,
+                            dialect,
+                            format!("range partition bounds on table {table:?} overlap"),
+                            "make sibling range partition bounds pairwise non-overlapping",
+                        ));
+                    }
+                }
+            }
+        }
+        PartitionSpec::List { .. } => {
+            let mut seen = std::collections::BTreeSet::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                match bounds {
+                    PartitionBounds::List { values } => {
+                        for value in values {
+                            let key = partition_bound_key(value);
+                            if !seen.insert(key) {
+                                return Err(partition_error(
+                                    CODE_PARTITION_BOUNDS_ILL_FORMED,
+                                    *op_index,
+                                    ts_locations,
+                                    dialect,
+                                    format!(
+                                        "list partition value {} appears more than once on table {table:?}",
+                                        partition_bound_key(value)
+                                    ),
+                                    "ensure each list-bound value appears at most once across all sibling partitions",
+                                ));
+                            }
+                        }
+                    }
+                    PartitionBounds::Default => {}
+                    _ => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("list partitioned table {table:?} has a non-list child bound"),
+                            "use list bounds or a default child under a list-partitioned parent",
+                        ));
+                    }
+                }
+            }
+        }
+        PartitionSpec::Hash { .. } => {
+            let mut classes = Vec::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                match bounds {
+                    PartitionBounds::Default => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("hash partitioned table {table:?} cannot have a default child"),
+                            "remove the default child from hash partitioning and use modulus/remainder bounds",
+                        ));
+                    }
+                    PartitionBounds::Hash { modulus, remainder } => {
+                    if *modulus == 0 || *remainder >= *modulus {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition on table {table:?} has modulus {modulus} and remainder {remainder}; remainder must be less than a non-zero modulus"
+                            ),
+                            "use hash bounds with modulus > 0 and remainder < modulus",
+                        ));
+                    }
+                    classes.push((*op_index, u128::from(*modulus), u128::from(*remainder)));
+                    }
+                    _ => {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!("hash partitioned table {table:?} has a non-hash child bound"),
+                            "use modulus/remainder bounds under a hash-partitioned parent",
+                        ));
+                    }
+                }
+            }
+            for i in 0..classes.len() {
+                for j in (i + 1)..classes.len() {
+                    let (op_index, m1, r1) = classes[i];
+                    let (op_index2, m2, r2) = classes[j];
+                    let (small_m, small_r, large_m, large_r, err_op) = if m1 <= m2 {
+                        (m1, r1, m2, r2, op_index2)
+                    } else {
+                        (m2, r2, m1, r1, op_index)
+                    };
+                    if large_m % small_m != 0 {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            err_op,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition moduli {m1} and {m2} on table {table:?} are not comparable by divisibility"
+                            ),
+                            "use hash partition moduli where every pair is comparable by divisibility",
+                        ));
+                    }
+                    if large_r % small_m == small_r {
+                        return Err(partition_error(
+                            CODE_PARTITION_BOUNDS_ILL_FORMED,
+                            err_op,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition congruence classes ({m1},{r1}) and ({m2},{r2}) overlap on table {table:?}"
+                            ),
+                            "use non-overlapping hash remainder classes",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_partition_bounds_total(
+    table: &str,
+    parent: &PartitionParentFold,
+    dialect: Dialect,
+    ts_locations: &[Option<String>],
+) -> Result<(), AuthoringError> {
+    use crate::model::ir::{PartitionBounds, PartitionSpec};
+
+    match &parent.spec {
+        PartitionSpec::Range { .. } | PartitionSpec::List { .. } => {
+            if !parent
+                .children
+                .values()
+                .any(|(_, bounds)| matches!(bounds, PartitionBounds::Default))
+            {
+                return Err(partition_error(
+                    CODE_PARTITION_BOUNDS_NOT_TOTAL,
+                    parent.op_index,
+                    ts_locations,
+                    dialect,
+                    format!(
+                        "collapse-affirmed {} partitioned table {table:?} has no default child",
+                        partition_spec_label(&parent.spec)
+                    ),
+                    "add a .partition(...).create({ default: true }) child, or omit whenUnsupported and target Postgres only",
+                ));
+            }
+        }
+        PartitionSpec::Hash { .. } => {
+            let mut lcm = 1_u128;
+            let mut classes = Vec::new();
+            for (_name, (op_index, bounds)) in &parent.children {
+                if let PartitionBounds::Hash { modulus, remainder } = bounds {
+                    lcm = hash_lcm(lcm, u128::from(*modulus)).ok_or_else(|| {
+                        partition_error(
+                            CODE_PARTITION_BOUNDS_NOT_TOTAL,
+                            *op_index,
+                            ts_locations,
+                            dialect,
+                            format!(
+                                "hash partition modulus set on table {table:?} overflows the validator's exact lcm arithmetic"
+                            ),
+                            "use smaller hash moduli or avoid collapse affirmation for this hash partition set",
+                        )
+                    })?;
+                    classes.push((u128::from(*modulus), u128::from(*remainder)));
+                }
+            }
+            let covered: u128 = classes.iter().map(|(m, _)| lcm / *m).sum();
+            if covered != lcm {
+                return Err(partition_error(
+                    CODE_PARTITION_BOUNDS_NOT_TOTAL,
+                    parent.op_index,
+                    ts_locations,
+                    dialect,
+                    format!(
+                        "collapse-affirmed hash partitioned table {table:?} covers {covered} of {lcm} residue classes"
+                    ),
+                    "declare hash children whose modulus/remainder classes cover every residue in 0..lcm(moduli)-1",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -460,7 +1144,7 @@ pub fn validate_op_scoped(
     let check_constraint =
         |kind: &IrConstraintKind, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
             match kind {
-                IrConstraintKind::Check { expr } => {
+                IrConstraintKind::Check { expr, .. } => {
                     validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
                 }
                 IrConstraintKind::Exclusion { elements, where_predicate, .. } => {
@@ -469,6 +1153,7 @@ pub fn validate_op_scoped(
                             ColumnOrExpr::Column { name } => {
                                 let col = crate::model::expr::Expr::ColRef {
                                     name: name.clone(),
+                                    table: None,
                                 };
                                 validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
                             }
@@ -490,7 +1175,7 @@ pub fn validate_op_scoped(
         |element: &IndexElement, scope: &TargetScope<'_>| -> Result<(), AuthoringError> {
             match element {
                 IndexElement::Column { name, .. } => {
-                    let col = crate::model::expr::Expr::ColRef { name: name.clone() };
+                    let col = crate::model::expr::Expr::ColRef { name: name.clone(), table: None };
                     validate_expr(&col, target_dialect, scope, op_index, ts_location)?;
                 }
                 IndexElement::Expr { expr } => {
@@ -518,12 +1203,7 @@ pub fn validate_op_scoped(
             for c in constraints {
                 check_constraint(&c.kind, &scope)?;
             }
-            let pk_cols = primary_key.as_deref().or_else(|| {
-                constraints.iter().find_map(|c| match &c.kind {
-                    IrConstraintKind::Pk { columns } => Some(columns.as_slice()),
-                    _ => None,
-                })
-            });
+            let pk_cols = primary_key.as_deref();
             // **Migration-first P2a (§4)** — the per-column declared-only facets
             // (`id_prefix` / `vector_metric`) carry validate-time bounds: the IR's
             // threat model is a hand-crafted `.ir.json`, so a malformed/reserved
@@ -611,8 +1291,10 @@ pub fn validate_op_scoped(
         }
         Op::Update { table, set, r#where, .. } => {
             let scope = TargetScope::structural_only(table);
-            for rhs in set.values() {
-                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            for value in set.values() {
+                if let crate::model::ir::IrValue::Expr(expr) = value {
+                    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                }
             }
             if let Some(pred) = r#where {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
@@ -625,8 +1307,10 @@ pub fn validate_op_scoped(
         }
         Op::Backfill { table, set, filter, .. } => {
             let scope = TargetScope::structural_only(table);
-            for rhs in set.values() {
-                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            for value in set.values() {
+                if let crate::model::ir::IrValue::Expr(expr) = value {
+                    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                }
             }
             if let Some(pred) = filter {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
@@ -859,17 +1543,45 @@ pub fn validate_op_scoped(
             op_index,
             ts_location,
         ),
+        Op::SetColumnDefault { value, .. } => {
+            if let crate::model::ir::IrDefault::Expr { expr } = value {
+                validate_default_expr(
+                    "setColumnDefault.value",
+                    expr,
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
+            }
+            Ok(())
+        }
+        Op::SetRls { enabled, forced, .. } if enabled.is_none() && forced.is_none() => {
+            Err(AuthoringError {
+                code: CODE_OP_INVALID.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: "setRls needs at least one of { enabled, forced }".to_string(),
+                suggested_fix: Some(
+                    "set enabled, forced, or both on the setRls op".to_string(),
+                ),
+            })
+        }
         Op::DropTable { .. }
         | Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
         | Op::DetachPartition { .. }
         | Op::DropPartition { .. }
         | Op::RenameTable { .. }
         | Op::DropColumn { .. }
         | Op::SetColumnNotNull { .. }
         | Op::DropColumnNotNull { .. }
-        | Op::SetColumnDefault { .. }
         | Op::DropColumnDefault { .. }
         | Op::DropConstraint { .. }
+        // ValidateConstraint carries no embedded Expr; its PG-only dialect refusal
+        // runs in the op-level `error_from_decision` gate above.
+        | Op::ValidateConstraint { .. }
         | Op::CreateEnum { .. }
         | Op::DropEnum { .. }
         | Op::DropDomain { .. }
@@ -887,10 +1599,7 @@ pub fn validate_op_scoped(
         | Op::DropOwnedBy { .. }
         | Op::Grant { .. }
         | Op::Revoke { .. }
-        | Op::EnableRls { .. }
-        | Op::ForceRls { .. }
-        | Op::DisableRls { .. }
-        | Op::NoForceRls { .. }
+        | Op::SetRls { .. }
         | Op::DropPolicy { .. }
         | Op::DropTrigger { .. }
         | Op::DropView { .. }
@@ -1049,9 +1758,7 @@ fn validate_op_support(
 
     fn feature_kind(feature: Feature) -> UnsupportedKind {
         match feature {
-            Feature::TableLevelCheck | Feature::AlterColumnUsing | Feature::SynthDefault => {
-                UnsupportedKind::Expr
-            }
+            Feature::TableLevelCheck | Feature::AlterColumnUsing => UnsupportedKind::Expr,
             _ => UnsupportedKind::Op,
         }
     }
@@ -1065,10 +1772,6 @@ fn validate_op_support(
                 identity: Some(_), ..
             } => UnsupportedKind::Identity,
             Op::SetColumnType { using: Some(_), .. } => UnsupportedKind::Expr,
-            Op::SetColumnDefault {
-                value: IrDefault::Fn { .. },
-                ..
-            } => UnsupportedKind::Expr,
             Op::AddConstraint {
                 constraint,
                 ..
@@ -1102,10 +1805,6 @@ fn validate_op_support(
         Ok(())
     }
 
-    fn default_is_synth(default: Option<&IrDefault>) -> bool {
-        matches!(default, Some(IrDefault::Fn { .. }))
-    }
-
     fn default_is_nextval(default: Option<&IrDefault>) -> bool {
         matches!(default, Some(IrDefault::Nextval { .. }))
     }
@@ -1116,6 +1815,26 @@ fn validate_op_support(
 
     fn with_storage_params(with: &Option<crate::model::ir::IndexStorageParams>) -> bool {
         with.as_ref().is_some_and(|params| !params.is_empty())
+    }
+
+    fn index_elements_have_opclass(columns: &[IndexElement]) -> bool {
+        columns.iter().any(|element| {
+            matches!(element, IndexElement::Column { opclass: Some(_), .. })
+        })
+    }
+
+    fn index_elements_have_collation(columns: &[IndexElement]) -> bool {
+        columns.iter().any(|element| {
+            matches!(element, IndexElement::Column { collation: Some(_), .. })
+        })
+    }
+
+    fn constraint_kind_not_valid(kind: &IrConstraintKind) -> bool {
+        matches!(
+            kind,
+            IrConstraintKind::Fk { not_valid: Some(true), .. }
+                | IrConstraintKind::Check { not_valid: Some(true), .. }
+        )
     }
 
     fn fk_features(
@@ -1156,6 +1875,29 @@ fn validate_op_support(
         };
 
     let support = op.support();
+    match op {
+        Op::CreateTable {
+            name,
+            partition_by: Some(partition_by),
+            ..
+        } if !matches!(target_dialect, Dialect::Postgres) && !partition_by.collapse() => {
+            return Err(AuthoringError {
+                code: CODE_DIALECT_UNSUPPORTED.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                ts_location: ts_location.map(str::to_string),
+                dialect: target_dialect,
+                reason: format!(
+                    "partitioned table {name:?} is native only on Postgres unless partitionBy.whenUnsupported is affirmed as \"collapse\""
+                ),
+                suggested_fix: Some(
+                    "add partitionBy.whenUnsupported: \"collapse\" and satisfy the partition collapse validation rules, or target Postgres only"
+                        .to_string(),
+                ),
+            });
+        }
+        _ => {}
+    }
     if let Some(err) = error_from_decision(
         support.decision(target_dialect),
         op_kind(op),
@@ -1183,19 +1925,31 @@ fn validate_op_support(
             }
             if columns
                 .iter()
-                .any(|col| default_is_synth(col.default.as_ref()))
-            {
-                check(Feature::SynthDefault)?;
-            }
-            if columns
-                .iter()
                 .any(|col| default_is_nextval(col.default.as_ref()))
             {
                 check(Feature::SequenceDefault)?;
             }
             for constraint in constraints {
+                // `NOT VALID` is meaningless at create-time (there are no existing
+                // rows to defer, and PostgreSQL rejects `NOT VALID` in `CREATE TABLE`).
+                // Refuse it fail-closed on the create-time inline constraint so a
+                // hand-crafted IR cannot smuggle it into a silently-dropped slot; it
+                // is only authorable via addForeignKey/addCheck (ALTER TABLE ADD
+                // CONSTRAINT).
+                if constraint_kind_not_valid(&constraint.kind) {
+                    return Err(AuthoringError {
+                        code: CODE_OP_INVALID.to_string(),
+                        kind: None,
+                        op_index,
+                        ts_location: ts_location.map(str::to_string),
+                        dialect: target_dialect,
+                        reason: "notValid is only valid on addForeignKey/addCheck (ALTER TABLE ADD CONSTRAINT); a create-time constraint cannot be NOT VALID".to_string(),
+                        suggested_fix: Some(
+                            "drop notValid from the create() constraint, or add the constraint after createTable via addForeignKey/addCheck with { notValid: true }".to_string(),
+                        ),
+                    });
+                }
                 match &constraint.kind {
-                    IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
                     IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
                     IrConstraintKind::Fk {
                         columns,
@@ -1232,27 +1986,30 @@ fn validate_op_support(
                 if index.only.unwrap_or(false) {
                     check(Feature::IndexOnly)?;
                 }
+                if index.nulls_not_distinct.unwrap_or(false) {
+                    check(Feature::IndexNullsNotDistinct)?;
+                }
+                if index_elements_have_opclass(&index.columns) {
+                    check(Feature::IndexOpclass)?;
+                }
+                if index_elements_have_collation(&index.columns) {
+                    check(Feature::IndexCollation)?;
+                }
                 if non_btree_index_method(index.using) {
                     check(Feature::NonBtreeIndexMethod)?;
                 }
             }
         }
-        Op::CreatePartition { .. } | Op::DetachPartition { .. } | Op::DropPartition { .. } => {
-            check(Feature::PartitionDdl)?;
-        }
+        Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. } => check(Feature::PartitionDdl)?,
         Op::AddColumn { default, .. } => {
-            if default_is_synth(default.as_ref()) {
-                check(Feature::SynthDefault)?;
-            }
             if default_is_nextval(default.as_ref()) {
                 check(Feature::SequenceDefault)?;
             }
         }
         Op::SetColumnType { using: Some(_), .. } => check(Feature::AlterColumnUsing)?,
-        Op::SetColumnDefault {
-            value: IrDefault::Fn { .. },
-            ..
-        } => check(Feature::SynthDefault)?,
         Op::SetColumnDefault {
             value: IrDefault::Nextval { .. },
             ..
@@ -1264,6 +2021,7 @@ fn validate_op_support(
             include,
             with,
             only,
+            nulls_not_distinct,
             ..
         } => {
             if columns
@@ -1284,6 +2042,15 @@ fn validate_op_support(
             if only.unwrap_or(false) {
                 check(Feature::IndexOnly)?;
             }
+            if nulls_not_distinct.unwrap_or(false) {
+                check(Feature::IndexNullsNotDistinct)?;
+            }
+            if index_elements_have_opclass(columns) {
+                check(Feature::IndexOpclass)?;
+            }
+            if index_elements_have_collation(columns) {
+                check(Feature::IndexCollation)?;
+            }
             if non_btree_index_method(*using) {
                 check(Feature::NonBtreeIndexMethod)?;
             }
@@ -1293,18 +2060,26 @@ fn validate_op_support(
             ..
         } => check(Feature::RenameColumnGuard)?,
         Op::AddConstraint { constraint, .. } => match &constraint.kind {
-            IrConstraintKind::Pk { .. } => check(Feature::UserPrimaryKey)?,
             IrConstraintKind::Fk {
                 columns,
                 references_columns,
                 deferrable,
                 initially_deferred,
+                not_valid,
                 ..
             } => {
                 fk_features(columns, references_columns, &mut check)?;
                 fk_deferrable_consistency(deferrable, initially_deferred)?;
+                if *not_valid == Some(true) {
+                    check(Feature::ConstraintNotValid)?;
+                }
             }
-            IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
+            IrConstraintKind::Check { not_valid, .. } => {
+                check(Feature::TableLevelCheck)?;
+                if *not_valid == Some(true) {
+                    check(Feature::ConstraintNotValid)?;
+                }
+            }
             IrConstraintKind::Exclusion { .. } => check(Feature::ExclusionConstraint)?,
             IrConstraintKind::Unique { .. } => {}
         },
@@ -1437,7 +2212,7 @@ fn validate_vendor_op(
             (
                 format!(
                     "the @zeroship/migrate/pg vendor op (capability {:?}) is Postgres-only — \
-                     roles/grants/RLS/policies/triggers/functions/extensions/schemas/pgRaw have \
+                     roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/pgRaw have \
                      no SQLite analogue (PgOnly)",
                     cap.as_token()
                 ),
@@ -2097,8 +2872,10 @@ fn validate_trigger_stmt(
         crate::model::ir::TriggerStmt::Update { table, set, r#where, schema } => {
             validate_schema(schema.as_deref())?;
             let scope = TargetScope::structural_only(table);
-            for rhs in set.values() {
-                validate_expr(rhs, target_dialect, &scope, op_index, ts_location)?;
+            for value in set.values() {
+                if let crate::model::ir::IrValue::Expr(expr) = value {
+                    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+                }
             }
             if let Some(pred) = r#where {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
@@ -2158,6 +2935,11 @@ fn validate_default_for_type(
     ts_location: Option<&str>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{ColType, EmptyContainerKind, IrDefault};
+
+    if let IrDefault::Expr { expr } = default {
+        validate_default_expr(position, expr, target_dialect, op_index, ts_location)?;
+        return Ok(());
+    }
 
     if let IrDefault::Nextval { .. } = default {
         if !matches!(target_dialect, Dialect::Postgres) {
@@ -2249,6 +3031,129 @@ fn validate_default_for_type(
             "use this default only on {expected} columns, or remove `.default({{}})` / `.default([])`"
         )),
     })
+}
+
+fn validate_default_expr(
+    position: &str,
+    expr: &Expr,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let scope = TargetScope::structural_only(position);
+    validate_expr(expr, target_dialect, &scope, op_index, ts_location)?;
+
+    fn mk_err(
+        reason: String,
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+    ) -> AuthoringError {
+        AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Expr),
+            op_index,
+            ts_location: ts_location.map(str::to_string),
+            dialect: target_dialect,
+            reason,
+            suggested_fix: Some(
+                "use only literals, CASE, immutable scalar helpers, and c.fn.now()/c.fn.genRandomUuid() in column defaults"
+                    .to_string(),
+            ),
+        }
+    }
+
+    fn walk(
+        expr: &Expr,
+        target_dialect: Dialect,
+        op_index: usize,
+        ts_location: Option<&str>,
+    ) -> Result<(), AuthoringError> {
+        match expr {
+            Expr::ColRef { .. } => Err(mk_err(
+                "a column default cannot reference a column".to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::Agg { .. } => Err(mk_err(
+                "a column default cannot use an aggregate".to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::FnCall { r#fn, args } => {
+                if matches!(r#fn, ScalarFn::CurrentSetting | ScalarFn::CurrentUser) {
+                    return Err(mk_err(
+                        "a column default cannot use volatile or vendor-only functions".to_string(),
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    ));
+                }
+                for arg in args {
+                    walk(arg, target_dialect, op_index, ts_location)?;
+                }
+                Ok(())
+            }
+            Expr::PgRegexMatch { .. }
+            | Expr::PgColumnSize { .. }
+            | Expr::PgExtract { .. }
+            | Expr::PgInterval { .. }
+            | Expr::Dialectal { .. } => Err(mk_err(
+                "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes"
+                    .to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::Extract { .. } => Err(mk_err(
+                "a column default cannot use an EXTRACT expression".to_string(),
+                target_dialect,
+                op_index,
+                ts_location,
+            )),
+            Expr::Literal { .. } => Ok(()),
+            Expr::BinOp { lhs, rhs, .. } => {
+                walk(lhs, target_dialect, op_index, ts_location)?;
+                walk(rhs, target_dialect, op_index, ts_location)
+            }
+            Expr::UnaryOp { operand, .. } => walk(operand, target_dialect, op_index, ts_location),
+            Expr::Case { branches, r#else } => {
+                for CaseBranch { when, then } in branches {
+                    walk(when, target_dialect, op_index, ts_location)?;
+                    walk(then, target_dialect, op_index, ts_location)?;
+                }
+                if let Some(expr) = r#else {
+                    walk(expr, target_dialect, op_index, ts_location)?;
+                }
+                Ok(())
+            }
+            Expr::FnSynth { args, .. } => {
+                for arg in args {
+                    walk(arg, target_dialect, op_index, ts_location)?;
+                }
+                Ok(())
+            }
+            Expr::Cast { operand, .. } => walk(operand, target_dialect, op_index, ts_location),
+            Expr::Between { operand, low, high } => {
+                walk(operand, target_dialect, op_index, ts_location)?;
+                walk(low, target_dialect, op_index, ts_location)?;
+                walk(high, target_dialect, op_index, ts_location)
+            }
+            Expr::Like { operand, pattern } => {
+                walk(operand, target_dialect, op_index, ts_location)?;
+                walk(pattern, target_dialect, op_index, ts_location)
+            }
+            Expr::DistinctFrom { left, right } => {
+                walk(left, target_dialect, op_index, ts_location)?;
+                walk(right, target_dialect, op_index, ts_location)
+            }
+            Expr::InList { expr, .. } => walk(expr, target_dialect, op_index, ts_location),
+        }
+    }
+
+    walk(expr, target_dialect, op_index, ts_location)
 }
 
 /// **Migration-first P2a (§4)** — validate one [`IrColumn`](crate::model::ir::IrColumn)'s
@@ -2383,7 +3288,7 @@ fn validate_column_facets(
                  supported on smallInt/int/bigInt columns",
                 col.name
             ),
-            "declare the column as `t.smallInt().identity(...)`, `t.integer().identity(...)`, \
+            "declare the column as `t.smallInt().identity(...)`, `t.int().identity(...)`, \
              or `t.bigInt().identity(...)`"
                 .to_string(),
         ));
@@ -2467,7 +3372,7 @@ fn validate_col_type_position(
         }
     }
 
-    if matches!(ty, ColType::Char { len: 0 }) {
+    if matches!(ty, ColType::Char { length: 0 }) {
         return Err(AuthoringError {
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),
@@ -2599,6 +3504,7 @@ pub fn validate_ir_resolved(
         let ts = ts_locations.get(op_index).and_then(Option::as_deref);
         validate_op_resolved(op, target_dialect, live_columns, op_index, ts)?;
     }
+    validate_partition_recording(ir, target_dialect, ts_locations)?;
     Ok(())
 }
 
@@ -2641,8 +3547,10 @@ pub fn validate_op_resolved(
         Op::Update { table, set, r#where, .. } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
-                for rhs in set.values() {
-                    validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
+                for value in set.values() {
+                    if let crate::model::ir::IrValue::Expr(expr) = value {
+                        validate_expr(expr, target_dialect, &scope, op_index, ts)?;
+                    }
                 }
                 if let Some(pred) = r#where {
                     validate_expr(pred, target_dialect, &scope, op_index, ts)?;
@@ -2662,8 +3570,10 @@ pub fn validate_op_resolved(
         Op::Backfill { table, set, filter, .. } => {
             if let Some(cols) = resolved_scope(table) {
                 let scope = TargetScope::new(table, &cols);
-                for rhs in set.values() {
-                    validate_expr(rhs, target_dialect, &scope, op_index, ts)?;
+                for value in set.values() {
+                    if let crate::model::ir::IrValue::Expr(expr) = value {
+                        validate_expr(expr, target_dialect, &scope, op_index, ts)?;
+                    }
                 }
                 if let Some(pred) = filter {
                     validate_expr(pred, target_dialect, &scope, op_index, ts)?;
@@ -2781,7 +3691,16 @@ impl Ctx<'_> {
         }
         let d = depth + 1;
         match expr {
-            Expr::ColRef { name } => self.check_colref(name),
+            // Unqualified ref: resolve against the enclosing single target table
+            // (rule (c)). Qualified ref (`c("t","col")`, §3.4): the full
+            // "qualified-ref table must be in the FROM set" scope check
+            // (`QUALIFIED_REF_UNKNOWN_TABLE`) is coupled with the Phase-2 view/FROM
+            // builder; for this additive slice accept the qualified form
+            // structurally (lenient pass — see design §3.4).
+            Expr::ColRef { name, table } => match table {
+                Some(_) => Ok(()),
+                None => self.check_colref(name),
+            },
             Expr::Literal { .. } => Ok(()),
             Expr::BinOp { lhs, rhs, .. } => {
                 self.walk_depth(lhs, d)?;
@@ -2789,18 +3708,25 @@ impl Ctx<'_> {
             }
             Expr::UnaryOp { operand, .. } => self.walk_depth(operand, d),
             Expr::Case { branches, r#else } => {
-                for CaseBranch { condition, result } in branches {
-                    self.walk_depth(condition, d)?;
-                    self.walk_depth(result, d)?;
+                for CaseBranch { when, then } in branches {
+                    self.walk_depth(when, d)?;
+                    self.walk_depth(then, d)?;
                 }
                 if let Some(e) = r#else {
                     self.walk_depth(e, d)?;
                 }
                 Ok(())
             }
-            // FnCall is an allow-listed scalar by construction (the closed
-            // ScalarFn enum) — only its args need recursion.
-            Expr::FnCall { args, .. } => {
+            // FnCall is an allow-listed scalar by the closed ScalarFn enum, but
+            // two members are PG-only VENDOR scalars (vendor spec §2.10):
+            // `current_setting` / `current_user` render as PG built-ins with no
+            // faithful SQLite/MySQL form, so they must be gated off the portable
+            // core exactly like the other PG-only expr nodes below — otherwise a
+            // portable op carrying them validates clean and breaks at apply.
+            Expr::FnCall { r#fn, args } => {
+                if matches!(r#fn, ScalarFn::CurrentSetting | ScalarFn::CurrentUser) {
+                    self.check_pg_only_expr("current_setting / current_user")?;
+                }
                 for a in args {
                     self.walk_depth(a, d)?;
                 }
@@ -2810,23 +3736,163 @@ impl Ctx<'_> {
             // Cast target is portable by the closed CastTarget enum (rule d);
             // recurse into the operand.
             Expr::Cast { operand, .. } => self.walk_depth(operand, d),
-            Expr::PgArrayMembership { expr, op, elems } => {
-                self.check_pg_array_membership(expr, *op, elems, d)
+            // Portable predicate nodes (§3.4): between/like/distinctFrom render on
+            // ALL three dialects (the engine owns distinctFrom's per-dialect
+            // lowering), so there is NO dialect gate — just recurse structurally.
+            Expr::Between { operand, low, high } => {
+                self.walk_depth(operand, d)?;
+                self.walk_depth(low, d)?;
+                self.walk_depth(high, d)
             }
+            Expr::Like { operand, pattern } => {
+                self.walk_depth(operand, d)?;
+                self.walk_depth(pattern, d)
+            }
+            Expr::DistinctFrom { left, right } => {
+                self.walk_depth(left, d)?;
+                self.walk_depth(right, d)
+            }
+            // Portable aggregate node (§3.4/§3.6): count/sum/avg/min/max render
+            // identically on all three dialects, so there is NO dialect gate. The
+            // "aggregate only valid in a grouped/SELECT context" check
+            // (`AGG_POSITION_INVALID`) is coupled with the Phase-2 view/select
+            // builder — this additive slice accepts the node STRUCTURALLY, just
+            // recursing into the optional argument (`count(*)` has none).
+            Expr::Agg { func: _, arg, distinct: _ } => match arg {
+                Some(e) => self.walk_depth(e, d),
+                None => Ok(()),
+            },
+            Expr::InList { expr, elems, negated: _ } => self.check_in_list(expr, elems, d),
             Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
             Expr::PgColumnSize { expr } => {
                 self.check_pg_only_expr("pg_column_size")?;
                 self.walk_depth(expr, d)
             }
-            Expr::Extract { field: _, expr } => {
-                self.check_pg_only_expr("EXTRACT")?;
-                self.walk_depth(expr, d)
+            Expr::Extract { field: _, from } => self.walk_depth(from, d),
+            Expr::PgExtract { field: _, from } => {
+                self.check_pg_only_expr("PG EXTRACT")?;
+                self.walk_depth(from, d)
             }
-            Expr::PgIntervalLiteral { value } => {
+            Expr::PgInterval { duration } => {
                 self.check_pg_only_expr("PG interval literal")?;
-                self.check_pg_interval_literal(value)
+                self.check_duration(duration)
+            }
+            // The one Layer-2 portability escape (§3.4): a per-dialect value
+            // divergence. Structurally validate EVERY present leg (dialect-
+            // neutral), then apply the per-TARGET scope math (own leg OR default).
+            Expr::Dialectal { default, pg, sqlite, mysql } => {
+                self.check_dialectal(default, pg, sqlite, mysql, d)
             }
         }
+    }
+
+    /// Validate an [`Expr::Dialectal`] — the `dialect({ default?, pg?, sqlite?,
+    /// mysql? })` Layer-2 escape (design §3.4). Three checks, in order:
+    ///
+    /// 1. **At least one leg** — a legless `dialect({})` is malformed on EVERY
+    ///    target (dialect-neutral [`CODE_UNSUPPORTED`]).
+    /// 2. **Recurse into every present leg** structurally, regardless of the
+    ///    target dialect — an unresolved `ColRef` / malformed nested node in ANY
+    ///    leg must reject (dialect-neutral, mirroring `check_synth`). Runs before
+    ///    the scope check so a precise per-node error surfaces rather than being
+    ///    masked by the coverage refusal.
+    /// 3. **Scope math, per-TARGET** — the target must be covered by either its
+    ///    OWN leg or a `default`; else refuse fail-closed with
+    ///    [`CODE_EXPR_NOT_PORTABLE`]. This is per-target: a `dialect()` missing
+    ///    the sqlite leg (no default) is fine targeting PG, refused targeting
+    ///    SQLite/MySQL.
+    ///
+    /// RATCHET (P11 / §3.4): each leg is one of the four ratcheted budget
+    /// counters. The budget mechanism is a later phase (not yet built); the
+    /// per-leg count is wired in when it lands. Deferred — not gated here.
+    fn check_dialectal(
+        &self,
+        default: &Option<Box<Expr>>,
+        pg: &Option<Box<Expr>>,
+        sqlite: &Option<Box<Expr>>,
+        mysql: &Option<Box<Expr>>,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        // (1) at least one leg.
+        if default.is_none() && pg.is_none() && sqlite.is_none() && mysql.is_none() {
+            return Err(self.err(
+                CODE_UNSUPPORTED,
+                Some(UnsupportedKind::Expr),
+                self.target_dialect,
+                "dialect({}) carries no legs; a per-dialect value escape must \
+                 provide at least one of default/pg/sqlite/mysql"
+                    .to_string(),
+                Some("supply at least one dialect leg (or a default)".to_string()),
+            ));
+        }
+        // (2) recurse into EVERY present leg. The structural checks remain the
+        // same, but PG-only portability gates must be judged against the leg that
+        // could render them: pg as PG, sqlite as SQLite, mysql as MySQL. The
+        // default leg is required to be portable because it may cover any target.
+        if let Some(leg) = default {
+            self.walk_depth_portable_default(leg, depth)?;
+        }
+        if let Some(leg) = pg {
+            self.walk_depth_as(Dialect::Postgres, leg, depth)?;
+        }
+        if let Some(leg) = sqlite {
+            self.walk_depth_as(Dialect::Sqlite, leg, depth)?;
+        }
+        if let Some(leg) = mysql {
+            self.walk_depth_as(Dialect::Mysql, leg, depth)?;
+        }
+        // (3) SCOPE MATH, per-TARGET: own leg OR default covers this dialect.
+        let own_present = match self.target_dialect {
+            Dialect::Postgres => pg.is_some(),
+            Dialect::Sqlite => sqlite.is_some(),
+            Dialect::Mysql => mysql.is_some(),
+        };
+        if own_present || default.is_some() {
+            return Ok(());
+        }
+        Err(self.err(
+            CODE_EXPR_NOT_PORTABLE,
+            Some(UnsupportedKind::Expr),
+            self.target_dialect,
+            format!(
+                "dialect() has no leg for the {} target and no default leg; the \
+                 per-dialect divergence does not cover this dialect",
+                self.target_dialect.as_str()
+            ),
+            Some(format!(
+                "add a {} leg or a default leg to the dialect() escape",
+                self.target_dialect.as_str()
+            )),
+        ))
+    }
+
+    fn with_target_dialect(&self, target_dialect: Dialect) -> Ctx<'_> {
+        Ctx {
+            target_dialect,
+            scope: self.scope,
+            op_index: self.op_index,
+            ts_location: self.ts_location,
+        }
+    }
+
+    fn walk_depth_as(
+        &self,
+        target_dialect: Dialect,
+        expr: &Expr,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        self.with_target_dialect(target_dialect).walk_depth(expr, depth)
+    }
+
+    fn walk_depth_portable_default(
+        &self,
+        expr: &Expr,
+        depth: u32,
+    ) -> Result<(), AuthoringError> {
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            self.walk_depth_as(dialect, expr, depth)?;
+        }
+        Ok(())
     }
 
     /// Rule (c): a `ColRef` must resolve to a column on the enclosing target
@@ -3038,7 +4104,11 @@ impl Ctx<'_> {
     /// PostgreSQL-only value nodes, so SQLite/MySQL validation refuses them as
     /// `UNSUPPORTED { kind:"expr" }` before rendering.
     fn check_pg_only_expr(&self, name: &'static str) -> Result<(), AuthoringError> {
-        if self.target_dialect == Dialect::Postgres {
+        // Read the PG-only verdict off the generated dialect vocabulary (a
+        // `pg = portable, else = unsupported` disposition) rather than a bespoke
+        // `== Postgres` dialect arm — the same `Disposition::is_supported` reading
+        // `Op::support` uses when assembling per-dialect support cells.
+        if crate::model::support::pg_only_expr_disposition(self.target_dialect).is_supported() {
             return Ok(());
         }
         Err(self.err(
@@ -3079,28 +4149,15 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    fn check_pg_array_membership(
+    fn check_in_list(
         &self,
         expr: &Expr,
-        _op: PgArrayMembershipOp,
         elems: &[String],
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        self.check_pg_only_expr("PG ARRAY membership")?;
         self.walk_depth(expr, depth)?;
-        if elems.is_empty() {
-            return Err(self.err(
-                CODE_UNSUPPORTED,
-                Some(UnsupportedKind::Expr),
-                self.target_dialect,
-                "PG ARRAY membership requires at least one text element; empty \
-                 ARRAY[] has no inferred element type"
-                    .to_string(),
-                Some("pass one or more string literals in the membership array".to_string()),
-            ));
-        }
         for elem in elems {
-            self.check_pg_text_literal(elem, "PG ARRAY membership element")?;
+            self.check_pg_text_literal(elem, "inList element")?;
         }
         Ok(())
     }
@@ -3116,17 +4173,14 @@ impl Ctx<'_> {
         self.check_pg_text_literal(pattern, "PG regex pattern")
     }
 
-    fn check_pg_interval_literal(&self, value: &str) -> Result<(), AuthoringError> {
-        if !is_safe_pg_interval_literal(value) {
+    fn check_duration(&self, duration: &Duration) -> Result<(), AuthoringError> {
+        if duration.is_empty() {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
                 self.target_dialect,
-                format!(
-                    "PG interval literal {value:?} is outside the strict P1 interval grammar \
-                     (expected HH:MM:SS or HH:MM:SS.ffffff, with two-digit minutes/seconds)"
-                ),
-                Some("use a time-like interval literal such as \"00:01:00\"".to_string()),
+                "PG interval duration must include at least one field".to_string(),
+                Some("use a structured duration such as {\"minutes\":1}".to_string()),
             ));
         }
         Ok(())
@@ -3215,50 +4269,13 @@ impl Ctx<'_> {
     }
 }
 
-fn is_safe_pg_interval_literal(value: &str) -> bool {
-    if value.is_empty() || value.len() > 32 || value.contains('\0') {
-        return false;
-    }
-    let Some((hours, rest)) = value.split_once(':') else {
-        return false;
-    };
-    if hours.is_empty() || hours.len() > 6 || !hours.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    let Some((minutes, seconds)) = rest.split_once(':') else {
-        return false;
-    };
-    if minutes.len() != 2
-        || !minutes.bytes().all(|b| b.is_ascii_digit())
-        || minutes.parse::<u8>().map_or(true, |m| m > 59)
-    {
-        return false;
-    }
-    let (seconds_whole, fraction) = match seconds.split_once('.') {
-        Some((whole, frac)) => (whole, Some(frac)),
-        None => (seconds, None),
-    };
-    if seconds_whole.len() != 2
-        || !seconds_whole.bytes().all(|b| b.is_ascii_digit())
-        || seconds_whole.parse::<u8>().map_or(true, |s| s > 59)
-    {
-        return false;
-    }
-    if let Some(frac) = fraction {
-        if frac.is_empty() || frac.len() > 6 || !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::expr::{
-        BinaryOp, CastTarget, Expr, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
+        BinaryOp, CastTarget, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
     };
-    use crate::model::ir::{IndexElement, IrScalar};
+    use crate::model::ir::{IndexElement, IrScalar, IrValue};
 
     fn cols() -> Vec<String> {
         vec!["name".into(), "first".into(), "last".into(), "total".into()]
@@ -3315,6 +4332,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn current_setting_and_current_user_are_pg_only_rejected_off_postgres() {
+        // Regression: current_setting / current_user are PG-only VENDOR scalars
+        // (they render as PG built-ins with no SQLite/MySQL form). A portable op
+        // carrying them must be REFUSED at validate on SQLite/MySQL — not sail
+        // through and break at apply.
+        let c = cols();
+        let sc = scope("users", &c);
+        for f in [ScalarFn::CurrentUser, ScalarFn::CurrentSetting] {
+            let e = Expr::FnCall { r#fn: f, args: vec![] };
+            assert!(
+                validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok(),
+                "{f:?} must validate on Postgres"
+            );
+            for d in [Dialect::Sqlite, Dialect::Mysql] {
+                let err = validate_expr(&e, d, &sc, 0, None)
+                    .expect_err("a PG-only vendor scalar must be refused off Postgres");
+                assert_eq!(err.code, CODE_UNSUPPORTED, "{f:?} on {d:?}: {err}");
+                assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+            }
+        }
+    }
+
     // ── (a) every allow-listed node validates ──────────────────────────────
 
     #[test]
@@ -3345,11 +4385,11 @@ mod tests {
         // Case + FnCall(coalesce) + concat.
         let case = Expr::Case {
             branches: vec![CaseBranch {
-                condition: Expr::UnaryOp {
+                when: Expr::UnaryOp {
                     op: UnaryOp::IsNull,
                     operand: Box::new(Expr::col("first")),
                 },
-                result: Expr::lit(IrScalar::Str("none".into())),
+                then: Expr::lit(IrScalar::Str("none".into())),
             }],
             r#else: Some(Box::new(Expr::FnCall {
                 r#fn: ScalarFn::Coalesce,
@@ -3359,19 +4399,19 @@ mod tests {
         assert!(validate_expr(&case, Dialect::Postgres, &sc, 1, None).is_ok());
     }
 
-    fn pg_any(expr: Expr, elems: Vec<&str>) -> Expr {
-        Expr::PgArrayMembership {
+    fn in_list(expr: Expr, elems: Vec<&str>) -> Expr {
+        Expr::InList {
             expr: Box::new(expr),
-            op: PgArrayMembershipOp::Eq,
             elems: elems.into_iter().map(str::to_string).collect(),
+            negated: false,
         }
     }
 
-    fn pg_ne_all(expr: Expr, elems: Vec<&str>) -> Expr {
-        Expr::PgArrayMembership {
+    fn not_in_list(expr: Expr, elems: Vec<&str>) -> Expr {
+        Expr::InList {
             expr: Box::new(expr),
-            op: PgArrayMembershipOp::Ne,
             elems: elems.into_iter().map(str::to_string).collect(),
+            negated: true,
         }
     }
 
@@ -3380,8 +4420,6 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            pg_any(Expr::col("name"), vec!["active", "past_due"]),
-            pg_ne_all(Expr::col("name"), vec!["suspended"]),
             Expr::PgRegexMatch {
                 expr: Box::new(Expr::col("name")),
                 pattern: "^[a-z]+$".to_string(),
@@ -3391,9 +4429,140 @@ mod tests {
                 lhs: Box::new(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
                 rhs: Box::new(Expr::lit(IrScalar::Int(8192))),
             },
+            Expr::PgExtract {
+                field: PgExtractField::Epoch,
+                from: Box::new(Expr::col("total")),
+            },
         ] {
             validate_expr(&e, Dialect::Postgres, &sc, 0, None)
                 .unwrap_or_else(|err| panic!("PG-only expression must validate on PG: {err}"));
+        }
+    }
+
+    #[test]
+    fn portable_predicate_and_extract_nodes_validate_on_all_three_dialects() {
+        // between / like / distinctFrom / inList / extract are PORTABLE (§3.4):
+        // they render on all three dialects (the engine owns each per-dialect
+        // lowering), so the walk accepts them with NO dialect gate — including on
+        // SQLite/MySQL, exactly where the PG-only nodes are refused.
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::Between {
+                operand: Box::new(Expr::col("total")),
+                low: Box::new(Expr::lit(IrScalar::Int(0))),
+                high: Box::new(Expr::lit(IrScalar::Int(100))),
+            },
+            Expr::Like {
+                operand: Box::new(Expr::col("name")),
+                pattern: Box::new(Expr::lit(IrScalar::Str("A%".into()))),
+            },
+            Expr::DistinctFrom {
+                left: Box::new(Expr::col("first")),
+                right: Box::new(Expr::col("last")),
+            },
+            in_list(Expr::col("name"), vec!["active", "past_due"]),
+            not_in_list(Expr::col("name"), vec!["suspended"]),
+            in_list(Expr::col("name"), vec![]),
+            Expr::Extract { field: ExtractField::Year, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Month, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Day, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Hour, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Minute, from: Box::new(Expr::col("total")) },
+            Expr::Extract { field: ExtractField::Dow, from: Box::new(Expr::col("total")) },
+        ];
+        for e in &nodes {
+            for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+                validate_expr(e, d, &sc, 0, None).unwrap_or_else(|err| {
+                    panic!("portable predicate/extract must validate on {d:?}: {err}")
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn portable_aggregate_nodes_validate_on_all_three_dialects() {
+        use crate::model::expr::AggFunc;
+        // count(*) / count(DISTINCT col) / sum/avg/min/max(col) are PORTABLE (§3.4/
+        // §3.6): byte-identical SQL on PG/SQLite/MySQL, so the walk accepts them with
+        // NO dialect gate. (The grouped/SELECT position check is a Phase-2 concern;
+        // this slice accepts the node structurally, recursing into the arg.)
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::Agg { func: AggFunc::Count, arg: None, distinct: false },
+            Expr::Agg {
+                func: AggFunc::Count,
+                arg: Some(Box::new(Expr::col("total"))),
+                distinct: true,
+            },
+            Expr::Agg { func: AggFunc::Sum, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg { func: AggFunc::Avg, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg { func: AggFunc::Min, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+            Expr::Agg { func: AggFunc::Max, arg: Some(Box::new(Expr::col("total"))), distinct: false },
+        ];
+        for e in &nodes {
+            for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+                validate_expr(e, d, &sc, 0, None)
+                    .unwrap_or_else(|err| panic!("portable aggregate must validate on {d:?}: {err}"));
+            }
+        }
+        // A bogus column inside the aggregate arg is still caught by the recursive
+        // colref check (the node isn't a blind accept).
+        let bad = Expr::Agg {
+            func: AggFunc::Sum,
+            arg: Some(Box::new(Expr::col("does_not_exist"))),
+            distinct: false,
+        };
+        assert!(
+            validate_expr(&bad, Dialect::Postgres, &sc, 0, None).is_err(),
+            "aggregate must still validate its argument's column ref"
+        );
+    }
+
+    #[test]
+    fn portable_scalar_fns_validate_on_all_three_dialects() {
+        // mod / round / floor / ceil / substr / replace are PORTABLE ScalarFns
+        // (§3.4): identical spelling on PG/SQLite/MySQL (mod renders as the `%`
+        // operator), so the walk accepts them with NO dialect gate — unlike the
+        // PG-only currentSetting/currentUser vendor scalars.
+        let c = cols();
+        let sc = scope("users", &c);
+        let nodes = [
+            Expr::FnCall {
+                r#fn: ScalarFn::Mod,
+                args: vec![Expr::col("total"), Expr::lit(IrScalar::Int(3))],
+            },
+            Expr::FnCall { r#fn: ScalarFn::Round, args: vec![Expr::col("total")] },
+            Expr::FnCall {
+                r#fn: ScalarFn::Round,
+                args: vec![Expr::col("total"), Expr::lit(IrScalar::Int(2))],
+            },
+            Expr::FnCall { r#fn: ScalarFn::Floor, args: vec![Expr::col("total")] },
+            Expr::FnCall { r#fn: ScalarFn::Ceil, args: vec![Expr::col("total")] },
+            Expr::FnCall {
+                r#fn: ScalarFn::Substr,
+                args: vec![
+                    Expr::col("name"),
+                    Expr::lit(IrScalar::Int(1)),
+                    Expr::lit(IrScalar::Int(3)),
+                ],
+            },
+            Expr::FnCall {
+                r#fn: ScalarFn::Replace,
+                args: vec![
+                    Expr::col("name"),
+                    Expr::lit(IrScalar::Str("a".into())),
+                    Expr::lit(IrScalar::Str("b".into())),
+                ],
+            },
+        ];
+        for e in &nodes {
+            for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+                validate_expr(e, d, &sc, 0, None).unwrap_or_else(|err| {
+                    panic!("portable scalar fn must validate on {d:?}: {err}")
+                });
+            }
         }
     }
 
@@ -3402,12 +4571,15 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            pg_any(Expr::col("name"), vec!["active"]),
             Expr::PgRegexMatch {
                 expr: Box::new(Expr::col("name")),
                 pattern: "^[a-z]+$".to_string(),
             },
             Expr::PgColumnSize { expr: Box::new(Expr::col("name")) },
+            Expr::PgExtract {
+                field: PgExtractField::Epoch,
+                from: Box::new(Expr::col("total")),
+            },
         ] {
             for d in [Dialect::Sqlite, Dialect::Mysql] {
                 let err = validate_expr(&e, d, &sc, 0, None)
@@ -3421,20 +4593,16 @@ mod tests {
     }
 
     #[test]
-    fn pg_only_expr_literal_shapes_are_checked() {
+    fn text_literal_shapes_are_checked() {
         let c = cols();
         let sc = scope("users", &c);
-        let empty_membership = Expr::PgArrayMembership {
-            expr: Box::new(Expr::col("name")),
-            op: PgArrayMembershipOp::Eq,
-            elems: vec![],
-        };
-        let err = validate_expr(&empty_membership, Dialect::Postgres, &sc, 0, None).unwrap_err();
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert!(err.reason.contains("at least one"));
+        let empty_membership = in_list(Expr::col("name"), vec![]);
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_expr(&empty_membership, d, &sc, 0, None)
+                .unwrap_or_else(|err| panic!("empty inList must validate on {d:?}: {err}"));
+        }
 
-        let nul_elem = pg_any(Expr::col("name"), vec!["ok", "bad\0value"]);
+        let nul_elem = in_list(Expr::col("name"), vec!["ok", "bad\0value"]);
         let err = validate_expr(&nul_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("NUL"));
@@ -3750,6 +4918,163 @@ mod tests {
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
+    // ── the Layer-2 dialect() per-dialect value escape (§3.4) ────────────────
+
+    fn dialectal(
+        default: Option<Expr>,
+        pg: Option<Expr>,
+        sqlite: Option<Expr>,
+        mysql: Option<Expr>,
+    ) -> Expr {
+        Expr::Dialectal {
+            default: default.map(Box::new),
+            pg: pg.map(Box::new),
+            sqlite: sqlite.map(Box::new),
+            mysql: mysql.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn dialectal_missing_leg_no_default_accepted_on_own_target_refused_off_target() {
+        // dialect({ pg: A }) — no default. Its covered set is exactly {pg}: it is
+        // ACCEPTED targeting PG (its own leg), REFUSED targeting SQLite/MySQL
+        // (neither own leg nor default) — the per-TARGET scope math.
+        let sc = TargetScope::structural_only("t");
+        let e = dialectal(None, Some(Expr::lit(IrScalar::Str("A".into()))), None, None);
+
+        assert!(
+            validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok(),
+            "a pg-only dialect() covers the PG target"
+        );
+        for d in [Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(
+                err.code, CODE_EXPR_NOT_PORTABLE,
+                "a pg-only dialect() must refuse the {d:?} target (no own leg, no default); got: {err}"
+            );
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+    }
+
+    #[test]
+    fn dialectal_default_covers_every_off_target() {
+        // dialect({ default: D, pg: A }) covers ALL dialects: PG via its own leg,
+        // SQLite/MySQL via the default. Accepted on every target.
+        let sc = TargetScope::structural_only("t");
+        let e = dialectal(
+            Some(Expr::lit(IrScalar::Int(0))),
+            Some(Expr::lit(IrScalar::Str("A".into()))),
+            None,
+            None,
+        );
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            assert!(
+                validate_expr(&e, d, &sc, 0, None).is_ok(),
+                "a default leg covers the {d:?} target"
+            );
+        }
+    }
+
+    #[test]
+    fn dialectal_pg_vendor_node_in_pg_leg_validates_on_all_covered_targets() {
+        // Regression: the PG-only gate must validate each dialect() leg as the
+        // dialect that owns that leg. A PG-vendor node in the pg leg is fine even
+        // while validating a SQLite/MySQL target, because those targets render
+        // their own portable legs and never render the pg leg.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            None,
+            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            Some(Expr::col("name")),
+            Some(Expr::col("name")),
+        );
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            validate_expr(&e, d, &sc, 0, None).unwrap_or_else(|err| {
+                panic!("pgColumnSize in the pg leg must validate on covered {d:?}: {err}")
+            });
+        }
+    }
+
+    #[test]
+    fn dialectal_pg_vendor_node_in_pg_leg_does_not_cover_missing_mysql_leg() {
+        // The per-leg PG-only fix must not weaken the existing coverage rule:
+        // pg+sqlite with no default still cannot target MySQL.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            None,
+            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            Some(Expr::col("name")),
+            None,
+        );
+        assert!(validate_expr(&e, Dialect::Postgres, &sc, 0, None).is_ok());
+        assert!(validate_expr(&e, Dialect::Sqlite, &sc, 0, None).is_ok());
+        let err = validate_expr(&e, Dialect::Mysql, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_EXPR_NOT_PORTABLE,
+            "a dialect() with no mysql/default leg must still refuse MySQL; got: {err}"
+        );
+    }
+
+    #[test]
+    fn dialectal_default_leg_must_remain_portable() {
+        // `default` is not a vendor bucket. It may be selected for any target, so
+        // a PG-only node in default is refused even when the current target is PG.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            Some(Expr::PgColumnSize { expr: Box::new(Expr::col("name")) }),
+            None,
+            Some(Expr::col("name")),
+            Some(Expr::col("name")),
+        );
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(
+                err.code, CODE_UNSUPPORTED,
+                "a PG-only node in default must be refused on {d:?}; got: {err}"
+            );
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+    }
+
+    #[test]
+    fn dialectal_with_no_legs_is_refused_on_every_target() {
+        // dialect({}) — zero legs — is malformed on EVERY target (dialect-neutral
+        // CODE_UNSUPPORTED), enforced at validate (serde deserializes the empty
+        // node, the structural gate refuses it).
+        let sc = TargetScope::structural_only("t");
+        let e = dialectal(None, None, None, None);
+        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_expr(&e, d, &sc, 0, None).unwrap_err();
+            assert_eq!(err.code, CODE_UNSUPPORTED, "legless dialect() refused on {d:?}; got: {err}");
+            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        }
+    }
+
+    #[test]
+    fn dialectal_recurses_into_every_present_leg() {
+        // The scope check must not short-circuit recursion: a malformed nested
+        // node in ANY leg rejects, dialect-neutrally, even on a target the leg
+        // does not select. Here an unresolved ColRef sits in the (unselected)
+        // mysql leg while targeting PG.
+        let c = cols();
+        let sc = scope("users", &c);
+        let e = dialectal(
+            Some(Expr::lit(IrScalar::Int(0))),
+            Some(Expr::col("name")),
+            None,
+            Some(Expr::col("ghost")), // not a column on `users`
+        );
+        let err = validate_expr(&e, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(
+            err.code, CODE_UNSUPPORTED,
+            "an unresolved ColRef in ANY leg must reject (rule c), even off-target; got: {err}"
+        );
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+    }
+
     #[test]
     fn split_part_non_literal_args_rejected() {
         let c = cols();
@@ -3861,6 +5186,8 @@ mod tests {
                             ],
                         }),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],
@@ -3934,6 +5261,7 @@ mod tests {
 
     use crate::model::ir::{
         ColType, IrColumn, IrConstraint, IrConstraintKind, IrIndex, MigrationIr, Op,
+        PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
     };
     use std::collections::BTreeMap;
 
@@ -3960,6 +5288,458 @@ mod tests {
         dialect: Dialect,
     ) -> Result<(), AuthoringError> {
         validate_ir_scoped(ir, dialect, &[], None, &PolicyProfile::platform())
+    }
+
+    fn part_col(name: &str, ty: ColType, not_null: bool) -> IrColumn {
+        IrColumn {
+            name: name.into(),
+            ty,
+            nullable: not_null.then_some(false),
+            default: None,
+            unique: None,
+            id_prefix: None,
+            vector_metric: None,
+            case_sensitive: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }
+    }
+
+    fn idx_col(name: &str) -> IndexElement {
+        IndexElement::Column {
+            name: name.into(),
+            order: None,
+            opclass: None,
+            collation: None,
+        }
+    }
+
+    fn unique_idx(columns: &[&str]) -> IrIndex {
+        IrIndex {
+            name: None,
+            columns: columns.iter().map(|name| idx_col(name)).collect(),
+            unique: Some(true),
+            using: None,
+            r#where: None,
+            include: Vec::new(),
+            with: None,
+            only: None,
+            nulls_not_distinct: None,
+        }
+    }
+
+    fn safe_i(value: i64) -> PartitionBoundValue {
+        PartitionBoundValue::Int {
+            value: SafeI64::new(value).expect("test partition bound is JS-safe"),
+        }
+    }
+
+    fn str_b(value: &str) -> PartitionBoundValue {
+        PartitionBoundValue::String { value: value.into() }
+    }
+
+    fn create_parent(
+        name: &str,
+        spec: PartitionSpec,
+        columns: Vec<IrColumn>,
+        primary_key: Option<&[&str]>,
+        constraints: Vec<IrConstraint>,
+        indexes: Vec<IrIndex>,
+    ) -> Op {
+        Op::CreateTable {
+            name: name.into(),
+            columns,
+            primary_key: primary_key.map(|cols| cols.iter().map(|col| (*col).into()).collect()),
+            constraints,
+            indexes,
+            partition_by: Some(spec),
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn create_part(name: &str, of: &str, bounds: PartitionBounds) -> Op {
+        Op::CreatePartition {
+            name: name.into(),
+            of: of.into(),
+            bounds,
+            schema: None,
+            existence_guard: None,
+        }
+    }
+
+    fn drop_part(parent: &str, name: &str) -> Op {
+        Op::DropPartition {
+            parent: parent.into(),
+            name: name.into(),
+            schema: None,
+            existence_guard: None,
+            cascade: None,
+        }
+    }
+
+    #[test]
+    fn partitioned_table_without_collapse_is_dialect_unsupported_off_postgres() {
+        let ir = ir_with(vec![create_parent(
+            "events",
+            PartitionSpec::Range { columns: vec!["ts".into()], collapse: false },
+            vec![part_col("ts", ColType::Timestamp, true)],
+            None,
+            vec![],
+            vec![],
+        )]);
+
+        assert!(validate_ir_platform(&ir, Dialect::Postgres).is_ok());
+        let err = validate_ir_platform(&ir, Dialect::Sqlite)
+            .expect_err("non-affirmed partitioning must fail closed off Postgres");
+        assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "got: {err}");
+    }
+
+    #[test]
+    fn partition_key_coverage_refuses_non_covering_unique_and_accepts_covering() {
+        let base_cols = || {
+            vec![
+                part_col("tenant_id", ColType::Uuid, true),
+                part_col("ts", ColType::Timestamp, true),
+            ]
+        };
+        let spec = || PartitionSpec::Range { columns: vec!["ts".into()], collapse: false };
+
+        let bad = ir_with(vec![create_parent(
+            "events",
+            spec(),
+            base_cols(),
+            None,
+            vec![],
+            vec![unique_idx(&["tenant_id"])],
+        )]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("unique indexes on partitioned parents must cover the key");
+        assert_eq!(err.code, CODE_PARTITION_KEY_COVERAGE, "got: {err}");
+
+        let ok = ir_with(vec![create_parent(
+            "events",
+            spec(),
+            base_cols(),
+            None,
+            vec![],
+            vec![unique_idx(&["tenant_id", "ts"])],
+        )]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn collapse_requires_total_range_list_and_hash_bounds() {
+        let range_missing_default = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                vec![part_col("ts", ColType::Timestamp, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "events_0",
+                "events",
+                PartitionBounds::Range {
+                    from: vec![safe_i(0)],
+                    to: vec![safe_i(10)],
+                },
+            ),
+        ]);
+        let err = validate_ir_platform(&range_missing_default, Dialect::Postgres)
+            .expect_err("collapse range without default must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
+
+        let list_missing_default = ir_with(vec![
+            create_parent(
+                "orders",
+                PartitionSpec::List { columns: vec!["region".into()], collapse: true },
+                vec![part_col("region", ColType::Text, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "orders_us",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("US")] },
+            ),
+        ]);
+        let err = validate_ir_platform(&list_missing_default, Dialect::Postgres)
+            .expect_err("collapse list without default must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
+
+        let hash_partial = ir_with(vec![
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: true },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "sessions_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+        ]);
+        let err = validate_ir_platform(&hash_partial, Dialect::Postgres)
+            .expect_err("collapse hash must cover every residue");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
+
+        let hash_total = ir_with(vec![
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: true },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part(
+                "sessions_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+            create_part(
+                "sessions_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 1 },
+            ),
+        ]);
+        assert!(validate_ir_platform(&hash_total, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn collapse_hash_child_drop_is_underivable_but_pg_only_hash_drop_is_valid() {
+        let parent = |collapse| {
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+        let child_0 = || {
+            create_part(
+                "sessions_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            )
+        };
+        let child_1 = || {
+            create_part(
+                "sessions_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 1 },
+            )
+        };
+
+        let collapse_drop = ir_with(vec![
+            parent(true),
+            child_0(),
+            child_1(),
+            drop_part("sessions", "sessions_0"),
+        ]);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+            let err = validate_ir_platform(&collapse_drop, dialect)
+                .expect_err("collapse hash child drop must be recording-level underivable");
+            assert_eq!(err.code, CODE_PARTITION_HASH_DROP_UNDERIVABLE, "got: {err}");
+        }
+
+        let pg_only_drop =
+            ir_with(vec![parent(false), child_0(), child_1(), drop_part("sessions", "sessions_0")]);
+        assert!(validate_ir_platform(&pg_only_drop, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn collapse_refuses_composite_range_key() {
+        let ir = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range {
+                    columns: vec!["tenant_id".into(), "ts".into()],
+                    collapse: true,
+                },
+                vec![
+                    part_col("tenant_id", ColType::Uuid, true),
+                    part_col("ts", ColType::Timestamp, true),
+                ],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part("events_default", "events", PartitionBounds::Default),
+        ]);
+
+        let err = validate_ir_platform(&ir, Dialect::Postgres)
+            .expect_err("range collapse v1 supports one key column");
+        assert_eq!(err.code, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, "got: {err}");
+    }
+
+    #[test]
+    fn collapse_refuses_nullable_key_and_later_drop_not_null() {
+        let nullable = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                vec![part_col("ts", ColType::Timestamp, false)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part("events_default", "events", PartitionBounds::Default),
+        ]);
+        let err = validate_ir_platform(&nullable, Dialect::Postgres)
+            .expect_err("collapse partition keys must be not null");
+        assert_eq!(err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, "got: {err}");
+
+        let dropped_later = ir_with(vec![
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["ts".into()], collapse: true },
+                vec![part_col("ts", ColType::Timestamp, true)],
+                None,
+                vec![],
+                vec![],
+            ),
+            create_part("events_default", "events", PartitionBounds::Default),
+            Op::DropColumnNotNull {
+                table: "events".into(),
+                column: "ts".into(),
+                schema: None,
+                existence_guard: None,
+            },
+        ]);
+        let err = validate_ir_platform(&dropped_later, Dialect::Postgres)
+            .expect_err("later dropNotNull on a collapse key must refuse");
+        assert_eq!(err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, "got: {err}");
+    }
+
+    #[test]
+    fn partition_bounds_refuse_overlapping_range_and_accept_disjoint() {
+        let parent = || {
+            create_parent(
+                "events",
+                PartitionSpec::Range { columns: vec!["bucket".into()], collapse: false },
+                vec![part_col("bucket", ColType::Int, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+        let range = |name: &str, from: i64, to: i64| {
+            create_part(
+                name,
+                "events",
+                PartitionBounds::Range {
+                    from: vec![safe_i(from)],
+                    to: vec![safe_i(to)],
+                },
+            )
+        };
+
+        let bad = ir_with(vec![parent(), range("events_a", 0, 10), range("events_b", 5, 20)]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("overlapping range siblings must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
+
+        let ok = ir_with(vec![parent(), range("events_a", 0, 10), range("events_b", 10, 20)]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn partition_bounds_refuse_duplicate_list_value_and_accept_unique() {
+        let parent = || {
+            create_parent(
+                "orders",
+                PartitionSpec::List { columns: vec!["region".into()], collapse: false },
+                vec![part_col("region", ColType::Text, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+
+        let bad = ir_with(vec![
+            parent(),
+            create_part(
+                "orders_a",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("US"), str_b("US")] },
+            ),
+        ]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("duplicate list values must refuse");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
+
+        let ok = ir_with(vec![
+            parent(),
+            create_part(
+                "orders_us",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("US")] },
+            ),
+            create_part(
+                "orders_eu",
+                "orders",
+                PartitionBounds::List { values: vec![str_b("EU")] },
+            ),
+        ]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
+    }
+
+    #[test]
+    fn partition_bounds_refuse_non_factor_chain_hash_and_accept_factor_chain() {
+        let parent = || {
+            create_parent(
+                "sessions",
+                PartitionSpec::Hash { columns: vec!["tenant_id".into()], collapse: false },
+                vec![part_col("tenant_id", ColType::Uuid, true)],
+                None,
+                vec![],
+                vec![],
+            )
+        };
+
+        let bad = ir_with(vec![
+            parent(),
+            create_part(
+                "sessions_2_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+            create_part(
+                "sessions_3_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 3, remainder: 1 },
+            ),
+        ]);
+        let err = validate_ir_platform(&bad, Dialect::Postgres)
+            .expect_err("hash moduli must be comparable by divisibility");
+        assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
+
+        let ok = ir_with(vec![
+            parent(),
+            create_part(
+                "sessions_2_0",
+                "sessions",
+                PartitionBounds::Hash { modulus: 2, remainder: 0 },
+            ),
+            create_part(
+                "sessions_4_1",
+                "sessions",
+                PartitionBounds::Hash { modulus: 4, remainder: 1 },
+            ),
+        ]);
+        assert!(validate_ir_platform(&ok, Dialect::Postgres).is_ok());
     }
 
     // ── PR10: schema confinement + guard direction + schema-ident safety ────────
@@ -4287,7 +6067,9 @@ mod tests {
         // on the live `users` table.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
-            set: [("name".to_string(), Expr::col("ghost"))].into_iter().collect(),
+            set: [("name".to_string(), IrValue::Expr(Expr::col("ghost")))]
+                .into_iter()
+                .collect(),
             r#where: None,
             batch: None,
             schema: None,
@@ -4343,7 +6125,9 @@ mod tests {
         // The SAME shape but the ColRef references a column that DOES exist.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
-            set: [("name".to_string(), Expr::col("name"))].into_iter().collect(),
+            set: [("name".to_string(), IrValue::Expr(Expr::col("name")))]
+                .into_iter()
+                .collect(),
             r#where: None,
             batch: None,
             schema: None,
@@ -4372,6 +6156,8 @@ mod tests {
                     columns: vec![IndexElement::Column {
                         name: "first".into(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     }],
                     unique: None,
                     using: None,
@@ -4382,6 +6168,7 @@ mod tests {
                 include: Vec::new(),
                 with: None,
                 only: None,
+                nulls_not_distinct: None,
                 }],
 
             partition_by: None,
@@ -4493,6 +6280,8 @@ mod tests {
                 columns: vec![IndexElement::Column {
                     name: "first".into(),
                     order: None,
+                    opclass: None,
+                    collation: None,
                 }],
                 unique: Some(true),
                 using: None,
@@ -4504,6 +6293,7 @@ mod tests {
             include: Vec::new(),
             with: None,
             only: None,
+            nulls_not_distinct: None,
             }],
 
         partition_by: None,
@@ -4547,6 +6337,8 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("ghost")),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],
@@ -4582,6 +6374,8 @@ mod tests {
                         op: UnaryOp::IsNotNull,
                         operand: Box::new(Expr::col("ghost")),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],
@@ -4603,7 +6397,7 @@ mod tests {
         // The Update is the SECOND op — the walker must stamp op_index = 1, and
         // it must reach the `set` RHS (the splitPart) to reject it.
         let mut set = BTreeMap::new();
-        set.insert("name".to_string(), split(", ", 1)); // multi-char delim
+        set.insert("name".to_string(), IrValue::Expr(split(", ", 1))); // multi-char delim
         let ir = ir_with(vec![
             Op::DropColumn {
                 table: "t".into(),
@@ -4629,6 +6423,8 @@ mod tests {
             columns: vec![IndexElement::Column {
                 name: "a".into(),
                 order: None,
+                opclass: None,
+                collation: None,
             }],
             name: None,
             unique: None,
@@ -4638,6 +6434,7 @@ mod tests {
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: None,
         concurrently: None,
             schema: None,
             existence_guard: None,
@@ -4667,7 +6464,7 @@ mod tests {
     #[test]
     fn validate_ir_walks_backfill_filter_and_set() {
         let mut set = BTreeMap::new();
-        set.insert("name".to_string(), Expr::col("first")); // fine structurally
+        set.insert("name".to_string(), IrValue::Expr(Expr::col("first"))); // fine structurally
         let ir = ir_with(vec![Op::Backfill {
             table: "users".into(),
             cursor_column: "id".into(),
@@ -4704,7 +6501,10 @@ mod tests {
         // bound) and that does NOT exist on the live `users` table.
         let ir = ir_with(vec![Op::Update {
             table: "users".into(),
-            set: [("name".to_string(), Expr::col("column_that_was_dropped"))]
+            set: [(
+                "name".to_string(),
+                IrValue::Expr(Expr::col("column_that_was_dropped")),
+            )]
                 .into_iter()
                 .collect(),
             r#where: Some(Expr::BinOp {

@@ -3,20 +3,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { table } from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 import {
-  alterRole,
   createFunction,
-  createPolicy,
-  dropExtension,
   dropFunction,
   dropOwnedBy,
-  dropPolicy,
-  dropRole,
-  dropSchema,
   extension,
   grant,
+  pgTable,
   raw,
   revoke,
   role,
@@ -39,7 +33,14 @@ test("@zeroship/migrate/pg subpath resolves through package exports", async () =
   assert.equal(typeof imported.raw, "function");
   assert.equal(typeof imported.createFunction, "function");
   assert.equal(typeof imported.domain, "function");
+  assert.equal(typeof imported.pgTable, "function");
   assert.equal(typeof imported.sequence, "function");
+  assert.equal(imported.dropSchema, undefined);
+  assert.equal(imported.dropExtension, undefined);
+  assert.equal(imported.alterRole, undefined);
+  assert.equal(imported.dropRole, undefined);
+  assert.equal(imported.createPolicy, undefined);
+  assert.equal(imported.dropPolicy, undefined);
   assert.equal(imported.sql, undefined);
 });
 
@@ -58,28 +59,27 @@ test("SA-8: grant/revoke reject empty privilege/role arrays and a non-object tar
   );
 });
 
-test("SA-10/SA-11: createPolicy requires using and rejects an explicit empty to[]", () => {
+test("pgTable().policy().create requires using and rejects an explicit empty to[]", () => {
   assert.throws(
-    () => record(() => createPolicy({ name: "p", table: "u" } as any)),
+    () => record(() => pgTable("u").policy("p").create({} as any)),
     (e: any) => e.code === "OP_INVALID" && /using is required/.test(e.message),
   );
   assert.throws(
     () =>
       record(() =>
-        createPolicy({ name: "p", table: "u", to: [], using: (c: any) => c("x").isNotNull() } as any),
+        pgTable("u").policy("p").create({ to: [], using: (c: any) => c("x").isNotNull() } as any),
       ),
     (e: any) => e.code === "OP_INVALID" && /to must be a non-empty role array/.test(e.message),
   );
 });
 
-test("vendor named exports record every standalone vendor op shape", () => {
+test("vendor exports and policy selectors record every vendor op shape", () => {
   const ops = record(() => {
-    schema({ name: "zs", ifNotExists: true, authorization: "owner" });
-    dropSchema({ name: "zs", ifExists: true, cascade: true });
-    extension({ name: "citext", ifNotExists: true, schema: "public" });
-    dropExtension({ name: "citext", ifExists: true });
-    role({
-      name: "app_role",
+    schema("zs").create({ ifNotExists: true, authorization: "owner" });
+    schema("zs").drop({ ifExists: true, cascade: true });
+    extension("citext").create({ ifNotExists: true, schema: "public" });
+    extension("citext").drop({ ifExists: true });
+    role("app_role").create({
       login: true,
       password: "secret",
       bypassRls: true,
@@ -90,8 +90,8 @@ test("vendor named exports record every standalone vendor op shape", () => {
       setSearchPath: ["zs", "public"],
       ifNotExists: true,
     });
-    alterRole({ name: "app_role", setSearchPath: ["zs"], resetSearchPath: true });
-    dropRole({ name: "app_role", ifExists: true });
+    role("app_role").setOptions({ setSearchPath: ["zs"], resetSearchPath: true });
+    role("app_role").drop({ ifExists: true });
     dropOwnedBy({ roles: ["app_role"] });
     grant({
       privileges: ["select", "usage"],
@@ -104,16 +104,13 @@ test("vendor named exports record every standalone vendor op shape", () => {
       on: { kind: "table", names: ["users"], schema: "zs" },
       from: ["public"],
     });
-    createPolicy({
-      name: "tenant_only",
-      table: "users",
-      schema: "zs",
+    pgTable("users", { schema: "zs" }).policy("tenant_only").create({
       for: "select",
       to: ["app_role"],
       using: (c) => c("app_id").eq("app_demo"),
       withCheck: (c) => c("app_id").isNotNull(),
     });
-    dropPolicy({ name: "tenant_only", table: "users", schema: "zs", ifExists: true });
+    pgTable("users", { schema: "zs" }).policy("tenant_only").drop({ ifExists: true });
     createFunction({
       name: "tenant_guard",
       schema: "zs",
@@ -216,23 +213,19 @@ test("vendor named exports record every standalone vendor op shape", () => {
   ]);
 });
 
-test("table-scoped pg methods record RLS and policy op shapes", () => {
+test("table-scoped pg methods record setRls and legacy policy op payloads", () => {
   const ops = record(() => {
-    table("secrets", { schema: "zs" })
-      .enableRowLevelSecurity()
-      .forceRowLevelSecurity()
-      .createPolicy({
-        name: "tenant_only",
-        using: (c) => c("tenant_id").eq(c.fn.currentSetting("tenant.id", true)),
+    pgTable("secrets", { schema: "zs" })
+      .setRls({ enabled: true, forced: true })
+      .policy("tenant_only").create({
+        using: (c) => c("tenant_id").eq(c.pg.currentSetting("tenant.id", true)),
       })
-      .dropPolicy({ name: "tenant_only", ifExists: true })
-      .disableRowLevelSecurity()
-      .noForceRowLevelSecurity();
+      .policy("tenant_only").drop({ ifExists: true })
+      .setRls({ enabled: false, forced: false });
   });
 
   assert.deepEqual(ops, [
-    { op: "enableRls", table: "secrets", schema: "zs" },
-    { op: "forceRls", table: "secrets", schema: "zs" },
+    { op: "setRls", table: "secrets", schema: "zs", enabled: true, forced: true },
     {
       op: "createPolicy",
       name: "tenant_only",
@@ -254,9 +247,19 @@ test("table-scoped pg methods record RLS and policy op shapes", () => {
       },
     },
     { op: "dropPolicy", name: "tenant_only", table: "secrets", schema: "zs", ifExists: true },
-    { op: "disableRls", table: "secrets", schema: "zs" },
-    { op: "noForceRls", table: "secrets", schema: "zs" },
+    { op: "setRls", table: "secrets", schema: "zs", enabled: false, forced: false },
   ]);
+});
+
+test("setRls omits absent fields and rejects empty patches", () => {
+  assert.deepEqual(
+    record(() => pgTable("secrets", { schema: "zs" }).setRls({ enabled: true })),
+    [{ op: "setRls", table: "secrets", schema: "zs", enabled: true }],
+  );
+  assert.throws(
+    () => record(() => pgTable("secrets", { schema: "zs" }).setRls({})),
+    (e: any) => e.code === "OP_INVALID" && /\.setRls needs at least one/.test(e.message),
+  );
 });
 
 test("raw requires reason and never records binds", () => {

@@ -1,13 +1,12 @@
 import { table, t } from "@zeroship/migrate";
-import { extension, grant, role, schema } from "@zeroship/migrate/pg";
+import { extension, grant, pgTable, role, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_ts_vendor";
 
 export function up() {
-  extension({ name: "citext", ifNotExists: true });
-  schema({ name: "zeroship", ifNotExists: true });
-  role({
-    name: "zeroship_ts_test_app",
+  extension("citext").create({ ifNotExists: true });
+  schema("zeroship").create({ ifNotExists: true });
+  role("zeroship_ts_test_app").create({
     login: true,
     password: "zeroship_ts_test_app",
     setSearchPath: ["zeroship", "public"],
@@ -28,15 +27,13 @@ export function up() {
     to: ["zeroship_ts_test_app"],
   });
 
-  const accounts = table("ts_accounts", { schema: "zeroship" });
-  accounts.enableRowLevelSecurity();
-  accounts.forceRowLevelSecurity();
-  accounts.createPolicy({
-    name: "tenant_isolation",
+  const accounts = pgTable("ts_accounts", { schema: "zeroship" });
+  accounts.setRls({ enabled: true, forced: true });
+  accounts.policy("tenant_isolation").create({
     for: "all",
     using: (c) =>
-      c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
     withCheck: (c) =>
-      c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
   });
 }

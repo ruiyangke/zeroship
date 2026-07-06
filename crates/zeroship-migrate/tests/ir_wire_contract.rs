@@ -335,7 +335,7 @@ fn unknown_per_op_key_is_rejected() {
 #[test]
 fn unknown_constraint_key_is_rejected() {
     let json = r#"{"op":"addConstraint","table":"t","constraint":{
-        "kind":{"kind":"pk","columns":["id"]},"bogus":true}}"#;
+        "kind":{"kind":"unique","columns":["id"]},"bogus":true}}"#;
     let err = serde_json::from_str::<Op>(json).unwrap_err();
     assert!(
         err.to_string().contains("bogus") || err.to_string().contains("unknown field"),
@@ -812,6 +812,8 @@ fn create_index_omits_all_absent_optionals() {
         columns: vec![IndexElement::Column {
             name: "email".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         name: None,
         unique: None,
@@ -820,13 +822,14 @@ fn create_index_omits_all_absent_optionals() {
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: None,
         concurrently: None,
         schema: None,
         existence_guard: None,
     };
     let v = serde_json::to_value(&op).unwrap();
     let obj = v.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where", "include", "with", "only", "concurrently"] {
+    for absent in ["name", "unique", "using", "where", "include", "with", "only", "concurrently", "nullsNotDistinct"] {
         assert!(
             !obj.contains_key(absent),
             "absent `{absent}` must be OMITTED, not null: {v}"
@@ -856,6 +859,8 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         columns: vec![IndexElement::Column {
             name: "id".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         unique: None,
         using: None,
@@ -863,16 +868,22 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: None,
     };
     let iv = serde_json::to_value(&ix).unwrap();
     let iobj = iv.as_object().unwrap();
-    for absent in ["name", "unique", "using", "where", "include", "with", "only"] {
+    for absent in ["name", "unique", "using", "where", "include", "with", "only", "nullsNotDistinct"] {
         assert!(!iobj.contains_key(absent), "IrIndex absent `{absent}` must be omitted: {iv}");
+    }
+    // The absent per-element opclass/collation must be omitted too (byte-neutral).
+    let elem = iv["columns"][0].as_object().unwrap();
+    for absent in ["opclass", "collation", "order"] {
+        assert!(!elem.contains_key(absent), "IndexElement absent `{absent}` must be omitted: {iv}");
     }
     // IrConstraint.name absent.
     let con = IrConstraint {
         name: None,
-        kind: IrConstraintKind::Pk { columns: vec!["id".into()] },
+        kind: IrConstraintKind::Unique { columns: vec!["id".into()] },
     };
     let conv = serde_json::to_value(&con).unwrap();
     assert!(
@@ -907,6 +918,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
         indexes: vec![],
         partition_by: Some(PartitionSpec::Range {
             columns: vec!["created_at".into()],
+            collapse: false,
         }),
         runtime_options: None,
         schema: None,
@@ -915,6 +927,14 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
     let value = serde_json::to_value(&parent).unwrap();
     assert!(value.get("partitionBy").is_some(), "partition key must be camelCase: {value}");
     assert!(value.get("partition_by").is_none(), "snake_case partition key must not serialize: {value}");
+    assert_eq!(
+        value
+            .get("partitionBy")
+            .and_then(|partition| partition.get("collapse"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "partitionBy.collapse must serialize explicitly on the wire: {value}"
+    );
     let back: Op = serde_json::from_value(value).unwrap();
     assert_eq!(parent, back);
 
@@ -964,6 +984,7 @@ fn partition_ops_round_trip_and_absent_fields_stay_omitted() {
         concurrently: Some(true),
     };
     let drop = Op::DropPartition {
+        parent: "events".into(),
         name: "events_2026_05".into(),
         schema: None,
         existence_guard: None,
@@ -987,11 +1008,11 @@ fn expr_case_omits_absent_else() {
     use zeroship_migrate::model::expr::{CaseBranch, UnaryOp};
     let e = Expr::Case {
         branches: vec![CaseBranch {
-            condition: Expr::UnaryOp {
+            when: Expr::UnaryOp {
                 op: UnaryOp::IsNull,
                 operand: Box::new(Expr::col("a")),
             },
-            result: Expr::lit(IrScalar::Int(1)),
+            then: Expr::lit(IrScalar::Int(1)),
         }],
         r#else: None,
     };

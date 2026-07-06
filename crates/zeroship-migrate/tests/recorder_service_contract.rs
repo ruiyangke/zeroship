@@ -17,7 +17,7 @@ use zeroship_migrate::frontend::{RecorderError, RecorderService};
 const MIGRATION: &str = r#"
 import { table, t } from "@zeroship/migrate";
 export function up() {
-  table("svc_tbl").create({ columns: { id: t.integer().notNull() } });
+  table("svc_tbl").create({ columns: { id: t.int().notNull() } });
 }
 "#;
 

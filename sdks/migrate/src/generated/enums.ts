@@ -49,6 +49,12 @@ export type ScalarFn =
   | "trim"
   | "length"
   | "abs"
+  | "mod"
+  | "round"
+  | "floor"
+  | "ceil"
+  | "substr"
+  | "replace"
   | "currentSetting"
   | "currentUser";
 
@@ -63,18 +69,6 @@ export type ScalarFn =
 export type SynthFn = "concatWs" | "splitPart" | "now" | "genRandomUuid";
 
 /**
- * The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two
- * NULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the
- * full [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a
- * non-nullary synth (`splitPart`/`concatWs`) as an unknown variant at
- * DESERIALIZE, so a hand-crafted `.ir.json` carrying `{"fn":"splitPart"}` as a
- * default cannot pass the loader and defer the blow-up to rendering. The wire
- * tokens match [`SynthFn`]'s (`"now"`, `"genRandomUuid"`) so the on-disk bytes
- * are unchanged from the pre-narrowing type.
- */
-export type SynthDefaultFn = "now" | "genRandomUuid";
-
-/**
  * Empty container defaults admitted as column DEFAULTs. This is intentionally
  * EMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.
  */
@@ -87,19 +81,45 @@ export type EmptyContainerKind = "object" | "array";
 export type CastTarget = "text" | "integer" | "real" | "boolean" | "blob" | "uuid";
 
 /**
- * **PG-ONLY** membership operator over a literal text array. The closed variants
- * intentionally encode the two Postgres idioms the platform's dumped CHECK/domain
- * predicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.
+ * CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
+ *
+ * Each admitted field has a live three-dialect proof and a faithful renderer on
+ * PostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in
+ * [`PgExtractField`] instead.
  */
-export type PgArrayMembershipOp = "eq" | "ne";
+export type ExtractField = "year" | "month" | "day" | "hour" | "minute" | "dow";
 
 /**
- * CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
+ * CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.
  *
- * P1 admits only the platform `day` marker. Add more fields only with a concrete
- * golden needing them and matching renderer/validation coverage.
+ * These fields either have no portable SQLite/MySQL analogue or have semantics
+ * that diverge under the mandated portable renderers.
  */
-export type ExtractField = "day";
+export type PgExtractField =
+  | "second"
+  | "doy"
+  | "epoch"
+  | "quarter"
+  | "week"
+  | "isodow"
+  | "isoyear"
+  | "century"
+  | "decade"
+  | "millennium"
+  | "microseconds"
+  | "milliseconds"
+  | "timezone"
+  | "timezone_hour"
+  | "timezone_minute";
+
+/**
+ * The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).
+ *
+ * `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,
+ * SQLite, and MySQL (only the surrounding identifier quoting differs), so there
+ * is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
+ */
+export type AggFunc = "count" | "sum" | "avg" | "min" | "max";
 
 /**
  * CLOSED per-column index sort-order set. Omitted means the SQL default

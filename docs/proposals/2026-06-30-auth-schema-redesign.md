@@ -2,9 +2,9 @@
 
 **Status:** proposal, design-only. No migration code in this change.
 **Date:** 2026-06-30.
-**Scope:** auth, identity, OAuth, session, grant, token, client, operator RBAC, authorization-decision, and net-policy tables currently created by `db/migrations/V*.sql` excluding `*.down.sql`.
+**Scope:** auth, identity, OAuth, session, grant, token, client, operator RBAC, authorization-decision, and net-policy tables currently created by `db/migrations-ts/`.
 
-This is a pre-launch clean redesign. P1 should implement the final names directly; do not add compatibility aliases, migration shims, or old-name fallbacks. The Liquibase changesets in `db/migrations/` are canonical; older SQL header comments that say rows were transcribed from Rust embedded migrations are stale provenance notes, not a second source of truth.
+This is a pre-launch clean redesign. P1 should implement the final names directly; do not add compatibility aliases, migration shims, or old-name fallbacks. The JS DSL files in `db/migrations-ts/` are canonical.
 
 ## Schema decision (operator)
 
@@ -425,7 +425,7 @@ RLS: mandatory `ENABLE` + `FORCE ROW LEVEL SECURITY`, keyed on `app_id = current
 
 This map is intentionally flat and implementation-oriented. Rows marked `delete` should not get replacement columns. Rows marked `merge` are absorbed into the target table, not kept as aliases.
 
-Migration mechanics: because this is pre-launch, implement the final names by rewriting the canonical Liquibase changesets in place and resetting dev databases. Do not add rename/backfill migrations. Any table rename or column rename in this map requires lockstep edits to the creating changeset and to `V0025__roles_rls.sql` grants/RLS policies; `V0032__control_admin_role_policy_update_grant.sql` must also be folded into the final `platform_admin_roles`/`platform_policies` grant shape.
+Migration mechanics: because this is pre-launch, implement the final names by rewriting the canonical JS DSL migration files in place and resetting dev databases. Do not add rename/backfill migrations. Any table rename or column rename in this map requires lockstep edits to the relevant table, grant, and RLS policy definitions in `db/migrations-ts/`.
 
 | Old object | New object | Action |
 | --- | --- | --- |
@@ -678,7 +678,7 @@ Migration mechanics: because this is pre-launch, implement the final names by re
 ## 6. Implementation notes and open questions
 
 1. **Operator/admin population is resolved:** `zeroship.platform_admin_roles` is the database-backed operator layer. It uses `user_id` because operators are selected from the platform-user pool, while the table name and `role` enum keep operator/admin RBAC distinct from end-user identity. `principal_id` remains a code/authz term, not a persisted user FK name.
-2. **Migration mechanics:** P1 should rewrite the canonical Liquibase changesets in place and reset dev databases. In particular, `V0025__roles_rls.sql` must be re-emitted against the renamed tables/columns for every GRANT, `ENABLE ROW LEVEL SECURITY`, `FORCE ROW LEVEL SECURITY`, and policy predicate; `V0032__control_admin_role_policy_update_grant.sql` must be folded into the final platform-admin/policy grants. Do not create a rename/backfill changeset.
+2. **Migration mechanics:** P1 should rewrite the canonical JS DSL files in place and reset dev databases. In particular, the grant and RLS policy files in `db/migrations-ts/` must be re-emitted against the renamed tables/columns for every GRANT, `ENABLE ROW LEVEL SECURITY`, `FORCE ROW LEVEL SECURITY`, and policy predicate. Do not create a rename/backfill changeset.
 3. **RLS GUC contract:** `sessions`, `app_session_anchors`, and `app_secrets` use `zeroship.tenant_app` as UUID `app_id`; `app_user_identities` uses `zeroship.tenant_client` as TEXT OAuth `client_id`. This split is part of the contract and must move with the `app_client_id` -> `client_id` rename.
 4. **`app_net_grants`/`net_policy_catalog` actor columns:** user-authored operator edits use `granted_by_user_id` / `updated_by_user_id`. System-authored catalog seeds should use an explicit system-provenance column such as `updated_by_system`, not overload a user FK with text like `migration:V0058`.
 5. **Final OP token table internals:** `oauth_authorization_codes` and `oauth_refresh_tokens` names are canonical here, but exact token hashing, family, reuse-detection, and status columns should be finalized in the OP AS spec. Do not create differently named tables while that spec is refined.

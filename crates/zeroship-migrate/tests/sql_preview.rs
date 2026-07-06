@@ -41,7 +41,7 @@ const REPRESENTATIVE_IR: &str = r#"{
       {"name":"label","type":"text"}
     ]},
     {"op":"addColumn","table":"codes","column":"note","type":"text","nullable":true},
-    {"op":"addColumn","table":"codes","column":"flag","type":"bool","nullable":true,"existenceGuard":"ifNotExists"},
+    {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"},
     {"op":"createIndex","table":"codes","name":"codes_label_idx","columns":[{"kind":"column","name":"label"}]},
     {"op":"insert","table":"codes",
       "columns":["id","created_at","updated_at","version","code","label"],
@@ -67,7 +67,7 @@ const REPRESENTATIVE_IR_MYSQL: &str = r#"{
       {"name":"label","type":"text"}
     ]},
     {"op":"addColumn","table":"codes","column":"note","type":"text","nullable":true},
-    {"op":"addColumn","table":"codes","column":"flag","type":"bool","nullable":true,"existenceGuard":"ifNotExists"},
+    {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"},
     {"op":"createIndex","table":"codes","name":"codes_label_idx","columns":[{"kind":"column","name":"label"}]},
     {"op":"insert","table":"codes",
       "columns":["id","created_at","updated_at","version","code","label"],
@@ -312,7 +312,7 @@ fn backfill_is_labeled_never_fabricated() {
 #[test]
 fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
     let ir = r#"{"ir_version":1,"name":"g","ops":[
-      {"op":"addColumn","table":"codes","column":"flag","type":"bool","nullable":true,"existenceGuard":"ifNotExists"}
+      {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"}
     ]}"#;
     let out = render_ir_json_sql(ir, SqlDialect::Postgres, &opts()).expect("renders offline");
     assert!(

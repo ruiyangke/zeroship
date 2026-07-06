@@ -80,6 +80,7 @@ fn live_from_snapshot(snap: &SchemaSnapshot, owner: &str) -> LiveSchema {
         .map(|i| i.name.clone())
         .collect();
     live.table_snapshots = snap.tables.clone();
+    live.partitions = snap.partitions.clone();
     live.table_ownership = snap.tables.keys().map(|t| (t.clone(), owner.to_string())).collect();
     live
 }

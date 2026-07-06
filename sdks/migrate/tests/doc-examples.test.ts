@@ -45,6 +45,7 @@ const VOCAB_PREAMBLE = `import {
   comment,
   t, fromDb, lintDeterminism,
 } from "@zeroship/migrate";
+import { pgTable } from "@zeroship/migrate/pg";
 import { t as dbT } from "@zeroship/db";
 `;
 

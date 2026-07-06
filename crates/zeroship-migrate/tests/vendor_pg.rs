@@ -132,9 +132,59 @@ fn render_revoke_from_public() {
 }
 
 #[test]
-fn render_enable_rls() {
-    let op = Op::EnableRls { table: "app_secrets".into(), schema: None };
-    assert_eq!(render_up(&op), r#"ALTER TABLE "zeroship"."app_secrets" ENABLE ROW LEVEL SECURITY"#);
+fn render_set_rls() {
+    let op = Op::SetRls {
+        table: "app_secrets".into(),
+        schema: None,
+        enabled: Some(true),
+        forced: Some(true),
+    };
+    let stmts = render_vendor_op(&op, SCHEMA).expect("vendor render");
+    assert_eq!(stmts.len(), 2, "setRls enabled+forced renders two stable statements");
+    assert_eq!(stmts[0].up, r#"ALTER TABLE "zeroship"."app_secrets" ENABLE ROW LEVEL SECURITY"#);
+    assert_eq!(stmts[0].down.as_deref(), Some(r#"ALTER TABLE "zeroship"."app_secrets" DISABLE ROW LEVEL SECURITY"#));
+    assert_eq!(stmts[1].up, r#"ALTER TABLE "zeroship"."app_secrets" FORCE ROW LEVEL SECURITY"#);
+    assert_eq!(stmts[1].down.as_deref(), Some(r#"ALTER TABLE "zeroship"."app_secrets" NO FORCE ROW LEVEL SECURITY"#));
+}
+
+#[test]
+fn set_rls_renders_pg_and_refuses_off_pg() {
+    let op = Op::SetRls {
+        table: "app_secrets".into(),
+        schema: None,
+        enabled: Some(true),
+        forced: Some(true),
+    };
+    let platform = SchemaScope::Allowlist(vec!["zeroship".into()]);
+    let ir = ir_with(vec![op.clone()]);
+
+    validate_ir_scoped(
+        &ir,
+        Dialect::Postgres,
+        &[],
+        Some(&platform),
+        &PolicyProfile::platform(),
+    )
+    .expect("setRls validates on Postgres with platform capabilities");
+    let stmts = render_vendor_op(&op, SCHEMA).expect("setRls renders on Postgres");
+    assert_eq!(stmts.len(), 2, "enabled+forced setRls renders two ALTER statements");
+    assert!(stmts[0].up.contains("ENABLE ROW LEVEL SECURITY"), "got: {stmts:?}");
+    assert!(stmts[1].up.contains("FORCE ROW LEVEL SECURITY"), "got: {stmts:?}");
+
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir_scoped(
+            &ir,
+            dialect,
+            &[],
+            Some(&platform),
+            &PolicyProfile::platform(),
+        )
+        .expect_err(&format!("setRls must be refused on {dialect:?}"));
+        assert!(
+            matches!(err.code.as_str(), CODE_UNSUPPORTED | CODE_VENDOR_OP_DENIED),
+            "setRls on {dialect:?} must fail closed as PG-only/vendor, got {err:?}"
+        );
+    }
 }
 
 #[test]

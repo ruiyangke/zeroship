@@ -523,7 +523,7 @@ fn fixture_ir() -> MigrationIr {
             "columns": [
                 { "name": "id", "type": "bigInt", "nullable": false, "identity": { "always": false } },
                 { "name": "email", "type": "string", "nullable": false },
-                { "name": "active", "type": "bool", "nullable": false },
+                { "name": "active", "type": "boolean", "nullable": false },
                 { "name": "profile", "type": "json", "nullable": true }
             ],
             "primaryKey": ["id"],
@@ -538,6 +538,212 @@ fn fixture_ir() -> MigrationIr {
         "preconditions": []
     }))
     .expect("fixture IR is valid")
+}
+
+fn partition_collapse_ir() -> MigrationIr {
+    serde_json::from_value(json!({
+        "ir_version": CURRENT_IR_VERSION,
+        "name": "mysql_partition_collapse",
+        "owner_app": OWNER,
+        "ops": [
+            {
+                "op": "createTable",
+                "name": "events",
+                "existenceGuard": "ifNotExists",
+                "columns": [
+                    { "name": "bucket", "type": "int", "nullable": false },
+                    { "name": "payload", "type": "text", "nullable": false }
+                ],
+                "primaryKey": null,
+                "partitionBy": {
+                    "kind": "range",
+                    "columns": ["bucket"],
+                    "collapse": true
+                }
+            },
+            {
+                "op": "createPartition",
+                "name": "events_0",
+                "of": "events",
+                "bounds": {
+                    "kind": "range",
+                    "from": [{ "kind": "int", "value": 0 }],
+                    "to": [{ "kind": "int", "value": 100 }]
+                }
+            },
+            {
+                "op": "createPartition",
+                "name": "events_default",
+                "of": "events",
+                "bounds": { "kind": "default" }
+            }
+        ],
+        "flags": {},
+        "depends_on": [],
+        "supersedes": [],
+        "preconditions": []
+    }))
+    .expect("partition collapse IR is valid")
+}
+
+fn partition_test_ir(name: &str, ops: Vec<Value>) -> MigrationIr {
+    serde_json::from_value(json!({
+        "ir_version": CURRENT_IR_VERSION,
+        "name": name,
+        "owner_app": OWNER,
+        "ops": ops,
+        "flags": {},
+        "depends_on": [],
+        "supersedes": [],
+        "preconditions": []
+    }))
+    .expect("partition test IR is valid")
+}
+
+fn partition_parent_json() -> Value {
+    json!({
+        "op": "createTable",
+        "name": "events",
+        "columns": [
+            { "name": "bucket", "type": "int", "nullable": false },
+            { "name": "payload", "type": "text", "nullable": false }
+        ],
+        "primaryKey": null,
+        "partitionBy": {
+            "kind": "range",
+            "columns": ["bucket"],
+            "collapse": true
+        },
+        "existenceGuard": "ifNotExists"
+    })
+}
+
+fn range_partition_json(name: &str, from: i64, to: i64) -> Value {
+    json!({
+        "op": "createPartition",
+        "name": name,
+        "of": "events",
+        "bounds": {
+            "kind": "range",
+            "from": [{ "kind": "int", "value": from }],
+            "to": [{ "kind": "int", "value": to }]
+        }
+    })
+}
+
+fn default_partition_json() -> Value {
+    json!({
+        "op": "createPartition",
+        "name": "events_default",
+        "of": "events",
+        "bounds": { "kind": "default" }
+    })
+}
+
+fn drop_partition_json(name: &str) -> Value {
+    json!({
+        "op": "dropPartition",
+        "parent": "events",
+        "name": name
+    })
+}
+
+fn insert_events_json(rows: &[(i64, &str)]) -> Value {
+    let rows = rows
+        .iter()
+        .map(|(bucket, payload)| json!([bucket, payload]))
+        .collect::<Vec<_>>();
+    json!({
+        "op": "insert",
+        "table": "events",
+        "columns": ["bucket", "payload"],
+        "rows": rows
+    })
+}
+
+fn drop_events_table_json() -> Value {
+    json!({
+        "op": "dropTable",
+        "table": "events",
+        "existenceGuard": "ifExists"
+    })
+}
+
+fn live_from_partition_fold(schema: &str, ops: &[zeroship_migrate::Op]) -> LiveSchema {
+    let snap = fold_ops(ops, SqlDialect::Mysql, schema).expect("fold partition ops");
+    let mut live = LiveSchema::from_tables(snap.tables.keys().cloned().collect());
+    live.table_snapshots = snap.tables;
+    live.partitions = snap.partitions;
+    live
+}
+
+fn lower_mysql_steps_with_live(
+    schema: &str,
+    ir: &MigrationIr,
+    live: &LiveSchema,
+    label: &str,
+) -> Vec<PlanStep> {
+    IrAuthor::new(schema, OWNER, SqlDialect::Mysql)
+        .lower_steps(ir, live)
+        .unwrap_or_else(|err| panic!("lower {label} IR to MySQL steps: {err}"))
+}
+
+async fn apply_mysql_steps(
+    backend: &MysqlBackend,
+    cfg: &ExecutorConfig,
+    steps: &[PlanStep],
+    approval: Approval,
+) -> Result<(), String> {
+    for step in steps {
+        match step {
+            PlanStep::Ddl(migration) => {
+                MigrationEngine::new()
+                    .apply_verified(
+                        std::slice::from_ref(migration),
+                        &GuardConfig::confined_mysql(cfg.project_schema.clone()),
+                        None,
+                        approval,
+                        backend,
+                        cfg,
+                        OWNER,
+                    )
+                    .await
+                    .map_err(|err| format!("{err:?}"))?;
+            }
+            PlanStep::Dml { .. } | PlanStep::Backfill(_) | PlanStep::OnlineRename(_) => {
+                MigrationEngine::new()
+                    .apply_plan(
+                        std::slice::from_ref(step),
+                        approval,
+                        backend,
+                        cfg,
+                        OWNER,
+                        LockMode::Acquire,
+                    )
+                    .await
+                    .map_err(|err| format!("{err:?}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn mysql_event_rows(backend: &MysqlBackend) -> Vec<(i64, String)> {
+    let rows = query(
+        backend,
+        "SELECT bucket, payload FROM events ORDER BY bucket",
+        &[],
+    )
+    .await;
+    rows.rows
+        .iter()
+        .map(|row| {
+            (
+                value_as_i64(field(row, "bucket")),
+                value_as_string(row.get("payload")),
+            )
+        })
+        .collect()
 }
 
 fn fixture_migrations(schema: &str) -> (MigrationIr, Vec<Migration>) {
@@ -703,6 +909,38 @@ async fn apply_fixture(
         )
         .await
         .expect("live MySQL apply succeeds")
+}
+
+async fn lower_plan_and_apply_mysql(
+    backend: &MysqlBackend,
+    cfg: &ExecutorConfig,
+    ir: &str,
+    reg: &std::collections::BTreeMap<String, String>,
+) -> zeroship_migrate::engine::DeclarativeDeployOutcome {
+    let document = zeroship_migrate::model::load::load_ir_document(
+        ir,
+        OWNER,
+        zeroship_migrate::model::validate::Dialect::Mysql,
+        reg,
+        None,
+        None,
+    )
+    .expect("load gate");
+    let author = IrAuthor::new(cfg.project_schema.clone(), OWNER, SqlDialect::Mysql);
+    let plan = author
+        .lower_plan(&document, &LiveSchema::default())
+        .expect("lower the IR plan on MySQL");
+    MigrationEngine::new()
+        .apply_plan(
+            &plan.steps,
+            Approval::None,
+            backend,
+            cfg,
+            OWNER,
+            LockMode::Acquire,
+        )
+        .await
+        .expect("apply the authored DML plan on MySQL")
 }
 
 async fn query(
@@ -1385,6 +1623,309 @@ fn live_apply_creates_table_and_index_over_mysql2_node_net() {
 }
 
 #[test]
+fn live_partition_collapse_applies_as_plain_table_over_mysql2_node_net() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "partitioncollapse", |backend, cfg, _account| Box::pin(async move {
+        let ir = partition_collapse_ir();
+        zeroship_migrate::model::validate::validate_ir_scoped(
+            &ir,
+            zeroship_migrate::model::validate::Dialect::Mysql,
+            &[],
+            None,
+            &zeroship_migrate::PolicyProfile::platform(),
+        )
+        .expect("collapse-affirmed partition recording validates on MySQL");
+        let steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &ir,
+            &LiveSchema::default(),
+            "partition_collapse",
+        );
+        assert_eq!(
+            steps.len(),
+            2,
+            "bounded createPartition lowers to a mirror guard DML step; default child remains no-DDL on MySQL"
+        );
+        let rendered = steps
+            .iter()
+            .map(|step| match step {
+                PlanStep::Ddl(migration) => migration.up.clone(),
+                PlanStep::Dml { template, .. } => template.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("partitionBy collapsed to a plain table"),
+            "degraded leg should be visible in MySQL plan output:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("partition collapse populated-default mirror guard"),
+            "bounded child create should carry the populated-default mirror guard:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("PARTITION BY") && !rendered.contains("PARTITION OF"),
+            "MySQL collapse must not emit native partition syntax:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("events_0") && !rendered.contains("events_default"),
+            "MySQL collapse must not emit child table DDL:\n{rendered}"
+        );
+
+        apply_mysql_steps(backend, cfg, &steps, Approval::None)
+            .await
+            .expect("apply partition collapse parent + mirror guard");
+        backend
+            .exec(&format!(
+                "INSERT INTO {}.{} (bucket, payload) VALUES (42, 'range'), (250, 'default')",
+                qi(&cfg.project_schema),
+                qi("events")
+            ))
+            .await
+            .expect("insert rows into collapsed MySQL table");
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT bucket, payload FROM {}.{} ORDER BY bucket",
+                qi(&cfg.project_schema),
+                qi("events")
+            ),
+            &[],
+        )
+        .await;
+        assert_eq!(rows_len(&rows), 2, "both rows must read from collapsed table");
+        assert_eq!(value_as_i64(field(&rows.rows[0], "bucket")), 42);
+        assert_eq!(value_as_string(rows.rows[0].get("payload")), "range");
+        assert_eq!(value_as_i64(field(&rows.rows[1], "bucket")), 250);
+        assert_eq!(value_as_string(rows.rows[1].get("payload")), "default");
+
+        let child_tables = query(
+            backend,
+            "SELECT TABLE_NAME FROM information_schema.TABLES
+              WHERE TABLE_SCHEMA = ? AND TABLE_NAME IN ('events_0', 'events_default')",
+            &[BindValue::Text(cfg.project_schema.clone())],
+        )
+        .await;
+        assert_eq!(
+            rows_len(&child_tables),
+            0,
+            "collapse child partitions must be no-DDL on MySQL"
+        );
+    }));
+}
+
+#[test]
+fn live_partition_collapse_bounded_child_drop_deletes_bound_rows_over_mysql2_node_net() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "partitiondrop", |backend, cfg, _account| Box::pin(async move {
+        let ir = partition_test_ir(
+            "mysql_partition_bounded_drop",
+            vec![
+                partition_parent_json(),
+                range_partition_json("events_0", 0, 100),
+                default_partition_json(),
+                insert_events_json(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+                drop_partition_json("events_0"),
+            ],
+        );
+        let steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &ir,
+            &LiveSchema::default(),
+            "partition_bounded_drop",
+        );
+        let rendered = format!("{steps:#?}");
+        assert!(
+            rendered.contains("partition child drop collapsed to DELETE FROM parent")
+                && rendered.contains("`bucket` >= 0 AND `bucket` < 100"),
+            "bounded child drop must lower to a bounded DELETE on MySQL:\n{rendered}"
+        );
+        apply_mysql_steps(backend, cfg, &steps, Approval::Approved)
+            .await
+            .expect("apply bounded child drop on MySQL");
+        assert_eq!(
+            mysql_event_rows(backend).await,
+            vec![
+                (150, "default-a".to_string()),
+                (250, "default-b".to_string()),
+            ]
+        );
+    }));
+}
+
+#[test]
+fn live_partition_collapse_default_child_drop_deletes_residual_rows_over_mysql2_node_net() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "partitiondefaultdrop", |backend, cfg, _account| Box::pin(async move {
+        let ir = partition_test_ir(
+            "mysql_partition_default_drop",
+            vec![
+                partition_parent_json(),
+                range_partition_json("events_0", 0, 100),
+                default_partition_json(),
+                insert_events_json(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+                drop_partition_json("events_default"),
+            ],
+        );
+        let steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &ir,
+            &LiveSchema::default(),
+            "partition_default_drop",
+        );
+        let rendered = format!("{steps:#?}");
+        assert!(
+            rendered.contains("NOT (`bucket` >= 0 AND `bucket` < 100)"),
+            "default child drop must lower to residual sibling negation on MySQL:\n{rendered}"
+        );
+        apply_mysql_steps(backend, cfg, &steps, Approval::Approved)
+            .await
+            .expect("apply default child drop on MySQL");
+        assert_eq!(
+            mysql_event_rows(backend).await,
+            vec![(42, "range".to_string())]
+        );
+    }));
+}
+
+#[test]
+fn live_partition_collapse_mirror_guard_errors_only_for_matching_default_rows_over_mysql2_node_net()
+{
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "partitionguarddirty", |backend, cfg, _account| Box::pin(async move {
+        let dirty = partition_test_ir(
+            "mysql_partition_guard_dirty",
+            vec![
+                partition_parent_json(),
+                default_partition_json(),
+                insert_events_json(&[(42, "stray")]),
+                range_partition_json("events_0", 0, 100),
+            ],
+        );
+        let dirty_steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &dirty,
+            &LiveSchema::default(),
+            "partition_guard_dirty",
+        );
+        let rendered = format!("{dirty_steps:#?}");
+        assert!(
+            rendered.contains("partition collapse populated-default mirror guard")
+                && rendered.contains("JSON_EXTRACT(CONCAT('!', `bucket`), '$')"),
+            "bounded create must carry the MySQL mirror guard:\n{rendered}"
+        );
+        apply_mysql_steps(backend, cfg, &dirty_steps, Approval::None)
+            .await
+            .expect_err("matching default rows must trip the MySQL mirror guard");
+    }));
+
+    run_isolated_mysql(&live, "partitionguardclean", |backend, cfg, _account| Box::pin(async move {
+        let clean = partition_test_ir(
+            "mysql_partition_guard_clean",
+            vec![
+                partition_parent_json(),
+                default_partition_json(),
+                insert_events_json(&[(250, "default")]),
+                range_partition_json("events_0", 0, 100),
+            ],
+        );
+        let clean_steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &clean,
+            &LiveSchema::default(),
+            "partition_guard_clean",
+        );
+        apply_mysql_steps(backend, cfg, &clean_steps, Approval::None)
+            .await
+            .expect("non-matching default rows must not trip the MySQL mirror guard");
+        assert_eq!(
+            mysql_event_rows(backend).await,
+            vec![(250, "default".to_string())]
+        );
+    }));
+}
+
+#[test]
+fn live_partition_collapse_child_create_down_round_trip_over_mysql2_node_net() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "partitiondown", |backend, cfg, _account| Box::pin(async move {
+        let up = partition_test_ir(
+            "mysql_partition_up",
+            vec![
+                partition_parent_json(),
+                range_partition_json("events_0", 0, 100),
+                default_partition_json(),
+                insert_events_json(&[(42, "range"), (150, "default-a"), (250, "default-b")]),
+            ],
+        );
+        let up_steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &up,
+            &LiveSchema::default(),
+            "partition_up",
+        );
+        apply_mysql_steps(backend, cfg, &up_steps, Approval::None)
+            .await
+            .expect("apply MySQL partition up");
+        assert_eq!(
+            mysql_event_rows(backend).await,
+            vec![
+                (42, "range".to_string()),
+                (150, "default-a".to_string()),
+                (250, "default-b".to_string()),
+            ]
+        );
+
+        let live = live_from_partition_fold(&cfg.project_schema, &up.ops);
+        let down_children = partition_test_ir(
+            "mysql_partition_down_children",
+            vec![drop_partition_json("events_default"), drop_partition_json("events_0")],
+        );
+        let down_child_steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &down_children,
+            &live,
+            "partition_down_children",
+        );
+        apply_mysql_steps(backend, cfg, &down_child_steps, Approval::Approved)
+            .await
+            .expect("apply MySQL semantic child drops");
+        assert!(
+            mysql_event_rows(backend).await.is_empty(),
+            "child drops should remove all rows before parent drop"
+        );
+
+        let down_parent = partition_test_ir("mysql_partition_down_parent", vec![drop_events_table_json()]);
+        let down_parent_steps = lower_mysql_steps_with_live(
+            &cfg.project_schema,
+            &down_parent,
+            &LiveSchema::default(),
+            "partition_down_parent",
+        );
+        apply_mysql_steps(backend, cfg, &down_parent_steps, Approval::Approved)
+            .await
+            .expect("apply MySQL semantic down");
+        let tables = query(backend, "SHOW TABLES LIKE 'events'", &[]).await;
+        assert_eq!(rows_len(&tables), 0, "events table should be gone after down");
+    }));
+}
+
+#[test]
 fn live_journal_records_completed_and_second_apply_skips() {
     let _lock = lock_env();
     let _env = EnvGuard::set_dev();
@@ -1450,6 +1991,159 @@ fn live_journal_records_completed_and_second_apply_skips() {
             "second apply must not re-journal/re-execute"
         );
         println!("mysql_jsdriver_e2e journal skip assertions ran");
+    }));
+}
+
+#[test]
+fn in_list_predicates_apply_identically_on_mysql() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "inlist", |backend, cfg, _account| Box::pin(async move {
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (\
+                    id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,\
+                    status VARCHAR(64) NOT NULL,\
+                    in_match VARCHAR(8) NOT NULL,\
+                    not_in_match VARCHAR(8) NOT NULL,\
+                    empty_in_match VARCHAR(8) NOT NULL,\
+                    empty_not_in_match VARCHAR(8) NOT NULL\
+                )",
+                qi(&cfg.project_schema),
+                qi("inlist_rows")
+            ))
+            .await
+            .expect("create MySQL inList proof table");
+
+        let reg = std::collections::BTreeMap::from([("inlist_rows".to_string(), OWNER.to_string())]);
+        let seed = r#"{"ir_version":1,"name":"seed_inlist_rows","ops":[
+            {"op":"insert","table":"inlist_rows",
+             "columns":["status","in_match","not_in_match","empty_in_match","empty_not_in_match"],
+             "rows":[
+                ["active","no","no","no","no"],
+                ["trial","no","no","no","no"],
+                ["deleted","no","no","no","no"],
+                ["archived","no","no","no","no"]
+             ]}
+        ]}"#;
+        lower_plan_and_apply_mysql(backend, cfg, seed, &reg).await;
+
+        let updates = r#"{"ir_version":1,"name":"update_inlist_rows","ops":[
+            {"op":"update","table":"inlist_rows",
+             "set":{"in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["active","trial"],"negated":false}},
+            {"op":"update","table":"inlist_rows",
+             "set":{"not_in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["deleted","archived"],"negated":true}},
+            {"op":"update","table":"inlist_rows",
+             "set":{"empty_in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":false}},
+            {"op":"update","table":"inlist_rows",
+             "set":{"empty_not_in_match":{"node":"literal","value":"yes"}},
+             "where":{"node":"inList","expr":{"node":"colRef","name":"status"},"elems":[],"negated":true}}
+        ]}"#;
+        lower_plan_and_apply_mysql(backend, cfg, updates, &reg).await;
+
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT status, in_match, not_in_match, empty_in_match, empty_not_in_match \
+                 FROM {}.{} ORDER BY status",
+                qi(&cfg.project_schema),
+                qi("inlist_rows")
+            ),
+            &[],
+        )
+        .await;
+        let got = rows
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    value_as_string(row.get("status")),
+                    value_as_string(row.get("in_match")),
+                    value_as_string(row.get("not_in_match")),
+                    value_as_string(row.get("empty_in_match")),
+                    value_as_string(row.get("empty_not_in_match")),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            got,
+            vec![
+                ("active".into(), "yes".into(), "yes".into(), "no".into(), "yes".into()),
+                ("archived".into(), "no".into(), "no".into(), "no".into(), "yes".into()),
+                ("deleted".into(), "no".into(), "no".into(), "no".into(), "yes".into()),
+                ("trial".into(), "yes".into(), "yes".into(), "no".into(), "yes".into()),
+            ],
+            "MySQL inList/notIn/empty-list predicate matrix"
+        );
+    }));
+}
+
+#[test]
+fn update_set_scalar_and_expr_apply_on_mysql() {
+    let _lock = lock_env();
+    let _env = EnvGuard::set_dev();
+    let Some(live) = live_mysql_or_skip() else { return };
+
+    run_isolated_mysql(&live, "mixed_set", |backend, cfg, _account| Box::pin(async move {
+        backend
+            .exec(&format!(
+                "CREATE TABLE {}.{} (\
+                    id VARCHAR(32) NOT NULL PRIMARY KEY,\
+                    base BIGINT NOT NULL,\
+                    scalar_val BIGINT NOT NULL,\
+                    expr_val BIGINT NOT NULL\
+                )",
+                qi(&cfg.project_schema),
+                qi("mix")
+            ))
+            .await
+            .expect("create MySQL mixed-set proof table");
+        backend
+            .exec(&format!(
+                "INSERT INTO {}.{} (id, base, scalar_val, expr_val) VALUES ('m1', 5, 0, 0)",
+                qi(&cfg.project_schema),
+                qi("mix")
+            ))
+            .await
+            .expect("seed MySQL mixed-set proof row");
+
+        let reg = std::collections::BTreeMap::from([("mix".to_string(), OWNER.to_string())]);
+        let update = r#"{"ir_version":1,"name":"update_mix","ops":[
+            {"op":"update","table":"mix",
+             "set":{"scalar_val":7,"expr_val":{"node":"binOp","op":"add",
+                 "lhs":{"node":"colRef","name":"base"},
+                 "rhs":{"node":"literal","value":1}}},
+             "where":{"node":"binOp","op":"eq",
+                 "lhs":{"node":"colRef","name":"id"},
+                 "rhs":{"node":"literal","value":"m1"}}}
+        ]}"#;
+        lower_plan_and_apply_mysql(backend, cfg, update, &reg).await;
+
+        let rows = query(
+            backend,
+            &format!(
+                "SELECT scalar_val, expr_val FROM {}.{} WHERE id = 'm1'",
+                qi(&cfg.project_schema),
+                qi("mix")
+            ),
+            &[],
+        )
+        .await;
+        assert_eq!(rows_len(&rows), 1, "one MySQL mixed-set proof row");
+        let row = &rows.rows[0];
+        assert_eq!(
+            (
+                value_as_string(row.get("scalar_val")),
+                value_as_string(row.get("expr_val")),
+            ),
+            ("7".to_string(), "6".to_string()),
+            "MySQL update.set scalar and expression values apply identically"
+        );
     }));
 }
 
