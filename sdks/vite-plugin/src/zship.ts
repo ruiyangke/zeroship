@@ -96,6 +96,8 @@ interface Manifest {
   transformer?: "superjson" | "json";
   /** Inert outbound TCP request hints. Grants live only in control's table. */
   net?: NetConfig;
+  /** Build-time workflow schedule registrations. */
+  schedules?: WireScheduleRegistration[];
   /**
    * The generated runtime schema descriptor (`schema.runtime.json`) carried by
    * the bundle. `{ hash }` is the sha256 of the `gen-types`-emitted descriptor
@@ -117,6 +119,15 @@ interface NetRequest {
   host: string;
   port: number;
   reason: string;
+}
+
+interface WireScheduleRegistration {
+  name: string;
+  workflowName: string;
+  schedule: Record<string, unknown>;
+  input: unknown;
+  overlap: "allow" | "skipIfRunning";
+  catchUp: { mode: "skip" } | { mode: "backfill"; max: number };
 }
 
 /** The runtime schema descriptor carried by the `.zship`
@@ -197,6 +208,7 @@ export interface ZshipOptions {
     resources: Record<string, Record<string, unknown>>;
     transformer: "superjson" | "json";
     net?: NetConfig;
+    schedules?: WireScheduleRegistration[];
   };
   /**
    * Migration/typegen settings. The packer never carries migration documents in
@@ -448,6 +460,9 @@ export async function emitZship(
   manifest.transformer = transformer;
   if (options.rpcExtras?.net && (options.rpcExtras.net.requests?.length ?? 0) > 0) {
     manifest.net = options.rpcExtras.net;
+  }
+  if (options.rpcExtras?.schedules && options.rpcExtras.schedules.length > 0) {
+    manifest.schedules = options.rpcExtras.schedules;
   }
 
   // 8b. Carry the generated runtime schema descriptor. Migration documents are

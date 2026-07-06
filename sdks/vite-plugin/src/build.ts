@@ -13,6 +13,7 @@ import {
 import {
   computeManifestExtras,
   type DiscoveredProcedure,
+  type DiscoveredSchedule,
 } from "./manifest.js";
 import {
   zeroshipBootstrapResolverPlugin,
@@ -693,10 +694,22 @@ export function buildPlugin(
             moduleConfig: p.moduleConfig,
           }),
         );
+        const schedules: DiscoveredSchedule[] = (state.discoveredSchedules ?? []).map(
+          (s) => ({
+            filePath: s.filePath,
+            name: s.name,
+            workflowName: s.workflowName,
+            schedule: s.schedule,
+            input: s.input,
+            overlap: s.overlap,
+            catchUp: s.catchUp,
+          }),
+        );
 
         const extras = await computeManifestExtras({
           root,
           procedures,
+          schedules,
           mode: viteMode,
         });
 
@@ -709,6 +722,7 @@ export function buildPlugin(
             resources: extras.resources,
             transformer: extras.transformer,
             net: extras.net,
+            schedules: extras.schedules,
           },
           // Carry the generated runtime schema descriptor (`schema.runtime.json`)
           // the buildStart gen-types step emitted. Migration documents are

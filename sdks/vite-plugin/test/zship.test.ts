@@ -318,6 +318,61 @@ describe("emitZship", () => {
     }
   });
 
+  test("carries workflow schedules into the manifest", async () => {
+    const fix = await makeFixture({
+      "dist/server/index.js":
+        "export default { fetch: async () => new Response('ok') };\n",
+    });
+
+    try {
+      const result = await emitZship({
+        root: fix.root,
+        builtAt: "2026-07-06T00:00:00Z",
+        compiler: "@zeroship/vite-plugin@test",
+        silent: true,
+        rpcExtras: {
+          resources: {},
+          transformer: "json",
+          schedules: [
+            {
+              name: "nightly-report-us",
+              workflowName: "NightlyReport",
+              input: { region: "us" },
+              overlap: "skipIfRunning",
+              catchUp: { mode: "backfill", max: 3 },
+              schedule: {
+                kind: "cron",
+                cron_expr: "30 2 * * *",
+                tz: "America/New_York",
+                overlap: "skipIfRunning",
+                catchUp: { mode: "backfill", max: 3 },
+              },
+            },
+          ],
+        },
+      });
+
+      assert.deepEqual(result.manifest.schedules, [
+        {
+          name: "nightly-report-us",
+          workflowName: "NightlyReport",
+          input: { region: "us" },
+          overlap: "skipIfRunning",
+          catchUp: { mode: "backfill", max: 3 },
+          schedule: {
+            kind: "cron",
+            cron_expr: "30 2 * * *",
+            tz: "America/New_York",
+            overlap: "skipIfRunning",
+            catchUp: { mode: "backfill", max: 3 },
+          },
+        },
+      ]);
+    } finally {
+      await fix.cleanup();
+    }
+  });
+
   test("emits SSG-only archive (no worker) with SPA fallback resource when no server bundle exists", async () => {
     const fix = await makeFixture({
       "dist/index.html": "<!doctype html><html><body>hello</body></html>",

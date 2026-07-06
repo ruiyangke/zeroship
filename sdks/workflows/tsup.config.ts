@@ -12,6 +12,6 @@ const shared = {
 
 export default defineConfig({
   ...shared,
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/schedule.ts"],
   clean: true,
 });

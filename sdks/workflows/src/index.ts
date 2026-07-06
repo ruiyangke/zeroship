@@ -239,3 +239,26 @@ export class WorkflowUnsupportedError extends Error {
     this.name = "WorkflowUnsupportedError";
   }
 }
+
+export {
+  compileSchedule,
+  cronExpr,
+  every,
+  InvalidScheduleError,
+  schedule,
+} from "./schedule.js";
+export type {
+  CompileScheduleOptions,
+  CronScheduleDescriptor,
+  IntervalScheduleDescriptor,
+  IntervalUnit,
+  NormalizedScheduleDescriptor,
+  Schedule,
+  ScheduleAnchor,
+  ScheduleCatchUp,
+  ScheduleOverlap,
+  ScheduleRegistration,
+  ScheduleRegistrationOptions,
+  TimeOfDay,
+  TimeZone,
+} from "./schedule.js";
