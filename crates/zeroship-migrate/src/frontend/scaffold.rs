@@ -722,18 +722,16 @@ fn render_op_call(op: &Op) -> String {
 }
 
 fn render_create_runtime_options(options: &TableRuntimeOptions) -> Vec<String> {
-    vec![
-        format!("    softDelete: {}", options.soft_delete),
-        format!("    versioning: {}", options.versioning),
-        format!(
-            "    strictness: {}",
-            js_str(match options.strictness {
-                TableStrictness::Strict => "strict",
-                TableStrictness::Lenient => "lenient",
-                TableStrictness::Off => "off",
-            })
-        ),
-    ]
+    vec![format!(
+        "    options: {{ softDelete: {}, versioning: {}, strictness: {} }}",
+        options.soft_delete,
+        options.versioning,
+        js_str(match options.strictness {
+            TableStrictness::Strict => "strict",
+            TableStrictness::Lenient => "lenient",
+            TableStrictness::Off => "off",
+        })
+    )]
 }
 
 /// Render a column as a `t.*` chain inside a `create({ columns })` map.
@@ -779,7 +777,9 @@ fn render_t_for(ty: &ColType) -> String {
         ColType::Date => "t.date()".into(),
         ColType::Uuid => "t.uuid()".into(),
         ColType::Bytes => "t.bytes()".into(),
-        ColType::Decimal { precision, scale } => format!("t.numeric({precision}, {scale})"),
+        ColType::Decimal { precision, scale } => {
+            format!("t.numeric({{ precision: {precision}, scale: {scale} }})")
+        }
         ColType::Enum { name, .. } => format!("t.enum({})", js_str(name)),
         ColType::Domain { name, .. } => format!("t.domain({})", js_str(name)),
         // Goodies are not generated (rejected earlier); render a hand-author note.

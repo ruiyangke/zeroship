@@ -169,7 +169,7 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
         "t.inet()",
         "t.textArray()",
         "t.bytes()",
-        "t.numeric(38, 9)",
+        "t.numeric({ precision: 38, scale: 9 })",
     ] {
         assert!(
             gen.ts_body.contains(chain),
