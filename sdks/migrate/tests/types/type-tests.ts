@@ -497,8 +497,9 @@ export function checkExpressionSurfaceTypechecks(): void {
   // @ts-expect-error — core CHECK builders expose only immutable c.fn helpers.
   table("oauth_authorization_codes").check("no_now").add({ expr: (c) => c.fn.now().isNotNull() });
 
-  // @ts-expect-error — core CHECK builders do not expose PostgreSQL vendor helpers.
-  table("oauth_authorization_codes").check("no_pg").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_") });
+  // P0: `regex` is a first-class chain operator on the CORE check builder
+  // (PostgreSQL-first; fails closed off-PG at validate-time, not tsc).
+  table("oauth_authorization_codes").check("core_regex").add({ expr: (c) => c("user_id").regex("^usr_") });
 
   // @ts-expect-error — PG-only extract fields are not in the portable extract union.
   table("oauth_authorization_codes").check("no_pg_extract_field").add({ expr: (c) => c.fn.extract("epoch", c("created_at")).gt(0) });
@@ -514,10 +515,10 @@ export function checkExpressionSurfaceTypechecks(): void {
     expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
   });
   pgTable("oauth_authorization_codes").check("user_id_fmt").add({
-    expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$"),
+    expr: (c) => c("user_id").regex("^usr_[0-9A-Za-z]{20,40}$"),
   });
   pgTable("oauth_authorization_codes").check("data_size").add({
-    expr: (c) => c.pg.columnSize(c("data")).lt(1000),
+    expr: (c) => c("data").columnSize().lt(1000),
   });
   table("oauth_authorization_codes").check("active_is_bool").add({
     expr: (c) => c("active").isNotNull(),
@@ -531,11 +532,13 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
     withCheck: (c) => c("owner").eq(c.pg.currentUser()),
   });
 
-  // @ts-expect-error — dot-spelled PG regex is vendor-only; use `c.pg.regex(c("x"), pattern)`.
+  // P0: `regex` is a first-class chain operator (PG-first). It typechecks.
+  table("exprs").update({ set: { x: (c) => c("x").regex("^a$") } });
+  // @ts-expect-error — `matches` was renamed to `regex` (S1); the old name is gone.
   table("exprs").update({ set: { x: (c) => c("x")["matches"]("^a$") } });
 
-  // @ts-expect-error — dot-spelled PG column size is vendor-only; use `c.pg.columnSize(c("x"))`.
-  table("exprs").update({ set: { x: (c) => c("x")["columnSize"]() } });
+  // P0: `columnSize` is a first-class chain operator (PG-first). It typechecks.
+  table("exprs").update({ set: { x: (c) => c("x").columnSize() } });
 
   // @ts-expect-error — current_setting is PG-vendor and lives under `c.pg`.
   table("exprs").update({ set: { x: (c) => c.fn["currentSetting"]("zeroship.tenant_app", true) } });

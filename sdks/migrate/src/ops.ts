@@ -1736,6 +1736,14 @@ class ExprChainImpl implements ExprChainType {
   distinctFrom(x: unknown) {
     return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
   }
+  // PG-first chain operators (P0). Same IR nodes as the old `c.pg.*` helpers;
+  // the dialect gate lives in the Rust validator (fail-closed off-target).
+  regex(pattern: string) {
+    return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
+  }
+  columnSize() {
+    return chain({ node: "pgColumnSize", expr: this.__node });
+  }
 }
 
 export function check(name: string, expr: CheckExprFn): CheckDef {
@@ -1882,12 +1890,6 @@ const agg: AggNamespace = {
 };
 
 const pgExpr: PgExprNamespace = {
-  regex: (expr, pattern) => chain({
-    node: "pgRegexMatch",
-    expr: exprArg(expr),
-    pattern: pgRegexPattern(pattern),
-  }),
-  columnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
   currentSetting: (name, missingOk) =>
     chain({
       node: "fnCall",
