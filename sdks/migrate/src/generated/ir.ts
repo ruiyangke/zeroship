@@ -196,7 +196,7 @@ export type Expr =
   | { node: "like"; operand: Expr; pattern: Expr }
   | { node: "distinctFrom"; left: Expr; right: Expr }
   | { node: "agg"; func: AggFunc; arg?: Expr | null; distinct?: boolean }
-  | { node: "inList"; expr: Expr; elems: string[]; negated: boolean }
+  | { node: "inList"; expr: Expr; elems: IrScalar[]; negated: boolean }
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
   | { node: "pgColumnSize"; expr: Expr }
   | { node: "extract"; field: ExtractField; from: Expr }

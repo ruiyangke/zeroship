@@ -63,6 +63,7 @@ export type {
   FnNamespace,
   AggNamespace,
   Duration,
+  Scalar,
   ScalarValue,
   DecimalValue,
   BytesValue,

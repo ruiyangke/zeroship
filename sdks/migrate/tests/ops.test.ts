@@ -1214,6 +1214,8 @@ test("portable between/like/in/notIn/distinctFrom chain builders record the righ
         i: (c) => c("status").in(["a", "b"]),
         ni: (c) => c("status").notIn(["x"]),
         empty: (c) => c("status").in([]),
+        codes: (c) => c("http_status").in([200, 404, 500]),
+        bools: (c) => c("enabled").in([true, false]),
         d: (c) => c("a").distinctFrom(c("b")),
       },
     }),
@@ -1246,6 +1248,18 @@ test("portable between/like/in/notIn/distinctFrom chain builders record the righ
     node: "inList",
     expr: { node: "colRef", name: "status" },
     elems: [],
+    negated: false,
+  });
+  assert.deepEqual(set.codes, {
+    node: "inList",
+    expr: { node: "colRef", name: "http_status" },
+    elems: [200, 404, 500],
+    negated: false,
+  });
+  assert.deepEqual(set.bools, {
+    node: "inList",
+    expr: { node: "colRef", name: "enabled" },
+    elems: [true, false],
     negated: false,
   });
   assert.deepEqual(set.d, {
@@ -1640,10 +1654,18 @@ test("c.fn and c.pg build portable extract, pgExtract, and structured interval n
   });
 });
 
-test("inList rejects malformed text arrays and c.pg rejects regex patterns", () => {
+test("inList rejects malformed scalar arrays and c.pg rejects regex patterns", () => {
   assert.throws(
     () => record(() => table("t").update({ set: { x: (c) => c("x").in(["ok", 7 as any]) } })),
-    (e: any) => e.code === "OP_INVALID" && /must be a string/.test(e.message),
+    (e: any) => e.code === "OP_INVALID" && /homogeneous/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c("x").in([byteValue("AQID") as any]) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be a Scalar/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c("x").in([{ value: "ok" } as any]) } })),
+    (e: any) => e.code === "OP_INVALID" && /must be a Scalar/.test(e.message),
   );
   assert.throws(
     () => record(() => table("t").update({ set: { x: (c) => c("x").notIn([""]) } })),

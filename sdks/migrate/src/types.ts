@@ -443,16 +443,17 @@ export interface BytesValue {
   readonly bytes: string;
 }
 
+/** The pinned scalar set accepted by value-list predicates such as
+ *  `.in([...])` / `.notIn([...])`. */
+export type Scalar = string | number | boolean | null;
+
 /** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
  *  carry (§3.5 numeric / bytes domain). The builder normalizes a branded
  *  `decimal(...)` into the `{ decimal }` IR carrier, a branded `byteValue(...)`
  *  into the `{ bytes }` carrier, and a `Uint8Array` into the `{ bytes: base64 }`
  *  carrier before recording. */
 export type ScalarValue =
-  | string
-  | number
-  | boolean
-  | null
+  | Scalar
   | DecimalValue
   | BytesValue
   | Uint8Array;
@@ -544,12 +545,13 @@ export interface ExprChain {
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
   // portable predicates (§3.4): `between`/`like` render identical syntax on all
   // three dialects; `in`/`notIn` are portably named but keep PG's pg_dump-faithful
-  // `ANY/ALL ARRAY[...]::text` render; `distinctFrom` is portably named but
-  // per-dialect rendered (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
+  // `ANY/ALL ARRAY[...]` render for homogeneous scalar lists; `distinctFrom` is
+  // portably named but per-dialect rendered (PG/SQLite `IS DISTINCT FROM` vs
+  // MySQL `NOT (x <=> y)`).
   between(low: unknown, high: unknown): ExprChain;
   like(pattern: unknown): ExprChain;
-  "in"(values: readonly string[]): ExprChain;
-  notIn(values: readonly string[]): ExprChain;
+  "in"(values: readonly Scalar[]): ExprChain;
+  notIn(values: readonly Scalar[]): ExprChain;
   distinctFrom(x: unknown): ExprChain;
 }
 

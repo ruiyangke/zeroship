@@ -411,17 +411,19 @@ pub enum Expr {
         #[serde(default, skip_serializing_if = "is_false")]
         distinct: bool,
     },
-    /// A **portable** text-list membership predicate (`c("x").in([...])` /
+    /// A **portable** scalar-list membership predicate (`c("x").in([...])` /
     /// `c("x").notIn([...])`). PostgreSQL renders in the pg_dump-faithful
-    /// `= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite
-    /// and MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:
+    /// `= ANY (ARRAY[...])` / `<> ALL (ARRAY[...])` shape; text elements keep an
+    /// explicit `::text` cast. SQLite and MySQL render `IN (...)` / `NOT IN (...)`.
+    /// Empty lists are defined:
     /// `IN []` renders false, `NOT IN []` renders true.
     InList {
-        /// The expression tested against the literal text list.
+        /// The expression tested against the literal scalar list.
         expr: Box<Expr>,
-        /// Text elements. PostgreSQL renders each as a safe string literal with an
+        /// Homogeneous scalar elements. Text elements serialize as plain JSON
+        /// strings and PostgreSQL renders each as a safe string literal with an
         /// explicit `::text` cast to match pg_dump's CHECK/domain shape.
-        elems: Vec<String>,
+        elems: Vec<IrScalar>,
         /// `false` => membership (`IN` / `= ANY`); `true` => non-membership
         /// (`NOT IN` / `<> ALL`).
         negated: bool,
