@@ -1,0 +1,53 @@
+{
+  "name": "@zeroship/eslint-plugin-workflow",
+  "version": "0.1.0",
+  "description": "ESLint correctness guards for zeroship durable workflows",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "http://localhost:4873"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./rules/no-nondeterministic-step-name": {
+      "types": "./dist/rules/no-nondeterministic-step-name.d.ts",
+      "import": "./dist/rules/no-nondeterministic-step-name.js",
+      "default": "./dist/rules/no-nondeterministic-step-name.js"
+    },
+    "./rules/no-nondeterministic-between-steps": {
+      "types": "./dist/rules/no-nondeterministic-between-steps.d.ts",
+      "import": "./dist/rules/no-nondeterministic-between-steps.js",
+      "default": "./dist/rules/no-nondeterministic-between-steps.js"
+    },
+    "./rules/no-parallel-steps": {
+      "types": "./dist/rules/no-parallel-steps.d.ts",
+      "import": "./dist/rules/no-parallel-steps.js",
+      "default": "./dist/rules/no-parallel-steps.js"
+    },
+    "./rules/no-nested-step": {
+      "types": "./dist/rules/no-nested-step.d.ts",
+      "import": "./dist/rules/no-nested-step.js",
+      "default": "./dist/rules/no-nested-step.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

@@ -140,9 +140,20 @@ export class PermanentError extends Error {
 }
 
 export class StepTimeoutError extends Error {
+  readonly retryable = true;
+
   constructor(message = "workflow step timed out") {
     super(message);
     this.name = "StepTimeoutError";
+  }
+}
+
+export class WorkflowStepTimeoutError extends Error {
+  readonly retryable = true;
+
+  constructor(message = "workflow step timed out") {
+    super(message);
+    this.name = "WorkflowStepTimeoutError";
   }
 }
 
@@ -154,15 +165,37 @@ export class RestartError extends Error {
 }
 
 export class NestedStepError extends Error {
+  readonly retryable = false;
+
   constructor(message = "workflow step methods cannot be called from inside a step body") {
     super(message);
     this.name = "NestedStepError";
   }
 }
 
+export class WorkflowNestedStepError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "workflow step methods cannot be called from inside a step body") {
+    super(message);
+    this.name = "WorkflowNestedStepError";
+  }
+}
+
 export class UnsupportedError extends Error {
+  readonly retryable = false;
+
   constructor(message = "workflow operation is not supported by this runtime") {
     super(message);
     this.name = "UnsupportedError";
+  }
+}
+
+export class WorkflowUnsupportedError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "workflow operation is not supported by this runtime") {
+    super(message);
+    this.name = "WorkflowUnsupportedError";
   }
 }
