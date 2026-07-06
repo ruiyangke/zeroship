@@ -18,6 +18,7 @@ use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_control::{
     admin_handlers, api, bootstrap_console, device_handlers, env_handlers,
     internal, oauth_grants_handlers, oauth_handlers, stripe_handlers, token_handlers,
+    workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
 };
 
@@ -1741,6 +1742,7 @@ fn main() -> std::io::Result<()> {
                 web::resource("/internal/usage")
                     .route(web::post().to(internal::report_usage)),
             )
+            .configure(workflow_instance_api::configure)
             .service(
                 web::resource("/internal/billing/reconcile")
                     .route(web::post().to(internal::force_reconcile)),
