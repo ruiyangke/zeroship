@@ -236,6 +236,13 @@ declare const globalThis: {
     }
   }
 
+  class WorkflowTimeoutError extends Error {
+    constructor(message = "workflow signal wait timed out") {
+      super(message);
+      this.name = "WorkflowTimeoutError";
+    }
+  }
+
   function mkErr(message: string, status: number, code: string): Error {
     const e = new Error(message) as Error & { status?: number; code?: string };
     e.status = status;
@@ -255,7 +262,9 @@ declare const globalThis: {
   }
 
   function deserializeError(error: JournalStepRecord["error"]): Error {
-    const e = new Error(error?.message ?? "workflow step failed");
+    const e = error?.type === "WorkflowTimeoutError"
+      ? new WorkflowTimeoutError(error?.message)
+      : new Error(error?.message ?? "workflow step failed");
     e.name = error?.type ?? e.name;
     if (error?.stack) e.stack = error.stack;
     return e;
@@ -385,6 +394,7 @@ declare const globalThis: {
           if (issued.record.output !== undefined) return issued.record.output;
           return issued.record.consumedSignal ?? null;
         }
+        if (issued.record.state === "failed") return this.#resolveRecord<unknown>(issued.record);
         throw new SuspendSignal({
           kind: "wait_signal",
           ordinal: issued.ordinal,

@@ -157,6 +157,15 @@ export class WorkflowStepTimeoutError extends Error {
   }
 }
 
+export class WorkflowTimeoutError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "workflow signal wait timed out") {
+    super(message);
+    this.name = "WorkflowTimeoutError";
+  }
+}
+
 export class RestartError extends Error {
   constructor(message = "workflow restart failed") {
     super(message);

@@ -33,6 +33,7 @@ use zeroship_control::{
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const WORKFLOW_NAME: &str = "KeystoneWorkflow";
+const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -415,9 +416,12 @@ fn config(owner: &str) -> WorkflowEngineConfig {
     }
 }
 
-async fn seed_run(fx: &Fixture, label: &str) -> String {
+async fn seed_workflow_run(
+    fx: &Fixture,
+    workflow_name: &str,
+    input: serde_json::Value,
+) -> String {
     let run_id = zeroship_core::typed_id::new_workflow_run_id();
-    let input = serde_json::json!({ "case": label });
     let wake_at = Utc::now();
     fx.pg
         .execute(
@@ -426,7 +430,7 @@ async fn seed_run(fx: &Fixture, label: &str) -> String {
              VALUES ($1, $2, $3, $4, 'queued', $5, $6, now())",
             &[
                 &run_id,
-                &WORKFLOW_NAME,
+                &workflow_name,
                 &fx.app_id,
                 &fx.deploy_id,
                 &input,
@@ -436,6 +440,31 @@ async fn seed_run(fx: &Fixture, label: &str) -> String {
         .await
         .expect("seed workflow run");
     run_id
+}
+
+async fn seed_run(fx: &Fixture, label: &str) -> String {
+    seed_workflow_run(
+        fx,
+        WORKFLOW_NAME,
+        serde_json::json!({ "case": label }),
+    )
+    .await
+}
+
+async fn seed_signal_run(
+    fx: &Fixture,
+    label: &str,
+    timeout: &str,
+    max_signal_age: Option<&str>,
+) -> String {
+    let mut input = serde_json::json!({
+        "case": label,
+        "timeout": timeout,
+    });
+    if let Some(max_signal_age) = max_signal_age {
+        input["maxSignalAge"] = serde_json::Value::String(max_signal_age.to_string());
+    }
+    seed_workflow_run(fx, SIGNAL_WORKFLOW_NAME, input).await
 }
 
 async fn run_state(
@@ -501,11 +530,43 @@ async fn drive_until_completed<D>(
         .await
         .expect("load stuck run");
     panic!(
-        "run {run_id} did not complete: state={:?} wake_at={:?} claimed_by={:?} nonce={:?}",
+        "run {run_id} did not complete at {:?}: state={:?} wake_at={:?} claimed_by={:?} nonce={:?}; {}",
+        Utc::now(),
         rows[0].get::<_, String>("state"),
         rows[0].get::<_, Option<DateTime<Utc>>>("wake_at"),
         rows[0].get::<_, Option<String>>("claimed_by"),
-        rows[0].get::<_, Option<String>>("dispatch_nonce")
+        rows[0].get::<_, Option<String>>("dispatch_nonce"),
+        run_debug(fx, run_id).await
+    );
+}
+
+async fn drive_until_waiting<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    run_id: &str,
+) where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..180 {
+        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+            .await
+            .expect("workflow tick");
+        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        if state == "waiting" {
+            return;
+        }
+        if state == "failed" || state == "completed" {
+            panic!(
+                "run {run_id} reached {state} before waiting: {}",
+                run_debug(fx, run_id).await
+            );
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "run {run_id} did not park waiting: {}",
+        run_debug(fx, run_id).await
     );
 }
 
@@ -558,6 +619,85 @@ async fn assert_expected_steps(fx: &Fixture, run_id: &str) {
     assert!(dupes.is_empty(), "duplicate workflow step rows: {dupes:?}");
 }
 
+async fn assert_signal_success_steps(fx: &Fixture, run_id: &str) {
+    let rows = step_rows(fx, run_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (1, "go".to_string(), "wait_signal".to_string(), "completed".to_string()),
+            (2, "b".to_string(), "run".to_string(), "completed".to_string()),
+        ],
+        "workflow_steps must contain exactly a, go wait, b once"
+    );
+}
+
+async fn assert_signal_timeout_steps(fx: &Fixture, run_id: &str) {
+    let rows = step_rows(fx, run_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (1, "go".to_string(), "wait_signal".to_string(), "failed".to_string()),
+            (2, "timeout".to_string(), "run".to_string(), "completed".to_string()),
+        ],
+        "workflow_steps must contain exactly a, failed go wait, timeout once"
+    );
+}
+
+async fn assert_signal_wait_parked(
+    fx: &Fixture,
+    run_id: &str,
+    max_signal_age_ms: Option<i64>,
+) -> DateTime<Utc> {
+    let rows = fx
+        .pg
+        .query(
+            "SELECT r.state AS run_state, r.wake_at AS run_wake_at, r.waiting_step_key, \
+                    s.state AS step_state, s.wake_at AS step_wake_at, \
+                    s.signal_type, s.max_signal_age_ms \
+               FROM zeroship.workflow_runs r \
+               JOIN zeroship.workflow_steps s ON s.run_id = r.id AND s.ordinal = 1 \
+              WHERE r.id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load parked wait");
+    assert_eq!(rows.len(), 1, "missing wait step for run {run_id}");
+    assert_eq!(rows[0].get::<_, String>("run_state"), "waiting");
+    assert_eq!(rows[0].get::<_, String>("step_state"), "running");
+    assert_eq!(rows[0].get::<_, Option<String>>("signal_type").as_deref(), Some("go"));
+    assert_eq!(
+        rows[0].get::<_, Option<i64>>("max_signal_age_ms"),
+        max_signal_age_ms
+    );
+    let key: Option<String> = rows[0].get("waiting_step_key");
+    assert!(
+        key.as_deref()
+            .is_some_and(|key| key == "wait:1:go:go" || key.starts_with("wait:1:go:go:")),
+        "waiting_step_key should encode the go wait, got {key:?}"
+    );
+    let run_wake_at: DateTime<Utc> = rows[0]
+        .get::<_, Option<DateTime<Utc>>>("run_wake_at")
+        .expect("run wake_at");
+    let step_wake_at: DateTime<Utc> = rows[0]
+        .get::<_, Option<DateTime<Utc>>>("step_wake_at")
+        .expect("step wake_at");
+    assert!(
+        run_wake_at
+            .signed_duration_since(step_wake_at)
+            .num_milliseconds()
+            .abs()
+            <= 1,
+        "run wake_at should mirror wait deadline: run={run_wake_at:?} step={step_wake_at:?}"
+    );
+    assert!(
+        step_wake_at > Utc::now(),
+        "wait deadline should be absolute and in the future when parked"
+    );
+    step_wake_at
+}
+
 async fn side_counts(fx: &Fixture, run_id: &str) -> BTreeMap<String, i64> {
     fx.pg
         .query(
@@ -572,6 +712,55 @@ async fn side_counts(fx: &Fixture, run_id: &str) -> BTreeMap<String, i64> {
         .into_iter()
         .map(|row| (row.get("step_name"), row.get("n")))
         .collect()
+}
+
+async fn run_output(fx: &Fixture, run_id: &str) -> serde_json::Value {
+    let rows = fx
+        .pg
+        .query(
+            "SELECT output FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load run output");
+    rows[0]
+        .get::<_, Option<serde_json::Value>>("output")
+        .unwrap_or(serde_json::Value::Null)
+}
+
+async fn post_signal(
+    control_url: &str,
+    app_id: Uuid,
+    run_id: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    let url = format!(
+        "{}/internal/workflows/runs/{}/signal",
+        control_url.trim_end_matches('/'),
+        run_id
+    );
+    let body = serde_json::to_vec(&serde_json::json!({
+        "type": "go",
+        "payload": payload,
+    }))
+    .expect("signal body json");
+    let client = cyper::Client::new();
+    let builder = client.post(&url).expect("signal request URL");
+    let builder = builder
+        .header("content-type", "application/json")
+        .expect("content-type header")
+        .header("x-zeroship-app-id", app_id.to_string())
+        .expect("app id header");
+    let response = builder.body(body).send().await.expect("post signal");
+    let status = response.status().as_u16();
+    let bytes = response.bytes().await.expect("read signal response");
+    assert_eq!(
+        status,
+        202,
+        "signal endpoint returned HTTP {status}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    serde_json::from_slice(&bytes).expect("signal response json")
 }
 
 async fn run_debug(fx: &Fixture, run_id: &str) -> String {
@@ -612,6 +801,7 @@ async fn durable_workflows_m1_keystone_real_spine() {
     }
 
     let db_url = required_env("CONTROL_TEST_DB");
+    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL");
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
     let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
         .parse()
@@ -758,4 +948,220 @@ async fn durable_workflows_m1_keystone_real_spine() {
         "step a body is at-least-once across the dropped-checkpoint crash"
     );
     assert_eq!(crash_counts.get("b").copied(), Some(1));
+
+    let signal_run = seed_signal_run(&fx, "signal", "PT30S", Some("PT5S")).await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-signal-park"),
+        &signal_run,
+    )
+    .await;
+    let _signal_deadline = assert_signal_wait_parked(&fx, &signal_run, Some(5_000)).await;
+    let signal_counts = side_counts(&fx, &signal_run).await;
+    assert_eq!(signal_counts.get("a").copied(), Some(1));
+    assert_eq!(signal_counts.get("b").copied(), None);
+
+    let signal_body = post_signal(
+        &control_url,
+        fx.app_id,
+        &signal_run,
+        serde_json::json!({"ok": true, "source": "e2e"}),
+    )
+    .await;
+    let signal_id = signal_body["id"]
+        .as_str()
+        .expect("signal endpoint id")
+        .to_string();
+    assert!(signal_id.starts_with("sig_"));
+    let after_signal = fx
+        .pg
+        .query_one(
+            "SELECT r.wake_at, s.payload, s.consumed_by \
+               FROM zeroship.workflow_runs r \
+               JOIN zeroship.workflow_signals s ON s.run_id = r.id \
+              WHERE r.id = $1 AND s.id = $2",
+            &[&signal_run, &signal_id],
+        )
+        .await
+        .expect("load delivered signal");
+    let pulled_wake: DateTime<Utc> = after_signal.get("wake_at");
+    assert!(
+        pulled_wake <= Utc::now() + ChronoDuration::seconds(1),
+        "signal endpoint should pull wake_at to now, got {pulled_wake:?}"
+    );
+    assert_eq!(
+        after_signal.get::<_, serde_json::Value>("payload"),
+        serde_json::json!({"ok": true, "source": "e2e"})
+    );
+    assert_eq!(after_signal.get::<_, Option<String>>("consumed_by"), None);
+
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-signal-drive"),
+        &signal_run,
+    )
+    .await;
+    assert_signal_success_steps(&fx, &signal_run).await;
+    let signal_counts = side_counts(&fx, &signal_run).await;
+    assert_eq!(signal_counts.get("a").copied(), Some(1));
+    assert_eq!(signal_counts.get("b").copied(), Some(1));
+    let consumed = fx
+        .pg
+        .query_one(
+            "SELECT consumed_by FROM zeroship.workflow_signals WHERE id = $1",
+            &[&signal_id],
+        )
+        .await
+        .expect("load consumed signal");
+    assert_eq!(
+        consumed.get::<_, Option<String>>("consumed_by").as_deref(),
+        Some(signal_run.as_str())
+    );
+    let wait_output = fx
+        .pg
+        .query_one(
+            "SELECT output, consumed_signal_id \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND ordinal = 1",
+            &[&signal_run],
+        )
+        .await
+        .expect("load signal wait step");
+    let output: serde_json::Value = wait_output.get("output");
+    assert_eq!(output["payload"], serde_json::json!({"ok": true, "source": "e2e"}));
+    assert_eq!(
+        wait_output
+            .get::<_, Option<String>>("consumed_signal_id")
+            .as_deref(),
+        Some(signal_id.as_str())
+    );
+    assert_eq!(
+        run_output(&fx, &signal_run).await["signal"]["payload"],
+        serde_json::json!({"ok": true, "source": "e2e"})
+    );
+
+    let timeout_run = seed_signal_run(&fx, "timeout", "PT1S", None).await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-timeout-park"),
+        &timeout_run,
+    )
+    .await;
+    let timeout_deadline = assert_signal_wait_parked(&fx, &timeout_run, None).await;
+    assert!(
+        timeout_deadline <= Utc::now() + ChronoDuration::seconds(2),
+        "short timeout should park within ~1s, got deadline {timeout_deadline:?}"
+    );
+    let early_claim = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&real_dispatcher),
+        config("dw07-timeout-early"),
+    )
+    .await
+    .expect("early timeout tick");
+    assert_eq!(early_claim, 0, "timeout must not claim before waiting deadline");
+    assert_eq!(run_state(&fx.pg, &timeout_run).await.0, "waiting");
+    let now = Utc::now();
+    if timeout_deadline > now {
+        let wait_ms = timeout_deadline
+            .signed_duration_since(now)
+            .num_milliseconds()
+            .saturating_add(125)
+            .max(0) as u64;
+        compio::time::sleep(Duration::from_millis(wait_ms)).await;
+    }
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-timeout-drive"),
+        &timeout_run,
+    )
+    .await;
+    assert_signal_timeout_steps(&fx, &timeout_run).await;
+    let timeout_wait = fx
+        .pg
+        .query_one(
+            "SELECT error FROM zeroship.workflow_steps WHERE run_id = $1 AND ordinal = 1",
+            &[&timeout_run],
+        )
+        .await
+        .expect("timeout wait step");
+    let timeout_error: serde_json::Value = timeout_wait.get("error");
+    assert_eq!(timeout_error["type"], "WorkflowTimeoutError");
+    let timeout_output = run_output(&fx, &timeout_run).await;
+    assert_eq!(timeout_output["state"], "timeout");
+    assert_eq!(timeout_output["errorName"], "WorkflowTimeoutError");
+    let timeout_counts = side_counts(&fx, &timeout_run).await;
+    assert_eq!(timeout_counts.get("a").copied(), Some(1));
+    assert_eq!(timeout_counts.get("timeout").copied(), Some(1));
+    assert_eq!(timeout_counts.get("b").copied(), None);
+
+    let stale_run = seed_signal_run(&fx, "stale", "PT1S", Some("PT0.2S")).await;
+    let stale_signal_id = zeroship_core::typed_id::new_workflow_signal_id();
+    let stale_created_at = Utc::now() - ChronoDuration::seconds(5);
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_signals \
+                (id, run_id, type, payload, created_at, origin, delivery) \
+             VALUES ($1, $2, 'go', $3, $4, 'app', 'direct')",
+            &[
+                &stale_signal_id,
+                &stale_run,
+                &serde_json::json!({"stale": true}),
+                &stale_created_at,
+            ],
+        )
+        .await
+        .expect("insert stale signal");
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-stale-park"),
+        &stale_run,
+    )
+    .await;
+    let stale_deadline = assert_signal_wait_parked(&fx, &stale_run, Some(200)).await;
+    assert!(
+        stale_deadline <= Utc::now() + ChronoDuration::seconds(2),
+        "stale short timeout should park within ~1s, got deadline {stale_deadline:?}"
+    );
+    let now = Utc::now();
+    if stale_deadline > now {
+        let wait_ms = stale_deadline
+            .signed_duration_since(now)
+            .num_milliseconds()
+            .saturating_add(125)
+            .max(0) as u64;
+        compio::time::sleep(Duration::from_millis(wait_ms)).await;
+    }
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-stale-drive"),
+        &stale_run,
+    )
+    .await;
+    assert_signal_timeout_steps(&fx, &stale_run).await;
+    let stale_signal = fx
+        .pg
+        .query_one(
+            "SELECT consumed_by FROM zeroship.workflow_signals WHERE id = $1",
+            &[&stale_signal_id],
+        )
+        .await
+        .expect("load stale signal");
+    assert_eq!(
+        stale_signal
+            .get::<_, Option<String>>("consumed_by")
+            .as_deref(),
+        Some(stale_run.as_str()),
+        "stale over-age signal should be marked consumed without satisfying the wait"
+    );
+    let stale_counts = side_counts(&fx, &stale_run).await;
+    assert_eq!(stale_counts.get("a").copied(), Some(1));
+    assert_eq!(stale_counts.get("timeout").copied(), Some(1));
+    assert_eq!(stale_counts.get("b").copied(), None);
 }

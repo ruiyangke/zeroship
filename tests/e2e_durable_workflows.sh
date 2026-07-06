@@ -50,6 +50,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+stop_services() {
+  if [ -f "$PIDFILE" ]; then
+    while read -r pid; do
+      [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done < "$PIDFILE"
+    : > "$PIDFILE"
+  fi
+  wait 2>/dev/null || true
+}
+
+terminate_pg_db_connections() {
+  docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d postgres -v ON_ERROR_STOP=1 \
+    -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$PG_DB' AND pid <> pg_backend_pid();" \
+    >/dev/null
+}
+
 require_cmd() {
   command -v "$1" >/dev/null || { fail "$1 required"; exit 2; }
 }
@@ -181,11 +197,32 @@ export class KeystoneWorkflow {
   }
 }
 
+export class SignalWorkflow {
+  async run(trigger, step) {
+    const a = await step.run("a", () => bump(trigger.runId, "a"));
+    try {
+      const signal = await step.waitForSignal("go", {
+        type: "go",
+        timeout: trigger.input.timeout,
+        maxSignalAge: trigger.input.maxSignalAge,
+      });
+      const b = await step.run("b", () => bump(trigger.runId, "b"));
+      return { state: "signaled", a, signal, b };
+    } catch (error) {
+      if (!error || error.name !== "WorkflowTimeoutError") {
+        throw error;
+      }
+      const timeout = await step.run("timeout", () => bump(trigger.runId, "timeout"));
+      return { state: "timeout", errorName: error.name, a, timeout };
+    }
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
   },
-  workflows: { KeystoneWorkflow },
+  workflows: { KeystoneWorkflow, SignalWorkflow },
 };
 EOF
 build_zship "$WORK/workflow.js" "$WORK/workflow.zship"
@@ -273,6 +310,7 @@ pass "gateway/worker warmed real deployed app"
 echo "=== DW-07 keystone assertions ==="
 ZEROSHIP_DW_E2E=1 \
 CONTROL_TEST_DB="$DBURL" \
+ZEROSHIP_DW_E2E_CONTROL_URL="http://localhost:$CONTROL_PORT" \
 ZEROSHIP_DW_E2E_GATEWAY_URL="http://localhost:$GATE_PORT" \
 ZEROSHIP_DW_E2E_APP_ID="$APP_ID" \
 ZEROSHIP_DW_E2E_DEPLOY_ID="$DEPLOY_ID" \
@@ -291,3 +329,22 @@ ZEROSHIP_DW_E2E_PG_DB="$PG_DB" \
     exit 1
   }
 pass "DW-07 keystone e2e passed"
+
+echo "=== DW-07 stop services before regression ==="
+stop_services
+terminate_pg_db_connections
+pass "stopped real services; workflow engine regression runs alone"
+
+echo "=== DW-07 workflow engine regression ==="
+CONTROL_TEST_DB="$DBURL" \
+  cargo test -p zeroship-control --test workflow_engine_test -- --nocapture --test-threads=1 || {
+    fail "DW-07 workflow engine regression failed"
+    echo "--- control.log ---"
+    tail -120 "$WORK/control.log" || true
+    echo "--- worker.log ---"
+    tail -160 "$WORK/worker.log" || true
+    echo "--- gate.log ---"
+    tail -120 "$WORK/gate.log" || true
+    exit 1
+  }
+pass "DW-07 workflow engine regression passed"

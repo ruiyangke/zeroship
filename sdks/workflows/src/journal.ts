@@ -2,6 +2,7 @@ import {
   PermanentError,
   WorkflowNestedStepError,
   WorkflowStepTimeoutError,
+  WorkflowTimeoutError,
   WorkflowUnsupportedError,
   type ChildWorkflowOptions,
   type SignalEnvelope,
@@ -484,6 +485,8 @@ function deserializeError(error: JournalStepRecord["error"]): Error {
     ? new PermanentError(message)
     : error?.type === "WorkflowStepTimeoutError" || error?.type === "StepTimeoutError"
       ? new WorkflowStepTimeoutError(message)
+      : error?.type === "WorkflowTimeoutError"
+        ? new WorkflowTimeoutError(message)
       : error?.type === "WorkflowNestedStepError" || error?.type === "NestedStepError"
         ? new WorkflowNestedStepError(message)
         : error?.type === "WorkflowUnsupportedError" || error?.type === "UnsupportedError"
