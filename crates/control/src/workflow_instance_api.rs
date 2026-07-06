@@ -76,6 +76,37 @@ pub struct SignalBody {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RestartBody {
+    #[serde(default)]
+    pub from: Option<RestartTargetBody>,
+    #[serde(default)]
+    pub deploy: Option<RestartDeployBody>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestartTargetBody {
+    pub name: String,
+    #[serde(default)]
+    pub occurrence: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RestartDeployBody {
+    Pin(String),
+    Object { pin: String },
+}
+
+impl RestartDeployBody {
+    fn pin(&self) -> &str {
+        match self {
+            Self::Pin(pin) => pin.as_str(),
+            Self::Object { pin } => pin.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListRunsQuery {
     #[serde(default)]
     pub state: Option<String>,
@@ -107,6 +138,7 @@ enum WorkflowApiError {
     BadRequest(String),
     NotFound(String),
     Conflict(String),
+    Restart(String),
     PayloadTooLarge(String),
     RateLimited { retry_after_secs: f64 },
     RateLimitUnavailable(String),
@@ -122,6 +154,10 @@ impl WorkflowApiError {
             Self::NotFound(msg) => web::HttpResponse::NotFound().json(&json!({ "error": msg })),
             Self::Conflict(msg) => web::HttpResponse::Conflict().json(&json!({
                 "error": "RunConflict",
+                "message": msg,
+            })),
+            Self::Restart(msg) => web::HttpResponse::Conflict().json(&json!({
+                "error": "RestartError",
                 "message": msg,
             })),
             Self::PayloadTooLarge(msg) => {
@@ -295,12 +331,12 @@ fn waiting_key_matches_signal(waiting_step_key: Option<&str>, signal_type: &str)
 }
 
 fn restored_state_expr() -> &'static str {
-    "CASE \
+    "COALESCE(paused_from_status, CASE \
         WHEN waiting_step_key LIKE 'wait:%' THEN 'waiting' \
         WHEN waiting_step_key LIKE 'sleep:%' THEN 'sleeping' \
         WHEN wake_at IS NULL OR wake_at <= now() THEN 'queued' \
         ELSE 'sleeping' \
-     END"
+     END)"
 }
 
 fn status_output(row: &compio_postgres::Row) -> Value {
@@ -562,6 +598,7 @@ async fn create_run_inner(
                             output_hash = NULL, \
                             output_size = NULL, \
                             output_content_type = NULL, \
+                            paused_from_status = NULL, \
                             claimed_by = NULL, \
                             lease_expires = NULL, \
                             dispatch_nonce = NULL, \
@@ -798,6 +835,289 @@ pub async fn cancel_run(
     control_transition(req, state, run_id, "cancel").await
 }
 
+pub async fn restart_run(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    run_id: Path<String>,
+    body: Json<RestartBody>,
+) -> web::HttpResponse {
+    let app_id = match app_id_from_channel(&req, &state) {
+        Ok(app_id) => app_id,
+        Err(resp) => return resp,
+    };
+    let run_id = run_id.into_inner();
+    if let Err(e) = validate_run_id(&run_id) {
+        return e.response();
+    }
+    match restart_run_inner(&state, app_id, &run_id, body.into_inner()).await {
+        Ok(value) => web::HttpResponse::Ok().json(&value),
+        Err(e) => e.response(),
+    }
+}
+
+async fn restart_run_inner(
+    state: &AppState,
+    app_id: Uuid,
+    run_id: &str,
+    body: RestartBody,
+) -> Result<Value, WorkflowApiError> {
+    let full_restart = body.from.is_none();
+    let deploy_pin = body
+        .deploy
+        .as_ref()
+        .map(RestartDeployBody::pin)
+        .unwrap_or(if full_restart { "latest" } else { "started" });
+    if !matches!(deploy_pin, "latest" | "started") {
+        return Err(WorkflowApiError::Restart(format!(
+            "invalid restart deploy pin '{deploy_pin}'"
+        )));
+    }
+    if !full_restart && deploy_pin != "started" {
+        return Err(WorkflowApiError::Restart(
+            "partial restart cannot change deploy pin".to_string(),
+        ));
+    }
+
+    let mut conn = state.registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+
+    tx.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", &[&run_id])
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+
+    let rows = tx
+        .query(
+            "SELECT workflow_name, deploy_id, output_kind, output_hash \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1 AND app_id = $2 \
+              FOR UPDATE",
+            &[&run_id, &app_id],
+        )
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    let Some(row) = rows.first() else {
+        tx.commit()
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        return Err(WorkflowApiError::NotFound(
+            "workflow run not found".to_string(),
+        ));
+    };
+    let workflow_name: String = row.get("workflow_name");
+    let current_deploy_id: String = row.get("deploy_id");
+    let output_kind: String = row.get("output_kind");
+    let output_hash: Option<String> = row.get("output_hash");
+
+    let target_ordinal = if let Some(target) = body.from.as_ref() {
+        if target.name.is_empty() {
+            return Err(WorkflowApiError::BadRequest(
+                "restart target name must not be empty".to_string(),
+            ));
+        }
+        let occurrence = target.occurrence.unwrap_or(0);
+        if occurrence < 0 {
+            return Err(WorkflowApiError::BadRequest(
+                "restart target occurrence must be >= 0".to_string(),
+            ));
+        }
+        let rows = tx
+            .query(
+                "SELECT ordinal \
+                   FROM zeroship.workflow_steps \
+                  WHERE run_id = $1 AND name = $2 AND name_occurrence = $3",
+                &[&run_id, &target.name, &occurrence],
+            )
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        let Some(row) = rows.first() else {
+            return Err(WorkflowApiError::NotFound(
+                "workflow restart target not found".to_string(),
+            ));
+        };
+        row.get::<_, i32>("ordinal")
+    } else {
+        0
+    };
+
+    if target_ordinal > 0 {
+        let rows = tx
+            .query(
+                "SELECT 1 \
+                   FROM zeroship.workflow_steps \
+                  WHERE run_id = $1 \
+                    AND ordinal < $2 \
+                    AND compensation_finished_at IS NOT NULL \
+                  LIMIT 1",
+                &[&run_id, &target_ordinal],
+            )
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        if !rows.is_empty() {
+            return Err(WorkflowApiError::Restart(
+                "cannot partial-restart past a completed compensation; use a full restart"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let target_deploy_id = if full_restart && deploy_pin == "latest" {
+        active_deploy_for_workflow(&tx, &app_id, &workflow_name)
+            .await?
+            .id
+    } else {
+        current_deploy_id.clone()
+    };
+    let signal_epoch_bump: i32 = if target_deploy_id != current_deploy_id {
+        1
+    } else {
+        0
+    };
+
+    tx.execute(
+        "UPDATE zeroship.workflow_blobs b \
+            SET refcount = GREATEST(refcount - 1, 0), \
+                last_referenced_at = now() \
+           FROM zeroship.workflow_steps s \
+          WHERE s.run_id = $1 \
+            AND s.ordinal >= $2 \
+            AND s.output_kind = 'blob' \
+            AND b.hash = s.output_hash",
+        &[&run_id, &target_ordinal],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    if output_kind == "blob" {
+        if let Some(hash) = output_hash.as_ref() {
+            tx.execute(
+                "UPDATE zeroship.workflow_blobs \
+                    SET refcount = GREATEST(refcount - 1, 0), \
+                        last_referenced_at = now() \
+                  WHERE hash = $1",
+                &[hash],
+            )
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        }
+    }
+
+    tx.execute(
+        "UPDATE zeroship.workflow_signals \
+            SET consumed_by = NULL \
+          WHERE consumed_by = $1 \
+            AND delivery <> 'topic' \
+            AND id IN ( \
+                SELECT consumed_signal_id \
+                  FROM zeroship.workflow_steps \
+                 WHERE run_id = $1 \
+                   AND ordinal >= $2 \
+                   AND consumed_signal_id IS NOT NULL \
+            )",
+        &[&run_id, &target_ordinal],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    tx.execute(
+        "DELETE FROM zeroship.workflow_signals \
+          WHERE run_id = $1 \
+            AND delivery = 'topic' \
+            AND id IN ( \
+                SELECT consumed_signal_id \
+                  FROM zeroship.workflow_steps \
+                 WHERE run_id = $1 \
+                   AND ordinal >= $2 \
+                   AND consumed_signal_id IS NOT NULL \
+            )",
+        &[&run_id, &target_ordinal],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    tx.execute(
+        "DELETE FROM zeroship.workflow_subscriptions \
+          WHERE run_id = $1 AND ordinal >= $2",
+        &[&run_id, &target_ordinal],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    tx.execute(
+        "DELETE FROM zeroship.workflow_steps \
+          WHERE run_id = $1 AND ordinal >= $2",
+        &[&run_id, &target_ordinal],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    tx.execute(
+        "UPDATE zeroship.workflow_steps \
+            SET compensation_state = 'pending', \
+                compensation_attempt = 0, \
+                compensation_wake_at = NULL, \
+                compensation_error = NULL, \
+                compensation_batch_id = NULL \
+          WHERE run_id = $1 \
+            AND ordinal < $2 \
+            AND compensation_state = 'running'",
+        &[&run_id, &target_ordinal],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+
+    let restarted_from: Option<i32> = (!full_restart).then_some(target_ordinal);
+    let restarted_by = format!("app:{app_id}");
+    tx.execute(
+        "UPDATE zeroship.workflow_runs \
+            SET state = 'queued', \
+                wake_at = now(), \
+                output = NULL, \
+                error = NULL, \
+                output_kind = 'inline', \
+                output_hash = NULL, \
+                output_size = NULL, \
+                output_content_type = NULL, \
+                compensation_target = NULL, \
+                compensation_outcome = NULL, \
+                next_ordinal = $2, \
+                stuck_strikes = 0, \
+                waiting_step_key = NULL, \
+                paused_from_status = NULL, \
+                claimed_by = NULL, \
+                lease_expires = NULL, \
+                dispatch_nonce = NULL, \
+                claim_epoch = claim_epoch + 1, \
+                deploy_id = $3, \
+                signal_epoch = signal_epoch + $4, \
+                restart_count = restart_count + 1, \
+                restarted_at = now(), \
+                restarted_from_ordinal = $5, \
+                restarted_by = $6 \
+          WHERE id = $1 AND app_id = $7",
+        &[
+            &run_id,
+            &target_ordinal,
+            &target_deploy_id,
+            &signal_epoch_bump,
+            &restarted_from,
+            &restarted_by,
+            &app_id,
+        ],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+
+    Ok(json!({
+        "runId": run_id,
+        "id": run_id,
+        "state": "queued",
+        "restartedFromOrdinal": restarted_from,
+        "pinnedTo": target_deploy_id,
+    }))
+}
+
 async fn control_transition(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -851,10 +1171,26 @@ async fn control_transition(
                 tx.query(
                     "UPDATE zeroship.workflow_runs \
                         SET state = 'paused', \
-                            claimed_by = NULL, \
-                            lease_expires = NULL, \
-                            dispatch_nonce = NULL, \
-                            claim_epoch = claim_epoch + 1 \
+                            paused_from_status = CASE \
+                                WHEN state = 'paused' THEN paused_from_status \
+                                ELSE state \
+                            END, \
+                            claimed_by = CASE \
+                                WHEN state = 'running' AND claimed_by IS NOT NULL THEN claimed_by \
+                                ELSE NULL \
+                            END, \
+                            lease_expires = CASE \
+                                WHEN state = 'running' AND claimed_by IS NOT NULL THEN lease_expires \
+                                ELSE NULL \
+                            END, \
+                            dispatch_nonce = CASE \
+                                WHEN state = 'running' AND claimed_by IS NOT NULL THEN dispatch_nonce \
+                                ELSE NULL \
+                            END, \
+                            claim_epoch = CASE \
+                                WHEN state = 'running' AND claimed_by IS NOT NULL THEN claim_epoch \
+                                ELSE claim_epoch + 1 \
+                            END \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
                     &[&run_id, &app_id],
@@ -872,9 +1208,7 @@ async fn control_transition(
                 let sql = format!(
                     "UPDATE zeroship.workflow_runs \
                         SET state = {}, \
-                            claimed_by = NULL, \
-                            lease_expires = NULL, \
-                            dispatch_nonce = NULL \
+                            paused_from_status = NULL \
                       WHERE id = $1 AND app_id = $2 \
                       RETURNING state",
                     restored_state_expr()
@@ -903,6 +1237,7 @@ async fn control_transition(
                             output_hash = NULL, \
                             output_size = NULL, \
                             output_content_type = NULL, \
+                            paused_from_status = NULL, \
                             claimed_by = NULL, \
                             lease_expires = NULL, \
                             dispatch_nonce = NULL, \
@@ -1030,6 +1365,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/internal/workflows/runs/{run_id}/cancel")
             .route(web::post().to(cancel_run)),
+    )
+    .service(
+        web::resource("/internal/workflows/runs/{run_id}/restart")
+            .route(web::post().to(restart_run)),
     );
 }
 

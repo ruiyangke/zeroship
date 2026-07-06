@@ -74,6 +74,7 @@ export function up() {
       next_ordinal: t.int().notNull().default(0),
       stuck_strikes: t.smallInt().notNull().default(0),
       waiting_step_key: t.text(),
+      paused_from_status: t.text(),
       signal_epoch: t.int().notNull().default(0),
       parent_run_id: t.text(),
       parent_wait_step_key: t.text(),

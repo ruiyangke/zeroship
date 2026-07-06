@@ -327,6 +327,22 @@ fn builds_authenticated_workflow_instance_requests() {
         "http://control.test/internal/workflows/runs/run_abc%2Fdef"
     );
     assert!(status.body.is_none());
+
+    let restart = zeroship_plugin_workflow::client::build_restart_request(
+        &cfg,
+        "run_abc/def",
+        json!({ "from": { "name": "charge" } }),
+    )
+    .expect("restart request");
+    assert_eq!(restart.method, WorkflowHttpMethod::Post);
+    assert_eq!(
+        restart.url,
+        "http://control.test/internal/workflows/runs/run_abc%2Fdef/restart"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(restart.body.as_deref().expect("body")).unwrap(),
+        json!({ "from": { "name": "charge" } })
+    );
 }
 
 #[test]
@@ -420,6 +436,10 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
             check(cancel.state === "cancelled", "cancel.state", cancel);
             const finalStatus = await env.workflows.Checkout.get(run.id).status();
             check(finalStatus.state === "cancelled", "status.cancelled", finalStatus);
+            const restarted = await run.restart();
+            check(restarted.id === run.id, "restart.sameRun", restarted.id);
+            const restartStatus = await restarted.status();
+            check(restartStatus.state === "queued", "restart.status", restartStatus);
             return Response.json({
               ok: failures.length === 0,
               failures,
@@ -427,7 +447,8 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
               signalId: signal.id,
               first,
               cancel,
-              finalStatus
+              finalStatus,
+              restartStatus
             }, { status: failures.length === 0 ? 200 : 500 });
           }
         };
@@ -446,7 +467,7 @@ async fn v8_binding_round_trips_through_the_control_instance_api() {
         )
         .await
         .expect("run row");
-    assert_eq!(run.get::<_, String>("state"), "cancelled");
+    assert_eq!(run.get::<_, String>("state"), "queued");
 
     let signals = fx
         .pg

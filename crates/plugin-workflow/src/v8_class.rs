@@ -15,8 +15,8 @@ use zeroship_runtime_macros::v8_class;
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method, v8_name};
 
 use crate::client::{
-    build_get_status_request, build_signal_request, build_start_request, build_transition_request,
-    execute_json, WorkflowClientConfig, WorkflowRpcError,
+    build_get_status_request, build_restart_request, build_signal_request, build_start_request,
+    build_transition_request, execute_json, WorkflowClientConfig, WorkflowRpcError,
 };
 
 // ---------------------------------------------------------------------------
@@ -186,6 +186,70 @@ fn signal_body(
     }))
 }
 
+fn restart_body(
+    scope: &mut v8::PinScope<'_, '_>,
+    opts: v8::Local<v8::Value>,
+) -> Result<Value, OpError> {
+    let mut opts = read_options_object(scope, opts, "workflow.restart")?;
+    let mut body = Map::new();
+    if let Some(from) = opts.remove("from") {
+        match from {
+            Value::Null => {}
+            Value::Object(map) => {
+                let Some(name) = map.get("name") else {
+                    return Err(OpError::type_error(
+                        "workflow.restart: from.name must be provided",
+                    ));
+                };
+                match name {
+                    Value::String(s) if !s.is_empty() => {}
+                    Value::String(_) => {
+                        return Err(OpError::type_error(
+                            "workflow.restart: from.name must be a non-empty string",
+                        ));
+                    }
+                    other => {
+                        return Err(OpError::type_error(format!(
+                            "workflow.restart: from.name must be a string, got {}",
+                            json_type_name(other)
+                        )));
+                    }
+                }
+                if let Some(occurrence) = map.get("occurrence") {
+                    let ok = occurrence.as_i64().is_some_and(|n| n >= 0);
+                    if !ok {
+                        return Err(OpError::type_error(
+                            "workflow.restart: from.occurrence must be a non-negative integer",
+                        ));
+                    }
+                }
+                body.insert("from".to_string(), Value::Object(map));
+            }
+            other => {
+                return Err(OpError::type_error(format!(
+                    "workflow.restart: from must be an object, got {}",
+                    json_type_name(&other)
+                )));
+            }
+        }
+    }
+    if let Some(deploy) = opts.remove("deploy") {
+        match deploy {
+            Value::Null => {}
+            Value::String(_) | Value::Object(_) => {
+                body.insert("deploy".to_string(), deploy);
+            }
+            other => {
+                return Err(OpError::type_error(format!(
+                    "workflow.restart: deploy must be a string or object, got {}",
+                    json_type_name(&other)
+                )));
+            }
+        }
+    }
+    Ok(Value::Object(body))
+}
+
 fn runtime_state(scope: &mut v8::PinScope<'_, '_>) -> SharedState {
     scope
         .get_slot::<SharedState>()
@@ -275,6 +339,55 @@ fn dispatch_start<'s>(
                         }
                         Err(e) => ResolveValue::RejectError(e.to_op_error()),
                     }
+                }
+                Err(e) => ResolveValue::RejectError(e.to_op_error()),
+            },
+            Err(e) => ResolveValue::RejectError(e.to_op_error()),
+        };
+        OpResult::JsValue {
+            resolver,
+            value,
+            request_id,
+        }
+    }));
+    promise
+}
+
+fn dispatch_restart<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    client: WorkflowClientConfig,
+    run_id: String,
+    body: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let request = build_restart_request(&client, &run_id, body);
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_promise(scope, &state);
+    state.borrow_mut().spawned_ops.push(Box::pin(async move {
+        let value = match request {
+            Ok(req) => match execute_json(req).await {
+                Ok(value) => {
+                    let response_run_id = value
+                        .get("runId")
+                        .or_else(|| value.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| run_id.clone());
+                    let resolver_for_continuation = resolver.clone();
+                    ResolveValue::Continuation(Box::new(move |scope, _state| {
+                        let local_resolver = v8::Local::new(scope, &resolver_for_continuation);
+                        match mint_workflow_run(scope, client, response_run_id) {
+                            Some(obj) => {
+                                local_resolver.resolve(scope, obj.into());
+                            }
+                            None => {
+                                let err = OpError::error(
+                                    "workflow restart: failed to mint WorkflowRun",
+                                );
+                                let exc = err.to_exception(scope);
+                                local_resolver.reject(scope, exc);
+                            }
+                        }
+                    }))
                 }
                 Err(e) => ResolveValue::RejectError(e.to_op_error()),
             },
@@ -418,6 +531,22 @@ impl WorkflowRun {
         Ok(dispatch_json(
             scope,
             build_transition_request(&self.client, &self.run_id, "cancel"),
+        )
+        .into())
+    }
+
+    #[v8_method]
+    fn restart<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        opts: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let body = restart_body(scope, opts)?;
+        Ok(dispatch_restart(
+            scope,
+            self.client.clone(),
+            self.run_id.clone(),
+            body,
         )
         .into())
     }
