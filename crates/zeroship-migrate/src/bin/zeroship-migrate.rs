@@ -40,8 +40,8 @@ use zeroship_migrate::plan::loader::{
 mod config;
 use config::FileEnvLayer;
 
-/// The generic-by-default migration directory for the public tool (dbmate parity).
-const DEFAULT_DIR: &str = "./db/migrations";
+/// The generic-by-default migration directory for the public tool.
+const DEFAULT_DIR: &str = "./migrations";
 
 /// The generic meta/journal schema for the public (Trusted/Confined) tool —
 /// dbmate's `schema_migrations` lives in `public`. The Platform profile overrides
@@ -62,7 +62,7 @@ struct Cli {
     /// `-- migrate:up`/`down` sections) or Flyway files (`V<NNNN>__*.sql`) are
     /// auto-detected. Precedence (highest first): this flag, then the
     /// `ZEROSHIP_MIGRATE_MIGRATIONS_DIR` env, then `migrations_dir` in
-    /// `zeroship-migrate.toml`, then the default `./db/migrations`. No clap
+    /// `zeroship-migrate.toml`, then the default `./migrations`. No clap
     /// `default_value`, so the bin can tell "flag absent" from "flag given".
     #[arg(long, global = true)]
     dir: Option<PathBuf>,
@@ -238,7 +238,7 @@ enum Command {
     /// sections. Prints the created path.
     ///
     /// NOTE (PR7 raw-SQL demotion): this raw-`.sql` authoring path is **RETAINED for
-    /// the dbmate-style operator CLI and the platform Flyway-mode** — it is NOT the
+    /// the dbmate-style operator CLI and legacy SQL corpora** — it is NOT the
     /// recommended creator authoring path. Creators author portable, bi-dialect
     /// (PG + SQLite) migrations as op.* `@zeroship/migrate` `.ts` modules (compiled to
     /// `.ir.json`) via `zeroship-migrate-js new`/`generate` — the DSL expresses the
@@ -364,7 +364,7 @@ enum Command {
 }
 
 /// The effective migration directory under the precedence rule (CLI flag > env >
-/// config file > default `./db/migrations`). The clap `--dir` flag, when present,
+/// config file > default `./migrations`). The clap `--dir` flag, when present,
 /// is highest; otherwise the folded file+env `migrations_dir` (env already wins
 /// over file inside [`FileEnvLayer`]); otherwise the built-in default.
 fn effective_dir(cli: &Cli, layer: &FileEnvLayer) -> PathBuf {
