@@ -23,7 +23,6 @@ import {
   lit,
   decimal,
   byteValue,
-  interval,
   dialect,
 } from "../src/index.js";
 import { domain, pgTable, sequence } from "../src/pg.js";
@@ -80,7 +79,7 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   assert.equal((imported as any).and, undefined);
   assert.equal((imported as any).or, undefined);
   assert.equal((imported as any).not, undefined);
-  assert.equal(typeof imported.interval, "function");
+  assert.equal((imported as any).interval, undefined);
   assert.equal((imported as any).pgEnum, undefined);
   assert.equal((imported as any).pgDomain, undefined);
   assert.equal((imported as any).domain, undefined);
@@ -1349,7 +1348,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
         check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
         check("enabled_and_visible", (c) => c("enabled").and(c("visible"))),
-        check("expires_window", (c) => c("expires_at").le(c("created_at").add(interval("00:01:00")))),
+        { name: "expires_window", expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) },
         check("not_archived", (c) => c("kind").eq(lit("archived")).not()),
         check("kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
       ],
@@ -1417,7 +1416,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       node: "binOp",
       op: "add",
       lhs: { node: "colRef", name: "created_at" },
-      rhs: { node: "pgInterval", duration: "00:01:00" },
+      rhs: { node: "pgInterval", duration: { minutes: 1 } },
     },
   });
   assert.deepEqual(checks[8], {
@@ -1581,7 +1580,7 @@ test("domain check validation rejects smuggled volatile functions and aggregates
   );
 });
 
-test("c.fn and c.pg build portable extract, pgExtract, and interval literal nodes", () => {
+test("c.fn and c.pg build portable extract, pgExtract, and structured interval nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
       as: t.date(),
@@ -1603,7 +1602,7 @@ test("c.fn and c.pg build portable extract, pgExtract, and interval literal node
       checks: [
         {
           name: "expires_window",
-          expr: (c) => c("expires_at").le(c("issued_at").add(c.pg.interval("00:01:00"))),
+          expr: (c) => c("expires_at").le(c("issued_at").add(c.pg.interval({ minutes: 1 }))),
         },
       ],
     });
@@ -1636,7 +1635,7 @@ test("c.fn and c.pg build portable extract, pgExtract, and interval literal node
       node: "binOp",
       op: "add",
       lhs: { node: "colRef", name: "issued_at" },
-      rhs: { node: "pgInterval", duration: "00:01:00" },
+      rhs: { node: "pgInterval", duration: { minutes: 1 } },
     },
   });
 });
@@ -1663,8 +1662,12 @@ test("inList rejects malformed text arrays and c.pg rejects regex patterns", () 
     (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval("1 minute") } })),
-    (e: any) => e.code === "OP_INVALID" && /HH:MM:SS/.test(e.message),
+    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval({}) } })),
+    (e: any) => e.code === "OP_INVALID" && /at least one duration field/.test(e.message),
+  );
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval({ minutes: 1.5 }) } })),
+    (e: any) => e.code === "OP_INVALID" && /minutes must be an integer/.test(e.message),
   );
 });
 

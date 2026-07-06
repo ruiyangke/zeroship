@@ -127,6 +127,18 @@ export interface VectorOptions {
   metric?: VectorMetric;
 }
 
+/** Structured duration value for PG interval literals and future date shifting.
+ *  At least one integer field is required; absent fields are omitted on the wire
+ *  in canonical order (`years`, `months`, `days`, `hours`, `minutes`, `seconds`). */
+export interface Duration {
+  years?: number;
+  months?: number;
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
+}
+
 /** Options for `.mask({ kind, classification? })` — a STANDALONE column mask.
  *  `kind` is REQUIRED (closed {@link MaskKind}); `classification` is optional and
  *  DEFAULTS to `"pii"` (closed {@link Classification}). `kind: "none"` is the
@@ -670,8 +682,8 @@ export interface PgExprNamespace {
   /** Renders portable fields as `extract` and PG-only fields as `pgExtract`. */
   extract(field: ExtractField, expr: unknown): ExprChain;
   extract(field: PgExtractField, expr: unknown): ExprChain;
-  /** Renders `'<safe>'::interval` on PostgreSQL. Accepts strict `HH:MM:SS[.ffffff]`. */
-  interval(value: string): ExprChain;
+  /** Renders a structured PostgreSQL interval literal. */
+  interval(duration: Duration): ExprChain;
 }
 
 /** The single injected builder handle: a column-accessor function `c("name")`

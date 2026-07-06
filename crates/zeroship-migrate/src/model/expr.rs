@@ -455,11 +455,12 @@ pub enum Expr {
         /// Source expression.
         from: Box<Expr>,
     },
-    /// **PG-ONLY** interval literal rendered as `'<safe>'::interval`.
+    /// **PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.
     PgInterval {
-        /// A strictly-validated interval literal. P1 admits only time-like
-        /// `HH:MM:SS[.ffffff]` values such as `00:01:00`.
-        duration: String,
+        /// Structured duration fields. Fields serialize in canonical order
+        /// (`years`, `months`, `days`, `hours`, `minutes`, `seconds`) and absent
+        /// fields are omitted from the wire.
+        duration: Duration,
     },
     /// **The one Layer-2 portability escape (design §3.4 / §6.4)** — a
     /// per-dialect VALUE divergence. Each present leg is a full [`Expr`]; the
@@ -505,6 +506,38 @@ pub enum Expr {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mysql: Option<Box<Expr>>,
     },
+}
+
+/// Structured duration value for PostgreSQL interval literals and future portable
+/// date shifts. All fields are optional integers; validation requires at least
+/// one present field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Duration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub years: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub months: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<i64>,
+}
+
+impl Duration {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.years.is_none()
+            && self.months.is_none()
+            && self.days.is_none()
+            && self.hours.is_none()
+            && self.minutes.is_none()
+            && self.seconds.is_none()
+    }
 }
 
 /// One `(when, then)` branch of a [`Expr::Case`].

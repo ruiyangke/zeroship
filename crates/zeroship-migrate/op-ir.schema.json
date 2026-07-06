@@ -3644,12 +3644,12 @@
           ]
         },
         {
-          "description": "**PG-ONLY** interval literal rendered as `'<safe>'::interval`.",
+          "description": "**PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.",
           "type": "object",
           "properties": {
             "duration": {
-              "description": "A strictly-validated interval literal. P1 admits only time-like\n`HH:MM:SS[.ffffff]` values such as `00:01:00`.",
-              "type": "string"
+              "description": "Structured duration fields. Fields serialize in canonical order\n(`years`, `months`, `days`, `hours`, `minutes`, `seconds`) and absent\nfields are omitted from the wire.",
+              "$ref": "#/$defs/Duration"
             },
             "node": {
               "type": "string",
@@ -4125,6 +4125,55 @@
           "const": "timezone_minute"
         }
       ]
+    },
+    "Duration": {
+      "description": "Structured duration value for PostgreSQL interval literals and future portable\ndate shifts. All fields are optional integers; validation requires at least\none present field.",
+      "type": "object",
+      "properties": {
+        "years": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "months": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "days": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "hours": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false
     },
     "EmptyContainerKind": {
       "description": "Empty container defaults admitted as column DEFAULTs. This is intentionally\nEMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.",

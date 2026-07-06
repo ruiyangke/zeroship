@@ -233,7 +233,7 @@ export function up() {
     },
     primaryKey: ["code_hash"],
   });
-  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))) });
+  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) });
   table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_pkce_method_check").add({ expr: (c) => c("pkce_method").eq("S256") });
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {

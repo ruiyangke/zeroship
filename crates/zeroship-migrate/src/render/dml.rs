@@ -75,7 +75,7 @@ use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
 use crate::model::expr::{
-    AggFunc, BinaryOp, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
+    AggFunc, BinaryOp, Duration, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
 };
 use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
@@ -494,55 +494,33 @@ fn render_pg_extract(
     Ok(format!("EXTRACT({} FROM {expr})", render_pg_extract_field(field)))
 }
 
-fn render_pg_interval_literal(value: &str, dialect: SqlDialect) -> Result<String, DmlError> {
+fn render_pg_interval_literal(duration: &Duration, dialect: SqlDialect) -> Result<String, DmlError> {
     if !matches!(dialect, SqlDialect::Postgres) {
         return Err(DmlError::UnrenderableExpr(
             "PG interval literal is PostgreSQL-only".to_string(),
         ));
     }
-    if !is_safe_pg_interval_literal(value) {
-        return Err(DmlError::UnrenderableExpr(format!(
-            "PG interval literal {value:?} is outside the strict P1 interval grammar"
-        )));
-    }
-    Ok(format!("{}::interval", sql_string_literal(value)))
-}
 
-fn is_safe_pg_interval_literal(value: &str) -> bool {
-    if value.is_empty() || value.len() > 32 || value.contains('\0') {
-        return false;
-    }
-    let Some((hours, rest)) = value.split_once(':') else {
-        return false;
-    };
-    if hours.is_empty() || hours.len() > 6 || !hours.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    let Some((minutes, seconds)) = rest.split_once(':') else {
-        return false;
-    };
-    if minutes.len() != 2
-        || !minutes.bytes().all(|b| b.is_ascii_digit())
-        || minutes.parse::<u8>().map_or(true, |m| m > 59)
-    {
-        return false;
-    }
-    let (seconds_whole, fraction) = match seconds.split_once('.') {
-        Some((whole, frac)) => (whole, Some(frac)),
-        None => (seconds, None),
-    };
-    if seconds_whole.len() != 2
-        || !seconds_whole.bytes().all(|b| b.is_ascii_digit())
-        || seconds_whole.parse::<u8>().map_or(true, |s| s > 59)
-    {
-        return false;
-    }
-    if let Some(frac) = fraction {
-        if frac.is_empty() || frac.len() > 6 || !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
+    let mut parts = Vec::new();
+    for (value, singular, plural) in [
+        (duration.years, "year", "years"),
+        (duration.months, "month", "months"),
+        (duration.days, "day", "days"),
+        (duration.hours, "hour", "hours"),
+        (duration.minutes, "minute", "minutes"),
+        (duration.seconds, "second", "seconds"),
+    ] {
+        if let Some(value) = value {
+            let unit = if value == 1 || value == -1 { singular } else { plural };
+            parts.push(format!("{value} {unit}"));
         }
     }
-    true
+    if parts.is_empty() {
+        return Err(DmlError::UnrenderableExpr(
+            "PG interval duration must include at least one field".to_string(),
+        ));
+    }
+    Ok(format!("INTERVAL {}", sql_string_literal(&parts.join(" "))))
 }
 
 /// The SQL spelling of a binary operator (§3.3.1 method↔node table). `Concat` is

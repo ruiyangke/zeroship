@@ -38,7 +38,6 @@ export {
   lit,
   decimal,
   byteValue,
-  interval,
   nextval,
   minValue,
   maxValue,

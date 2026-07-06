@@ -674,7 +674,7 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
                 "lhs":{"node":"colRef","name":"expires_at"},
                 "rhs":{"node":"binOp","op":"add",
                     "lhs":{"node":"colRef","name":"issued_at"},
-                    "rhs":{"node":"pgInterval","duration":"00:01:00"}}}}}
+                    "rhs":{"node":"pgInterval","duration":{"minutes":1}}}}}}
         ]}
     ]}"#;
     let plan = author_and_apply(&conn, &cfg, ir, &registry(&[]), Approval::Approved).await;
@@ -700,7 +700,7 @@ async fn pg_extract_and_interval_literal_render_and_apply_on_pg() {
     );
     assert!(
         rendered.contains(
-            r#"CONSTRAINT "expires_window_check" CHECK (("expires_at" <= ("issued_at" + '00:01:00'::interval)))"#
+            r#"CONSTRAINT "expires_window_check" CHECK (("expires_at" <= ("issued_at" + INTERVAL '1 minute')))"#
         ),
         "missing rendered interval CHECK in:\n{rendered}"
     );
@@ -782,7 +782,7 @@ fn pg_extract_and_interval_literal_validate_refuse_non_pg() {
                 "node":"pgExtract","field":"epoch","from":{"node":"colRef","name":"x"}}}}
         ]}"#,
         r#"{"ir_version":1,"name":"interval_refuse","ops":[
-            {"op":"update","table":"t","set":{"x":{"node":"pgInterval","duration":"00:01:00"}}}
+            {"op":"update","table":"t","set":{"x":{"node":"pgInterval","duration":{"minutes":1}}}}
         ]}"#,
     ];
 

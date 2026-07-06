@@ -201,7 +201,7 @@ export type Expr =
   | { node: "pgColumnSize"; expr: Expr }
   | { node: "extract"; field: ExtractField; from: Expr }
   | { node: "pgExtract"; field: PgExtractField; from: Expr }
-  | { node: "pgInterval"; duration: string }
+  | { node: "pgInterval"; duration: Duration }
   // The one Layer-2 portability escape (§3.4): a per-dialect value divergence.
   // Legs serialize in canonical order (default, pg, sqlite, mysql); a `None` leg
   // is skipped on the wire. Scope math is validated per-target by the engine.
@@ -215,6 +215,15 @@ export type IrValue = IrScalar | Expr;
 export interface CaseBranch {
   when: Expr;
   then: Expr;
+}
+
+export interface Duration {
+  years?: number;
+  months?: number;
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
 }
 
 /** A generated/computed column facet. `expr` is the closed expression AST; `stored`
