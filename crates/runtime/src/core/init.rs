@@ -500,6 +500,13 @@ class ZsWorkflowSuspendSignal extends Error {
     }
 }
 
+class ZsWorkflowTimeoutError extends Error {
+    constructor(message = "workflow signal wait timed out") {
+        super(message);
+        this.name = "WorkflowTimeoutError";
+    }
+}
+
 function wfErr(message, status, code) {
     const e = new Error(message);
     e.status = status;
@@ -517,7 +524,9 @@ function wfSerializeError(e) {
 }
 
 function wfDeserializeError(error) {
-    const e = new Error((error && error.message) || "workflow step failed");
+    const e = error && error.type === "WorkflowTimeoutError"
+        ? new ZsWorkflowTimeoutError(error.message)
+        : new Error((error && error.message) || "workflow step failed");
     e.name = (error && error.type) || e.name;
     if (error && error.stack) e.stack = error.stack;
     return e;
@@ -637,6 +646,7 @@ class ZsJournalBackedStep {
                 if (issued.record.output !== undefined) return issued.record.output;
                 return issued.record.consumedSignal ?? null;
             }
+            if (issued.record.state === "failed") return this.#resolveRecord(issued.record);
             throw new ZsWorkflowSuspendSignal({
                 kind: "wait_signal",
                 ordinal: issued.ordinal,

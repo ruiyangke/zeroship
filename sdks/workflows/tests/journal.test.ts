@@ -11,6 +11,7 @@ import {
 import {
   WorkflowNestedStepError,
   WorkflowStepTimeoutError,
+  WorkflowTimeoutError,
   WorkflowUnsupportedError,
 } from "../src/index.ts";
 
@@ -261,7 +262,7 @@ test("step.run timeout records a retryable WorkflowStepTimeoutError", async () =
   );
 });
 
-test("sleep and waitForSignal misses suspend without a thrown SignalTimeout class", async () => {
+test("sleep and waitForSignal misses suspend and timeout replays throw WorkflowTimeoutError", async () => {
   const sleepStep = createJournalStep(envelope());
   await assert.rejects(
     async () => sleepStep.sleep("cooldown", "5m"),
@@ -295,9 +296,16 @@ test("sleep and waitForSignal misses suspend without a thrown SignalTimeout clas
       name: "approved",
       nameOccurrence: 0,
       kind: "wait_signal",
-      state: "completed",
-      output: null,
+      state: "failed",
+      error: {
+        type: "WorkflowTimeoutError",
+        message: "workflow signal wait timed out for approved",
+        retryable: false,
+      },
     },
   ]));
-  assert.equal(await timedOut.waitForSignal("approved", { timeout: "1h" }), null);
+  await assert.rejects(
+    () => timedOut.waitForSignal("approved", { timeout: "1h" }),
+    WorkflowTimeoutError,
+  );
 });

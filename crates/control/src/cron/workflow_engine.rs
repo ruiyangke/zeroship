@@ -561,7 +561,9 @@ where
     let dispatch_nonce = typed_id::new_workflow_dispatch_id();
     let lease_expires = Utc::now() + chrono::Duration::milliseconds(config.claim_ttl_ms);
     if let Some(key) = candidate.waiting_step_key.as_deref() {
-        resolve_due_waiting_step(tx, &candidate.run_id, key, &dispatch_nonce).await?;
+        if !resolve_due_waiting_step(tx, &candidate.run_id, key, &dispatch_nonce).await? {
+            return Ok(None);
+        }
     }
 
     let rows = tx
@@ -696,7 +698,7 @@ async fn resolve_due_waiting_step<C>(
     run_id: &str,
     key: &str,
     dispatch_nonce: &str,
-) -> Result<(), RegistryError>
+) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
@@ -721,6 +723,15 @@ where
                 dispatch_nonce,
             )
             .await?;
+            tx.execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET waiting_step_key = NULL, wake_at = now() \
+                  WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .map_err(RegistryError::from)?;
+            Ok(true)
         }
         WaitingStep::WaitSignal {
             ordinal,
@@ -728,8 +739,42 @@ where
             signal_type,
             max_signal_age_ms,
         } => {
+            let step_rows = tx
+                .query(
+                    "SELECT wake_at \
+                       FROM zeroship.workflow_steps \
+                      WHERE run_id = $1 \
+                        AND ordinal = $2 \
+                        AND name = $3 \
+                        AND kind = 'wait_signal' \
+                        AND state = 'running' \
+                      FOR UPDATE",
+                    &[&run_id, &ordinal, &name],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+            let Some(step_row) = step_rows.first() else {
+                return Err(RegistryError::InvalidInput(format!(
+                    "waiting_step_key {key} has no running workflow_steps row"
+                )));
+            };
+            let deadline: Option<DateTime<Utc>> = step_row.get("wake_at");
+            let now = Utc::now();
             let min_created_at =
-                max_signal_age_ms.map(|age| Utc::now() - chrono::Duration::milliseconds(age));
+                max_signal_age_ms.map(|age| now - chrono::Duration::milliseconds(age));
+            if let Some(stale_cutoff) = min_created_at.as_ref() {
+                tx.execute(
+                    "UPDATE zeroship.workflow_signals \
+                        SET consumed_by = $1 \
+                      WHERE run_id = $1 \
+                        AND type = $2 \
+                        AND consumed_by IS NULL \
+                        AND created_at < $3",
+                    &[&run_id, &signal_type, stale_cutoff],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+            }
             let signal = tx
                 .query(
                     "SELECT id, payload, created_at, origin, delivery, topic \
@@ -745,36 +790,68 @@ where
                 )
                 .await
                 .map_err(RegistryError::from)?;
-            let (output, consumed_signal_id) = match signal.first() {
-                Some(row) => {
-                    let signal_id: String = row.get("id");
-                    let payload: Option<Value> = row.get("payload");
-                    let created_at: DateTime<Utc> = row.get("created_at");
-                    let origin: String = row.get("origin");
-                    let delivery: String = row.get("delivery");
-                    let topic: Option<String> = row.get("topic");
+
+            let Some(row) = signal.first() else {
+                if deadline.map_or(true, |deadline| deadline <= now) {
+                    insert_resolved_step(
+                        tx,
+                        &StepCheckpoint {
+                            ordinal,
+                            name,
+                            name_occurrence: 0,
+                            kind: "wait_signal".to_string(),
+                            state: "failed".to_string(),
+                            output: None,
+                            error: Some(serde_json::json!({
+                                "type": "WorkflowTimeoutError",
+                                "message": format!("workflow signal wait timed out for {signal_type}"),
+                                "retryable": false,
+                            })),
+                            wake_at: None,
+                            signal_type: Some(signal_type),
+                            max_signal_age_ms,
+                            consumed_signal_id: None,
+                        },
+                        run_id,
+                        dispatch_nonce,
+                    )
+                    .await?;
                     tx.execute(
-                        "UPDATE zeroship.workflow_signals \
-                            SET consumed_by = $1 \
-                          WHERE id = $2 AND consumed_by IS NULL",
-                        &[&run_id, &signal_id],
+                        "UPDATE zeroship.workflow_runs \
+                            SET waiting_step_key = NULL, wake_at = now() \
+                          WHERE id = $1",
+                        &[&run_id],
                     )
                     .await
                     .map_err(RegistryError::from)?;
-                    (
-                        Some(serde_json::json!({
-                            "type": signal_type,
-                            "payload": payload,
-                            "receivedAt": created_at.to_rfc3339(),
-                            "origin": origin,
-                            "delivery": delivery,
-                            "topic": topic,
-                        })),
-                        Some(signal_id),
-                    )
+                    return Ok(true);
                 }
-                None => (Some(Value::Null), None),
+
+                tx.execute(
+                    "UPDATE zeroship.workflow_runs \
+                        SET state = 'waiting', wake_at = $2 \
+                      WHERE id = $1",
+                    &[&run_id, &deadline],
+                )
+                .await
+                .map_err(RegistryError::from)?;
+                return Ok(false);
             };
+
+            let signal_id: String = row.get("id");
+            let payload: Option<Value> = row.get("payload");
+            let created_at: DateTime<Utc> = row.get("created_at");
+            let origin: String = row.get("origin");
+            let delivery: String = row.get("delivery");
+            let topic: Option<String> = row.get("topic");
+            tx.execute(
+                "UPDATE zeroship.workflow_signals \
+                    SET consumed_by = $1 \
+                  WHERE id = $2 AND consumed_by IS NULL",
+                &[&run_id, &signal_id],
+            )
+            .await
+            .map_err(RegistryError::from)?;
             insert_resolved_step(
                 tx,
                 &StepCheckpoint {
@@ -783,27 +860,37 @@ where
                     name_occurrence: 0,
                     kind: "wait_signal".to_string(),
                     state: "completed".to_string(),
-                    output,
+                    output: Some(serde_json::json!({
+                        "id": signal_id.clone(),
+                        "type": signal_type.clone(),
+                        "payload": payload,
+                        "createdAt": created_at.to_rfc3339(),
+                        "receivedAt": created_at.to_rfc3339(),
+                        "origin": origin,
+                        "delivery": delivery,
+                        "topic": topic,
+                    })),
                     error: None,
                     wake_at: None,
                     signal_type: Some(signal_type),
                     max_signal_age_ms,
-                    consumed_signal_id,
+                    consumed_signal_id: Some(signal_id),
                 },
                 run_id,
                 dispatch_nonce,
             )
             .await?;
+            tx.execute(
+                "UPDATE zeroship.workflow_runs \
+                    SET waiting_step_key = NULL, wake_at = now() \
+                  WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .map_err(RegistryError::from)?;
+            Ok(true)
         }
     }
-
-    tx.execute(
-        "UPDATE zeroship.workflow_runs SET waiting_step_key = NULL WHERE id = $1",
-        &[&run_id],
-    )
-    .await
-    .map_err(RegistryError::from)?;
-    Ok(())
 }
 
 fn spawn_dispatch<D>(
@@ -1080,7 +1167,7 @@ where
              consumed_signal_id = EXCLUDED.consumed_signal_id, \
              finished_at = EXCLUDED.finished_at \
            WHERE zeroship.workflow_steps.state = 'running' \
-             AND EXCLUDED.state = 'completed' \
+             AND EXCLUDED.state IN ('completed', 'failed') \
              AND zeroship.workflow_steps.name = EXCLUDED.name \
              AND zeroship.workflow_steps.kind = EXCLUDED.kind",
         &[
