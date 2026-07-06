@@ -6145,7 +6145,6 @@ mod tests {
                 .into_iter()
                 .collect(),
             r#where: None,
-            batch: None,
             schema: None,
         }]);
 
@@ -6203,7 +6202,6 @@ mod tests {
                 .into_iter()
                 .collect(),
             r#where: None,
-            batch: None,
             schema: None,
         }]);
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -6479,7 +6477,7 @@ mod tests {
                 schema: None,
                 existence_guard: None,
             },
-            Op::Update { table: "users".into(), set, r#where: None, batch: None, schema: None },
+            Op::Update { table: "users".into(), set, r#where: None, schema: None },
         ]);
         let ts = vec![None, Some("m.ts:9".to_string())];
         let err = validate_ir(&ir, Dialect::Sqlite, &ts).unwrap_err();
@@ -6586,7 +6584,6 @@ mod tests {
                 lhs: Box::new(Expr::col("column_that_was_dropped")),
                 rhs: Box::new(Expr::lit(IrScalar::Int(1))),
             }),
-            batch: None,
             schema: None,
         }]);
 

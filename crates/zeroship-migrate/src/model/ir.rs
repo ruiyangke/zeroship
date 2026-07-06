@@ -1740,7 +1740,7 @@ pub struct IrOnConflict {
     pub do_update: Option<BTreeMap<String, IrValue>>,
 }
 
-/// A batched-backfill / batched-update knob.
+/// A batched-backfill knob.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IrBatch {
@@ -2866,7 +2866,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// `UPDATE … SET … WHERE …` (optionally batched).
+    /// `UPDATE … SET … WHERE …`.
     Update {
         /// Target table.
         table: String,
@@ -2875,9 +2875,6 @@ pub enum Op {
         /// Optional WHERE predicate (closed AST).
         #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
         r#where: Option<Expr>,
-        /// Optional batching knob.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        batch: Option<IrBatch>,
         /// **PR10** — the schema qualifier (§2.7).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,

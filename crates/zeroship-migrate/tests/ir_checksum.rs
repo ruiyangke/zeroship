@@ -387,7 +387,6 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
                 lhs: Box::new(Expr::col("total")),
                 rhs: Box::new(Expr::lit(IrScalar::Int(threshold))),
             }),
-            batch: None,
             schema: None,
         }
     };

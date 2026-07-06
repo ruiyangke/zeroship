@@ -86,7 +86,7 @@ enum LoweredOp {
     Rename(Box<RenameStep>),
     /// **PR6a** — a DML op (`insert`/`update`/`del`/`backfill`) lowered through the
     /// creator-DML assembler ([`crate::render::dml`]) into a [`PlanStep::Dml`]
-    /// (parameterized one-shot) or [`PlanStep::Backfill`] (PG batched). NOT
+    /// (parameterized one-shot) or [`PlanStep::Backfill`] (batched backfill). NOT
     /// fragment-guarded the way DDL is: a one-shot `Dml` step's values are NATIVE
     /// binds (never interpolated), so there is no rendered-literal fragment a guard
     /// would inspect, and the executor's `run_dml_step` re-runs the destructive
@@ -2853,7 +2853,7 @@ impl IrAuthor {
     /// Portability boundaries (§9), all HARD errors (never silent):
     /// - `insert { onConflict }` on **SQLite** → [`crate::render::dml::DmlError::OnConflictNotPortable`].
     ///
-    /// A **batched** `backfill` / `update { batch }` is PORTABLE on BOTH backends
+    /// A **batched** `backfill` is PORTABLE on BOTH backends
     /// since PR6b (PG `backfill.rs`, SQLite `apply::backend::sqlite::backfill_sql`) — it is
     /// no longer a SQLite hard error.
     ///
@@ -2911,23 +2911,7 @@ impl IrAuthor {
                 .map_err(IrLowerError::DmlAssemble)?;
                 Ok(self.dml_step(op_index, table, "insert", asm, false))
             }
-            Op::Update { table, set, r#where, batch, .. } => {
-                if batch.is_some() {
-                    // A batched update is a backfill in disguise (resumable, paged):
-                    // route it through the backfill path so its SQLite leg hits the
-                    // PR6b boundary, never a silent one-shot UPDATE.
-                    let b = batch.as_ref().expect("batch is_some");
-                    return self.lower_backfill(
-                        eff_schema,
-                        table,
-                        &b.cursor_column,
-                        b.batch_size.get(),
-                        set,
-                        r#where.as_ref(),
-                        // A batched update has no separate name; derive a stable one.
-                        &format!("batched_update_{table}"),
-                    );
-                }
+            Op::Update { table, set, r#where, .. } => {
                 let asm = crate::render::dml::assemble_update(
                     eff_schema,
                     dialect,
@@ -3014,7 +2998,7 @@ impl IrAuthor {
         }
     }
 
-    /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
+    /// Lower a `backfill` into a [`PlanStep::Backfill`]. The
     /// `set`/`filter` render to INLINE SQL strings ([`crate::render::dml::assemble_backfill_clauses`])
     /// the [`crate::model::backfill::BackfillSpec`] executor consumes (it guard-checks /
     /// authorizer-vets the assembled `UPDATE` before any batch).
@@ -3027,7 +3011,7 @@ impl IrAuthor {
     /// `BackfillSpec` shape, so the plan step is uniform.
     ///
     /// **#149** — the backfill EXECUTOR ([`crate::model::backfill::BackfillSpec`]) now
-    /// carries a per-spec `schema`, so a schema-qualified batched backfill/update
+    /// carries a per-spec `schema`, so a schema-qualified batched backfill
     /// RUNS (it no longer fails closed at lower). The spec's `schema` is set from
     /// `eff_schema` (§2.7), which the cross-schema scope gate (`permits`) has
     /// ALREADY vetted: under Confined `eff == project_schema` (a foreign qualifier
@@ -3044,7 +3028,7 @@ impl IrAuthor {
     // `Op::Backfill` IR variant (schema/table/cursor/batch/set/filter/name); a
     // params struct would just re-wrap the variant's own fields with no gain and
     // risks the behavior change this hygiene pass forbids. Private method, 2
-    // in-crate callers.
+    // in-crate caller.
     #[allow(clippy::too_many_arguments)]
     fn lower_backfill(
         &self,
@@ -6526,33 +6510,34 @@ mod tests {
         );
     }
 
-    /// **#149 (was PR10 review F5)** — a batched `update {{ batch }}` (a backfill in
-    /// disguise) with a gate-approved foreign schema runs cross-schema identically to
-    /// `backfill` — the resumable path is uniform. RED before #149 (it failed closed).
+    /// **#149 (was PR10 review F5)** — a backfill with a gate-approved foreign
+    /// schema runs cross-schema through the resumable path. RED before #149 (it
+    /// failed closed).
     #[test]
-    fn schema_qualified_batched_update_runs_cross_schema_pg() {
+    fn schema_qualified_backfill_runs_cross_schema_pg_regression() {
         let json = r#"{"ir_version":1,"name":"u","owner_app":"app_a","ops":[
-            {"op":"update","table":"t","schema":"app2",
+            {"op":"backfill","table":"t","schema":"app2",
+             "cursorColumn":"id","batchSize":500,"name":"bf_t",
              "set":{"v":{"node":"colRef","name":"v"}},
-             "batch":{"cursorColumn":"id","batchSize":500}}
+             "filter":{"node":"colRef","name":"v"}}
         ]}"#;
-        let ir: MigrationIr = serde_json::from_str(json).expect("batched update IR parses");
+        let ir: MigrationIr = serde_json::from_str(json).expect("backfill IR parses");
         let author = IrAuthor::new("app1", "app_a", SqlDialect::Postgres).with_schema_scope(
             crate::model::policy::SchemaScope::Allowlist(vec!["app1".into(), "app2".into()]),
         );
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
-            .expect("a gate-approved cross-schema batched update lowers");
+            .expect("a gate-approved cross-schema backfill lowers");
         let spec = steps
             .iter()
             .find_map(|s| match s {
                 PlanStep::Backfill(spec) => Some(spec),
                 _ => None,
             })
-            .expect("the batched update produced a PlanStep::Backfill");
+            .expect("the backfill produced a PlanStep::Backfill");
         assert_eq!(
             spec.schema, "app2",
-            "the batched-update backfill spec carries the foreign schema; got {:?}",
+            "the backfill spec carries the foreign schema; got {:?}",
             spec.schema
         );
     }

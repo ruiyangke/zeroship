@@ -402,7 +402,6 @@ fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             table: "t".into(),
             set: std::iter::once(("a".to_string(), IrValue::Expr(col_ref()))).collect(),
             r#where: None,
-            batch: None,
             schema: None,
         },
     ));

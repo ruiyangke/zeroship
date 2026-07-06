@@ -492,7 +492,7 @@ table("orders").backfill({
   synonym.
 - `.del`'s `where` is **mandatory** — an unguarded full-table delete is rejected
   at record time.
-- `.backfill` (and `.update({ batch })`) is a batched, per-batch-transactional,
+- `.backfill` is a batched, per-batch-transactional,
   resumable loop that persists crash-safe cursor progress under the project
   lock. It runs on **both backends** (PG via the existing windowed executor;
   SQLite via the committed batched executor).
@@ -527,9 +527,9 @@ into. Its meaning is **profile-gated**:
   non-`main` SQLite schema requires an explicit `ATTACH … AS <schema>` the operator
   arranges, never an implicit re-pin to `main`.
 
-- **Backfill / batched-update + an explicit schema (profile-gated):** the resumable
+- **Backfill + an explicit schema (profile-gated):** the resumable
   backfill executor now threads a **per-spec schema** (`BackfillSpec.schema`), so a
-  schema-qualified `backfill` (or a batched `update { batch }`) **runs** against
+  schema-qualified `backfill` **runs** against
   `"schema"."table"` — the windowed `UPDATE`, the `search_path` anchor, and the
   catalog introspection all target that schema, and the progress row records it
   (`target_schema`). Which schemas are reachable is decided **upstream** by the

@@ -389,7 +389,7 @@ export interface IrOnConflict {
   doUpdate?: { [column: string]: IrValue } | null;
 }
 
-/** A batched-backfill / batched-update knob. */
+/** A batched-backfill knob. */
 export interface IrBatch {
   cursorColumn: string;
   batchSize: number;
@@ -510,7 +510,7 @@ export type Op =
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "validateConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }
-  | { op: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
+  | { op: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
   | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: IrValue }; filter?: Expr | null; name: string; schema?: string | null }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }

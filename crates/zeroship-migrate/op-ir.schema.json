@@ -1282,7 +1282,7 @@
           ]
         },
         {
-          "description": "`UPDATE … SET … WHERE …` (optionally batched).",
+          "description": "`UPDATE … SET … WHERE …`.",
           "type": "object",
           "properties": {
             "table": {
@@ -1301,17 +1301,6 @@
               "anyOf": [
                 {
                   "$ref": "#/$defs/Expr"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "batch": {
-              "description": "Optional batching knob.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/IrBatch"
                 },
                 {
                   "type": "null"
@@ -5597,25 +5586,6 @@
       "additionalProperties": false,
       "required": [
         "columns"
-      ]
-    },
-    "IrBatch": {
-      "description": "A batched-backfill / batched-update knob.",
-      "type": "object",
-      "properties": {
-        "cursorColumn": {
-          "description": "The cursor column to page over.",
-          "type": "string"
-        },
-        "batchSize": {
-          "description": "Rows per batch (JS-safe-integer bounded).",
-          "$ref": "#/$defs/SafeU64"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "cursorColumn",
-        "batchSize"
       ]
     },
     "SafeU64": {
