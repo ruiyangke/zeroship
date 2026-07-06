@@ -471,6 +471,7 @@ pub async fn workflow_dispatch_unsigned(
     let record = |egress_bytes: u64| {
         let wall_us = wall_start.elapsed().as_micros() as u64;
         cache::record_request(&app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+        cache::record_workflow_step(&app_id);
     };
 
     match outcome {
@@ -800,8 +801,25 @@ export default { workflows: { Checkout } };
         Arc<crate::WorkerConfig>,
         PathBuf,
     ) {
+        let (app_id, blob_store, envs, logs, config, _meter, blob_root) =
+            workflow_test_state_with_meter(max_pinned_isolates_per_app);
+        (app_id, blob_store, envs, logs, config, blob_root)
+    }
+
+    fn workflow_test_state_with_meter(
+        max_pinned_isolates_per_app: usize,
+    ) -> (
+        Uuid,
+        Arc<dyn BlobStore>,
+        SharedEnvs,
+        crate::logs::SharedLogs,
+        Arc<crate::WorkerConfig>,
+        Arc<zeroship_metering::Meter>,
+        PathBuf,
+    ) {
         init_runtime();
         let app_id = Uuid::new_v4();
+        let meter = Arc::new(zeroship_metering::Meter::new());
         crate::cache::init_cache(
             10,
             max_pinned_isolates_per_app,
@@ -811,7 +829,7 @@ export default { workflows: { Checkout } };
                 db_url: None,
                 kv_url: None,
                 storage_backend: None,
-                meter: Arc::new(zeroship_metering::Meter::new()),
+                meter: meter.clone(),
             },
         );
         let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -840,7 +858,7 @@ export default { workflows: { Checkout } };
             blob_store: blob_store.clone(),
             workflow_dispatch_unsigned: true,
         });
-        (app_id, blob_store, envs, logs, config, blob_root)
+        (app_id, blob_store, envs, logs, config, meter, blob_root)
     }
 
     #[test]
@@ -879,6 +897,66 @@ export default { workflows: { Checkout } };
             assert_eq!(result["ordinal"], 0);
             assert_eq!(result["output"]["mark"], "A");
             assert_eq!(result["output"]["bodyRuns"], 1);
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn workflow_dispatch_feeds_platform_counters_and_workflow_steps_metric() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            let (app_id, blob_store, envs, logs, config, meter, blob_root) =
+                workflow_test_state_with_meter(4);
+            let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "M").await;
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/workflow-dispatch-unsigned/{app_id}")
+                            .route(web::post().to(workflow_dispatch_unsigned)),
+                    ),
+            )
+            .await;
+
+            let payload = serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap();
+            let req = test::TestRequest::post()
+                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .set_payload(payload.clone())
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            assert!(!body.is_empty(), "workflow dispatch returned a response body");
+
+            let snap = meter.drain();
+            let usage = snap
+                .get(&app_id)
+                .expect("workflow dispatch recorded usage for app");
+            assert_eq!(usage.requests, 1, "workflow dispatch is one metered request");
+            assert_eq!(
+                usage.ingress_bytes,
+                payload.len() as u64,
+                "workflow dispatch ingress is the StepRequest JSON body"
+            );
+            assert_eq!(
+                usage.egress_bytes,
+                body.len() as u64,
+                "workflow dispatch egress is the StepResult JSON body"
+            );
+            assert!(usage.wall_us > 0, "workflow dispatch records wall_us");
+            assert!(usage.cpu_us > 0, "workflow dispatch records cpu_us");
+            assert_eq!(
+                usage.custom.get("workflow_steps").copied(),
+                Some(1),
+                "workflow dispatch records observability workflow_steps"
+            );
 
             let _ = std::fs::remove_dir_all(blob_root);
         });

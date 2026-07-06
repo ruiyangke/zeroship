@@ -329,17 +329,26 @@ async fn spend_blocked_gateway() -> web::HttpResponse {
 }
 
 async fn seed_app_and_deploy(fx: &Fixture, label: &str) -> (Uuid, String) {
+    seed_app_and_deploy_on_plan(
+        fx,
+        label,
+        &zeroship_control::bootstrap_console::free_plan_id(),
+    )
+    .await
+}
+
+async fn seed_app_and_deploy_on_plan(
+    fx: &Fixture,
+    label: &str,
+    plan_id: &str,
+) -> (Uuid, String) {
     let app_id = Uuid::new_v4();
     let name = format!("wf-{label}-{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
             "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
              VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash')",
-            &[
-                &app_id,
-                &name,
-                &zeroship_control::bootstrap_console::free_plan_id(),
-            ],
+            &[&app_id, &name, &plan_id],
         )
         .await
         .expect("insert app");
@@ -358,6 +367,31 @@ async fn seed_app_and_deploy(fx: &Fixture, label: &str) -> (Uuid, String) {
         .await
         .expect("insert deploy");
     (app_id, deploy_id)
+}
+
+async fn seed_workflow_cap_plan(fx: &Fixture, label: &str, run_cap: i64, app_cap: i64) -> String {
+    let plan_id = format!("pln_wf_cap_{}_{}", label, Uuid::new_v4().simple());
+    let runtime = serde_json::json!({
+        "cpu_limit_ms": 50,
+        "wall_timeout_ms": 5000,
+        "heap_limit_mb": 64,
+        "workflow_journal_max_bytes": run_cap,
+        "workflow_app_journal_max_bytes": app_cap,
+    });
+    let net = serde_json::json!({
+        "max_sockets": 4,
+        "egress_ceiling_bytes": 10485760,
+    });
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.plans \
+                (id, name, runtime_limits_json, net_policy_limits_json, spend_limit_default_cents) \
+             VALUES ($1, $2, $3, $4, 0)",
+            &[&plan_id, &format!("wf-cap-{label}"), &runtime, &net],
+        )
+        .await
+        .expect("insert workflow cap plan");
+    plan_id
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -641,6 +675,17 @@ async fn wait_for_completed(fx: &Fixture, run_ids: &[String]) {
         .map(|r| (r.get("id"), r.get("state"), r.get("claimed_by")))
         .collect();
     panic!("blocked dispatches did not complete after release: {states:?}");
+}
+
+async fn pg_json_size(fx: &Fixture, value: &serde_json::Value) -> i64 {
+    fx.pg
+        .query_one(
+            "SELECT pg_column_size($1::jsonb)::bigint AS bytes",
+            &[value],
+        )
+        .await
+        .expect("pg_column_size jsonb")
+        .get("bytes")
 }
 
 async fn wait_for_cancelled_without_steps(fx: &Fixture, run_id: &str) {
@@ -939,10 +984,114 @@ async fn apply_outcome_checkpoints_idempotently() {
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1 AND ordinal = 0",
             &[&run_id],
+    )
+    .await
+    .expect("count steps");
+    assert_eq!(rows[0].get::<_, i64>("n"), 1);
+
+    assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row().await;
+}
+
+async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row() {
+    let Some(fx) = isolated_fixture("journal-cap").await else {
+        return;
+    };
+    let first_output = serde_json::json!({"small": "ok"});
+    let second_output = serde_json::json!({"large": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"});
+    let first_size = pg_json_size(&fx, &first_output).await;
+    let second_size = pg_json_size(&fx, &second_output).await;
+    let run_cap = first_size + second_size - 1;
+    let plan_id = seed_workflow_cap_plan(&fx, "journal-cap", run_cap, 10_000_000).await;
+    let (app_id, deploy_id) = seed_app_and_deploy_on_plan(&fx, "journal-cap", &plan_id).await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "running",
+        -1_000,
+        None,
+        Some("owner-journal-cap"),
+        Some(60_000),
+        Some("wfd_journal_cap_1"),
+    )
+    .await;
+
+    let first = StepResult {
+        run_id: run_id.clone(),
+        dispatch_nonce: "wfd_journal_cap_1".to_string(),
+        checkpoints: vec![StepCheckpoint::completed_run(0, "first", first_output.clone())],
+        run_update: RunUpdate::Queued,
+    };
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, "owner-journal-cap", first)
+            .await
+            .expect("apply first checkpoint")
+    );
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT journal_bytes FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
         )
         .await
-        .expect("count steps");
-    assert_eq!(rows[0].get::<_, i64>("n"), 1);
+        .expect("load journal_bytes after first");
+    assert_eq!(row.get::<_, i64>("journal_bytes"), first_size);
+
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state='running', claimed_by=$1, dispatch_nonce=$2, lease_expires=$3 \
+              WHERE id=$4",
+            &[
+                &"owner-journal-cap",
+                &"wfd_journal_cap_2",
+                &(Utc::now() + ChronoDuration::seconds(60)),
+                &run_id,
+            ],
+        )
+        .await
+        .expect("reclaim for cap breach");
+    let second = StepResult {
+        run_id: run_id.clone(),
+        dispatch_nonce: "wfd_journal_cap_2".to_string(),
+        checkpoints: vec![StepCheckpoint::completed_run(1, "second", second_output)],
+        run_update: RunUpdate::Completed {
+            output: Some(serde_json::json!({"done": true})),
+        },
+    };
+    assert!(
+        workflow_engine::apply_step_result(&fx.state, "owner-journal-cap", second)
+            .await
+            .expect("apply second checkpoint")
+    );
+
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT state, error, journal_bytes \
+               FROM zeroship.workflow_runs WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("load capped run");
+    assert_eq!(row.get::<_, String>("state"), "failed");
+    let error: serde_json::Value = row.get("error");
+    assert_eq!(error["error_code"], "workflow_state_cap_exceeded");
+    assert_eq!(
+        row.get::<_, i64>("journal_bytes"),
+        first_size,
+        "oversized checkpoint must not advance journal_bytes"
+    );
+    let rows = fx
+        .pg
+        .query(
+            "SELECT ordinal FROM zeroship.workflow_steps WHERE run_id = $1 ORDER BY ordinal",
+            &[&run_id],
+        )
+        .await
+        .expect("load capped steps");
+    let ordinals: Vec<i32> = rows.into_iter().map(|row| row.get("ordinal")).collect();
+    assert_eq!(ordinals, vec![0], "oversized checkpoint row was not written");
 }
 
 #[compio::test]

@@ -3,7 +3,6 @@
 //! This cron owns only the control-plane scheduling core: due-run claiming,
 //! lease heartbeats, the dispatch seam, and the idempotent outcome apply txn.
 
-use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -19,6 +18,7 @@ use uuid::Uuid;
 use zeroship_core::typed_id;
 
 use crate::registry::RegistryError;
+use crate::workflow_limits;
 use crate::{AppState, Registry};
 
 /// Default tick cadence. Workflow wake latency is intentionally a scheduler
@@ -704,7 +704,7 @@ where
 {
     match parse_waiting_step_key(key)? {
         WaitingStep::Sleep { ordinal, name } => {
-            insert_resolved_step(
+            if insert_resolved_step(
                 tx,
                 &StepCheckpoint {
                     ordinal,
@@ -722,7 +722,10 @@ where
                 run_id,
                 dispatch_nonce,
             )
-            .await?;
+            .await? == StepWriteOutcome::CapExceeded
+            {
+                return Ok(false);
+            }
             tx.execute(
                 "UPDATE zeroship.workflow_runs \
                     SET waiting_step_key = NULL, wake_at = now() \
@@ -793,7 +796,7 @@ where
 
             let Some(row) = signal.first() else {
                 if deadline.map_or(true, |deadline| deadline <= now) {
-                    insert_resolved_step(
+                    if insert_resolved_step(
                         tx,
                         &StepCheckpoint {
                             ordinal,
@@ -815,7 +818,10 @@ where
                         run_id,
                         dispatch_nonce,
                     )
-                    .await?;
+                    .await? == StepWriteOutcome::CapExceeded
+                    {
+                        return Ok(false);
+                    }
                     tx.execute(
                         "UPDATE zeroship.workflow_runs \
                             SET waiting_step_key = NULL, wake_at = now() \
@@ -844,15 +850,7 @@ where
             let origin: String = row.get("origin");
             let delivery: String = row.get("delivery");
             let topic: Option<String> = row.get("topic");
-            tx.execute(
-                "UPDATE zeroship.workflow_signals \
-                    SET consumed_by = $1 \
-                  WHERE id = $2 AND consumed_by IS NULL",
-                &[&run_id, &signal_id],
-            )
-            .await
-            .map_err(RegistryError::from)?;
-            insert_resolved_step(
+            if insert_resolved_step(
                 tx,
                 &StepCheckpoint {
                     ordinal,
@@ -874,12 +872,23 @@ where
                     wake_at: None,
                     signal_type: Some(signal_type),
                     max_signal_age_ms,
-                    consumed_signal_id: Some(signal_id),
+                    consumed_signal_id: Some(signal_id.clone()),
                 },
                 run_id,
                 dispatch_nonce,
             )
-            .await?;
+            .await? == StepWriteOutcome::CapExceeded
+            {
+                return Ok(false);
+            }
+            tx.execute(
+                "UPDATE zeroship.workflow_signals \
+                    SET consumed_by = $1 \
+                  WHERE id = $2 AND consumed_by IS NULL",
+                &[&run_id, &signal_id],
+            )
+            .await
+            .map_err(RegistryError::from)?;
             tx.execute(
                 "UPDATE zeroship.workflow_runs \
                     SET waiting_step_key = NULL, wake_at = now() \
@@ -999,6 +1008,13 @@ enum ApplyError {
     Db(RegistryError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepWriteOutcome {
+    Wrote,
+    Noop,
+    CapExceeded,
+}
+
 impl fmt::Display for ApplyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1073,28 +1089,27 @@ async fn apply_step_result_on_registry(
     }
 
     for checkpoint in &result.checkpoints {
-        insert_resolved_step(&tx, checkpoint, &result.run_id, &result.dispatch_nonce)
+        match insert_resolved_step(&tx, checkpoint, &result.run_id, &result.dispatch_nonce)
             .await
-            .map_err(ApplyError::Db)?;
-    }
-
-    let mut consumed: Vec<String> = result
-        .checkpoints
-        .iter()
-        .filter_map(|s| s.consumed_signal_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    consumed.sort();
-    for signal_id in consumed {
-        tx.execute(
-            "UPDATE zeroship.workflow_signals \
-                SET consumed_by = $1 \
-              WHERE id = $2 AND consumed_by IS NULL",
-            &[&result.run_id, &signal_id],
-        )
-        .await
-        .map_err(map_apply_error)?;
+            .map_err(ApplyError::Db)?
+        {
+            StepWriteOutcome::CapExceeded => {
+                tx.commit().await.map_err(map_apply_error)?;
+                return Ok(true);
+            }
+            StepWriteOutcome::Wrote | StepWriteOutcome::Noop => {
+                if let Some(signal_id) = checkpoint.consumed_signal_id.as_ref() {
+                    tx.execute(
+                        "UPDATE zeroship.workflow_signals \
+                            SET consumed_by = $1 \
+                          WHERE id = $2 AND consumed_by IS NULL",
+                        &[&result.run_id, signal_id],
+                    )
+                    .await
+                    .map_err(map_apply_error)?;
+                }
+            }
+        }
     }
 
     let next_ordinal = result
@@ -1185,11 +1200,62 @@ async fn insert_resolved_step<C>(
     checkpoint: &StepCheckpoint,
     run_id: &str,
     batch_id: &str,
-) -> Result<(), RegistryError>
+) -> Result<StepWriteOutcome, RegistryError>
 where
     C: GenericClient + Sync,
 {
-    conn.execute(
+    let existing = conn
+        .query(
+            "SELECT state, name, kind \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND ordinal = $2 \
+              FOR UPDATE",
+            &[&run_id, &checkpoint.ordinal],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if let Some(row) = existing.first() {
+        let state: String = row.get("state");
+        let name: String = row.get("name");
+        let kind: String = row.get("kind");
+        let resolves_running = state == "running"
+            && matches!(checkpoint.state.as_str(), "completed" | "failed")
+            && name == checkpoint.name
+            && kind == checkpoint.kind;
+        if !resolves_running {
+            return Ok(StepWriteOutcome::Noop);
+        }
+    }
+
+    let delta = checkpoint_journal_bytes(conn, checkpoint).await?;
+    if delta > 0 {
+        let rows = conn
+            .query(
+                "SELECT app_id, journal_bytes \
+                   FROM zeroship.workflow_runs \
+                  WHERE id = $1 \
+                  FOR UPDATE",
+                &[&run_id],
+            )
+            .await
+            .map_err(RegistryError::from)?;
+        let Some(row) = rows.first() else {
+            return Err(RegistryError::NotFound(format!(
+                "workflow run {run_id} not found for journal accounting"
+            )));
+        };
+        let app_id: Uuid = row.get("app_id");
+        let current: i64 = row.get("journal_bytes");
+        let limits = workflow_limits::limits_for_app(conn, &app_id).await?;
+        if workflow_limits::cap_exceeded(current, delta, limits.run_max_bytes) {
+            mark_run_state_cap_exceeded(conn, run_id, current, delta, limits.run_max_bytes)
+                .await?;
+            return Ok(StepWriteOutcome::CapExceeded);
+        }
+    }
+
+    let changed = conn
+        .execute(
         "INSERT INTO zeroship.workflow_steps \
             (run_id, ordinal, name, name_occurrence, kind, state, output, error, \
              output_kind, wake_at, signal_type, max_signal_age_ms, consumed_signal_id, \
@@ -1209,21 +1275,88 @@ where
              AND EXCLUDED.state IN ('completed', 'failed') \
              AND zeroship.workflow_steps.name = EXCLUDED.name \
              AND zeroship.workflow_steps.kind = EXCLUDED.kind",
-        &[
-            &run_id,
-            &checkpoint.ordinal,
-            &checkpoint.name,
-            &checkpoint.name_occurrence,
-            &checkpoint.kind,
-            &checkpoint.state,
-            &checkpoint.output,
-            &checkpoint.error,
-            &checkpoint.wake_at,
-            &checkpoint.signal_type,
-            &checkpoint.max_signal_age_ms,
-            &checkpoint.consumed_signal_id,
-            &batch_id,
-        ],
+            &[
+                &run_id,
+                &checkpoint.ordinal,
+                &checkpoint.name,
+                &checkpoint.name_occurrence,
+                &checkpoint.kind,
+                &checkpoint.state,
+                &checkpoint.output,
+                &checkpoint.error,
+                &checkpoint.wake_at,
+                &checkpoint.signal_type,
+                &checkpoint.max_signal_age_ms,
+                &checkpoint.consumed_signal_id,
+                &batch_id,
+            ],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    if changed > 0 && delta > 0 {
+        conn.execute(
+            "UPDATE zeroship.workflow_runs \
+                SET journal_bytes = journal_bytes + $2 \
+              WHERE id = $1",
+            &[&run_id, &delta],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    }
+
+    Ok(if changed > 0 {
+        StepWriteOutcome::Wrote
+    } else {
+        StepWriteOutcome::Noop
+    })
+}
+
+async fn checkpoint_journal_bytes<C>(
+    conn: &C,
+    checkpoint: &StepCheckpoint,
+) -> Result<i64, RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let rows = conn
+        .query(
+            "SELECT (COALESCE(pg_column_size($1::jsonb), 0) \
+                    + COALESCE(pg_column_size($2::jsonb), 0))::bigint AS bytes",
+            &[&checkpoint.output, &checkpoint.error],
+        )
+        .await
+        .map_err(RegistryError::from)?;
+    Ok(rows[0].get("bytes"))
+}
+
+async fn mark_run_state_cap_exceeded<C>(
+    conn: &C,
+    run_id: &str,
+    current: i64,
+    delta: i64,
+    cap: i64,
+) -> Result<(), RegistryError>
+where
+    C: GenericClient + Sync,
+{
+    let error = workflow_limits::state_cap_error(current, delta, cap);
+    conn.execute(
+        "UPDATE zeroship.workflow_runs \
+            SET state = 'failed', \
+                output = NULL, \
+                error = $2, \
+                output_kind = 'inline', \
+                output_hash = NULL, \
+                output_size = NULL, \
+                output_content_type = NULL, \
+                wake_at = NULL, \
+                waiting_step_key = NULL, \
+                paused_from_status = NULL, \
+                claimed_by = NULL, \
+                lease_expires = NULL, \
+                dispatch_nonce = NULL \
+          WHERE id = $1",
+        &[&run_id, &error],
     )
     .await
     .map_err(RegistryError::from)?;

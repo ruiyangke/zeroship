@@ -242,6 +242,17 @@ pub fn record_request(
     });
 }
 
+/// Observability-only durable-workflow step volume. Billing parity rides the
+/// fixed `requests` counter from `record_request`; this custom metric lets
+/// operators inspect workflow replay volume without double-counting it.
+pub fn record_workflow_step(app_id: &Uuid) {
+    METER.with(|m| {
+        if let Some(meter) = m.borrow().as_ref() {
+            meter.increment(&app_id.to_string(), "workflow_steps", 1);
+        }
+    });
+}
+
 /// Record an INCREMENTAL streaming-usage delta (metering coverage #27, H1).
 ///
 /// A long-lived SSE/streaming response accrues `egress_bytes` and

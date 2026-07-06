@@ -46,6 +46,7 @@ pub mod tax;
 pub mod token_handlers;
 pub mod void_reissue;
 pub mod workflow_instance_api;
+pub(crate) mod workflow_limits;
 
 use std::collections::HashSet;
 use std::sync::Arc;
