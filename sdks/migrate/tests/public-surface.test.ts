@@ -52,7 +52,8 @@ test("public root .d.ts does not leak pg-only or recorder internals", async () =
   const coreExports = exportedNamesFromDts("index.d.ts");
   const pgExports = exportedNamesFromDts("pg.d.ts");
 
-  const pgLeaks = [...pgExports].filter((name) => coreExports.has(name)).sort();
+  const rootSharedPgTypes = new Set(["PgExtractField"]);
+  const pgLeaks = [...pgExports].filter((name) => coreExports.has(name) && !rootSharedPgTypes.has(name)).sort();
   assert.deepEqual(pgLeaks, [], "pg-only symbols belong to @zeroship/migrate/pg, not the package root");
 
   const forbiddenInternalExports = [
@@ -62,9 +63,8 @@ test("public root .d.ts does not leak pg-only or recorder internals", async () =
     "__pgPush",
     "__pgResolveExpr",
     "__pgSequence",
+    "cAgg",
     "cCase",
-    "cFn",
-    "cPg",
     "opProducers",
     "opProducerRegistry",
   ];

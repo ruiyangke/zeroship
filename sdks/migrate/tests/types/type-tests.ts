@@ -85,7 +85,7 @@ export function antiRotMigration(): void {
   table("nonexistent_table").update({ set: { legacy_col: 1 }, where: migrate.lit(1).eq(migrate.lit(1)) });
   table("nonexistent_table").delete({ where: migrate.lit(1).eq(migrate.lit(1)) });
   table("nonexistent_table").backfill({
-    set: { legacy_col: (c) => c.fn.splitPart(c("phantom_col"), " ", 1) },
+    set: { legacy_col: (c) => c("phantom_col").splitPart(" ", 1) },
     where: (c) => c("phantom_col").isNotNull(),
   });
   table("nonexistent_table").insert({ rows: { phantom_col: "ok", another_phantom: 42 } });
@@ -247,7 +247,7 @@ export function indexGrammar(): void {
     on: [
       "email",
       { column: "created_at", order: "desc" },
-      { expr: (c) => c.fn.lower(c("email")) },
+      { expr: (c) => c("email").lower() },
     ],
     unique: true,
   });
@@ -256,7 +256,7 @@ export function indexGrammar(): void {
     on: [
       "email",
       { column: "created_at", order: "desc", opclass: "timestamp_ops", collation: "C", nulls: "last" },
-      { expr: (c) => c.fn.lower(c("email")) },
+      { expr: (c) => c("email").lower() },
     ],
     using: "gin",
     where: (c) => c("active").isTrue(),
@@ -318,9 +318,9 @@ export function indexGrammar(): void {
 }
 
 export function immutableOnlyBuilderSlots(): void {
-  t.text().generated((c) => c.fn.lower(c("email")));
+  t.text().generated((c) => c("email").lower());
   pgTable("users").index("users_email_lower_idx").add({
-    on: [{ expr: (c) => c.fn.lower(c("email")) }],
+    on: [{ expr: (c) => c("email").lower() }],
     where: (c) => c("active").isTrue(),
   });
 
@@ -426,8 +426,8 @@ export function badExprShapes(): void {
   });
 
   table("users").update({
-    // @ts-expect-error — `c.fn` has no `notARealFn` member.
-    set: { name: (c) => c.fn.notARealFn(c("name")) },
+    // @ts-expect-error — there is no `.notARealFn()` operator on the expr chain.
+    set: { name: (c) => c("name").notARealFn() },
   });
 
   table("users").update({
@@ -441,7 +441,6 @@ export function badExprShapes(): void {
   });
 
   table("users").update({
-    // @ts-expect-error — `coalesce` lives only on c.fn now (§7 dedup), not the chain.
     set: { name: (c) => c("name").coalesce("x") },
   });
 
@@ -502,8 +501,8 @@ export function checkExpressionSurfaceTypechecks(): void {
   // (PostgreSQL-first; fails closed off-PG at validate-time, not tsc).
   table("oauth_authorization_codes").check("core_regex").add({ expr: (c) => c("user_id").regex("^usr_") });
 
-  // @ts-expect-error — PG-only extract fields are not in the portable extract union.
-  table("oauth_authorization_codes").check("no_pg_extract_field").add({ expr: (c) => c.fn.extract("epoch", c("created_at")).gt(0) });
+  // PG-only extract fields typecheck on the core surface and fail closed off-PG at validate time.
+  table("oauth_authorization_codes").check("pg_extract_field_validate_gated").add({ expr: (c) => c("created_at").extract("epoch").gt(0) });
 
   pgTable("oauth_authorization_codes").check("max_ttl").add({
     expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))),
@@ -512,7 +511,7 @@ export function checkExpressionSurfaceTypechecks(): void {
   // @ts-expect-error — interval takes a structured Duration, not HH:MM:SS text.
   pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (c) => c("expires_at").le(c("created_at").add(interval("00:01:00"))) });
   pgTable("oauth_authorization_codes").check("epoch_positive").add({
-    expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
+    expr: (c) => c("created_at").extract("epoch").gt(0),
   });
   pgTable("oauth_authorization_codes").check("user_id_fmt").add({
     expr: (c) => c("user_id").regex("^usr_[0-9A-Za-z]{20,40}$"),
@@ -540,11 +539,11 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
   // P0: `columnSize` is a first-class chain operator (PG-first). It typechecks.
   table("exprs").update({ set: { x: (c) => c("x").columnSize() } });
 
-  // @ts-expect-error — currentSetting is a top-level import, not a c.fn member.
-  table("exprs").update({ set: { x: (c) => c.fn["currentSetting"]("zeroship.tenant_app", true) } });
+  // @ts-expect-error — currentSetting is a top-level import, not a chain member.
+  table("exprs").update({ set: { x: (c) => c("x")["currentSetting"]("zeroship.tenant_app", true) } });
 
-  // @ts-expect-error — currentUser is a top-level import, not a c.fn member.
-  table("exprs").update({ set: { x: (c) => c.fn["currentUser"]() } });
+  // @ts-expect-error — currentUser is a top-level import, not a chain member.
+  table("exprs").update({ set: { x: (c) => c("x")["currentUser"]() } });
 
   // @ts-expect-error — the expression builder is callable; `c.col(...)` is removed.
   table("exprs").update({ set: { x: (c) => c.col("x") } });
@@ -557,11 +556,11 @@ export function domainValueCheckSurfaceTypechecks(): void {
   });
   domain("billing_period").create({
     as: t.date(),
-    check: (v) => v.pg.extract("day", v).eq(1),
+    check: (v) => v.extract("day").eq(1),
   });
   domain("email_domain").create({
     as: t.text(),
-    check: (v) => v.fn.lower(v).like("%@%"),
+    check: (v) => v.lower().like("%@%"),
   });
 
   domain("bad_domain_call").create({

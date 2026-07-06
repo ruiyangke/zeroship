@@ -4,7 +4,7 @@
 //!
 //! This is the SQLite peer of the control-plane `deploy_migrate_test.rs` PG e2e:
 //! a valid `.ir.json` lowers + applies (the table exists, the migration journals),
-//! and the SQLite-specific hostile case — an out-of-envelope `c.fn.splitPart`
+//! and the SQLite-specific hostile case — an out-of-envelope `.splitPart`
 //! against a SQLite target — is refused by the gate (`EXPR_NOT_PORTABLE`) before
 //! any apply. No shims, no PG-gating: the real SQLite runtime.
 
@@ -189,7 +189,7 @@ async fn ir_json_string_default_with_embedded_semicolon_newline_applies_on_sqlit
     );
 }
 
-// HOSTILE (SQLite-specific) — an out-of-envelope `c.fn.splitPart` in a backfill
+// HOSTILE (SQLite-specific) — an out-of-envelope `.splitPart` in a backfill
 // SET against a SQLite target is refused by the gate (EXPR_NOT_PORTABLE) BEFORE
 // any apply. `splitPart` is PG-expressible but out-of-envelope on SQLite (§9), so
 // the dialect-parameterized validate refuses it fail-closed.

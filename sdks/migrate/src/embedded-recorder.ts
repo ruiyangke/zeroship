@@ -11,7 +11,7 @@
 // Why a dedicated entry (not the package `.` entry `index.ts`): the engine needs
 // the FULL recorder surface — the internal recorder seam (`__begin`/`__drain`),
 // the derived producer census (`opProducers`/`opProducerRegistry`), the
-// value-position `cCase`/`cFn`/`cPg` namespaces, the `__pgDomain`/`__pgSequence` handles
+// value-position `cCase`/`cAgg` namespaces, the `__pgDomain`/`__pgSequence` handles
 // the `/pg` subpath shim re-aliases, AND the whole `pg.ts` vendor surface — all
 // in ONE module (the `@zeroship/migrate/pg` shim in the engine re-exports from
 // `@zeroship/migrate`). `index.ts` is the narrower npm public API. The export set
@@ -43,14 +43,14 @@ export {
   currentSetting,
   currentUser,
   interval,
+  concatWs,
   nextval,
   minValue,
   maxValue,
   t,
   // value-position function namespaces
   cCase,
-  cFn,
-  cPg,
+  cAgg,
   // PG-only handles the `/pg` shim re-aliases to `domain`/`sequence`
   __pgDomain,
   __pgSequence,

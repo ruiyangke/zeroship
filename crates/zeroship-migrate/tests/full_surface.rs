@@ -67,16 +67,16 @@ fn t_text_nullable_by_default_notnull_opts_in() {
     );
 }
 
-/// `c.fn.concatWs(" ", c("a"), c("b"))` records a `fnSynth(concatWs)` node — the
+/// `concatWs(" ", c("a"), c("b"))` records a `fnSynth(concatWs)` node — the
 /// NULL-skipping safe-join helper (§3.3.1) that renders byte-identically on PG/
 /// SQLite. Pinning the node shape here (the apply-identity is in the engine's
 /// `ir_dml_*` PG/SQLite suites).
 #[test]
 fn concatws_records_fnsynth_node() {
     let src = r#"
-        import { table, now, genRandomUuid } from "@zeroship/migrate";
+        import { table, now, genRandomUuid, concatWs } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("u").update({ set: { full: (c) => c.fn.concatWs(" ", c("a"), c("b")) } });
+            table("u").update({ set: { full: (c) => concatWs(" ", c("a"), c("b")) } });
         }};
     "#;
     let ir = record(src, "concatws");
@@ -406,10 +406,10 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
         (
             "nested_fn_expr_arg",
             r#"
-                import { table, now, genRandomUuid } from "@zeroship/migrate";
+                import { table, now, genRandomUuid, lit } from "@zeroship/migrate";
                 export default { name: "n", up() {
                     const f = () => 42;
-                    table("t").update({ set: { doc: (c) => c.fn.coalesce({ a: f }, "x") } });
+                    table("t").update({ set: { doc: () => lit({ a: f }).coalesce("x") } });
                 }};
             "#,
         ),
@@ -543,7 +543,7 @@ fn same_source_records_same_json() {
             const u = table("u");
             u.create({ columns: { id: t.id(), email: t.text().notNull() } });
             u.column("status").add({ type: t.text().default("new") });
-            u.update({ set: { email: (c) => c.fn.lower(c("email")) }, where: (c) => c("id").isNotNull() });
+            u.update({ set: { email: (c) => c("email").lower() }, where: (c) => c("id").isNotNull() });
         }};
     "#;
     let a =
@@ -660,7 +660,7 @@ fn update_has_no_batch_knob() {
 
 /// The determinism lint is WIRED into the record path as a soft advisory only:
 /// calls evaluate normally, the recorder persists the produced value, and the
-/// source lint steers authors toward DB-evaluated symbols / `c.fn.*`.
+/// source lint steers authors toward DB-evaluated symbols / top-level constructors.
 #[test]
 fn record_path_allows_date_now_call_with_soft_warning() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
@@ -1271,9 +1271,9 @@ fn twin_table_surface_records_full_expected_op_sequence() {
             u.index("u_email_idx").add({ on: ["email"], unique: true });
             u.index("u_old_idx").drop({ ifExists: true });
             u.insert({ rows: [{ email: "a@b.c", status: "new" }] });
-            u.update({ set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull() });
+            u.update({ set: { status: (c) => c("status").lower() }, where: (c) => c("id").isNotNull() });
             u.delete({ where: (c) => c("status").isNull(), limit: 10 });
-            u.backfill({ set: { status: (c) => c.fn.coalesce(c("status"), "new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
+            u.backfill({ set: { status: (c) => c("status").coalesce("new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
         }};
     "#;
     let ir = record(src, "fluent_full");

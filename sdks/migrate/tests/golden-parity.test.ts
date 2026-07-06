@@ -25,6 +25,7 @@ import {
   now,
   genRandomUuid,
   currentSetting,
+  concatWs,
 } from "../src/index.js";
 import {
   createFunction,
@@ -187,12 +188,12 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
     });
     table("status_codes").update({
       set: {
-        label: (c) => c.fn.coalesce(c("label"), "unknown"),
-        norm: (c) => c.fn.lower(c.fn.trim(c("label"))),
-        shout: (c) => c.fn.upper(c("label")),
-        len: (c) => c.fn.length(c("label")),
-        mag: (c) => c.fn.abs(c("code").sub(500)),
-        canon: (c) => c.fn.nullif(c("label"), ""),
+        label: (c) => c("label").coalesce("unknown"),
+        norm: (c) => c("label").trim().lower(),
+        shout: (c) => c("label").upper(),
+        len: (c) => c("label").length(),
+        mag: (c) => c("code").sub(500).abs(),
+        canon: (c) => c("label").nullif(""),
         score: (c) => c("code").add(1).mul(2).sub(3).div(1),
         joined: (c) => c("label").concat(" ", c("code").cast({ to: "text" })),
         code_txt: (c) => c("code").cast({ to: "text" }),
@@ -216,8 +217,8 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
     });
     table("status_codes").backfill({
       set: {
-        full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast({ to: "text" })),
-        first: (c) => c.fn.splitPart(c("label"), " ", 1),
+        full: (c) => concatWs(" ", c("label"), c("code").cast({ to: "text" })),
+        first: (c) => c("label").splitPart(" ", 1),
         touched: now(),
         token: genRandomUuid(),
       },

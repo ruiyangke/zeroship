@@ -28,6 +28,7 @@ import {
   currentSetting,
   currentUser,
   interval,
+  concatWs,
 } from "../src/index.js";
 import { domain, pgTable, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
@@ -809,13 +810,13 @@ test("non-native function values fail closed instead of recording as JSON null",
     isInvalidFunction,
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { v: (c) => c.fn.lower((() => "x") as any) } })),
+    () => record(() => table("t").update({ set: { v: () => lit((() => "x") as any).lower() } })),
     isInvalidFunction,
   );
   assert.throws(
     () =>
       record(() =>
-        table("t").update({ set: { v: (c) => c.fn.coalesce({ doc: { a: () => 1 } } as any, "x") } }),
+        table("t").update({ set: { v: () => lit({ doc: { a: () => 1 } } as any).coalesce("x") } }),
       ),
     isInvalidFunction,
   );
@@ -999,7 +1000,7 @@ test("the (c) => Expr builder constructs the closed AST", () => {
     table("t").update({
       set: {
         a: (c) => c("x").add(1).mul(2).cast({ to: "int" }),
-        b: (c) => c.fn.concatWs(" ", c("p"), c("q")),
+        b: (c) => concatWs(" ", c("p"), c("q")),
         d: (c) => c.case({ branches: [{ when: c("x").lt(0), then: c("y") }], else: c("z") }),
         e: (c) => c("payload").cast({ to: "bytes" }),
         f: (c) => c("label").cast({ to: "text" }),
@@ -1631,19 +1632,19 @@ test("domain check validation rejects smuggled volatile functions and aggregates
   );
 });
 
-test("c.fn, c.pg.extract, and root interval build extract and interval nodes", () => {
+test("chain extract and root interval build extract and interval nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
       as: t.date(),
-      check: (v) => v.pg.extract("day", v).eq(1),
+      check: (v) => v.extract("day").eq(1),
     });
     table("events").update({
       set: {
-        year_part: (c) => c.fn.extract("year", c("created_at")),
+        year_part: (c) => c("created_at").extract("year"),
       },
     });
     pgTable("epoch_events").check("epoch_positive").add({
-      expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
+      expr: (c) => c("created_at").extract("epoch").gt(0),
     });
     pgTable("oauth_device_codes").create({
       columns: {
@@ -1691,7 +1692,7 @@ test("c.fn, c.pg.extract, and root interval build extract and interval nodes", (
   });
 });
 
-test("inList rejects malformed scalar arrays and c.pg rejects regex patterns", () => {
+test("inList rejects malformed scalar arrays and chain regex rejects bad patterns", () => {
   assert.throws(
     () => record(() => table("t").update({ set: { x: (c) => c("x").in(["ok", 7 as any]) } })),
     (e: any) => e.code === "OP_INVALID" && /homogeneous/.test(e.message),
@@ -1713,11 +1714,7 @@ test("inList rejects malformed scalar arrays and c.pg rejects regex patterns", (
     (e: any) => e.code === "OP_INVALID" && /pattern must be non-empty/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.fn.extract("epoch" as any, c("x")) } })),
-    (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
-  );
-  assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.extract("bogus" as any, c("x")) } })),
+    () => record(() => table("t").update({ set: { x: (c) => c("x").extract("bogus" as any) } })),
     (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
   );
   assert.throws(
@@ -1733,7 +1730,7 @@ test("inList rejects malformed scalar arrays and c.pg rejects regex patterns", (
 test("index columns normalize to closed column/expression elements", () => {
   const ops = record(() =>
     pgTable("users").index("users_email_lower_idx").add({
-      on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
+      on: ["email", { expr: (c) => c("email").lower() }],
       where: (c) => c("active").isTrue(),
     }),
   );
@@ -2192,26 +2189,26 @@ test("backfill defaults cursorColumn to 'id' and batchSize to the engine default
   assert.equal(ops[0].set.x.fn, "now");
 });
 
-test("c.fn.splitPart grammar lint rejects an empty delimiter / non-positive n", () => {
+test("chain splitPart grammar lint rejects an empty delimiter / non-positive n", () => {
   const isExprNotPortable = (e: any) => e.code === "EXPR_NOT_PORTABLE";
-  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c.fn.splitPart(c("n"), "", 1) } })), isExprNotPortable);
-  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c.fn.splitPart(c("n"), " ", 0) } })), isExprNotPortable);
-  const ops = record(() => table("u").update({ set: { x: (c) => c.fn.splitPart(c("n"), " ", 1) } }));
+  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c("n").splitPart("", 1) } })), isExprNotPortable);
+  assert.throws(() => record(() => table("u").update({ set: { x: (c) => c("n").splitPart(" ", 0) } })), isExprNotPortable);
+  const ops = record(() => table("u").update({ set: { x: (c) => c("n").splitPart(" ", 1) } }));
   assert.equal(ops[0].set.x.fn, "splitPart");
 });
 
-test("c.fn.{mod,round,floor,ceil,substr,replace} record the right portable fnCall node", () => {
+test("chain {mod,round,floor,ceil,substr,replace} record the right portable fnCall node", () => {
   const ops = record(() =>
     table("t").update({
       set: {
-        m: (c) => c.fn.mod(c("n"), 3),
-        r1: (c) => c.fn.round(c("x")),
-        r2: (c) => c.fn.round(c("x"), 2),
-        fl: (c) => c.fn.floor(c("x")),
-        ce: (c) => c.fn.ceil(c("x")),
-        s2: (c) => c.fn.substr(c("s"), 1),
-        s3: (c) => c.fn.substr(c("s"), 1, 3),
-        rp: (c) => c.fn.replace(c("s"), "a", "b"),
+        m: (c) => c("n").mod(3),
+        r1: (c) => c("x").round(),
+        r2: (c) => c("x").round(2),
+        fl: (c) => c("x").floor(),
+        ce: (c) => c("x").ceil(),
+        s2: (c) => c("s").substr(1),
+        s3: (c) => c("s").substr(1, 3),
+        rp: (c) => c("s").replace("a", "b"),
       },
     }),
   );

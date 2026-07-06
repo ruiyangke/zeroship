@@ -35,7 +35,7 @@ contract.
 
 ```ts
 // migrations/0007_split_name.ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid, concatWs } from "@zeroship/migrate";
 
 export default {
   name: "split_name_column", // optional; defaults to the filename label
@@ -46,8 +46,8 @@ export default {
     users.column("last_name").add({ type: t.text() });
     users.backfill({
       set: {
-        first_name: (c) => c.fn.splitPart(c("name"), " ", 1),
-        last_name: (c) => c.fn.splitPart(c("name"), " ", 2),
+        first_name: (c) => c("name").splitPart(" ", 1),
+        last_name: (c) => c("name").splitPart(" ", 2),
       },
       where: (c) => c("first_name").isNull(),
     });
@@ -58,8 +58,8 @@ export default {
     const users = table("users");
     users.column("name").add({ type: t.text() });
     users.backfill({
-      // c.fn.concatWs is NULL-skipping — the safe join; copy this, not `.concat`
-      set: { name: (c) => c.fn.concatWs(" ", c("first_name"), c("last_name")) },
+      // concatWs is NULL-skipping — the safe join; copy this, not `.concat`
+      set: { name: (c) => concatWs(" ", c("first_name"), c("last_name")) },
     });
     users.column("first_name").drop();
     users.column("last_name").drop();
@@ -144,10 +144,9 @@ surface (see [The `table()` surface](#the-table-surface)). The handle's terminal
 record eagerly and return the handle, so calls chain and a handle is reusable
 across statements ([Var-assign + reuse](#var-assign--reuse)).
 
-There is **no importable `fn`**: the scalar-function namespace is reached
-through the single expression-builder handle as `c.fn.*` (see
-[The fluent expression surface](#the-fluent-expression-surface)), so a migration
-never has an imported-but-unused symbol.
+There is **no scalar-function namespace**: scalar functions with a natural receiver are
+chain methods on `ExprChain` (see [The fluent expression surface](#the-fluent-expression-surface)).
+The one receiver-less scalar helper is the top-level `concatWs(...)` import.
 
 ## Names are strings (and why)
 
@@ -191,7 +190,7 @@ No mature migration tool binds migration files to the live schema:
 - **The `t` column-type lexicon** — `t.text()` / `t.numeric()` and their
   chainable modifiers (`.notNull()` / `.default()`) are typed.
 - **The fluent-expression node shapes** — `c`'s methods (`.eq` / `.concat` /
-  `.gt` / `c.fn.splitPart` …) have typed arities and return an `Expr`; calling a
+  `.gt` / `.splitPart` …) have typed arities and return an `Expr`; calling a
   non-existent operator method fails `tsc`. (Method *names* are the typed builder
   API; that is not the forbidden string-vs-typed mix, because every *identifier*
   `c` references is still a plain string.)
@@ -483,14 +482,14 @@ plans.insert({
 });
 
 table("orders").update({
-  set: { status: (c) => c.fn.upper(c("status")) },
+  set: { status: (c) => c("status").upper() },
   where: (c) => c("status").eq("pending"),
 });
 
 table("sessions").delete({ where: (c) => c("expires_at").lt("2026-01-01T00:00:00Z") });
 
 table("orders").backfill({
-  set: { total_norm: (c) => c.fn.coalesce(c("total"), 0) },
+  set: { total_norm: (c) => c("total").coalesce(0) },
   cursorColumn: "id", // defaults to the single-column PK ("id")
   batchSize: 1000, // defaults to the engine's chosen size
 });
@@ -818,23 +817,23 @@ interpolated):
 - boolean: `.and(...es)`, `.or(...es)`, `.not()`
 - arithmetic: `.add(x)`, `.sub(x)`, `.mul(x)`, `.div(x)`
 - string/value: `.concat(...parts)` (raw `||`, NULL-propagating). The
-  NULL-skipping `concatWs` and `coalesce` live on `c.fn.*` only (they are not
-  chain methods).
+  NULL-skipping `concatWs` is a top-level import; `coalesce` is a chain method.
 - null/bool tests: `.isNull()`, `.isNotNull()`, `.isTrue()`, `.isFalse()`
 - cast: `.cast({ to: "text" | "int" | "real" | "boolean" | "bytes" | "uuid" })`
   (the closed scalar `ColType` target set only)
 
-**`c.fn.*` — the scalar-function namespace** (`sdks/migrate/src/ops.ts:322-357`):
+**Scalar chain methods + top-level `concatWs`**:
 
-- `c.fn.lower(e)`, `c.fn.upper(e)`, `c.fn.trim(e)`, `c.fn.length(e)`,
-  `c.fn.abs(e)`
-- `c.fn.coalesce(...)`, `c.fn.nullif(a, b)`
-- `c.fn.concatWs(sep, ...parts)` — NULL-skipping concatenation, the safe form
+- `e.lower()`, `e.upper()`, `e.trim()`, `e.length()`, `e.abs()`
+- `e.coalesce(...rest)`, `e.nullif(b)`
+- `e.mod(b)`, `e.round(n?)`, `e.floor()`, `e.ceil()`, `e.substr(start, len?)`,
+  `e.replace(from, to)`, `e.extract(field)`, `e.splitPart(delim, n)`
+- `concatWs(sep, ...parts)` — NULL-skipping concatenation, the safe form
   for joining first+last name. Engine-synthesized to be byte-identical across PG
   (`concat_ws`) and SQLite (a proven `coalesce`-folded `||`). For empty-string
-  join use `c.fn.concatWs("", …)`.
+  join use `concatWs("", …)`.
 - `c.case({ branches: [{ when: cond, then: val }, …], else?: elseVal })` — the searched `CASE` form
-- `c.fn.splitPart(e, delim, n)` — the engine-synthesized portable split helper,
+- `e.splitPart(delim, n)` — the engine-synthesized portable split helper,
   within its pinned envelope (see below)
 
 **Top-level value constructors**:
@@ -851,9 +850,8 @@ interpolated):
 
 The expression records as **dialect-neutral data, never SQL** — the engine owns
 all per-dialect lowering, so the plan checksum is dialect-stable. There is no
-author-named `substr` / `split_part` / `instr` / `replace`: those cross-dialect
-semantics diverge, so they are simply not in the namespace. The only split
-surface is the engine-pinned `c.fn.splitPart`.
+author-named `split_part` / `instr`: those cross-dialect semantics diverge, so
+the split surface is the engine-pinned `.splitPart(...)` chain method.
 
 ### Determinism: don't bake a clock or RNG into a migration
 
@@ -869,7 +867,7 @@ not by a gate:
   an apply-time value.
 - A **call** (`Date.now()`) just evaluates and the resulting scalar is recorded
   verbatim; `lintDeterminism(source)` emits an advisory **warning** steering you
-  to the symbol / `c.fn.*` form — it is advisory-only, never a hard reject (there
+  to the symbol / top-level constructor form — it is advisory-only, never a hard reject (there
   is no record-twice / invocation determinism gate).
 - A **function value** (native symbol or otherwise) nested inside a container/JSON
   op value is rejected fail-closed (a function can't be DB-evaluated inside a JSON
@@ -890,12 +888,12 @@ transform only through the closed fluent AST, never raw SQL.
   fluent AST: column refs, auto-wrapped literals, arithmetic,
   comparison/boolean operators, `c.case`, the allow-listed
   provably-identical scalars (`coalesce`, `nullif`, `lower`, `upper`, `trim`,
-  `length`, `abs`, `.cast({ to })`, `.concat`), and `c.fn.concatWs`.
-- The engine-synthesized `c.fn.splitPart` helper **within its pinned envelope**.
+  `length`, `abs`, `.cast({ to })`, `.concat`), and `concatWs`.
+- The engine-synthesized `.splitPart` helper **within its pinned envelope**.
 
 ### The `splitPart` / `concatWs` portable-expression envelope
 
-`c.fn.splitPart(col, delim, n)` lowers to `split_part(col, 'd', n)` on Postgres
+`col.splitPart(delim, n)` lowers to `split_part(col, 'd', n)` on Postgres
 and to a pinned, exhibited `instr`/`substr` expression on SQLite, proven
 byte-identical to PG against real SQLite 3.51.2. The full portability envelope —
 admitting it on **both** backends — is:
@@ -927,7 +925,7 @@ The value being split *may* contain multibyte UTF-8 content — it is the
 occurs inside a UTF-8 multibyte sequence, which is precisely why the byte-wise
 SQLite scan finds the same boundaries as PG's character-wise `split_part`.
 
-`c.fn.concatWs(sep, …)` is the NULL-skipping join, engine-synthesized to render
+`concatWs(sep, …)` is the NULL-skipping join, engine-synthesized to render
 byte-identically on both backends. Prefer it over `.concat(...)` for joining
 values: `.concat` maps to `||`, whose NULL rule is documented (a NULL operand
 yields NULL on both backends) — fine when you want propagation, a footgun when
@@ -935,7 +933,7 @@ you don't.
 
 ### Out of envelope is a hard error, not a silent mis-apply
 
-A `c.fn.splitPart` call outside the envelope — a multi-character / empty /
+A `.splitPart` call outside the envelope — a multi-character / empty /
 non-ASCII delimiter, `n = 0`, negative `n`, `n > 8`, or non-literal args — is a
 hard `EXPR_NOT_PORTABLE` error on the SQLite leg. The clearly-malformed shapes
 (empty delimiter, non-positive / non-integer `n`) are caught earlier, at record
@@ -950,7 +948,7 @@ structured error names the two real resolutions:
   "op_index": 2,
   "ts_location": "migrations/0007_split_name.ts:9",
   "dialect": "sqlite",
-  "reason": "c.fn.splitPart is portable only for a single-ASCII delimiter and a positive literal n in 1..8; this call is out of envelope"
+  "reason": ".splitPart is portable only for a single-ASCII delimiter and a positive literal n in 1..8; this call is out of envelope"
 }
 ```
 
@@ -1192,7 +1190,7 @@ loads). For reference — and because the bi-dialect-apply CI gate (below) appli
 exactly this IR on **both** Postgres and SQLite — here is a representative
 split-name migration as IR:
 structurally equivalent to the hero `up()` ([Module shape](#module-shape)) — the
-same two `addColumn`s, a `c.fn.splitPart` backfill, and a `dropColumn`, applying
+same two `addColumn`s, a `.splitPart` backfill, and a `dropColumn`, applying
 byte-identically on PG and SQLite from this one artifact.
 
 > This appendix is **illustrative, not the literal recording of the TS hero**.

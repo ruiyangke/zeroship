@@ -711,7 +711,7 @@ async fn in_list_predicates_apply_identically_on_sqlite() {
     );
 }
 
-/// **PR6a `c.fn.concatWs` SQLite lowering — faithful apply coverage (§9).** SQLite
+/// **PR6a `concatWs` SQLite lowering — faithful apply coverage (§9).** SQLite
 /// has no native `concat_ws`, so the assembler lowers `concatWs(delim, a, b, …)` to
 /// a pinned NULL-skipping `||`-fold + head-trim. PG's `concat_ws` SKIPS NULL
 /// arguments; the SQLite fold must produce a BYTE-IDENTICAL result. This drives the
