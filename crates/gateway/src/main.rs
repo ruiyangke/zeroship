@@ -16,7 +16,7 @@ use zeroship_core::config::{
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::{
     auth_token, backchannel_logout, blob_cache, browser_auth, enforce, idempotency, oidc_rp, proxy,
-    router, session_token, signing, sync, GateConfig, GateState,
+    router, session_token, signal_ingress, signing, sync, GateConfig, GateState,
 };
 
 #[global_allocator]
@@ -758,6 +758,20 @@ fn main() -> std::io::Result<()> {
             .service(
                 web::resource("/__zeroship/internal/workflow-dispatch")
                     .route(web::post().to(router::workflow_dispatch_internal)),
+            )
+            .service(
+                web::resource("/__zeroship/v1/signal")
+                    .state(web::types::PayloadConfig::new(
+                        signal_ingress::SIGNAL_INGRESS_BODY_BYTES,
+                    ))
+                    .route(web::post().to(signal_ingress::public_signal_ingress)),
+            )
+            .service(
+                web::resource("/__zeroship/signals/v1")
+                    .state(web::types::PayloadConfig::new(
+                        signal_ingress::SIGNAL_INGRESS_BODY_BYTES,
+                    ))
+                    .route(web::post().to(signal_ingress::public_signal_ingress)),
             )
             // auth-sdk BFF redesign slice R1b — the ONE identity-session
             // resource. `/token` is GONE (merged here); both methods live on

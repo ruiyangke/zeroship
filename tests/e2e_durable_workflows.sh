@@ -218,6 +218,19 @@ export class SignalWorkflow {
   }
 }
 
+export class TopicSignalWorkflow {
+  async run(trigger, step) {
+    const a = await step.run("a", () => bump(trigger.runId, "a"));
+    const signal = await step.waitForSignal("topic-go", {
+      type: "go",
+      topic: trigger.input.topic,
+      timeout: "PT30S",
+    });
+    const b = await step.run("b", () => bump(trigger.runId, "b"));
+    return { state: "topic-signaled", a, signal, b };
+  }
+}
+
 export class ConcurrentWorkflow {
   async run(trigger, step) {
     const [a, b, c] = await Promise.all([
@@ -275,6 +288,7 @@ export default {
   workflows: {
     KeystoneWorkflow,
     SignalWorkflow,
+    TopicSignalWorkflow,
     ConcurrentWorkflow,
     SideEffectWorkflow,
     BareAwaitWorkflow,

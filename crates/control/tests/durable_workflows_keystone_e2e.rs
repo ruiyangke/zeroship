@@ -28,6 +28,7 @@ use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, StepRequest,
     WorkflowEngineConfig,
 };
+use zeroship_control::cron::workflow_signal_fanout::{self, FanoutSweepConfig};
 use zeroship_control::cron::workflow_schedules::{self, ScheduleSweepConfig};
 use serial_test::serial;
 use zeroship_control::{
@@ -37,6 +38,7 @@ use zeroship_control::{
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const WORKFLOW_NAME: &str = "KeystoneWorkflow";
 const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
+const TOPIC_SIGNAL_WORKFLOW_NAME: &str = "TopicSignalWorkflow";
 const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
 const SIDE_EFFECT_WORKFLOW_NAME: &str = "SideEffectWorkflow";
 const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
@@ -512,6 +514,15 @@ async fn seed_signal_run(
     seed_workflow_run(fx, SIGNAL_WORKFLOW_NAME, input).await
 }
 
+async fn seed_topic_signal_run(fx: &Fixture, label: &str, topic: &str) -> String {
+    seed_workflow_run(
+        fx,
+        TOPIC_SIGNAL_WORKFLOW_NAME,
+        serde_json::json!({ "case": label, "topic": topic }),
+    )
+    .await
+}
+
 async fn seed_completed_step(
     fx: &Fixture,
     run_id: &str,
@@ -758,6 +769,24 @@ async fn assert_signal_timeout_steps(fx: &Fixture, run_id: &str) {
     );
 }
 
+async fn assert_topic_success_steps(fx: &Fixture, run_id: &str) {
+    let rows = step_rows(fx, run_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                1,
+                "topic-go".to_string(),
+                "wait_signal".to_string(),
+                "completed".to_string(),
+            ),
+            (2, "b".to_string(), "run".to_string(), "completed".to_string()),
+        ],
+        "topic workflow must contain exactly a, topic wait, b once"
+    );
+}
+
 async fn assert_concurrent_steps(fx: &Fixture, run_id: &str) {
     let rows = step_rows(fx, run_id).await;
     assert_eq!(
@@ -958,6 +987,95 @@ async fn post_signal(
         String::from_utf8_lossy(&bytes)
     );
     serde_json::from_slice(&bytes).expect("signal response json")
+}
+
+async fn create_run_signal_token(
+    control_url: &str,
+    app_id: Uuid,
+    run_id: &str,
+    ttl: &str,
+) -> String {
+    let url = format!(
+        "{}/internal/workflows/runs/{}/signal-token",
+        control_url.trim_end_matches('/'),
+        run_id
+    );
+    create_signal_token_at(&url, app_id, ttl).await
+}
+
+async fn create_topic_signal_token(
+    control_url: &str,
+    app_id: Uuid,
+    topic: &str,
+    ttl: &str,
+) -> String {
+    let url = format!(
+        "{}/internal/workflows/topics/{}/signal-token",
+        control_url.trim_end_matches('/'),
+        topic
+    );
+    create_signal_token_at(&url, app_id, ttl).await
+}
+
+async fn create_signal_token_at(url: &str, app_id: Uuid, ttl: &str) -> String {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "types": ["go"],
+        "ttl": ttl,
+    }))
+    .expect("token body json");
+    let client = cyper::Client::new();
+    let response = client
+        .post(url)
+        .expect("token request URL")
+        .header("content-type", "application/json")
+        .expect("content-type header")
+        .header("x-zeroship-app-id", app_id.to_string())
+        .expect("app id header")
+        .body(body)
+        .send()
+        .await
+        .expect("post signal token");
+    let status = response.status().as_u16();
+    let bytes = response.bytes().await.expect("read token response");
+    assert_eq!(
+        status,
+        200,
+        "signal token endpoint returned HTTP {status}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("token response json");
+    let token = value["token"].as_str().expect("token string").to_string();
+    assert!(token.starts_with("wst_"), "unexpected token {token}");
+    token
+}
+
+async fn post_public_signal(
+    gateway_url: &str,
+    token: &str,
+    payload: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let url = format!("{}/__zeroship/v1/signal", gateway_url.trim_end_matches('/'));
+    let body = serde_json::to_vec(&serde_json::json!({
+        "token": token,
+        "payload": payload,
+    }))
+    .expect("public signal body json");
+    let client = cyper::Client::new();
+    let response = client
+        .post(&url)
+        .expect("public signal request URL")
+        .header("content-type", "application/json")
+        .expect("content-type header")
+        .body(body)
+        .send()
+        .await
+        .expect("post public signal");
+    let status = response.status().as_u16();
+    let bytes = response.bytes().await.expect("read public signal response");
+    let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        serde_json::json!({ "raw": String::from_utf8_lossy(&bytes).to_string() })
+    });
+    (status, value)
 }
 
 async fn post_control(
@@ -1683,6 +1801,314 @@ async fn durable_workflows_m1_keystone_real_spine() {
     assert_eq!(
         run_output(&fx, &signal_run).await["signal"]["payload"],
         serde_json::json!({"ok": true, "source": "e2e"})
+    );
+
+    let external_run = seed_signal_run(&fx, "external-signal", "PT30S", None).await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw16-external-park"),
+        &external_run,
+    )
+    .await;
+    let external_token =
+        create_run_signal_token(&control_url, fx.app_id, &external_run, "PT30S").await;
+    let (status, external_body) = post_public_signal(
+        &gateway_url,
+        &external_token,
+        serde_json::json!({"ok": true, "source": "public-ingress"}),
+    )
+    .await;
+    assert_eq!(status, 202, "public signal should be accepted: {external_body}");
+    let external_signal_id = external_body["id"]
+        .as_str()
+        .expect("public signal id")
+        .to_string();
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw16-external-drive"),
+        &external_run,
+    )
+    .await;
+    assert_signal_success_steps(&fx, &external_run).await;
+    assert_eq!(
+        run_output(&fx, &external_run).await["signal"]["payload"],
+        serde_json::json!({"ok": true, "source": "public-ingress"})
+    );
+    let external_signal = fx
+        .pg
+        .query_one(
+            "SELECT origin, delivery, idempotency_key, consumed_by \
+               FROM zeroship.workflow_signals WHERE id = $1",
+            &[&external_signal_id],
+        )
+        .await
+        .expect("load external signal");
+    assert_eq!(external_signal.get::<_, String>("origin"), "ingress");
+    assert_eq!(external_signal.get::<_, String>("delivery"), "direct");
+    assert!(
+        external_signal
+            .get::<_, Option<String>>("idempotency_key")
+            .is_some(),
+        "external token delivery must store a replay key"
+    );
+    assert_eq!(
+        external_signal
+            .get::<_, Option<String>>("consumed_by")
+            .as_deref(),
+        Some(external_run.as_str())
+    );
+
+    let replay = post_public_signal(
+        &gateway_url,
+        &external_token,
+        serde_json::json!({"ok": true, "source": "replay"}),
+    )
+    .await;
+    assert_eq!(replay.0, 409, "replayed token should be rejected: {}", replay.1);
+
+    let forged_run = seed_signal_run(&fx, "forged-token", "PT30S", None).await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw16-forged-park"),
+        &forged_run,
+    )
+    .await;
+    let forged_token = create_run_signal_token(&control_url, fx.app_id, &forged_run, "PT30S").await;
+    let mut forged_bytes = forged_token.into_bytes();
+    let last = forged_bytes.last_mut().expect("token bytes");
+    *last = if *last == b'a' { b'b' } else { b'a' };
+    let forged_token = String::from_utf8(forged_bytes).expect("forged token utf8");
+    let forged = post_public_signal(
+        &gateway_url,
+        &forged_token,
+        serde_json::json!({"ok": false}),
+    )
+    .await;
+    assert!(
+        forged.0 == 401 || forged.0 == 403,
+        "forged token should be rejected with 401/403, got {} body {}",
+        forged.0,
+        forged.1
+    );
+
+    let expired_run = seed_signal_run(&fx, "expired-token", "PT30S", None).await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw16-expired-park"),
+        &expired_run,
+    )
+    .await;
+    let expired_token = create_run_signal_token(&control_url, fx.app_id, &expired_run, "PT1S").await;
+    compio::time::sleep(Duration::from_millis(2_250)).await;
+    let expired = post_public_signal(
+        &gateway_url,
+        &expired_token,
+        serde_json::json!({"ok": false}),
+    )
+    .await;
+    assert!(
+        expired.0 == 401 || expired.0 == 403,
+        "expired token should be rejected with 401/403, got {} body {}",
+        expired.0,
+        expired.1
+    );
+
+    let terminal_run = seed_signal_run(&fx, "terminal-token", "PT30S", None).await;
+    drive_until_waiting(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw16-terminal-park"),
+        &terminal_run,
+    )
+    .await;
+    let terminal_token =
+        create_run_signal_token(&control_url, fx.app_id, &terminal_run, "PT30S").await;
+    let _ = post_signal(
+        &control_url,
+        fx.app_id,
+        &terminal_run,
+        serde_json::json!({"ok": true, "source": "internal"}),
+    )
+    .await;
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw16-terminal-drive"),
+        &terminal_run,
+    )
+    .await;
+    let terminal = post_public_signal(
+        &gateway_url,
+        &terminal_token,
+        serde_json::json!({"ok": false}),
+    )
+    .await;
+    assert!(
+        terminal.0 == 404 || terminal.0 == 409,
+        "terminal run signal should be rejected with 404/409, got {} body {}",
+        terminal.0,
+        terminal.1
+    );
+
+    let topic = format!("dw16-topic-{}", Uuid::new_v4().simple());
+    let topic_runs = vec![
+        seed_topic_signal_run(&fx, "topic-a", &topic).await,
+        seed_topic_signal_run(&fx, "topic-b", &topic).await,
+        seed_topic_signal_run(&fx, "topic-c", &topic).await,
+    ];
+    for (idx, run_id) in topic_runs.iter().enumerate() {
+        drive_until_waiting(
+            &fx,
+            Arc::clone(&real_dispatcher),
+            config(&format!("dw16-topic-park-{idx}")),
+            run_id,
+        )
+        .await;
+    }
+    let sub_count: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_subscriptions \
+              WHERE app_id = $1 AND topic = $2",
+            &[&fx.app_id, &topic],
+        )
+        .await
+        .expect("count topic subscriptions")
+        .get("n");
+    assert_eq!(sub_count, 3, "three runs should subscribe to the topic");
+
+    let topic_token = create_topic_signal_token(&control_url, fx.app_id, &topic, "PT30S").await;
+    let (topic_status, topic_body) = post_public_signal(
+        &gateway_url,
+        &topic_token,
+        serde_json::json!({"ok": true, "source": "topic-ingress"}),
+    )
+    .await;
+    assert_eq!(
+        topic_status, 202,
+        "topic public signal should create a broadcast: {topic_body}"
+    );
+    let broadcast_id = topic_body["id"]
+        .as_str()
+        .expect("broadcast id")
+        .to_string();
+    assert!(broadcast_id.starts_with("wbc_"));
+
+    let first_fanout = workflow_signal_fanout::tick_with_config(
+        &fx.state,
+        FanoutSweepConfig {
+            max_broadcasts_per_tick: 1,
+            max_deliveries_per_broadcast: 2,
+        },
+    )
+    .await
+    .expect("first fanout tick");
+    assert_eq!(first_fanout.broadcasts, 1);
+    assert_eq!(first_fanout.deliveries, 2);
+    let pending_state: String = fx
+        .pg
+        .query_one(
+            "SELECT fanout_state FROM zeroship.workflow_broadcasts WHERE id = $1",
+            &[&broadcast_id],
+        )
+        .await
+        .expect("load partial broadcast state")
+        .get("fanout_state");
+    assert_eq!(
+        pending_state, "pending",
+        "partial fan-out should leave broadcast pending for re-drain"
+    );
+    let second_fanout = workflow_signal_fanout::tick_with_config(
+        &fx.state,
+        FanoutSweepConfig {
+            max_broadcasts_per_tick: 1,
+            max_deliveries_per_broadcast: 100,
+        },
+    )
+    .await
+    .expect("second fanout tick");
+    assert_eq!(second_fanout.broadcasts, 1);
+    assert_eq!(second_fanout.deliveries, 1);
+    let third_fanout = workflow_signal_fanout::tick_with_config(
+        &fx.state,
+        FanoutSweepConfig {
+            max_broadcasts_per_tick: 1,
+            max_deliveries_per_broadcast: 100,
+        },
+    )
+    .await
+    .expect("idempotent fanout tick");
+    assert_eq!(third_fanout.deliveries, 0);
+    let completed_state: String = fx
+        .pg
+        .query_one(
+            "SELECT fanout_state FROM zeroship.workflow_broadcasts WHERE id = $1",
+            &[&broadcast_id],
+        )
+        .await
+        .expect("load completed broadcast state")
+        .get("fanout_state");
+    assert_eq!(completed_state, "completed");
+    let delivered_rows = fx
+        .pg
+        .query(
+            "SELECT run_id, COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_signals \
+              WHERE broadcast_id = $1 \
+              GROUP BY run_id \
+              ORDER BY run_id",
+            &[&broadcast_id],
+        )
+        .await
+        .expect("load broadcast deliveries");
+    assert_eq!(delivered_rows.len(), 3, "broadcast should reach all subscribers");
+    for row in &delivered_rows {
+        assert_eq!(
+            row.get::<_, i64>("n"),
+            1,
+            "redrain must not duplicate delivery for {:?}",
+            row.get::<_, String>("run_id")
+        );
+    }
+    for (idx, run_id) in topic_runs.iter().enumerate() {
+        drive_until_completed(
+            &fx,
+            Arc::clone(&real_dispatcher),
+            config(&format!("dw16-topic-drive-{idx}")),
+            run_id,
+        )
+        .await;
+        assert_topic_success_steps(&fx, run_id).await;
+        let output = run_output(&fx, run_id).await;
+        assert_eq!(
+            output["signal"]["payload"],
+            serde_json::json!({"ok": true, "source": "topic-ingress"})
+        );
+        assert_eq!(output["signal"]["delivery"], "topic");
+        assert_eq!(output["signal"]["topic"], topic);
+        let counts = side_counts(&fx, run_id).await;
+        assert_eq!(counts.get("a").copied(), Some(1));
+        assert_eq!(counts.get("b").copied(), Some(1));
+    }
+    let remaining_subs: i64 = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_subscriptions \
+              WHERE app_id = $1 AND topic = $2",
+            &[&fx.app_id, &topic],
+        )
+        .await
+        .expect("count remaining topic subscriptions")
+        .get("n");
+    assert_eq!(
+        remaining_subs, 0,
+        "completed topic waits should delete their subscriptions"
     );
 
     let timeout_run = seed_signal_run(&fx, "timeout", "PT1S", None).await;
