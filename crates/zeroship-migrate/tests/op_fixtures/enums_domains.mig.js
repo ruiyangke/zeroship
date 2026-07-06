@@ -34,7 +34,7 @@ export function up() {
     checks: [
       { name: "status_ne_all", expr: (c) => c("status").notIn(["x"]) },
       { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
-      { name: "data_size", expr: (c) => c.pg.pgColumnSize(c("data")).le(8192) },
+      { name: "data_size", expr: (c) => c.pg.columnSize(c("data")).le(8192) },
     ],
   });
 

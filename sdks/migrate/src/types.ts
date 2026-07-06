@@ -674,7 +674,7 @@ export interface PgExprNamespace {
   /** Renders `<expr> ~ '<pattern>'::text` on PostgreSQL. */
   regex(expr: unknown, pattern: string): ExprChain;
   /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
-  pgColumnSize(expr: unknown): ExprChain;
+  columnSize(expr: unknown): ExprChain;
   /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
   currentSetting(name: string, missingOk?: boolean): ExprChain;
   /** PG vendor scalar for RLS policies: current_user. */

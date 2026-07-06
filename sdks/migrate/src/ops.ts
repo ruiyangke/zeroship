@@ -1842,7 +1842,7 @@ const pgExpr: PgExprNamespace = {
     expr: exprArg(expr),
     pattern: pgRegexPattern(pattern),
   }),
-  pgColumnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
+  columnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
   currentSetting: (name, missingOk) =>
     chain({
       node: "fnCall",

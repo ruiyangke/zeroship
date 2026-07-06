@@ -47,7 +47,7 @@ export function up() {
     primaryKey: ["ts", "event_id"],
     partitionBy: { range: ["ts"] },
   });
-  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_data_check").add({ expr: (c) => c.pg.pgColumnSize(c("data")).le(8192) });
+  pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_data_check").add({ expr: (c) => c.pg.columnSize(c("data")).le(8192) });
   pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_event_id_check").add({ expr: (c) => c.pg.regex(c("event_id"), "^evt_[0-9A-Za-z]{20,40}$") });
   pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_sandbox_id_check").add({ expr: (c) => c.pg.regex(c("sandbox_id"), "^sbx_[0-9A-Za-z]{20,40}$") });
   pgTable("sandbox_events", { schema: "zeroship" }).check("sandbox_events_user_id_check").add({ expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$") });
