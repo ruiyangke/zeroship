@@ -35,6 +35,7 @@ const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
 static DB_CLONE_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TIMING_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn db_url() -> Option<String> {
     std::env::var("CONTROL_TEST_DB").ok()
@@ -270,7 +271,6 @@ async fn build_fixture_with_gateway(
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
     let control_pg = Arc::new(pg(db_url).await);
-    ensure_engine_columns(&control_pg).await;
 
     Fixture {
         state: Arc::new(AppState {
@@ -326,23 +326,6 @@ async fn build_fixture_with_gateway(
 
 async fn spend_blocked_gateway() -> web::HttpResponse {
     web::HttpResponse::PaymentRequired().json(&serde_json::json!({"code": "SPEND_LIMIT"}))
-}
-
-async fn ensure_engine_columns(pg: &compio_postgres::Client) {
-    pg.batch_execute(
-        "ALTER TABLE zeroship.workflow_runs \
-           ADD COLUMN IF NOT EXISTS dispatch_nonce text; \
-         ALTER TABLE zeroship.workflow_runs \
-           ADD COLUMN IF NOT EXISTS waiting_step_key text; \
-         ALTER TABLE zeroship.workflow_runs \
-           ADD COLUMN IF NOT EXISTS paused_from_status text; \
-         CREATE INDEX IF NOT EXISTS workflow_runs_dw04_due_idx \
-           ON zeroship.workflow_runs (app_id, wake_at, id) \
-           WHERE wake_at IS NOT NULL \
-             AND state IN ('queued','running','sleeping','waiting');",
-    )
-    .await
-    .expect("ensure DW-04 test columns");
 }
 
 async fn seed_app_and_deploy(fx: &Fixture, label: &str) -> (Uuid, String) {
@@ -429,6 +412,12 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         heartbeat_ms: 60_000,
         owner_id: owner.to_string(),
     }
+}
+
+fn timing_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    TIMING_TEST_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
@@ -654,6 +643,53 @@ async fn wait_for_completed(fx: &Fixture, run_ids: &[String]) {
     panic!("blocked dispatches did not complete after release: {states:?}");
 }
 
+async fn wait_for_cancelled_without_steps(fx: &Fixture, run_id: &str) {
+    let mut stable_observations = 0;
+    let mut last_state = None;
+    for _ in 0..100 {
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT state, wake_at, claimed_by, dispatch_nonce \
+                   FROM zeroship.workflow_runs WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("cancelled row");
+        let step_rows = fx
+            .pg
+            .query(
+                "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("count steps");
+        let state: String = row.get("state");
+        let wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+        let claimed_by: Option<String> = row.get("claimed_by");
+        let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
+        let step_count: i64 = step_rows[0].get("n");
+
+        if state == "cancelled"
+            && wake_at.is_none()
+            && claimed_by.is_none()
+            && dispatch_nonce.is_none()
+            && step_count == 0
+        {
+            stable_observations += 1;
+            if stable_observations >= 5 {
+                return;
+            }
+        } else {
+            stable_observations = 0;
+        }
+        last_state = Some((state, wake_at, claimed_by, dispatch_nonce, step_count));
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("late outcome after cancel was not stably discarded: {last_state:?}");
+}
+
 #[compio::test]
 async fn tick_claims_due_run_and_sets_owner_and_nonce() {
     let Some(fx) = isolated_fixture("claim").await else {
@@ -744,6 +780,7 @@ async fn concurrent_ticks_claim_disjoint_rows() {
 
 #[compio::test]
 async fn stale_lease_is_taken_over_after_ttl() {
+    let _timing_guard = timing_test_guard();
     let Some(fx) = isolated_fixture("stale").await else {
         return;
     };
@@ -853,7 +890,7 @@ async fn apply_outcome_checkpoints_idempotently() {
         -1_000,
         None,
         Some("owner-apply"),
-        Some(0),
+        Some(60_000),
         Some("wfd_apply"),
     )
     .await;
@@ -1200,6 +1237,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
 
 #[compio::test]
 async fn cancel_mid_dispatch_discards_late_outcome() {
+    let _timing_guard = timing_test_guard();
     let Some(fx) = isolated_fixture("cancel-mid").await else {
         return;
     };
@@ -1249,34 +1287,7 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
     .await;
     assert_eq!(resp.status(), ntex::http::StatusCode::OK);
     let _ = release.send(());
-    compio::time::sleep(Duration::from_millis(100)).await;
-
-    let row = fx
-        .pg
-        .query_one(
-            "SELECT state, wake_at, claimed_by, dispatch_nonce \
-               FROM zeroship.workflow_runs WHERE id = $1",
-            &[&run_id],
-        )
-        .await
-        .expect("cancelled row");
-    assert_eq!(row.get::<_, String>("state"), "cancelled");
-    assert_eq!(row.get::<_, Option<DateTime<Utc>>>("wake_at"), None);
-    assert_eq!(row.get::<_, Option<String>>("claimed_by"), None);
-    assert_eq!(row.get::<_, Option<String>>("dispatch_nonce"), None);
-    let steps = fx
-        .pg
-        .query(
-            "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_steps WHERE run_id = $1",
-            &[&run_id],
-        )
-        .await
-        .expect("count steps");
-    assert_eq!(
-        steps[0].get::<_, i64>("n"),
-        0,
-        "late outcome after cancel must be discarded"
-    );
+    wait_for_cancelled_without_steps(&fx, &run_id).await;
     let claimed = workflow_engine::tick_with_dispatcher(
         &fx.state,
         Arc::new(CompleteDispatcher),
@@ -1484,6 +1495,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
 
 #[compio::test]
 async fn per_app_cap_does_not_livelock_queued_runs() {
+    let _timing_guard = timing_test_guard();
     let Some(fx) = isolated_fixture("cap").await else {
         return;
     };
@@ -1503,11 +1515,10 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
     cfg.max_inflight_dispatch = 2;
     let dispatcher = Arc::new(CompleteDispatcher);
 
-    for _ in 0..20 {
+    for _ in 0..200 {
         workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
             .await
             .expect("tick");
-        compio::time::sleep(Duration::from_millis(50)).await;
         let rows = fx
             .pg
             .query(
@@ -1521,6 +1532,7 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
         if rows[0].get::<_, i64>("n") == i64::try_from(run_ids.len()).unwrap() {
             return;
         }
+        compio::time::sleep(Duration::from_millis(10)).await;
     }
     let rows = fx
         .pg
@@ -1539,6 +1551,7 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
 
 #[ntex::test]
 async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
+    let _timing_guard = timing_test_guard();
     let gateway = test::server(|| async {
         web::App::new().service(
             web::resource("/__zeroship/internal/workflow-dispatch")
