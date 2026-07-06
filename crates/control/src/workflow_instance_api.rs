@@ -17,7 +17,7 @@ use zeroship_auth::ratelimit::{self, Bucket, RateLimitDecision};
 use zeroship_core::typed_id;
 
 use crate::registry::RegistryError;
-use crate::AppState;
+use crate::{workflow_limits, AppState};
 
 pub const APP_ID_HEADER: &str = "x-zeroship-app-id";
 pub const ALT_APP_ID_HEADER: &str = "zeroship-app-id";
@@ -139,6 +139,7 @@ enum WorkflowApiError {
     NotFound(String),
     Conflict(String),
     Restart(String),
+    JournalCapExceeded(String),
     PayloadTooLarge(String),
     RateLimited { retry_after_secs: f64 },
     RateLimitUnavailable(String),
@@ -158,6 +159,10 @@ impl WorkflowApiError {
             })),
             Self::Restart(msg) => web::HttpResponse::Conflict().json(&json!({
                 "error": "RestartError",
+                "message": msg,
+            })),
+            Self::JournalCapExceeded(msg) => web::HttpResponse::TooManyRequests().json(&json!({
+                "error": workflow_limits::WORKFLOW_STATE_CAP_ERROR_CODE,
                 "message": msg,
             })),
             Self::PayloadTooLarge(msg) => {
@@ -434,12 +439,73 @@ fn workflow_container_has(value: &Value, workflow_name: &str) -> bool {
     }
 }
 
+async fn check_create_journal_capacity<C>(
+    conn: &C,
+    app_id: &Uuid,
+    input_journal_bytes: i64,
+) -> Result<(), WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    workflow_limits::lock_app_journal_accounting(conn, app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    let limits = workflow_limits::limits_for_app(conn, app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    if workflow_limits::cap_exceeded(0, input_journal_bytes, limits.run_max_bytes) {
+        return Err(WorkflowApiError::JournalCapExceeded(format!(
+            "workflow run input exceeds per-run journal cap ({} > {})",
+            input_journal_bytes, limits.run_max_bytes
+        )));
+    }
+    check_app_journal_capacity(conn, app_id, input_journal_bytes, limits.app_max_bytes).await
+}
+
+async fn check_signal_journal_capacity<C>(
+    conn: &C,
+    app_id: &Uuid,
+    payload_journal_bytes: i64,
+) -> Result<(), WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    workflow_limits::lock_app_journal_accounting(conn, app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    let limits = workflow_limits::limits_for_app(conn, app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    check_app_journal_capacity(conn, app_id, payload_journal_bytes, limits.app_max_bytes).await
+}
+
+async fn check_app_journal_capacity<C>(
+    conn: &C,
+    app_id: &Uuid,
+    delta: i64,
+    app_max_bytes: i64,
+) -> Result<(), WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    let current = workflow_limits::app_journal_bytes(conn, app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    if workflow_limits::cap_exceeded(current, delta, app_max_bytes) {
+        return Err(WorkflowApiError::JournalCapExceeded(format!(
+            "workflow app journal cap exceeded (current {current} + delta {delta} > {app_max_bytes})"
+        )));
+    }
+    Ok(())
+}
+
 async fn insert_run<C>(
     conn: &C,
     app_id: &Uuid,
     workflow_name: &str,
     deploy_id: &str,
     input: &Value,
+    input_journal_bytes: i64,
     dedup_key: Option<&String>,
     run_id: &str,
 ) -> Result<(), WorkflowApiError>
@@ -448,14 +514,15 @@ where
 {
     conn.execute(
         "INSERT INTO zeroship.workflow_runs \
-            (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, started_at) \
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, now(), now())",
+            (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), now())",
         &[
             &run_id,
             &workflow_name,
             app_id,
             &deploy_id,
             input,
+            &input_journal_bytes,
             &dedup_key,
         ],
     )
@@ -470,6 +537,7 @@ async fn insert_run_on_conflict_do_nothing<C>(
     workflow_name: &str,
     deploy_id: &str,
     input: &Value,
+    input_journal_bytes: i64,
     dedup_key: &String,
     run_id: &str,
 ) -> Result<Option<String>, WorkflowApiError>
@@ -479,8 +547,8 @@ where
     let rows = conn
         .query(
             "INSERT INTO zeroship.workflow_runs \
-                (id, workflow_name, app_id, deploy_id, state, input, dedup_key, wake_at, started_at) \
-             VALUES ($1, $2, $3, $4, 'queued', $5, $6, now(), now()) \
+                (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), now()) \
              ON CONFLICT (app_id, workflow_name, dedup_key) DO NOTHING \
              RETURNING id",
             &[
@@ -489,6 +557,7 @@ where
                 app_id,
                 &deploy_id,
                 input,
+                &input_journal_bytes,
                 &dedup_key,
             ],
         )
@@ -539,34 +608,56 @@ async fn create_run_inner(
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
+    let input_journal_bytes = workflow_limits::json_column_size(&tx, &body.input)
+        .await
+        .map_err(WorkflowApiError::from)?;
+    workflow_limits::lock_app_journal_accounting(&tx, &app_id)
+        .await
+        .map_err(WorkflowApiError::from)?;
 
     let run_id = if let Some(key) = dedup_key.as_ref() {
         match policy {
             ConflictPolicy::Join => {
-                let candidate = typed_id::new_workflow_run_id();
-                if let Some(inserted) = insert_run_on_conflict_do_nothing(
-                    &tx,
-                    &app_id,
-                    &workflow_name,
-                    &deploy.id,
-                    &body.input,
-                    key,
-                    &candidate,
-                )
-                .await?
+                if let Some(existing) = existing_keyed_run(&tx, &app_id, &workflow_name, key).await?
                 {
-                    inserted
+                    existing
                 } else {
-                    existing_keyed_run(&tx, &app_id, &workflow_name, key)
-                        .await?
-                        .ok_or_else(|| {
-                            WorkflowApiError::Database(
-                                "workflow start conflict lost its incumbent".to_string(),
-                            )
-                        })?
+                    check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
+                    let candidate = typed_id::new_workflow_run_id();
+                    if let Some(inserted) = insert_run_on_conflict_do_nothing(
+                        &tx,
+                        &app_id,
+                        &workflow_name,
+                        &deploy.id,
+                        &body.input,
+                        input_journal_bytes,
+                        key,
+                        &candidate,
+                    )
+                    .await?
+                    {
+                        inserted
+                    } else {
+                        existing_keyed_run(&tx, &app_id, &workflow_name, key)
+                            .await?
+                            .ok_or_else(|| {
+                                WorkflowApiError::Database(
+                                    "workflow start conflict lost its incumbent".to_string(),
+                                )
+                            })?
+                    }
                 }
             }
             ConflictPolicy::Reject => {
+                if existing_keyed_run(&tx, &app_id, &workflow_name, key)
+                    .await?
+                    .is_some()
+                {
+                    return Err(WorkflowApiError::Conflict(
+                        "workflow run already exists for key".to_string(),
+                    ));
+                }
+                check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
                 let candidate = typed_id::new_workflow_run_id();
                 if let Some(inserted) = insert_run_on_conflict_do_nothing(
                     &tx,
@@ -574,6 +665,7 @@ async fn create_run_inner(
                     &workflow_name,
                     &deploy.id,
                     &body.input,
+                    input_journal_bytes,
                     key,
                     &candidate,
                 )
@@ -587,6 +679,7 @@ async fn create_run_inner(
                 }
             }
             ConflictPolicy::Replace => {
+                check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
                 tx.execute(
                     "UPDATE zeroship.workflow_runs \
                         SET state = 'cancelled', \
@@ -616,6 +709,7 @@ async fn create_run_inner(
                     &workflow_name,
                     &deploy.id,
                     &body.input,
+                    input_journal_bytes,
                     key,
                     &candidate,
                 )
@@ -634,6 +728,7 @@ async fn create_run_inner(
             }
         }
     } else {
+        check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
         let candidate = typed_id::new_workflow_run_id();
         insert_run(
             &tx,
@@ -641,6 +736,7 @@ async fn create_run_inner(
             &workflow_name,
             &deploy.id,
             &body.input,
+            input_journal_bytes,
             None,
             &candidate,
         )
@@ -759,6 +855,13 @@ pub async fn signal_run(
         Ok(tx) => tx,
         Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
     };
+    let payload_journal_bytes = match workflow_limits::json_column_size(&tx, &body.payload).await {
+        Ok(bytes) => bytes,
+        Err(e) => return WorkflowApiError::from(e).response(),
+    };
+    if let Err(e) = workflow_limits::lock_app_journal_accounting(&tx, &app_id).await {
+        return WorkflowApiError::from(e).response();
+    }
     let rows = match tx
         .query(
             "SELECT state, waiting_step_key \
@@ -778,6 +881,9 @@ pub async fn signal_run(
     };
     let run_state: String = row.get("state");
     let waiting_step_key: Option<String> = row.get("waiting_step_key");
+    if let Err(e) = check_signal_journal_capacity(&tx, &app_id, payload_journal_bytes).await {
+        return e.response();
+    }
     let signal_id = typed_id::new_workflow_signal_id();
     if let Err(e) = tx
         .execute(

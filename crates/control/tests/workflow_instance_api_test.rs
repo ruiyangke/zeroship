@@ -127,17 +127,28 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 }
 
 async fn seed_app(fx: &Fixture, label: &str, workflows: &[&str]) -> (Uuid, String) {
+    seed_app_on_plan(
+        fx,
+        label,
+        workflows,
+        &zeroship_control::bootstrap_console::free_plan_id(),
+    )
+    .await
+}
+
+async fn seed_app_on_plan(
+    fx: &Fixture,
+    label: &str,
+    workflows: &[&str],
+    plan_id: &str,
+) -> (Uuid, String) {
     let app_id = Uuid::new_v4();
     let app_name = format!("wf-api-{label}-{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
             "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
              VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash')",
-            &[
-                &app_id,
-                &app_name,
-                &zeroship_control::bootstrap_console::free_plan_id(),
-            ],
+            &[&app_id, &app_name, &plan_id],
         )
         .await
         .expect("insert app");
@@ -161,6 +172,42 @@ async fn seed_app(fx: &Fixture, label: &str, workflows: &[&str]) -> (Uuid, Strin
         .await
         .expect("insert app deploy");
     (app_id, deploy_id)
+}
+
+async fn seed_workflow_cap_plan(fx: &Fixture, label: &str, run_cap: i64, app_cap: i64) -> String {
+    let plan_id = format!("pln_wf_api_cap_{}_{}", label, Uuid::new_v4().simple());
+    let runtime = json!({
+        "cpu_limit_ms": 50,
+        "wall_timeout_ms": 5000,
+        "heap_limit_mb": 64,
+        "workflow_journal_max_bytes": run_cap,
+        "workflow_app_journal_max_bytes": app_cap,
+    });
+    let net = json!({
+        "max_sockets": 4,
+        "egress_ceiling_bytes": 10485760,
+    });
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.plans \
+                (id, name, runtime_limits_json, net_policy_limits_json, spend_limit_default_cents) \
+             VALUES ($1, $2, $3, $4, 0)",
+            &[&plan_id, &format!("wf-api-cap-{label}"), &runtime, &net],
+        )
+        .await
+        .expect("insert workflow cap plan");
+    plan_id
+}
+
+async fn pg_json_size(fx: &Fixture, value: &Value) -> i64 {
+    fx.pg
+        .query_one(
+            "SELECT pg_column_size($1::jsonb)::bigint AS bytes",
+            &[value],
+        )
+        .await
+        .expect("pg_column_size jsonb")
+        .get("bytes")
 }
 
 async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
@@ -517,6 +564,99 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     assert_eq!(signal.get::<_, Value>("payload"), json!({ "by": "usr_test" }));
     assert_eq!(signal.get::<_, String>("origin"), "app");
     assert_eq!(signal.get::<_, String>("delivery"), "direct");
+
+    let oversized_input = json!({ "blob": "x".repeat(256) });
+    let oversized_input_bytes = pg_json_size(&fx, &oversized_input).await;
+    let create_cap_plan = seed_workflow_cap_plan(
+        &fx,
+        "create-cap",
+        oversized_input_bytes + 1024,
+        oversized_input_bytes - 1,
+    )
+    .await;
+    let (create_cap_app, _) =
+        seed_app_on_plan(&fx, "create-cap", &["Checkout"], &create_cap_plan).await;
+    let resp = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri("/internal/workflows/Checkout/runs")
+                .set_json(&json!({ "input": oversized_input })),
+            create_cap_app,
+        )
+        .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "per-app aggregate journal cap should 429 create"
+    );
+    let rows = fx
+        .pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE app_id = $1",
+            &[&create_cap_app],
+        )
+        .await
+        .expect("count capped create runs");
+    assert_eq!(rows[0].get::<_, i64>("n"), 0);
+
+    let capped_input = json!({ "seed": true });
+    let capped_payload = json!({ "payload": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" });
+    let capped_input_bytes = pg_json_size(&fx, &capped_input).await;
+    let capped_payload_bytes = pg_json_size(&fx, &capped_payload).await;
+    let signal_cap_plan = seed_workflow_cap_plan(
+        &fx,
+        "signal-cap",
+        1_000_000,
+        capped_input_bytes + capped_payload_bytes - 1,
+    )
+    .await;
+    let (signal_cap_app, _) =
+        seed_app_on_plan(&fx, "signal-cap", &["Checkout"], &signal_cap_plan).await;
+    let resp = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri("/internal/workflows/Checkout/runs")
+                .set_json(&json!({ "input": capped_input })),
+            signal_cap_app,
+        )
+        .to_request(),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let capped_created: Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
+    let capped_run_id = capped_created["id"]
+        .as_str()
+        .expect("capped create response id")
+        .to_string();
+    let resp = test::call_service(
+        &app,
+        authed(
+            test::TestRequest::post()
+                .uri(&format!("/internal/workflows/runs/{capped_run_id}/signal"))
+                .set_json(&json!({ "type": "approved", "payload": capped_payload })),
+            signal_cap_app,
+        )
+        .to_request(),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "per-app aggregate journal cap should 429 signal"
+    );
+    let rows = fx
+        .pg
+        .query(
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_signals WHERE run_id = $1",
+            &[&capped_run_id],
+        )
+        .await
+        .expect("count capped signal rows");
+    assert_eq!(rows[0].get::<_, i64>("n"), 0);
 }
 
 #[compio::test]
