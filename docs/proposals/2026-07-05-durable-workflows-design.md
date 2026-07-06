@@ -220,11 +220,18 @@ await run.restart({ deploy: "started" });        // reproduce on the exact deplo
 | Call | Durable semantics |
 | --- | --- |
 | `step.run(name, config?, fn)` | Run `fn` once, journal its result under `name`. Re-runs on crash/retry (at-least-once *effect*, exactly-once *result*). `config.retries.maxAttempts`, `config.timeout` (`StepTimeoutError`). `config.output` selects the output representation (`"auto"` default · `"inline"` · `"ref"` · `{ as: "stream" }`), returning the value or a `StepOutputRef` (§3.5). `config.compensate` attaches an **undo closure** run in reverse order on terminal run failure (§3.8, §21) — valid **only** on `step.run` (sleeps/signals produce no external effect). |
+| `step.sideEffect(name, fn)` | Compute `fn` once and freeze the returned value into the journal. On replay, return the frozen value inline without re-running `fn`. This is the sanctioned way to capture inline non-determinism (`Date.now()`, random bytes, UUIDs, reading a small config value) when the work does **not** warrant a full `step.run`: no retries, no timeout, no compensation, no blob/stream output mode. Journal representation: one completed `workflow_steps` row with `kind='sideEffect'`, `output_kind='inline'`, and the value in `output`; no new columns. |
 | `step.sleep(name, duration)` | Suspend the run until `now + duration`; `wake_at`-unified (§8). |
 | `step.sleepUntil(name, when)` | Absolute-deadline sibling of `step.sleep`: suspend until the instant `when` (a `Date` or epoch **ms**). Same `kind='sleep'` / `wake_at` machinery (§8), differing only in that `wake_at = to_timestamptz(when)` (absolute target) instead of `now + duration`. One-sided guarantee: **never before `when`** (single DB clock), best-effort `≥ when`; a past `when` is a zero-length sleep. Zero DDL delta. |
 | `step.waitForSignal(name, { type?, timeout, maxSignalAge })` | Suspend until a fresh matching signal arrives; `type` defaults to `name`; **resolves to `null` on `timeout`** (the timeout→null convention — the await does not throw, there is no thrown timeout class); `maxSignalAge` rejects stale signals. Returns `SignalEnvelope<P> \| null` (§3.6). |
 | `step.all(steps, { concurrency? })` | **Durable, order-preserving `Promise.all`** — the ergonomic form of the concurrent frontier (§3.3, §6). |
 | `step.call(WorkflowClass, input, opts?)` | Spawn (idempotent, deterministic key) + await a **child** run's typed `Output`; a child error rethrows into the parent. Modelled as a `wait_signal`-flavored suspension on the child's terminal join signal (§3.7, §20). `opts.cascade` opts into cancel-cascade; `opts.timeout` → `ChildTimeoutError`. |
+
+Example:
+
+```ts
+const id = await step.sideEffect("id", () => crypto.randomUUID());
+```
 
 **Error classes.** `PermanentError` (non-retryable **business** failure — fail the run immediately),
 `StepTimeoutError` (thrown on a per-step `config.timeout`), `ChildTimeoutError`/`ChildCancelledError` (§3.7),
@@ -236,6 +243,39 @@ compensator on a `step.sleep`) and `LimitExceededError` (an output/size/batch ca
 had retry budget. **`waitForSignal`'s timeout is a return convention, not a thrown class:** its `timeout`
 resolves the await to `null` (the app decides what to do), it does not throw — there is no exported
 timeout-signal error symbol.
+
+### 3.2.1 I/O & determinism contract
+
+The workflow body may only observe the outside world through journaled `step.run` / `step.sideEffect`
+output — never live I/O. A replay must be a pure function of `(workflow code, trigger, journal prefix)`;
+anything observed outside the journal can differ on the next dispatch and corrupt the replay.
+
+Wrong:
+
+```ts
+export class SyncOrder extends Workflow<{ id: string }, Order> {
+  async run(trigger: WorkflowTrigger<{ id: string }>, step: Step) {
+    const response = await fetch(`https://api.example.test/orders/${trigger.input.id}`);
+    return await response.json();
+  }
+}
+```
+
+Right:
+
+```ts
+export class SyncOrder extends Workflow<{ id: string }, Order> {
+  async run(trigger: WorkflowTrigger<{ id: string }>, step: Step) {
+    return await step.run("load-order", async () => {
+      const response = await fetch(`https://api.example.test/orders/${trigger.input.id}`);
+      return await response.json();
+    });
+  }
+}
+```
+
+Use `step.run` for external I/O and effectful work. Use `step.sideEffect` for lightweight inline
+non-determinism whose value must be captured once and replayed thereafter.
 
 ### 3.3 Concurrency is opt-in-by-shape (`static concurrency` + `step.all`)
 
@@ -455,6 +495,9 @@ step.run<T>(name: string, config: StepConfig<T> & { output: "ref" | { as: "ref";
 // stream (bytes) → an untyped byte handle
 step.run(name: string, config: StepConfig<Uint8Array> & { output: { as: "stream"; contentType?: string } },
          fn: () => ReadableStream<Uint8Array> | AsyncIterable<Uint8Array> | Blob): Promise<StepOutputRef<Uint8Array>>;
+
+// sideEffect → inline journaled value only; no retries/timeouts/compensation/output handles
+step.sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
 ```
 
 The handle is reconstructed from the journal row on **every** replay with no I/O; reads are lazy and
@@ -1352,7 +1395,7 @@ CREATE TABLE zeroship.workflow_steps (
   ordinal          integer     NOT NULL,              -- deterministic call index (journal order)
   name             text        NOT NULL,              -- observability + determinism guard (§11)
   name_occurrence  integer     NOT NULL DEFAULT 0,    -- nth issuance of `name` (loops)
-  kind             text        NOT NULL,              -- 'run' | 'sleep' | 'wait_signal' | 'child'
+  kind             text        NOT NULL,              -- 'run' | 'sideEffect' | 'sleep' | 'wait_signal' | 'child'
   state            text        NOT NULL,              -- 'running' | 'completed' | 'failed'
   attempt          integer     NOT NULL DEFAULT 0,
   max_attempts     integer     NOT NULL DEFAULT 1,    -- config.retries.maxAttempts
@@ -1408,6 +1451,9 @@ additions for audit/observability. **No new table is required for concurrency.**
 `output_hash` / `output_size` / `output_content_type` columns are the blob-rail additions (§3.5, §17):
 `output_kind='inline'` carries the result in `output`, `output_kind='blob'` carries a bounded
 content-addressed reference (`output` is `NULL`) — a *representation* choice, not a new step lifecycle.
+`kind='sideEffect'` uses the same inline output columns as `kind='run'`, but it is always a single
+completed row: no retry budget, no timeout, no compensation, no blob/stream output mode, and no new
+columns.
 `child_run_id` + `kind='child'` are the child-orchestration additions (§3.7, §20): a `kind='child'` step
 reuses the exact `running → completed|failed` lifecycle of `kind='wait_signal'` — `signal_type` holds the
 reserved join type `'__zs.child:<ordinal>'`, `consumed_signal_id` the bound terminal signal, and the
@@ -2289,16 +2335,25 @@ the antichain theorem (§6.1).
   fails exactly as in the pre-compensation engine. The forward path (§5/§6) is byte-identical; compensation
   code is entered only when a terminal failure meets a non-empty `pending` set. ∎
 
-**Nondeterminism traps.** A raw non-`step` `await` in the workflow *body* (e.g. a bare `fetch`) parks the
-function on a promise the engine doesn't control and can corrupt frontier-drain detection → forbidden by the
-replay model; detected best-effort (a pending non-step promise at the macrotask boundary is flagged) and the
-run fails `NondeterministicError`. A `name` divergence at a given ordinal across replays → `NondeterministicError`,
-fail-closed. `step.sleepUntil(name, when)` (§3.2) freezes `when` into `wake_at` **at first discovery and
-journals it** — never recomputed on later replays — exactly like `step.sleep`'s `now + duration`; so even a
-`when` derived from a bare `Date.now()` (itself a nondeterminism trap) cannot cause replay divergence *of
-the sleep step*, and it adds **no** new clause here — a `sleep`/`sleepUntil` row carries no output value and
-its `wake_at` is a journaled constant, covered by C1/C5 unchanged (the idiomatic use derives `when` from a
-journaled source — `trigger.input`, `trigger.startedAt`, or a prior `step.run` output).
+**Nondeterminism traps.** The reliable protection is structural, not timing-based: if a replay issues a
+step whose `name`, `kind`, or same-name occurrence differs at a committed ordinal, the dispatch fails
+`NondeterministicError` and the run fails closed. This catches the journal-corrupting class of
+nondeterminism because the check compares the replay against the journal prefix directly.
+
+A raw non-`step` `await` in the workflow *body* (e.g. a bare `fetch`) is still forbidden: the workflow body
+may only observe the outside world through journaled `step.run` / `step.sideEffect` output (§3.2.1). The
+runtime's current bare-I/O detection is best-effort at await time: a pending non-step promise at the
+macrotask boundary is flagged, but a fast promise that resolves before that boundary may not be caught by
+the event loop. The robust mechanism is prevention, scheduled as **DW-13f — dispatch-scoped I/O prevention
++ `sideEffect`**: during a workflow dispatch, platform-provided `fetch` and timers throw when called
+outside a journal callback (`step.run` for I/O, `step.sideEffect` for inline non-determinism). `step.sleepUntil(name,
+when)` (§3.2) freezes `when` into `wake_at` **at first discovery and journals it** — never recomputed on
+later replays — exactly like `step.sleep`'s `now + duration`; so even a `when` derived from a bare
+`Date.now()` (itself forbidden outside `step.sideEffect`) cannot cause replay divergence *of the sleep
+step*, and it adds **no** new clause here — a `sleep`/`sleepUntil` row carries no output value and its
+`wake_at` is a journaled constant, covered by C1/C5 unchanged (the idiomatic use derives `when` from a
+journaled source — `trigger.input`, `trigger.startedAt`, a prior `step.run` output, or a prior
+`step.sideEffect` output).
 
 ---
 
@@ -3838,6 +3893,7 @@ surface:
 - **Steps:** `step.run(name, config?, fn)` with `config.retries.maxAttempts` / `config.backoff` /
   `config.timeout` / `config.output` (`"auto"|"inline"|"ref"|{as:"ref"|"stream"}`) / `config.compensate`
   (the single generic `StepConfig<T>`, §3.5/§3.8); `step.sleep(name, duration)`;
+  `step.sideEffect(name, fn)` (inline journaled-once value for non-determinism, no retries/timeouts/compensation);
   `step.sleepUntil(name, when)` (absolute-deadline sibling, `when: Date | epoch-ms`, §3.2);
   `step.waitForSignal(name, { type?, timeout, maxSignalAge, topic? })` → `SignalEnvelope<P> | null`
   (`null` on timeout; envelope carries `origin`/`delivery`, A9); `step.all(steps, { concurrency? })`;
