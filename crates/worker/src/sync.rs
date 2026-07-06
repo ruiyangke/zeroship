@@ -798,6 +798,7 @@ mod tests {
 
             crate::cache::init_cache(
                 10,
+                4,
                 crate::cache::KernelConfig {
                     db_url: None,
                     kv_url: None,
@@ -855,10 +856,12 @@ mod tests {
                 kv_url: None,
                 storage_backend: None,
                 max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_dispatch_unsigned: false,
             });
 
             let app = test::init_service(

@@ -3,16 +3,18 @@ use std::sync::Arc;
 use futures::{pin_mut, FutureExt};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use ntex::util::Bytes;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use zeroship_core::auth::{
     extract_bearer, validate_control_key, verify_zeroship_user_header_for_request,
 };
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
+use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
-    StreamReader,
+    SettledWorkflow, StreamReader, WorkflowOutcome,
 };
 
 use crate::sync::SharedEnvs;
@@ -342,6 +344,161 @@ pub async fn dispatch(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowStepRequest {
+    run_id: String,
+    workflow_name: String,
+    trigger: serde_json::Value,
+    #[serde(default)]
+    journal: Vec<serde_json::Value>,
+    deploy_hash: String,
+    #[serde(default)]
+    attempt: Option<u32>,
+    nonce: String,
+}
+
+/// Test-only durable-workflow replay ingress.
+///
+/// DW-05 deliberately leaves signature/nonce verification to a later task.
+/// Production config never enables this handler; tests can flip
+/// `workflow_dispatch_unsigned` and feed a hand-built StepRequest through the
+/// same worker/pinned-isolate path.
+pub async fn workflow_dispatch_unsigned(
+    req: HttpRequest,
+    config: web::types::State<Arc<WorkerConfig>>,
+    envs: web::types::State<SharedEnvs>,
+    logs: web::types::State<crate::logs::SharedLogs>,
+    path: web::types::Path<String>,
+    body: Bytes,
+) -> HttpResponse {
+    if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
+        return resp;
+    }
+    if !config.workflow_dispatch_unsigned {
+        return HttpResponse::Forbidden()
+            .json(&serde_json::json!({"error": "workflow dispatch unsigned disabled"}));
+    }
+
+    let app_id = match path.parse::<Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            metrics::inc(&metrics::DISPATCH_REJECTED_BAD_APP_ID);
+            return HttpResponse::BadRequest().body(r#"{"error":"invalid app_id"}"#);
+        }
+    };
+    if body.len() > MAX_DISPATCH_BODY_BYTES {
+        metrics::inc(&metrics::DISPATCH_REJECTED_BODY_TOO_LARGE);
+        return HttpResponse::PayloadTooLarge()
+            .json(&serde_json::json!({"error": "dispatch body too large"}));
+    }
+    let envelope_json = match std::str::from_utf8(body.as_ref()) {
+        Ok(s) => s,
+        Err(e) => {
+            metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": format!("invalid utf-8 envelope: {e}")}));
+        }
+    };
+    let parsed: WorkflowStepRequest = match serde_json::from_str(envelope_json) {
+        Ok(v) => v,
+        Err(e) => {
+            metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
+            return HttpResponse::BadRequest()
+                .json(&serde_json::json!({"error": format!("invalid workflow envelope: {e}")}));
+        }
+    };
+    if parsed.run_id.is_empty()
+        || parsed.workflow_name.is_empty()
+        || parsed.deploy_hash.is_empty()
+        || parsed.nonce.is_empty()
+        || !parsed.trigger.is_object()
+    {
+        metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
+        return HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "workflow envelope requires runId, workflowName, trigger object, deployHash, and nonce"
+        }));
+    }
+    let _journal_len = parsed.journal.len();
+    let _attempt = parsed.attempt.unwrap_or(0);
+
+    if cache::get_workflow_runtime(&app_id, &parsed.deploy_hash).is_none() {
+        metrics::inc(&metrics::ON_DEMAND_LOADS_TOTAL);
+        if let Err(e) =
+            load_pinned_workflow_on_demand(&config, &envs, &app_id, &parsed.deploy_hash).await
+        {
+            metrics::inc(&metrics::ON_DEMAND_LOAD_FAILURES);
+            return HttpResponse::ServiceUnavailable().json(&serde_json::json!({
+                "error": format!("failed to load pinned workflow app: {e}")
+            }));
+        }
+    }
+
+    let runtime = match cache::get_workflow_runtime(&app_id, &parsed.deploy_hash) {
+        Some(r) => r,
+        None => {
+            return HttpResponse::NotFound().json(&serde_json::json!({
+                "error": format!("app {app_id} deploy {} not loaded", parsed.deploy_hash)
+            }));
+        }
+    };
+
+    let env: EnvSnapshot = match crate::sync::get_env(&envs, &app_id) {
+        Some(entry) => entry.snapshot.clone(),
+        None => {
+            metrics::inc(&metrics::ENV_UNAVAILABLE_TOTAL);
+            return HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "env unavailable"}));
+        }
+    };
+
+    metrics::inc(&metrics::DISPATCH_TOTAL);
+    let ingress_bytes = body.len() as u64;
+    let wall_start = std::time::Instant::now();
+    let cancel = CancelFlag::new();
+    let ctx = RequestCtx::new(cancel);
+    let cpu_start = zeroship_runtime::init::thread_cpu_time();
+    let outcome = {
+        runtime.enter_isolate();
+        let o = runtime.call_workflow_dispatch(envelope_json, &env, ctx);
+        runtime.exit_isolate();
+        o
+    };
+    let cpu_us = zeroship_runtime::init::thread_cpu_time()
+        .saturating_sub(cpu_start)
+        .as_micros() as u64;
+
+    let record = |egress_bytes: u64| {
+        let wall_us = wall_start.elapsed().as_micros() as u64;
+        cache::record_request(&app_id, cpu_us, wall_us, egress_bytes, ingress_bytes);
+    };
+
+    match outcome {
+        WorkflowOutcome::Response { json, logs: request_logs } => {
+            crate::logs::append(&logs, app_id, request_logs);
+            record(json.len() as u64);
+            HttpResponse::Ok().content_type("application/json").body(json)
+        }
+        WorkflowOutcome::Pending { rx, cancel } => {
+            match recv_with_timeout(&rx, wall_limit(&runtime), &cancel, &runtime).await {
+                Some(Ok(SettledWorkflow { json, logs: request_logs })) => {
+                    crate::logs::append(&logs, app_id, request_logs);
+                    record(json.len() as u64);
+                    HttpResponse::Ok().content_type("application/json").body(json)
+                }
+                Some(Err(e)) => {
+                    record(0);
+                    make_error(&e)
+                }
+                None => {
+                    record(0);
+                    make_error_msg(504, "workflow dispatch timed out")
+                }
+            }
+        }
+    }
+}
+
 /// Record the UNARY metering counters for a streaming response EXACTLY ONCE,
 /// at stream start (metering coverage #27, H1).
 ///
@@ -544,6 +701,339 @@ mod tests {
             .expect("dispatch frame")
     }
 
+    fn append_tar_file(builder: &mut tar::Builder<Vec<u8>>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, std::io::Cursor::new(bytes))
+            .expect("append tar file");
+    }
+
+    fn workflow_source(mark: &str) -> Vec<u8> {
+        r#"
+const MARK = "__MARK__";
+
+export class Checkout {
+  async run(trigger, step) {
+    const first = await step.run("first", () => {
+      globalThis.__bodyRuns = (globalThis.__bodyRuns ?? 0) + 1;
+      return { mark: MARK, step: "first", bodyRuns: globalThis.__bodyRuns, input: trigger.input };
+    });
+    const second = await step.run("second", () => {
+      globalThis.__bodyRuns = (globalThis.__bodyRuns ?? 0) + 1;
+      return { mark: MARK, step: "second", bodyRuns: globalThis.__bodyRuns, first };
+    });
+    await step.sleep("nap", "PT1S");
+    return { mark: MARK, second };
+  }
+}
+
+export default { workflows: { Checkout } };
+"#
+        .replace("__MARK__", mark)
+        .into_bytes()
+    }
+
+    fn workflow_zship(source: &[u8]) -> Vec<u8> {
+        let source_hash = zeroship_bundle::sha256_hex(source);
+        let manifest = serde_json::json!({
+            "version": 1,
+            "worker": {
+                "entry": "index.js",
+                "modules": { "index.js": source_hash },
+            },
+            "resources": {},
+            "assets": {},
+            "runtime_assets": {},
+            "asset_version": 0,
+            "sourcemaps": {},
+            "metadata": { "built_at": "2026-07-06T00:00:00Z" },
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest json");
+        let mut builder = tar::Builder::new(Vec::new());
+        append_tar_file(&mut builder, "manifest.json", &manifest_bytes);
+        append_tar_file(&mut builder, &format!("blobs/{source_hash}"), source);
+        let tar_bytes = builder.into_inner().expect("tar bytes");
+        zstd::stream::encode_all(std::io::Cursor::new(tar_bytes), 0).expect("zstd encode")
+    }
+
+    async fn deploy_workflow_fixture(
+        blob_store: &Arc<dyn BlobStore>,
+        app_id: &Uuid,
+        mark: &str,
+    ) -> String {
+        let source = workflow_source(mark);
+        let zship = workflow_zship(&source);
+        zeroship_bundle::ingest(blob_store, app_id, &zship)
+            .await
+            .expect("workflow zship ingest")
+            .deploy_hash
+    }
+
+    fn workflow_request(deploy_hash: &str, journal: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "runId": "run_test",
+            "workflowName": "Checkout",
+            "trigger": {
+                "input": { "orderId": "ord_1" },
+                "startedAt": "2026-07-06T00:00:00Z",
+                "runId": "run_test",
+                "workflowName": "Checkout",
+            },
+            "journal": journal,
+            "deployHash": deploy_hash,
+            "attempt": 0,
+            "nonce": "nonce_test",
+        })
+    }
+
+    fn workflow_test_state(
+        max_pinned_isolates_per_app: usize,
+    ) -> (
+        Uuid,
+        Arc<dyn BlobStore>,
+        SharedEnvs,
+        crate::logs::SharedLogs,
+        Arc<crate::WorkerConfig>,
+        PathBuf,
+    ) {
+        init_runtime();
+        let app_id = Uuid::new_v4();
+        crate::cache::init_cache(
+            10,
+            max_pinned_isolates_per_app,
+            crate::cache::KernelConfig {
+                db_url: None,
+                kv_url: None,
+                storage_backend: None,
+                meter: Arc::new(zeroship_metering::Meter::new()),
+            },
+        );
+        let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+        crate::sync::put_env_from_json(
+            &envs,
+            app_id,
+            r#"{"vars":{},"secrets":{},"expose":[]}"#,
+            0,
+        )
+        .expect("insert workflow env");
+        let logs = crate::logs::new_store();
+        let blob_root = tmpdir("workflow-blob");
+        let blob_store: Arc<dyn BlobStore> =
+            Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+        let config = Arc::new(crate::WorkerConfig {
+            control_url: "http://127.0.0.1:1".to_string(),
+            control_key: String::new(),
+            db_url: None,
+            kv_url: None,
+            storage_backend: None,
+            max_isolates: 10,
+            max_pinned_isolates_per_app,
+            poll_interval_secs: 60,
+            worker_key: String::new(),
+            shutdown_timeout_secs: 0,
+            blob_store: blob_store.clone(),
+            workflow_dispatch_unsigned: true,
+        });
+        (app_id, blob_store, envs, logs, config, blob_root)
+    }
+
+    #[test]
+    fn workflow_dispatch_first_frontier_returns_step_completed() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
+            let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/workflow-dispatch-unsigned/{app_id}")
+                            .route(web::post().to(workflow_dispatch_unsigned)),
+                    ),
+            )
+            .await;
+
+            let req = test::TestRequest::post()
+                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap())
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            let result: serde_json::Value =
+                serde_json::from_slice(&body).expect("workflow StepResult JSON");
+            assert_eq!(result["kind"], "StepCompleted");
+            assert_eq!(result["name"], "first");
+            assert_eq!(result["ordinal"], 0);
+            assert_eq!(result["output"]["mark"], "A");
+            assert_eq!(result["output"]["bodyRuns"], 1);
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn workflow_dispatch_replays_journal_hit_without_rerunning_body() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
+            let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/workflow-dispatch-unsigned/{app_id}")
+                            .route(web::post().to(workflow_dispatch_unsigned)),
+                    ),
+            )
+            .await;
+
+            let first_req = test::TestRequest::post()
+                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, vec![])).unwrap())
+                .to_request();
+            let first_resp = test::call_service(&app, first_req).await;
+            assert_eq!(first_resp.status(), StatusCode::OK);
+            let first_body = test::read_body(first_resp).await;
+            let first_result: serde_json::Value =
+                serde_json::from_slice(&first_body).expect("first StepResult JSON");
+            assert_eq!(first_result["name"], "first");
+
+            let journal = vec![serde_json::json!({
+                "ordinal": first_result["ordinal"],
+                "name": first_result["name"],
+                "nameOccurrence": first_result["nameOccurrence"],
+                "kind": "run",
+                "state": "completed",
+                "output": first_result["output"],
+            })];
+            let second_req = test::TestRequest::post()
+                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .set_payload(serde_json::to_vec(&workflow_request(&deploy_hash, journal)).unwrap())
+                .to_request();
+            let second_resp = test::call_service(&app, second_req).await;
+            assert_eq!(second_resp.status(), StatusCode::OK);
+            let second_body = test::read_body(second_resp).await;
+            let result: serde_json::Value =
+                serde_json::from_slice(&second_body).expect("second StepResult JSON");
+            assert_eq!(result["kind"], "StepCompleted");
+            assert_eq!(result["name"], "second");
+            assert_eq!(result["ordinal"], 1);
+            assert_eq!(
+                result["output"]["bodyRuns"], 2,
+                "the completed first step must be replayed from journal, not re-run"
+            );
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn workflow_dispatch_keeps_in_flight_run_on_pinned_deploy_after_redeploy() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
+            let deploy_a = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
+            let deploy_b = deploy_workflow_fixture(&blob_store, &app_id, "B").await;
+            assert_ne!(deploy_a, deploy_b);
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/workflow-dispatch-unsigned/{app_id}")
+                            .route(web::post().to(workflow_dispatch_unsigned)),
+                    ),
+            )
+            .await;
+
+            for (deploy_hash, expected_mark) in [(&deploy_a, "A"), (&deploy_b, "B"), (&deploy_a, "A")] {
+                let req = test::TestRequest::post()
+                    .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                    .set_payload(
+                        serde_json::to_vec(&workflow_request(deploy_hash, vec![])).unwrap(),
+                    )
+                    .to_request();
+                let resp = test::call_service(&app, req).await;
+                assert_eq!(resp.status(), StatusCode::OK);
+                let body = test::read_body(resp).await;
+                let result: serde_json::Value =
+                    serde_json::from_slice(&body).expect("workflow StepResult JSON");
+                assert_eq!(result["kind"], "StepCompleted");
+                assert_eq!(result["output"]["mark"], expected_mark);
+            }
+            assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_a));
+            assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_b));
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn workflow_dispatch_pinned_isolate_budget_lru_evicts_per_app() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(1);
+            let deploy_a = deploy_workflow_fixture(&blob_store, &app_id, "A").await;
+            let deploy_b = deploy_workflow_fixture(&blob_store, &app_id, "B").await;
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/workflow-dispatch-unsigned/{app_id}")
+                            .route(web::post().to(workflow_dispatch_unsigned)),
+                    ),
+            )
+            .await;
+
+            let req_a = test::TestRequest::post()
+                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .set_payload(serde_json::to_vec(&workflow_request(&deploy_a, vec![])).unwrap())
+                .to_request();
+            let resp_a = test::call_service(&app, req_a).await;
+            assert_eq!(resp_a.status(), StatusCode::OK);
+            assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_a));
+
+            let req_b = test::TestRequest::post()
+                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .set_payload(serde_json::to_vec(&workflow_request(&deploy_b, vec![])).unwrap())
+                .to_request();
+            let resp_b = test::call_service(&app, req_b).await;
+            assert_eq!(resp_b.status(), StatusCode::OK);
+            assert!(!crate::cache::has_pinned_workflow_app(&app_id, &deploy_a));
+            assert!(crate::cache::has_pinned_workflow_app(&app_id, &deploy_b));
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
     // Regression: the `unlimited`/`enterprise` plan reports `wall_timeout =
     // None`, and `wall_limit` must pass that `None` straight through (no cap) so
     // a long single-request streaming upload isn't cut. Pre-fix this
@@ -604,6 +1094,7 @@ mod tests {
             "#;
             crate::cache::init_cache(
                 10,
+                4,
                 crate::cache::KernelConfig {
                     db_url: None,
                     kv_url: None,
@@ -641,10 +1132,12 @@ mod tests {
                 kv_url: None,
                 storage_backend: None,
                 max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_dispatch_unsigned: false,
             });
 
             let app = test::init_service(
@@ -707,6 +1200,7 @@ mod tests {
             "#;
             crate::cache::init_cache(
                 10,
+                4,
                 crate::cache::KernelConfig {
                     db_url: None,
                     kv_url: None,
@@ -744,10 +1238,12 @@ mod tests {
                 kv_url: None,
                 storage_backend: None,
                 max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_dispatch_unsigned: false,
             });
 
             let app = test::init_service(
@@ -803,6 +1299,7 @@ mod tests {
             "#;
             crate::cache::init_cache(
                 10,
+                4,
                 crate::cache::KernelConfig {
                     db_url: None,
                     kv_url: None,
@@ -840,10 +1337,12 @@ mod tests {
                 kv_url: None,
                 storage_backend: None,
                 max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_dispatch_unsigned: false,
             });
 
             let app = test::init_service(
@@ -914,6 +1413,7 @@ mod tests {
             let meter = std::sync::Arc::new(zeroship_metering::Meter::new());
             crate::cache::init_cache(
                 10,
+                4,
                 crate::cache::KernelConfig {
                     db_url: None,
                     kv_url: None,
@@ -951,10 +1451,12 @@ mod tests {
                 kv_url: None,
                 storage_backend: None,
                 max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_dispatch_unsigned: false,
             });
 
             let app = test::init_service(
@@ -1096,6 +1598,7 @@ mod tests {
             let storage_root = tmpdir("storage");
             crate::cache::init_cache(
                 10,
+                4,
                 crate::cache::KernelConfig {
                     // Dummy DSN: DbPlugin stores the URL and connects lazily,
                     // so `env.db` is installed without a live Postgres.
@@ -1135,10 +1638,12 @@ mod tests {
                 kv_url: None,
                 storage_backend: None,
                 max_isolates: 10,
+                max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
                 worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
+                workflow_dispatch_unsigned: false,
             });
 
             let app = test::init_service(
@@ -1210,6 +1715,7 @@ mod tests {
     fn init_meter_for_stream_test() -> Arc<zeroship_metering::Meter> {
         let meter = Arc::new(zeroship_metering::Meter::new());
         crate::cache::init_cache(
+            4,
             4,
             crate::cache::KernelConfig {
                 db_url: None,
@@ -1467,6 +1973,66 @@ async fn load_on_demand(
         app_id = %app_id,
         blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
         "worker: on-demand loaded app"
+    );
+    Ok(())
+}
+
+async fn load_pinned_workflow_on_demand(
+    config: &WorkerConfig,
+    envs: &SharedEnvs,
+    app_id: &Uuid,
+    deploy_hash: &str,
+) -> Result<(), String> {
+    let manifest_bytes = config
+        .blob_store
+        .get_manifest(app_id, deploy_hash)
+        .await
+        .map_err(|e| format!("manifest fetch failed: {e}"))?;
+    let manifest: zeroship_bundle::Manifest = serde_json::from_slice(manifest_bytes.as_ref())
+        .map_err(|e| format!("manifest parse failed: {e}"))?;
+    if manifest.deploy_hash.as_deref() != Some(deploy_hash) {
+        return Err(format!(
+            "manifest deploy_hash mismatch: expected {deploy_hash}, got {:?}",
+            manifest.deploy_hash
+        ));
+    }
+    manifest
+        .validate()
+        .map_err(|e| format!("manifest validation failed: {e}"))?;
+
+    let bundle_hash = crate::sync::worker_entry_hash(&manifest, app_id)
+        .ok_or_else(|| format!("app {app_id} deploy {deploy_hash} has no worker code"))?;
+    let bytes = config
+        .blob_store
+        .get_blob(&bundle_hash)
+        .await
+        .map_err(|e| format!("blob fetch failed: {e}"))?;
+    if bytes.is_empty() {
+        return Err("empty bundle".into());
+    }
+
+    let env_entry = crate::sync::get_env(envs, app_id)
+        .ok_or_else(|| "env unavailable for pinned workflow load".to_string())?;
+    let descriptor_json = crate::sync::runtime_descriptor_json(&manifest, &config.blob_store, app_id)
+        .await
+        .map_err(|e| format!("descriptor load failed: {e}"))?;
+
+    cache::load_pinned_workflow_app(
+        *app_id,
+        deploy_hash,
+        &bytes,
+        AppRuntimeLimits::default(),
+        AppNetPolicy::default(),
+        descriptor_json.as_deref(),
+        &env_entry.snapshot,
+    )
+    .map_err(|e| format!("failed to load pinned bundle: {e}"))?;
+
+    tracing::info!(
+        app_id = %app_id,
+        deploy_hash = %deploy_hash,
+        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+        "worker: on-demand loaded pinned workflow app"
     );
     Ok(())
 }

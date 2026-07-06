@@ -35,6 +35,28 @@ pub enum FetchOutcome {
     },
 }
 
+/// Result of executing the durable-workflow replay entry in the bootstrap.
+pub enum WorkflowOutcome {
+    /// Replay completed synchronously or settled during the dispatch
+    /// microtask checkpoint. `json` is the already-stringified StepResult.
+    Response {
+        json: String,
+        logs: Vec<String>,
+    },
+    /// Replay returned a pending promise. The runtime pump resolves it and
+    /// sends a [`SettledWorkflow`] through `rx`.
+    Pending {
+        rx: ResultReceiver<Result<SettledWorkflow, DispatchError>>,
+        cancel: CancelFlag,
+    },
+}
+
+/// Settled durable-workflow replay result delivered by the pump.
+pub struct SettledWorkflow {
+    pub json: String,
+    pub logs: Vec<String>,
+}
+
 /// Mirror of `FetchOutcome`'s three non-Pending variants — delivered
 /// via the pending-resolver channel after a handler's promise settles.
 /// Variant names match `FetchOutcome` so the kernel → receiver

@@ -65,6 +65,14 @@ struct WorkerCli {
     #[arg(long = "max-isolates", env = "MAX_ISOLATES", default_value = "200")]
     max_isolates: usize,
 
+    /// Maximum deploy-pinned workflow replay isolates kept per app.
+    #[arg(
+        long = "max-pinned-isolates-per-app",
+        env = "MAX_PINNED_ISOLATES_PER_APP",
+        default_value = "4"
+    )]
+    max_pinned_isolates_per_app: usize,
+
     /// Control-plane polling interval in seconds.
     #[arg(long = "poll-interval", env = "POLL_INTERVAL", default_value = "5")]
     poll_interval: u64,
@@ -154,6 +162,10 @@ impl std::fmt::Debug for WorkerCli {
             .field("control_key", &"<redacted>")
             .field("dev_insecure", &self.dev_insecure)
             .field("max_isolates", &self.max_isolates)
+            .field(
+                "max_pinned_isolates_per_app",
+                &self.max_pinned_isolates_per_app,
+            )
             .field("poll_interval", &self.poll_interval)
             .field("db", &"<redacted>")
             .field("worker_key", &"<redacted>")
@@ -206,6 +218,7 @@ pub struct WorkerConfig {
     /// (inherently shared) — see `WorkerCli::storage_url`.
     pub storage_backend: Option<StorageBackendConfig>,
     pub max_isolates: usize,
+    pub max_pinned_isolates_per_app: usize,
     pub poll_interval_secs: u64,
     /// Shared secret with the gateway. When non-empty, every /dispatch call
     /// must present `Authorization: Bearer <worker_key>` and the
@@ -225,6 +238,10 @@ pub struct WorkerConfig {
     /// each crate keeps its own `Arc` over a shared remote backend
     /// (for example S3 with an on-disk LRU).
     pub blob_store: Arc<dyn BlobStore>,
+    /// Test-only unsigned durable-workflow replay ingress. Production boot
+    /// never exposes a CLI/env switch for this; signed control-plane dispatch
+    /// replaces it in a later durable-workflows task.
+    pub workflow_dispatch_unsigned: bool,
 }
 
 fn main() -> std::io::Result<()> {
@@ -260,6 +277,7 @@ fn main() -> std::io::Result<()> {
         cli.check_config,
     );
     let max_isolates = cli.max_isolates;
+    let max_pinned_isolates_per_app = cli.max_pinned_isolates_per_app;
     let poll_interval = cli.poll_interval;
     let db_url = zeroship_core::config::obtain_secret(
         "DATABASE_URL / --db",
@@ -389,6 +407,10 @@ fn main() -> std::io::Result<()> {
         report.field("worker_threads", CheckValue::Count(workers_count));
         report.field("max_isolates", CheckValue::Count(max_isolates));
         report.field(
+            "max_pinned_isolates_per_app",
+            CheckValue::Count(max_pinned_isolates_per_app),
+        );
+        report.field(
             "poll_interval_secs",
             CheckValue::Count(usize::try_from(poll_interval).unwrap_or(usize::MAX)),
         );
@@ -479,10 +501,12 @@ fn main() -> std::io::Result<()> {
         kv_url: kv_url_opt,
         storage_backend,
         max_isolates,
+        max_pinned_isolates_per_app,
         poll_interval_secs: poll_interval,
         worker_key,
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
+        workflow_dispatch_unsigned: false,
     });
 
     let bind_addr = format!("{bind_host}:{port}");
@@ -502,6 +526,7 @@ fn main() -> std::io::Result<()> {
         bind = %bind_addr,
         threads = workers_count,
         max_isolates = config.max_isolates,
+        max_pinned_isolates_per_app = config.max_pinned_isolates_per_app,
         shutdown_timeout_secs = config.shutdown_timeout_secs,
         "worker listening"
     );
@@ -563,6 +588,7 @@ fn main() -> std::io::Result<()> {
         let logs = shared_logs.clone();
         cache::init_cache(
             config.max_isolates,
+            config.max_pinned_isolates_per_app,
             cache::KernelConfig {
                 db_url: config.db_url.clone(),
                 kv_url: config.kv_url.clone(),
@@ -580,6 +606,10 @@ fn main() -> std::io::Result<()> {
             .state(envs)
             .state(logs)
             .service(web::resource("/dispatch/{app_id}").route(web::post().to(handler::dispatch)))
+            .service(
+                web::resource("/workflow-dispatch-unsigned/{app_id}")
+                    .route(web::post().to(handler::workflow_dispatch_unsigned)),
+            )
             .service(web::resource("/logs/{app_id}").route(web::get().to(logs::get_logs)))
             .service(web::resource("/health").route(web::get().to(|| async {
                 web::HttpResponse::Ok().body(r#"{"status":"ok"}"#)

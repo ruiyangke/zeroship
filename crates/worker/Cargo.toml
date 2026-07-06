@@ -36,6 +36,8 @@ tracing = { workspace = true }
 # temp LocalFs storage dir + blob dir per run (KV uses the real Redis backend at
 # REDIS_TEST_URL); tempfile gives each test an isolated dir for the FS legs.
 tempfile = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
 
 [lints]
 workspace = true
