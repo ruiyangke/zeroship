@@ -112,6 +112,13 @@ export function badOpShapes(): void {
   // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").
   table("users").update({ set: { name: 1n } });
 
+  table("users").update({
+    set: { name: "x" },
+    where: (c) => c("id").isNotNull(),
+    // @ts-expect-error — batched writes are spelled backfill({ cursorColumn, batchSize }), not update({ batch }).
+    batch: { cursorColumn: "id", batchSize: 500 },
+  });
+
   // @ts-expect-error — the table-level `.rename({ to })` REQUIRES a `to` string.
   table("users").rename({});
 

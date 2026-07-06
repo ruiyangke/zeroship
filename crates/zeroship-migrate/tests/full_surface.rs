@@ -639,25 +639,23 @@ fn fluent_insert_normalizes_decimal_and_bytes_scalars() {
     assert_eq!(row[1].get("bytes").unwrap(), "AP8="); // base64([0,255])
 }
 
-/// `update { batch }` is authorable through the engine recorder AND deserializes
-/// into `Op::Update.batch` (parity with the npm DSL, which now also exposes
-/// `batch`). The two JS impls expose ONE surface.
+/// `update` records a plain one-shot `Op::Update`; `backfill` is the sole
+/// batched-write spelling.
 #[test]
-fn update_carries_a_batch_knob() {
+fn update_has_no_batch_knob() {
     let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").update({
                 set: { x: (c) => c.fn.now() },
                 where: (c) => c("id").isNotNull(),
-                batch: { cursorColumn: "id", batchSize: 500 },
             });
         }};
     "#;
-    let ir = record(src, "ubatch");
-    let batch = ops(&ir)[0].get("batch").expect("update records the batch knob");
-    assert_eq!(batch.get("cursorColumn").unwrap(), "id");
-    assert_eq!(batch.get("batchSize").unwrap(), 500);
+    let ir = record(src, "uplain");
+    let op = &ops(&ir)[0];
+    assert_eq!(op.get("op").unwrap(), "update");
+    assert!(op.get("batch").is_none(), "update must not record a batch field");
 }
 
 /// The determinism lint is WIRED into the record path as a soft advisory only:

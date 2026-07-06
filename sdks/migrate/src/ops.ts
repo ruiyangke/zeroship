@@ -3273,7 +3273,6 @@ function recordUpdate(table: string, args: UpdateArgs): void {
     table,
     set: resolveSet(args.set),
     where: resolveExpr(args.where),
-    batch: args.batch,
     schema: args.schema,
   });
 }

@@ -163,7 +163,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   validateConstraint: ["existenceGuard", "name", "schema", "table"].sort(),
   // DML ops carry `schema` but NO `existenceGuard`.
   insert: ["columns", "onConflict", "rows", "schema", "table"].sort(),
-  update: ["batch", "schema", "set", "table", "where"].sort(),
+  update: ["schema", "set", "table", "where"].sort(),
   delete: ["limit", "schema", "table", "where"].sort(),
   backfill: ["batchSize", "cursorColumn", "filter", "name", "schema", "set", "table"].sort(),
   createView: ["columns", "materialized", "name", "query", "replace", "schema"].sort(),

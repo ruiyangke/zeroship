@@ -954,15 +954,29 @@ test("onConflict.doUpdate normalizes decimal()/Uint8Array scalar assignments", (
   });
 });
 
-test("update accepts a batch knob (parity with the engine recorder)", () => {
+test("update records a plain one-shot op with no batch field", () => {
   const ops = record(() =>
     table("t").update({
       set: { x: (c) => c.fn.now() },
       where: (c) => c("id").isNotNull(),
-      batch: { cursorColumn: "id", batchSize: 500 },
     }),
   );
-  assert.deepEqual(ops[0].batch, { cursorColumn: "id", batchSize: 500 });
+  assert.equal(ops[0].op, "update");
+  assert.equal("batch" in ops[0], false);
+});
+
+test("backfill remains the batched-write spelling", () => {
+  const ops = record(() =>
+    table("t").backfill({
+      set: { x: (c) => c.fn.now() },
+      where: (c) => c("id").isNotNull(),
+      cursorColumn: "id",
+      batchSize: 500,
+    }),
+  );
+  assert.equal(ops[0].op, "backfill");
+  assert.equal(ops[0].cursorColumn, "id");
+  assert.equal(ops[0].batchSize, 500);
 });
 
 test("del records the 'delete' wire tag and requires where", () => {

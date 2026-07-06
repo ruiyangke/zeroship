@@ -819,11 +819,6 @@ export interface InsertArgs<R extends Row = Row> {
 export interface UpdateArgs {
   set: Record<string, DmlSetValue>;
   where?: ExprFn;
-  /** Page a large one-shot UPDATE over a cursor column (`Op::Update.batch`): the
-   *  engine lowers it to the same windowed/batched executor a `backfill` uses
-   *  (PG writable-CTE windowed UPDATE / SQLite per-batch-txn). Absent ⇒ a single
-   *  unbatched UPDATE. Parity with the engine recorder. */
-  batch?: IrBatch;
   /** The schema qualifier (§3); overrides the handle default. */
   schema?: string;
 }
