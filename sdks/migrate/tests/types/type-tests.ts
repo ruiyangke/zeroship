@@ -76,6 +76,9 @@ export function antiRotMigration(): void {
     where: (c) => c("yet_another_missing_column").isNull(),
   });
   table("nonexistent_table").delete({ where: (c) => c("phantom_col").eq(1) });
+  // L5 (M19): update/delete/backfill `where` accept a built ExprChain / Expr, not just a `(c) => …` callback.
+  table("nonexistent_table").update({ set: { legacy_col: 1 }, where: migrate.lit(1).eq(migrate.lit(1)) });
+  table("nonexistent_table").delete({ where: migrate.lit(1).eq(migrate.lit(1)) });
   table("nonexistent_table").backfill({
     set: { legacy_col: (c) => c.fn.splitPart(c("phantom_col"), " ", 1) },
     where: (c) => c("phantom_col").isNotNull(),
