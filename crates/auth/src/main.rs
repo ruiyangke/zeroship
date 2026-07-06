@@ -226,7 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .detach();
 
-    // Schema is owned by zeroship-migrate (db/migrations, applied by the
+    // Schema is owned by zeroship-migrate (db/migrations-ts, applied by the
     // compose `migrate` service / `ops/db-migrate.sh`) out of band before this
     // service boots — not here.
 

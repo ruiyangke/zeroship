@@ -12,7 +12,7 @@
 # gateway serve (static assets) + (best-effort) an RPC round-trip.
 #
 # Prereqs (see docs/runbooks/local-dev.md):
-#   - release binaries: cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship
+#   - release binaries: cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship -p zeroship-migrate --bins
 #   - a Postgres reachable at $DATABASE_URL (default: the compose instance on :5440)
 #   - examples/starter deps installed (pnpm install) so `pnpm build` works
 # ---------------------------------------------------------------------------
@@ -61,16 +61,20 @@ echo "=== 2. Bring up the stack ==="
 for p in $CONTROL_PORT $WORKER_PORT $GATE_PORT; do lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true; done
 rm -rf /tmp/gp-bundles
 
-# Fresh dedicated DB + the full platform schema (db/migrations/*.sql are plain
-# SQL, applied in order — no migrate-engine build needed).
+# Fresh dedicated DB + the full platform schema (db/migrations-ts JS DSL,
+# recorded to transient IR by zeroship-migrate).
 echo "  migrating a fresh $PG_DB ..."
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || \
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
-for f in $(ls "$ROOT"/db/migrations/V*.sql | grep -vE "\.down\." | sort); do
-  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q < "$f" >/tmp/gp-migrate.log 2>&1 \
-    || { fail "migration $(basename "$f") failed"; tail -5 /tmp/gp-migrate.log; exit 1; }
-done
+ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
+  "$BIN/zeroship-migrate" migrate \
+    --dir "$ROOT/db/migrations-ts" \
+    --database-url "$DB_URL" \
+    --profile platform \
+    --yes \
+    --no-dump-schema >/tmp/gp-migrate.log 2>&1 \
+    || { fail "platform migrations failed"; tail -20 /tmp/gp-migrate.log; exit 1; }
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regclass('zeroship.apps')" 2>/dev/null | grep -q apps \
   && pass "schema migrated (fresh $PG_DB)" || { fail "schema missing after migrate"; exit 1; }
 

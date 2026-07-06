@@ -1,5 +1,5 @@
 //! Regression guard for T1: the control crate is migrated by `zeroship-migrate`
-//! (`db/migrations`, platform profile), NOT Liquibase. The schema-authority
+//! (`db/migrations-ts`, platform profile), NOT Liquibase. The schema-authority
 //! convergence moved the platform DB (control/auth/billing/auth-provider state) off
 //! Liquibase onto zeroship-migrate, but doc-comments and test/bench setup prose
 //! still pointed operators at the dead `docker run liquibase ... -v db/changelog`
@@ -68,7 +68,7 @@ fn control_crate_has_no_operational_liquibase_residue() {
     assert!(
         offenders.is_empty(),
         "control crate still has operational Liquibase residue (the platform DB \
-         is migrated by `zeroship-migrate migrate --dir db/migrations --profile \
+         is migrated by `zeroship-migrate migrate --dir db/migrations-ts --profile \
          platform`, not Liquibase). Offending lines:\n{}",
         offenders.join("\n")
     );

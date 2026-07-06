@@ -291,7 +291,7 @@ pub fn suggest_migration_name(name: &str) -> String {
 // directions via section markers:
 //
 // ```text
-// db/migrations/20240617123000_create_users.sql
+// migrations/20240617123000_create_users.sql
 // -- migrate:up
 // CREATE TABLE users (id bigserial primary key, ...);
 //
@@ -1489,49 +1489,6 @@ mod tests {
         assert_eq!(migs.len(), 1, "only the .sql migration is loaded by the Flyway path");
         assert!(migs[0].up.contains("CREATE TABLE t"));
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn flyway_db_migrations_still_load_ordered() {
-        // Coexistence regression: the EXISTING platform port (`db/migrations/`,
-        // the `V<NNNN>__…` Flyway set) must auto-detect as Flyway and load
-        // IDENTICALLY after the dbmate path was added — every versioned up
-        // migration, strictly ascending. This is the pure (no-PG) peer of the
-        // PG-gated `tests/platform_port_pg.rs`, guaranteeing the dbmate work did
-        // not perturb the platform loader.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../db/migrations");
-        if !dir.is_dir() {
-            // The repo always ships db/migrations; skip only if a stripped checkout
-            // somehow lacks it (never in CI).
-            eprintln!("skipping: {} not present", dir.display());
-            return;
-        }
-        let migs = load_dir_migrations(&dir).expect("the platform Flyway port still loads");
-        let expected = std::fs::read_dir(&dir)
-            .expect("read db/migrations")
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry.path().is_file()
-                    && entry.file_name().to_str().is_some_and(|name| {
-                        name.starts_with('V')
-                            && name.ends_with(".sql")
-                            && !name.ends_with(".down.sql")
-                    })
-            })
-            .count();
-        assert_eq!(
-            migs.len(),
-            expected,
-            "all ported V<NNNN>__ up files load"
-        );
-        // Auto-detect chose Flyway, not dbmate: none is repeatable here and the
-        // versions are strictly ascending (the Flyway numeric ordering).
-        for w in migs.windows(2) {
-            assert!(w[0].version < w[1].version, "Flyway versions strictly ascending");
-        }
-        for m in &migs {
-            assert_eq!(m.owner_app, PLATFORM_OWNER_APP);
-        }
     }
 
     // ----- test fixtures -----

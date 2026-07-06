@@ -177,8 +177,9 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && pass "ephe
   && pass "applied ops/postgres-init.sql" || true
 
 MIG_LOG="$WORK/migrate.log"
-if "$BIN/zeroship-migrate" migrate \
-    --dir "$ROOT/db/migrations" \
+if ZEROSHIP_RECORDER_CHILD="$BIN/zeroship-migrate-recorder-child" \
+    "$BIN/zeroship-migrate" migrate \
+    --dir "$ROOT/db/migrations-ts" \
     --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
     --profile platform --yes > "$MIG_LOG" 2>&1; then
   pass "platform migrations applied cleanly from scratch (zeroship-migrate)"
