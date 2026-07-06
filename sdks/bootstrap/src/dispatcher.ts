@@ -29,6 +29,7 @@ export {};
 
 declare const globalThis: {
   __zsDispatch?: unknown;
+  __zsWorkflowDispatch?: unknown;
   __zsEnterKind?: (kind: string) => number;
   __zsExitKind?: (token: number) => void;
   __zsValidateOutput?: boolean;
@@ -157,5 +158,28 @@ declare const globalThis: {
     } finally {
       if (tok >= 0 && typeof xk === "function") xk(tok);
     }
+  };
+})(globalThis as never);
+
+(function installZsWorkflowDispatch(globalScope: typeof globalThis) {
+  if (typeof globalScope.__zsWorkflowDispatch === "function") return;
+
+  function mkErr(message: string, status: number, code: string): Error {
+    const e = new Error(message) as Error & { status?: number; code?: string };
+    e.status = status;
+    e.code = code;
+    return e;
+  }
+
+  globalScope.__zsWorkflowDispatch = async function workflowDispatchStub(
+    _userNamespace: unknown,
+    _envelope: unknown,
+    _ctx?: unknown,
+  ): Promise<never> {
+    throw mkErr(
+      "__zsWorkflowDispatch is installed but the workflow replay host is not wired yet",
+      501,
+      "WORKFLOW_DISPATCH_UNIMPLEMENTED",
+    );
   };
 })(globalThis as never);
