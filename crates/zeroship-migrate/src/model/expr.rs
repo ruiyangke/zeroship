@@ -160,21 +160,21 @@ pub enum SynthFn {
     GenRandomUuid,
 }
 
-/// The closed portable cast-target set (§3.3.1). A non-portable cast target is
-/// rejected (`UNSUPPORTED { kind: "expr" }`).
+/// The closed cast-target set (§3.3.1), aligned to scalar `ColType` tokens. A
+/// non-portable cast target is rejected (`UNSUPPORTED { kind: "expr" }`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum CastTarget {
     /// `text`
     Text,
-    /// `integer`
-    Integer,
+    /// `int` (`INTEGER` on SQL backends)
+    Int,
     /// `real`
     Real,
     /// `boolean`
     Boolean,
-    /// `blob` (`BYTEA` on PG)
-    Blob,
+    /// `bytes` (`BYTEA` on PG)
+    Bytes,
     /// `uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).
     /// Needed for the VENDOR policy predicates — the 0025 tenant-isolation
     /// policy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a
@@ -344,7 +344,7 @@ pub enum Expr {
         /// args, validated in-envelope structurally — §3.3.1.1(b)).
         args: Vec<Expr>,
     },
-    /// A cast to a portable type (`.cast("integer")`).
+    /// A cast to a portable type (`.cast({ to: "int" })`).
     Cast {
         /// The expression being cast.
         operand: Box<Expr>,

@@ -403,7 +403,7 @@ const orders = table("orders");
 orders.column("status").add({ type: t.text().notNull().default("new") });
 orders.column("legacy").drop({ ifExists: true });
 orders.column("label").rename({ to: "display_label", type: t.text() }); // named ⇒ no swap
-orders.column("total").setType({ to: t.numeric({ precision: 14, scale: 2 }), using: (c) => c("total").cast("real") });
+orders.column("total").setType({ to: t.numeric({ precision: 14, scale: 2 }), using: (c) => c("total").cast({ to: "real" }) });
 orders.column("note").dropNotNull();
 orders.column("note").setDefault("memo");
 orders.column("note").dropDefault();
@@ -813,8 +813,8 @@ interpolated):
   NULL-skipping `concatWs` and `coalesce` live on `c.fn.*` only (they are not
   chain methods).
 - null/bool tests: `.isNull()`, `.isNotNull()`, `.isTrue()`, `.isFalse()`
-- cast: `.cast("text" | "integer" | "real" | "boolean" | "blob")` (the closed
-  portable target set only)
+- cast: `.cast({ to: "text" | "int" | "real" | "boolean" | "bytes" | "uuid" })`
+  (the closed scalar `ColType` target set only)
 
 **`c.fn.*` — the scalar-function namespace** (`sdks/migrate/src/ops.ts:322-357`):
 
@@ -879,7 +879,7 @@ transform only through the closed fluent AST, never raw SQL.
   fluent AST: column refs, auto-wrapped literals, arithmetic,
   comparison/boolean operators, `c.case`, the allow-listed
   provably-identical scalars (`coalesce`, `nullif`, `lower`, `upper`, `trim`,
-  `length`, `abs`, `.cast(<portable type>)`, `.concat`), and `c.fn.concatWs`.
+  `length`, `abs`, `.cast({ to })`, `.concat`), and `c.fn.concatWs`.
 - The engine-synthesized `c.fn.splitPart` helper **within its pinned envelope**.
 
 ### The `splitPart` / `concatWs` portable-expression envelope

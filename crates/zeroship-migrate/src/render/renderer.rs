@@ -199,10 +199,10 @@ impl DmlRenderer for PostgresDmlRenderer {
     fn cast_target(&self, target: CastTarget) -> &'static str {
         match target {
             CastTarget::Text => "text",
-            CastTarget::Integer => "integer",
+            CastTarget::Int => "integer",
             CastTarget::Real => "real",
             CastTarget::Boolean => "boolean",
-            CastTarget::Blob => "bytea",
+            CastTarget::Bytes => "bytea",
             CastTarget::Uuid => "uuid",
         }
     }
@@ -330,10 +330,10 @@ impl DmlRenderer for SqliteDmlRenderer {
     fn cast_target(&self, target: CastTarget) -> &'static str {
         match target {
             CastTarget::Text => "text",
-            CastTarget::Integer => "integer",
+            CastTarget::Int => "integer",
             CastTarget::Real => "real",
             CastTarget::Boolean => "integer",
-            CastTarget::Blob => "blob",
+            CastTarget::Bytes => "blob",
             CastTarget::Uuid => "text",
         }
     }
@@ -484,10 +484,10 @@ impl DmlRenderer for MysqlDmlRenderer {
     fn cast_target(&self, target: CastTarget) -> &'static str {
         match target {
             CastTarget::Text => "char",
-            CastTarget::Integer => "signed",
+            CastTarget::Int => "signed",
             CastTarget::Real => "double",
             CastTarget::Boolean => "unsigned",
-            CastTarget::Blob => "binary",
+            CastTarget::Bytes => "binary",
             CastTarget::Uuid => "char(36)",
         }
     }

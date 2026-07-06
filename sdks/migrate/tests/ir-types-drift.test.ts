@@ -95,7 +95,7 @@ const TS = {
   UnaryOp: ["not", "isNull", "isNotNull", "isTrue", "isFalse"].sort(),
   ScalarFn: ["coalesce", "nullif", "lower", "upper", "trim", "length", "abs", "mod", "round", "floor", "ceil", "substr", "replace", "currentSetting", "currentUser"].sort(),
   SynthFn: ["concatWs", "splitPart", "now", "genRandomUuid"].sort(),
-  CastTarget: ["text", "integer", "real", "boolean", "blob", "uuid"].sort(),
+  CastTarget: ["text", "int", "real", "boolean", "bytes", "uuid"].sort(),
   ExtractField: ["year", "month", "day", "hour", "minute", "dow"].sort(),
   PgExtractField: [
     "second", "doy", "epoch", "quarter", "week", "isodow", "isoyear",

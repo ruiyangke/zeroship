@@ -618,7 +618,7 @@ async fn batched_backfill_portable_on_sqlite() {
     );
 }
 
-/// Structural-validator portable expressions apply on SQLite: a `cast("integer")`
+/// Structural-validator portable expressions apply on SQLite: a `cast({ to: "int" })`
 /// and a `concat` with a NULL operand are portable closed-AST nodes (§3.3.1) — they
 /// lower + apply cleanly on the real SQLite backend (the PG leg is covered by the
 /// assembler unit tests + the PG e2e). Concat with NULL propagates NULL on BOTH

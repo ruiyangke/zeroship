@@ -39,6 +39,7 @@ import type {
   ColumnRef,
   CommentTargetArg,
   AlterSequenceArgs,
+  CastTarget,
   CreateDomainArgs,
   CreateEnumArgs,
   CreateSequenceArgs,
@@ -1580,6 +1581,23 @@ const pgExtractFields = [
 type PgExtractFieldToken = typeof pgExtractFields[number];
 const pgExtractFieldSet = new Set<string>(pgExtractFields);
 
+const castTargets = ["text", "int", "real", "boolean", "bytes", "uuid"] as const;
+const castTargetSet = new Set<string>(castTargets);
+
+function castTarget(args: unknown): CastTarget {
+  if (!isPlainObject(args)) {
+    throw structuredError("OP_INVALID", "cast(args): args must be { to }");
+  }
+  const to = args.to;
+  if (typeof to !== "string" || !castTargetSet.has(to)) {
+    throw structuredError(
+      "OP_INVALID",
+      `cast({ to }): to must be one of ${castTargets.map((t) => JSON.stringify(t)).join(", ")}; got ${JSON.stringify(to)}`,
+    );
+  }
+  return to as CastTarget;
+}
+
 function extractField(field: unknown, what = "c.fn.extract(field, expr)"): PortableExtractField {
   if (typeof field !== "string" || !portableExtractFieldSet.has(field)) {
     throw structuredError(
@@ -1687,8 +1705,8 @@ class ExprChainImpl implements ExprChainType {
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
-  cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
-    return chain({ node: "cast", operand: this.__node, target });
+  cast(args: { to: CastTarget }) {
+    return chain({ node: "cast", operand: this.__node, target: castTarget(args) });
   }
   // Portable predicate nodes (§3.4). `between`/`like` render identical syntax on
   // all three dialects; `distinctFrom` is portably named but per-dialect rendered

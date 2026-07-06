@@ -199,8 +199,8 @@ export function up() {
   });
   table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_amount_cents_check").add({ expr: (c) => c("amount_cents").ne(0) });
   pgTable("credit_ledger", { schema: "zeroship" }).check("credit_ledger_currency_check").add({ expr: (c) => c.pg.regex(c("currency"), "^[a-z]{3}$") });
-  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_grant_ref").add({ expr: (c) => c("kind").cast("text").in(["consumed", "void_reversal", "refund_clawback"]).and(c("consumed_from_grant_id").isNotNull()).or(c("kind").cast("text").notIn(["consumed", "void_reversal", "refund_clawback"]).and(c("consumed_from_grant_id").isNull())) });
-  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_kind_sign").add({ expr: (c) => c("kind").cast("text").in(["consumed", "refund_clawback"]).and(c("amount_cents").lt(0)).or(c("kind").cast("text").notIn(["consumed", "refund_clawback"]).and(c("amount_cents").gt(0))) });
+  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_grant_ref").add({ expr: (c) => c("kind").cast({ to: "text" }).in(["consumed", "void_reversal", "refund_clawback"]).and(c("consumed_from_grant_id").isNotNull()).or(c("kind").cast({ to: "text" }).notIn(["consumed", "void_reversal", "refund_clawback"]).and(c("consumed_from_grant_id").isNull())) });
+  table("credit_ledger", { schema: "zeroship" }).check("credit_ledger_kind_sign").add({ expr: (c) => c("kind").cast({ to: "text" }).in(["consumed", "refund_clawback"]).and(c("amount_cents").lt(0)).or(c("kind").cast({ to: "text" }).notIn(["consumed", "refund_clawback"]).and(c("amount_cents").gt(0))) });
   table("invoice_lines", { schema: "zeroship" }).create({
     columns: {
       invoice_id: t.text().notNull(),

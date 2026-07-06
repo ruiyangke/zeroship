@@ -187,8 +187,8 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
         mag: (c) => c.fn.abs(c("code").sub(500)),
         canon: (c) => c.fn.nullif(c("label"), ""),
         score: (c) => c("code").add(1).mul(2).sub(3).div(1),
-        joined: (c) => c("label").concat(" ", c("code").cast("text")),
-        code_txt: (c) => c("code").cast("text"),
+        joined: (c) => c("label").concat(" ", c("code").cast({ to: "text" })),
+        code_txt: (c) => c("code").cast({ to: "text" }),
       },
       where: (c) => c("code").gt(0).and(c("label").isNotNull()),
     });
@@ -209,7 +209,7 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
     });
     table("status_codes").backfill({
       set: {
-        full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast("text")),
+        full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast({ to: "text" })),
         first: (c) => c.fn.splitPart(c("label"), " ", 1),
         touched: (c) => c.fn.now(),
         token: (c) => c.fn.genRandomUuid(),
@@ -277,9 +277,9 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     secrets.policy("tenant_isolation").create({
       for: "all",
       using: (c) =>
-        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
+        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
       withCheck: (c) =>
-        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
+        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
     });
     secrets.policy("tenant_isolation").drop({ ifExists: true });
     secrets.setRls({ enabled: false, forced: false });

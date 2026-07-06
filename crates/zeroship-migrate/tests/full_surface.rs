@@ -563,7 +563,7 @@ fn fluent_expr_builder_constructs_closed_ast() {
         export default { name: "n", up() {
             table("t").update({
                 set: {
-                    a: (c) => c("x").add(1).cast("integer"),
+                    a: (c) => c("x").add(1).cast({ to: "int" }),
                     b: (c) => c("y").isNull().not(),
                 },
                 where: (c) => c("x").gt(0).and(c("y").le(10)),
@@ -572,10 +572,10 @@ fn fluent_expr_builder_constructs_closed_ast() {
     "#;
     let ir = record(src, "fluent_expr");
     let set = ops(&ir)[0].get("set").unwrap();
-    // a: cast(add(colRef x, lit 1), integer)
+    // a: cast(add(colRef x, lit 1), int)
     let a = set.get("a").unwrap();
     assert_eq!(a.get("node").unwrap(), "cast");
-    assert_eq!(a.get("target").unwrap(), "integer");
+    assert_eq!(a.get("target").unwrap(), "int");
     assert_eq!(a.get("operand").unwrap().get("op").unwrap(), "add");
     // b: not(isNull(colRef y))
     let b = set.get("b").unwrap();

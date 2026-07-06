@@ -733,7 +733,7 @@ fn render_agg(f: AggFunc, arg_sql: Option<&str>, distinct: bool) -> String {
     }
 }
 
-/// The portable cast-target SQL type per dialect (§3.3.1). `blob` is `BYTEA` on
+/// The portable cast-target SQL type per dialect (§3.3.1). `bytes` is `BYTEA` on
 /// PG / `BLOB` on SQLite; the rest share spelling.
 fn cast_target_sql(target: crate::model::expr::CastTarget, dialect: SqlDialect) -> &'static str {
     crate::render::renderer::renderer(dialect).cast_target(target)
@@ -1697,6 +1697,39 @@ mod tests {
             mysql.starts_with("CONCAT(") && !mysql.contains("||"),
             "MySQL MUST render Concat as CONCAT(...), never `||` (logical OR): got {mysql}"
         );
+    }
+
+    #[test]
+    fn cast_renders_per_dialect_type_names() {
+        use crate::model::expr::CastTarget;
+
+        let cases = [
+            (
+                CastTarget::Int,
+                "CAST(\"x\" AS integer)",
+                "CAST(\"x\" AS integer)",
+                "CAST(`x` AS signed)",
+            ),
+            (
+                CastTarget::Bytes,
+                "CAST(\"x\" AS bytea)",
+                "CAST(\"x\" AS blob)",
+                "CAST(`x` AS binary)",
+            ),
+            (
+                CastTarget::Text,
+                "CAST(\"x\" AS text)",
+                "CAST(\"x\" AS text)",
+                "CAST(`x` AS char)",
+            ),
+        ];
+
+        for (target, pg, sqlite, mysql) in cases {
+            let expr = Expr::Cast { operand: Box::new(Expr::col("x")), target };
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), sqlite);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
+        }
     }
 
     // ── Qualified column refs (§3.4, the join-ON fix) ────────────────────────
