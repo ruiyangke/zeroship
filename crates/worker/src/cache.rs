@@ -253,6 +253,19 @@ pub fn record_workflow_step(app_id: &Uuid) {
     });
 }
 
+/// Record a successful workflow output blob write. The workflow blob store is
+/// a trusted platform storage path, so it uses the same storage usage counters
+/// as the native storage primitive.
+pub fn record_workflow_blob_write(app_id: &Uuid, bytes: u64) {
+    METER.with(|m| {
+        if let Some(meter) = m.borrow().as_ref() {
+            let id = app_id.to_string();
+            meter.increment(&id, "storage_ops", 1);
+            meter.increment(&id, "storage_bytes", bytes);
+        }
+    });
+}
+
 /// Record an INCREMENTAL streaming-usage delta (metering coverage #27, H1).
 ///
 /// A long-lived SSE/streaming response accrues `egress_bytes` and

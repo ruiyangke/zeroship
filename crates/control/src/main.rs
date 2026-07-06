@@ -14,7 +14,7 @@ use zeroship_core::config::{
     bootstrap_or_exit, env_is_truthy, parse_bool_flag, resolve_overlay_string,
     validate_master_key_material, CheckConfigReport, CheckFormat, CheckValue,
 };
-use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
+use zeroship_bundle::{build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore};
 use zeroship_control::{
     admin_handlers, api, bootstrap_console, device_handlers, env_handlers,
     internal, oauth_grants_handlers, oauth_handlers, stripe_handlers, token_handlers,
@@ -1225,6 +1225,8 @@ fn main() -> std::io::Result<()> {
     // `BlobStore::delete_app_manifests`.
     let blob_store: Arc<dyn BlobStore> =
         build_blob_store(&store_url).expect("failed to initialise blob store");
+    let workflow_blob_store: Arc<dyn WorkflowBlobStore> = build_workflow_blob_store(&store_url)
+        .expect("failed to initialise workflow blob store");
 
     if !legacy_keys.is_empty() {
         tracing::info!(
@@ -1471,6 +1473,7 @@ fn main() -> std::io::Result<()> {
         env_store,
         stripe_store,
         blob_store,
+        workflow_blob_store,
         control_key: zeroship_control::SecretString::new(control_key),
         master_key: zeroship_control::SecretString::new(master_key),
         stripe_webhook_secret: zeroship_control::SecretString::new(stripe_webhook_secret),

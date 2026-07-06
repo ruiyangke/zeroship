@@ -27,10 +27,13 @@ export interface BackoffConfig {
 
 export interface StepOutputRef {
   readonly kind: "workflow-step-output-ref";
+  readonly ref: string;
   readonly hash: string;
   readonly size: number;
   readonly contentType?: string;
   json<T = unknown>(): Promise<T>;
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
   bytes(): Promise<Uint8Array>;
   stream(): ReadableStream<Uint8Array>;
 }
@@ -50,7 +53,7 @@ export interface StepConfig<T = unknown> {
   retries?: RetryConfig;
   backoff?: BackoffConfig;
   timeout?: string;
-  output?: "auto" | "inline" | "ref" | { as: "ref" | "stream"; contentType?: string };
+  output?: "auto" | "inline" | "ref" | "blob" | "stream" | { as: "ref" | "blob" | "stream"; contentType?: string };
   compensate?: Compensator<T>;
 }
 
@@ -91,6 +94,11 @@ export interface ChildWorkflowOptions {
 
 export interface WorkflowStep {
   run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  run<T>(
+    name: string,
+    config: StepConfig<T> & { output: "ref" | "blob" | "stream" | { as: "ref" | "blob" | "stream"; contentType?: string } },
+    fn: () => T | Promise<T>,
+  ): Promise<StepOutputRef>;
   run<T>(name: string, config: StepConfig<T>, fn: () => T | Promise<T>): Promise<T>;
   sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
   sleep(name: string, duration: string): Promise<void>;
@@ -111,6 +119,7 @@ export interface WorkflowStep {
 }
 
 export type Step = WorkflowStep;
+export type StatusOutput<T = unknown> = T | StepOutputRef;
 
 export type WorkflowRunState =
   | "queued"
@@ -137,7 +146,7 @@ export interface RestartOptions {
 export interface WorkflowRun<Output = unknown> {
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
-  status(): Promise<{ state: WorkflowRunState; output?: Output | StepOutputRef; error?: unknown }>;
+  status(): Promise<{ state: WorkflowRunState; output?: StatusOutput<Output>; error?: unknown }>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;

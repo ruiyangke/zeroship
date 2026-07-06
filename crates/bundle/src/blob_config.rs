@@ -18,6 +18,7 @@ use compio_s3::{S3Config, S3Credentials};
 
 use crate::blob::{BlobStore, LocalDiskBlobStore};
 use crate::s3_blob::S3BlobStore;
+use crate::workflow_blob::{LocalWorkflowBlobStore, RemoteWorkflowBlobStore, WorkflowBlobStore};
 
 /// A parsed `--blob-store` location.
 #[derive(Debug, Clone)]
@@ -111,6 +112,23 @@ pub fn build_blob_store(
     }
 }
 
+/// Build the workflow-output blob store from the same parsed location as the
+/// deploy blob store. The store owns a separate `wfblob/` namespace.
+pub fn build_workflow_blob_store(
+    url: &StoreUrl,
+) -> Result<Arc<dyn WorkflowBlobStore>, BlobStoreConfigError> {
+    match url {
+        StoreUrl::Local(root) => {
+            let store = LocalWorkflowBlobStore::new(root.clone())?;
+            Ok(Arc::new(store))
+        }
+        StoreUrl::S3(cfg) => {
+            let creds = s3_credentials_from_env()?;
+            Ok(Arc::new(RemoteWorkflowBlobStore::new(cfg.clone(), creds)))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,6 +173,17 @@ mod tests {
         let store = build_blob_store(&u).expect("local build");
         assert!(store.local_path(&"a".repeat(64)).is_some());
         assert!(root.join("blobs").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn build_local_workflow_store_creates_separate_namespace() {
+        let mut root = std::env::temp_dir();
+        root.push(format!("zswfblobcfg-{}", uuid::Uuid::new_v4().simple()));
+        let u = StoreUrl::Local(root.clone());
+        let _store = build_workflow_blob_store(&u).expect("local workflow build");
+        assert!(root.join("wfblob").exists());
+        assert!(!root.join("blobs").exists());
         std::fs::remove_dir_all(&root).ok();
     }
 }

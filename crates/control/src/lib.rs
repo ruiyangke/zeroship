@@ -52,7 +52,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use zeroize::Zeroizing;
-use zeroship_bundle::BlobStore;
+use zeroship_bundle::{BlobStore, WorkflowBlobStore};
 
 pub use env_store::EnvStore;
 pub use rate_limit::{Quota, RateLimiter};
@@ -127,6 +127,10 @@ pub struct AppState {
     /// gateway and worker read. App purge deletes the per-app manifest
     /// keyspace via `BlobStore::delete_app_manifests`.
     pub blob_store: Arc<dyn BlobStore>,
+    /// Content-addressed workflow output store. This is intentionally separate
+    /// from deploy bundle blobs so workflow-output GC can never delete deploy
+    /// artifacts.
+    pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
     pub control_key: SecretString,
     pub master_key: SecretString,
     /// Stripe webhook signing secret. Required in prod; empty +

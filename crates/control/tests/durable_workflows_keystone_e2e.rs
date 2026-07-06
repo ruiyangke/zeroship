@@ -9,9 +9,10 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -24,6 +25,7 @@ use compio_postgres::{connect, NoTls};
 use futures::channel::oneshot;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_control::cron::workflow_blob_gc;
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, StepRequest,
     WorkflowEngineConfig,
@@ -44,6 +46,8 @@ const SIDE_EFFECT_WORKFLOW_NAME: &str = "SideEffectWorkflow";
 const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
 const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
 const SCHEDULED_WORKFLOW_NAME: &str = "ScheduledWorkflow";
+const BLOB_OUTPUT_WORKFLOW_NAME: &str = "BlobOutputWorkflow";
+const STREAM_LIMIT_WORKFLOW_NAME: &str = "StreamLimitWorkflow";
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -66,6 +70,7 @@ struct Fixture {
     state: Arc<AppState>,
     pg: Arc<compio_postgres::Client>,
     blob_root: PathBuf,
+    cleanup_blob_root: bool,
     deploy_tmp_dir: PathBuf,
     app_id: Uuid,
     deploy_id: String,
@@ -73,7 +78,9 @@ struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.blob_root);
+        if self.cleanup_blob_root {
+            let _ = std::fs::remove_dir_all(&self.blob_root);
+        }
         let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
     }
 }
@@ -88,7 +95,10 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 }
 
 async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id: String) -> Fixture {
-    let blob_root = tmpdir("control-blob");
+    let (blob_root, cleanup_blob_root) = match std::env::var("ZEROSHIP_DW_E2E_BLOB_ROOT") {
+        Ok(root) if !root.trim().is_empty() => (PathBuf::from(root), false),
+        _ => (tmpdir("control-blob"), true),
+    };
     let deploy_tmp_dir = tmpdir("deploy");
     let registry = Registry::new(db_url).await.expect("registry");
     common::ensure_builtin_plans(&registry).await;
@@ -96,6 +106,10 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
     let stripe_store = StripeStore::new(registry.clone());
     let blob_store: Arc<dyn BlobStore> =
         Arc::new(LocalDiskBlobStore::new(blob_root.clone()).expect("blob store"));
+    let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
+        zeroship_bundle::LocalWorkflowBlobStore::new(blob_root.clone())
+            .expect("workflow blob store"),
+    );
     let control_pg = Arc::new(pg(db_url).await);
 
     Fixture {
@@ -104,6 +118,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
             env_store,
             stripe_store,
             blob_store,
+            workflow_blob_store,
             control_key: SecretString::new("test-control-key".to_string()),
             master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
             stripe_webhook_secret: SecretString::new(String::new()),
@@ -145,6 +160,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
         }),
         pg: control_pg,
         blob_root,
+        cleanup_blob_root,
         deploy_tmp_dir,
         app_id,
         deploy_id,
@@ -1111,6 +1127,58 @@ async fn post_control(
     serde_json::from_slice(&body_bytes).expect("control response json")
 }
 
+async fn get_output_bytes(
+    control_url: &str,
+    app_id: Uuid,
+    run_id: &str,
+    step_name: Option<&str>,
+    range: Option<&str>,
+) -> (u16, Vec<u8>) {
+    let url = match step_name {
+        Some(step_name) => format!(
+            "{}/internal/workflows/runs/{}/steps/{}/output?occurrence=0",
+            control_url.trim_end_matches('/'),
+            run_id,
+            step_name
+        ),
+        None => format!(
+            "{}/internal/workflows/runs/{}/output",
+            control_url.trim_end_matches('/'),
+            run_id
+        ),
+    };
+    let client = cyper::Client::new();
+    let mut builder = client
+        .get(&url)
+        .expect("output request URL")
+        .header("x-zeroship-app-id", app_id.to_string())
+        .expect("app id header");
+    if let Some(range) = range {
+        builder = builder.header("range", range).expect("range header");
+    }
+    let response = builder.send().await.expect("get output");
+    let status = response.status().as_u16();
+    let bytes = response.bytes().await.expect("read output response");
+    (status, bytes.to_vec())
+}
+
+fn count_regular_files(root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_file() => 1,
+                Ok(kind) if kind.is_dir() => count_regular_files(&path),
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
 async fn run_debug(fx: &Fixture, run_id: &str) -> String {
     let run_rows = fx
         .pg
@@ -1710,6 +1778,298 @@ async fn durable_workflows_m1_keystone_real_spine() {
     );
     assert_eq!(crash_counts.get("b").copied(), Some(1));
 
+    let blob_size = 1024 * 1024 + 17;
+    let blob_run = seed_workflow_run(
+        &fx,
+        BLOB_OUTPUT_WORKFLOW_NAME,
+        serde_json::json!({"size": blob_size}),
+    )
+    .await;
+    let (blob_crash_dispatcher, blob_dropped_rx, blob_release_tx) =
+        CrashOnceDispatcher::new(gateway_url.clone());
+    let blob_crash_dispatcher = Arc::new(blob_crash_dispatcher);
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&blob_crash_dispatcher),
+        config("dw15-blob-crash-first"),
+    )
+    .await
+    .expect("blob crash first tick");
+    assert_eq!(claimed, 1);
+    let dropped = blob_dropped_rx.await.expect("dropped blob StepResult");
+    let dropped_hash = match &dropped {
+        DispatchOutcome::Completed(result) => {
+            assert_eq!(result.run_id, blob_run);
+            assert_eq!(result.checkpoints.len(), 1);
+            assert_eq!(result.checkpoints[0].name, "big");
+            assert!(
+                result.checkpoints[0].output.is_none(),
+                "blob-backed checkpoint must not inline the large output"
+            );
+            result.checkpoints[0]
+                .output_ref
+                .as_ref()
+                .expect("dropped checkpoint blob ref")
+                .hash
+                .clone()
+        }
+        other => panic!("blob dispatch did not produce StepResult: {other:?}"),
+    };
+    assert!(
+        step_rows(&fx, &blob_run).await.is_empty(),
+        "dropped blob result must not commit a journal row"
+    );
+    compio::time::sleep(Duration::from_millis(1_650)).await;
+    let takeover = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&real_dispatcher),
+        config("dw15-blob-takeover"),
+    )
+    .await
+    .expect("blob takeover tick");
+    assert_eq!(takeover, 1, "expired blob lease should be reclaimed");
+    let _ = blob_release_tx.send(());
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw15-blob-drive"),
+        &blob_run,
+    )
+    .await;
+    let blob_step = fx
+        .pg
+        .query_one(
+            "SELECT output_kind, output_hash, output_size, output, output_content_type \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND name = 'big'",
+            &[&blob_run],
+        )
+        .await
+        .expect("load blob step row");
+    assert_eq!(blob_step.get::<_, String>("output_kind"), "blob");
+    let committed_hash: String = blob_step
+        .get::<_, Option<String>>("output_hash")
+        .expect("committed blob hash");
+    assert_eq!(committed_hash, dropped_hash);
+    assert!(blob_step.get::<_, Option<serde_json::Value>>("output").is_none());
+    assert_eq!(
+        blob_step
+            .get::<_, Option<String>>("output_content_type")
+            .as_deref(),
+        Some("application/json")
+    );
+    let (step_status, step_bytes) =
+        get_output_bytes(&control_url, fx.app_id, &blob_run, Some("big"), None).await;
+    assert_eq!(step_status, 200);
+    assert_eq!(
+        blob_step.get::<_, Option<i64>>("output_size"),
+        Some(step_bytes.len() as i64)
+    );
+    let step_json: serde_json::Value =
+        serde_json::from_slice(&step_bytes).expect("blob step output json");
+    assert_eq!(
+        step_json["payload"].as_str().expect("payload string").len(),
+        blob_size
+    );
+    let blob_output = run_output(&fx, &blob_run).await;
+    assert_eq!(step_json["digest"], blob_output["digest"]);
+    assert_eq!(blob_output["len"].as_u64(), Some(blob_size as u64));
+    let (run_status, run_bytes) =
+        get_output_bytes(&control_url, fx.app_id, &blob_run, None, None).await;
+    assert_eq!(run_status, 200);
+    let run_read_json: serde_json::Value =
+        serde_json::from_slice(&run_bytes).expect("run output json");
+    assert_eq!(run_read_json, blob_output);
+    let (range_status, range_bytes) = get_output_bytes(
+        &control_url,
+        fx.app_id,
+        &blob_run,
+        Some("big"),
+        Some("bytes=0-31"),
+    )
+    .await;
+    assert_eq!(range_status, 206);
+    assert_eq!(range_bytes.as_slice(), &step_bytes[..32]);
+    let object = fx
+        .state
+        .workflow_blob_store
+        .get_blob(&committed_hash)
+        .await
+        .expect("workflow blob object");
+    assert_eq!(object.as_ref(), step_bytes.as_slice());
+    let ref_row = fx
+        .pg
+        .query_one(
+            "SELECT refcount, size \
+               FROM zeroship.workflow_blobs \
+              WHERE hash = $1",
+            &[&committed_hash],
+        )
+        .await
+        .expect("load blob ref row");
+    assert_eq!(ref_row.get::<_, i32>("refcount"), 1);
+    assert_eq!(ref_row.get::<_, i64>("size"), step_bytes.len() as i64);
+
+    let stream_blob_files_before = count_regular_files(&fx.blob_root.join("wfblob"));
+    let stream_run = seed_workflow_run(
+        &fx,
+        STREAM_LIMIT_WORKFLOW_NAME,
+        serde_json::json!({"size": 2_097_153}),
+    )
+    .await;
+    let stream_error = drive_until_failed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw15-stream-limit"),
+        &stream_run,
+        "stream-limit",
+    )
+    .await;
+    assert_eq!(stream_error["type"], "LimitExceededError");
+    assert!(
+        step_rows(&fx, &stream_run).await.is_empty(),
+        "over-limit stream output must not commit a blob-backed step row"
+    );
+    assert_eq!(
+        count_regular_files(&fx.blob_root.join("wfblob")),
+        stream_blob_files_before,
+        "over-limit stream output must clean partial workflow blob writes"
+    );
+
+    let gc_guard_run = seed_workflow_run(
+        &fx,
+        BLOB_OUTPUT_WORKFLOW_NAME,
+        serde_json::json!({"size": blob_size + 31}),
+    )
+    .await;
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw15-gc-guard-drive"),
+        &gc_guard_run,
+    )
+    .await;
+    let guard_hash: String = fx
+        .pg
+        .query_one(
+            "SELECT output_hash \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND name = 'big'",
+            &[&gc_guard_run],
+        )
+        .await
+        .expect("load guard blob hash")
+        .get::<_, Option<String>>("output_hash")
+        .expect("guard blob hash");
+    let old_ref = Utc::now()
+        - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 60);
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_blobs \
+                SET refcount = 0, last_referenced_at = $2 \
+              WHERE hash = $1",
+            &[&guard_hash, &old_ref],
+        )
+        .await
+        .expect("age referenced blob row");
+    let guarded_deleted = workflow_blob_gc::tick_ref_sweep(&fx.state)
+        .await
+        .expect("run guarded ref sweep");
+    assert_eq!(
+        guarded_deleted, 0,
+        "ref sweep must not delete a blob still referenced by a step row"
+    );
+    assert!(fx
+        .state
+        .workflow_blob_store
+        .get_blob(&guard_hash)
+        .await
+        .is_ok());
+
+    let reclaim_run = seed_workflow_run(
+        &fx,
+        BLOB_OUTPUT_WORKFLOW_NAME,
+        serde_json::json!({"size": blob_size + 43}),
+    )
+    .await;
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw15-reclaim-drive"),
+        &reclaim_run,
+    )
+    .await;
+    let reclaim_hash: String = fx
+        .pg
+        .query_one(
+            "SELECT output_hash \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND name = 'big'",
+            &[&reclaim_run],
+        )
+        .await
+        .expect("load reclaim blob hash")
+        .get::<_, Option<String>>("output_hash")
+        .expect("reclaim blob hash");
+    let restart = post_control(
+        &control_url,
+        fx.app_id,
+        &reclaim_run,
+        "restart",
+        serde_json::json!({"from": {"name": "big"}}),
+    )
+    .await;
+    assert_eq!(restart["runId"], reclaim_run);
+    assert_eq!(restart["state"], "queued");
+    assert_eq!(restart["restartedFromOrdinal"], 0);
+    assert!(
+        step_rows(&fx, &reclaim_run).await.is_empty(),
+        "restart from blob step must drop the blob-backed step row"
+    );
+    let reclaim_refcount: i32 = fx
+        .pg
+        .query_one(
+            "SELECT refcount \
+               FROM zeroship.workflow_blobs \
+              WHERE hash = $1",
+            &[&reclaim_hash],
+        )
+        .await
+        .expect("load reclaim refcount")
+        .get("refcount");
+    assert_eq!(reclaim_refcount, 0);
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_blobs \
+                SET last_referenced_at = $2 \
+              WHERE hash = $1",
+            &[&reclaim_hash, &old_ref],
+        )
+        .await
+        .expect("age reclaim blob row");
+    let deploy_blob_files_before_gc = count_regular_files(&fx.blob_root.join("blobs"));
+    let manifest_files_before_gc = count_regular_files(&fx.blob_root.join("manifests"));
+    let reclaimed = workflow_blob_gc::tick_ref_sweep(&fx.state)
+        .await
+        .expect("run reclaim ref sweep");
+    assert_eq!(reclaimed, 1);
+    assert!(fx
+        .state
+        .workflow_blob_store
+        .get_blob(&reclaim_hash)
+        .await
+        .is_err());
+    assert_eq!(
+        count_regular_files(&fx.blob_root.join("blobs")),
+        deploy_blob_files_before_gc,
+        "workflow blob GC must not touch deploy bundle blobs"
+    );
+    assert_eq!(
+        count_regular_files(&fx.blob_root.join("manifests")),
+        manifest_files_before_gc,
+        "workflow blob GC must not touch deploy manifests"
+    );
+
     let signal_run = seed_signal_run(&fx, "signal", "PT30S", Some("PT5S")).await;
     drive_until_waiting(
         &fx,
@@ -1903,7 +2263,11 @@ async fn durable_workflows_m1_keystone_real_spine() {
     )
     .await;
     let expired_token = create_run_signal_token(&control_url, fx.app_id, &expired_run, "PT1S").await;
-    compio::time::sleep(Duration::from_millis(2_250)).await;
+    // Wait past TTL(1s) + timestamp-tolerance(1s) with margin for integer-second
+    // rounding: exp = mint_second+1, so the token is only strictly expired once
+    // now_second >= mint_second+3. 2.25s lands on the mint_second+2 boundary and
+    // flakes; 3.5s clears it deterministically for any sub-second mint alignment.
+    compio::time::sleep(Duration::from_millis(3_500)).await;
     let expired = post_public_signal(
         &gateway_url,
         &expired_token,

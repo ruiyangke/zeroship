@@ -186,11 +186,24 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     kind: JournalStepKind;
     state: JournalStepState;
     output?: unknown;
+    outputRef?: StepOutputRefDescriptor;
     error?: { type?: string; message?: string; stack?: string; retryable?: boolean };
     wakeAt?: string;
     signalType?: string;
     consumedSignal?: unknown;
     childRunId?: string;
+  };
+  type WorkflowOutputReadConfig = {
+    controlUrl: string;
+    token: string;
+    appId: string;
+  };
+  type StepOutputRefDescriptor = {
+    kind?: string;
+    ref?: string;
+    hash: string;
+    size: number;
+    contentType?: string;
   };
   type FrontierOutcome =
     | {
@@ -200,6 +213,8 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         nameOccurrence: number;
         state: "completed";
         output: unknown;
+        outputMode?: string;
+        outputContentType?: string;
       }
     | {
         kind: "run";
@@ -275,6 +290,9 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
   const WORKFLOW_BODY_TIMER_ERROR =
     "workflow bodies may not use timers directly — use step.sleep(...) instead";
+  const workflowRealFetch = (globalScope as typeof globalThis & {
+    fetch?: (...args: unknown[]) => Promise<Response>;
+  }).fetch;
 
   function assertWorkflowBodyMayUseFetch(): void {
     if (workflowDispatchAls.getStore()?.mode === "body") {
@@ -353,6 +371,110 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     return e;
   }
 
+  function workflowOutputConfig(config: unknown): {
+    outputMode?: string;
+    outputContentType?: string;
+  } {
+    if (!config || typeof config !== "object") return {};
+    const output = (config as { output?: unknown }).output;
+    if (typeof output === "string") return { outputMode: output };
+    if (output && typeof output === "object") {
+      const as = (output as { as?: unknown }).as;
+      const contentType = (output as { contentType?: unknown }).contentType;
+      return {
+        ...(typeof as === "string" ? { outputMode: as } : {}),
+        ...(typeof contentType === "string" && contentType ? { outputContentType: contentType } : {}),
+      };
+    }
+    return {};
+  }
+
+  function workflowOutputReadConfig(envelope: Record<string, unknown>): WorkflowOutputReadConfig | undefined {
+    const raw = envelope.outputRead;
+    if (!raw || typeof raw !== "object") return undefined;
+    const value = raw as Record<string, unknown>;
+    const controlUrl = typeof value.controlUrl === "string" ? value.controlUrl : "";
+    const token = typeof value.token === "string" ? value.token : "";
+    const appId = typeof value.appId === "string" ? value.appId : "";
+    if (!controlUrl || !token || !appId) return undefined;
+    return { controlUrl, token, appId };
+  }
+
+  function createStepOutputRef(
+    descriptor: StepOutputRefDescriptor,
+    outputRead: WorkflowOutputReadConfig | undefined,
+    runId: string,
+    name: string,
+    occurrence: number,
+    memo: Map<string, Promise<Uint8Array>>,
+  ): unknown {
+    const ref = descriptor.ref ?? `wfblob:sha256:${descriptor.hash}`;
+    const memoKey = `${runId}:${name}:${occurrence}:${descriptor.hash}`;
+    const readBytes = () => {
+      let promise = memo.get(memoKey);
+      if (!promise) {
+        promise = fetchStepOutputBytes(outputRead, runId, name, occurrence);
+        memo.set(memoKey, promise);
+      }
+      return promise;
+    };
+    const readText = async () => new TextDecoder().decode(await readBytes());
+    return {
+      kind: "workflow-step-output-ref",
+      ref,
+      hash: descriptor.hash,
+      size: descriptor.size,
+      ...(descriptor.contentType ? { contentType: descriptor.contentType } : {}),
+      async json() {
+        return JSON.parse(await readText());
+      },
+      async text() {
+        return readText();
+      },
+      async arrayBuffer() {
+        const bytes = await readBytes();
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      },
+      bytes() {
+        return readBytes();
+      },
+      stream() {
+        return new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(await readBytes());
+            controller.close();
+          },
+        });
+      },
+    };
+  }
+
+  async function fetchStepOutputBytes(
+    outputRead: WorkflowOutputReadConfig | undefined,
+    runId: string,
+    name: string,
+    occurrence: number,
+  ): Promise<Uint8Array> {
+    if (!outputRead) {
+      throw mkErr("workflow output read endpoint is unavailable", 500, "WORKFLOW_DEFINITION_ERROR");
+    }
+    if (typeof workflowRealFetch !== "function") {
+      throw mkErr("fetch is unavailable for workflow output reads", 500, "WORKFLOW_DEFINITION_ERROR");
+    }
+    const base = outputRead.controlUrl.replace(/\/+$/, "");
+    const url = `${base}/internal/workflows/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(name)}/output?occurrence=${occurrence}`;
+    const response = await workflowRealFetch(url, {
+      headers: {
+        authorization: `Bearer ${outputRead.token}`,
+        "x-zeroship-app-id": outputRead.appId,
+      },
+    });
+    if (!response.ok) {
+      throw mkErr(`workflow output read failed with HTTP ${response.status}`, 500, "WORKFLOW_OUTPUT_READ_FAILED");
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
   function buildTrigger(envelope: Record<string, unknown>): Record<string, unknown> {
     const raw = envelope.trigger && typeof envelope.trigger === "object"
       ? { ...(envelope.trigger as Record<string, unknown>) }
@@ -382,12 +504,28 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         kind: String(row.kind ?? "run") as JournalStepKind,
         state: String(row.state ?? "completed") as JournalStepState,
         output: row.output,
+        outputRef: normalizeOutputRef(row.outputRef),
         error: row.error as JournalStepRecord["error"],
         wakeAt: typeof row.wakeAt === "string" ? row.wakeAt : undefined,
         signalType: typeof row.signalType === "string" ? row.signalType : undefined,
         consumedSignal: row.consumedSignal,
         childRunId: typeof row.childRunId === "string" ? row.childRunId : undefined,
       }));
+  }
+
+  function normalizeOutputRef(value: unknown): StepOutputRefDescriptor | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    const raw = value as Record<string, unknown>;
+    const hash = typeof raw.hash === "string" ? raw.hash : "";
+    const size = typeof raw.size === "number" ? raw.size : Number(raw.size);
+    if (!hash || !Number.isFinite(size)) return undefined;
+    return {
+      kind: typeof raw.kind === "string" ? raw.kind : undefined,
+      ref: typeof raw.ref === "string" ? raw.ref : undefined,
+      hash,
+      size,
+      contentType: typeof raw.contentType === "string" ? raw.contentType : undefined,
+    };
   }
 
   class DispatchMicrotaskQuiescenceBarrier {
@@ -438,6 +576,9 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     readonly #stepsByOrdinal = new Map<number, JournalStepRecord>();
     readonly #nameOccurrences = new Map<string, number>();
     readonly #quiescence: DispatchMicrotaskQuiescenceBarrier;
+    readonly #runId: string;
+    readonly #outputRead: WorkflowOutputReadConfig | undefined;
+    readonly #outputReadMemo = new Map<string, Promise<Uint8Array>>();
     #cursor = 0;
     #frontier: FrontierCoordinator | undefined;
     #activeStepCallbacks = 0;
@@ -445,8 +586,15 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     #parallelIssueWindow = false;
     #parallelIssueWindowToken = 0;
 
-    constructor(steps: JournalStepRecord[], quiescence: DispatchMicrotaskQuiescenceBarrier) {
+    constructor(
+      steps: JournalStepRecord[],
+      quiescence: DispatchMicrotaskQuiescenceBarrier,
+      runId: string,
+      outputRead: WorkflowOutputReadConfig | undefined,
+    ) {
       this.#quiescence = quiescence;
+      this.#runId = runId;
+      this.#outputRead = outputRead;
       for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
@@ -468,6 +616,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       maybeFn?: () => T | Promise<T>,
     ): Promise<T> {
       this.#assertNotNested();
+      const config = typeof configOrFn === "function" ? undefined : configOrFn;
       const fn = typeof configOrFn === "function" ? configOrFn : maybeFn;
       if (typeof fn !== "function") {
         return Promise.reject(mkErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
@@ -475,7 +624,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
 
       const issued = this.#issue(name, "run");
       if (issued.record) return this.#recordPromise<T>(issued.record);
-      return this.#registerFrontier(this.#runFrontier(issued, name, fn as () => T | Promise<T>));
+      return this.#registerFrontier(this.#runFrontier(issued, name, config, fn as () => T | Promise<T>));
     }
 
     sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
@@ -592,11 +741,13 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     async #runFrontier<T>(
       issued: { ordinal: number; nameOccurrence: number },
       name: string,
+      config: unknown,
       fn: () => T | Promise<T>,
     ): Promise<FrontierOutcome> {
       const bodyPromise = this.#invokeStepBody(fn);
       try {
         const output = await bodyPromise;
+        const outputConfig = workflowOutputConfig(config);
         return {
           kind: "run",
           ordinal: issued.ordinal,
@@ -604,6 +755,7 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
           nameOccurrence: issued.nameOccurrence,
           state: "completed",
           output,
+          ...outputConfig,
         };
       } catch (e) {
         if (e instanceof SuspendSignal) throw e;
@@ -725,7 +877,19 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
     }
 
     #resolveRecord<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): T {
-      if (record.state === "completed") return record.output as T;
+      if (record.state === "completed") {
+        if (record.outputRef) {
+          return createStepOutputRef(
+            record.outputRef,
+            this.#outputRead,
+            this.#runId,
+            record.name,
+            record.nameOccurrence ?? 0,
+            this.#outputReadMemo,
+          ) as T;
+        }
+        return record.output as T;
+      }
       if (record.state === "failed") throw deserializeError(record.error);
       throw new SuspendSignal(pendingOutcome ?? {
         kind: record.kind === "child" ? "child" : record.kind,
@@ -945,7 +1109,14 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       nameOccurrence: outcome.nameOccurrence,
     };
     if ((outcome.kind === "run" || outcome.kind === "sideEffect") && outcome.state === "completed") {
-      return { ...base, kind: "StepCompleted", stepKind: outcome.kind, output: outcome.output };
+      return {
+        ...base,
+        kind: "StepCompleted",
+        stepKind: outcome.kind,
+        output: outcome.output,
+        ...(outcome.outputMode ? { outputMode: outcome.outputMode } : {}),
+        ...(outcome.outputContentType ? { outputContentType: outcome.outputContentType } : {}),
+      };
     }
     if (outcome.kind === "run" && outcome.state === "failed") {
       return { ...base, kind: "RunFailed", error: outcome.error };
@@ -1022,7 +1193,12 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
         throw mkErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
       }
       const quiescence = new DispatchMicrotaskQuiescenceBarrier();
-      const step = new JournalBackedStep(normalizeJournal(env), quiescence);
+      const step = new JournalBackedStep(
+        normalizeJournal(env),
+        quiescence,
+        String(env.runId ?? ""),
+        workflowOutputReadConfig(env),
+      );
       const blockedByNonStepWork = quiescence.waitUntilBlocked(() => step.frontierObserved);
       let outputPromise: Promise<unknown>;
       try {

@@ -12,7 +12,9 @@ use zeroship_core::config::{
     bootstrap_or_exit, parse_bool_flag, require_unless_dev, CheckConfigReport, CheckFormat,
     CheckValue,
 };
-use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
+use zeroship_bundle::{
+    build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
+};
 use zeroship_plugin_storage::StorageBackendConfig;
 use zeroship_runtime::init::init_v8;
 
@@ -126,6 +128,14 @@ struct WorkerCli {
     #[arg(long = "workflow-dispatch-unsigned", hide = true, default_value_t = false)]
     workflow_dispatch_unsigned: bool,
 
+    /// Maximum persisted bytes for one workflow step output blob.
+    #[arg(
+        long = "max-step-blob-bytes",
+        env = "ZEROSHIP_MAX_STEP_BLOB_BYTES",
+        default_value = "67108864"
+    )]
+    max_step_blob_bytes: u64,
+
     /// HTTP bind host.
     #[arg(long = "bind", env = "WORKER_BIND", default_value = "127.0.0.1")]
     bind: String,
@@ -181,6 +191,7 @@ impl std::fmt::Debug for WorkerCli {
             .field("kv_url", &"<redacted>")
             .field("storage_url", &self.storage_url)
             .field("workflow_dispatch_unsigned", &self.workflow_dispatch_unsigned)
+            .field("max_step_blob_bytes", &self.max_step_blob_bytes)
             .field("bind", &self.bind)
             .field("socket", &self.socket)
             .field("config_path", &self.config_path)
@@ -245,6 +256,8 @@ pub struct WorkerConfig {
     /// each crate keeps its own `Arc` over a shared remote backend
     /// (for example S3 with an on-disk LRU).
     pub blob_store: Arc<dyn BlobStore>,
+    pub workflow_blob_store: Arc<dyn WorkflowBlobStore>,
+    pub max_step_blob_bytes: u64,
     /// Test-only unsigned durable-workflow replay ingress. Production boot
     /// never exposes a CLI/env switch for this; signed control-plane dispatch
     /// replaces it in a later durable-workflows task.
@@ -430,6 +443,10 @@ fn main() -> std::io::Result<()> {
         report.field("insecure_dev", CheckValue::Flag(insecure_dev));
         report.field("blob_store", CheckValue::Plain(blob_store_root.clone()));
         report.field("blob_store_remote", CheckValue::Flag(blob_store_is_remote));
+        report.field(
+            "max_step_blob_bytes",
+            CheckValue::Count(usize::try_from(cli.max_step_blob_bytes).unwrap_or(usize::MAX)),
+        );
         report.field("socket_configured", CheckValue::Flag(!socket_path.is_empty()));
         report.field("db_configured", CheckValue::Flag(!db_url.is_empty()));
         // Surface the kernel-namespace wiring without leaking the KV URL
@@ -470,6 +487,8 @@ fn main() -> std::io::Result<()> {
 
     let blob_store: Arc<dyn BlobStore> =
         build_blob_store(&store_url).expect("failed to initialise blob store");
+    let workflow_blob_store: Arc<dyn WorkflowBlobStore> = build_workflow_blob_store(&store_url)
+        .expect("failed to initialise workflow blob store");
     tracing::info!(
         blob_store_root = %blob_store_root,
         blob_store_remote = blob_store_is_remote,
@@ -513,6 +532,8 @@ fn main() -> std::io::Result<()> {
         worker_key,
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
+        workflow_blob_store,
+        max_step_blob_bytes: cli.max_step_blob_bytes,
         workflow_dispatch_unsigned: cli.workflow_dispatch_unsigned,
     });
 

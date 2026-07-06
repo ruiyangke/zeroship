@@ -50,6 +50,18 @@ pub struct CreateRunBody {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct StepOutputPath {
+    run_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StepOutputQuery {
+    #[serde(default)]
+    occurrence: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum OnConflictBody {
     Policy(String),
@@ -1333,6 +1345,222 @@ pub async fn get_run_status(
     }))
 }
 
+pub async fn get_run_output(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    run_id: Path<String>,
+) -> web::HttpResponse {
+    let app_id = match app_id_from_channel(&req, &state) {
+        Ok(app_id) => app_id,
+        Err(resp) => return resp,
+    };
+    let run_id = run_id.into_inner();
+    if let Err(e) = validate_run_id(&run_id) {
+        return e.response();
+    }
+    let rows = match state
+        .control_pg
+        .query(
+            "SELECT output, output_kind, output_hash, output_size, output_content_type \
+               FROM zeroship.workflow_runs \
+              WHERE id = $1 AND app_id = $2",
+            &[&run_id, &app_id],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+    };
+    let Some(row) = rows.first() else {
+        return WorkflowApiError::NotFound("workflow run not found".to_string()).response();
+    };
+    output_row_response(&req, &state, app_id, row).await
+}
+
+pub async fn get_step_output(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    path: Path<StepOutputPath>,
+    query: Query<StepOutputQuery>,
+) -> web::HttpResponse {
+    let app_id = match app_id_from_channel(&req, &state) {
+        Ok(app_id) => app_id,
+        Err(resp) => return resp,
+    };
+    let path = path.into_inner();
+    if let Err(e) = validate_run_id(&path.run_id) {
+        return e.response();
+    }
+    let occurrence = query.occurrence.unwrap_or(0);
+    if occurrence < 0 {
+        return WorkflowApiError::BadRequest("step occurrence must be >= 0".to_string())
+            .response();
+    }
+    let rows = match state
+        .control_pg
+        .query(
+            "SELECT s.output, s.output_kind, s.output_hash, s.output_size, s.output_content_type \
+               FROM zeroship.workflow_steps s \
+               JOIN zeroship.workflow_runs r ON r.id = s.run_id \
+              WHERE s.run_id = $1 \
+                AND r.app_id = $2 \
+                AND s.name = $3 \
+                AND s.name_occurrence = $4 \
+                AND s.state = 'completed' \
+              ORDER BY s.ordinal \
+              LIMIT 1",
+            &[&path.run_id, &app_id, &path.name, &occurrence],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+    };
+    let Some(row) = rows.first() else {
+        return WorkflowApiError::NotFound("workflow step output not found".to_string())
+            .response();
+    };
+    output_row_response(&req, &state, app_id, row).await
+}
+
+async fn output_row_response(
+    req: &web::HttpRequest,
+    state: &AppState,
+    app_id: Uuid,
+    row: &compio_postgres::Row,
+) -> web::HttpResponse {
+    let output_kind: String = row.get("output_kind");
+    let content_type: String = row
+        .get::<_, Option<String>>("output_content_type")
+        .unwrap_or_else(|| "application/json".to_string());
+    let body = if output_kind == "blob" {
+        let hash: Option<String> = row.get("output_hash");
+        let size: Option<i64> = row.get("output_size");
+        let Some(hash) = hash else {
+            return WorkflowApiError::Database("blob output missing hash".to_string()).response();
+        };
+        let data = match state.workflow_blob_store.get_blob(&hash).await {
+            Ok(data) => data,
+            Err(e) => {
+                return infrastructure_error_response("workflow output blob read", e);
+            }
+        };
+        if let Some(expected) = size {
+            if expected >= 0 && data.len() as i64 != expected {
+                return infrastructure_error_response(
+                    "workflow output blob read",
+                    format!("blob size mismatch for {hash}"),
+                );
+            }
+        }
+        data.to_vec()
+    } else {
+        let output: Option<Value> = row.get("output");
+        match serde_json::to_vec(&output.unwrap_or(Value::Null)) {
+            Ok(bytes) => bytes,
+            Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
+        }
+    };
+
+    let total = body.len();
+    let range = match parse_bytes_range(req, total) {
+        Ok(range) => range,
+        Err(resp) => return resp,
+    };
+    let (status, start, end) = match range {
+        Some((start, end)) => (StatusCode::PARTIAL_CONTENT, start, end),
+        None if total == 0 => (StatusCode::OK, 0, 0),
+        None => (StatusCode::OK, 0, total - 1),
+    };
+    let slice = if total == 0 {
+        Vec::new()
+    } else {
+        body[start..=end].to_vec()
+    };
+
+    record_workflow_output_read_usage(state, &app_id, slice.len() as i64).await;
+
+    let mut builder = web::HttpResponse::build(status);
+    builder.header("content-type", content_type);
+    builder.header("accept-ranges", "bytes");
+    builder.header("content-length", slice.len().to_string());
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder.header(
+            "content-range",
+            format!("bytes {start}-{end}/{total}"),
+        );
+    }
+    builder.body(slice)
+}
+
+fn parse_bytes_range(
+    req: &web::HttpRequest,
+    total: usize,
+) -> Result<Option<(usize, usize)>, web::HttpResponse> {
+    let Some(raw) = req.headers().get("range").and_then(|value| value.to_str().ok()) else {
+        return Ok(None);
+    };
+    let Some(spec) = raw.strip_prefix("bytes=") else {
+        return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE).finish());
+    };
+    if spec.contains(',') || total == 0 {
+        let mut builder = web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE);
+        builder.header("content-range", format!("bytes */{total}"));
+        return Err(builder.finish());
+    }
+    let Some((start_raw, end_raw)) = spec.split_once('-') else {
+        return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE).finish());
+    };
+    let (start, end) = if start_raw.is_empty() {
+        let suffix = match end_raw.parse::<usize>() {
+            Ok(value) if value > 0 => value,
+            _ => return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE).finish()),
+        };
+        let start = total.saturating_sub(suffix);
+        (start, total - 1)
+    } else {
+        let start = match start_raw.parse::<usize>() {
+            Ok(value) => value,
+            Err(_) => return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE).finish()),
+        };
+        let end = if end_raw.is_empty() {
+            total - 1
+        } else {
+            match end_raw.parse::<usize>() {
+                Ok(value) => value.min(total - 1),
+                Err(_) => {
+                    return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .finish());
+                }
+            }
+        };
+        (start, end)
+    };
+    if start >= total || start > end {
+        let mut builder = web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE);
+        builder.header("content-range", format!("bytes */{total}"));
+        return Err(builder.finish());
+    }
+    Ok(Some((start, end)))
+}
+
+async fn record_workflow_output_read_usage(state: &AppState, app_id: &Uuid, bytes: i64) {
+    let mut deltas = vec![("storage_ops".to_string(), 1)];
+    if bytes > 0 {
+        deltas.push(("storage_bytes".to_string(), bytes));
+        deltas.push(("storage_egress_bytes".to_string(), bytes));
+        deltas.push(("egress_bytes".to_string(), bytes));
+    }
+    let metering = crate::metering::Metering::new(state.registry.clone());
+    if let Err(e) = metering.record_direct(app_id, &deltas).await {
+        tracing::warn!(
+            app_id = %app_id,
+            error = %e,
+            "workflow output read metering failed"
+        );
+    }
+}
+
 pub async fn signal_run(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
@@ -2380,6 +2608,14 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/internal/workflows/runs/{run_id}")
             .route(web::get().to(get_run_status)),
+    )
+    .service(
+        web::resource("/internal/workflows/runs/{run_id}/output")
+            .route(web::get().to(get_run_output)),
+    )
+    .service(
+        web::resource("/internal/workflows/runs/{run_id}/steps/{name}/output")
+            .route(web::get().to(get_step_output)),
     )
     .service(
         web::resource("/internal/workflows/runs/{run_id}/signal")
