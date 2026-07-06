@@ -52,6 +52,17 @@ function assertCompletedRun(
   assert.deepEqual(outcome.output, expected.output);
 }
 
+function assertCompletedSideEffect(
+  outcome: FrontierOutcome,
+  expected: { ordinal: number; name: string; output: unknown },
+): void {
+  assert.equal(outcome.kind, "sideEffect");
+  assert.equal(outcome.state, "completed");
+  assert.equal(outcome.ordinal, expected.ordinal);
+  assert.equal(outcome.name, expected.name);
+  assert.deepEqual(outcome.output, expected.output);
+}
+
 async function runWithDispatcherDrain(
   fn: (step: ReturnType<typeof createJournalStep>) => unknown | Promise<unknown>,
   steps: JournalEnvelope["steps"] = [],
@@ -143,6 +154,69 @@ test("first step.run miss runs once, captures output, then suspends", { timeout:
     },
   );
   assert.equal(calls, 1);
+});
+
+test("first step.sideEffect miss runs once, captures output, then suspends", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+  let calls = 0;
+
+  await assert.rejects(
+    async () => step.sideEffect("v", async () => {
+      calls++;
+      return { value: calls };
+    }),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assertCompletedSideEffect(signal.outcomes[0]!, {
+        ordinal: 0,
+        name: "v",
+        output: { value: 1 },
+      });
+      return true;
+    },
+  );
+  assert.equal(calls, 1);
+});
+
+test("step.sideEffect journal hit returns frozen output without running fn", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope([
+    {
+      ordinal: 0,
+      name: "v",
+      nameOccurrence: 0,
+      kind: "sideEffect",
+      state: "completed",
+      output: { value: "frozen" },
+    },
+  ]));
+  let calls = 0;
+
+  const result = await step.sideEffect("v", () => {
+    calls++;
+    return { value: "fresh" };
+  });
+
+  assert.equal(calls, 0);
+  assert.deepEqual(result, { value: "frozen" });
+});
+
+test("step.sideEffect kind divergence throws NondeterministicError", { timeout: TEST_TIMEOUT_MS }, () => {
+  const step = createJournalStep(envelope([
+    {
+      ordinal: 0,
+      name: "v",
+      nameOccurrence: 0,
+      kind: "run",
+      state: "completed",
+      output: { value: "run" },
+    },
+  ]));
+
+  assert.throws(
+    () => step.sideEffect("v", () => ({ value: "side-effect" })),
+    NondeterministicError,
+  );
 });
 
 test("Promise.all over step misses collects one concurrent frontier batch", { timeout: TEST_TIMEOUT_MS }, async () => {

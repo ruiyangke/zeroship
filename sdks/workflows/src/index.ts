@@ -92,6 +92,7 @@ export interface ChildWorkflowOptions {
 export interface WorkflowStep {
   run<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
   run<T>(name: string, config: StepConfig<T>, fn: () => T | Promise<T>): Promise<T>;
+  sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
   sleep(name: string, duration: string): Promise<void>;
   sleepUntil(name: string, when: Date | number): Promise<void>;
   /**

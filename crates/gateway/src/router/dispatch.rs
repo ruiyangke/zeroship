@@ -263,6 +263,7 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
             "ordinal": required_i64(result, "ordinal")?,
             "name": required_str(result, "name")?,
             "nameOccurrence": result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+            "stepKind": workflow_step_kind_or_run(result)?,
             "output": result.get("output").cloned().unwrap_or(Value::Null),
         })),
         "RunCompleted" => Ok(serde_json::json!({
@@ -307,6 +308,18 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
     }
 }
 
+fn workflow_step_kind_or_run(value: &Value) -> Result<Value, String> {
+    let step_kind = value
+        .get("stepKind")
+        .filter(|value| !value.is_null())
+        .and_then(Value::as_str)
+        .unwrap_or("run");
+    match step_kind {
+        "run" | "sideEffect" => Ok(Value::String(step_kind.to_string())),
+        other => Err(format!("unknown workflow stepKind {other:?}")),
+    }
+}
+
 fn workflow_error_or_default(error: Option<&Value>, message: &str) -> Value {
     error
         .filter(|value| !value.is_null())
@@ -332,7 +345,11 @@ fn normalize_workflow_outcomes(
             return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
         }
         match kind {
-            "StepCompleted" | "RunCompleted" => {}
+            "StepCompleted" => {
+                let step_kind = workflow_step_kind_or_run(outcome)?;
+                outcome["stepKind"] = step_kind;
+            }
+            "RunCompleted" => {}
             "RunFailed" => {
                 if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
                     let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
@@ -383,11 +400,12 @@ fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> 
         let kind = checkpoint.get("kind").and_then(Value::as_str).unwrap_or_default();
         let state = checkpoint.get("state").and_then(Value::as_str).unwrap_or_default();
         match (kind, state) {
-            ("run", "completed") => outcomes.push(serde_json::json!({
+            ("run" | "sideEffect", "completed") => outcomes.push(serde_json::json!({
                 "kind": "StepCompleted",
                 "ordinal": required_i64(checkpoint, "ordinal")?,
                 "name": required_str(checkpoint, "name")?,
                 "nameOccurrence": checkpoint.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0),
+                "stepKind": kind,
                 "output": checkpoint.get("output").cloned().unwrap_or(Value::Null),
             })),
             ("run", "failed") => {
@@ -2764,6 +2782,32 @@ mod tests {
         assert_eq!(result["outcomes"][0]["kind"], "Wait");
         assert_eq!(result["outcomes"][0]["signalType"], "go");
         assert_eq!(result["outcomes"][0]["maxSignalAgeMs"], 5_000);
+    }
+
+    #[test]
+    fn workflow_step_completed_preserves_side_effect_step_kind() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "StepCompleted",
+            "runId": "run_test",
+            "nonce": "wfd_test",
+            "workflowName": "Checkout",
+            "ordinal": 0,
+            "name": "v",
+            "nameOccurrence": 0,
+            "stepKind": "sideEffect",
+            "output": {"value": 1}
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("sideEffect completed result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "StepCompleted");
+        assert_eq!(result["outcomes"][0]["stepKind"], "sideEffect");
+        assert_eq!(result["outcomes"][0]["name"], "v");
     }
 
     #[test]

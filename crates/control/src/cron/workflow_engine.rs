@@ -137,6 +137,10 @@ impl StepCheckpoint {
     }
 }
 
+fn default_step_kind() -> String {
+    "run".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum StepOutcome {
@@ -145,6 +149,8 @@ pub enum StepOutcome {
         name: String,
         #[serde(default, rename = "nameOccurrence")]
         name_occurrence: i32,
+        #[serde(default = "default_step_kind", rename = "stepKind")]
+        step_kind: String,
         #[serde(default)]
         output: Option<Value>,
     },
@@ -415,13 +421,19 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                 ordinal,
                 name,
                 name_occurrence,
+                step_kind,
                 output,
             } => {
+                if !matches!(step_kind.as_str(), "run" | "sideEffect") {
+                    return Err(format!(
+                        "workflow StepCompleted stepKind must be run or sideEffect, got {step_kind:?}"
+                    ));
+                }
                 checkpoints.push(StepCheckpoint {
                     ordinal: *ordinal,
                     name: name.clone(),
                     name_occurrence: *name_occurrence,
-                    kind: "run".to_string(),
+                    kind: step_kind.clone(),
                     state: "completed".to_string(),
                     output: output.clone(),
                     error: None,
@@ -576,10 +588,11 @@ fn outcomes_from_apply_parts(
 
     for checkpoint in checkpoints {
         match (checkpoint.kind.as_str(), checkpoint.state.as_str()) {
-            ("run", "completed") => outcomes.push(StepOutcome::StepCompleted {
+            ("run" | "sideEffect", "completed") => outcomes.push(StepOutcome::StepCompleted {
                 ordinal: checkpoint.ordinal,
                 name: checkpoint.name.clone(),
                 name_occurrence: checkpoint.name_occurrence,
+                step_kind: checkpoint.kind.clone(),
                 output: checkpoint.output.clone(),
             }),
             ("run", "failed") => {

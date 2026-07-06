@@ -164,7 +164,7 @@ declare const globalThis: {
 (function installZsWorkflowDispatch(globalScope: typeof globalThis) {
   if (typeof globalScope.__zsWorkflowDispatch === "function") return;
 
-  type JournalStepKind = "run" | "sleep" | "wait_signal" | "child";
+  type JournalStepKind = "run" | "sideEffect" | "sleep" | "wait_signal" | "child";
   type JournalStepState = "running" | "completed" | "failed";
   type JournalStepRecord = {
     ordinal: number;
@@ -181,7 +181,7 @@ declare const globalThis: {
   };
   type FrontierOutcome =
     | {
-        kind: "run";
+        kind: "run" | "sideEffect";
         ordinal: number;
         name: string;
         nameOccurrence: number;
@@ -414,6 +414,17 @@ declare const globalThis: {
       return this.#registerFrontier(this.#runFrontier(issued, name, fn as () => T | Promise<T>));
     }
 
+    sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
+      this.#assertNotNested();
+      if (typeof fn !== "function") {
+        return Promise.reject(mkErr("step.sideEffect requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
+      }
+
+      const issued = this.#issue(name, "sideEffect");
+      if (issued.record) return this.#recordPromise<T>(issued.record);
+      return this.#registerFrontier(this.#sideEffectFrontier(issued, name, fn));
+    }
+
     sleep(name: string, duration: string): Promise<void> {
       this.#assertNotNested();
       const issued = this.#issue(name, "sleep");
@@ -539,6 +550,31 @@ declare const globalThis: {
           nameOccurrence: issued.nameOccurrence,
           state: "failed",
           error: serializeError(e),
+        };
+      } finally {
+        bodyPromise.catch(() => {});
+        this.#activeStepCallbacks--;
+        if (this.#activeStepCallbacks === 0) {
+          this.#parallelIssueWindow = false;
+        }
+      }
+    }
+
+    async #sideEffectFrontier<T>(
+      issued: { ordinal: number; nameOccurrence: number },
+      name: string,
+      fn: () => T | Promise<T>,
+    ): Promise<FrontierOutcome> {
+      const bodyPromise = this.#invokeStepBody(fn);
+      try {
+        const output = await bodyPromise;
+        return {
+          kind: "sideEffect",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "completed",
+          output,
         };
       } finally {
         bodyPromise.catch(() => {});
@@ -844,8 +880,8 @@ declare const globalThis: {
       name: outcome.name,
       nameOccurrence: outcome.nameOccurrence,
     };
-    if (outcome.kind === "run" && outcome.state === "completed") {
-      return { ...base, kind: "StepCompleted", output: outcome.output };
+    if ((outcome.kind === "run" || outcome.kind === "sideEffect") && outcome.state === "completed") {
+      return { ...base, kind: "StepCompleted", stepKind: outcome.kind, output: outcome.output };
     }
     if (outcome.kind === "run" && outcome.state === "failed") {
       return { ...base, kind: "RunFailed", error: outcome.error };
@@ -863,13 +899,16 @@ declare const globalThis: {
         topic: outcome.topic,
       };
     }
-    return {
-      ...base,
-      kind: "Wait",
-      childWorkflowName: outcome.workflowName,
-      input: outcome.input,
-      options: outcome.options,
-    };
+    if (outcome.kind === "child") {
+      return {
+        ...base,
+        kind: "Wait",
+        childWorkflowName: outcome.workflowName,
+        input: outcome.input,
+        options: outcome.options,
+      };
+    }
+    throw new NondeterministicError("unsupported workflow frontier outcome");
   }
 
   function resultBatch(

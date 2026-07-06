@@ -579,6 +579,8 @@ function wfJournal(envelope) {
         }));
 }
 
+// Runtime dispatcher copy: keep behavior in lock-step with
+// sdks/bootstrap/src/dispatcher.ts and sdks/workflows/src/journal.ts.
 class ZsJournalBackedStep {
     #stepsByOrdinal = new Map();
     #nameOccurrences = new Map();
@@ -602,6 +604,16 @@ class ZsJournalBackedStep {
         const issued = this.#issue(name, "run");
         if (issued.record) return this.#recordPromise(issued.record);
         return this.#registerFrontier(this.#runFrontier(issued, name, fn));
+    }
+
+    sideEffect(name, fn) {
+        this.#assertNotNested();
+        if (typeof fn !== "function") {
+            return Promise.reject(wfErr("step.sideEffect requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
+        }
+        const issued = this.#issue(name, "sideEffect");
+        if (issued.record) return this.#recordPromise(issued.record);
+        return this.#registerFrontier(this.#sideEffectFrontier(issued, name, fn));
     }
 
     sleep(name, duration) {
@@ -725,6 +737,27 @@ class ZsJournalBackedStep {
                 nameOccurrence: issued.nameOccurrence,
                 state: "failed",
                 error: wfSerializeError(e),
+            };
+        } finally {
+            bodyPromise.catch(() => {});
+            this.#activeStepCallbacks--;
+            if (this.#activeStepCallbacks === 0) {
+                this.#parallelIssueWindow = false;
+            }
+        }
+    }
+
+    async #sideEffectFrontier(issued, name, fn) {
+        const bodyPromise = this.#invokeStepBody(fn);
+        try {
+            const output = await bodyPromise;
+            return {
+                kind: "sideEffect",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "completed",
+                output,
             };
         } finally {
             bodyPromise.catch(() => {});
@@ -898,8 +931,8 @@ function workflowFrontierResult(envelope, outcome) {
         name: outcome.name,
         nameOccurrence: outcome.nameOccurrence,
     };
-    if (outcome.kind === "run" && outcome.state === "completed") {
-        return { ...base, kind: "StepCompleted", output: outcome.output };
+    if ((outcome.kind === "run" || outcome.kind === "sideEffect") && outcome.state === "completed") {
+        return { ...base, kind: "StepCompleted", stepKind: outcome.kind, output: outcome.output };
     }
     if (outcome.kind === "run" && outcome.state === "failed") {
         return { ...base, kind: "RunFailed", error: outcome.error };

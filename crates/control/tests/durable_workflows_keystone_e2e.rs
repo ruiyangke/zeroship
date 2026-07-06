@@ -36,6 +36,7 @@ const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const WORKFLOW_NAME: &str = "KeystoneWorkflow";
 const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
 const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
+const SIDE_EFFECT_WORKFLOW_NAME: &str = "SideEffectWorkflow";
 const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
 const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
 
@@ -759,6 +760,47 @@ async fn assert_concurrent_steps(fx: &Fixture, run_id: &str) {
     );
 }
 
+async fn assert_side_effect_steps(fx: &Fixture, run_id: &str) {
+    let rows = step_rows(fx, run_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            (
+                0,
+                "v".to_string(),
+                "sideEffect".to_string(),
+                "completed".to_string(),
+            ),
+            (
+                1,
+                "after".to_string(),
+                "run".to_string(),
+                "completed".to_string(),
+            ),
+        ],
+        "sideEffect workflow must checkpoint the frozen value once, then the real run step"
+    );
+    let row = fx
+        .pg
+        .query_one(
+            "SELECT output \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND ordinal = 0",
+            &[&run_id],
+        )
+        .await
+        .expect("load sideEffect output");
+    let output: serde_json::Value = row.get("output");
+    assert_eq!(output["step"], "v");
+    // The side-effect server returns a PRE-insert count: record_side_effect uses a
+    // data-modifying CTE (WITH inserted AS (INSERT ...) SELECT COUNT(*) ...), and in
+    // Postgres a data-modifying CTE's effects are not visible to a sibling SELECT of
+    // the same table in the same statement — so the first "v" bump returns 0. This
+    // asserts the sideEffect journaled bump's real return value faithfully; that the
+    // fn ran exactly ONCE (memoized on replay) is proven by side_counts["v"] == 1 below.
+    assert_eq!(output["count"], 0);
+}
+
 async fn assert_signal_wait_parked(
     fx: &Fixture,
     run_id: &str,
@@ -1078,6 +1120,37 @@ async fn durable_workflows_m1_keystone_real_spine() {
         "3-wide frontier plus final should complete in fewer dispatches than serial a,b,c,final; got {}",
         concurrent_dispatcher.count()
     );
+
+    let side_effect_run = seed_workflow_run(
+        &fx,
+        SIDE_EFFECT_WORKFLOW_NAME,
+        serde_json::json!({"case": "side-effect"}),
+    )
+    .await;
+    let side_effect_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
+    drive_until_completed(
+        &fx,
+        Arc::clone(&side_effect_dispatcher),
+        config("dw13-side-effect"),
+        &side_effect_run,
+    )
+    .await;
+    assert_side_effect_steps(&fx, &side_effect_run).await;
+    let side_effect_counts = side_counts(&fx, &side_effect_run).await;
+    assert_eq!(side_effect_counts.get("v").copied(), Some(1));
+    assert_eq!(side_effect_counts.get("after").copied(), Some(1));
+    assert!(
+        side_effect_dispatcher.count() >= 2,
+        "sideEffect replay proof should span multiple dispatches; got {}",
+        side_effect_dispatcher.count()
+    );
+    let side_effect_output = run_output(&fx, &side_effect_run).await;
+    assert_eq!(side_effect_output["v"]["step"], "v");
+    // Pre-insert count from the side-effect server's data-modifying CTE (see
+    // assert_side_effect_steps); the frozen sideEffect value is replayed into the
+    // run output verbatim. Exactly-once execution is proven by side_counts above.
+    assert_eq!(side_effect_output["v"]["count"], 0);
+    assert_eq!(side_effect_output["after"]["step"], "after");
 
     let name_divergence_run = seed_workflow_run(
         &fx,
