@@ -1,4 +1,4 @@
-//! PR6b — the JS-side `c.fn.splitPart` GRAMMAR lint (§9), exercised through the
+//! PR6b — the JS-side `.splitPart` GRAMMAR lint (§9), exercised through the
 //! REAL V8 `op.*` recorder. The record-time JS recorder is DIALECT-NEUTRAL, so it
 //! enforces only the dialect-NEUTRAL grammar (a non-empty string-literal delimiter,
 //! a positive-integer literal `n`) — the subset that is broken on BOTH backends.
@@ -18,7 +18,7 @@ fn record(src: &str) -> Result<String, String> {
     record_migration_to_json_unsandboxed(src, OWNER, "lint").map_err(|e| e.to_string())
 }
 
-/// In-envelope `c.fn.splitPart(c("name"), " ", 1)` records cleanly and emits a
+/// In-envelope `c("name").splitPart(" ", 1)` records cleanly and emits a
 /// `fnSynth(splitPart, …)` node (the §3.1 hero shape).
 #[test]
 fn in_envelope_split_part_records() {
@@ -27,7 +27,7 @@ fn in_envelope_split_part_records() {
         export const name = "split_name";
         export function up() {
             table("users").backfill({
-                set: { first_name: (c) => c.fn.splitPart(c("name"), " ", 1) },
+                set: { first_name: (c) => c("name").splitPart(" ", 1) },
                 cursorColumn: "id",
                 batchSize: 100,
                 name: "split_name_bf",
@@ -58,7 +58,7 @@ fn out_of_envelope_grammar_valid_split_part_records() {
             export const name = "pgonly";
             export function up() {{
                 table("users").backfill({{
-                    set: {{ x: (c) => c.fn.splitPart(c("name"), {delim}, {n}) }},
+                    set: {{ x: (c) => c("name").splitPart({delim}, {n}) }},
                     cursorColumn: "id",
                     batchSize: 100,
                     name: "pgonly_bf",
@@ -93,7 +93,7 @@ fn grammar_broken_split_part_throws_expr_not_portable() {
             export const name = "bad";
             export function up() {{
                 table("users").backfill({{
-                    set: {{ x: (c) => c.fn.splitPart(c("name"), {delim}, {n}) }},
+                    set: {{ x: (c) => c("name").splitPart({delim}, {n}) }},
                     cursorColumn: "id",
                     batchSize: 100,
                     name: "bad_bf",
@@ -118,7 +118,7 @@ fn non_string_delim_throws() {
         export const name = "bad";
         export function up() {
             table("users").backfill({
-                set: { x: (c) => c.fn.splitPart(c("name"), c("sep"), 1) },
+                set: { x: (c) => c("name").splitPart(c("sep"), 1) },
                 cursorColumn: "id",
                 batchSize: 100,
                 name: "bad_bf",

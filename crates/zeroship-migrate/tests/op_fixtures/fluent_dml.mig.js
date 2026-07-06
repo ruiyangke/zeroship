@@ -2,14 +2,14 @@
 // the SOLE public `table()` entry. Exercises the row-object `insert({ rows })`
 // form, `update`/`delete`/`backfill` with the one `where` keyword, and the
 // single-handle `(c) => Expr` builder (`c("name")` + the chainable operator methods
-// + the `c.fn.*` namespace).
+// + the scalar chain methods).
 //
 // Exercises EVERY Expr node + operator:
 //   colRef, literal (auto-wrapped bare value), binOp {eq,ne,lt,le,gt,ge,and,or,
 //   add,sub,mul,div,concat}, unaryOp {not,isNull,isNotNull,isTrue,isFalse},
 //   case, fnCall {coalesce,nullif,lower,upper,trim,length,abs}, fnSynth
 //   {concatWs,splitPart,now,genRandomUuid}, cast.
-import { table, now, genRandomUuid } from "@zeroship/migrate";
+import { table, now, genRandomUuid, concatWs } from "@zeroship/migrate";
 
 export default {
   name: "fluent_dml",
@@ -29,12 +29,12 @@ export default {
     // update({ set, where }) — `set` values + `where` are `(c) => Expr`.
     sc.update({
       set: {
-        label: (c) => c.fn.coalesce(c("label"), "unknown"),
-        norm: (c) => c.fn.lower(c.fn.trim(c("label"))),
-        shout: (c) => c.fn.upper(c("label")),
-        len: (c) => c.fn.length(c("label")),
-        mag: (c) => c.fn.abs(c("code").sub(500)),
-        canon: (c) => c.fn.nullif(c("label"), ""),
+        label: (c) => c("label").coalesce("unknown"),
+        norm: (c) => c("label").trim().lower(),
+        shout: (c) => c("label").upper(),
+        len: (c) => c("label").length(),
+        mag: (c) => c("code").sub(500).abs(),
+        canon: (c) => c("label").nullif(""),
         score: (c) => c("code").add(1).mul(2).sub(3).div(1),
         joined: (c) => c("label").concat(" ", c("code").cast({ to: "text" })),
         code_txt: (c) => c("code").cast({ to: "text" }),
@@ -64,8 +64,8 @@ export default {
     // concatWs/splitPart/now/genRandomUuid.
     sc.backfill({
       set: {
-        full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast({ to: "text" })),
-        first: (c) => c.fn.splitPart(c("label"), " ", 1),
+        full: (c) => concatWs(" ", c("label"), c("code").cast({ to: "text" })),
+        first: (c) => c("label").splitPart(" ", 1),
         touched: now(),
         token: genRandomUuid(),
       },
