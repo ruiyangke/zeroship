@@ -28,6 +28,7 @@ use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, StepRequest,
     WorkflowEngineConfig,
 };
+use serial_test::serial;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
@@ -983,6 +984,7 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
 }
 
 #[compio::test]
+#[serial]
 async fn durable_workflows_m1_keystone_real_spine() {
     if !enabled() {
         eprintln!("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
@@ -1632,13 +1634,9 @@ async fn durable_workflows_m1_keystone_real_spine() {
     assert_eq!(stale_counts.get("b").copied(), None);
 }
 
-// Bare non-step I/O is best-effort per design §11: a fast local fetch can resolve before
-// the dispatch drain boundary, so this assertion is intentionally parked until DW-13f adds
-// dispatch-scoped fetch/timer prevention. The positive determinism gate is the name-divergence
-// proof in durable_workflows_m1_keystone_real_spine.
 #[compio::test]
-#[ignore = "known gap: bare body I/O detection is best-effort until DW-13f prevention"]
-async fn bare_await_best_effort_known_gap() {
+#[serial]
+async fn bare_await_body_io_is_rejected() {
     if !enabled() {
         eprintln!("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
         return;
@@ -1650,19 +1648,13 @@ async fn bare_await_best_effort_known_gap() {
         .parse()
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
-    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
-        .parse()
-        .expect("side port");
-    let side_cfg = SideEffectConfig {
-        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
-        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
-        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
-    };
-
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
-    start_side_effect_server(side_cfg, side_port);
-    compio::time::sleep(Duration::from_millis(100)).await;
+    // No side-effect server here: the BareAwaitWorkflow body fetch is rejected
+    // synchronously by the dispatch-scoped I/O guard before any in-step fetch is
+    // reached, so no server is needed; starting a second server would collide
+    // with the keystone test's server on the shared ZEROSHIP_DW_E2E_SIDE_PORT
+    // (#[serial] serializes the tests, but the detached server thread holds the port).
 
     let bare_await_run = seed_workflow_run(
         &fx,

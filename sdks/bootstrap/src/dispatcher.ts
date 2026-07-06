@@ -43,6 +43,19 @@ declare const globalThis: {
   [key: string]: unknown;
 };
 
+type WorkflowDispatchContext = { mode: "body" | "step" };
+type AsyncLocalStorageLike<T> = {
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
+};
+type AsyncLocalStorageConstructor = new <T>() => AsyncLocalStorageLike<T>;
+
+const asyncHooksSpecifier = "node:" + "async_hooks";
+const { AsyncLocalStorage } = await import(asyncHooksSpecifier) as {
+  AsyncLocalStorage: AsyncLocalStorageConstructor;
+};
+const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
+
 (function installZsDispatch(globalScope: typeof globalThis) {
   if (typeof globalScope.__zsDispatch === "function") return; // idempotent
 
@@ -257,6 +270,57 @@ declare const globalThis: {
       this.name = "NondeterministicError";
     }
   }
+
+  const WORKFLOW_BODY_FETCH_ERROR =
+    "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
+  const WORKFLOW_BODY_TIMER_ERROR =
+    "workflow bodies may not use timers directly — use step.sleep(...) instead";
+
+  function assertWorkflowBodyMayUseFetch(): void {
+    if (workflowDispatchAls.getStore()?.mode === "body") {
+      throw new NondeterministicError(WORKFLOW_BODY_FETCH_ERROR);
+    }
+  }
+
+  function assertWorkflowBodyMayUseTimer(): void {
+    if (workflowDispatchAls.getStore()?.mode === "body") {
+      throw new NondeterministicError(WORKFLOW_BODY_TIMER_ERROR);
+    }
+  }
+
+  function installWorkflowIoGuards(): void {
+    const guardable = globalScope as typeof globalThis & {
+      fetch?: (...args: unknown[]) => unknown;
+      setTimeout?: (...args: unknown[]) => unknown;
+      setInterval?: (...args: unknown[]) => unknown;
+    };
+
+    const realFetch = guardable.fetch;
+    if (typeof realFetch === "function") {
+      guardable.fetch = function guardedWorkflowFetch(this: unknown, ...args: unknown[]): unknown {
+        assertWorkflowBodyMayUseFetch();
+        return Reflect.apply(realFetch, this, args);
+      };
+    }
+
+    const realSetTimeout = guardable.setTimeout;
+    if (typeof realSetTimeout === "function") {
+      guardable.setTimeout = function guardedWorkflowSetTimeout(this: unknown, ...args: unknown[]): unknown {
+        assertWorkflowBodyMayUseTimer();
+        return Reflect.apply(realSetTimeout, this, args);
+      };
+    }
+
+    const realSetInterval = guardable.setInterval;
+    if (typeof realSetInterval === "function") {
+      guardable.setInterval = function guardedWorkflowSetInterval(this: unknown, ...args: unknown[]): unknown {
+        assertWorkflowBodyMayUseTimer();
+        return Reflect.apply(realSetInterval, this, args);
+      };
+    }
+  }
+
+  installWorkflowIoGuards();
 
   function mkErr(message: string, status: number, code: string): Error {
     const e = new Error(message) as Error & { status?: number; code?: string };
@@ -597,7 +661,7 @@ declare const globalThis: {
 
       this.#callbackSyncDepth++;
       try {
-        return Promise.resolve(fn());
+        return workflowDispatchAls.run({ mode: "step" }, () => Promise.resolve(fn()));
       } catch (e) {
         return Promise.reject(e);
       } finally {
@@ -953,7 +1017,8 @@ declare const globalThis: {
     try {
       const WorkflowClass = resolveWorkflow(userNamespace, workflowName);
       const workflow = new WorkflowClass();
-      if (typeof workflow.run !== "function") {
+      const run = workflow.run;
+      if (typeof run !== "function") {
         throw mkErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
       }
       const quiescence = new DispatchMicrotaskQuiescenceBarrier();
@@ -961,7 +1026,10 @@ declare const globalThis: {
       const blockedByNonStepWork = quiescence.waitUntilBlocked(() => step.frontierObserved);
       let outputPromise: Promise<unknown>;
       try {
-        outputPromise = Promise.resolve(workflow.run(buildTrigger(env), step));
+        outputPromise = workflowDispatchAls.run(
+          { mode: "body" },
+          () => Promise.resolve(run.call(workflow, buildTrigger(env), step)),
+        );
       } catch (error) {
         quiescence.stop();
         blockedByNonStepWork.catch(() => {});

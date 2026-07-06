@@ -397,12 +397,66 @@ pub(crate) const DB_INIT_JS: &str = include_str!(
 /// process (see [`BOOTSTRAP_KIND_BRIDGE_SPEC`]) and is not part of the creator
 /// module graph contract.
 const KIND_BRIDGE_JS: &str = r##"
+import { AsyncLocalStorage } from "node:async_hooks";
+
+const zsWorkflowDispatchAls = new AsyncLocalStorage();
+const ZS_WORKFLOW_BODY_FETCH_ERROR =
+    "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
+const ZS_WORKFLOW_BODY_TIMER_ERROR =
+    "workflow bodies may not use timers directly — use step.sleep(...) instead";
 const enterKind = globalThis.__zsEnterKind;
 const exitKind = globalThis.__zsExitKind;
 
 try { delete globalThis.__zsEnterKind; } catch (_e) {}
 try { delete globalThis.__zsExitKind; } catch (_e) {}
 try { delete globalThis.__zsClearKind; } catch (_e) {}
+
+class ZsNondeterministicError extends Error {
+    constructor(message = "workflow replay is nondeterministic") {
+        super(message);
+        this.name = "NondeterministicError";
+    }
+}
+
+function zsAssertWorkflowBodyMayUseFetch() {
+    if (zsWorkflowDispatchAls.getStore()?.mode === "body") {
+        throw new ZsNondeterministicError(ZS_WORKFLOW_BODY_FETCH_ERROR);
+    }
+}
+
+function zsAssertWorkflowBodyMayUseTimer() {
+    if (zsWorkflowDispatchAls.getStore()?.mode === "body") {
+        throw new ZsNondeterministicError(ZS_WORKFLOW_BODY_TIMER_ERROR);
+    }
+}
+
+function zsInstallWorkflowIoGuards() {
+    const realFetch = globalThis.fetch;
+    if (typeof realFetch === "function") {
+        globalThis.fetch = function guardedWorkflowFetch(...args) {
+            zsAssertWorkflowBodyMayUseFetch();
+            return Reflect.apply(realFetch, this, args);
+        };
+    }
+
+    const realSetTimeout = globalThis.setTimeout;
+    if (typeof realSetTimeout === "function") {
+        globalThis.setTimeout = function guardedWorkflowSetTimeout(...args) {
+            zsAssertWorkflowBodyMayUseTimer();
+            return Reflect.apply(realSetTimeout, this, args);
+        };
+    }
+
+    const realSetInterval = globalThis.setInterval;
+    if (typeof realSetInterval === "function") {
+        globalThis.setInterval = function guardedWorkflowSetInterval(...args) {
+            zsAssertWorkflowBodyMayUseTimer();
+            return Reflect.apply(realSetInterval, this, args);
+        };
+    }
+}
+
+zsInstallWorkflowIoGuards();
 
 function isAsyncIterator(x) {
     return x != null && typeof x === "object"
@@ -509,13 +563,6 @@ class ZsWorkflowTimeoutError extends Error {
     constructor(message = "workflow signal wait timed out") {
         super(message);
         this.name = "WorkflowTimeoutError";
-    }
-}
-
-class ZsNondeterministicError extends Error {
-    constructor(message = "workflow replay is nondeterministic") {
-        super(message);
-        this.name = "NondeterministicError";
     }
 }
 
@@ -780,7 +827,7 @@ class ZsJournalBackedStep {
 
         this.#callbackSyncDepth++;
         try {
-            return Promise.resolve(fn());
+            return zsWorkflowDispatchAls.run({ mode: "step" }, () => Promise.resolve(fn()));
         } catch (e) {
             return Promise.reject(e);
         } finally {
@@ -808,6 +855,7 @@ class ZsJournalBackedStep {
         if (!frontier.sealed) {
             frontier.add(outcome);
         }
+        frontier.promise.catch(() => {});
         return frontier.promise;
     }
 
@@ -993,7 +1041,10 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
             throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
         }
         const step = new ZsJournalBackedStep(wfJournal(envelope));
-        const output = await workflow.run(wfTrigger(envelope), step);
+        const output = await zsWorkflowDispatchAls.run(
+            { mode: "body" },
+            () => workflow.run(wfTrigger(envelope), step),
+        );
         return workflowTerminalResult(envelope, {
             kind: "RunCompleted",
             runId: envelope.runId,

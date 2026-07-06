@@ -241,6 +241,7 @@ export class SideEffectWorkflow {
 export class BareAwaitWorkflow {
   async run(trigger, step) {
     const pending = step.run("first", () => bump(trigger.runId, "first"));
+    // Body-level I/O must fail before this workflow can observe the pending step.
     await fetch(
       \`\${SIDE_EFFECT_URL}/bump?run=\${encodeURIComponent(trigger.runId)}&step=bare-await\`,
       { method: "POST" },

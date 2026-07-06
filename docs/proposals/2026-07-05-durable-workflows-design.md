@@ -2340,17 +2340,17 @@ step whose `name`, `kind`, or same-name occurrence differs at a committed ordina
 `NondeterministicError` and the run fails closed. This catches the journal-corrupting class of
 nondeterminism because the check compares the replay against the journal prefix directly.
 
-A raw non-`step` `await` in the workflow *body* (e.g. a bare `fetch`) is still forbidden: the workflow body
+A raw non-`step` `await` in the workflow *body* (e.g. a bare `fetch`) is forbidden: the workflow body
 may only observe the outside world through journaled `step.run` / `step.sideEffect` output (§3.2.1). The
-runtime's current bare-I/O detection is best-effort at await time: a pending non-step promise at the
-macrotask boundary is flagged, but a fast promise that resolves before that boundary may not be caught by
-the event loop. The robust mechanism is prevention, scheduled as **DW-13f — dispatch-scoped I/O prevention
-+ `sideEffect`**: during a workflow dispatch, platform-provided `fetch` and timers throw when called
-outside a journal callback (`step.run` for I/O, `step.sideEffect` for inline non-determinism). `step.sleepUntil(name,
+runtime prevents the load-bearing bare-I/O cases at call time with dispatch-scoped I/O guards:
+platform-provided `fetch`, `setTimeout`, and `setInterval` throw `NondeterministicError` while the
+workflow body is executing, but pass through unchanged inside a journal callback (`step.run` for I/O,
+`step.sideEffect` for inline non-determinism) and outside workflow dispatch entirely. This is independent
+of promise timing and applies on replay even when no new frontier has been discovered. `step.sleepUntil(name,
 when)` (§3.2) freezes `when` into `wake_at` **at first discovery and journals it** — never recomputed on
-later replays — exactly like `step.sleep`'s `now + duration`; so even a `when` derived from a bare
-`Date.now()` (itself forbidden outside `step.sideEffect`) cannot cause replay divergence *of the sleep
-step*, and it adds **no** new clause here — a `sleep`/`sleepUntil` row carries no output value and its
+later replays — exactly like `step.sleep`'s `now + duration`; so even a `when` derived from `Date.now()`
+cannot cause replay divergence *of the sleep step* once discovered, and it adds **no** new clause here —
+a `sleep`/`sleepUntil` row carries no output value and its
 `wake_at` is a journaled constant, covered by C1/C5 unchanged (the idiomatic use derives `when` from a
 journaled source — `trigger.input`, `trigger.startedAt`, a prior `step.run` output, or a prior
 `step.sideEffect` output).
