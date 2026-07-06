@@ -228,11 +228,17 @@ declare const globalThis: {
 
   class SuspendSignal extends Error {
     readonly outcome: FrontierOutcome;
+    readonly outcomes: readonly FrontierOutcome[];
 
-    constructor(outcome: FrontierOutcome) {
+    constructor(outcome: FrontierOutcome | readonly FrontierOutcome[]) {
       super("workflow dispatch frontier reached");
       this.name = "SuspendSignal";
-      this.outcome = outcome;
+      const outcomes = Array.isArray(outcome) ? outcome : [outcome];
+      if (outcomes.length === 0) {
+        throw mkErr("workflow frontier batch cannot be empty", 500, "WORKFLOW_DEFINITION_ERROR");
+      }
+      this.outcome = outcomes[0]!;
+      this.outcomes = outcomes;
     }
   }
 
@@ -311,13 +317,17 @@ declare const globalThis: {
     readonly #stepsByOrdinal = new Map<number, JournalStepRecord>();
     readonly #nameOccurrences = new Map<string, number>();
     #cursor = 0;
-    #inStepBody = false;
+    #frontier: FrontierCoordinator | undefined;
+    #activeStepCallbacks = 0;
+    #callbackSyncDepth = 0;
+    #parallelIssueWindow = false;
+    #parallelIssueWindowToken = 0;
 
     constructor(steps: JournalStepRecord[]) {
       for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
-    async run<T>(
+    run<T>(
       name: string,
       configOrFn: unknown,
       maybeFn?: () => T | Promise<T>,
@@ -325,44 +335,20 @@ declare const globalThis: {
       this.#assertNotNested();
       const fn = typeof configOrFn === "function" ? configOrFn : maybeFn;
       if (typeof fn !== "function") {
-        throw mkErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR");
+        return Promise.reject(mkErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR"));
       }
 
       const issued = this.#issue(name, "run");
-      if (issued.record) return this.#resolveRecord<T>(issued.record);
-
-      try {
-        this.#inStepBody = true;
-        const output = await (fn as () => T | Promise<T>)();
-        throw new SuspendSignal({
-          kind: "run",
-          ordinal: issued.ordinal,
-          name,
-          nameOccurrence: issued.nameOccurrence,
-          state: "completed",
-          output,
-        });
-      } catch (e) {
-        if (e instanceof SuspendSignal) throw e;
-        throw new SuspendSignal({
-          kind: "run",
-          ordinal: issued.ordinal,
-          name,
-          nameOccurrence: issued.nameOccurrence,
-          state: "failed",
-          error: serializeError(e),
-        });
-      } finally {
-        this.#inStepBody = false;
-      }
+      if (issued.record) return this.#recordPromise<T>(issued.record);
+      return this.#registerFrontier(this.#runFrontier(issued, name, fn as () => T | Promise<T>));
     }
 
-    async sleep(name: string, duration: string): Promise<void> {
+    sleep(name: string, duration: string): Promise<void> {
       this.#assertNotNested();
       const issued = this.#issue(name, "sleep");
       if (issued.record) {
-        if (issued.record.state === "completed") return;
-        throw new SuspendSignal({
+        if (issued.record.state === "completed") return Promise.resolve();
+        return this.#recordPromise<void>(issued.record, {
           kind: "sleep",
           ordinal: issued.ordinal,
           name,
@@ -371,7 +357,7 @@ declare const globalThis: {
           wakeAt: issued.record.wakeAt ?? duration,
         });
       }
-      throw new SuspendSignal({
+      return this.#suspendFrontier({
         kind: "sleep",
         ordinal: issued.ordinal,
         name,
@@ -381,21 +367,41 @@ declare const globalThis: {
       });
     }
 
-    async sleepUntil(name: string, when: Date | number): Promise<void> {
+    sleepUntil(name: string, when: Date | number): Promise<void> {
+      this.#assertNotNested();
       const target = typeof when === "number" ? new Date(when) : when;
-      return this.sleep(name, target.toISOString());
+      const issued = this.#issue(name, "sleep");
+      if (issued.record) {
+        if (issued.record.state === "completed") return Promise.resolve();
+        return this.#recordPromise<void>(issued.record, {
+          kind: "sleep",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "running",
+          wakeAt: issued.record.wakeAt ?? target.toISOString(),
+        });
+      }
+      return this.#suspendFrontier({
+        kind: "sleep",
+        ordinal: issued.ordinal,
+        name,
+        nameOccurrence: issued.nameOccurrence,
+        state: "running",
+        wakeAt: target.toISOString(),
+      });
     }
 
-    async waitForSignal(name: string, opts: Record<string, unknown> = {}): Promise<unknown> {
+    waitForSignal(name: string, opts: Record<string, unknown> = {}): Promise<unknown> {
       this.#assertNotNested();
       const issued = this.#issue(name, "wait_signal");
       if (issued.record) {
         if (issued.record.state === "completed") {
-          if (issued.record.output !== undefined) return issued.record.output;
-          return issued.record.consumedSignal ?? null;
+          if (issued.record.output !== undefined) return Promise.resolve(issued.record.output);
+          return Promise.resolve(issued.record.consumedSignal ?? null);
         }
-        if (issued.record.state === "failed") return this.#resolveRecord<unknown>(issued.record);
-        throw new SuspendSignal({
+        if (issued.record.state === "failed") return this.#recordPromise<unknown>(issued.record);
+        return this.#recordPromise<unknown>(issued.record, {
           kind: "wait_signal",
           ordinal: issued.ordinal,
           name,
@@ -407,7 +413,7 @@ declare const globalThis: {
           topic: typeof opts.topic === "string" ? opts.topic : undefined,
         });
       }
-      throw new SuspendSignal({
+      return this.#suspendFrontier({
         kind: "wait_signal",
         ordinal: issued.ordinal,
         name,
@@ -420,12 +426,12 @@ declare const globalThis: {
       });
     }
 
-    async call(WorkflowClass: { new(): unknown; name?: string }, input: unknown, options?: unknown): Promise<unknown> {
+    call(WorkflowClass: { new(): unknown; name?: string }, input: unknown, options?: unknown): Promise<unknown> {
       this.#assertNotNested();
       const name = WorkflowClass.name ?? "Workflow";
       const issued = this.#issue(name, "child");
-      if (issued.record) return this.#resolveRecord<unknown>(issued.record);
-      throw new SuspendSignal({
+      if (issued.record) return this.#recordPromise<unknown>(issued.record);
+      return this.#suspendFrontier({
         kind: "child",
         ordinal: issued.ordinal,
         name,
@@ -435,6 +441,84 @@ declare const globalThis: {
         input,
         options,
       });
+    }
+
+    async #runFrontier<T>(
+      issued: { ordinal: number; nameOccurrence: number },
+      name: string,
+      fn: () => T | Promise<T>,
+    ): Promise<FrontierOutcome> {
+      const bodyPromise = this.#invokeStepBody(fn);
+      try {
+        const output = await bodyPromise;
+        return {
+          kind: "run",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "completed",
+          output,
+        };
+      } catch (e) {
+        if (e instanceof SuspendSignal) throw e;
+        return {
+          kind: "run",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "failed",
+          error: serializeError(e),
+        };
+      } finally {
+        bodyPromise.catch(() => {});
+        this.#activeStepCallbacks--;
+        if (this.#activeStepCallbacks === 0) {
+          this.#parallelIssueWindow = false;
+        }
+      }
+    }
+
+    #invokeStepBody<T>(fn: () => T | Promise<T>): Promise<T> {
+      this.#activeStepCallbacks++;
+      this.#parallelIssueWindow = true;
+      const issueWindowToken = ++this.#parallelIssueWindowToken;
+      queueMicrotask(() => {
+        if (this.#parallelIssueWindowToken === issueWindowToken) {
+          this.#parallelIssueWindow = false;
+        }
+      });
+
+      this.#callbackSyncDepth++;
+      try {
+        return Promise.resolve(fn());
+      } catch (e) {
+        return Promise.reject(e);
+      } finally {
+        this.#callbackSyncDepth--;
+      }
+    }
+
+    #suspendFrontier<T>(outcome: FrontierOutcome): Promise<T> {
+      return this.#registerFrontier(Promise.resolve(outcome));
+    }
+
+    #recordPromise<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): Promise<T> {
+      try {
+        return Promise.resolve(this.#resolveRecord<T>(record, pendingOutcome));
+      } catch (e) {
+        if (e instanceof SuspendSignal) {
+          return this.#registerFrontier(Promise.resolve(e.outcome));
+        }
+        return Promise.reject(e);
+      }
+    }
+
+    #registerFrontier<T>(outcome: Promise<FrontierOutcome>): Promise<T> {
+      const frontier = this.#frontier ??= new FrontierCoordinator();
+      if (!frontier.sealed) {
+        frontier.add(outcome);
+      }
+      return frontier.promise as Promise<T>;
     }
 
     #issue(name: string, kind: JournalStepKind): {
@@ -462,10 +546,10 @@ declare const globalThis: {
       return { ordinal, nameOccurrence, record };
     }
 
-    #resolveRecord<T>(record: JournalStepRecord): T {
+    #resolveRecord<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): T {
       if (record.state === "completed") return record.output as T;
       if (record.state === "failed") throw deserializeError(record.error);
-      throw new SuspendSignal({
+      throw new SuspendSignal(pendingOutcome ?? {
         kind: record.kind === "child" ? "child" : record.kind,
         ordinal: record.ordinal,
         name: record.name,
@@ -482,9 +566,65 @@ declare const globalThis: {
     }
 
     #assertNotNested(): void {
-      if (this.#inStepBody) {
+      if (
+        this.#activeStepCallbacks > 0 &&
+        (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow)
+      ) {
         throw mkErr("workflow step methods cannot be called from inside a step body", 500, "WORKFLOW_DEFINITION_ERROR");
       }
+    }
+  }
+
+  class FrontierCoordinator {
+    readonly promise: Promise<never>;
+    #pending = 0;
+    #sealed = false;
+    #settled = false;
+    #fatal: unknown;
+    #outcomes: FrontierOutcome[] = [];
+    #reject: (reason?: unknown) => void = () => {};
+
+    constructor() {
+      this.promise = new Promise<never>((_, reject) => {
+        this.#reject = reject;
+      });
+      queueMicrotask(() => this.seal());
+    }
+
+    get sealed(): boolean {
+      return this.#sealed;
+    }
+
+    add(outcome: Promise<FrontierOutcome>): void {
+      if (this.#sealed) return;
+      this.#pending++;
+      outcome.then(
+        (settled) => {
+          this.#outcomes.push(settled);
+        },
+        (error) => {
+          this.#fatal ??= error;
+        },
+      ).finally(() => {
+        this.#pending--;
+        this.#maybeFinish();
+      });
+    }
+
+    seal(): void {
+      this.#sealed = true;
+      this.#maybeFinish();
+    }
+
+    #maybeFinish(): void {
+      if (this.#settled || !this.#sealed || this.#pending > 0) return;
+      this.#settled = true;
+      if (this.#fatal !== undefined) {
+        this.#reject(this.#fatal);
+        return;
+      }
+      this.#outcomes.sort((a, b) => a.ordinal - b.ordinal);
+      this.#reject(new SuspendSignal(this.#outcomes));
     }
   }
 
@@ -545,6 +685,33 @@ declare const globalThis: {
     };
   }
 
+  function resultBatch(
+    envelope: Record<string, unknown>,
+    outcomes: readonly FrontierOutcome[],
+  ): Record<string, unknown> {
+    const mapped = outcomes.map((outcome) => resultFromFrontier(envelope, outcome));
+    const base = {
+      runId: envelope.runId,
+      dispatchNonce: envelope.nonce,
+      workflowName: envelope.workflowName,
+      outcomes: mapped,
+    };
+    return mapped.length === 1 ? { ...mapped[0], ...base } : base;
+  }
+
+  function terminalBatch(
+    envelope: Record<string, unknown>,
+    outcome: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return {
+      ...outcome,
+      runId: envelope.runId,
+      dispatchNonce: envelope.nonce,
+      workflowName: envelope.workflowName,
+      outcomes: [outcome],
+    };
+  }
+
   globalScope.__zsWorkflowDispatch = async function workflowDispatch(
     userNamespace: unknown,
     envelope: unknown,
@@ -565,24 +732,24 @@ declare const globalThis: {
       }
       const step = new JournalBackedStep(normalizeJournal(env));
       const output = await workflow.run(buildTrigger(env), step);
-      return {
+      return terminalBatch(env, {
         kind: "RunCompleted",
         runId: env.runId,
         nonce: env.nonce,
         workflowName,
         output,
-      };
+      });
     } catch (e) {
       if (e instanceof SuspendSignal) {
-        return resultFromFrontier(env, e.outcome);
+        return resultBatch(env, e.outcomes);
       }
-      return {
+      return terminalBatch(env, {
         kind: "RunFailed",
         runId: env.runId,
         nonce: env.nonce,
         workflowName,
         error: serializeError(e),
-      };
+      });
     }
   };
 })(globalThis as never);

@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -34,6 +35,7 @@ use zeroship_control::{
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const WORKFLOW_NAME: &str = "KeystoneWorkflow";
 const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
+const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -188,6 +190,33 @@ impl StepDispatcher for CrashOnceDispatcher {
         }
         let _ = release.await;
         outcome
+    }
+}
+
+#[derive(Clone)]
+struct CountingDispatcher {
+    inner: GatewayStepDispatcher,
+    count: Arc<AtomicUsize>,
+}
+
+impl CountingDispatcher {
+    fn new(gateway_url: String) -> Self {
+        Self {
+            inner: GatewayStepDispatcher::new(gateway_url),
+            count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for CountingDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.inner.dispatch(request).await
     }
 }
 
@@ -645,6 +674,20 @@ async fn assert_signal_timeout_steps(fx: &Fixture, run_id: &str) {
     );
 }
 
+async fn assert_concurrent_steps(fx: &Fixture, run_id: &str) {
+    let rows = step_rows(fx, run_id).await;
+    assert_eq!(
+        rows,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (1, "b".to_string(), "run".to_string(), "completed".to_string()),
+            (2, "c".to_string(), "run".to_string(), "completed".to_string()),
+            (3, "final".to_string(), "run".to_string(), "completed".to_string()),
+        ],
+        "concurrent workflow must checkpoint a, b, c together, then final"
+    );
+}
+
 async fn assert_signal_wait_parked(
     fx: &Fixture,
     run_id: &str,
@@ -937,6 +980,32 @@ async fn durable_workflows_m1_keystone_real_spine() {
         restarted_counts.get("b").copied(),
         Some(2),
         "restart from b must re-run b"
+    );
+
+    let concurrent_run = seed_workflow_run(
+        &fx,
+        CONCURRENT_WORKFLOW_NAME,
+        serde_json::json!({"case": "concurrent"}),
+    )
+    .await;
+    let concurrent_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
+    drive_until_completed(
+        &fx,
+        Arc::clone(&concurrent_dispatcher),
+        config("dw07-concurrent"),
+        &concurrent_run,
+    )
+    .await;
+    assert_concurrent_steps(&fx, &concurrent_run).await;
+    let concurrent_counts = side_counts(&fx, &concurrent_run).await;
+    assert_eq!(concurrent_counts.get("a").copied(), Some(1));
+    assert_eq!(concurrent_counts.get("b").copied(), Some(1));
+    assert_eq!(concurrent_counts.get("c").copied(), Some(1));
+    assert_eq!(concurrent_counts.get("final").copied(), Some(1));
+    assert!(
+        concurrent_dispatcher.count() < 4,
+        "3-wide frontier plus final should complete in fewer dispatches than serial a,b,c,final; got {}",
+        concurrent_dispatcher.count()
     );
 
     let pause_run = seed_run(&fx, "pause-mid").await;

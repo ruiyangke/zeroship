@@ -732,7 +732,19 @@ export class Checkout {
   }
 }
 
-export default { workflows: { Checkout } };
+export class ConcurrentWorkflow {
+  async run(trigger, step) {
+    const values = await Promise.all([
+      step.run("a", () => ({ mark: MARK, step: "a", input: trigger.input })),
+      step.run("b", () => ({ mark: MARK, step: "b", input: trigger.input })),
+      step.run("c", () => ({ mark: MARK, step: "c", input: trigger.input })),
+    ]);
+    const final = await step.run("final", () => ({ mark: MARK, values }));
+    return { values, final };
+  }
+}
+
+export default { workflows: { Checkout, ConcurrentWorkflow } };
 "#
         .replace("__MARK__", mark)
         .into_bytes()
@@ -775,14 +787,22 @@ export default { workflows: { Checkout } };
     }
 
     fn workflow_request(deploy_hash: &str, journal: Vec<serde_json::Value>) -> serde_json::Value {
+        workflow_request_named(deploy_hash, "Checkout", journal)
+    }
+
+    fn workflow_request_named(
+        deploy_hash: &str,
+        workflow_name: &str,
+        journal: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
         serde_json::json!({
             "runId": "run_test",
-            "workflowName": "Checkout",
+            "workflowName": workflow_name,
             "trigger": {
                 "input": { "orderId": "ord_1" },
                 "startedAt": "2026-07-06T00:00:00Z",
                 "runId": "run_test",
-                "workflowName": "Checkout",
+                "workflowName": workflow_name,
             },
             "journal": journal,
             "deployHash": deploy_hash,
@@ -897,6 +917,63 @@ export default { workflows: { Checkout } };
             assert_eq!(result["ordinal"], 0);
             assert_eq!(result["output"]["mark"], "A");
             assert_eq!(result["output"]["bodyRuns"], 1);
+
+            let _ = std::fs::remove_dir_all(blob_root);
+        });
+    }
+
+    #[test]
+    fn workflow_dispatch_concurrent_frontier_returns_outcomes_batch() {
+        let Ok(runtime) = compio::runtime::Runtime::new() else {
+            eprintln!("skipping (cannot create compio runtime)");
+            return;
+        };
+
+        runtime.block_on(async {
+            let (app_id, blob_store, envs, logs, config, blob_root) = workflow_test_state(4);
+            let deploy_hash = deploy_workflow_fixture(&blob_store, &app_id, "C").await;
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .service(
+                        web::resource("/workflow-dispatch-unsigned/{app_id}")
+                            .route(web::post().to(workflow_dispatch_unsigned)),
+                    ),
+            )
+            .await;
+
+            let req = test::TestRequest::post()
+                .uri(&format!("/workflow-dispatch-unsigned/{app_id}"))
+                .set_payload(
+                    serde_json::to_vec(&workflow_request_named(
+                        &deploy_hash,
+                        "ConcurrentWorkflow",
+                        vec![],
+                    ))
+                    .unwrap(),
+                )
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = test::read_body(resp).await;
+            let result: serde_json::Value =
+                serde_json::from_slice(&body).expect("workflow StepResult JSON");
+            let outcomes = result["outcomes"].as_array().expect("outcomes array");
+            assert_eq!(outcomes.len(), 3);
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .map(|outcome| (
+                        outcome["kind"].as_str().unwrap(),
+                        outcome["ordinal"].as_i64().unwrap(),
+                        outcome["name"].as_str().unwrap(),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![("StepCompleted", 0, "a"), ("StepCompleted", 1, "b"), ("StepCompleted", 2, "c")]
+            );
+            assert!(result.get("kind").is_none(), "wide batch has no single top-level kind");
 
             let _ = std::fs::remove_dir_all(blob_root);
         });
