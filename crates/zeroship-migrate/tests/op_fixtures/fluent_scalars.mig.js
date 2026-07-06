@@ -16,7 +16,7 @@ export function up() {
     columns: {
       id: t.id(),
       // a large-int column default carried via the decimal() -> {decimal} carrier
-      seq: t.numeric(38, 0).notNull().default(decimal("9007199254740993")),
+      seq: t.numeric({ precision: 38, scale: 0 }).notNull().default(decimal("9007199254740993")),
       // a bytes column default carried via the Uint8Array -> {bytes} carrier
       salt: t.bytes().default(new Uint8Array([1, 2, 3, 255])),
     },

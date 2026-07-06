@@ -211,18 +211,18 @@ test("create() with a composite primaryKey records the top-level primaryKey", ()
   assert.equal(ops[0].constraints, undefined);
 });
 
-test("table runtime option terminals take object args and default enabled true", () => {
+test("table runtime options record setTableOptions patches", () => {
   const publicOps = record(() => {
-    table("posts").softDelete();
-    table("posts").softDelete({ enabled: false, schema: "archive" });
-    table("posts").withVersioning();
-    table("posts", { schema: "app" }).withVersioning({ enabled: false });
+    table("posts").setOptions({ softDelete: true });
+    table("posts", { schema: "archive" }).setOptions({ softDelete: false });
+    table("posts").setOptions({ versioning: true });
+    table("posts", { schema: "app" }).setOptions({ versioning: false });
   });
   const engineOps = recordEngine(({ table }) => {
-    table("posts").softDelete();
-    table("posts").softDelete({ enabled: false, schema: "archive" });
-    table("posts").withVersioning();
-    table("posts", { schema: "app" }).withVersioning({ enabled: false });
+    table("posts").setOptions({ softDelete: true });
+    table("posts", { schema: "archive" }).setOptions({ softDelete: false });
+    table("posts").setOptions({ versioning: true });
+    table("posts", { schema: "app" }).setOptions({ versioning: false });
   });
 
   assert.deepEqual(publicOps, engineOps);
@@ -250,6 +250,50 @@ test("table runtime option terminals take object args and default enabled true",
       schema: "app",
     },
   ]);
+});
+
+test("create({ options }) records runtimeOptions with the existing defaults", () => {
+  const ops = record(() =>
+    table("posts").create({
+      columns: { title: t.text() },
+      options: { strictness: "off" },
+    }),
+  );
+  const engineOps = recordEngine(({ table, t }) =>
+    table("posts").create({
+      columns: { title: t.text() },
+      options: { strictness: "off" },
+    }),
+  );
+
+  assert.deepEqual(ops, engineOps);
+  assert.deepEqual(ops[0].runtimeOptions, {
+    softDelete: false,
+    versioning: false,
+    strictness: "off",
+  });
+});
+
+test("named type payloads record the same ColType tokens", () => {
+  const author = (table: any, t: any) =>
+    table("types").create({
+      columns: {
+        amount: t.numeric({ precision: 12, scale: 2 }),
+        code: t.char({ length: 3 }),
+        embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
+        default_numeric: t.numeric(),
+      },
+    });
+  const ops = record(() => author(table, t));
+  const engineOps = recordEngine(({ table, t }) => author(table, t));
+  const cols = Object.fromEntries(ops[0].columns.map((col: any) => [col.name, col.type]));
+
+  assert.deepEqual(ops, engineOps);
+  assert.deepEqual(cols.amount, { decimal: { precision: 12, scale: 2 } });
+  assert.deepEqual(cols.code, { char: { length: 3 } });
+  assert.deepEqual(cols.embedding, { vector: { vector: 1536 } });
+  assert.deepEqual(cols.default_numeric, { decimal: { precision: 38, scale: 9 } });
+  assert.equal(ops[0].columns.find((col: any) => col.name === "embedding").vectorMetric, "cosine");
 });
 
 test("C2 — create() column that is both .unique() + .primaryKey() emits NO column-level unique", () => {
@@ -557,7 +601,7 @@ test("update set records scalar RHS as IrValue scalar and callback RHS as IrValu
 test("decimal() validates decimal strings and records byte-identical IR", () => {
   const ops = record(() => {
     table("t").insert({ rows: [{ price: decimal("0.00") }] });
-    table("t").create({ columns: { price: t.numeric(12, 2).default(decimal("-10.50")) } });
+    table("t").create({ columns: { price: t.numeric({ precision: 12, scale: 2 }).default(decimal("-10.50")) } });
     table("t").insert({
       rows: [{ id: 1 }],
       onConflict: { columns: ["id"], doUpdate: { price: decimal("9007199254740993") } as any },
@@ -615,11 +659,11 @@ test("byteValue() validates bytes inputs and records byte-identical IR", () => {
 test("public and engine recorders match for decimal() scalar values", () => {
   const pub = record(() => {
     table("t").insert({ rows: [{ price: decimal("0.00") }] });
-    table("t").create({ columns: { price: t.numeric(12, 2).default(decimal("0.00")) } });
+    table("t").create({ columns: { price: t.numeric({ precision: 12, scale: 2 }).default(decimal("0.00")) } });
   });
   const eng = recordEngine(({ table, t, decimal }) => {
     table("t").insert({ rows: [{ price: decimal("0.00") }] });
-    table("t").create({ columns: { price: t.numeric(12, 2).default(decimal("0.00")) } });
+    table("t").create({ columns: { price: t.numeric({ precision: 12, scale: 2 }).default(decimal("0.00")) } });
   });
   assert.deepEqual(pub, eng);
 });
@@ -649,7 +693,7 @@ test("bigint and removed scalar carriers fail closed at record time", () => {
     isBigintRefusal,
   );
   assert.throws(
-    () => record(() => table("t").create({ columns: { big: t.numeric(38, 0).default(9007199254740993n as any) } })),
+    () => record(() => table("t").create({ columns: { big: t.numeric({ precision: 38, scale: 0 }).default(9007199254740993n as any) } })),
     isBigintRefusal,
   );
   assert.throws(
@@ -667,7 +711,7 @@ test("bigint and removed scalar carriers fail closed at record time", () => {
     isDecimalCarrierRefusal,
   );
   assert.throws(
-    () => record(() => table("t").create({ columns: { price: t.numeric(12, 2).default({ decimal: "0.00" } as any) } })),
+    () => record(() => table("t").create({ columns: { price: t.numeric({ precision: 12, scale: 2 }).default({ decimal: "0.00" } as any) } })),
     isDecimalCarrierRefusal,
   );
   assert.throws(
@@ -791,7 +835,7 @@ test("a column default carries decimal()/Uint8Array through the same IrScalar ca
   const ops = record(() =>
     table("t").create({
       columns: {
-        big: t.numeric(38, 0).default(decimal("9007199254740993")),
+        big: t.numeric({ precision: 38, scale: 0 }).default(decimal("9007199254740993")),
         raw: t.bytes().default(new Uint8Array([255, 0])),
       },
     }),

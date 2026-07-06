@@ -123,6 +123,7 @@ import type {
   SequenceHandle,
   TableHandle,
   TableOptions,
+  TableRuntimeOptions,
   TableStrictness,
   TableRef,
   TextOptions,
@@ -513,6 +514,28 @@ function requireOptionalBoolean(v: unknown, what: string): boolean | undefined {
   return v;
 }
 
+function requirePlainObject(v: unknown, what: string): asserts v is Record<string, unknown> {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw structuredError("OP_INVALID", `${what} must be an object`);
+  }
+}
+
+function requireOptionalPositiveInteger(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
+    throw structuredError("OP_INVALID", `${what} must be a positive integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireOptionalNonNegativeInteger(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-negative integer; got ${v}`);
+  }
+  return v;
+}
+
 function indexElementFacet(v: unknown, what: string): string | undefined {
   if (v === undefined) return undefined;
   if (typeof v !== "string" || v.length === 0) {
@@ -522,9 +545,12 @@ function indexElementFacet(v: unknown, what: string): string | undefined {
 }
 
 function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
-  const softDelete = requireOptionalBoolean(args.softDelete, "create({ softDelete })");
-  const versioning = requireOptionalBoolean(args.versioning, "create({ versioning })");
-  const strictness = requireStrictness(args.strictness, "create({ strictness })");
+  const opts = args.options;
+  if (opts === undefined) return undefined;
+  requirePlainObject(opts, "create({ options })");
+  const softDelete = requireOptionalBoolean(opts.softDelete, "create({ options: { softDelete } })");
+  const versioning = requireOptionalBoolean(opts.versioning, "create({ options: { versioning } })");
+  const strictness = requireStrictness(opts.strictness, "create({ options: { strictness } })");
   const hasOptions =
     softDelete !== undefined ||
     versioning !== undefined ||
@@ -537,11 +563,8 @@ function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
   });
 }
 
-function runtimeOptionsPatchFromArgs(args: {
-  softDelete?: boolean;
-  versioning?: boolean;
-  strictness?: TableStrictness;
-}): Node {
+function runtimeOptionsPatchFromArgs(args: TableRuntimeOptions): Node {
+  requirePlainObject(args, "setOptions(args)");
   const softDelete = requireOptionalBoolean(args.softDelete, "setOptions({ softDelete })");
   const versioning = requireOptionalBoolean(args.versioning, "setOptions({ versioning })");
   const strictness = requireStrictness(args.strictness, "setOptions({ strictness })");
@@ -598,7 +621,7 @@ function requireSequenceBounds(min: number | null | undefined, max: number | nul
 
 /** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
  *  spelling of the engine's `VectorMetric` enum. Mirrored here (lock-step with
- *  `migrate_ops.js`) so `t.vector(n, { metric })` rejects an out-of-set metric
+ *  `migrate_ops.js`) so `t.vector({ dimensions, metric })` rejects an out-of-set metric
  *  with a friendly client-side OP_INVALID; the engine's closed enum stays
  *  authoritative. */
 export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerProduct"];
@@ -639,7 +662,7 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _unique: boolean;
   // Migration-first P2a (§2b) declared-only facets carried on the IrColumn:
   // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
-  // (`t.vector(n, {metric})`). #174: a standalone column mask (`.mask({…})`).
+  // (`t.vector({ dimensions, metric })`). #174: a standalone column mask (`.mask({…})`).
   // Absent ⇒ omitted on the wire.
   readonly _idPrefix: string | undefined;
   readonly _vectorMetric: string | undefined;
@@ -708,7 +731,7 @@ class ColumnDefImpl implements ColumnDefType {
   __withIdPrefix(prefix: string): ColumnDefImpl {
     return this.with({ idPrefix: prefix });
   }
-  /** Internal: carry the pgvector distance metric (`t.vector(n, {metric})`). */
+  /** Internal: carry the pgvector distance metric (`t.vector({ dimensions, metric })`). */
   __withVectorMetric(metric: string): ColumnDefImpl {
     return this.with({ vectorMetric: metric });
   }
@@ -730,7 +753,7 @@ class ColumnDefImpl implements ColumnDefType {
    *  the field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask`
    *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
    *  `classification` is optional and DEFAULTS to `"pii"` (closed
-   *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector(n, { metric })`:
+   *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector({ dimensions, metric })`:
    *  a friendly client-side OP_INVALID over the SAME closed set the engine's enums
    *  enforce authoritatively. */
   mask(opts: MaskOptions): ColumnDefImpl {
@@ -1215,11 +1238,17 @@ export const t: TypeLexicon = {
   },
   text: (opts?: TextOptions) => textColumn(opts),
   textArray: () => new ColumnDefImpl("textArray"),
-  numeric: (precision = 38, scale = 9) =>
-    new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
-  char: (n) => {
-    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
-      throw structuredError("OP_INVALID", `t.char(n): n must be a positive integer, got ${n}`);
+  numeric: (opts = {}) => {
+    requirePlainObject(opts, "t.numeric(opts)");
+    const precision = requireOptionalPositiveInteger(opts.precision, "t.numeric({ precision })") ?? 38;
+    const scale = requireOptionalNonNegativeInteger(opts.scale, "t.numeric({ scale })") ?? 9;
+    return new ColumnDefImpl({ decimal: { precision, scale } } as ColType);
+  },
+  char: (opts) => {
+    requirePlainObject(opts, "t.char(opts)");
+    const n = requireOptionalPositiveInteger(opts.length, "t.char({ length })");
+    if (n === undefined) {
+      throw structuredError("OP_INVALID", "t.char({ length }) requires length");
     }
     return new ColumnDefImpl({ char: { length: n } } as ColType);
   },
@@ -1233,20 +1262,22 @@ export const t: TypeLexicon = {
     requireString(targetTable, "t.ref(target)");
     return new ColumnDefImpl({ ref: { references: targetTable } } as ColType);
   },
-  vector: (n, opts?: VectorOptions) => {
-    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
-      throw structuredError("OP_INVALID", `t.vector(n): n must be a positive integer, got ${n}`);
+  vector: (opts: VectorOptions) => {
+    requirePlainObject(opts, "t.vector(opts)");
+    const n = requireOptionalPositiveInteger(opts.dimensions, "t.vector({ dimensions })");
+    if (n === undefined) {
+      throw structuredError("OP_INVALID", "t.vector({ dimensions }) requires dimensions");
     }
     let col = new ColumnDefImpl({ vector: { vector: n } } as ColType);
-    if (opts && opts.metric !== undefined) {
-      requireString(opts.metric, "t.vector(n, { metric })");
+    if (opts.metric !== undefined) {
+      requireString(opts.metric, "t.vector({ metric })");
       // LOW-1: a closed-set check on the metric token gives a friendly OP_INVALID at
       // authoring time instead of a cryptic serde "unknown variant" at the Rust
       // deserialize seam (the engine's closed `VectorMetric` enum stays authoritative).
       if (!VECTOR_METRICS.includes(opts.metric)) {
         throw structuredError(
           "OP_INVALID",
-          `t.vector(n, { metric }): metric must be one of ${VECTOR_METRICS.join(" | ")}, ` +
+          `t.vector({ dimensions, metric }): metric must be one of ${VECTOR_METRICS.join(" | ")}, ` +
             `got ${JSON.stringify(opts.metric)}`,
           { metric: opts.metric },
         );
@@ -3602,19 +3633,7 @@ export function __makeTableHandle(
       return handle;
     },
     setOptions(args) {
-      recordSetTableOptions(name, { ...args, schema: pickSchema(args, dflt) });
-      return handle;
-    },
-    softDelete(args = {}) {
-      recordSetTableOptions(name, { softDelete: args.enabled ?? true, schema: pickSchema(args, dflt) });
-      return handle;
-    },
-    withVersioning(args = {}) {
-      recordSetTableOptions(name, { versioning: args.enabled ?? true, schema: pickSchema(args, dflt) });
-      return handle;
-    },
-    strictness(level, args = {}) {
-      recordSetTableOptions(name, { strictness: level, schema: pickSchema(args, dflt) });
+      recordSetTableOptions(name, { ...args, schema: dflt });
       return handle;
     },
     comment(text, args = {}) {

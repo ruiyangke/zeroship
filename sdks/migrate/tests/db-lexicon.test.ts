@@ -44,7 +44,7 @@ test("ONE lexicon: a t.ref FK in the schema lowers the same {ref} ColType as the
 
 test("ONE lexicon: a pgvector field carries its dims through the shared ColType", () => {
   assert.deepEqual(colTypeFromDbField(dbT.vector(1536)), { vector: { vector: 1536 } });
-  assert.deepEqual(colTypeFromDbField(dbT.vector(8)), migrateColType(t.vector(8)));
+  assert.deepEqual(colTypeFromDbField(dbT.vector(8)), migrateColType(t.vector({ dimensions: 8 })));
 });
 
 test("ONE lexicon: an encrypted column reduces to the recursive `encrypted` ColType arm", () => {

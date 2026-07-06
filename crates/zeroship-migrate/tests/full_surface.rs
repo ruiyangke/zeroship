@@ -604,7 +604,7 @@ fn fluent_insert_normalizes_decimal_and_bytes_scalars() {
             tbl.create({
                 columns: {
                     id: t.id(),
-                    seq: t.numeric(38, 0).notNull().default(decimal("9007199254740993")),
+                    seq: t.numeric({ precision: 38, scale: 0 }).notNull().default(decimal("9007199254740993")),
                     salt: t.bytes().default(new Uint8Array([1, 2, 3, 255])),
                 },
             });
@@ -1373,7 +1373,7 @@ fn add_column_with_id_prefix_is_refused_not_dropped() {
     );
 }
 
-/// **#173** — `t.vector(n, { metric })` on an `addColumn` is now CARRIED on the op
+/// **#173** — `t.vector({ dimensions, metric })` on an `addColumn` is now CARRIED on the op
 /// tail (`Op::AddColumn` gained a `vectorMetric` slot), not refused/dropped — a vector
 /// ADD COLUMN renders the metric opclass. RED pre-#173: `__toAddColumnTail` THREW a
 /// create-only `OP_INVALID` on `_vectorMetric` (the P2a fail-closed this lift removes).
@@ -1383,7 +1383,7 @@ fn add_column_with_vector_metric_is_carried_not_refused() {
         r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("docs").column("emb").add({ type: t.vector(8, { metric: "cosine" }) });
+            table("docs").column("emb").add({ type: t.vector({ dimensions: 8, metric: "cosine" }) });
         }};
     "#,
         "addcol_metric",
@@ -1393,7 +1393,7 @@ fn add_column_with_vector_metric_is_carried_not_refused() {
     assert_eq!(
         add.get("vectorMetric").and_then(|v| v.as_str()),
         Some("cosine"),
-        "an addColumn t.vector(n, {{ metric }}) must CARRY the metric on the op tail \
+        "an addColumn t.vector({{ dimensions, metric }}) must CARRY the metric on the op tail \
          (the #173 lift of the P2a fail-closed), got: {add:#}"
     );
 }
@@ -1500,7 +1500,7 @@ fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() 
     );
 }
 
-/// A `t.vector(n)` (no metric) on an addColumn is STILL allowed — only the declared
+/// A `t.vector({ dimensions })` (no metric) on an addColumn is STILL allowed — only the declared
 /// metric facet is create-only. Pins that the HIGH-2 reject is scoped to the facet,
 /// not the vector column type.
 #[test]
@@ -1509,7 +1509,7 @@ fn add_column_plain_vector_is_allowed() {
         r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("docs").column("emb").add({ type: t.vector(8) });
+            table("docs").column("emb").add({ type: t.vector({ dimensions: 8 }) });
         }};
     "#,
         "addcol_plain_vector",
@@ -1529,7 +1529,7 @@ fn vector_metric_out_of_set_is_rejected_client_side() {
         r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("docs").create({ columns: { emb: t.vector(8, { metric: "euclidean" }) } });
+            table("docs").create({ columns: { emb: t.vector({ dimensions: 8, metric: "euclidean" }) } });
         }};
     "#,
         "bad_metric",
@@ -1540,7 +1540,7 @@ fn vector_metric_out_of_set_is_rejected_client_side() {
     // is what makes this RED pre-fix (the serde error ALSO names the variants, so a
     // token-only assertion would falsely pass; we pin the client-side wording).
     assert!(
-        err.contains("t.vector(n, { metric })") && err.contains("must be one of"),
+        err.contains("t.vector({ dimensions, metric })") && err.contains("must be one of"),
         "an out-of-set vector metric must be rejected CLIENT-SIDE with a friendly \
          OP_INVALID naming the closed set, got: {err}"
     );

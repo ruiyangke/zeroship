@@ -218,13 +218,13 @@ The shipped factories (`sdks/migrate/src/ops.ts`):
 | `t.bigInt()` | 64-bit integer |
 | `t.real()` | single-precision float (float4) |
 | `t.double()` | double-precision float (float8) |
-| `t.numeric(precision?, scale?)` | fixed-precision decimal (default `(38, 9)`) |
+| `t.numeric({ precision?, scale? })` | fixed-precision decimal (default `(38, 9)`) |
 | `t.boolean()` | boolean |
 | `t.timestamp()` | timestamp |
 | `t.uuid()` | uuid |
 | `t.bytes()` | byte array |
 | `t.json()` | json |
-| `t.vector(n, opts?)` | a pgvector column of dimensionality `n`; `t.vector(n, { metric })` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
+| `t.vector({ dimensions, metric? })` | a pgvector column; `metric` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.geoPoint()` | a geo point |
 | `t.ref(targetTable)` | a foreign-key reference (plain-string target) |
 | `t.encrypted({ of })` | an application-level encrypted column wrapping an inner type |
@@ -251,7 +251,7 @@ export default {
     table("orders").create({
       columns: {
         id: t.id(),
-        total: t.numeric(12, 2).notNull().default(0),
+        total: t.numeric({ precision: 12, scale: 2 }).notNull().default(0),
         status: t.text().notNull().default("pending"),
         customer_id: t.ref("customers").notNull(),
       },
@@ -279,7 +279,7 @@ introspection cannot recover. It is valid **only in `create()`** — an added
 column is never the system PK, so `t.id({ prefix })` on `.column().add()` is a
 hard `OP_INVALID` (the prefix would otherwise be silently dropped).
 
-**`t.vector(n, { metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
+**`t.vector({ dimensions, metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
 operator class. Closed set: `cosine | l2 | innerProduct`. Declared-only (pgvector
 stores dimensions, not the search metric).
 
@@ -303,7 +303,7 @@ export default {
     table("documents").create({
       columns: {
         id: t.id({ prefix: "doc" }),
-        embedding: t.vector(1536, { metric: "cosine" }),
+        embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
         ssn: t.text().mask({ kind: "last4", classification: "pci" }),
         email: t.text().mask({ kind: "email" }), // classification defaults to "pii"
       },
@@ -403,7 +403,7 @@ const orders = table("orders");
 orders.column("status").add({ type: t.text().notNull().default("new") });
 orders.column("legacy").drop({ ifExists: true });
 orders.column("label").rename({ to: "display_label", type: t.text() }); // named ⇒ no swap
-orders.column("total").setType({ to: t.numeric(14, 2), using: (c) => c("total").cast("real") });
+orders.column("total").setType({ to: t.numeric({ precision: 14, scale: 2 }), using: (c) => c("total").cast("real") });
 orders.column("note").dropNotNull();
 orders.column("note").setDefault("memo");
 orders.column("note").dropDefault();
