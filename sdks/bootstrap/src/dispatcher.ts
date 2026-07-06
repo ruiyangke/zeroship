@@ -173,7 +173,7 @@ declare const globalThis: {
     kind: JournalStepKind;
     state: JournalStepState;
     output?: unknown;
-    error?: { type?: string; message?: string; stack?: string };
+    error?: { type?: string; message?: string; stack?: string; retryable?: boolean };
     wakeAt?: string;
     signalType?: string;
     consumedSignal?: unknown;
@@ -249,6 +249,15 @@ declare const globalThis: {
     }
   }
 
+  class NondeterministicError extends Error {
+    readonly retryable = false;
+
+    constructor(message = "workflow replay is nondeterministic") {
+      super(message);
+      this.name = "NondeterministicError";
+    }
+  }
+
   function mkErr(message: string, status: number, code: string): Error {
     const e = new Error(message) as Error & { status?: number; code?: string };
     e.status = status;
@@ -256,12 +265,14 @@ declare const globalThis: {
     return e;
   }
 
-  function serializeError(e: unknown): { type: string; message: string; stack?: string } {
+  function serializeError(e: unknown): { type: string; message: string; stack?: string; retryable?: boolean } {
     if (e instanceof Error) {
+      const retryable = (e as Error & { retryable?: unknown }).retryable;
       return {
         type: e.name || "Error",
         message: e.message,
         ...(e.stack ? { stack: e.stack } : {}),
+        ...(typeof retryable === "boolean" ? { retryable } : {}),
       };
     }
     return { type: "Error", message: String(e) };
@@ -270,7 +281,9 @@ declare const globalThis: {
   function deserializeError(error: JournalStepRecord["error"]): Error {
     const e = error?.type === "WorkflowTimeoutError"
       ? new WorkflowTimeoutError(error?.message)
-      : new Error(error?.message ?? "workflow step failed");
+      : error?.type === "NondeterministicError"
+        ? new NondeterministicError(error?.message)
+        : new Error(error?.message ?? "workflow step failed");
     e.name = error?.type ?? e.name;
     if (error?.stack) e.stack = error.stack;
     return e;
@@ -327,6 +340,10 @@ declare const globalThis: {
       for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
+    get frontierPromise(): Promise<never> | undefined {
+      return this.#frontier?.promise;
+    }
+
     run<T>(
       name: string,
       configOrFn: unknown,
@@ -347,7 +364,7 @@ declare const globalThis: {
       this.#assertNotNested();
       const issued = this.#issue(name, "sleep");
       if (issued.record) {
-        if (issued.record.state === "completed") return Promise.resolve();
+        if (issued.record.state === "completed") return brandStepPromise(Promise.resolve());
         return this.#recordPromise<void>(issued.record, {
           kind: "sleep",
           ordinal: issued.ordinal,
@@ -372,7 +389,7 @@ declare const globalThis: {
       const target = typeof when === "number" ? new Date(when) : when;
       const issued = this.#issue(name, "sleep");
       if (issued.record) {
-        if (issued.record.state === "completed") return Promise.resolve();
+        if (issued.record.state === "completed") return brandStepPromise(Promise.resolve());
         return this.#recordPromise<void>(issued.record, {
           kind: "sleep",
           ordinal: issued.ordinal,
@@ -397,8 +414,8 @@ declare const globalThis: {
       const issued = this.#issue(name, "wait_signal");
       if (issued.record) {
         if (issued.record.state === "completed") {
-          if (issued.record.output !== undefined) return Promise.resolve(issued.record.output);
-          return Promise.resolve(issued.record.consumedSignal ?? null);
+          if (issued.record.output !== undefined) return brandStepPromise(Promise.resolve(issued.record.output));
+          return brandStepPromise(Promise.resolve(issued.record.consumedSignal ?? null));
         }
         if (issued.record.state === "failed") return this.#recordPromise<unknown>(issued.record);
         return this.#recordPromise<unknown>(issued.record, {
@@ -504,12 +521,12 @@ declare const globalThis: {
 
     #recordPromise<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): Promise<T> {
       try {
-        return Promise.resolve(this.#resolveRecord<T>(record, pendingOutcome));
+        return brandStepPromise(Promise.resolve(this.#resolveRecord<T>(record, pendingOutcome)));
       } catch (e) {
         if (e instanceof SuspendSignal) {
           return this.#registerFrontier(Promise.resolve(e.outcome));
         }
-        return Promise.reject(e);
+        return brandStepPromise(Promise.reject(e));
       }
     }
 
@@ -536,10 +553,8 @@ declare const globalThis: {
           record.kind !== kind ||
           (record.nameOccurrence ?? 0) !== nameOccurrence
         ) {
-          throw mkErr(
+          throw new NondeterministicError(
             `workflow journal mismatch at ordinal ${ordinal}: expected ${kind} ${name}#${nameOccurrence}, got ${record.kind} ${record.name}#${record.nameOccurrence ?? 0}`,
-            409,
-            "NONDETERMINISTIC_WORKFLOW",
           );
         }
       }
@@ -578,6 +593,7 @@ declare const globalThis: {
   class FrontierCoordinator {
     readonly promise: Promise<never>;
     #pending = 0;
+    #observed = false;
     #sealed = false;
     #settled = false;
     #fatal: unknown;
@@ -585,10 +601,14 @@ declare const globalThis: {
     #reject: (reason?: unknown) => void = () => {};
 
     constructor() {
-      this.promise = new Promise<never>((_, reject) => {
+      this.promise = brandStepPromise(new Promise<never>((_, reject) => {
         this.#reject = reject;
+      }), () => {
+        this.#observed = true;
       });
-      queueMicrotask(() => this.seal());
+      queueMicrotask(() => {
+        queueMicrotask(() => this.seal());
+      });
     }
 
     get sealed(): boolean {
@@ -612,6 +632,11 @@ declare const globalThis: {
     }
 
     seal(): void {
+      if (!this.#observed) {
+        this.#fatal ??= new NondeterministicError(
+          "workflow body awaited non-step work while a frontier was pending",
+        );
+      }
       this.#sealed = true;
       this.#maybeFinish();
     }
@@ -626,6 +651,76 @@ declare const globalThis: {
       this.#outcomes.sort((a, b) => a.ordinal - b.ordinal);
       this.#reject(new SuspendSignal(this.#outcomes));
     }
+  }
+
+  const STEP_PROMISE_BRAND = Symbol.for("zeroship.workflow.stepPromise");
+
+  function isWorkflowStepPromise(value: unknown): boolean {
+    return (
+      (typeof value === "object" || typeof value === "function") &&
+      value !== null &&
+      (value as Record<symbol, unknown>)[STEP_PROMISE_BRAND] === true
+    );
+  }
+
+  class WorkflowStepPromise<T> extends Promise<T> {
+    declare readonly [STEP_PROMISE_BRAND]: true;
+    #observed = false;
+    readonly #onObserve: (() => void) | undefined;
+
+    static get [Symbol.species](): PromiseConstructor {
+      return Promise;
+    }
+
+    constructor(
+      executor: (
+        resolve: (value: T | PromiseLike<T>) => void,
+        reject: (reason?: unknown) => void,
+      ) => void,
+      onObserve?: () => void,
+    ) {
+      super(executor);
+      this.#onObserve = onObserve;
+      Object.defineProperty(this, STEP_PROMISE_BRAND, {
+        value: true,
+        configurable: false,
+        enumerable: false,
+        writable: false,
+      });
+    }
+
+    then<TResult1 = T, TResult2 = never>(
+      onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+      onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+    ): Promise<TResult1 | TResult2> {
+      this.#observe();
+      return super.then(onfulfilled, onrejected);
+    }
+
+    catch<TResult = never>(
+      onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null,
+    ): Promise<T | TResult> {
+      this.#observe();
+      return super.catch(onrejected);
+    }
+
+    finally(onfinally?: (() => void) | null): Promise<T> {
+      this.#observe();
+      return super.finally(onfinally);
+    }
+
+    #observe(): void {
+      if (this.#observed) return;
+      this.#observed = true;
+      this.#onObserve?.();
+    }
+  }
+
+  function brandStepPromise<T>(promise: Promise<T>, onObserve?: () => void): Promise<T> {
+    if (isWorkflowStepPromise(promise)) return promise;
+    return new WorkflowStepPromise<T>((resolve, reject) => {
+      promise.then(resolve, reject);
+    }, onObserve);
   }
 
   function resolveWorkflow(userNamespace: unknown, workflowName: string): { new(): { run?: unknown } } {
@@ -731,7 +826,29 @@ declare const globalThis: {
         throw mkErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
       }
       const step = new JournalBackedStep(normalizeJournal(env));
-      const output = await workflow.run(buildTrigger(env), step);
+      let outputPromise: Promise<unknown>;
+      try {
+        outputPromise = Promise.resolve(workflow.run(buildTrigger(env), step));
+      } catch (error) {
+        step.frontierPromise?.catch(() => {});
+        throw error;
+      }
+      const frontierPromise = step.frontierPromise;
+      if (frontierPromise) {
+        outputPromise.catch(() => {});
+        await Promise.race([
+          frontierPromise,
+          outputPromise.then(
+            () => {
+              throw new NondeterministicError("workflow completed while a frontier was pending");
+            },
+            (error) => {
+              throw error;
+            },
+          ),
+        ]);
+      }
+      const output = await outputPromise;
       return terminalBatch(env, {
         kind: "RunCompleted",
         runId: env.runId,
