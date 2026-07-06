@@ -272,10 +272,9 @@ async fn cli_dbmate_full_workflow_under_default_trusted_profile() {
 }
 
 /// The internal `--profile platform` path is UNAFFECTED by the Trusted default:
-/// an explicit `--profile platform` still applies the platform Flyway set. (Smoke:
-/// a single tiny platform-shaped dir, not the whole port — that lives in
-/// `bin_e2e_pg.rs`.) This guards against the default change silently breaking the
-/// compose/ops platform path.
+/// an explicit `--profile platform` can still apply a Flyway-shaped SQL fixture.
+/// This guards the retained legacy SQL loader without making it the platform
+/// source of truth.
 #[compio::test]
 async fn explicit_platform_profile_still_applies() {
     let tok = token();

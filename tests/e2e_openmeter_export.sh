@@ -116,8 +116,15 @@ docker exec "$PG_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 \
   && pass "applied ops/postgres-init.sql" || true
 
 MIG_LOG="$WORK/migrate.log"
-if cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -p zeroship-migrate --bin zeroship-migrate -- migrate \
-    --dir "$ROOT/db/migrations" \
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p zeroship-migrate --bin zeroship-migrate-recorder-child \
+  >"$WORK/migrate-recorder-build.log" 2>&1 || {
+    fail "zeroship-migrate recorder child build failed (see $WORK/migrate-recorder-build.log)"
+    tail -20 "$WORK/migrate-recorder-build.log"
+    exit 1
+  }
+if ZEROSHIP_RECORDER_CHILD="$ROOT/target/debug/zeroship-migrate-recorder-child" \
+    cargo run --quiet --manifest-path "$ROOT/Cargo.toml" -p zeroship-migrate --bin zeroship-migrate -- migrate \
+    --dir "$ROOT/db/migrations-ts" \
     --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
     --profile platform --yes > "$MIG_LOG" 2>&1; then
   pass "platform migrations applied cleanly from scratch (zeroship-migrate)"

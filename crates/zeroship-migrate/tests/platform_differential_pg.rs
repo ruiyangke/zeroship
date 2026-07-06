@@ -19,7 +19,7 @@
 //!     the project schema, ordered).
 //!
 //! The changelog is GENERATED (a deterministic dependency-safe Flyway dir), so the
-//! test does NOT depend on the untracked `db/migrations` build artifact.
+//! test does NOT depend on a concrete platform migration directory.
 
 use compio_postgres::Client;
 use zeroship_migrate::{

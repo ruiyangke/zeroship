@@ -659,7 +659,7 @@ purely trust-based. **Note:** a *complete* metering→pricing→spending-limit e
 | App plan management | 🟡 | PUT /api/apps/{id}/plan | `crates/control/src/api.rs` | — | — | plan_id is a label; no billing logic acts on it. |
 | Usage counter ingest (worker → control) | 🟡 | POST /internal/usage | `crates/control/src/internal.rs` | `docs/reference/billing-metering.md` | — | No worker ever calls it; ingest-only. |
 | Usage counter read (dashboard) | 🟡 | GET /api/apps/{id}/usage | `crates/control/src/api.rs` | `docs/reference/billing-metering.md` | — | Returns empty maps in real deploys. |
-| Usage history / snapshots | 🟠 | internal (DB schema only) | `db/changelog/changesets/0004_control.sql` | — | — | Table exists; no code reads/writes it. |
+| Usage history / snapshots | 🟠 | internal (DB schema only) | `db/migrations-ts/20260702000200_control_tables.ts` | — | — | Table exists; no code reads/writes it. |
 | env.meter.* native primitive | 🔵 | `env.meter.*` (planned) | `crates/control/src/metering.rs` | — | — | Single-line stub; not registered in runtime. |
 | Platform fee enforcement | 🟡 | internal (reads application_fee_amount) | `crates/control/src/stripe_handlers.rs` | — | — | 15% set by SDK; not re-verified server-side. |
 

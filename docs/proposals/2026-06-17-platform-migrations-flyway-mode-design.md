@@ -1,11 +1,17 @@
 # Platform Migrations on `zeroship-migrate` — Flyway-style Platform Profile
 
+> **Superseded implementation note (2026-07-06).** This proposal captured the
+> first post-Liquibase cutover through a Flyway-style SQL corpus. The current
+> platform source of truth is the JS DSL corpus in `db/migrations-ts/`; the
+> compose `migrate` service applies it with
+> `zeroship-migrate migrate --dir=/db/migrations-ts --profile=platform`.
+
 Status: **proposal** (pre-implementation; security-first). Date: 2026-06-17.
 Scope: replace **Liquibase** (the platform's own DB migration tooling for the
 `zeroship` / `oauth_hydra` schemas) with our own `zeroship-migrate` engine, by
 adding a second **trust profile** ("Platform") and a native **Flyway-style
 file-based loader** + a `zeroship-migrate` CLI binary. This reverses the
-"platform stays on Liquibase" rule in the 2026-06-16 engine design (§1.7) — see
+old separate-tool rule in the 2026-06-16 engine design (§1.7) — see
 §3.
 
 > Authoring note (per `feedback_proposal_workflow`): this draft is **uncommitted**
@@ -129,12 +135,12 @@ State, not re-derivation (from a completed mapping of the live tree):
 The 2026-06-16 engine design **§1.7** says, verbatim:
 
 > "The creator-migration engine's roles have **zero** access to
-> `control`/`auth`/`billing`. The platform's own db therefore stays on
-> **Liquibase** (engineer-authored, separate trust domain). Unifying them would
+> `control`/`auth`/`billing`. The platform's own db therefore uses a
+> **separate migration tool** (engineer-authored, separate trust domain). Unifying them would
 > hand the creator-migration path a route toward platform schemas — security-first
 > says **do not unify**."
 
-**This design reverses the conclusion ("stays on Liquibase") while preserving the
+**This design reverses the separate-tool conclusion while preserving the
 premise ("do not hand the creator path a route to platform schemas").** The §1.7
 reasoning conflated two separable things:
 
@@ -179,7 +185,7 @@ platform-migrator role). Scoping the claim this way means a critic cannot point 
 "but it still runs as a superuser-equivalent" as a contradiction — we say so up
 front.
 
-Net: §1.7 gets rewritten in the implementing PR from "stays on Liquibase" to
+Net: §1.7 gets rewritten in the implementing PR from "separate platform tool" to
 "runs on `zeroship-migrate` under the **Platform** profile; trust separation is
 the §5 call-site invariant, not tool separation."
 
@@ -1129,7 +1135,7 @@ zeroship-migrate <SUBCOMMAND> --dir <PATH> --database-url <DSN> [--profile platf
              requires explicit approval, mirrors engine.rs:710).
 
 Args:
-  --dir              Migration directory (default db/migrations/ post-port).
+  --dir              Migration directory (superseded platform default: db/migrations-ts/).
   --database-url     Postgres DSN (admin connection).
   --profile          platform (default for this binary) | confined. The ONLY place
                      `platform` is selectable; the CLI entrypoint lives in
@@ -1189,7 +1195,7 @@ single well-known key, no unrelated ids to collide with.)
 
 **Compose service swap** (`docker-compose.yml:81–95`): replace the
 `liquibase/liquibase:4.31` image + `update` command with the platform image
-running `zeroship-migrate migrate --dir /db/migrations --database-url
+running `zeroship-migrate migrate --dir /db/migrations-ts --database-url
 postgres://postgres:zeroship@postgres:5432/zeroship --profile platform`. It still
 **runs once and exits**; `control`/`auth` keep gating on
 `service_completed_successfully` (`docker-compose.yml:164–165`) — unchanged.
@@ -1263,7 +1269,7 @@ Mechanical, one PR:
    `.down.sql`).
 5. **Delete the changelog**: `db/changelog/db.changelog-master.yaml` and the whole
    `db/changelog/changesets/` tree are removed in the same PR; the new files live
-   under `db/migrations/`.
+   under `db/migrations-ts/`.
 6. **Compose + ops swap** (§9).
 
 Per the no-back-compat invariant, this is **one PR** — no dual-run, no
@@ -1333,7 +1339,7 @@ Per `feedback_faithful_e2e_tests` (run the REAL path, no shims):
   journal has one row per file. The old Liquibase object-for-object equivalence
   gate was completed during the f48c8a38 cutover and retired when
   `db/changelog/` was deleted; ongoing regression coverage is against the live
-  `db/migrations/` source plus rollback of the real `.down.sql` files.
+  `db/migrations-ts/` source through the Platform `.ts` apply path.
 - **T2 — Confined-default-unchanged regression (§6.4, H3).** Re-run the entire
   existing `tests/guard_security.rs` fixture set under `GuardConfig::confined(...)`
   and assert verdicts are identical to the pre-change baseline. **Explicitly
