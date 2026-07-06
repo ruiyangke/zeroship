@@ -93,7 +93,6 @@ export type {
   IndexDropArgs,
   CreateTableArgs,
   TableRuntimeOptions,
-  SetTableOptionsArgs,
   TableStrictness,
   ForeignKeyReference,
   ExclusionTarget,
@@ -143,6 +142,8 @@ export type {
   VectorMetric,
   IdOptions,
   TextOptions,
+  NumericOptions,
+  CharOptions,
   VectorOptions,
   MaskOptions,
   // re-exported generated IR wire types (ergonomics; goldens are the contract)

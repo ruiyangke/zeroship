@@ -439,7 +439,7 @@ export function up() {
       ratio: t.real().notNull(),
       source_ip: t.inet(),
       scopes: t.textArray().notNull(),
-      currency: t.char(3).notNull().default("usd"),
+      currency: t.char({ length: 3 }).notNull().default("usd"),
     },
     primaryKey: ["id"],
   });
@@ -1281,20 +1281,20 @@ async fn platform_ts_scalar_type_lexicon_round_trips_on_live_pg() {
             .await
             .as_deref(),
         Some("bpchar"),
-        "t.char(3) renders as Postgres bpchar"
+        "t.char({{ length: 3 }}) renders as Postgres bpchar"
     );
     assert_eq!(
         column_character_maximum_length(&conn, "zeroship", "platform_scalar_types", "currency")
             .await,
         Some(3),
-        "t.char(3) preserves character_maximum_length=3"
+        "t.char({{ length: 3 }}) preserves character_maximum_length=3"
     );
     assert_eq!(
         column_default_expr(&conn, "zeroship", "platform_scalar_types", "currency")
             .await
             .as_deref(),
         Some("'usd'::bpchar"),
-        "t.char(3).default(\"usd\") round-trips through pg_get_expr as bpchar"
+        "t.char({{ length: 3 }}).default(\"usd\") round-trips through pg_get_expr as bpchar"
     );
 
     reset(&conn, &meta).await;

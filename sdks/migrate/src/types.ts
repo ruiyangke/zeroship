@@ -108,9 +108,22 @@ export interface TextOptions {
   caseSensitive?: boolean;
 }
 
-/** Options for `t.vector(n, { metric })` — the pgvector distance metric (closed
- *  {@link VectorMetric} set). Omitted ⇒ the engine's opclass default. */
+/** Options for `t.numeric({ precision, scale })`. Omitted ⇒ (38, 9). */
+export interface NumericOptions {
+  precision?: number;
+  scale?: number;
+}
+
+/** Options for `t.char({ length })`. */
+export interface CharOptions {
+  length: number;
+}
+
+/** Options for `t.vector({ dimensions, metric })` — the pgvector dimensionality
+ *  plus optional distance metric (closed {@link VectorMetric} set). Omitted
+ *  metric ⇒ the engine's opclass default. */
 export interface VectorOptions {
+  dimensions: number;
   metric?: VectorMetric;
 }
 
@@ -204,9 +217,9 @@ export interface TypeLexicon {
   /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
   textArray(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
-  numeric(precision?: number, scale?: number): ColumnDef;
+  numeric(opts?: NumericOptions): ColumnDef;
   /** Fixed-length character string (`character(n)` / `CHAR(n)`). */
-  char(n: number): ColumnDef;
+  char(opts: CharOptions): ColumnDef;
   timestamp(): ColumnDef;
   /** Narrow SQL DATE token. Validates only as a PostgreSQL domain base type. */
   date(): ColumnDef;
@@ -216,11 +229,11 @@ export interface TypeLexicon {
   json(): ColumnDef;
   /** A foreign-key reference column (plain-string target — NOT live-schema-bound). */
   ref(targetTable: string): ColumnDef;
-  /** A pgvector embedding column of dimensionality `n`. `t.vector(n, { metric })`
-   *  records the declared distance metric on `IrColumn.vectorMetric` (the closed
+  /** A pgvector embedding column. `t.vector({ dimensions, metric })` records the
+   *  declared distance metric on `IrColumn.vectorMetric` (the closed
    *  {@link VectorMetric} set), so the ivfflat/hnsw opclass renders the declared
    *  metric instead of defaulting — a declared-only hint introspection can't recover. */
-  vector(n: number, opts?: VectorOptions): ColumnDef;
+  vector(opts: VectorOptions): ColumnDef;
   geoPoint(): ColumnDef;
   /** 16-bit signed integer. */
   smallInt(): ColumnDef;
@@ -1017,16 +1030,9 @@ export type ExclusionAddArgs = ExclusionConstraintArgs & {
 export type TableStrictness = "strict" | "lenient" | "off";
 
 export interface TableRuntimeOptions {
-  softDelete: boolean;
-  versioning: boolean;
-  strictness?: TableStrictness;
-}
-
-export interface SetTableOptionsArgs {
   softDelete?: boolean;
   versioning?: boolean;
   strictness?: TableStrictness;
-  schema?: string;
 }
 
 /** The all-object `create({...})` payload (§3.1). Table-level constraints/indexes
@@ -1054,11 +1060,9 @@ export interface SetTableOptionsArgs {
 export interface CreateTableArgs {
   columns: Record<string, ColumnDef>;
   /** Collection runtime metadata, carried into `schema.runtime.json`.
-   *  `softDelete` mirrors `@zeroship/db` `.softDelete()`, `versioning` mirrors
-   *  `.withVersioning()`, and `strictness` mirrors `.strictness(...)`. */
-  softDelete?: boolean;
-  versioning?: boolean;
-  strictness?: TableStrictness;
+   *  `softDelete`, `versioning`, and `strictness` share the same named bag as
+   *  `table(name).setOptions(...)`. */
+  options?: TableRuntimeOptions;
   /** Table primary key intent: undefined leaves the policy default unresolved,
    *  null requests no PK, and a string array records an explicit/composite PK. */
   primaryKey?: string[] | null;
@@ -1252,10 +1256,7 @@ export interface TableHandle {
    *  online column expand-contract; `ifExists` guards the source table). Records a
    *  `renameTable` Op; the engine emits the inverse rename as the down-migration. */
   rename(args: { to: string; ifExists?: boolean; schema?: string }): TableHandle;
-  setOptions(args: SetTableOptionsArgs): TableHandle;
-  softDelete(args?: { enabled?: boolean; schema?: string }): TableHandle;
-  withVersioning(args?: { enabled?: boolean; schema?: string }): TableHandle;
-  strictness(level: TableStrictness, args?: { schema?: string }): TableHandle;
+  setOptions(args: TableRuntimeOptions): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
   partition(name: string): PartitionRef;
 

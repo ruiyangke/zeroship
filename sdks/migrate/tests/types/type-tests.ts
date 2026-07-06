@@ -336,18 +336,26 @@ export function goodTableRename(): void {
 }
 
 export function tableRuntimeOptionTerminals(): void {
+  table("posts").setOptions({ softDelete: true });
+  table("posts").setOptions({ softDelete: false });
+  table("posts", { schema: "archive" }).setOptions({ softDelete: true });
+  table("posts").setOptions({ versioning: true });
+  table("posts").setOptions({ versioning: false });
+  table("posts", { schema: "archive" }).setOptions({ versioning: true });
+  table("posts").setOptions({ strictness: "lenient" });
+  table("posts").create({ columns: { title: t.text() }, options: { softDelete: true, versioning: true, strictness: "off" } });
+
+  // @ts-expect-error — `.softDelete()` is no longer a TableHandle method.
   table("posts").softDelete();
-  table("posts").softDelete({ enabled: false });
-  table("posts").softDelete({ enabled: true, schema: "archive" });
+
+  // @ts-expect-error — `.withVersioning()` is no longer a TableHandle method.
   table("posts").withVersioning();
-  table("posts").withVersioning({ enabled: false });
-  table("posts").withVersioning({ enabled: true, schema: "archive" });
 
-  // @ts-expect-error — `.softDelete()` no longer accepts a positional boolean.
-  table("posts").softDelete(false);
+  // @ts-expect-error — `.strictness()` is no longer a TableHandle method.
+  table("posts").strictness("strict");
 
-  // @ts-expect-error — `.withVersioning()` no longer accepts a positional boolean.
-  table("posts").withVersioning(true);
+  // @ts-expect-error — create-time runtime options live under `options`.
+  table("posts").create({ columns: { title: t.text() }, softDelete: true });
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -374,8 +382,22 @@ export function badColTypes(): void {
   // @ts-expect-error — there is no `.frobnicate()` chain modifier.
   t.text().frobnicate();
 
-  // @ts-expect-error — `t.vector(n)` requires a numeric dimension.
-  t.vector("not a number");
+  t.numeric({ precision: 12, scale: 2 });
+  t.numeric();
+  t.char({ length: 3 });
+  t.vector({ dimensions: 8, metric: "cosine" });
+
+  // @ts-expect-error — `t.numeric` now takes a named options bag.
+  t.numeric(12, 2);
+
+  // @ts-expect-error — `t.char` now takes a named length payload.
+  t.char(3);
+
+  // @ts-expect-error — `t.vector` now takes a named dimensions payload.
+  t.vector(8);
+
+  // @ts-expect-error — `t.vector({ dimensions })` requires a numeric dimension.
+  t.vector({ dimensions: "not a number" });
 
   // @ts-expect-error — the removed `{ notNull }` options-bag overload (§7).
   t.text({ notNull: true });
@@ -590,7 +612,7 @@ export function insertValueShapes(): void {
 export function decimalValueShapes(): void {
   const cents: DecimalValue = decimal("9007199254740993");
   table("ledger").insert({ rows: { amount: cents } });
-  table("ledger").create({ columns: { amount: t.numeric(38, 0).default(decimal("9007199254740993")) } });
+  table("ledger").create({ columns: { amount: t.numeric({ precision: 38, scale: 0 }).default(decimal("9007199254740993")) } });
   table("ledger").insert({
     rows: { id: 1, amount: decimal("0.00") },
     onConflict: { columns: ["id"], doUpdate: { amount: decimal("1.25") } },
@@ -601,7 +623,7 @@ export function decimalValueShapes(): void {
   table("ledger").insert({ rows: { amount: 9007199254740993n } });
 
   // @ts-expect-error — bigint defaults are refused by the authored value union.
-  table("ledger").create({ columns: { amount: t.numeric(38, 0).default(9007199254740993n) } });
+  table("ledger").create({ columns: { amount: t.numeric({ precision: 38, scale: 0 }).default(9007199254740993n) } });
 
   table("ledger").insert({
     rows: { id: 1, amount: decimal("0.00") },

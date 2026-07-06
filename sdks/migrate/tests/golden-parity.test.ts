@@ -117,14 +117,14 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
       columns: {
         id: t.id(),
         email: t.text().notNull().unique(),
-        balance: t.numeric(12, 2).notNull().default(decimal("0.00")),
+        balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
         authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
         profile: t.json(),
         owner: t.ref("users"),
-        embedding: t.vector(1536),
+        embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
         // re-blessed string → text (t.string alias removed, §7).
         label: t.text(),
@@ -155,7 +155,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("accounts").unique("accounts_external_uq").add({ columns: ["external_id"] });
     table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
     table("accounts").constraint("accounts_legacy_chk").drop();
-    table("accounts").column("balance").setType({ to: t.numeric(14, 2) });
+    table("accounts").column("balance").setType({ to: t.numeric({ precision: 14, scale: 2 }) });
     table("accounts").column("profile").setNotNull();
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
     pgTable("accounts").index("accounts_active_email_idx").add({

@@ -1,5 +1,5 @@
 // Artifact-identity parity for the column-level facets (#173/#174/#178 +
-// generated/identity): `t.id({ prefix })`, `t.vector(n, { metric })`, standalone
+// generated/identity): `t.id({ prefix })`, `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
 // S0.5 collapsed the recorder twin: there is no longer a hand-kept
@@ -74,7 +74,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
   begin();
   // createTable carrying the column facets:
   //  - t.id({ prefix })            → IrColumn.idPrefix
-  //  - t.vector(n, { metric })     → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
+  //  - t.vector({ dimensions, metric }) → IrColumn.vectorMetric (closed cosine|l2|innerProduct)
   //  - t.text().mask({ kind, classification }) → IrColumn.mask:{kind,classification}
   //  - t.int().generated(expr)     → IrColumn.generated:{expr,stored}
   //  - t.bigInt().identity(opts)   → IrColumn.identity:{always}
@@ -89,7 +89,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
       source_ip: t.inet(),
       total_cents: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
       virtual_total: t.int().generated((c: any) => c("qty").mul(c("unit_cents")), { virtual: true }),
-      embedding: t.vector(1536, { metric: "cosine" }),
+      embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
       // a standalone mask with an explicit classification
       ssn: t.text().mask({ kind: "last4", classification: "pci" }),
       // a standalone mask defaulting classification → "pii"
@@ -98,7 +98,7 @@ function authorWith({ begin, drain, t, table }: Rec): any[] {
     },
   });
   // addColumn carries vectorMetric + mask (NOT idPrefix — fail-closed on add):
-  table("documents").column("summary_vec").add({ type: t.vector(768, { metric: "innerProduct" }) });
+  table("documents").column("summary_vec").add({ type: t.vector({ dimensions: 768, metric: "innerProduct" }) });
   table("documents").column("phone").add({ type: t.text().mask({ kind: "last4" }) });
   table("documents").column("added_total").add({
     type: t.int().generated((c: any) => c("qty").mul(c("unit_cents"))),
@@ -122,7 +122,7 @@ test("the recorded facets carry the exact camelCase wire form", () => {
   // t.id({ prefix }) → idPrefix
   assert.equal(byName("id").idPrefix, "doc");
 
-  // t.vector(n, { metric }) → vectorMetric (closed token)
+  // t.vector({ dimensions, metric }) → vectorMetric (closed token)
   assert.equal(byName("embedding").vectorMetric, "cosine");
   assert.equal(byName("shard").type, "smallInt");
   assert.equal(byName("ratio").type, "real");
