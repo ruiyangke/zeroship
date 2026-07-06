@@ -262,7 +262,7 @@ fn portable_expr_samples() -> Vec<Expr> {
         // covered by render and MySQL live inList/notIn/empty-list proofs
         Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec!["active".to_string(), "trial".to_string()],
+            elems: vec![IrScalar::Str("active".to_string()), IrScalar::Str("trial".to_string())],
             negated: false,
         },
         // covered by extract_equivalence::portable_extract_fields_are_live_equivalent_on_all_three_dialects

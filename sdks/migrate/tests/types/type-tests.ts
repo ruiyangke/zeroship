@@ -428,6 +428,23 @@ export function badExprShapes(): void {
     set: { name: (c) => c("name").coalesce("x") },
   });
 
+  table("users").update({
+    set: {
+      http_status: (c) => c("http_status").in([200, 404, 500]),
+      enabled: (c) => c("enabled").notIn([true, false]),
+    },
+  });
+
+  table("users").update({
+    // @ts-expect-error — `.in` accepts only the pinned Scalar set, not bytes.
+    set: { payload: (c) => c("payload").in([byteValue("AQID")]) },
+  });
+
+  table("users").update({
+    // @ts-expect-error — `.notIn` accepts only the pinned Scalar set, not objects.
+    set: { kind: (c) => c("kind").notIn([{ value: "admin" }]) },
+  });
+
   table("users").create({
     columns: { name: t.text() },
     checks: [

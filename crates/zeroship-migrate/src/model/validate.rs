@@ -4152,12 +4152,58 @@ impl Ctx<'_> {
     fn check_in_list(
         &self,
         expr: &Expr,
-        elems: &[String],
+        elems: &[crate::model::ir::IrScalar],
         depth: u32,
     ) -> Result<(), AuthoringError> {
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum ElemKind {
+            Text,
+            Number,
+            Bool,
+            Null,
+        }
+
         self.walk_depth(expr, depth)?;
-        for elem in elems {
-            self.check_pg_text_literal(elem, "inList element")?;
+        let mut first_kind = None;
+        for (idx, elem) in elems.iter().enumerate() {
+            let kind = match elem {
+                crate::model::ir::IrScalar::Str(s) => {
+                    self.check_pg_text_literal(s, "inList element")?;
+                    ElemKind::Text
+                }
+                crate::model::ir::IrScalar::Int(_) | crate::model::ir::IrScalar::Decimal(_) => {
+                    ElemKind::Number
+                }
+                crate::model::ir::IrScalar::Bool(_) => ElemKind::Bool,
+                crate::model::ir::IrScalar::Null => ElemKind::Null,
+                crate::model::ir::IrScalar::Bytes(_) => {
+                    return Err(self.err(
+                        CODE_UNSUPPORTED,
+                        Some(UnsupportedKind::Expr),
+                        self.target_dialect,
+                        format!(
+                            "inList element {idx} must be string, number, boolean, or null; bytes are not allowed"
+                        ),
+                        Some("remove byte values from the in() / notIn() list".to_string()),
+                    ));
+                }
+            };
+            if let Some(first) = first_kind {
+                if kind != first {
+                    return Err(self.err(
+                        CODE_UNSUPPORTED,
+                        Some(UnsupportedKind::Expr),
+                        self.target_dialect,
+                        "inList elements must be homogeneous".to_string(),
+                        Some(
+                            "use one scalar kind per in() / notIn() list, or split the predicate"
+                                .to_string(),
+                        ),
+                    ));
+                }
+            } else {
+                first_kind = Some(kind);
+            }
         }
         Ok(())
     }
@@ -4278,7 +4324,7 @@ mod tests {
     use crate::model::ir::{IndexElement, IrScalar, IrValue};
 
     fn cols() -> Vec<String> {
-        vec!["name".into(), "first".into(), "last".into(), "total".into()]
+        vec!["name".into(), "first".into(), "last".into(), "total".into(), "active".into()]
     }
 
     fn scope<'a>(table: &'a str, cols: &'a [String]) -> TargetScope<'a> {
@@ -4402,7 +4448,7 @@ mod tests {
     fn in_list(expr: Expr, elems: Vec<&str>) -> Expr {
         Expr::InList {
             expr: Box::new(expr),
-            elems: elems.into_iter().map(str::to_string).collect(),
+            elems: elems.into_iter().map(|s| IrScalar::Str(s.to_string())).collect(),
             negated: false,
         }
     }
@@ -4410,7 +4456,7 @@ mod tests {
     fn not_in_list(expr: Expr, elems: Vec<&str>) -> Expr {
         Expr::InList {
             expr: Box::new(expr),
-            elems: elems.into_iter().map(str::to_string).collect(),
+            elems: elems.into_iter().map(|s| IrScalar::Str(s.to_string())).collect(),
             negated: true,
         }
     }
@@ -4464,6 +4510,16 @@ mod tests {
             in_list(Expr::col("name"), vec!["active", "past_due"]),
             not_in_list(Expr::col("name"), vec!["suspended"]),
             in_list(Expr::col("name"), vec![]),
+            Expr::InList {
+                expr: Box::new(Expr::col("total")),
+                elems: vec![IrScalar::Int(200), IrScalar::Int(404), IrScalar::Int(500)],
+                negated: false,
+            },
+            Expr::InList {
+                expr: Box::new(Expr::col("active")),
+                elems: vec![IrScalar::Bool(true), IrScalar::Bool(false)],
+                negated: false,
+            },
             Expr::Extract { field: ExtractField::Year, from: Box::new(Expr::col("total")) },
             Expr::Extract { field: ExtractField::Month, from: Box::new(Expr::col("total")) },
             Expr::Extract { field: ExtractField::Day, from: Box::new(Expr::col("total")) },
@@ -4606,6 +4662,24 @@ mod tests {
         let err = validate_expr(&nul_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("NUL"));
+
+        let mixed_elem = Expr::InList {
+            expr: Box::new(Expr::col("name")),
+            elems: vec![IrScalar::Str("ok".into()), IrScalar::Int(200)],
+            negated: false,
+        };
+        let err = validate_expr(&mixed_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert!(err.reason.contains("homogeneous"));
+
+        let bytes_elem = Expr::InList {
+            expr: Box::new(Expr::col("name")),
+            elems: vec![IrScalar::Bytes(vec![1, 2, 3])],
+            negated: false,
+        };
+        let err = validate_expr(&bytes_elem, Dialect::Postgres, &sc, 0, None).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert!(err.reason.contains("bytes are not allowed"));
 
         let empty_pattern = Expr::PgRegexMatch {
             expr: Box::new(Expr::col("name")),

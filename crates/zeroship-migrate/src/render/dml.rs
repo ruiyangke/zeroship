@@ -380,32 +380,120 @@ fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
+fn in_list_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
+    if s.is_empty() {
+        return Err(DmlError::UnrenderableExpr(format!("{what} must be non-empty")));
+    }
+    if s.contains('\0') {
+        return Err(DmlError::UnrenderableExpr(format!("{what} contains a NUL byte")));
+    }
+    Ok(sql_string_literal(s))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InListScalarKind {
+    Text,
+    Number,
+    Bool,
+    Null,
+}
+
+fn in_list_scalar_kind(elem: &IrScalar) -> Result<InListScalarKind, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(_) => InListScalarKind::Text,
+        IrScalar::Int(_) | IrScalar::Decimal(_) => InListScalarKind::Number,
+        IrScalar::Bool(_) => InListScalarKind::Bool,
+        IrScalar::Null => InListScalarKind::Null,
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKind>, DmlError> {
+    let mut kind = None;
+    for elem in elems {
+        let elem_kind = in_list_scalar_kind(elem)?;
+        if let Some(first) = kind {
+            if elem_kind != first {
+                return Err(DmlError::UnrenderableExpr(
+                    "inList elements must be homogeneous".to_string(),
+                ));
+            }
+        } else {
+            kind = Some(elem_kind);
+        }
+    }
+    Ok(kind)
+}
+
+fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(s) => pg_text_literal(s, "inList element")?,
+        IrScalar::Int(i) => i.to_string(),
+        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Bool(b) => {
+            if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+        }
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
+fn render_in_list_elem_portable(elem: &IrScalar) -> Result<String, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(s) => in_list_text_literal(s, "inList element")?,
+        IrScalar::Int(i) => i.to_string(),
+        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Bool(b) => {
+            if *b { "TRUE".to_string() } else { "FALSE".to_string() }
+        }
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
 fn render_in_list(
     expr: &str,
-    elems: &[String],
+    elems: &[IrScalar],
     negated: bool,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
     if elems.is_empty() {
         return Ok(if negated { "TRUE" } else { "FALSE" }.to_string());
     }
+    let kind = homogeneous_in_list_kind(elems)?.expect("non-empty list has kind");
+    let joiner = if matches!(kind, InListScalarKind::Text) { ", " } else { "," };
     match dialect {
         SqlDialect::Postgres => {
             let rendered: Result<Vec<_>, _> =
-                elems.iter().map(|elem| pg_text_literal(elem, "inList element")).collect();
+                elems.iter().map(render_in_list_elem_pg).collect();
             let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
             Ok(format!(
                 "({expr} {cmp} {quantifier} (ARRAY[{}]))",
-                rendered?.join(", ")
+                rendered?.join(joiner)
             ))
         }
         SqlDialect::Sqlite | SqlDialect::Mysql => {
             let rendered = elems
                 .iter()
-                .map(|elem| sql_string_literal(elem))
-                .collect::<Vec<_>>();
+                .map(render_in_list_elem_portable)
+                .collect::<Result<Vec<_>, _>>()?;
             let op = if negated { "NOT IN" } else { "IN" };
-            Ok(format!("({expr} {op} ({}))", rendered.join(", ")))
+            Ok(format!("({expr} {op} ({}))", rendered.join(joiner)))
         }
     }
 }
@@ -1933,7 +2021,7 @@ mod tests {
     fn in_list_renders_pg_any_all_and_sql_in_not_in_on_all_three_dialects() {
         let includes = Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec!["a".into(), "b".into()],
+            elems: vec![IrScalar::Str("a".into()), IrScalar::Str("b".into())],
             negated: false,
         };
         assert_eq!(
@@ -1951,7 +2039,7 @@ mod tests {
 
         let excludes = Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec!["x".into(), "y".into()],
+            elems: vec![IrScalar::Str("x".into()), IrScalar::Str("y".into())],
             negated: true,
         };
         assert_eq!(
@@ -1965,6 +2053,42 @@ mod tests {
         assert_eq!(
             render_expr_inline(&excludes, SqlDialect::Mysql).unwrap(),
             "(`status` NOT IN ('x', 'y'))"
+        );
+
+        let status_codes = Expr::InList {
+            expr: Box::new(Expr::col("http_status")),
+            elems: vec![IrScalar::Int(200), IrScalar::Int(404), IrScalar::Int(500)],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&status_codes, SqlDialect::Postgres).unwrap(),
+            "(\"http_status\" = ANY (ARRAY[200,404,500]))"
+        );
+        assert_eq!(
+            render_expr_inline(&status_codes, SqlDialect::Sqlite).unwrap(),
+            "(\"http_status\" IN (200,404,500))"
+        );
+        assert_eq!(
+            render_expr_inline(&status_codes, SqlDialect::Mysql).unwrap(),
+            "(`http_status` IN (200,404,500))"
+        );
+
+        let enabled = Expr::InList {
+            expr: Box::new(Expr::col("enabled")),
+            elems: vec![IrScalar::Bool(true), IrScalar::Bool(false)],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&enabled, SqlDialect::Postgres).unwrap(),
+            "(\"enabled\" = ANY (ARRAY[TRUE,FALSE]))"
+        );
+        assert_eq!(
+            render_expr_inline(&enabled, SqlDialect::Sqlite).unwrap(),
+            "(\"enabled\" IN (TRUE,FALSE))"
+        );
+        assert_eq!(
+            render_expr_inline(&enabled, SqlDialect::Mysql).unwrap(),
+            "(`enabled` IN (TRUE,FALSE))"
         );
     }
 
@@ -1998,7 +2122,7 @@ mod tests {
     fn in_list_escapes_text_elements() {
         let expr = Expr::InList {
             expr: Box::new(Expr::col("status")),
-            elems: vec!["a'b".into()],
+            elems: vec![IrScalar::Str("a'b".into())],
             negated: false,
         };
         assert_eq!(
@@ -2012,6 +2136,31 @@ mod tests {
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
             "(`status` IN ('a''b'))"
+        );
+    }
+
+    #[test]
+    fn in_list_rejects_mixed_and_bytes_elements() {
+        let mixed = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec![IrScalar::Str("ok".into()), IrScalar::Int(200)],
+            negated: false,
+        };
+        let err = render_expr_inline(&mixed, SqlDialect::Postgres).unwrap_err();
+        assert!(
+            err.to_string().contains("homogeneous"),
+            "mixed inList should fail homogeneous check: {err}"
+        );
+
+        let bytes = Expr::InList {
+            expr: Box::new(Expr::col("payload")),
+            elems: vec![IrScalar::Bytes(vec![1, 2, 3])],
+            negated: false,
+        };
+        let err = render_expr_inline(&bytes, SqlDialect::Sqlite).unwrap_err();
+        assert!(
+            err.to_string().contains("bytes are not allowed"),
+            "bytes inList should fail closed: {err}"
         );
     }
 

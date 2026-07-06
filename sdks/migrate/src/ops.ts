@@ -115,6 +115,7 @@ import type {
   RoleSetOptionsArgs,
   RefAction,
   Row,
+  Scalar,
   ScalarValue,
   SchemaCreateArgs,
   SchemaDropArgs,
@@ -1498,21 +1499,47 @@ function exprArg(x: unknown): Node {
   return { node: "literal", value: toIrScalar(x) };
 }
 
-function textLiteralArray(values: unknown, what: string): string[] {
-  if (!Array.isArray(values)) {
-    throw structuredError("OP_INVALID", `${what} must be a string[]`);
+type InListScalarKind = "string" | "number" | "boolean" | "null";
+
+function inListScalarKind(value: unknown, label: string): InListScalarKind {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      if (value.length === 0) {
+        throw structuredError("OP_INVALID", `${label} must be non-empty`);
+      }
+      if (value.includes("\0")) {
+        throw structuredError("OP_INVALID", `${label} must not contain a NUL byte`);
+      }
+      return "string";
+    case "number":
+      if (!Number.isFinite(value)) {
+        throw structuredError("OP_INVALID", `${label} must be a finite number`);
+      }
+      return "number";
+    case "boolean":
+      return "boolean";
+    default:
+      throw structuredError(
+        "OP_INVALID",
+        `${label} must be a Scalar (string, number, boolean, or null); got ${typeof value}`,
+      );
   }
+}
+
+function scalarLiteralArray(values: unknown, what: string): unknown[] {
+  if (!Array.isArray(values)) {
+    throw structuredError("OP_INVALID", `${what} must be a Scalar[]`);
+  }
+  let kind: InListScalarKind | undefined;
   return values.map((v, i) => {
-    if (typeof v !== "string") {
-      throw structuredError("OP_INVALID", `${what}[${i}] must be a string; got ${typeof v}`);
+    const elemKind = inListScalarKind(v, `${what}[${i}]`);
+    if (kind === undefined) {
+      kind = elemKind;
+    } else if (elemKind !== kind) {
+      throw structuredError("OP_INVALID", `${what} list must be homogeneous; ${what}[${i}] is ${elemKind}, expected ${kind}`);
     }
-    if (v.length === 0) {
-      throw structuredError("OP_INVALID", `${what}[${i}] must be non-empty`);
-    }
-    if (v.includes("\0")) {
-      throw structuredError("OP_INVALID", `${what}[${i}] must not contain a NUL byte`);
-    }
-    return v;
+    return toIrScalar(v);
   });
 }
 
@@ -1672,19 +1699,19 @@ class ExprChainImpl implements ExprChainType {
   like(pattern: unknown) {
     return chain({ node: "like", operand: this.__node, pattern: exprArg(pattern) });
   }
-  "in"(values: readonly string[]) {
+  "in"(values: readonly Scalar[]) {
     return chain({
       node: "inList",
       expr: this.__node,
-      elems: textLiteralArray(values, ".in(values)"),
+      elems: scalarLiteralArray(values, ".in(values)"),
       negated: false,
     });
   }
-  notIn(values: readonly string[]) {
+  notIn(values: readonly Scalar[]) {
     return chain({
       node: "inList",
       expr: this.__node,
-      elems: textLiteralArray(values, ".notIn(values)"),
+      elems: scalarLiteralArray(values, ".notIn(values)"),
       negated: true,
     });
   }

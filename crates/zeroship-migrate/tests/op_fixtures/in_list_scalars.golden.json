@@ -1,0 +1,130 @@
+{
+  "ir_version": 6,
+  "name": "in_list_scalars",
+  "owner_app": "app_corpus",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "scalar_membership",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "nullable": true
+        },
+        {
+          "name": "version",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "deleted_at",
+          "type": "timestamp",
+          "nullable": true
+        },
+        {
+          "name": "http_status",
+          "type": "int",
+          "nullable": false
+        },
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "nullable": false
+        }
+      ],
+      "primaryKey": [
+        "id"
+      ],
+      "constraints": [
+        {
+          "name": "http_status_known",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "inList",
+              "expr": {
+                "node": "colRef",
+                "name": "http_status"
+              },
+              "elems": [
+                200,
+                404,
+                500
+              ],
+              "negated": false
+            }
+          }
+        },
+        {
+          "name": "enabled_known",
+          "kind": {
+            "kind": "check",
+            "expr": {
+              "node": "inList",
+              "expr": {
+                "node": "colRef",
+                "name": "enabled"
+              },
+              "elems": [
+                true,
+                false
+              ],
+              "negated": false
+            }
+          }
+        }
+      ],
+      "indexes": [
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "deleted_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "updated_at"
+            }
+          ]
+        },
+        {
+          "columns": [
+            {
+              "kind": "column",
+              "name": "created_by"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "flags": {},
+  "depends_on": [],
+  "supersedes": [],
+  "preconditions": []
+}
