@@ -512,6 +512,13 @@ class ZsWorkflowTimeoutError extends Error {
     }
 }
 
+class ZsNondeterministicError extends Error {
+    constructor(message = "workflow replay is nondeterministic") {
+        super(message);
+        this.name = "NondeterministicError";
+    }
+}
+
 function wfErr(message, status, code) {
     const e = new Error(message);
     e.status = status;
@@ -531,6 +538,8 @@ function wfSerializeError(e) {
 function wfDeserializeError(error) {
     const e = error && error.type === "WorkflowTimeoutError"
         ? new ZsWorkflowTimeoutError(error.message)
+        : error && error.type === "NondeterministicError"
+            ? new ZsNondeterministicError(error.message)
         : new Error((error && error.message) || "workflow step failed");
     e.name = (error && error.type) || e.name;
     if (error && error.stack) e.stack = error.stack;
@@ -776,10 +785,8 @@ class ZsJournalBackedStep {
         const record = this.#stepsByOrdinal.get(ordinal);
         if (record) {
             if (record.name !== name || record.kind !== kind || (record.nameOccurrence ?? 0) !== nameOccurrence) {
-                throw wfErr(
+                throw new ZsNondeterministicError(
                     `workflow journal mismatch at ordinal ${ordinal}: expected ${kind} ${name}#${nameOccurrence}, got ${record.kind} ${record.name}#${record.nameOccurrence ?? 0}`,
-                    409,
-                    "NONDETERMINISTIC_WORKFLOW",
                 );
             }
         }
