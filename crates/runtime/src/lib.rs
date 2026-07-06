@@ -236,7 +236,9 @@ pub use modules::ModuleEntry;
 pub use state::{SharedState, RuntimeState, OpResult, SpawnedTimer, WebSocketState, WsMessage};
 pub use storage::AppStorage;
 pub use runtime::{AsyncEvent, AsyncWork, Runtime, RuntimeBuilder, RuntimeLease, RuntimeLimits};
-pub use fetch_outcome::{FetchOutcome, SettledFetch, RequestCtx, EnvSnapshot};
+pub use fetch_outcome::{
+    EnvSnapshot, FetchOutcome, RequestCtx, SettledFetch, SettledWorkflow, WorkflowOutcome,
+};
 pub use channel::{CancelFlag, ResultSender, ResultReceiver, StreamWriter, StreamReader};
 pub use serve::{start_server, ServerOptions};
 pub use plugin::{NativePlugin, NativeRegistrar};

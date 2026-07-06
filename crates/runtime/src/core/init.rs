@@ -491,6 +491,320 @@ export async function __zsDispatchRpc(rpc, name, input, ctx) {
         exit(token);
     }
 }
+
+class ZsWorkflowSuspendSignal extends Error {
+    constructor(outcome) {
+        super("workflow dispatch frontier reached");
+        this.name = "SuspendSignal";
+        this.outcome = outcome;
+    }
+}
+
+function wfErr(message, status, code) {
+    const e = new Error(message);
+    e.status = status;
+    e.code = code;
+    return e;
+}
+
+function wfSerializeError(e) {
+    if (e instanceof Error) {
+        const out = { type: e.name || "Error", message: e.message };
+        if (e.stack) out.stack = e.stack;
+        return out;
+    }
+    return { type: "Error", message: String(e) };
+}
+
+function wfDeserializeError(error) {
+    const e = new Error((error && error.message) || "workflow step failed");
+    e.name = (error && error.type) || e.name;
+    if (error && error.stack) e.stack = error.stack;
+    return e;
+}
+
+function wfTrigger(envelope) {
+    const raw = envelope.trigger && typeof envelope.trigger === "object" ? { ...envelope.trigger } : {};
+    if (!Object.prototype.hasOwnProperty.call(raw, "input")) raw.input = envelope.input;
+    if (typeof raw.runId !== "string") raw.runId = envelope.runId;
+    if (typeof raw.workflowName !== "string") raw.workflowName = envelope.workflowName;
+    const started = raw.startedAt;
+    raw.startedAt = started instanceof Date
+        ? started
+        : new Date(typeof started === "string" || typeof started === "number" ? started : Date.now());
+    return raw;
+}
+
+function wfJournal(envelope) {
+    const source = Array.isArray(envelope.journal)
+        ? envelope.journal
+        : Array.isArray(envelope.steps) ? envelope.steps : [];
+    return source
+        .filter((row) => row && typeof row === "object")
+        .map((row) => ({
+            ordinal: Number(row.ordinal),
+            name: String(row.name ?? ""),
+            nameOccurrence: Number(row.nameOccurrence ?? 0),
+            kind: String(row.kind ?? "run"),
+            state: String(row.state ?? "completed"),
+            output: row.output,
+            error: row.error,
+            wakeAt: typeof row.wakeAt === "string" ? row.wakeAt : undefined,
+            signalType: typeof row.signalType === "string" ? row.signalType : undefined,
+            consumedSignal: row.consumedSignal,
+            childRunId: typeof row.childRunId === "string" ? row.childRunId : undefined,
+        }));
+}
+
+class ZsJournalBackedStep {
+    #stepsByOrdinal = new Map();
+    #nameOccurrences = new Map();
+    #cursor = 0;
+    #inStepBody = false;
+
+    constructor(steps) {
+        for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
+    }
+
+    async run(name, configOrFn, maybeFn) {
+        this.#assertNotNested();
+        const fn = typeof configOrFn === "function" ? configOrFn : maybeFn;
+        if (typeof fn !== "function") {
+            throw wfErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+        const issued = this.#issue(name, "run");
+        if (issued.record) return this.#resolveRecord(issued.record);
+        try {
+            this.#inStepBody = true;
+            const output = await fn();
+            throw new ZsWorkflowSuspendSignal({
+                kind: "run",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "completed",
+                output,
+            });
+        } catch (e) {
+            if (e instanceof ZsWorkflowSuspendSignal) throw e;
+            throw new ZsWorkflowSuspendSignal({
+                kind: "run",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "failed",
+                error: wfSerializeError(e),
+            });
+        } finally {
+            this.#inStepBody = false;
+        }
+    }
+
+    async sleep(name, duration) {
+        this.#assertNotNested();
+        const issued = this.#issue(name, "sleep");
+        if (issued.record) {
+            if (issued.record.state === "completed") return;
+            throw new ZsWorkflowSuspendSignal({
+                kind: "sleep",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "running",
+                wakeAt: issued.record.wakeAt ?? duration,
+            });
+        }
+        throw new ZsWorkflowSuspendSignal({
+            kind: "sleep",
+            ordinal: issued.ordinal,
+            name,
+            nameOccurrence: issued.nameOccurrence,
+            state: "running",
+            wakeAt: duration,
+        });
+    }
+
+    async sleepUntil(name, when) {
+        const target = typeof when === "number" ? new Date(when) : when;
+        return this.sleep(name, target.toISOString());
+    }
+
+    async waitForSignal(name, opts = {}) {
+        this.#assertNotNested();
+        const issued = this.#issue(name, "wait_signal");
+        if (issued.record) {
+            if (issued.record.state === "completed") {
+                if (issued.record.output !== undefined) return issued.record.output;
+                return issued.record.consumedSignal ?? null;
+            }
+            throw new ZsWorkflowSuspendSignal({
+                kind: "wait_signal",
+                ordinal: issued.ordinal,
+                name,
+                nameOccurrence: issued.nameOccurrence,
+                state: "running",
+                signalType: issued.record.signalType ?? String(opts.type ?? name),
+                timeout: typeof opts.timeout === "string" ? opts.timeout : undefined,
+                maxSignalAge: typeof opts.maxSignalAge === "string" ? opts.maxSignalAge : undefined,
+                topic: typeof opts.topic === "string" ? opts.topic : undefined,
+            });
+        }
+        throw new ZsWorkflowSuspendSignal({
+            kind: "wait_signal",
+            ordinal: issued.ordinal,
+            name,
+            nameOccurrence: issued.nameOccurrence,
+            state: "running",
+            signalType: String(opts.type ?? name),
+            timeout: typeof opts.timeout === "string" ? opts.timeout : undefined,
+            maxSignalAge: typeof opts.maxSignalAge === "string" ? opts.maxSignalAge : undefined,
+            topic: typeof opts.topic === "string" ? opts.topic : undefined,
+        });
+    }
+
+    async call(WorkflowClass, input, options) {
+        this.#assertNotNested();
+        const name = WorkflowClass.name ?? "Workflow";
+        const issued = this.#issue(name, "child");
+        if (issued.record) return this.#resolveRecord(issued.record);
+        throw new ZsWorkflowSuspendSignal({
+            kind: "child",
+            ordinal: issued.ordinal,
+            name,
+            nameOccurrence: issued.nameOccurrence,
+            state: "running",
+            workflowName: name,
+            input,
+            options,
+        });
+    }
+
+    #issue(name, kind) {
+        const ordinal = this.#cursor++;
+        const nameOccurrence = this.#nameOccurrences.get(name) ?? 0;
+        this.#nameOccurrences.set(name, nameOccurrence + 1);
+        const record = this.#stepsByOrdinal.get(ordinal);
+        if (record) {
+            if (record.name !== name || record.kind !== kind || (record.nameOccurrence ?? 0) !== nameOccurrence) {
+                throw wfErr(
+                    `workflow journal mismatch at ordinal ${ordinal}: expected ${kind} ${name}#${nameOccurrence}, got ${record.kind} ${record.name}#${record.nameOccurrence ?? 0}`,
+                    409,
+                    "NONDETERMINISTIC_WORKFLOW",
+                );
+            }
+        }
+        return { ordinal, nameOccurrence, record };
+    }
+
+    #resolveRecord(record) {
+        if (record.state === "completed") return record.output;
+        if (record.state === "failed") throw wfDeserializeError(record.error);
+        throw new ZsWorkflowSuspendSignal({
+            kind: record.kind === "child" ? "child" : record.kind,
+            ordinal: record.ordinal,
+            name: record.name,
+            nameOccurrence: record.nameOccurrence ?? 0,
+            state: "running",
+            ...(record.kind === "sleep"
+                ? { wakeAt: record.wakeAt ?? "" }
+                : record.kind === "wait_signal"
+                    ? { signalType: record.signalType ?? record.name }
+                    : record.kind === "child"
+                        ? { workflowName: record.name, input: undefined }
+                        : { output: record.output }),
+        });
+    }
+
+    #assertNotNested() {
+        if (this.#inStepBody) {
+            throw wfErr("workflow step methods cannot be called from inside a step body", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+    }
+}
+
+function resolveWorkflow(userNamespace, workflowName) {
+    const mod = userNamespace ?? {};
+    const def = mod.default && typeof mod.default === "object" ? mod.default : {};
+    const candidates = [
+        mod[workflowName],
+        def.workflows && typeof def.workflows === "object" ? def.workflows[workflowName] : undefined,
+        def[workflowName],
+        typeof mod.default === "function" ? mod.default : undefined,
+    ];
+    const found = candidates.find((candidate) => typeof candidate === "function");
+    if (!found) throw wfErr("Workflow not found: " + workflowName, 404, "WORKFLOW_NOT_FOUND");
+    return found;
+}
+
+function workflowFrontierResult(envelope, outcome) {
+    const base = {
+        runId: envelope.runId,
+        nonce: envelope.nonce,
+        workflowName: envelope.workflowName,
+        ordinal: outcome.ordinal,
+        name: outcome.name,
+        nameOccurrence: outcome.nameOccurrence,
+    };
+    if (outcome.kind === "run" && outcome.state === "completed") {
+        return { ...base, kind: "StepCompleted", output: outcome.output };
+    }
+    if (outcome.kind === "run" && outcome.state === "failed") {
+        return { ...base, kind: "RunFailed", error: outcome.error };
+    }
+    if (outcome.kind === "sleep") {
+        return { ...base, kind: "Sleep", wakeAt: outcome.wakeAt };
+    }
+    if (outcome.kind === "wait_signal") {
+        return {
+            ...base,
+            kind: "Wait",
+            signalType: outcome.signalType,
+            timeout: outcome.timeout,
+            maxSignalAge: outcome.maxSignalAge,
+            topic: outcome.topic,
+        };
+    }
+    return {
+        ...base,
+        kind: "Wait",
+        childWorkflowName: outcome.workflowName,
+        input: outcome.input,
+        options: outcome.options,
+    };
+}
+
+export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
+    if (envelope == null || typeof envelope !== "object") {
+        throw wfErr("workflow dispatch envelope must be an object", 400, "INVALID_ARGUMENT");
+    }
+    const workflowName = typeof envelope.workflowName === "string" ? envelope.workflowName : "";
+    if (!workflowName) throw wfErr("workflowName is required", 400, "INVALID_ARGUMENT");
+    try {
+        const WorkflowClass = resolveWorkflow(userNamespace, workflowName);
+        const workflow = new WorkflowClass();
+        if (typeof workflow.run !== "function") {
+            throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+        const step = new ZsJournalBackedStep(wfJournal(envelope));
+        const output = await workflow.run(wfTrigger(envelope), step);
+        return {
+            kind: "RunCompleted",
+            runId: envelope.runId,
+            nonce: envelope.nonce,
+            workflowName,
+            output,
+        };
+    } catch (e) {
+        if (e instanceof ZsWorkflowSuspendSignal) return workflowFrontierResult(envelope, e.outcome);
+        return {
+            kind: "RunFailed",
+            runId: envelope.runId,
+            nonce: envelope.nonce,
+            workflowName,
+            error: wfSerializeError(e),
+        };
+    }
+}
 "##;
 
 pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
@@ -530,7 +844,7 @@ pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
 fn bootstrap_prefix_js() -> String {
     format!(
         r#"
-import {{ __zsDispatchRpc }} from "./{}";
+import {{ __zsDispatchRpc, __zsWorkflowDispatch }} from "./{}";
 import * as user from "./__user__.js";
 
 "#,
@@ -1057,6 +1371,13 @@ async function fallbackFetch(request) {
 }
 
 export default {
+    // Durable workflow replay entry. The worker calls this with a
+    // control-plane StepRequest envelope; the bootstrap replays the
+    // deploy-pinned Workflow class against the supplied journal prefix
+    // and returns a StepResult-shaped JSON object.
+    workflow(envelope, ctx) {
+        return __zsWorkflowDispatch(user, envelope, ctx);
+    },
     // Subscription dispatch. Caller hands in (name, input,
     // server-side WebSocket already accepted). Used by the kernel's
     // WS-upgrade path; tests can drive this directly via the

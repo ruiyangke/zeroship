@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -18,7 +19,37 @@ struct IsolateEntry {
 
 struct AppCache {
     isolates: HashMap<Uuid, IsolateEntry>,
+    workflow_isolates: HashMap<PinnedWorkflowKey, IsolateEntry>,
     max_size: usize,
+    max_pinned_isolates_per_app: usize,
+}
+
+#[derive(Clone, Debug, Eq)]
+pub struct PinnedWorkflowKey {
+    app_id: Uuid,
+    deploy_hash: String,
+}
+
+impl PinnedWorkflowKey {
+    fn new(app_id: Uuid, deploy_hash: impl Into<String>) -> Self {
+        Self {
+            app_id,
+            deploy_hash: deploy_hash.into(),
+        }
+    }
+}
+
+impl PartialEq for PinnedWorkflowKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.app_id == other.app_id && self.deploy_hash == other.deploy_hash
+    }
+}
+
+impl Hash for PinnedWorkflowKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.app_id.hash(state);
+        self.deploy_hash.hash(state);
+    }
 }
 
 thread_local! {
@@ -67,11 +98,13 @@ pub struct KernelConfig {
     pub meter: Arc<zeroship_metering::Meter>,
 }
 
-pub fn init_cache(max_size: usize, kernel: KernelConfig) {
+pub fn init_cache(max_size: usize, max_pinned_isolates_per_app: usize, kernel: KernelConfig) {
     CACHE.with(|c| {
         *c.borrow_mut() = Some(AppCache {
             isolates: HashMap::new(),
             max_size,
+            workflow_isolates: HashMap::new(),
+            max_pinned_isolates_per_app,
         });
     });
     if let Some(url) = kernel.db_url {
@@ -244,16 +277,21 @@ pub fn get_limits(app_id: &Uuid) -> Option<RuntimeLimits> {
     get_runtime(app_id).map(|runtime| runtime.limits())
 }
 
-/// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
-///
-/// Bundle bytes are the raw ES module source (UTF-8). The caller
-/// (`sync::reconcile_once` or `handler::load_on_demand`) resolves the
-/// worker-entry blob hash from the manifest and reads it via
-/// `BlobStore::get_blob` before calling here. Single-module bundles
-/// (today's only shape) become a one-element `modules` vector tagged
-/// `index.js`; multi-module deploys will pass a richer slice once the
-/// V8 module-resolve callback lands.
-pub fn load_app(
+pub fn get_workflow_runtime(app_id: &Uuid, deploy_hash: &str) -> Option<Runtime> {
+    let key = PinnedWorkflowKey::new(*app_id, deploy_hash);
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        let cache = cache.as_mut()?;
+        if let Some(entry) = cache.workflow_isolates.get_mut(&key) {
+            entry.last_used = std::time::Instant::now();
+            Some(entry.runtime.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn build_runtime(
     app_id: Uuid,
     bundle_bytes: &[u8],
     app_limits: AppRuntimeLimits,
@@ -261,7 +299,7 @@ pub fn load_app(
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
     env: &EnvSnapshot,
-) -> Result<(), String> {
+) -> Result<(Runtime, String), String> {
     let source = match std::str::from_utf8(bundle_bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -280,21 +318,14 @@ pub fn load_app(
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id_string.clone());
     // **T6** — inject the per-app deploy/schema-version token so plugin-db's
-    // deploy-keyed introspection cache (crypto/mask/column metadata) keys off
-    // the real `deploy_hash` and invalidates on a redeploy. `mint_db` reads
-    // this out of the isolate's `env_vars` and stamps it into the per-isolate
-    // DB context. Omitted when the control plane reported no deploy hash;
-    // plugin-db then defaults to the `"cold_start"` token.
+    // deploy-keyed introspection cache keys off the real deploy hash. Workflow
+    // replay also uses this slot, but with the run's pinned deploy hash.
     if let Some(dh) = deploy_hash {
         env_vars.insert("ZEROSHIP_DEPLOY_ID".to_string(), dh.to_string());
     }
 
     let limits = runtime_limits_from_app(&app_limits);
     let net_policy = net_policy_from_app(&app_id, &app_net_policy);
-    // Pass `app_id` so the runtime's RPC fast path can register
-    // every in-flight `AbortController` with `crate::rpc::abort`,
-    // keyed by `(app_id, request_id)`. `evict_lru` walks that
-    // registry on eviction.
     let mut builder = Runtime::builder()
         .modules(modules)
         .env_vars(env_vars)
@@ -302,10 +333,6 @@ pub fn load_app(
         .plugins(plugins)
         .app_id(app_id)
         .net_policy(net_policy)
-        // **Migration-first cutover (P4b)** — hand the bundled
-        // `RuntimeSchemaDescriptor` JSON (resolved from
-        // `manifest.runtime_descriptor`'s blob by the caller) to the
-        // runtime, which exposes it as `globalThis.__zsRuntimeDescriptor`.
         .runtime_descriptor(runtime_descriptor.map(str::to_string));
     if let Some(meter) = meter {
         builder = builder.meter(meter);
@@ -316,10 +343,38 @@ pub fn load_app(
         .map_err(|e| format!("failed to initialize app runtime: {e}"))?;
 
     // Exit isolate so other isolates can be created/entered on this thread.
-    // The handler will enter/exit around each call_fetch_handler call.
-    // (Warmup removed — `call_fetch_handler` does lazy init via
-    // `ensure_initialized` on the first request.)
     runtime.exit_isolate();
+
+    Ok((runtime, app_id_string))
+}
+
+/// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
+///
+/// Bundle bytes are the raw ES module source (UTF-8). The caller
+/// (`sync::reconcile_once` or `handler::load_on_demand`) resolves the
+/// worker-entry blob hash from the manifest and reads it via
+/// `BlobStore::get_blob` before calling here. Single-module bundles
+/// (today's only shape) become a one-element `modules` vector tagged
+/// `index.js`; multi-module deploys will pass a richer slice once the
+/// V8 module-resolve callback lands.
+pub fn load_app(
+    app_id: Uuid,
+    bundle_bytes: &[u8],
+    app_limits: AppRuntimeLimits,
+    app_net_policy: AppNetPolicy,
+    deploy_hash: Option<&str>,
+    runtime_descriptor: Option<&str>,
+    env: &EnvSnapshot,
+) -> Result<(), String> {
+    let (runtime, app_id_string) = build_runtime(
+        app_id,
+        bundle_bytes,
+        app_limits,
+        app_net_policy,
+        deploy_hash,
+        runtime_descriptor,
+        env,
+    )?;
 
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
@@ -343,6 +398,61 @@ pub fn load_app(
         runtime.start_pump();
         cache.isolates.insert(
             app_id,
+            IsolateEntry {
+                runtime,
+                last_used: std::time::Instant::now(),
+                app_id: app_id_string,
+            },
+        );
+
+        Ok(())
+    })
+}
+
+pub fn load_pinned_workflow_app(
+    app_id: Uuid,
+    deploy_hash: &str,
+    bundle_bytes: &[u8],
+    app_limits: AppRuntimeLimits,
+    app_net_policy: AppNetPolicy,
+    runtime_descriptor: Option<&str>,
+    env: &EnvSnapshot,
+) -> Result<(), String> {
+    let key = PinnedWorkflowKey::new(app_id, deploy_hash);
+    let (runtime, app_id_string) = build_runtime(
+        app_id,
+        bundle_bytes,
+        app_limits,
+        app_net_policy,
+        Some(deploy_hash),
+        runtime_descriptor,
+        env,
+    )?;
+
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        let cache = cache.as_mut().unwrap();
+        if cache.max_pinned_isolates_per_app == 0 {
+            return Err("pinned workflow isolate cache is disabled".to_string());
+        }
+
+        if !cache.workflow_isolates.contains_key(&key) {
+            while pinned_count_for_app(cache, &app_id) >= cache.max_pinned_isolates_per_app {
+                if !evict_pinned_lru_for_app(cache, &app_id) {
+                    tracing::warn!(
+                        app_id = %app_id,
+                        deploy_hash = %deploy_hash,
+                        max_pinned_isolates_per_app = cache.max_pinned_isolates_per_app,
+                        "worker: pinned workflow isolate cache full and every isolate is leased"
+                    );
+                    return Err("pinned workflow isolate cache full and every isolate is leased".into());
+                }
+            }
+        }
+
+        runtime.start_pump();
+        cache.workflow_isolates.insert(
+            key,
             IsolateEntry {
                 runtime,
                 last_used: std::time::Instant::now(),
@@ -416,6 +526,7 @@ pub fn evict_app(app_id: &Uuid) {
         let mut cache = c.borrow_mut();
         if let Some(cache) = cache.as_mut() {
             cache.isolates.remove(app_id);
+            cache.workflow_isolates.retain(|key, _| &key.app_id != app_id);
         }
     });
 }
@@ -428,6 +539,17 @@ pub fn has_app(app_id: &Uuid) -> bool {
         cache
             .as_ref()
             .is_some_and(|c| c.isolates.contains_key(app_id))
+    })
+}
+
+#[cfg(test)]
+pub fn has_pinned_workflow_app(app_id: &Uuid, deploy_hash: &str) -> bool {
+    let key = PinnedWorkflowKey::new(*app_id, deploy_hash);
+    CACHE.with(|c| {
+        let cache = c.borrow();
+        cache
+            .as_ref()
+            .is_some_and(|c| c.workflow_isolates.contains_key(&key))
     })
 }
 
@@ -541,8 +663,69 @@ fn evict_lru(cache: &mut AppCache) -> bool {
     true
 }
 
+fn pinned_count_for_app(cache: &AppCache, app_id: &Uuid) -> usize {
+    cache
+        .workflow_isolates
+        .keys()
+        .filter(|key| &key.app_id == app_id)
+        .count()
+}
+
+fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &Uuid) -> bool {
+    refresh_socket_activity(cache);
+
+    let Some(oldest_key) = cache
+        .workflow_isolates
+        .iter()
+        .filter(|(key, entry)| key.app_id == *app_id && !entry.runtime.is_isolate_leased())
+        .min_by_key(|(_, entry)| {
+            (
+                entry.runtime.active_native_socket_count() > 0,
+                entry.last_used,
+            )
+        })
+        .map(|(key, _)| key.clone())
+    else {
+        return false;
+    };
+
+    tracing::info!(
+        app_id = %oldest_key.app_id,
+        deploy_hash = %oldest_key.deploy_hash,
+        "worker: evicting pinned workflow LRU isolate"
+    );
+    crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
+
+    if let Some(entry) = cache.workflow_isolates.get(&oldest_key) {
+        let active_sockets = entry.runtime.active_native_socket_count();
+        if active_sockets > 0 {
+            let closed = entry.runtime.close_native_sockets_for_eviction();
+            tracing::info!(
+                app_id = %oldest_key.app_id,
+                deploy_hash = %oldest_key.deploy_hash,
+                active_sockets,
+                closed,
+                "worker: closing native sockets before pinned workflow isolate eviction"
+            );
+        }
+        entry.runtime.with_scope(|scope| {
+            zeroship_runtime::rpc::abort::entered_for_eviction(scope, oldest_key.app_id);
+        });
+    }
+
+    cache.workflow_isolates.remove(&oldest_key);
+    true
+}
+
 fn refresh_socket_activity(cache: &mut AppCache) {
     for entry in cache.isolates.values_mut() {
+        if let Some(activity) = entry.runtime.last_native_socket_activity() {
+            if activity > entry.last_used {
+                entry.last_used = activity;
+            }
+        }
+    }
+    for entry in cache.workflow_isolates.values_mut() {
         if let Some(activity) = entry.runtime.last_native_socket_activity() {
             if activity > entry.last_used {
                 entry.last_used = activity;
@@ -642,6 +825,7 @@ mod tests {
         std::thread::spawn(|| {
             init_cache(
                 4,
+                4,
                 KernelConfig {
                     db_url: Some("postgres://localhost/zs_unused".to_string()),
                     kv_url: Some("redis://127.0.0.1:6379".to_string()),
@@ -680,6 +864,7 @@ mod tests {
     fn create_plugins_omits_kv_storage_when_unconfigured() {
         std::thread::spawn(|| {
             init_cache(
+                4,
                 4,
                 KernelConfig {
                     db_url: None,
@@ -829,6 +1014,7 @@ mod tests {
                 let app_id = Uuid::new_v4();
                 init_cache(
                     4,
+                    4,
                     KernelConfig {
                         db_url: None,
                         kv_url: None,
@@ -878,6 +1064,7 @@ mod tests {
                 zeroship_runtime::init::init_v8();
                 let app_id = Uuid::new_v4();
                 init_cache(
+                    4,
                     4,
                     KernelConfig {
                         db_url: None,
@@ -943,6 +1130,7 @@ mod tests {
                 let app_id = Uuid::new_v4();
                 init_cache(
                     4,
+                    4,
                     KernelConfig {
                         db_url: None,
                         kv_url: None,
@@ -993,7 +1181,9 @@ mod tests {
             let socketless = test_runtime();
             let mut cache = AppCache {
                 isolates: HashMap::new(),
+                workflow_isolates: HashMap::new(),
                 max_size: 2,
+                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 socketed_id,
@@ -1034,7 +1224,9 @@ mod tests {
             let victim = test_runtime();
             let mut cache = AppCache {
                 isolates: HashMap::new(),
+                workflow_isolates: HashMap::new(),
                 max_size: 2,
+                max_pinned_isolates_per_app: 4,
             };
             cache.isolates.insert(
                 leased_id,
@@ -1073,7 +1265,9 @@ mod tests {
 
             let mut cache = AppCache {
                 isolates: HashMap::new(),
+                workflow_isolates: HashMap::new(),
                 max_size: 1,
+                max_pinned_isolates_per_app: 4,
             };
             cache
                 .isolates

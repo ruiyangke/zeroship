@@ -390,6 +390,20 @@ impl Runtime {
         )
     }
 
+    /// Durable-workflow replay dispatch. Invokes the bootstrap's
+    /// `default.workflow(envelope, ctx)` entry and returns the JSON
+    /// StepResult object it produced.
+    pub fn call_workflow_dispatch(
+        &self,
+        envelope_json: &str,
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+    ) -> crate::WorkflowOutcome {
+        self.inner
+            .borrow_mut()
+            .call_workflow_dispatch(self.modules.as_slice(), envelope_json, env, ctx)
+    }
+
     /// Enter the V8 isolate on this thread. Multi-tenant workers that keep
     /// several isolates per thread MUST call `enter_isolate` before each
     /// `dispatch_*` and `exit_isolate` after. Single-isolate callers can
@@ -677,6 +691,14 @@ enum PendingOrigin {
     /// return, classified via `classify_rpc_return` (envelope-wrapped,
     /// inspected if Response, fall-through if AsyncIterator).
     Rpc,
+    /// Promise came from `default.workflow` — resolved value is the
+    /// StepResult object the workflow replay bootstrap returns.
+    Workflow,
+}
+
+enum PendingReply {
+    Fetch(ResultSender<Result<crate::SettledFetch, DispatchError>>),
+    Workflow(ResultSender<Result<crate::SettledWorkflow, DispatchError>>),
 }
 
 /// Tracking info for an in-flight request whose dispatch returned a Promise.
@@ -684,9 +706,9 @@ struct PendingRequest {
     #[allow(dead_code)]
     id: u64,
     promise: v8::Global<v8::Promise>,
-    /// Reply slot for the `call_fetch_handler` pending path. Carries a
-    /// `SettledFetch` mirroring `FetchOutcome`'s three non-Pending variants.
-    reply_fetch: ResultSender<Result<crate::SettledFetch, DispatchError>>,
+    /// Reply slot for the pending path. Fetch/RPC requests settle to
+    /// `SettledFetch`; durable-workflow replay settles to `SettledWorkflow`.
+    reply: PendingReply,
     cpu_accumulated: Duration,
     wall_start: Instant,
     cancel: CancelFlag,
@@ -698,6 +720,14 @@ struct PendingRequest {
     /// and for runtimes built without an `app_id`.
     #[allow(dead_code)]
     abort_guard: Option<crate::rpc::abort::AbortGuard>,
+}
+
+fn send_pending_error(req: PendingRequest, error: impl Into<DispatchError>) {
+    let error = error.into();
+    match req.reply {
+        PendingReply::Fetch(tx) => tx.send(Err(error)),
+        PendingReply::Workflow(tx) => tx.send(Err(error)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -752,6 +782,9 @@ pub(crate) struct RuntimeInner {
     /// (`{"json":<result>}`); AsyncIterator returns and Response objects
     /// fall through to the slow path which encodes them.
     pub(crate) rpc_fn: Option<v8::Global<v8::Function>>,
+    /// Cached reference to `module.default.workflow` — the durable workflow
+    /// replay entry the worker invokes with a StepRequest envelope.
+    pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
     /// Cached JS helper that constructs a Request from Rust-supplied params.
     http_create_request_fn: Option<v8::Global<v8::Function>>,
     pub(crate) initialized: bool,
@@ -1018,6 +1051,7 @@ impl RuntimeInner {
             fetch_handler_fn: None,
             fetch_fast_fn: None,
             rpc_fn: None,
+            workflow_fn: None,
             http_create_request_fn: None,
             initialized: false,
             state,
@@ -1471,6 +1505,18 @@ impl RuntimeInner {
                                             Some(v8::Global::new(scope, func));
                                     }
                                 }
+                                let workflow_key = v8::String::new(scope, "workflow").unwrap();
+                                if let Some(workflow_val) =
+                                    default_obj.get(scope, workflow_key.into())
+                                {
+                                    if workflow_val.is_function() {
+                                        let func =
+                                            v8::Local::<v8::Function>::try_from(workflow_val)
+                                                .unwrap();
+                                        self.workflow_fn =
+                                            Some(v8::Global::new(scope, func));
+                                    }
+                                }
                             }
                         }
                     }
@@ -1634,6 +1680,103 @@ impl RuntimeInner {
     // -----------------------------------------------------------------------
     // Kernel dispatch primitive — call_fetch_handler
     // -----------------------------------------------------------------------
+
+    /// Kernel durable-workflow replay primitive. The worker passes the
+    /// control-plane StepRequest as JSON; the bootstrap returns a StepResult
+    /// object, which this method serializes back to JSON for the worker.
+    pub fn call_workflow_dispatch(
+        &mut self,
+        modules: &[crate::ModuleEntry],
+        envelope_json: &str,
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+    ) -> crate::WorkflowOutcome {
+        self.last_request_ts.set(Instant::now());
+        crate::node::net::state::reset_dispatch_egress(&self.state);
+
+        let init_result = self.initialize_modules(modules, env);
+        if self.workflow_fn.is_none() {
+            let msg = match init_result {
+                Err(err) => err,
+                Ok(()) => "No default.workflow handler exported".to_string(),
+            };
+            return crate::WorkflowOutcome::Response {
+                json: serde_json::json!({
+                    "kind": "RunFailed",
+                    "error": { "type": "Error", "message": msg },
+                })
+                .to_string(),
+                logs: vec![],
+            };
+        }
+
+        let request_id = self.next_direct_request_id;
+        self.next_direct_request_id += 1;
+        {
+            let mut s = self.state.borrow_mut();
+            s.executing_request_id = Some(request_id);
+            s.executing_request_cancel = Some(ctx.cancel.clone());
+        }
+
+        let wall_start = Instant::now();
+        self.arm_cpu_timer();
+        let dispatch_result: Result<Result<String, DispatchError>, v8::Global<v8::Promise>> =
+            enter_v8!(self, |scope| {
+                let workflow_fn = v8::Local::new(scope, self.workflow_fn.as_ref().unwrap());
+                match parse_workflow_envelope(scope, envelope_json) {
+                    Ok(envelope_arg) => {
+                        let ctx_arg: v8::Local<v8::Value> = {
+                            let maybe = self.state.borrow().ctx_obj.clone();
+                            match maybe {
+                                Some(g) => v8::Local::new(scope, g).into(),
+                                None => v8::Object::new(scope).into(),
+                            }
+                        };
+                        call_workflow_inner(scope, workflow_fn, envelope_arg, ctx_arg)
+                    }
+                    Err(e) => Ok(Err(e)),
+                }
+            });
+        self.disarm_cpu_timer();
+
+        if self.check_v8_terminated() {
+            self.clear_executing_request();
+            self.discard_request_state(request_id);
+            return crate::WorkflowOutcome::Response {
+                json: serde_json::json!({
+                    "kind": "RunFailed",
+                    "error": { "type": "Error", "message": "CPU time limit exceeded" },
+                })
+                .to_string(),
+                logs: vec![],
+            };
+        }
+
+        let cpu_elapsed = wall_start.elapsed();
+        match dispatch_result {
+            Ok(Ok(json)) => {
+                self.clear_executing_request();
+                let logs = self.drain_request_logs(request_id);
+                crate::WorkflowOutcome::Response { json, logs }
+            }
+            Ok(Err(e)) => {
+                self.clear_executing_request();
+                self.discard_request_state(request_id);
+                crate::WorkflowOutcome::Response {
+                    json: serde_json::json!({
+                        "kind": "RunFailed",
+                        "error": { "type": "Error", "message": e.message },
+                    })
+                    .to_string(),
+                    logs: vec![],
+                }
+            }
+            Err(promise) => {
+                self.clear_executing_request();
+                self.store_workflow_pending(request_id, promise, ctx, cpu_elapsed, wall_start)
+            }
+        }
+    }
 
     /// Kernel's sole HTTP dispatch primitive. Three tiers, in order:
     ///   1. `default.rpc(name, input, ctx)` when set + URL matches
@@ -2081,7 +2224,7 @@ impl RuntimeInner {
         self.pending_requests.insert(request_id, PendingRequest {
             id: request_id,
             promise,
-            reply_fetch: tx,
+            reply: PendingReply::Fetch(tx),
             cpu_accumulated,
             wall_start,
             cancel: ctx.cancel.clone(),
@@ -2091,6 +2234,34 @@ impl RuntimeInner {
         self.notify_pump();
 
         crate::FetchOutcome::Pending {
+            rx,
+            cancel: ctx.cancel,
+        }
+    }
+
+    fn store_workflow_pending(
+        &mut self,
+        request_id: u64,
+        promise: v8::Global<v8::Promise>,
+        ctx: crate::RequestCtx,
+        cpu_accumulated: Duration,
+        wall_start: Instant,
+    ) -> crate::WorkflowOutcome {
+        let (tx, rx) = channel::result_slot();
+
+        self.pending_requests.insert(request_id, PendingRequest {
+            id: request_id,
+            promise,
+            reply: PendingReply::Workflow(tx),
+            cpu_accumulated,
+            wall_start,
+            cancel: ctx.cancel.clone(),
+            origin: PendingOrigin::Workflow,
+            abort_guard: None,
+        });
+        self.notify_pump();
+
+        crate::WorkflowOutcome::Pending {
             rx,
             cancel: ctx.cancel,
         }
@@ -2277,7 +2448,7 @@ impl RuntimeInner {
                     // Only error the request whose JS was executing when the timer fired
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
+                            send_pending_error(req, "CPU time limit exceeded");
                         }
                     }
                     self.clear_executing_request();
@@ -2328,7 +2499,7 @@ impl RuntimeInner {
                 if self.check_v8_terminated() {
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
+                            send_pending_error(req, "CPU time limit exceeded");
                         }
                     }
                     self.clear_executing_request();
@@ -2481,7 +2652,7 @@ impl RuntimeInner {
                 if self.check_v8_terminated() {
                     if let Some(rid) = request_id {
                         if let Some(req) = self.pending_requests.remove(&rid) {
-                            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
+                            send_pending_error(req, "CPU time limit exceeded");
                         }
                     }
                     self.clear_executing_request();
@@ -2637,7 +2808,7 @@ impl RuntimeInner {
             // Only error the request whose timer callback was executing
             if let Some(rid) = owner_request_id {
                 if let Some(req) = self.pending_requests.remove(&rid) {
-                    req.reply_fetch.send(Err("CPU time limit exceeded".into()));
+                    send_pending_error(req, "CPU time limit exceeded");
                 }
             }
             self.clear_executing_request();
@@ -2716,7 +2887,7 @@ impl RuntimeInner {
                 // Only error the request whose timer callback was executing
                 if let Some(rid) = owner_request_id {
                     if let Some(req) = self.pending_requests.remove(&rid) {
-                        req.reply_fetch.send(Err("CPU time limit exceeded".into()));
+                        send_pending_error(req, "CPU time limit exceeded");
                     }
                 }
                 self.clear_executing_request();
@@ -2775,10 +2946,16 @@ impl RuntimeInner {
         let _wall_time = req.wall_start.elapsed();
 
         match settled {
-            SettledResult::Rpc(_) => {
-                // RPC path is gone; the pump should never produce this.
-                unreachable!("SettledResult::Rpc no longer produced after dispatch_rpc removal");
-            }
+            SettledResult::Rpc(Ok(json)) => match req.reply {
+                PendingReply::Workflow(tx) => {
+                    let logs = self.drain_request_logs(id);
+                    tx.send(Ok(crate::SettledWorkflow { json, logs }));
+                }
+                PendingReply::Fetch(_) => {
+                    unreachable!("SettledResult::Rpc no longer produced for fetch/RPC dispatch")
+                }
+            },
+            SettledResult::Rpc(Err(msg)) => send_pending_error(req, msg),
             SettledResult::Http(Ok(info)) => {
                 // `build_fetch_outcome` attaches the stream writer + drains
                 // logs; we translate its variants 1:1 into SettledFetch.
@@ -2793,10 +2970,15 @@ impl RuntimeInner {
                     crate::FetchOutcome::Pending { .. } =>
                         unreachable!("build_fetch_outcome never returns Pending"),
                 };
-                req.reply_fetch.send(Ok(settled));
+                match req.reply {
+                    PendingReply::Fetch(tx) => tx.send(Ok(settled)),
+                    PendingReply::Workflow(_) => {
+                        unreachable!("SettledResult::Http produced for workflow dispatch")
+                    }
+                }
             }
             SettledResult::Http(Err(msg)) => {
-                req.reply_fetch.send(Err(msg.into()));
+                send_pending_error(req, msg);
             }
         }
     }
@@ -2869,7 +3051,7 @@ impl RuntimeInner {
         if req.cpu_accumulated > cpu_limit {
             let req = self.pending_requests.remove(&request_id).unwrap();
             let _logs = self.drain_request_logs(request_id);
-            req.reply_fetch.send(Err("CPU time limit exceeded".into()));
+            send_pending_error(req, "CPU time limit exceeded");
         }
     }
 
@@ -3011,7 +3193,7 @@ impl RuntimeInner {
             // Notify the caller. If the handler already timed out, the
             // receiver is dropped and this send is a no-op — that's fine,
             // it just means we don't double-error.
-            req.reply_fetch.send(Err("Request timed out".into()));
+            send_pending_error(req, "Request timed out");
 
             // Drop every piece of per-request state that was still live
             // when cancellation fired. Before this fix, only `logs` got
@@ -3086,6 +3268,7 @@ fn collect_settled_promises(
             let result = match req.origin {
                 PendingOrigin::Fetch => http::extract_settled_result(scope, &req.promise, id),
                 PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
+                PendingOrigin::Workflow => settle_workflow_promise(scope, &req.promise),
             };
             Some((id, req, result))
         })
@@ -3553,6 +3736,109 @@ fn parse_rpc_body<'s>(
     match crate::rpc::decode_from_bytes(scope, body) {
         Ok(v) => InputParse::Ok(v),
         Err(_) => InputParse::Reject400("invalid JSON body"),
+    }
+}
+
+fn parse_workflow_envelope<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    json: &str,
+) -> Result<v8::Local<'s, v8::Value>, DispatchError> {
+    let Some(src) = v8::String::new(scope, json) else {
+        return Err(DispatchError::new("workflow envelope allocation failed", 500));
+    };
+    v8::json::parse(scope, src)
+        .ok_or_else(|| DispatchError::new("invalid workflow dispatch JSON", 400))
+}
+
+fn stringify_json_value(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> Result<String, DispatchError> {
+    v8::json::stringify(scope, value)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .ok_or_else(|| DispatchError::new("workflow dispatch result is not JSON-serializable", 500))
+}
+
+fn workflow_rejection_to_error(
+    scope: &mut v8::PinScope,
+    exc: v8::Local<v8::Value>,
+) -> DispatchError {
+    match crate::dispatch::v8_exception_to_error_value(scope, exc) {
+        DispatchResult::ErrorValue { message, status, .. } => {
+            DispatchError::new(message, status)
+        }
+        DispatchResult::Error(message) => DispatchError::new(message, 500),
+        _ => DispatchError::new("workflow dispatch rejected", 500),
+    }
+}
+
+fn call_workflow_inner<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    workflow_fn: v8::Local<'s, v8::Function>,
+    envelope_arg: v8::Local<'s, v8::Value>,
+    ctx_arg: v8::Local<'s, v8::Value>,
+) -> Result<Result<String, DispatchError>, v8::Global<v8::Promise>> {
+    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
+    let (result_val, caught_exception) = {
+        v8::tc_scope!(let tc, scope);
+        let r = workflow_fn.call(tc, undefined, &[envelope_arg, ctx_arg]);
+        if tc.has_caught() {
+            let exc = tc.exception();
+            let exc_global = exc.map(|e| v8::Global::new(tc, e));
+            (None, exc_global)
+        } else {
+            (r.map(|v| v8::Global::new(tc, v)), None)
+        }
+    };
+
+    crate::core::init::perform_microtask_checkpoint(scope);
+
+    if let Some(exc_global) = caught_exception {
+        let exc_local = v8::Local::new(scope, &exc_global);
+        return Ok(Err(workflow_rejection_to_error(scope, exc_local)));
+    }
+
+    let Some(result_global) = result_val else {
+        return Ok(Err(DispatchError::new("workflow dispatch returned no value", 500)));
+    };
+    let result = v8::Local::new(scope, &result_global);
+    if result.is_promise() {
+        let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+        return match promise.state() {
+            v8::PromiseState::Fulfilled => {
+                let resolved = promise.result(scope);
+                Ok(stringify_json_value(scope, resolved))
+            }
+            v8::PromiseState::Rejected => {
+                let exc = promise.result(scope);
+                Ok(Err(workflow_rejection_to_error(scope, exc)))
+            }
+            v8::PromiseState::Pending => Err(v8::Global::new(scope, promise)),
+        };
+    }
+    Ok(stringify_json_value(scope, result))
+}
+
+fn settle_workflow_promise(
+    scope: &mut v8::PinScope,
+    promise: &v8::Global<v8::Promise>,
+) -> SettledResult {
+    let local = v8::Local::new(scope, promise);
+    match local.state() {
+        v8::PromiseState::Fulfilled => {
+            let val = local.result(scope);
+            SettledResult::Rpc(
+                stringify_json_value(scope, val).map_err(|e| e.message),
+            )
+        }
+        v8::PromiseState::Rejected => {
+            let exc = local.result(scope);
+            let err = workflow_rejection_to_error(scope, exc);
+            SettledResult::Rpc(Err(err.message))
+        }
+        v8::PromiseState::Pending => {
+            SettledResult::Rpc(Err("workflow settle on pending promise".to_string()))
+        }
     }
 }
 

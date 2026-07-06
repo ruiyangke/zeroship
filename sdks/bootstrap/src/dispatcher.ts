@@ -164,6 +164,78 @@ declare const globalThis: {
 (function installZsWorkflowDispatch(globalScope: typeof globalThis) {
   if (typeof globalScope.__zsWorkflowDispatch === "function") return;
 
+  type JournalStepKind = "run" | "sleep" | "wait_signal" | "child";
+  type JournalStepState = "running" | "completed" | "failed";
+  type JournalStepRecord = {
+    ordinal: number;
+    name: string;
+    nameOccurrence?: number;
+    kind: JournalStepKind;
+    state: JournalStepState;
+    output?: unknown;
+    error?: { type?: string; message?: string; stack?: string };
+    wakeAt?: string;
+    signalType?: string;
+    consumedSignal?: unknown;
+    childRunId?: string;
+  };
+  type FrontierOutcome =
+    | {
+        kind: "run";
+        ordinal: number;
+        name: string;
+        nameOccurrence: number;
+        state: "completed";
+        output: unknown;
+      }
+    | {
+        kind: "run";
+        ordinal: number;
+        name: string;
+        nameOccurrence: number;
+        state: "failed";
+        error: { type: string; message: string; stack?: string };
+      }
+    | {
+        kind: "sleep";
+        ordinal: number;
+        name: string;
+        nameOccurrence: number;
+        state: "running";
+        wakeAt: string;
+      }
+    | {
+        kind: "wait_signal";
+        ordinal: number;
+        name: string;
+        nameOccurrence: number;
+        state: "running";
+        signalType: string;
+        timeout?: string;
+        maxSignalAge?: string;
+        topic?: string;
+      }
+    | {
+        kind: "child";
+        ordinal: number;
+        name: string;
+        nameOccurrence: number;
+        state: "running";
+        workflowName: string;
+        input: unknown;
+        options?: unknown;
+      };
+
+  class SuspendSignal extends Error {
+    readonly outcome: FrontierOutcome;
+
+    constructor(outcome: FrontierOutcome) {
+      super("workflow dispatch frontier reached");
+      this.name = "SuspendSignal";
+      this.outcome = outcome;
+    }
+  }
+
   function mkErr(message: string, status: number, code: string): Error {
     const e = new Error(message) as Error & { status?: number; code?: string };
     e.status = status;
@@ -171,15 +243,336 @@ declare const globalThis: {
     return e;
   }
 
-  globalScope.__zsWorkflowDispatch = async function workflowDispatchStub(
-    _userNamespace: unknown,
-    _envelope: unknown,
+  function serializeError(e: unknown): { type: string; message: string; stack?: string } {
+    if (e instanceof Error) {
+      return {
+        type: e.name || "Error",
+        message: e.message,
+        ...(e.stack ? { stack: e.stack } : {}),
+      };
+    }
+    return { type: "Error", message: String(e) };
+  }
+
+  function deserializeError(error: JournalStepRecord["error"]): Error {
+    const e = new Error(error?.message ?? "workflow step failed");
+    e.name = error?.type ?? e.name;
+    if (error?.stack) e.stack = error.stack;
+    return e;
+  }
+
+  function buildTrigger(envelope: Record<string, unknown>): Record<string, unknown> {
+    const raw = envelope.trigger && typeof envelope.trigger === "object"
+      ? { ...(envelope.trigger as Record<string, unknown>) }
+      : {};
+    raw.input = Object.prototype.hasOwnProperty.call(raw, "input") ? raw.input : envelope.input;
+    raw.runId = typeof raw.runId === "string" ? raw.runId : envelope.runId;
+    raw.workflowName = typeof raw.workflowName === "string" ? raw.workflowName : envelope.workflowName;
+    const started = raw.startedAt;
+    raw.startedAt = started instanceof Date
+      ? started
+      : new Date(typeof started === "string" || typeof started === "number" ? started : Date.now());
+    return raw;
+  }
+
+  function normalizeJournal(envelope: Record<string, unknown>): JournalStepRecord[] {
+    const source = Array.isArray(envelope.journal)
+      ? envelope.journal
+      : Array.isArray(envelope.steps)
+        ? envelope.steps
+        : [];
+    return source
+      .filter((row): row is Record<string, unknown> => row != null && typeof row === "object")
+      .map((row) => ({
+        ordinal: Number(row.ordinal),
+        name: String(row.name ?? ""),
+        nameOccurrence: Number(row.nameOccurrence ?? 0),
+        kind: String(row.kind ?? "run") as JournalStepKind,
+        state: String(row.state ?? "completed") as JournalStepState,
+        output: row.output,
+        error: row.error as JournalStepRecord["error"],
+        wakeAt: typeof row.wakeAt === "string" ? row.wakeAt : undefined,
+        signalType: typeof row.signalType === "string" ? row.signalType : undefined,
+        consumedSignal: row.consumedSignal,
+        childRunId: typeof row.childRunId === "string" ? row.childRunId : undefined,
+      }));
+  }
+
+  class JournalBackedStep {
+    readonly #stepsByOrdinal = new Map<number, JournalStepRecord>();
+    readonly #nameOccurrences = new Map<string, number>();
+    #cursor = 0;
+    #inStepBody = false;
+
+    constructor(steps: JournalStepRecord[]) {
+      for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
+    }
+
+    async run<T>(
+      name: string,
+      configOrFn: unknown,
+      maybeFn?: () => T | Promise<T>,
+    ): Promise<T> {
+      this.#assertNotNested();
+      const fn = typeof configOrFn === "function" ? configOrFn : maybeFn;
+      if (typeof fn !== "function") {
+        throw mkErr("step.run requires a function body", 500, "WORKFLOW_DEFINITION_ERROR");
+      }
+
+      const issued = this.#issue(name, "run");
+      if (issued.record) return this.#resolveRecord<T>(issued.record);
+
+      try {
+        this.#inStepBody = true;
+        const output = await (fn as () => T | Promise<T>)();
+        throw new SuspendSignal({
+          kind: "run",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "completed",
+          output,
+        });
+      } catch (e) {
+        if (e instanceof SuspendSignal) throw e;
+        throw new SuspendSignal({
+          kind: "run",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "failed",
+          error: serializeError(e),
+        });
+      } finally {
+        this.#inStepBody = false;
+      }
+    }
+
+    async sleep(name: string, duration: string): Promise<void> {
+      this.#assertNotNested();
+      const issued = this.#issue(name, "sleep");
+      if (issued.record) {
+        if (issued.record.state === "completed") return;
+        throw new SuspendSignal({
+          kind: "sleep",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "running",
+          wakeAt: issued.record.wakeAt ?? duration,
+        });
+      }
+      throw new SuspendSignal({
+        kind: "sleep",
+        ordinal: issued.ordinal,
+        name,
+        nameOccurrence: issued.nameOccurrence,
+        state: "running",
+        wakeAt: duration,
+      });
+    }
+
+    async sleepUntil(name: string, when: Date | number): Promise<void> {
+      const target = typeof when === "number" ? new Date(when) : when;
+      return this.sleep(name, target.toISOString());
+    }
+
+    async waitForSignal(name: string, opts: Record<string, unknown> = {}): Promise<unknown> {
+      this.#assertNotNested();
+      const issued = this.#issue(name, "wait_signal");
+      if (issued.record) {
+        if (issued.record.state === "completed") {
+          if (issued.record.output !== undefined) return issued.record.output;
+          return issued.record.consumedSignal ?? null;
+        }
+        throw new SuspendSignal({
+          kind: "wait_signal",
+          ordinal: issued.ordinal,
+          name,
+          nameOccurrence: issued.nameOccurrence,
+          state: "running",
+          signalType: issued.record.signalType ?? String(opts.type ?? name),
+          timeout: typeof opts.timeout === "string" ? opts.timeout : undefined,
+          maxSignalAge: typeof opts.maxSignalAge === "string" ? opts.maxSignalAge : undefined,
+          topic: typeof opts.topic === "string" ? opts.topic : undefined,
+        });
+      }
+      throw new SuspendSignal({
+        kind: "wait_signal",
+        ordinal: issued.ordinal,
+        name,
+        nameOccurrence: issued.nameOccurrence,
+        state: "running",
+        signalType: String(opts.type ?? name),
+        timeout: typeof opts.timeout === "string" ? opts.timeout : undefined,
+        maxSignalAge: typeof opts.maxSignalAge === "string" ? opts.maxSignalAge : undefined,
+        topic: typeof opts.topic === "string" ? opts.topic : undefined,
+      });
+    }
+
+    async call(WorkflowClass: { new(): unknown; name?: string }, input: unknown, options?: unknown): Promise<unknown> {
+      this.#assertNotNested();
+      const name = WorkflowClass.name ?? "Workflow";
+      const issued = this.#issue(name, "child");
+      if (issued.record) return this.#resolveRecord<unknown>(issued.record);
+      throw new SuspendSignal({
+        kind: "child",
+        ordinal: issued.ordinal,
+        name,
+        nameOccurrence: issued.nameOccurrence,
+        state: "running",
+        workflowName: name,
+        input,
+        options,
+      });
+    }
+
+    #issue(name: string, kind: JournalStepKind): {
+      ordinal: number;
+      nameOccurrence: number;
+      record?: JournalStepRecord;
+    } {
+      const ordinal = this.#cursor++;
+      const nameOccurrence = this.#nameOccurrences.get(name) ?? 0;
+      this.#nameOccurrences.set(name, nameOccurrence + 1);
+      const record = this.#stepsByOrdinal.get(ordinal);
+      if (record) {
+        if (
+          record.name !== name ||
+          record.kind !== kind ||
+          (record.nameOccurrence ?? 0) !== nameOccurrence
+        ) {
+          throw mkErr(
+            `workflow journal mismatch at ordinal ${ordinal}: expected ${kind} ${name}#${nameOccurrence}, got ${record.kind} ${record.name}#${record.nameOccurrence ?? 0}`,
+            409,
+            "NONDETERMINISTIC_WORKFLOW",
+          );
+        }
+      }
+      return { ordinal, nameOccurrence, record };
+    }
+
+    #resolveRecord<T>(record: JournalStepRecord): T {
+      if (record.state === "completed") return record.output as T;
+      if (record.state === "failed") throw deserializeError(record.error);
+      throw new SuspendSignal({
+        kind: record.kind === "child" ? "child" : record.kind,
+        ordinal: record.ordinal,
+        name: record.name,
+        nameOccurrence: record.nameOccurrence ?? 0,
+        state: "running",
+        ...(record.kind === "sleep"
+          ? { wakeAt: record.wakeAt ?? "" }
+          : record.kind === "wait_signal"
+            ? { signalType: record.signalType ?? record.name }
+            : record.kind === "child"
+              ? { workflowName: record.name, input: undefined }
+              : { output: record.output }),
+      } as FrontierOutcome);
+    }
+
+    #assertNotNested(): void {
+      if (this.#inStepBody) {
+        throw mkErr("workflow step methods cannot be called from inside a step body", 500, "WORKFLOW_DEFINITION_ERROR");
+      }
+    }
+  }
+
+  function resolveWorkflow(userNamespace: unknown, workflowName: string): { new(): { run?: unknown } } {
+    const mod = (userNamespace ?? {}) as Record<string, unknown>;
+    const def = mod.default && typeof mod.default === "object"
+      ? mod.default as Record<string, unknown>
+      : {};
+    const candidates = [
+      mod[workflowName],
+      (def.workflows && typeof def.workflows === "object"
+        ? (def.workflows as Record<string, unknown>)[workflowName]
+        : undefined),
+      def[workflowName],
+      typeof mod.default === "function" ? mod.default : undefined,
+    ];
+    const found = candidates.find((candidate) => typeof candidate === "function");
+    if (!found) {
+      throw mkErr(`Workflow not found: ${workflowName}`, 404, "WORKFLOW_NOT_FOUND");
+    }
+    return found as { new(): { run?: unknown } };
+  }
+
+  function resultFromFrontier(envelope: Record<string, unknown>, outcome: FrontierOutcome): Record<string, unknown> {
+    const base = {
+      runId: envelope.runId,
+      nonce: envelope.nonce,
+      workflowName: envelope.workflowName,
+      ordinal: outcome.ordinal,
+      name: outcome.name,
+      nameOccurrence: outcome.nameOccurrence,
+    };
+    if (outcome.kind === "run" && outcome.state === "completed") {
+      return { ...base, kind: "StepCompleted", output: outcome.output };
+    }
+    if (outcome.kind === "run" && outcome.state === "failed") {
+      return { ...base, kind: "RunFailed", error: outcome.error };
+    }
+    if (outcome.kind === "sleep") {
+      return { ...base, kind: "Sleep", wakeAt: outcome.wakeAt };
+    }
+    if (outcome.kind === "wait_signal") {
+      return {
+        ...base,
+        kind: "Wait",
+        signalType: outcome.signalType,
+        timeout: outcome.timeout,
+        maxSignalAge: outcome.maxSignalAge,
+        topic: outcome.topic,
+      };
+    }
+    return {
+      ...base,
+      kind: "Wait",
+      childWorkflowName: outcome.workflowName,
+      input: outcome.input,
+      options: outcome.options,
+    };
+  }
+
+  globalScope.__zsWorkflowDispatch = async function workflowDispatch(
+    userNamespace: unknown,
+    envelope: unknown,
     _ctx?: unknown,
-  ): Promise<never> {
-    throw mkErr(
-      "__zsWorkflowDispatch is installed but the workflow replay host is not wired yet",
-      501,
-      "WORKFLOW_DISPATCH_UNIMPLEMENTED",
-    );
+  ): Promise<Record<string, unknown>> {
+    if (envelope == null || typeof envelope !== "object") {
+      throw mkErr("workflow dispatch envelope must be an object", 400, "INVALID_ARGUMENT");
+    }
+    const env = envelope as Record<string, unknown>;
+    const workflowName = typeof env.workflowName === "string" ? env.workflowName : "";
+    if (!workflowName) throw mkErr("workflowName is required", 400, "INVALID_ARGUMENT");
+
+    try {
+      const WorkflowClass = resolveWorkflow(userNamespace, workflowName);
+      const workflow = new WorkflowClass();
+      if (typeof workflow.run !== "function") {
+        throw mkErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
+      }
+      const step = new JournalBackedStep(normalizeJournal(env));
+      const output = await workflow.run(buildTrigger(env), step);
+      return {
+        kind: "RunCompleted",
+        runId: env.runId,
+        nonce: env.nonce,
+        workflowName,
+        output,
+      };
+    } catch (e) {
+      if (e instanceof SuspendSignal) {
+        return resultFromFrontier(env, e.outcome);
+      }
+      return {
+        kind: "RunFailed",
+        runId: env.runId,
+        nonce: env.nonce,
+        workflowName,
+        error: serializeError(e),
+      };
+    }
   };
 })(globalThis as never);

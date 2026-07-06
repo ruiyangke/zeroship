@@ -7109,6 +7109,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "tracing",
  "url",
@@ -7120,6 +7121,7 @@ dependencies = [
  "zeroship-plugin-kv",
  "zeroship-plugin-storage",
  "zeroship-runtime",
+ "zstd",
 ]
 
 [[package]]
