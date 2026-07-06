@@ -23,7 +23,7 @@
 //!
 //! A pure-DDL `.sql` (or `.ir.json` with no DML/backfill/online op) lowers to a
 //! plan whose `steps == [Ddl(one Migration)]` — the overwhelming common case,
-//! and the only shape the platform Flyway-mode loader ever produces. The
+//! and the only shape the legacy Flyway/dbmate loader ever produces. The
 //! [`AppliedPlan::single_step`] facade builds exactly that, and
 //! [`AppliedPlan::single_step_migration`] reads it back out (fail-closed on a
 //! multi-step plan, §5.2).
@@ -142,10 +142,10 @@ impl AppliedPlan {
         }
     }
 
-    /// The thin `Migration`-facade the platform Flyway-mode runner consumes
+    /// The thin `Migration`-facade the legacy SQL runner consumes
     /// (§5.2): a plan whose `steps == [Ddl(_)]` yields that one `&Migration`;
     /// any other shape fails closed with [`NotSingleStep`]. This keeps the
-    /// platform runner operating over [`Migration`] and decoupled from
+    /// SQL runner operating over [`Migration`] and decoupled from
     /// `PlanStep`/`RenameStep` evolution.
     ///
     /// # Errors
