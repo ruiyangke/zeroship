@@ -11,8 +11,8 @@
 //! The variants are exactly:
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
-//! Cast | PgArrayMembership | PgRegexMatch | PgColumnSize | Extract |
-//! PgIntervalLiteral`.
+//! Cast | Between | Like | DistinctFrom | Agg | InList | PgRegexMatch |
+//! PgColumnSize | Extract | PgExtract | PgInterval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -109,6 +109,27 @@ pub enum ScalarFn {
     Length,
     /// `abs(e)`
     Abs,
+    /// `(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a
+    /// `mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;
+    /// the `%` spelling is identical on PG, SQLite, and MySQL, so this stays a
+    /// dialect-NEUTRAL `ScalarFn` (special-cased at the render seam, §3.4).
+    Mod,
+    /// `round(<x>)` / `round(<x>, <n>)` — portable rounding. Identical spelling on
+    /// PG, SQLite, and MySQL. Optional second (precision) argument.
+    Round,
+    /// `floor(<x>)` — portable floor. `floor()` exists on PG, MySQL, and SQLite
+    /// (≥3.35). Identical spelling.
+    Floor,
+    /// `ceil(<x>)` — portable ceiling. `ceil()` exists on PG, SQLite (≥3.35), and
+    /// MySQL (where `CEIL` is an alias of `CEILING`). Identical spelling.
+    Ceil,
+    /// `substr(<s>, <start>[, <len>])` — portable substring. `substr()` exists on
+    /// PG, SQLite, and MySQL (where `SUBSTR` is an alias of `SUBSTRING`). Identical
+    /// spelling. 1-based `start`; optional `len`.
+    Substr,
+    /// `replace(<s>, <from>, <to>)` — portable string replace. `replace()` exists
+    /// on PG, SQLite, and MySQL with identical spelling and semantics.
+    Replace,
     /// **VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).
     /// A PG GUC read needed by the RLS policy predicates (`0025`'s
     /// `current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it
@@ -162,27 +183,93 @@ pub enum CastTarget {
     Uuid,
 }
 
-/// **PG-ONLY** membership operator over a literal text array. The closed variants
-/// intentionally encode the two Postgres idioms the platform's dumped CHECK/domain
-/// predicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub enum PgArrayMembershipOp {
-    /// `<expr> = ANY (ARRAY[...])`
-    Eq,
-    /// `<expr> <> ALL (ARRAY[...])`
-    Ne,
-}
-
-/// CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
+/// CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
 ///
-/// P1 admits only the platform `day` marker. Add more fields only with a concrete
-/// golden needing them and matching renderer/validation coverage.
+/// Each admitted field has a live three-dialect proof and a faithful renderer on
+/// PostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in
+/// [`PgExtractField`] instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ExtractField {
+    /// Calendar year.
+    Year,
+    /// Month-of-year, 1-12.
+    Month,
     /// Day-of-month field.
     Day,
+    /// Hour-of-day, 0-23.
+    Hour,
+    /// Minute-of-hour, 0-59.
+    Minute,
+    /// Day-of-week, 0=Sunday through 6=Saturday.
+    Dow,
+}
+
+/// CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.
+///
+/// These fields either have no portable SQLite/MySQL analogue or have semantics
+/// that diverge under the mandated portable renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PgExtractField {
+    /// Seconds including fractional seconds on PostgreSQL.
+    Second,
+    /// Day-of-year.
+    Doy,
+    /// Seconds since 1970-01-01 00:00:00 UTC.
+    Epoch,
+    /// Calendar quarter.
+    Quarter,
+    /// ISO week number.
+    Week,
+    /// ISO day-of-week, 1=Monday through 7=Sunday.
+    Isodow,
+    /// ISO week-numbering year.
+    Isoyear,
+    /// Century.
+    Century,
+    /// Decade.
+    Decade,
+    /// Millennium.
+    Millennium,
+    /// Seconds field including fractional microseconds.
+    Microseconds,
+    /// Seconds field including fractional milliseconds.
+    Milliseconds,
+    /// Time-zone offset in seconds.
+    Timezone,
+    /// Time-zone offset hour.
+    TimezoneHour,
+    /// Time-zone offset minute.
+    TimezoneMinute,
+}
+
+/// The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).
+///
+/// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,
+/// SQLite, and MySQL (only the surrounding identifier quoting differs), so there
+/// is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum AggFunc {
+    /// `count(...)` (or `count(*)` when the [`Expr::Agg`] `arg` is `None`).
+    Count,
+    /// `sum(<arg>)`.
+    Sum,
+    /// `avg(<arg>)`.
+    Avg,
+    /// `min(<arg>)`.
+    Min,
+    /// `max(<arg>)`.
+    Max,
+}
+
+/// `skip_serializing_if` predicate: a `false` bool emits NOTHING on the wire, so a
+/// non-`distinct` [`Expr::Agg`] serializes byte-minimally (design §5 item 6). The
+/// bool `default`s to `false` on deserialize, so the round-trip is faithful.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// The CLOSED expression AST node (§3.3.1). Internally tagged on `"node"`,
@@ -201,6 +288,13 @@ pub enum Expr {
     ColRef {
         /// The column name (plain string).
         name: String,
+        /// Optional qualifying table/alias (`c("orders", "customer_id")` →
+        /// `table: Some("orders")`). Present only for the two-arg qualified form
+        /// (§3.4, the join-ON fix). An unqualified `c("col")` leaves this `None`
+        /// and, via `skip_serializing_if`, serializes byte-identically to the
+        /// pre-qualification wire shape — additive, no `ir_version` bump.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        table: Option<String>,
     },
     /// A typed scalar literal (a bare JS value auto-wrapped by a fluent operator
     /// method). Carries an [`IrScalar`] so the numeric domain is enforced at
@@ -225,10 +319,10 @@ pub enum Expr {
         /// The operand.
         operand: Box<Expr>,
     },
-    /// A searched `CASE` (`c.fn.case([[cond, val], …], else?)`). Each branch is
-    /// `(condition, result)`; both halves are themselves closed-AST nodes.
+    /// A searched `CASE` (`c.case({ branches: [{ when, then }], else? })`). Each branch is
+    /// `(when, then)`; both halves are themselves closed-AST nodes.
     Case {
-        /// `(condition, result)` branches, in order.
+        /// `(when, then)` branches, in order.
         branches: Vec<CaseBranch>,
         /// Optional `ELSE` result.
         #[serde(rename = "else", skip_serializing_if = "Option::is_none")]
@@ -257,17 +351,80 @@ pub enum Expr {
         /// The portable target type.
         target: CastTarget,
     },
-    /// **PG-ONLY** text-array membership rendered exactly as
-    /// `(<expr> = ANY (ARRAY['a'::text, ...]))` or
-    /// `(<expr> <> ALL (ARRAY['a'::text, ...]))`.
-    PgArrayMembership {
-        /// The expression tested against the literal text array.
+    /// A **portable** inclusive range test (`c("x").between(low, high)`) rendered
+    /// exactly as `(<operand> BETWEEN <low> AND <high>)` — IDENTICAL SQL on PG,
+    /// SQLite, and MySQL (standard SQL, inclusive on both ends).
+    Between {
+        /// The expression under test.
+        operand: Box<Expr>,
+        /// The inclusive lower bound.
+        low: Box<Expr>,
+        /// The inclusive upper bound.
+        high: Box<Expr>,
+    },
+    /// A **portable** `LIKE` pattern match (`c("x").like(pattern)`) rendered exactly
+    /// as `(<operand> LIKE <pattern>)` — the SAME syntax on PG, SQLite, and MySQL.
+    ///
+    /// NOTE: LIKE *case-sensitivity* semantics differ per dialect — PG is
+    /// case-sensitive, SQLite is ASCII-case-insensitive by default, and MySQL is
+    /// collation-dependent — so a dialect-uniform portability PROOF is a Phase-4
+    /// claiming-phase obligation (design §5). This slice adds the node + the
+    /// faithful syntax render only; it does not yet claim cross-dialect parity.
+    Like {
+        /// The expression under test.
+        operand: Box<Expr>,
+        /// The LIKE pattern expression.
+        pattern: Box<Expr>,
+    },
+    /// A **portable** NULL-safe inequality (`c("x").distinctFrom(y)`). The
+    /// per-dialect lowering is the engine's job (this is the point): PG + SQLite
+    /// render the standard `(<left> IS DISTINCT FROM <right>)`; MySQL has NO
+    /// `IS DISTINCT FROM` operator, so it lowers to `(NOT (<left> <=> <right>))` —
+    /// `<=>` is MySQL's NULL-safe equality, so its negation is exactly
+    /// "distinct from" (NULL-aware inequality).
+    DistinctFrom {
+        /// Left operand.
+        left: Box<Expr>,
+        /// Right operand.
+        right: Box<Expr>,
+    },
+    /// A **PORTABLE** aggregate function application (`c.agg.count()`,
+    /// `c.agg.sum(e)`, `c.agg.count(e, { distinct: true })` — design §3.4/§3.6).
+    ///
+    /// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and
+    /// MySQL (only identifier quoting differs), so there is NO dialect gate. `arg:
+    /// None` with `func: Count` is `COUNT(*)`; a present `arg` renders
+    /// `<func>(<arg>)`, and `distinct` inserts `DISTINCT`
+    /// (`count(DISTINCT <arg>)`).
+    ///
+    /// NB: the "an aggregate is only legal in a grouped/SELECT context" check is
+    /// coupled with the Phase-2 view/select builder (`AGG_POSITION_INVALID`) — this
+    /// additive slice accepts the node STRUCTURALLY only (design §3.4/§5 item 6).
+    Agg {
+        /// The aggregate function.
+        func: AggFunc,
+        /// The single argument expression. `None` + `func: Count` = `COUNT(*)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arg: Option<Box<Expr>>,
+        /// `DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the
+        /// wire when `false` so the node serializes byte-minimally.
+        #[serde(default, skip_serializing_if = "is_false")]
+        distinct: bool,
+    },
+    /// A **portable** text-list membership predicate (`c("x").in([...])` /
+    /// `c("x").notIn([...])`). PostgreSQL renders in the pg_dump-faithful
+    /// `= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite
+    /// and MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:
+    /// `IN []` renders false, `NOT IN []` renders true.
+    InList {
+        /// The expression tested against the literal text list.
         expr: Box<Expr>,
-        /// Which membership idiom to render.
-        op: PgArrayMembershipOp,
-        /// Text array elements. Rendered as safe string literals with an explicit
-        /// `::text` cast on every element to match pg_dump's CHECK/domain shape.
+        /// Text elements. PostgreSQL renders each as a safe string literal with an
+        /// explicit `::text` cast to match pg_dump's CHECK/domain shape.
         elems: Vec<String>,
+        /// `false` => membership (`IN` / `= ANY`); `true` => non-membership
+        /// (`NOT IN` / `<> ALL`).
+        negated: bool,
     },
     /// **PG-ONLY** regex match rendered exactly as
     /// `(<expr> ~ '<pattern>'::text)`.
@@ -283,36 +440,133 @@ pub enum Expr {
         /// The expression whose on-disk size Postgres should measure.
         expr: Box<Expr>,
     },
-    /// **PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.
+    /// **PORTABLE** scalar expression extracting a date/time part whose numeric
+    /// semantics are identical on PostgreSQL, SQLite, and MySQL.
     Extract {
         /// Closed EXTRACT field.
         field: ExtractField,
         /// Source expression.
-        expr: Box<Expr>,
+        from: Box<Expr>,
     },
-    /// **PG-ONLY** interval literal rendered as `'<safe>'::interval`.
-    PgIntervalLiteral {
-        /// A strictly-validated interval literal. P1 admits only time-like
-        /// `HH:MM:SS[.ffffff]` values such as `00:01:00`.
-        value: String,
+    /// **PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.
+    PgExtract {
+        /// Closed PostgreSQL EXTRACT field.
+        field: PgExtractField,
+        /// Source expression.
+        from: Box<Expr>,
+    },
+    /// **PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.
+    PgInterval {
+        /// Structured duration fields. Fields serialize in canonical order
+        /// (`years`, `months`, `days`, `hours`, `minutes`, `seconds`) and absent
+        /// fields are omitted from the wire.
+        duration: Duration,
+    },
+    /// **The one Layer-2 portability escape (design §3.4 / §6.4)** — a
+    /// per-dialect VALUE divergence. Each present leg is a full [`Expr`]; the
+    /// engine renders the leg matching the render's TARGET dialect — the
+    /// dialect's own leg if present, else `default`. This is `dialect({ default?,
+    /// pg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:
+    /// c.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).
+    ///
+    /// The node tag on the wire is `"dialect"` (`#[serde(rename)]`); the four
+    /// legs serialize in declaration order (`default, pg, sqlite, mysql`) — the
+    /// canonical leg order the checksum folds. A leg that is `None` is skipped on
+    /// the wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.
+    ///
+    /// **Scope math (validate, [`crate::model::validate`]).** The covered dialect
+    /// set is `{legs present} ∪ {all dialects if default present}`; a target with
+    /// NEITHER its own leg NOR a `default` is REFUSED fail-closed
+    /// (`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing
+    /// the `sqlite` leg with no `default` is fine when targeting PG, refused when
+    /// targeting SQLite. At least one leg must be present — a legless `dialect({})`
+    /// is malformed on every target (`UNSUPPORTED`), enforced at validate (all
+    /// four fields are `serde(default)` so an empty node deserializes, then the
+    /// structural gate refuses it).
+    ///
+    /// **RATCHET OBLIGATION (P11 / design §3.4).** The design counts each
+    /// `dialect()` leg as one of the four ratcheted budget counters. That budget
+    /// / baseline mechanism is a LATER phase and is NOT YET BUILT (there is no
+    /// baseline file in-tree). When it lands, the per-leg count of this node must
+    /// be wired into it. Deferred by design — this additive slice does not gate
+    /// on it.
+    #[serde(rename = "dialect")]
+    Dialectal {
+        /// The fallback leg, rendered for any target dialect that has no explicit
+        /// own leg. Its presence makes the covered set ALL dialects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Box<Expr>>,
+        /// The PostgreSQL leg.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pg: Option<Box<Expr>>,
+        /// The SQLite leg.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sqlite: Option<Box<Expr>>,
+        /// The MySQL leg.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mysql: Option<Box<Expr>>,
     },
 }
 
-/// One `(condition, result)` branch of a [`Expr::Case`].
+/// Structured duration value for PostgreSQL interval literals and future portable
+/// date shifts. All fields are optional integers; validation requires at least
+/// one present field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Duration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub years: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub months: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<i64>,
+}
+
+impl Duration {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.years.is_none()
+            && self.months.is_none()
+            && self.days.is_none()
+            && self.hours.is_none()
+            && self.minutes.is_none()
+            && self.seconds.is_none()
+    }
+}
+
+/// One `(when, then)` branch of a [`Expr::Case`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CaseBranch {
-    /// The branch condition (a boolean closed-AST node).
-    pub condition: Expr,
-    /// The branch result.
-    pub result: Expr,
+    /// The `WHEN` predicate (a boolean closed-AST node).
+    pub when: Expr,
+    /// The `THEN` result.
+    pub then: Expr,
 }
 
 impl Expr {
     /// A `ColRef` convenience constructor (tests / IrAuthor).
     #[must_use]
     pub fn col(name: impl Into<String>) -> Self {
-        Expr::ColRef { name: name.into() }
+        Expr::ColRef {
+            name: name.into(),
+            table: None,
+        }
+    }
+
+    /// A qualified `ColRef` convenience constructor (`c("orders", "id")`).
+    #[must_use]
+    pub fn col_qualified(table: impl Into<String>, name: impl Into<String>) -> Self {
+        Expr::ColRef {
+            name: name.into(),
+            table: Some(table.into()),
+        }
     }
 
     /// A `Literal` convenience constructor.

@@ -3,7 +3,8 @@
 //
 // These are MANUAL types that codegen cannot express: the fluent `table()`
 // handle + its selector sub-handles (`.column`/`.foreignKey`/…), the chainable
-// `ColumnDef` (`t.*`), the `(c) => Expr` `ExprBuilder`, and the all-strings
+// `ColumnDef` (`t.*`), the `(c) => Expr` `ExprBuilder`, default-expression
+// `DefaultBuilder`, immutable index/generated expression builders, and the all-strings
 // typing stance (§3 — names are plain `string`, NOT live-schema-bound). The
 // dialect-neutral IR wire types (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are
 // GENERATED from the engine's `op-ir.schema.json` (`json-schema-to-typescript`)
@@ -16,6 +17,7 @@ import type {
   ColType,
   CommentTarget,
   Expr,
+  ExtractField,
   ExclusionMethod,
   ExclusionOperator,
   IndexElement,
@@ -32,6 +34,7 @@ import type {
   PartitionBoundValue,
   PartitionBounds,
   PartitionSpec,
+  PgExtractField,
   PolicyCmd,
   RaiseLevel,
   SelectAst,
@@ -50,6 +53,7 @@ export type {
   ColType,
   CommentTarget,
   Expr,
+  ExtractField,
   ExclusionMethod,
   ExclusionOperator,
   IndexElement,
@@ -66,6 +70,7 @@ export type {
   PartitionBoundValue,
   PartitionBounds,
   PartitionSpec,
+  PgExtractField,
   Classification,
   RaiseLevel,
   SelectAst,
@@ -78,27 +83,9 @@ export type {
   ViewQuery,
 };
 
-/**
- * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
- * `ifNotExists` existence guard (the create/add family) is honored by an
- * engine-synthesized catalog probe at apply time: probe the live catalog under the
- * held advisory lock + the open per-step transaction, then `decide` — run the op
- * bare if the object is absent, journal a satisfied no-op if it is already present
- * with the DECLARED shape, or FAIL CLOSED if it is present with a shape that
- * diverges from (or cannot be proven equal to) the declared one. Never a silent
- * skip over a divergence. The option is therefore a plain `boolean`. See
- * `docs/reference/migrate-op-dsl.md` (existence-guard section).
- */
-export type IfNotExistsGuard = boolean;
-
-/**
- * **Supported as of op.* PR10 Part B** (executor-side catalog probe). The
- * `ifExists` existence guard (the drop/rename/alter family) is honored by the same
- * probe-under-lock flow: run the drop/alter if the source object is PRESENT,
- * journal a satisfied no-op if it is already absent (a drop has no shape to verify
- * — presence alone governs). A plain `boolean`. See {@link IfNotExistsGuard}.
- */
-export type IfExistsGuard = boolean;
+// Existence guards (`ifNotExists` / `ifExists`) are inline boolean options on the
+// relevant op specs. The executor honors them via catalog probes under lock; see
+// `docs/reference/migrate-op-dsl.md` (existence-guard section).
 
 // ── Sensitive-data column facets (#173/#174) ──
 //
@@ -121,10 +108,35 @@ export interface TextOptions {
   caseSensitive?: boolean;
 }
 
-/** Options for `t.vector(n, { metric })` — the pgvector distance metric (closed
- *  {@link VectorMetric} set). Omitted ⇒ the engine's opclass default. */
+/** Options for `t.numeric({ precision, scale })`. Omitted ⇒ (38, 9). */
+export interface NumericOptions {
+  precision?: number;
+  scale?: number;
+}
+
+/** Options for `t.char({ length })`. */
+export interface CharOptions {
+  length: number;
+}
+
+/** Options for `t.vector({ dimensions, metric })` — the pgvector dimensionality
+ *  plus optional distance metric (closed {@link VectorMetric} set). Omitted
+ *  metric ⇒ the engine's opclass default. */
 export interface VectorOptions {
+  dimensions: number;
   metric?: VectorMetric;
+}
+
+/** Structured duration value for PG interval literals and future date shifting.
+ *  At least one integer field is required; absent fields are omitted on the wire
+ *  in canonical order (`years`, `months`, `days`, `hours`, `minutes`, `seconds`). */
+export interface Duration {
+  years?: number;
+  months?: number;
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
 }
 
 /** Options for `.mask({ kind, classification? })` — a STANDALONE column mask.
@@ -162,8 +174,8 @@ export interface NextvalDefault {
 
 /**
  * A chainable column definition produced by the fluent `t.*` lexicon (§4).
- * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.ref(target)`/`.primaryKey()`
- * /`.unique()` opt in. ONE column-type representation — every column-type
+ * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.primaryKey()`/`.unique()`
+ * opt in. ONE column-type representation — every column-type
  * position (`create.columns`/`.column().add()`/`.column().rename()`/
  * `.column().setType()`) takes a `ColumnDef`.
  *
@@ -175,13 +187,10 @@ export interface NextvalDefault {
 export interface ColumnDef {
   /** Mark the column `NOT NULL` (the rarer, riskier opt-in). Returns a fresh def. */
   notNull(): ColumnDef;
-  /** A structured default — a typed scalar literal OR a nullary synth scalar
-   *  (`{ fn: "now" | "genRandomUuid" }`). NEVER raw SQL (property A). Returns a
-   *  fresh def. */
-  default(value: DefaultValue): ColumnDef;
-  /** Re-target as a foreign-key reference (a plain-string target table). Returns
-   *  a fresh def. */
-  ref(targetTable: string): ColumnDef;
+  /** A structured default — a typed scalar/container literal, `nextval(...)`, or
+   *  a narrow expression callback `(c) => c.fn.*`. NEVER raw SQL (property A).
+   *  Returns a fresh def. */
+  default(value: DefaultValue | DefaultExprFn): ColumnDef;
   /** Mark as the table primary key (implies `NOT NULL`). Returns a fresh def. */
   primaryKey(): ColumnDef;
   /** Add a single-column `UNIQUE`. Returns a fresh def. */
@@ -198,7 +207,7 @@ export interface ColumnDef {
   /** Declare a generated/computed column from a closed expression AST. Omitted
    * options render a STORED generated column; `{ virtual: true }` requests a
    * SQLite VIRTUAL column and is rejected on Postgres. */
-  generated(expr: ExprFn | ExprChain | Expr, opts?: GeneratedOptions): ColumnDef;
+  generated(expr: GeneratedColumnExprFn | ExprChain | Expr, opts?: GeneratedOptions): ColumnDef;
   /** Declare a SQL identity column. `{ always: true }` renders
    * `GENERATED ALWAYS AS IDENTITY`; otherwise `BY DEFAULT`. */
   identity(opts?: IdentityOptions): ColumnDef;
@@ -220,9 +229,9 @@ export interface TypeLexicon {
   /** PostgreSQL `text[]` column. Non-PG backends store the array payload as JSON text. */
   textArray(): ColumnDef;
   /** Fixed-precision decimal (default (38, 9)). */
-  numeric(precision?: number, scale?: number): ColumnDef;
+  numeric(opts?: NumericOptions): ColumnDef;
   /** Fixed-length character string (`character(n)` / `CHAR(n)`). */
-  char(n: number): ColumnDef;
+  char(opts: CharOptions): ColumnDef;
   timestamp(): ColumnDef;
   /** Narrow SQL DATE token. Validates only as a PostgreSQL domain base type. */
   date(): ColumnDef;
@@ -232,21 +241,21 @@ export interface TypeLexicon {
   json(): ColumnDef;
   /** A foreign-key reference column (plain-string target — NOT live-schema-bound). */
   ref(targetTable: string): ColumnDef;
-  /** A pgvector embedding column of dimensionality `n`. `t.vector(n, { metric })`
-   *  records the declared distance metric on `IrColumn.vectorMetric` (the closed
+  /** A pgvector embedding column. `t.vector({ dimensions, metric })` records the
+   *  declared distance metric on `IrColumn.vectorMetric` (the closed
    *  {@link VectorMetric} set), so the ivfflat/hnsw opclass renders the declared
    *  metric instead of defaulting — a declared-only hint introspection can't recover. */
-  vector(n: number, opts?: VectorOptions): ColumnDef;
+  vector(opts: VectorOptions): ColumnDef;
   geoPoint(): ColumnDef;
   /** 16-bit signed integer. */
   smallInt(): ColumnDef;
-  /** 32-bit signed integer (canonical; the `int` alias is removed, §7). */
-  integer(): ColumnDef;
+  /** 32-bit signed integer (canonical; `t.integer` is deleted, P10). */
   int(): ColumnDef;
   bigInt(): ColumnDef;
-  /** Single-precision float. */
+  /** Single-precision float (float4). */
   real(): ColumnDef;
-  float(): ColumnDef;
+  /** Double-precision float (float8). */
+  double(): ColumnDef;
   /** IP network/address (`inet` on Postgres). */
   inet(): ColumnDef;
   /** A named enum reference declared with `enumType(name).create({ values })`. */
@@ -276,8 +285,8 @@ export interface EnumHandle {
 
 export interface CreateDomainArgs {
   as: ColumnDef | ColType;
-  check?: ExprFn | ExprChain | Expr;
-  default?: ScalarValue | { fn: "now" | "genRandomUuid" };
+  check?: DomainCheckFn | ExprChain | Expr;
+  default?: ScalarValue | DefaultExprFn;
   notNull?: boolean;
   schema?: string;
 }
@@ -292,6 +301,74 @@ export interface DomainHandle {
   create(args: CreateDomainArgs): DomainHandle;
   drop(args?: DropDomainArgs): DomainHandle;
   comment(text: string | null, args?: { schema?: string }): DomainHandle;
+}
+
+export interface SchemaCreateArgs {
+  ifNotExists?: boolean;
+  authorization?: string;
+}
+
+export interface SchemaDropArgs {
+  ifExists?: boolean;
+  cascade?: boolean;
+}
+
+export interface DroppedSchemaHandle {
+  readonly name: string;
+  create(args?: SchemaCreateArgs): SchemaHandle;
+}
+
+export interface SchemaHandle extends DroppedSchemaHandle {
+  drop(args?: SchemaDropArgs): DroppedSchemaHandle;
+}
+
+export interface ExtensionCreateArgs {
+  ifNotExists?: boolean;
+  schema?: string;
+}
+
+export interface ExtensionDropArgs {
+  ifExists?: boolean;
+}
+
+export interface DroppedExtensionHandle {
+  readonly name: string;
+  create(args?: ExtensionCreateArgs): ExtensionHandle;
+}
+
+export interface ExtensionHandle extends DroppedExtensionHandle {
+  drop(args?: ExtensionDropArgs): DroppedExtensionHandle;
+}
+
+export interface RoleCreateArgs {
+  login?: boolean;
+  password?: string;
+  bypassRls?: boolean;
+  createRole?: boolean;
+  createDb?: boolean;
+  superuser?: boolean;
+  inRole?: string[];
+  setSearchPath?: string[];
+  ifNotExists?: boolean;
+}
+
+export interface RoleSetOptionsArgs {
+  setSearchPath?: string[];
+  resetSearchPath?: boolean;
+}
+
+export interface RoleDropArgs {
+  ifExists?: boolean;
+}
+
+export interface DroppedRoleHandle {
+  readonly name: string;
+  create(args?: RoleCreateArgs): RoleHandle;
+}
+
+export interface RoleHandle extends DroppedRoleHandle {
+  setOptions(args: RoleSetOptionsArgs): RoleHandle;
+  drop(args?: RoleDropArgs): DroppedRoleHandle;
 }
 
 export interface SequenceOwnedBy {
@@ -347,19 +424,37 @@ export interface SequenceHandle {
 
 // ── Scalars / rows ──
 
+declare const decimalValueBrand: unique symbol;
+declare const bytesValueBrand: unique symbol;
+
+/** A branded decimal value produced by the top-level `decimal("...")`
+ *  constructor. The recorder normalizes it to the IR `{ decimal: "..." }`
+ *  scalar carrier; authors cannot pass the in-band carrier directly. */
+export interface DecimalValue {
+  readonly [decimalValueBrand]: "decimal";
+  readonly decimal: string;
+}
+
+/** A branded bytes value produced by the top-level `byteValue(...)`
+ *  constructor. The recorder normalizes it to the IR `{ bytes: "<base64>" }`
+ *  scalar carrier; raw `Uint8Array` values remain accepted. */
+export interface BytesValue {
+  readonly [bytesValueBrand]: "bytes";
+  readonly bytes: string;
+}
+
 /** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
- *  carry (§3.5 numeric domain). The builder normalizes a JS `bigint` into the
- *  `{ decimal }` carrier (integers beyond 2^53) and a `Uint8Array` into the
- *  `{ bytes: base64 }` carrier before recording — both are accepted here for
- *  authoring ergonomics; you MAY also pass the explicit `{ decimal }` carrier (e.g.
- *  for a fractional value). */
+ *  carry (§3.5 numeric / bytes domain). The builder normalizes a branded
+ *  `decimal(...)` into the `{ decimal }` IR carrier, a branded `byteValue(...)`
+ *  into the `{ bytes }` carrier, and a `Uint8Array` into the `{ bytes: base64 }`
+ *  carrier before recording. */
 export type ScalarValue =
   | string
   | number
-  | bigint
   | boolean
   | null
-  | { decimal: string }
+  | DecimalValue
+  | BytesValue
   | Uint8Array;
 
 declare const dbSynthSymbolBrand: unique symbol;
@@ -381,8 +476,18 @@ export type DbSynthSymbol =
  *  `fnSynth(now/genRandomUuid)`; all other functions are rejected. */
 export type DmlValue = ScalarValue | DbSynthSymbol | ExprChain | Expr;
 
+/** A DML assignment RHS accepts the same scalar/expression values as insert rows,
+ *  plus the `(c) => Expr` callback shorthand. */
+export type DmlSetValue = DmlValue | ExprFn;
+
 /** Empty object/array defaults admitted for JSON/text-array columns. */
 export type EmptyContainerDefault = Record<string, never> | readonly [];
+
+export type JsonDefaultObject = {
+  readonly [key: string]: JsonDefaultValue;
+} & {
+  readonly fn?: never;
+};
 
 /** JSON value defaults admitted for JSON columns. Runtime recording accepts only
  *  integer JS numbers (`Number.isInteger(v) && Math.abs(v) < 2**53`) in v1. */
@@ -392,13 +497,11 @@ export type JsonDefaultValue =
   | string
   | number
   | readonly JsonDefaultValue[]
-  | { readonly [key: string]: JsonDefaultValue };
+  | JsonDefaultObject;
 
 /** A column default value accepted by default-bearing column terminals. */
 export type DefaultValue =
   | ScalarValue
-  | DbSynthSymbol
-  | { fn: "now" | "genRandomUuid" }
   | NextvalDefault
   | EmptyContainerDefault
   | JsonDefaultValue;
@@ -422,8 +525,8 @@ export interface ExprChain {
   gt(x: unknown): ExprChain;
   ge(x: unknown): ExprChain;
   // boolean
-  and(e: ExprChain): ExprChain;
-  or(e: ExprChain): ExprChain;
+  and(...es: ExprChain[]): ExprChain;
+  or(...es: ExprChain[]): ExprChain;
   not(): ExprChain;
   // arithmetic
   add(x: unknown): ExprChain;
@@ -437,11 +540,17 @@ export interface ExprChain {
   isNotNull(): ExprChain;
   isTrue(): ExprChain;
   isFalse(): ExprChain;
-  // PG-only value nodes used by the platform CHECK corpus.
-  matches(pattern: string): ExprChain;
-  columnSize(): ExprChain;
   // cast (the closed portable target set only)
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid"): ExprChain;
+  // portable predicates (§3.4): `between`/`like` render identical syntax on all
+  // three dialects; `in`/`notIn` are portably named but keep PG's pg_dump-faithful
+  // `ANY/ALL ARRAY[...]::text` render; `distinctFrom` is portably named but
+  // per-dialect rendered (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`).
+  between(low: unknown, high: unknown): ExprChain;
+  like(pattern: unknown): ExprChain;
+  "in"(values: readonly string[]): ExprChain;
+  notIn(values: readonly string[]): ExprChain;
+  distinctFrom(x: unknown): ExprChain;
 }
 
 /** The `c.fn.*` scalar-function namespace (§3.6) — reached off the single
@@ -455,14 +564,22 @@ export interface FnNamespace {
   abs(e: unknown): ExprChain;
   coalesce(...args: unknown[]): ExprChain;
   nullif(a: unknown, b: unknown): ExprChain;
-  /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
-  currentSetting(name: string, missingOk?: boolean): ExprChain;
-  /** PG vendor scalar for RLS policies: current_user. */
-  currentUser(): ExprChain;
+  /** Integer/numeric modulo, `(a % b)` — portable (`%` on PG/SQLite/MySQL). */
+  mod(a: unknown, b: unknown): ExprChain;
+  /** `round(x)` / `round(x, n)` — portable rounding, optional precision. */
+  round(x: unknown, n?: unknown): ExprChain;
+  /** `floor(x)` — portable floor (PG/MySQL/SQLite≥3.35). */
+  floor(x: unknown): ExprChain;
+  /** `ceil(x)` — portable ceiling (PG/SQLite≥3.35/MySQL). */
+  ceil(x: unknown): ExprChain;
+  /** `substr(s, start[, len])` — portable substring, 1-based start. */
+  substr(s: unknown, start: unknown, len?: unknown): ExprChain;
+  /** `replace(s, from, to)` — portable string replace. */
+  replace(s: unknown, from: unknown, to: unknown): ExprChain;
+  /** Portable date/time part extraction. */
+  extract(field: ExtractField, expr: unknown): ExprChain;
   /** NULL-skipping safe-join (renders byte-identically on PG/SQLite). */
   concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
-  /** The searched `CASE` form. */
-  case(branches: [unknown, unknown][], elseVal?: unknown): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
   splitPart(col: unknown, delim: string, n: number): ExprChain;
   /** DB-evaluated apply-time scalars, equivalent to the supported bare native
@@ -471,30 +588,114 @@ export interface FnNamespace {
   genRandomUuid(): ExprChain;
 }
 
+/** The immutable-only scalar namespace for generated columns and index predicates.
+ *  Immutable members: lower/upper/trim/length/abs/coalesce/nullif/mod/round/
+ *  floor/ceil/substr/replace/concatWs/splitPart. Volatile now/genRandomUuid are
+ *  intentionally absent; PG-vendor helpers live on PgExprNamespace. */
+export type ImmutableFnNamespace = Pick<
+  FnNamespace,
+  | "lower"
+  | "upper"
+  | "trim"
+  | "length"
+  | "abs"
+  | "coalesce"
+  | "nullif"
+  | "mod"
+  | "round"
+  | "floor"
+  | "ceil"
+  | "substr"
+  | "replace"
+  | "extract"
+  | "concatWs"
+  | "splitPart"
+>;
+
+/** The deliberately narrow builder available in column default expressions.
+ *  Defaults cannot reference columns, aggregates, vendor PG helpers, or trigger
+ *  OLD/NEW state by construction. */
+export interface DefaultBuilder {
+  fn: FnNamespace;
+  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
+}
+
+/** A column default expression callback. */
+export type DefaultExprFn = (c: DefaultBuilder) => ExprChain | Expr;
+
+interface ImmutableExprBuilderBase {
+  (name: string): ExprChain;
+  (table: string, name: string): ExprChain;
+  fn: ImmutableFnNamespace;
+  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
+}
+
+/** Builder for index expressions and predicates. Column refs, immutable
+ *  `c.fn.*`, and `c.case(...)` are available; aggregates, `c.pg`, and trigger
+ *  OLD/NEW state are not. */
+export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
+
+/** Builder for generated column expressions. Structurally matches
+ *  `IndexExprBuilder` today but remains distinct so the slots can diverge. */
+export interface GeneratedColumnBuilder extends ImmutableExprBuilderBase {}
+
+/** Builder for portable table CHECK expressions. CHECKs must be immutable and
+ *  non-aggregate; PostgreSQL-vendor helpers live on `pgTable().check()`. */
+export interface CheckBuilder extends ImmutableExprBuilderBase {}
+
+export type IndexExprFn = (c: IndexExprBuilder) => ExprChain | Expr;
+export type GeneratedColumnExprFn = (c: GeneratedColumnBuilder) => ExprChain | Expr;
+export type CheckExprFn = (c: CheckBuilder) => ExprChain | Expr;
+
+/** The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count`/`sum`/`avg`/
+ *  `min`/`max` render identically on PG, SQLite, and MySQL (only identifier
+ *  quoting differs), so there is no dialect gate. `count()` (no arg) is
+ *  `COUNT(*)`; the optional `{ distinct: true }` inserts `DISTINCT`. Reachable
+ *  from a SELECT/HAVING context (the position check is a Phase-2 obligation). */
+export interface AggNamespace {
+  /** `count(*)` (no arg) or `count(<expr>)` / `count(DISTINCT <expr>)`. */
+  count(expr?: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `sum(<expr>)` / `sum(DISTINCT <expr>)`. */
+  sum(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `avg(<expr>)` / `avg(DISTINCT <expr>)`. */
+  avg(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `min(<expr>)` / `min(DISTINCT <expr>)`. */
+  min(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+  /** `max(<expr>)` / `max(DISTINCT <expr>)`. */
+  max(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
+}
+
 /** PostgreSQL-only expression nodes. These methods intentionally live under
  *  `c.pg.*` so the portable chain surface stays dialect-neutral; the Rust
  *  validator rejects these nodes on SQLite/MySQL. */
 export interface PgExprNamespace {
-  /** Renders `<expr> = ANY (ARRAY['...'::text, ...])` on PostgreSQL. */
-  eqAnyArray(expr: unknown, elems: readonly string[]): ExprChain;
-  /** Renders `<expr> <> ALL (ARRAY['...'::text, ...])` on PostgreSQL. */
-  neAllArray(expr: unknown, elems: readonly string[]): ExprChain;
   /** Renders `<expr> ~ '<pattern>'::text` on PostgreSQL. */
   regex(expr: unknown, pattern: string): ExprChain;
   /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
-  columnSize(expr: unknown): ExprChain;
-  /** Renders `EXTRACT(day FROM <expr>)` on PostgreSQL. */
-  extract(field: "day", expr: unknown): ExprChain;
-  /** Renders `'<safe>'::interval` on PostgreSQL. Accepts strict `HH:MM:SS[.ffffff]`. */
-  interval(value: string): ExprChain;
+  pgColumnSize(expr: unknown): ExprChain;
+  /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
+  currentSetting(name: string, missingOk?: boolean): ExprChain;
+  /** PG vendor scalar for RLS policies: current_user. */
+  currentUser(): ExprChain;
+  /** Renders portable fields as `extract` and PG-only fields as `pgExtract`. */
+  extract(field: ExtractField, expr: unknown): ExprChain;
+  extract(field: PgExtractField, expr: unknown): ExprChain;
+  /** Renders a structured PostgreSQL interval literal. */
+  interval(duration: Duration): ExprChain;
 }
 
 /** The single injected builder handle: a column-accessor function `c("name")`
- *  (or `c.col("name")`) carrying the `c.fn.*` namespace. */
+ *  carrying the `c.fn.*` namespace. A two-arg form
+ *  `c("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
 export interface ExprBuilder {
   (name: string): ExprChain;
-  col(name: string): ExprChain;
+  (table: string, name: string): ExprChain;
+  /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
   fn: FnNamespace;
+  agg: AggNamespace;
   pg: PgExprNamespace;
 }
 
@@ -505,8 +706,32 @@ export type ExprFn = (c: ExprBuilder) => ExprChain;
 /** A named table-level CHECK constraint authored inside `table().create({ checks })`. */
 export interface CheckDef {
   name: string;
-  expr: ExprFn;
+  expr: CheckExprFn;
 }
+
+/** PostgreSQL-vendor CHECK builder: immutable core plus PG immutable value nodes. */
+export interface CheckBuilderWithPg extends CheckBuilder {
+  pg: PgExprNamespace;
+}
+
+export type PgCheckExprFn = (c: CheckBuilderWithPg) => ExprChain | Expr;
+
+export interface PgCheckDef {
+  name: string;
+  expr: PgCheckExprFn;
+}
+
+/** Builder for PostgreSQL domain CHECK expressions. The handle itself is the
+ *  domain VALUE expression; there is no general column accessor because a domain
+ *  CHECK can only refer to the value being constrained. */
+export interface DomainValueBuilder extends ExprChain {
+  fn: ImmutableFnNamespace;
+  /** The searched `CASE` form: `v.case({ branches: [{ when, then }], else? })`. */
+  case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
+  pg: PgExprNamespace;
+}
+
+export type DomainCheckFn = (v: DomainValueBuilder) => ExprChain | Expr;
 
 // ── Shared op-arg fragments (§3) ──
 
@@ -515,6 +740,7 @@ export interface CheckDef {
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
 export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
+export type PgIndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5";
 
 export interface PartitionBoundSentinel {
   readonly __zeroshipPartitionBound: "minValue" | "maxValue";
@@ -522,33 +748,27 @@ export interface PartitionBoundSentinel {
 
 export type PartitionBoundInput = string | number | PartitionBoundSentinel;
 
-export interface PartitionBuilder {
-  range(columns: readonly string[]): PartitionSpec;
-  list(columns: readonly string[]): PartitionSpec;
-  hash(columns: readonly string[]): PartitionSpec;
-}
-
-export interface PartitionOptions {
-  schema?: string;
-}
+export type PartitionByInput =
+  | { range: readonly string[]; whenUnsupported?: "collapse" }
+  | { list: readonly string[]; whenUnsupported?: "collapse" }
+  | { hash: readonly string[]; whenUnsupported?: "collapse" };
 
 export interface CreatePartitionOptions {
   schema?: string;
   ifNotExists?: boolean;
 }
 
-export type PartitionForValuesArgs =
+export type PartitionBoundArgs =
   | { from: readonly PartitionBoundInput[]; to: readonly PartitionBoundInput[] }
   | { in: readonly PartitionBoundInput[] }
-  | { modulus: number; remainder: number };
+  | { modulus: number; remainder: number }
+  | { default: true };
 
-export interface PartitionOfHandle {
-  forValues(bounds: PartitionForValuesArgs, args?: CreatePartitionOptions): void;
-  asDefault(args?: CreatePartitionOptions): void;
-}
-
-export interface PartitionHandle {
-  of(parent: string): PartitionOfHandle;
+export interface PartitionRef {
+  create(bound: PartitionBoundArgs, args?: CreatePartitionOptions): TableHandle;
+  attach(bound: PartitionBoundArgs, args?: AttachPartitionArgs): PgTableHandle;
+  drop(args?: DropPartitionArgs): TableHandle;
+  detach(args?: DetachPartitionArgs): PgTableHandle;
 }
 
 export interface DropPartitionArgs {
@@ -560,6 +780,10 @@ export interface DropPartitionArgs {
 export interface DetachPartitionArgs {
   schema?: string;
   concurrently?: boolean;
+}
+
+export interface AttachPartitionArgs {
+  schema?: string;
 }
 
 export type IndexStorageParamsArg = IndexStorageParams;
@@ -589,7 +813,7 @@ export interface InsertArgs<R extends Row = Row> {
 }
 
 export interface UpdateArgs {
-  set: Record<string, ExprFn>;
+  set: Record<string, DmlSetValue>;
   where?: ExprFn;
   /** Page a large one-shot UPDATE over a cursor column (`Op::Update.batch`): the
    *  engine lowers it to the same windowed/batched executor a `backfill` uses
@@ -608,7 +832,7 @@ export interface DelArgs {
 }
 
 export interface BackfillArgs {
-  set: Record<string, ExprFn>;
+  set: Record<string, DmlSetValue>;
   where?: ExprFn;
   /** Defaults to the single-column PK (`"id"`). */
   cursorColumn?: string;
@@ -637,7 +861,7 @@ export interface TriggerInsertArgs<R extends Row = Row> {
 
 export interface TriggerUpdateArgs {
   table: string;
-  set: Record<string, ExprFn>;
+  set: Record<string, DmlSetValue>;
   where?: ExprFn;
   schema?: string;
 }
@@ -653,12 +877,11 @@ export interface TriggerBodyBuilder {
   raise(args: TriggerRaiseArgs): TriggerStmt;
   insert<R extends Row = Row>(args: TriggerInsertArgs<R>): TriggerStmt;
   update(args: TriggerUpdateArgs): TriggerStmt;
-  del(args: TriggerDeleteArgs): TriggerStmt;
+  delete(args: TriggerDeleteArgs): TriggerStmt;
   select(expr: ExprFn | ExprChain | Expr): TriggerStmt;
 }
 
-interface CreateTriggerBaseArgs {
-  name: string;
+interface TriggerCreateBaseArgs {
   timing: TriggerTiming;
   events: TriggerEvent[];
   forEach: ForEach;
@@ -666,18 +889,21 @@ interface CreateTriggerBaseArgs {
   schema?: string;
 }
 
-export type CreateTriggerArgs =
-  | (CreateTriggerBaseArgs & { execute: string; body?: never })
-  | (CreateTriggerBaseArgs & { body: (b: TriggerBodyBuilder) => TriggerStmt[]; execute?: never });
+export type TriggerCreateArgs =
+  | (TriggerCreateBaseArgs & { execute: string; body?: never })
+  | (TriggerCreateBaseArgs & { body: (b: TriggerBodyBuilder) => TriggerStmt[]; execute?: never });
 
-export interface DropTriggerArgs {
-  name: string;
+export interface TriggerDropArgs {
   ifExists?: boolean;
   schema?: string;
 }
 
-export interface CreateTablePolicyArgs {
-  name: string;
+export interface TriggerRef {
+  create(args: TriggerCreateArgs): TableHandle;
+  drop(args?: TriggerDropArgs): TableHandle;
+}
+
+export interface PolicyCreateArgs {
   for?: PolicyCmd;
   to?: string[];
   using: ExprFn | ExprChain | Expr;
@@ -685,10 +911,14 @@ export interface CreateTablePolicyArgs {
   schema?: string;
 }
 
-export interface DropTablePolicyArgs {
-  name: string;
+export interface PolicyDropArgs {
   ifExists?: boolean;
   schema?: string;
+}
+
+export interface PolicyRef {
+  create(args: PolicyCreateArgs): PgTableHandle;
+  drop(args?: PolicyDropArgs): PgTableHandle;
 }
 
 // ── `view()` entry + the closed SelectAst builder (§A1/§3.1) ──
@@ -696,7 +926,7 @@ export interface DropTablePolicyArgs {
 /** The options bag `view(name, opts?)` accepts. Carries the default
  *  `{ schema, columns }` every op the returned {@link ViewHandle} records is
  *  stamped with where applicable. Inline `create({ columns })` /
- *  `createRaw({ columns })` overrides the handle default. */
+ *  `create({ columns })` overrides the handle default. */
 export interface ViewOptions {
   schema?: string;
   columns?: string[];
@@ -718,15 +948,7 @@ export interface ViewQueryBuilder {
 }
 
 export interface CreateViewArgs {
-  as: ((q: ViewQueryBuilder) => ViewQueryBuilder | SelectAst) | ViewQueryBuilder | SelectAst;
-  columns?: string[];
-  replace?: boolean;
-  materialized?: boolean;
-  schema?: string;
-}
-
-export interface CreateRawViewArgs {
-  sql: string;
+  as: ((q: ViewQueryBuilder) => ViewQueryBuilder | SelectAst) | ViewQueryBuilder | SelectAst | { raw: string };
   columns?: string[];
   replace?: boolean;
   materialized?: boolean;
@@ -741,7 +963,6 @@ export interface DropViewArgs {
 
 export interface ViewHandle {
   create(args: CreateViewArgs): ViewHandle;
-  createRaw(args: CreateRawViewArgs): ViewHandle;
   drop(args?: DropViewArgs): ViewHandle;
   comment(text: string | null, args?: { schema?: string }): ViewHandle;
 }
@@ -763,18 +984,32 @@ export type ExclusionTarget = string | ExprFn | ExprChain | Expr;
 /** Column index element object form. Use `order: "desc"` to render `col DESC`;
  *  `order: "asc"` and omitted order serialize as the default ASC shape. */
 export interface IndexColumnElementArg {
-  kind: "column";
-  name: string;
+  column: string;
+  order?: IndexSortOrder;
+}
+
+export interface IndexExprElementArg {
+  expr: IndexExprFn;
   order?: IndexSortOrder;
 }
 
 export type IndexElementArg =
   | string
-  | ExprFn
-  | ExprChain
-  | Expr
   | IndexColumnElementArg
-  | { kind: "expr"; expr: ExprFn | ExprChain | Expr };
+  | IndexExprElementArg;
+
+export type PgIndexElement =
+  | string
+  | (IndexColumnElementArg & {
+    opclass?: string;
+    collation?: string;
+    nulls?: "first" | "last";
+  })
+  | (IndexExprElementArg & {
+    opclass?: string;
+    collation?: string;
+    nulls?: "first" | "last";
+  });
 
 export type CommentTargetArg =
   | { kind: "table"; name: string; schema?: string }
@@ -794,7 +1029,7 @@ export interface ExclusionElementArg {
 export interface ExclusionConstraintArgs {
   using?: ExclusionMethod;
   elements: ExclusionElementArg[];
-  where?: ExprFn | ExprChain | Expr;
+  where?: IndexExprFn | ExprChain | Expr;
   deferrable?: boolean;
   initiallyDeferred?: boolean;
 }
@@ -807,16 +1042,9 @@ export type ExclusionAddArgs = ExclusionConstraintArgs & {
 export type TableStrictness = "strict" | "lenient" | "off";
 
 export interface TableRuntimeOptions {
-  softDelete: boolean;
-  versioning: boolean;
-  strictness?: TableStrictness;
-}
-
-export interface SetTableOptionsArgs {
   softDelete?: boolean;
   versioning?: boolean;
   strictness?: TableStrictness;
-  schema?: string;
 }
 
 /** The all-object `create({...})` payload (§3.1). Table-level constraints/indexes
@@ -844,11 +1072,9 @@ export interface SetTableOptionsArgs {
 export interface CreateTableArgs {
   columns: Record<string, ColumnDef>;
   /** Collection runtime metadata, carried into `schema.runtime.json`.
-   *  `softDelete` mirrors `@zeroship/db` `.softDelete()`, `versioning` mirrors
-   *  `.withVersioning()`, and `strictness` mirrors `.strictness(...)`. */
-  softDelete?: boolean;
-  versioning?: boolean;
-  strictness?: TableStrictness;
+   *  `softDelete`, `versioning`, and `strictness` share the same named bag as
+   *  `table(name).setOptions(...)`. */
+  options?: TableRuntimeOptions;
   /** Table primary key intent: undefined leaves the policy default unresolved,
    *  null requests no PK, and a string array records an explicit/composite PK. */
   primaryKey?: string[] | null;
@@ -866,17 +1092,20 @@ export interface CreateTableArgs {
   exclusions?: Array<{ name: string } & ExclusionConstraintArgs>;
   indexes?: Array<{
     name: string;
-    columns: IndexElementArg[];
+    on: IndexElementArg[];
     unique?: boolean;
     using?: IndexMethod;
     /** Partial-index predicate. Renders on PostgreSQL and SQLite; MySQL refuses
      *  it fail-closed because MySQL has no partial indexes. */
-    where?: ExprFn;
+    where?: IndexExprFn;
     include?: readonly string[];
     with?: IndexStorageParamsArg;
     only?: boolean;
+    /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
+     *  validate on SQLite/MySQL. */
+    nullsNotDistinct?: boolean;
   }>;
-  partitionBy?: PartitionSpec;
+  partitionBy?: PartitionByInput;
   ifNotExists?: boolean;
   /** Overrides the handle default schema. */
   schema?: string;
@@ -896,7 +1125,7 @@ export interface ColumnRef {
   setType(args: { to: ColumnDef; using?: ExprFn; schema?: string }): TableHandle;
   setNotNull(args?: { schema?: string }): TableHandle;
   dropNotNull(args?: { schema?: string }): TableHandle;
-  setDefault(value: DefaultValue, args?: { schema?: string }): TableHandle;
+  setDefault(value: DefaultValue | DefaultExprFn, args?: { schema?: string }): TableHandle;
   dropDefault(args?: { schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
@@ -910,6 +1139,9 @@ export interface ForeignKeyRef {
     onUpdate?: RefAction;
     deferrable?: boolean;
     initiallyDeferred?: boolean;
+    /** PostgreSQL-only online constraint adoption — add `NOT VALID` (skip the
+     *  add-time scan), then `pgTable(...).constraint(name).validate()` later. */
+    notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   }): TableHandle;
@@ -922,39 +1154,81 @@ export interface UniqueRef {
 
 /** The `.check(name)` selector sub-handle (§3.3). */
 export interface CheckRef {
-  add(args: { expr: ExprFn; ifNotExists?: boolean; schema?: string }): TableHandle;
+  add(args: {
+    expr: CheckExprFn;
+    /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
+     *  `pgTable(...).constraint(name).validate()` later. */
+    notValid?: boolean;
+    ifNotExists?: boolean;
+    schema?: string;
+  }): TableHandle;
+}
+
+export interface PgCheckRef extends CheckRef {
+  add(args: {
+    expr: PgCheckExprFn;
+    /** PostgreSQL-only online constraint adoption — add `NOT VALID`, then
+     *  `pgTable(...).constraint(name).validate()` later. */
+    notValid?: boolean;
+    ifNotExists?: boolean;
+    schema?: string;
+  }): PgTableHandle;
 }
 
 /** The `.exclusion(name)` selector sub-handle (§3.3). PostgreSQL renders native
  *  `EXCLUDE`; SQLite/MySQL fail closed. */
 export interface ExclusionRef {
-  add(args: ExclusionAddArgs): TableHandle;
+  add(args: ExclusionAddArgs): PgTableHandle;
 }
 
-/** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic drop by
- *  name; its only terminal is `.drop`. */
+/** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic operations
+ *  on an existing named constraint. */
 export interface ConstraintRef {
   drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
 
+export interface PgConstraintRef extends ConstraintRef {
+  /** PostgreSQL-only — validate a previously `NOT VALID` FK/CHECK against existing
+   *  rows under a weaker lock (records a `validateConstraint` Op). */
+  validate(args?: { ifExists?: boolean; schema?: string }): PgTableHandle;
+}
+
 /** The `.index(name)` selector sub-handle (§3.4). */
+export interface IndexAddArgs {
+  on: IndexElementArg[];
+  unique?: boolean;
+  ifNotExists?: boolean;
+  schema?: string;
+}
+
+export interface PgIndexAdd extends IndexAddArgs {
+  on: PgIndexElement[];
+  using?: PgIndexMethod;
+  /** Partial-index predicate. PG-vendor: reachable through `pgTable().index()`. */
+  where?: IndexExprFn;
+  include?: readonly string[];
+  with?: IndexStorageParamsArg;
+  only?: boolean;
+  /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
+   *  validate on SQLite/MySQL. */
+  nullsNotDistinct?: boolean;
+}
+
+export interface IndexDropArgs {
+  ifExists?: boolean;
+  /** `unique` drives the destructive/approval gating at apply; absent/false is a
+   *  plain reversible index drop. */
+  unique?: boolean;
+  schema?: string;
+}
+
+export interface PgIndexDropArgs extends IndexDropArgs {
+  concurrently?: boolean;
+}
+
 export interface IndexRef {
-  using(method: IndexMethod): IndexRef;
-  include(columns: readonly string[]): IndexRef;
-  with(params: IndexStorageParamsArg): IndexRef;
-  only(enabled?: boolean): IndexRef;
-  add(args: {
-    columns: IndexElementArg[];
-    unique?: boolean;
-    using?: IndexMethod;
-    where?: ExprFn;
-    include?: readonly string[];
-    with?: IndexStorageParamsArg;
-    only?: boolean;
-    ifNotExists?: boolean;
-    schema?: string;
-  }): TableHandle;
+  add(args: IndexAddArgs): TableHandle;
   /**
    * Drop the index. `unique` is NOT in the spec's literal §3.4 arg list, but the
    * IR `Op::DropIndex.unique` field DRIVES the destructive/approval gating at apply
@@ -963,8 +1237,13 @@ export interface IndexRef {
    * apply-path safety signal (the brief's "apply path UNCHANGED"); absent/false ⇒
    * a plain, reversible drop.
    */
-  drop(args?: { ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string }): TableHandle;
+  drop(args?: IndexDropArgs): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
+}
+
+export interface PgIndexRef extends IndexRef {
+  add(args: PgIndexAdd): PgTableHandle;
+  drop(args?: PgIndexDropArgs): PgTableHandle;
 }
 
 /**
@@ -989,53 +1268,42 @@ export interface TableHandle {
    *  online column expand-contract; `ifExists` guards the source table). Records a
    *  `renameTable` Op; the engine emits the inverse rename as the down-migration. */
   rename(args: { to: string; ifExists?: boolean; schema?: string }): TableHandle;
-  setOptions(args: SetTableOptionsArgs): TableHandle;
-  softDelete(enabled?: boolean, args?: { schema?: string }): TableHandle;
-  withVersioning(enabled?: boolean, args?: { schema?: string }): TableHandle;
-  strictness(level: TableStrictness, args?: { schema?: string }): TableHandle;
+  setOptions(args: TableRuntimeOptions): TableHandle;
   comment(text: string | null, args?: { schema?: string }): TableHandle;
-  detachPartition(name: string, args?: DetachPartitionArgs): TableHandle;
+  partition(name: string): PartitionRef;
 
   // §3.2/§3.3/§3.4 — selectors for named sub-objects
   column(name: string): ColumnRef;
+  // §3.2 (P1: one grammar, one spelling) — the selector form is THE grammar for
+  // named constraints. The `addForeignKey`/`addCheck` verb twins are DELETED;
+  // `foreignKey(name).add(...)`/`check(name).add(...)` are the sole spelling
+  // (and the sole public writers of the `addConstraint` fk/check payload).
   foreignKey(name: string): ForeignKeyRef;
-  addForeignKey(
-    name: string,
-    args: {
-      columns: string[];
-      references: ForeignKeyReference;
-      onDelete?: RefAction;
-      onUpdate?: RefAction;
-      deferrable?: boolean;
-      initiallyDeferred?: boolean;
-      ifNotExists?: boolean;
-      schema?: string;
-    },
-  ): TableHandle;
   unique(name: string): UniqueRef;
   check(name: string): CheckRef;
-  addCheck(name: string, expr: ExprFn, args?: { ifNotExists?: boolean; schema?: string }): TableHandle;
-  exclusion(name: string): ExclusionRef;
   constraint(name: string): ConstraintRef;
   index(name: string): IndexRef;
 
   // §3.5 — table data (direct named DML; no existence guard — DML is unguardable)
   insert<R extends Row = Row>(args: InsertArgs<R>): TableHandle;
   update(args: UpdateArgs): TableHandle;
-  del(args: DelArgs): TableHandle;
+  delete(args: DelArgs): TableHandle;
   backfill(args: BackfillArgs): TableHandle;
 
-  // `@zeroship/migrate/pg` — table-scoped privileged primitives.
-  enableRowLevelSecurity(): TableHandle;
-  forceRowLevelSecurity(): TableHandle;
-  disableRowLevelSecurity(): TableHandle;
-  noForceRowLevelSecurity(): TableHandle;
-  createPolicy(args: CreateTablePolicyArgs): TableHandle;
-  dropPolicy(args: DropTablePolicyArgs): TableHandle;
-
   // §A2 — cross-dialect core triggers.
-  createTrigger(args: CreateTriggerArgs): TableHandle;
-  dropTrigger(args: DropTriggerArgs): TableHandle;
+  trigger(name: string): TriggerRef;
+}
+
+/** The widened table handle returned by `@zeroship/migrate/pg`'s `pgTable()`.
+ *  It is the same runtime object as `table()`, with table-scoped PG vendor
+ *  methods made reachable only from the `/pg` type surface. */
+export interface PgTableHandle extends TableHandle {
+  check(name: string): PgCheckRef;
+  constraint(name: string): PgConstraintRef;
+  index(name: string): PgIndexRef;
+  exclusion(name: string): ExclusionRef;
+  setRls(args: { enabled?: boolean; forced?: boolean }): PgTableHandle;
+  policy(name: string): PolicyRef;
 }
 
 /** One determinism-lint finding. */

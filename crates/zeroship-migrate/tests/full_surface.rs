@@ -94,11 +94,11 @@ fn concatws_records_fnsynth_node() {
 /// FK op regardless of field order — the named-field (not transposable-positional)
 /// guarantee (§3.2 shaping convention 2).
 #[test]
-fn addforeignkey_field_order_independent() {
+fn foreignkey_add_field_order_independent() {
     let src_a = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("orders").addForeignKey("orders_customer_fk", {
+            table("orders").foreignKey("orders_customer_fk").add({
                 columns: ["customer_id"],
                 references: { table: "customers", columns: ["id"] },
             });
@@ -129,11 +129,11 @@ fn addforeignkey_field_order_independent() {
 }
 
 #[test]
-fn addforeignkey_records_composite_non_id_fk() {
+fn foreignkey_add_records_composite_non_id_fk() {
     let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("billing_line_provider_refs", { schema: "zeroship" }).addForeignKey("billing_line_provider_refs_line_fk", {
+            table("billing_line_provider_refs", { schema: "zeroship" }).foreignKey("billing_line_provider_refs_line_fk").add({
                 columns: ["invoice_id", "app_id", "segment_no"],
                 references: {
                     schema: "zeroship",
@@ -294,7 +294,7 @@ fn math_random_symbol_records_as_fnsynth_gen_random_uuid() {
 }
 
 #[test]
-fn default_date_now_symbol_equals_default_fn_now() {
+fn removed_function_default_forms_fail_closed() {
     let symbol = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
@@ -307,7 +307,10 @@ fn default_date_now_symbol_equals_default_fn_now() {
             table("t").create({ columns: { at: t.timestamp().default({ fn: "now" }) } });
         }};
     "#;
-    assert_eq!(ops(&record(symbol, "default_date_now_symbol"))[0], ops(&record(explicit, "default_fn_now"))[0]);
+    let symbol_err = record_err(symbol, "default_date_now_symbol");
+    assert!(symbol_err.contains("bare native-symbol default forms are removed"), "{symbol_err}");
+    let explicit_err = record_err(explicit, "default_fn_now");
+    assert!(explicit_err.contains("old `{ fn: ... }"), "{explicit_err}");
 }
 
 #[test]
@@ -332,13 +335,16 @@ fn non_native_function_value_fails_closed_in_v8_recorder() {
     let default = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").create({ columns: { v: t.integer().default(() => 1) } });
+            table("t").create({ columns: { v: t.int().default(() => 1) } });
         }};
     "#;
-    let err = record_err(default, "bad_fn_default");
-    assert!(
-        err.contains("function values are not valid here"),
-        "non-native function default must fail closed, got: {err}"
+    let ir = record(default, "literal_expr_default");
+    let cols = ops(&ir)[0].get("columns").and_then(|c| c.as_array()).unwrap();
+    let v = column_named(cols, "v");
+    assert_eq!(
+        v.get("default"),
+        Some(&json!({ "expr": { "node": "literal", "value": 1 } })),
+        "default callbacks record expression defaults"
     );
 }
 
@@ -583,26 +589,26 @@ fn fluent_expr_builder_constructs_closed_ast() {
     assert_eq!(w.get("rhs").unwrap().get("op").unwrap(), "le");
 }
 
-/// A spec-blessed `bigint` / `Uint8Array` author value passed through the FLUENT
+/// A spec-blessed `decimal()` / `Uint8Array` author value passed through the FLUENT
 /// insert + column default records the closed `IrScalar` WIRE carriers
 /// (`{decimal}` / `{bytes:base64}`), so the RECORD path produces a shape Rust
 /// accepts value-equal — the previously promised-but-broken §3.2/§2.3.2 path. A
-/// pre-fix recorder either THROWS on the bigint (JSON.stringify) or emits the
-/// `{"0":…}` array-index spelling Rust HARD-REJECTS, so `record` would fail.
+/// pre-fix recorder either cannot expose the decimal value constructor or emits
+/// the `{"0":…}` array-index spelling Rust HARD-REJECTS, so `record` would fail.
 #[test]
-fn fluent_insert_normalizes_bigint_and_bytes_scalars() {
+fn fluent_insert_normalizes_decimal_and_bytes_scalars() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, decimal } from "@zeroship/migrate";
         export default { name: "n", up() {
             const tbl = table("t");
             tbl.create({
                 columns: {
                     id: t.id(),
-                    seq: t.numeric(38, 0).notNull().default(9007199254740993n),
+                    seq: t.numeric({ precision: 38, scale: 0 }).notNull().default(decimal("9007199254740993")),
                     salt: t.bytes().default(new Uint8Array([1, 2, 3, 255])),
                 },
             });
-            tbl.insert({ rows: [ { seq: 9007199254740993n, salt: new Uint8Array([0, 255]) } ] });
+            tbl.insert({ rows: [ { seq: decimal("9007199254740993"), salt: new Uint8Array([0, 255]) } ] });
         }};
     "#;
     // Recording succeeds (the typed `MigrationIr` deserialize is the gate) — the
@@ -802,8 +808,10 @@ fn record_path_allows_date_now_inside_comment_or_string() {
 // ───────────────────────────────────────────────────────────────────────────
 // PR10 review F1 (HIGH) — twin-fidelity round-trip.
 //
-// The engine-embedded V8 recorder (`migrate_ops.js`) is the byte-for-byte twin
-// of `sdks/migrate/src/ops.ts`. Before this fix the twin DROPPED the `schema`
+// The engine-embedded V8 recorder is the compiled artifact
+// (`sdks/migrate/dist/embedded-recorder.js`) built from `sdks/migrate/src/ops.ts`
+// (S0.5 collapsed the former hand-kept `migrate_ops.js` twin). Before this fix the
+// recorder DROPPED the `schema`
 // qualifier and `existenceGuard` token on 10 op variants at RECORD time — a
 // silently-dropped `ifNotExists` turned a guarded create into a bare
 // unconditional create (fail-OPEN over a divergent object), and a dropped schema
@@ -847,7 +855,7 @@ fn twin_create_table_carries_schema_and_guard() {
     let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").create({ columns: { qty: t.integer() }, schema: "app2", ifNotExists: true });
+            table("t").create({ columns: { qty: t.int() }, schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "create_schema_guard");
@@ -967,7 +975,7 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
 fn sequences_and_exclusion_constraints_record_canonical_ir() {
     let src = r#"
         import { table, t } from "@zeroship/migrate";
-        import { sequence } from "@zeroship/migrate/pg";
+        import { pgTable, sequence } from "@zeroship/migrate/pg";
         export default { name: "n", up() {
             sequence("invoice_seq").create({
                 as: t.bigInt(),
@@ -989,7 +997,7 @@ fn sequences_and_exclusion_constraints_record_canonical_ir() {
                 schema: "app2",
             });
             sequence("invoice_seq").drop({ schema: "app2", ifExists: true });
-            table("bookings", { schema: "app2" }).exclusion("bookings_no_overlap").add({
+            pgTable("bookings", { schema: "app2" }).exclusion("bookings_no_overlap").add({
                 using: "gist",
                 elements: [
                     { target: "room", operator: "=" },
@@ -1068,7 +1076,7 @@ fn twin_add_column_carries_schema_and_guard() {
     let src = r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").column("c").add({ type: t.integer(), schema: "app2", ifNotExists: true });
+            table("t").column("c").add({ type: t.int(), schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "add_column_schema_guard");
@@ -1152,7 +1160,7 @@ fn twin_create_index_carries_schema_and_guard() {
     let src = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").index("idx_t_a").add({ columns: ["a"], schema: "app2", ifNotExists: true });
+            table("t").index("idx_t_a").add({ on: ["a"], schema: "app2", ifNotExists: true });
         }};
     "#;
     let ir = record(src, "create_index_schema_guard");
@@ -1201,7 +1209,7 @@ fn twin_dml_ops_carry_schema() {
     let del = r#"
         import { table } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").del({ where: (c) => c("a").gt(0), schema: "app2" });
+            table("t").delete({ where: (c) => c("a").gt(0), schema: "app2" });
         }};
     "#;
     assert_schema(&op_named(&record(del, "delete_schema"), "delete"), "app2");
@@ -1239,11 +1247,11 @@ fn twin_table_surface_records_full_expected_op_sequence() {
             u.unique("u_email_uq").add({ columns: ["email"] });
             u.check("u_status_chk").add({ expr: (c) => c("status").isNotNull() });
             u.constraint("u_legacy_chk").drop({ ifExists: true });
-            u.index("u_email_idx").add({ columns: ["email"], unique: true });
+            u.index("u_email_idx").add({ on: ["email"], unique: true });
             u.index("u_old_idx").drop({ ifExists: true });
             u.insert({ rows: [{ email: "a@b.c", status: "new" }] });
             u.update({ set: { status: (c) => c.fn.lower(c("status")) }, where: (c) => c("id").isNotNull() });
-            u.del({ where: (c) => c("status").isNull(), limit: 10 });
+            u.delete({ where: (c) => c("status").isNull(), limit: 10 });
             u.backfill({ set: { status: (c) => c.fn.coalesce(c("status"), "new") }, cursorColumn: "id", batchSize: 500, name: "bf_status" });
         }};
     "#;
@@ -1295,7 +1303,7 @@ fn twin_table_create_with_table_level_specs_carries_schema_and_guard() {
                     team: t.text().notNull(),
                 },
                 uniques: [{ name: "m_team_uq", columns: ["team"] }],
-                indexes: [{ name: "m_account_idx", columns: ["account_id"] }],
+                indexes: [{ name: "m_account_idx", on: ["account_id"] }],
                 ifNotExists: true,
             });
         }};
@@ -1318,9 +1326,9 @@ fn twin_table_per_method_schema_overrides_default() {
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
             const u = table("users", { schema: "app2" });
-            u.column("a").add({ type: t.integer() });                       // table default
-            u.column("b").add({ type: t.integer(), ifNotExists: true });     // guard-only → keeps default
-            u.column("c").add({ type: t.integer(), schema: "other" });       // override
+            u.column("a").add({ type: t.int() });                       // table default
+            u.column("b").add({ type: t.int(), ifNotExists: true });     // guard-only → keeps default
+            u.column("c").add({ type: t.int(), schema: "other" });       // override
         }};
     "#;
     let ir = record(src, "override");
@@ -1365,7 +1373,7 @@ fn add_column_with_id_prefix_is_refused_not_dropped() {
     );
 }
 
-/// **#173** — `t.vector(n, { metric })` on an `addColumn` is now CARRIED on the op
+/// **#173** — `t.vector({ dimensions, metric })` on an `addColumn` is now CARRIED on the op
 /// tail (`Op::AddColumn` gained a `vectorMetric` slot), not refused/dropped — a vector
 /// ADD COLUMN renders the metric opclass. RED pre-#173: `__toAddColumnTail` THREW a
 /// create-only `OP_INVALID` on `_vectorMetric` (the P2a fail-closed this lift removes).
@@ -1375,7 +1383,7 @@ fn add_column_with_vector_metric_is_carried_not_refused() {
         r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("docs").column("emb").add({ type: t.vector(8, { metric: "cosine" }) });
+            table("docs").column("emb").add({ type: t.vector({ dimensions: 8, metric: "cosine" }) });
         }};
     "#,
         "addcol_metric",
@@ -1385,7 +1393,7 @@ fn add_column_with_vector_metric_is_carried_not_refused() {
     assert_eq!(
         add.get("vectorMetric").and_then(|v| v.as_str()),
         Some("cosine"),
-        "an addColumn t.vector(n, {{ metric }}) must CARRY the metric on the op tail \
+        "an addColumn t.vector({{ dimensions, metric }}) must CARRY the metric on the op tail \
          (the #173 lift of the P2a fail-closed), got: {add:#}"
     );
 }
@@ -1423,11 +1431,11 @@ fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() 
                 id: t.bigInt().identity({ always: true }).primaryKey(),
                 qty: t.int(),
                 unit_cents: t.int(),
-                total_cents: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents"))),
-                virtual_total: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents")), { virtual: true }),
+                total_cents: t.int().generated((c) => c("qty").mul(c("unit_cents"))),
+                virtual_total: t.int().generated((c) => c("qty").mul(c("unit_cents")), { virtual: true }),
             }});
             table("line_items").column("added_total").add({
-                type: t.int().generated((c) => c.col("qty").mul(c.col("unit_cents"))),
+                type: t.int().generated((c) => c("qty").mul(c("unit_cents"))),
             });
             table("line_items").column("seq").add({ type: t.bigInt().identity() });
         }};
@@ -1492,7 +1500,7 @@ fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() 
     );
 }
 
-/// A `t.vector(n)` (no metric) on an addColumn is STILL allowed — only the declared
+/// A `t.vector({ dimensions })` (no metric) on an addColumn is STILL allowed — only the declared
 /// metric facet is create-only. Pins that the HIGH-2 reject is scoped to the facet,
 /// not the vector column type.
 #[test]
@@ -1501,7 +1509,7 @@ fn add_column_plain_vector_is_allowed() {
         r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("docs").column("emb").add({ type: t.vector(8) });
+            table("docs").column("emb").add({ type: t.vector({ dimensions: 8 }) });
         }};
     "#,
         "addcol_plain_vector",
@@ -1521,7 +1529,7 @@ fn vector_metric_out_of_set_is_rejected_client_side() {
         r#"
         import { table, t } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("docs").create({ columns: { emb: t.vector(8, { metric: "euclidean" }) } });
+            table("docs").create({ columns: { emb: t.vector({ dimensions: 8, metric: "euclidean" }) } });
         }};
     "#,
         "bad_metric",
@@ -1532,7 +1540,7 @@ fn vector_metric_out_of_set_is_rejected_client_side() {
     // is what makes this RED pre-fix (the serde error ALSO names the variants, so a
     // token-only assertion would falsely pass; we pin the client-side wording).
     assert!(
-        err.contains("t.vector(n, { metric })") && err.contains("must be one of"),
+        err.contains("t.vector({ dimensions, metric })") && err.contains("must be one of"),
         "an out-of-set vector metric must be rejected CLIENT-SIDE with a friendly \
          OP_INVALID naming the closed set, got: {err}"
     );
@@ -1549,7 +1557,7 @@ fn twin_table_no_schema_omits_key() {
     let ir = record(
         r#"
         import { table, t } from "@zeroship/migrate";
-        export default { name: "n", up() { table("users").column("a").add({ type: t.integer() }); }};
+        export default { name: "n", up() { table("users").column("a").add({ type: t.int() }); }};
     "#,
         "facade_noschema",
     );

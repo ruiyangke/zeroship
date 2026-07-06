@@ -7,8 +7,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{
-    ColType, IndexElement, IndexSortOrder, IrColumn, IrDefault, Op, SynthDefaultFn,
+    ColType, IndexElement, IndexSortOrder, IrColumn, IrDefault, Op,
     CURRENT_IR_VERSION, SYSTEM_FIELD_NAMES, TableRuntimeOptions, TableStrictness,
 };
 use crate::model::profile::PolicyProfile;
@@ -153,8 +154,8 @@ export function up() {{
   // synth scalar so the value is computed at apply time — deterministic by
   // construction, NEVER a host clock / RNG (those bake a frozen value into the
   // transient recording and may diverge across replays). Uncomment to use:
-  //   table("{name}").column("token").add({{ type: t.uuid().notNull().default({{ fn: "genRandomUuid" }}) }});
-  //   table("{name}").column("expires_at").add({{ type: t.timestamp().notNull().default({{ fn: "now" }}) }});
+  //   table("{name}").column("token").add({{ type: t.uuid().notNull().default((c) => c.fn.genRandomUuid()) }});
+  //   table("{name}").column("expires_at").add({{ type: t.timestamp().notNull().default((c) => c.fn.now()) }});
 }}
 
 export function down() {{
@@ -182,13 +183,13 @@ fn col_type_for_data_type(
         "smallint" | "int2" => ColType::SmallInt,
         "integer" | "int4" | "int" => ColType::Int,
         "bigint" | "int8" => ColType::BigInt,
-        "double precision" | "float8" => ColType::Float,
+        "double precision" | "float8" => ColType::Double,
         "real" | "float4" => ColType::Real,
-        "boolean" | "bool" => ColType::Bool,
+        "boolean" | "bool" => ColType::Boolean,
         "jsonb" | "json" => ColType::Json,
         "timestamp with time zone" | "timestamptz" | "timestamp" => ColType::Timestamp,
         "uuid" => ColType::Uuid,
-        "bytea" => ColType::Bytea,
+        "bytea" => ColType::Bytes,
         "numeric" => ColType::Decimal {
             precision: 38,
             scale: 9,
@@ -256,15 +257,27 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
         idx.columns
             .iter()
             .cloned()
-            .map(|name| IndexElement::Column { name, order: None })
+            .map(|name| IndexElement::Column {
+                name,
+                order: None,
+                opclass: None,
+                collation: None,
+            })
             .collect()
     } else {
         idx.elements
             .iter()
             .map(|element| match element {
-                IndexElementSnapshot::Column { name, order } => Ok(IndexElement::Column {
+                IndexElementSnapshot::Column {
+                    name,
+                    order,
+                    opclass,
+                    collation,
+                } => Ok(IndexElement::Column {
                     name: name.clone(),
                     order: *order,
+                    opclass: opclass.clone(),
+                    collation: collation.clone(),
                 }),
                 IndexElementSnapshot::Expr(_) => Err(ScaffoldError::UnsupportedIndex {
                     table: table.to_string(),
@@ -284,6 +297,7 @@ fn synth_index_op(table: &str, idx: &IndexSnapshot) -> Result<Op, ScaffoldError>
         include: Vec::new(),
         with: None,
         only: None,
+        nulls_not_distinct: if idx.nulls_not_distinct { Some(true) } else { None },
         concurrently: None,
         schema: None,
         existence_guard: None,
@@ -662,18 +676,19 @@ fn render_op_call(op: &Op) -> String {
                     IndexElement::Column {
                         name,
                         order: Some(IndexSortOrder::Desc),
+                        ..
                     } => format!(
-                        "{{ kind: \"column\", name: {}, order: \"desc\" }}",
+                        "{{ column: {}, order: \"desc\" }}",
                         js_str(name)
                     ),
                     IndexElement::Column { name, .. } => js_str(name),
                     IndexElement::Expr { expr } => format!(
-                        "{{ kind: \"expr\", expr: {} }}",
+                        "{{ expr: {} }}",
                         serde_json::to_string(expr).expect("Expr serializes")
                     ),
                 })
                 .collect();
-            // The index NAME is the selector argument (name-first); `columns`/`unique`
+            // The index NAME is the selector argument (name-first); `on`/`unique`
             // ride the args object. The synth path always names the index.
             let idx_name = name
                 .clone()
@@ -688,7 +703,7 @@ fn render_op_call(op: &Op) -> String {
                         .join("_");
                     format!("{table}_{parts}_idx")
                 });
-            let mut args = format!("columns: [{}]", cols.join(", "));
+            let mut args = format!("on: [{}]", cols.join(", "));
             if *unique == Some(true) {
                 args.push_str(", unique: true");
             }
@@ -707,18 +722,16 @@ fn render_op_call(op: &Op) -> String {
 }
 
 fn render_create_runtime_options(options: &TableRuntimeOptions) -> Vec<String> {
-    vec![
-        format!("    softDelete: {}", options.soft_delete),
-        format!("    versioning: {}", options.versioning),
-        format!(
-            "    strictness: {}",
-            js_str(match options.strictness {
-                TableStrictness::Strict => "strict",
-                TableStrictness::Lenient => "lenient",
-                TableStrictness::Off => "off",
-            })
-        ),
-    ]
+    vec![format!(
+        "    options: {{ softDelete: {}, versioning: {}, strictness: {} }}",
+        options.soft_delete,
+        options.versioning,
+        js_str(match options.strictness {
+            TableStrictness::Strict => "strict",
+            TableStrictness::Lenient => "lenient",
+            TableStrictness::Off => "off",
+        })
+    )]
 }
 
 /// Render a column as a `t.*` chain inside a `create({ columns })` map.
@@ -754,34 +767,41 @@ fn render_t_for(ty: &ColType) -> String {
         ColType::TextArray => "t.textArray()".into(),
         ColType::Inet => "t.inet()".into(),
         ColType::SmallInt => "t.smallInt()".into(),
-        ColType::Int => "t.integer()".into(),
+        ColType::Int => "t.int()".into(),
         ColType::BigInt => "t.bigInt()".into(),
-        ColType::Float => "t.float()".into(),
+        ColType::Double => "t.double()".into(),
         ColType::Real => "t.real()".into(),
-        ColType::Bool => "t.boolean()".into(),
+        ColType::Boolean => "t.boolean()".into(),
         ColType::Json => "t.json()".into(),
         ColType::Timestamp => "t.timestamp()".into(),
         ColType::Date => "t.date()".into(),
         ColType::Uuid => "t.uuid()".into(),
-        ColType::Bytea => "t.bytes()".into(),
-        ColType::Decimal { precision, scale } => format!("t.numeric({precision}, {scale})"),
-        ColType::Enum { name } => format!("t.enum({})", js_str(name)),
-        ColType::Domain { name } => format!("t.domain({})", js_str(name)),
+        ColType::Bytes => "t.bytes()".into(),
+        ColType::Decimal { precision, scale } => {
+            format!("t.numeric({{ precision: {precision}, scale: {scale} }})")
+        }
+        ColType::Enum { name, .. } => format!("t.enum({})", js_str(name)),
+        ColType::Domain { name, .. } => format!("t.domain({})", js_str(name)),
         // Goodies are not generated (rejected earlier); render a hand-author note.
         _ => "t.text() /* TODO: hand-author this column type */".into(),
     }
 }
 
-/// Render an `IrDefault` as a `.default(...)` chain call. A synth fn renders to the
-/// DB-evaluated `{ fn: "now" | "genRandomUuid" }` (deterministic by construction).
+/// Render an `IrDefault` as a `.default(...)` chain call. Synth expressions render
+/// to DB-evaluated default lambdas (deterministic by construction).
 fn render_default(d: &IrDefault) -> String {
     match d {
-        IrDefault::Fn { r#fn } => {
-            let token = match r#fn {
-                SynthDefaultFn::Now => "now",
-                SynthDefaultFn::GenRandomUuid => "genRandomUuid",
-            };
-            format!(".default({{ fn: {} }})", js_str(token))
+        IrDefault::Expr { expr } => match expr {
+            Expr::FnSynth { r#fn: SynthFn::Now, args } if args.is_empty() => {
+                ".default((c) => c.fn.now())".to_string()
+            }
+            Expr::FnSynth { r#fn: SynthFn::GenRandomUuid, args } if args.is_empty() => {
+                ".default((c) => c.fn.genRandomUuid())".to_string()
+            }
+            _ => {
+                let v = serde_json::to_string(expr).unwrap_or_else(|_| r#"{"node":"literal","value":null}"#.into());
+                format!(".default(() => {v} as any)")
+            }
         }
         IrDefault::Literal { value } => {
             // A typed literal default — render via serde_json (a string/number/bool).
@@ -843,9 +863,9 @@ mod tests {
     fn scaffold_is_deterministic_by_construction() {
         let ts = scaffold_new_ts("add_widgets").unwrap();
         // The recommended synth-default pattern is documented in the scaffold.
-        assert!(ts.contains("c.fn.now()") || ts.contains(r#"{ fn: "now" }"#));
+        assert!(ts.contains("c.fn.now()"));
         assert!(
-            ts.contains("c.fn.genRandomUuid()") || ts.contains(r#"{ fn: "genRandomUuid" }"#)
+            ts.contains("c.fn.genRandomUuid()")
         );
         // Tighten the guarantee (LOW-fix): scan ONLY the EXECUTABLE op body (line
         // comments stripped) for host clock / RNG accessors — so the test genuinely

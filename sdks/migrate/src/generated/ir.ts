@@ -18,6 +18,7 @@
 // + the `Checksum::of_ir` round-trip are the contract source of truth (§4.3/PR3).
 
 import type {
+  AggFunc,
   BinaryOp,
   CastTarget,
   CmpOp,
@@ -37,12 +38,11 @@ import type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
-  PgArrayMembershipOp,
+  PgExtractField,
   Privilege,
   RaiseLevel,
   RefAction,
   ScalarFn,
-  SynthDefaultFn,
   SynthFn,
   TableStrictness,
   TriggerEvent,
@@ -51,6 +51,7 @@ import type {
 } from "./enums.js";
 
 export type {
+  AggFunc,
   BinaryOp,
   CastTarget,
   CmpOp,
@@ -70,12 +71,11 @@ export type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
-  PgArrayMembershipOp,
+  PgExtractField,
   Privilege,
   RaiseLevel,
   RefAction,
   ScalarFn,
-  SynthDefaultFn,
   SynthFn,
   TableStrictness,
   TriggerEvent,
@@ -107,23 +107,23 @@ export type ColType =
   | "int"
   | "smallInt"
   | "bigInt"
-  | "float"
+  | "double"
   | "real"
-  | "bool"
+  | "boolean"
   | "json"
   | "timestamp"
   | "date"
   | "uuid"
   | "inet"
   | "textArray"
-  | "bytea"
+  | "bytes"
   | "geoPoint"
-  | { char: { len: number } }
+  | { char: { length: number } }
   | { ref: { references: string } }
   | { vector: { vector: number } }
   | { decimal: { precision: number; scale: number } }
-  | { enum: { name: string } }
-  | { domain: { name: string } }
+  | { enum: { name: string; schema?: string } }
+  | { domain: { name: string; schema?: string } }
   | { encrypted: { of: ColType } };
 
 /** The CLOSED pgvector distance-metric lexicon (P2a §4) — drives the ivfflat/hnsw
@@ -172,20 +172,19 @@ export type IrJsonValue =
   | IrJsonValue[]
   | { [key: string]: IrJsonValue };
 
-/** A column DEFAULT — a typed scalar literal, a nullary synth scalar
- *  (`now`/`genRandomUuid`), an empty container default, a non-empty JSON value
- *  default, or a PostgreSQL sequence `nextval` reference. Never raw SQL
- *  (property A). */
+/** A column DEFAULT — a typed scalar literal, a closed expression AST, an empty
+ *  container default, a non-empty JSON value default, or a PostgreSQL sequence
+ *  `nextval` reference. Never raw SQL (property A). */
 export type IrDefault =
   | { literal: { value: IrScalar } }
-  | { fn: { fn: SynthDefaultFn } }
+  | { expr: Expr }
   | { container: EmptyContainerKind }
   | { json: IrJsonValue }
   | { nextval: SequenceRef };
 
 /** The CLOSED expression AST node (§3.3.1), internally tagged on `node`. */
 export type Expr =
-  | { node: "colRef"; name: string }
+  | { node: "colRef"; name: string; table?: string | null }
   | { node: "literal"; value: IrScalar }
   | { node: "binOp"; op: BinaryOp; lhs: Expr; rhs: Expr }
   | { node: "unaryOp"; op: UnaryOp; operand: Expr }
@@ -193,20 +192,38 @@ export type Expr =
   | { node: "fnCall"; fn: ScalarFn; args: Expr[] }
   | { node: "fnSynth"; fn: SynthFn; args: Expr[] }
   | { node: "cast"; operand: Expr; target: CastTarget }
-  | { node: "pgArrayMembership"; expr: Expr; op: PgArrayMembershipOp; elems: string[] }
+  | { node: "between"; operand: Expr; low: Expr; high: Expr }
+  | { node: "like"; operand: Expr; pattern: Expr }
+  | { node: "distinctFrom"; left: Expr; right: Expr }
+  | { node: "agg"; func: AggFunc; arg?: Expr | null; distinct?: boolean }
+  | { node: "inList"; expr: Expr; elems: string[]; negated: boolean }
   | { node: "pgRegexMatch"; expr: Expr; pattern: string }
   | { node: "pgColumnSize"; expr: Expr }
-  | { node: "extract"; field: ExtractField; expr: Expr }
-  | { node: "pgIntervalLiteral"; value: string };
+  | { node: "extract"; field: ExtractField; from: Expr }
+  | { node: "pgExtract"; field: PgExtractField; from: Expr }
+  | { node: "pgInterval"; duration: Duration }
+  // The one Layer-2 portability escape (§3.4): a per-dialect value divergence.
+  // Legs serialize in canonical order (default, pg, sqlite, mysql); a `None` leg
+  // is skipped on the wire. Scope math is validated per-target by the engine.
+  | { node: "dialect"; default?: Expr | null; pg?: Expr | null; sqlite?: Expr | null; mysql?: Expr | null };
 
 /** A DML cell in an insert row or `onConflict.doUpdate`: either a typed scalar
  *  literal or a closed expression AST such as `fnSynth(now)`. */
 export type IrValue = IrScalar | Expr;
 
-/** One `(condition, result)` branch of an `Expr` `case`. */
+/** One `(when, then)` branch of an `Expr` `case`. */
 export interface CaseBranch {
-  condition: Expr;
-  result: Expr;
+  when: Expr;
+  then: Expr;
+}
+
+export interface Duration {
+  years?: number;
+  months?: number;
+  days?: number;
+  hours?: number;
+  minutes?: number;
+  seconds?: number;
 }
 
 /** A generated/computed column facet. `expr` is the closed expression AST; `stored`
@@ -248,10 +265,9 @@ export interface IrColumn {
 
 /** The kind of a table constraint (closed, internally tagged on `kind`). */
 export type IrConstraintKind =
-  | { kind: "pk"; columns: string[] }
-  | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[]; onDelete?: RefAction | null; onUpdate?: RefAction | null }
+  | { kind: "fk"; columns: string[]; referencesTable: string; referencesColumns: string[]; onDelete?: RefAction | null; onUpdate?: RefAction | null; notValid?: boolean | null }
   | { kind: "unique"; columns: string[] }
-  | { kind: "check"; expr: Expr }
+  | { kind: "check"; expr: Expr; notValid?: boolean | null }
   | {
       kind: "exclusion";
       usingMethod?: ExclusionMethod;
@@ -266,9 +282,16 @@ export type ColumnOrExpr =
   | { kind: "column"; name: string }
   | { kind: "expr"; expr: Expr };
 
-/** Index target: a column name or a closed expression AST. */
+/** Index target: a column name or a closed expression AST. The `opclass` and
+ *  `collation` per-column facets are PG-vendor (fail-closed off PostgreSQL). */
 export type IndexElement =
-  | { kind: "column"; name: string; order?: IndexSortOrder | null }
+  | {
+      kind: "column";
+      name: string;
+      order?: IndexSortOrder | null;
+      opclass?: string | null;
+      collation?: string | null;
+    }
   | { kind: "expr"; expr: Expr };
 
 /** One `(target WITH operator)` element in an exclusion constraint. */
@@ -316,13 +339,15 @@ export interface IrIndex {
   include?: string[];
   with?: IndexStorageParams | null;
   only?: boolean | null;
+  /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor. */
+  nullsNotDistinct?: boolean | null;
 }
 
 /** Partitioning strategy for a partitioned table parent. */
 export type PartitionSpec =
-  | { kind: "range"; columns: string[] }
-  | { kind: "list"; columns: string[] }
-  | { kind: "hash"; columns: string[] };
+  | { kind: "range"; columns: string[]; collapse?: boolean }
+  | { kind: "list"; columns: string[]; collapse?: boolean }
+  | { kind: "hash"; columns: string[]; collapse?: boolean };
 
 /** Closed partition-bound literal. Never raw SQL. */
 export type PartitionBoundValue =
@@ -380,7 +405,7 @@ export type TriggerAction =
  *  shapes where possible and adds the closed `Raise` node. */
 export type TriggerStmt =
   | { stmt: "insert"; table: string; columns: string[]; rows: IrValue[][]; schema?: string | null }
-  | { stmt: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; schema?: string | null }
+  | { stmt: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; schema?: string | null }
   | { stmt: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
   | { stmt: "select"; expr: Expr }
   | { stmt: "raise"; level: RaiseLevel; message: string; errcode?: string | null };
@@ -450,8 +475,9 @@ export type GrantTarget =
 export type Op =
   | { op: "createTable"; name: string; columns: IrColumn[]; primaryKey: string[] | null; constraints?: IrConstraint[]; indexes?: IrIndex[]; partitionBy?: PartitionSpec | null; runtimeOptions?: TableRuntimeOptions | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "createPartition"; name: string; of: string; bounds: PartitionBounds; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "attachPartition"; parent: string; name: string; bound: PartitionBounds; schema?: string | null }
   | { op: "detachPartition"; parent: string; name: string; schema?: string | null; concurrently?: boolean | null }
-  | { op: "dropPartition"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
+  | { op: "dropPartition"; parent: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; cascade?: boolean | null }
   | { op: "dropTable"; table: string; cascade?: boolean | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "renameTable"; table: string; to: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "addColumn"; table: string; column: string; type: ColType; nullable?: boolean | null; default?: IrDefault | null; vectorMetric?: VectorMetric | null; caseSensitive?: boolean | null; mask?: IrMask | null; generated?: GeneratedCol | null; identity?: IdentityCol | null; schema?: string | null; existenceGuard?: ExistenceGuard | null }
@@ -468,6 +494,7 @@ export type Op =
       include?: string[];
       with?: IndexStorageParams | null;
       only?: boolean | null;
+      nullsNotDistinct?: boolean | null;
       schema?: string | null;
       existenceGuard?: ExistenceGuard | null;
     }
@@ -481,10 +508,11 @@ export type Op =
   | { op: "setTableOptions"; table: string; options: TableRuntimeOptionsPatch; schema?: string | null }
   | { op: "addConstraint"; table: string; constraint: IrConstraint; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "dropConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
+  | { op: "validateConstraint"; table: string; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null }
   | { op: "insert"; table: string; columns: string[]; rows: IrValue[][]; onConflict?: IrOnConflict | null; schema?: string | null }
-  | { op: "update"; table: string; set: { [column: string]: Expr }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
+  | { op: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; batch?: IrBatch | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
-  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: Expr }; filter?: Expr | null; name: string; schema?: string | null }
+  | { op: "backfill"; table: string; cursorColumn: string; batchSize: number; set: { [column: string]: IrValue }; filter?: Expr | null; name: string; schema?: string | null }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
   | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }
   | { op: "createEnum"; name: string; schema?: string | null; values: string[] }
@@ -552,10 +580,7 @@ export type Op =
   | { op: "dropOwnedBy"; roles: string[] }
   | { op: "grant"; privileges: Privilege[]; on: GrantTarget; to: string[]; withGrantOption?: boolean | null }
   | { op: "revoke"; privileges: Privilege[]; on: GrantTarget; from: string[] }
-  | { op: "enableRls"; table: string; schema?: string | null }
-  | { op: "forceRls"; table: string; schema?: string | null }
-  | { op: "disableRls"; table: string; schema?: string | null }
-  | { op: "noForceRls"; table: string; schema?: string | null }
+  | { op: "setRls"; table: string; schema?: string | null; enabled?: boolean | null; forced?: boolean | null }
   | {
       op: "createPolicy";
       name: string;

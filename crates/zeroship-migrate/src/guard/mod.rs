@@ -1800,45 +1800,53 @@ pub(crate) fn check_ir_data_security_policy(
                     },
                 );
             }
-            Op::EnableRls { table, schema } => {
-                let key = table_key_for_policy(cfg, schema, table);
-                tables
-                    .entry(key)
-                    .and_modify(|state| {
-                        state.exists_after = true;
-                        state.rls_enabled = true;
-                        state.last_op_index = op_index;
-                        state.table = table.clone();
-                    })
-                    .or_insert_with(|| RlsTableState {
-                        exists_after: true,
-                        rls_enabled: true,
-                        last_op_index: op_index,
-                        table: table.clone(),
+            Op::SetRls {
+                table,
+                schema,
+                enabled,
+                forced,
+            } => {
+                if enabled == &Some(false) {
+                    return Err(IrDataSecurityError {
+                        op_index,
+                        source: GuardError::DataSecurityPolicy {
+                            rule: data_security_rule::REQUIRE_RLS,
+                            statement: format!(
+                                "setRls {table:?} enabled:false is forbidden while data_security.require_rls=true"
+                            ),
+                        },
                     });
+                }
+                if forced == &Some(false) {
+                    return Err(IrDataSecurityError {
+                        op_index,
+                        source: GuardError::DataSecurityPolicy {
+                            rule: data_security_rule::REQUIRE_RLS,
+                            statement: format!(
+                                "setRls {table:?} forced:false is forbidden while data_security.require_rls=true"
+                            ),
+                        },
+                    });
+                }
+                if enabled == &Some(true) {
+                    let key = table_key_for_policy(cfg, schema, table);
+                    tables
+                        .entry(key)
+                        .and_modify(|state| {
+                            state.exists_after = true;
+                            state.rls_enabled = true;
+                            state.last_op_index = op_index;
+                            state.table = table.clone();
+                        })
+                        .or_insert_with(|| RlsTableState {
+                            exists_after: true,
+                            rls_enabled: true,
+                            last_op_index: op_index,
+                            table: table.clone(),
+                        });
+                }
             }
-            Op::DisableRls { table, .. } => {
-                return Err(IrDataSecurityError {
-                    op_index,
-                    source: GuardError::DataSecurityPolicy {
-                        rule: data_security_rule::REQUIRE_RLS,
-                        statement: format!(
-                            "disableRls {table:?} is forbidden while data_security.require_rls=true"
-                        ),
-                    },
-                });
-            }
-            Op::NoForceRls { table, .. } => {
-                return Err(IrDataSecurityError {
-                    op_index,
-                    source: GuardError::DataSecurityPolicy {
-                        rule: data_security_rule::REQUIRE_RLS,
-                        statement: format!(
-                            "noForceRls {table:?} is forbidden while data_security.require_rls=true"
-                        ),
-                    },
-                });
-            }
+            Op::AttachPartition { .. } | Op::DetachPartition { .. } => {}
             Op::DropTable { table, schema, .. } | Op::DropPartition { name: table, schema, .. } => {
                 let key = table_key_for_policy(cfg, schema, table);
                 tables
@@ -1856,7 +1864,6 @@ pub(crate) fn check_ir_data_security_policy(
                         table: table.clone(),
                     });
             }
-            Op::DetachPartition { .. } => {}
             Op::RenameTable { table, to, schema, .. } => {
                 let from = table_key_for_policy(cfg, schema, table);
                 let to_key = table_key_for_policy(cfg, schema, to);
@@ -3346,13 +3353,15 @@ mod tests {
         let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
         let ir = ir_with(vec![
             create_table("users"),
-            Op::EnableRls {
+            Op::SetRls {
                 table: "users".to_string(),
                 schema: None,
+                enabled: Some(true),
+                forced: None,
             },
         ]);
 
-        check_ir_data_security_policy(&cfg, &ir).expect("matching enableRls satisfies require_rls");
+        check_ir_data_security_policy(&cfg, &ir).expect("matching setRls satisfies require_rls");
     }
 
     #[test]
@@ -3360,13 +3369,17 @@ mod tests {
         let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
         let ir = ir_with(vec![
             create_table("users"),
-            Op::EnableRls {
+            Op::SetRls {
                 table: "users".to_string(),
                 schema: None,
+                enabled: Some(true),
+                forced: None,
             },
-            Op::DisableRls {
+            Op::SetRls {
                 table: "users".to_string(),
                 schema: None,
+                enabled: Some(false),
+                forced: None,
             },
         ]);
 
@@ -3387,13 +3400,17 @@ mod tests {
         let cfg = platform_guard_config().with_data_security(true, DestructiveOps::Allow);
 
         for op in [
-            Op::DisableRls {
+            Op::SetRls {
                 table: "users".to_string(),
                 schema: None,
+                enabled: Some(false),
+                forced: None,
             },
-            Op::NoForceRls {
+            Op::SetRls {
                 table: "users".to_string(),
                 schema: None,
+                enabled: None,
+                forced: Some(false),
             },
         ] {
             let err = check_ir_data_security_policy(&cfg, &ir_with(vec![op])).unwrap_err();

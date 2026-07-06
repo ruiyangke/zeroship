@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use zeroship_migrate::model::capability::VendorCapability;
 use zeroship_migrate::model::ir::{
     ColType, IdentityCol, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraintKind,
-    IrDefault, Op, PartitionBounds, SequenceRef, TriggerAction, ViewQuery,
+    IrDefault, Op, PartitionBounds, PartitionSpec, SequenceRef, TriggerAction, ViewQuery,
 };
 use zeroship_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
-use zeroship_migrate::model::validate::validate_ir_scoped;
+use zeroship_migrate::model::validate::{validate_ir_scoped, CODE_DIALECT_UNSUPPORTED};
 use zeroship_migrate::{
     IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, PolicyProfile, SchemaScope, SqlDialect,
     CURRENT_IR_VERSION,
@@ -18,6 +18,7 @@ const DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::Sqlite, Dialect::Mys
 const EXPECTED_OPS: &[&str] = &[
     "createTable",
     "createPartition",
+    "attachPartition",
     "detachPartition",
     "dropPartition",
     "dropTable",
@@ -35,6 +36,7 @@ const EXPECTED_OPS: &[&str] = &[
     "setTableOptions",
     "addConstraint",
     "dropConstraint",
+    "validateConstraint",
     "insert",
     "update",
     "delete",
@@ -61,10 +63,7 @@ const EXPECTED_OPS: &[&str] = &[
     "dropOwnedBy",
     "grant",
     "revoke",
-    "enableRls",
-    "forceRls",
-    "disableRls",
-    "noForceRls",
+    "setRls",
     "createPolicy",
     "dropPolicy",
     "createFunction",
@@ -241,8 +240,8 @@ fn support_declarations_cover_every_op_and_dialect() {
     let expected: BTreeSet<String> = EXPECTED_OPS.iter().map(|s| (*s).to_string()).collect();
     assert_eq!(
         expected.len(),
-        54,
-        "matrix must mirror the closed 54-op v1 discriminant set"
+        53,
+        "matrix must mirror the closed 53-op v1 discriminant set"
     );
     assert_eq!(
         schema_op_tags(),
@@ -319,6 +318,37 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.into(),
         order: None,
+        opclass: None,
+        collation: None,
+    }
+}
+
+fn partitioned_create_table() -> Op {
+    Op::CreateTable {
+        name: "events".into(),
+        columns: vec![IrColumn {
+            name: "created_at".into(),
+            ty: ColType::Timestamp,
+            nullable: None,
+            default: None,
+            unique: None,
+            id_prefix: None,
+            case_sensitive: None,
+            vector_metric: None,
+            mask: None,
+            generated: None,
+            identity: None,
+        }],
+        primary_key: None,
+        constraints: vec![],
+        indexes: vec![],
+        partition_by: Some(PartitionSpec::Range {
+            columns: vec!["created_at".into()],
+            collapse: false,
+        }),
+        runtime_options: None,
+        schema: None,
+        existence_guard: None,
     }
 }
 
@@ -338,6 +368,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
         },
         Op::DropPartition {
+            parent: "events".into(),
             name: "events_default".into(),
             schema: None,
             existence_guard: None,
@@ -356,6 +387,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "events".into(),
@@ -370,6 +402,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "events".into(),
@@ -387,6 +420,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
         Op::CreateIndex {
             table: "events".into(),
@@ -401,6 +435,7 @@ fn partition_feature_ops() -> Vec<Op> {
             concurrently: None,
             schema: None,
             existence_guard: None,
+            nulls_not_distinct: None,
         },
     ]
 }
@@ -504,8 +539,11 @@ fn identity_always_ops() -> Vec<Op> {
 }
 
 #[test]
-fn partition_ops_and_partition_index_features_are_pg_only() {
+fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
     for op in partition_feature_ops() {
+        if matches!(op, Op::CreatePartition { .. }) {
+            continue;
+        }
         let tag = op_tag(&op);
         let support = op.support();
         for dialect in DIALECTS {
@@ -515,12 +553,35 @@ fn partition_ops_and_partition_index_features_are_pg_only() {
                 validates, decision_supported,
                 "{tag} {dialect:?}: support decision and validate() must agree"
             );
-            assert_eq!(
-                decision_supported,
-                matches!(dialect, Dialect::Postgres),
-                "{tag} {dialect:?}: partition DSL slice is PostgreSQL-only"
-            );
+            let expected_supported =
+                matches!(op, Op::DropPartition { .. }) || matches!(dialect, Dialect::Postgres);
+            assert_eq!(decision_supported, expected_supported, "{tag} {dialect:?}");
         }
+    }
+}
+
+#[test]
+fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
+    let op = partitioned_create_table();
+    assert!(
+        validate_current(&op, Dialect::Postgres),
+        "partitioned createTable must validate on PostgreSQL"
+    );
+
+    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        let err = validate_ir_scoped(
+            &one_op_ir(op.clone()),
+            dialect,
+            &[],
+            Some(&SchemaScope::Unconfined),
+            &PolicyProfile::platform(),
+        )
+        .expect_err("partitioned createTable must fail closed off PostgreSQL");
+        assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "{dialect:?}: {err}");
+        assert!(
+            err.reason.contains("partitionBy.whenUnsupported"),
+            "{dialect:?}: {err}"
+        );
     }
 }
 

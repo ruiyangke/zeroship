@@ -136,15 +136,15 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
         ColType::Int,
         ColType::SmallInt,
         ColType::BigInt,
-        ColType::Float,
+        ColType::Double,
         ColType::Real,
-        ColType::Bool,
+        ColType::Boolean,
         ColType::Json,
         ColType::Timestamp,
         ColType::Uuid,
         ColType::Inet,
         ColType::TextArray,
-        ColType::Bytea,
+        ColType::Bytes,
         ColType::Decimal { precision: 38, scale: 9 },
     ] {
         assert!(
@@ -157,10 +157,10 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
     // on any one would drop / mis-spell it).
     for chain in [
         "t.text()",
-        "t.integer()",
+        "t.int()",
         "t.smallInt()",
         "t.bigInt()",
-        "t.float()",
+        "t.double()",
         "t.real()",
         "t.boolean()",
         "t.json()",
@@ -169,7 +169,7 @@ fn generate_all_column_types_records_to_direct_ir_checksum() {
         "t.inet()",
         "t.textArray()",
         "t.bytes()",
-        "t.numeric(38, 9)",
+        "t.numeric({ precision: 38, scale: 9 })",
     ] {
         assert!(
             gen.ts_body.contains(chain),

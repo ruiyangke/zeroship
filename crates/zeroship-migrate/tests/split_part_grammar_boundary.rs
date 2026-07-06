@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use zeroship_migrate::render::dml::assemble_backfill_clauses;
 use zeroship_migrate::model::expr::{Expr, SynthFn};
-use zeroship_migrate::model::ir::IrScalar;
+use zeroship_migrate::model::ir::{IrScalar, IrValue};
 use zeroship_migrate::model::load::load_ir_document;
 use zeroship_migrate::model::validate::Dialect;
 use zeroship_migrate::SqlDialect;
@@ -23,7 +23,7 @@ fn split(col: &str, delim: &str, n: i64) -> Expr {
     Expr::FnSynth {
         r#fn: SynthFn::SplitPart,
         args: vec![
-            Expr::ColRef { name: col.into() },
+            Expr::ColRef { name: col.into(), table: None },
             Expr::Literal { value: IrScalar::Str(delim.into()) },
             Expr::Literal { value: IrScalar::Int(n) },
         ],
@@ -34,13 +34,15 @@ fn registry() -> std::collections::BTreeMap<String, String> {
     [("t".to_string(), APP.to_string())].into_iter().collect()
 }
 
-/// A raw author-named `instr` / `substr` / `split_part` `fnCall` is NOT in the
+/// A raw author-named `instr` / `split_part` `fnCall` is NOT in the
 /// portable-expression grammar (the closed `ScalarFn` enum) — it fails to load on
 /// EITHER dialect. There is no raw escape: an author cannot name `instr` even
-/// though the engine's own lowering uses it (the two lists are distinct).
+/// though the engine's own lowering uses it (the two lists are distinct). NB:
+/// `substr`/`replace` are NO LONGER in this list — they are now first-class
+/// portable `ScalarFn`s (§3.4), so a `fnCall` naming them loads fine.
 #[test]
 fn raw_split_funcs_rejected_at_load_both_dialects() {
-    for raw_fn in ["instr", "substr", "split_part", "replace"] {
+    for raw_fn in ["instr", "split_part"] {
         let ir = format!(
             r#"{{"ir_version":1,"name":"raw","ops":[
                 {{"op":"update","table":"t",
@@ -107,7 +109,7 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
 #[test]
 fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
     // multi-char delimiter, the §9 grammar-boundary example.
-    let set = BTreeMap::from([("x".to_string(), split("v", ", ", 1))]);
+    let set = BTreeMap::from([("x".to_string(), IrValue::Expr(split("v", ", ", 1)))]);
     let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None)
         .expect("out-of-envelope splitPart must LOWER to native split_part on PG");
     assert_eq!(c.set_clause, "\"x\" = split_part(\"v\", ', ', 1)");

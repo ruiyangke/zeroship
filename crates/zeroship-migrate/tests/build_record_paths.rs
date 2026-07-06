@@ -33,11 +33,11 @@ import { table, t } from "@zeroship/migrate";
 export function up() {
   table("widgets").create({
     columns: {
-      id: t.uuid().notNull().primaryKey().default({ fn: "genRandomUuid" }),
+      id: t.uuid().notNull().primaryKey().default((c) => c.fn.genRandomUuid()),
       title: t.text().notNull(),
     },
   });
-  table("widgets").column("qty").add({ type: t.integer() });
+  table("widgets").column("qty").add({ type: t.int() });
 }
 "#;
 

@@ -98,7 +98,7 @@ export function up() {
       status: t.text().notNull().default("new"),
     },
   });
-  table("widgets").column("qty").add({ type: t.integer() });
+  table("widgets").column("qty").add({ type: t.int() });
 }
 "#;
     fs::write(mig_dir.path().join(format!("{stem}.ts")), ts.as_bytes()).unwrap();
@@ -282,6 +282,8 @@ async fn generate_index_bearing_schema_redifs_to_zero_on_pg() {
                     == &vec![IndexElement::Column {
                         name: "email".to_string(),
                         order: None,
+                        opclass: None,
+                        collation: None,
                     }]
         )),
         "the unique-field index must be synthesized as a createIndex op; ops: {:?}",

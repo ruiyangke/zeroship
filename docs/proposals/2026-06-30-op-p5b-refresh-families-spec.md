@@ -2,7 +2,7 @@
 
 **Status:** proposal (design-only, uncommitted draft). Pre-launch; no back-compat (AGENTS.md "Development status").
 **Scope:** add `grant_type=refresh_token` to the self-contained OP (`crates/auth/src/op/`) and the `zeroship.oauth_refresh_tokens` family store, for the **CLI / programmatic face only** — the `zeroship login` device-token deploy flow and confidential OAuth clients that request `offline_access`. The **browser / console face gets NO refresh family** (OQ-1 → Option B, see Revision log). The browser face is a bounded, server-authoritative gateway session with just-in-time (JIT) access-token re-mint; its contract is stated here in §8 and its implementation is deferred to **P5c** (the gateway re-home).
-**Author seam:** `crates/auth/src/op/refresh.rs` (new), `crates/auth/src/op/authorization_code.rs` (issuance + `TokenResponse`), `db/migrations/V0064__oauth_refresh_tokens.sql` (new). The gateway's `do_refresh` is **removed**, not swapped (§8).
+**Author seam:** `crates/auth/src/op/refresh.rs` (new), `crates/auth/src/op/authorization_code.rs` (issuance + `TokenResponse`), `db/migrations-ts/20260702000300_auth_oauth_tables.ts`. The gateway's `do_refresh` is **removed**, not swapped (§8).
 
 This spec was authored to be torn apart by a design-critic. Every storage rule, every rotation step, and every threat carries a named gating test. Where this spec and P0 (`2026-06-30-op-p0-spec-threat-model.md`) or the canonical schema redesign (`2026-06-30-auth-schema-redesign.md`) disagree, **the canonical names win** and the divergence is called out explicitly (the one deliberate canonical *amendment*, `family_absolute_expires_at`, is flagged as such in §2.2 / §6, not silently labelled "canonical").
 
@@ -347,7 +347,7 @@ UPDATE zeroship.oauth_refresh_tokens SET revoked_at = NOW()
 
 AND write the access-token kill markers. Because `token_revocations.sub` is the **per-(client, sector) pairwise subject**, the fan-out is **one marker per `(client_id, pairwise_sub)`** the user has a live family in (round-1 #8): for a single-client family kill that is one row; for a credential-bump kill (§7) it is one row per distinct `client_id` in the user's live families:
 
-<!-- Corrected in round 5 (MINOR-1): the column is `sub`, not `token_subject`. Verified against db/migrations/V0002__auth.sql:228 (PRIMARY KEY (client_id, sub)) and the live writer crates/control/src/oauth_grants_handlers.rs:240. -->
+<!-- Corrected in round 5 (MINOR-1): the column is `sub`, not `token_subject`. Verified against db/migrations-ts/20260702000300_auth_oauth_tables.ts and the live writer crates/control/src/oauth_grants_handlers.rs:240. -->
 ```
 INSERT zeroship.token_revocations(client_id, sub, revoked_after)
   VALUES ($client_id, derive_pairwise(AUTH_PAIRWISE_SALT, $user_id, sector($client_id)), NOW())
@@ -666,4 +666,4 @@ Per `feedback_regression_test_per_fix` + `feedback_verify_full_suite_not_lib`: e
 - OAuth 2.0 for Browser-Based Apps (BCP draft) — no refresh token to the browser; BFF/token-handler pattern: https://datatracker.ietf.org/doc/draft-ietf-oauth-browser-based-apps/
 - OIDC Core 1.0 — §12.2 (id_token on refresh OPTIONAL; nonce MUST match original), §8.1 (pairwise): https://openid.net/specs/openid-connect-core-1_0.html
 - Internal: `docs/proposals/oauth2-standards-conformance.md`, `docs/proposals/2026-06-30-op-p0-spec-threat-model.md` (§2.4/§4.1/§446/§551/§559), `docs/proposals/2026-06-30-auth-schema-redesign.md` (§`oauth_refresh_tokens`)
-- Internal code: `crates/auth/src/sessions/login.rs` (30m idle/12h absolute), `crates/auth/src/store/sessions.rs::validate`, `crates/auth/src/op/authorization_code.rs`, `crates/auth/src/op/issuer.rs`, `db/migrations/V0063__oauth_authorization_codes.sql`
+- Internal code: `crates/auth/src/sessions/login.rs` (30m idle/12h absolute), `crates/auth/src/store/sessions.rs::validate`, `crates/auth/src/op/authorization_code.rs`, `crates/auth/src/op/issuer.rs`, `db/migrations-ts/20260702000300_auth_oauth_tables.ts`

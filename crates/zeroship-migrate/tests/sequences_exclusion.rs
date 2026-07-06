@@ -435,6 +435,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.to_string(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -462,6 +464,7 @@ fn postgres_and_sqlite_render_partial_index_where() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     };
     let live = BTreeSet::from(["users".to_string()]);
 
@@ -474,7 +477,7 @@ fn postgres_and_sqlite_render_partial_index_where() {
     let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
     assert_eq!(
         sqlite[0].up,
-        r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "users" ("active") WHERE ("active" IS TRUE)"#
+        r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "users" ("active") WHERE ("active" = 1)"#
     );
 }
 
@@ -494,6 +497,7 @@ fn postgres_and_sqlite_render_expression_index_elements() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     };
     let live = BTreeSet::from(["users".to_string()]);
 
@@ -506,7 +510,7 @@ fn postgres_and_sqlite_render_expression_index_elements() {
     let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
     assert_eq!(
         sqlite[0].up,
-        r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "users" ("email", (lower("email"))) WHERE ("active" IS TRUE)"#
+        r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "users" ("email", (lower("email"))) WHERE ("active" = 1)"#
     );
 }
 
@@ -527,6 +531,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
             concurrently: None,
                 schema: None,
                 existence_guard: None,
+                nulls_not_distinct: None,
             }]),
         Dialect::Mysql,
         &[],
@@ -554,6 +559,7 @@ fn mysql_fail_closes_on_partial_index_predicate() {
             concurrently: None,
                 schema: None,
                 existence_guard: None,
+                nulls_not_distinct: None,
             }]),
         Dialect::Mysql,
         &[],

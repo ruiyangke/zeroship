@@ -687,9 +687,9 @@ pub async fn snapshot_schema(
         let columns: Vec<String> = r.try_get("columns").unwrap_or_default();
         let partstrat: i8 = r.get("partstrat");
         t.partition_by = match u8::try_from(partstrat).ok().map(char::from) {
-            Some('r') => Some(PartitionSpec::Range { columns }),
-            Some('l') => Some(PartitionSpec::List { columns }),
-            Some('h') => Some(PartitionSpec::Hash { columns }),
+            Some('r') => Some(PartitionSpec::Range { columns, collapse: false }),
+            Some('l') => Some(PartitionSpec::List { columns, collapse: false }),
+            Some('h') => Some(PartitionSpec::Hash { columns, collapse: false }),
             _ => None,
         };
     }
@@ -924,6 +924,7 @@ pub async fn snapshot_schema(
                 only: false,
                 // Emission-only; never recovered from the catalog.
                 opclass: None,
+                nulls_not_distinct: false,
                 comment: r.try_get("comment").ok().flatten(),
             });
         }
@@ -1620,7 +1621,7 @@ fn diff_attrs(
         elements
             .iter()
             .map(|element| match element {
-                IndexElementSnapshot::Column { name, order } => {
+                IndexElementSnapshot::Column { name, order, .. } => {
                     match canonical_index_sort_order(*order) {
                         Some(IndexSortOrder::Desc) => format!("col:{name} desc"),
                         Some(IndexSortOrder::Asc) | None => format!("col:{name}"),

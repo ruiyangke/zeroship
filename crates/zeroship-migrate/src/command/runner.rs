@@ -60,7 +60,7 @@ pub enum RunProfile {
 /// design §9). Profile-agnostic; the runner decides token minting from `profile`.
 #[derive(Debug, Clone)]
 pub struct RunConfig {
-    /// Migration directory (`--dir`, default `db/migrations/`).
+    /// Migration directory (`--dir`, CLI default `./migrations`).
     pub dir: std::path::PathBuf,
     /// Admin Postgres DSN (`--database-url` / `DATABASE_URL`).
     pub database_url: String,
@@ -251,9 +251,9 @@ pub enum RunError {
     #[error("resolve-pending: {0}")]
     ResolvePending(String),
     /// A loaded migration plan was not a single-step DDL plan (`op.*` DSL §5.2):
-    /// the platform Flyway-mode runner consumes plans through the thin
+    /// the legacy SQL runner consumes plans through the thin
     /// `AppliedPlan::single_step_migration()` facade, which fails closed on a
-    /// multi-step plan. This arm is **provably unreachable on the platform path**
+    /// multi-step plan. This arm is **provably unreachable on the legacy SQL path**
     /// (a Flyway/dbmate `.sql` always lowers to one `Ddl` step — asserted by the
     /// single-step-shape precondition test) and exists for defense in depth.
     #[error("plan shape: {0}")]
@@ -262,7 +262,7 @@ pub enum RunError {
     /// Pre-launch, a directory is exactly one format.
     #[error(
         "mixed platform migration corpus in '{dir}': found {found} \
-         (use exactly one format: .ts record/apply, or legacy .sql for db/migrations)"
+         (use exactly one format: .ts record/apply, or legacy .sql for generic SQL corpora)"
     )]
     MixedPlatformMigrationCorpus {
         /// The migration directory.
@@ -290,10 +290,10 @@ pub enum RunError {
 
 /// Load the migration directory and project each [`AppliedPlan`] down to its one
 /// `&Migration` through the [`single_step_migration`](crate::render::plan::AppliedPlan::single_step_migration)
-/// facade (`op.*` DSL §5.2). The platform Flyway-mode runner operates over
+/// facade (`op.*` DSL §5.2). The legacy SQL runner operates over
 /// `Migration` and never touches `PlanStep`/`RenameStep`, so it stays decoupled
-/// from plan-shape evolution; the facade fails closed if a platform changelog
-/// ever produced a multi-step plan (it cannot today — see the precondition test).
+/// from plan-shape evolution; the facade fails closed if a SQL changelog ever
+/// produced a multi-step plan (it cannot today — see the precondition test).
 // Cold CLI error path; see RunError's doc for why the large variants stay unboxed.
 #[allow(clippy::result_large_err)]
 fn load_dir_flat(dir: &Path) -> Result<Vec<crate::model::migration::Migration>, RunError> {
@@ -316,9 +316,9 @@ enum MigrationCorpusFormat {
 ///
 /// Model C selects `.ts` as the platform source format: the runner records each
 /// file to transient IR at migrate time and applies that IR. The `.sql` branch is
-/// retained only for the current repo-root `db/migrations/` port until the platform
-/// schema is rebaselined to `.ts`. Committed Platform `.ir.json` is intentionally
-/// rejected here; creator migrations are also `.ts` source with transient IR.
+/// retained only for legacy/generic SQL corpora, not as the platform source.
+/// Committed Platform `.ir.json` is intentionally rejected here; creator
+/// migrations are also `.ts` source with transient IR.
 fn platform_corpus_format(dir: &Path) -> Result<MigrationCorpusFormat, RunError> {
     let read = std::fs::read_dir(dir).map_err(|e| {
         RunError::Load(LoaderError::Io {
@@ -2391,7 +2391,7 @@ mod tests {
     #[test]
     fn build_exec_cfg_platform_is_platform_trust() {
         let cfg = RunConfig {
-            dir: std::path::PathBuf::from("db/migrations"),
+            dir: std::path::PathBuf::from("fixtures/migrations"),
             database_url: "host=localhost".to_string(),
             engine_override: None,
             profile: RunProfile::Platform,
@@ -2418,7 +2418,7 @@ mod tests {
     #[test]
     fn build_exec_cfg_confined_is_confined_trust() {
         let cfg = RunConfig {
-            dir: std::path::PathBuf::from("db/migrations"),
+            dir: std::path::PathBuf::from("fixtures/migrations"),
             database_url: "host=localhost".to_string(),
             engine_override: None,
             profile: RunProfile::Confined,

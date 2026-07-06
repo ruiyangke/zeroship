@@ -12,15 +12,17 @@ export function up() {
       author_id: t.uuid().notNull(),
       status: t.text().notNull().default("draft"),
     },
-    softDelete: true,
-    versioning: true,
-    strictness: "lenient",
+    options: {
+      softDelete: true,
+      versioning: true,
+      strictness: "lenient",
+    },
   });
 
   table("posts").index("posts_author_status_idx").add({
-    columns: ["author_id", "status"],
+    on: ["author_id", "status"],
   });
 
-  table("posts").withVersioning(false);
-  table("posts").strictness("off");
+  table("posts").setOptions({ versioning: false });
+  table("posts").setOptions({ strictness: "off" });
 }

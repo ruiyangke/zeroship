@@ -218,7 +218,7 @@ at minimum:
 Run platform migrations before booting services:
 
 ```bash
-zeroship-migrate migrate --dir ./db/migrations --database-url "$DATABASE_URL" --profile platform --yes
+zeroship-migrate migrate --dir ./db/migrations-ts --database-url "$DATABASE_URL" --profile platform --yes
 ```
 
 Then start `zeroship-auth` with the variables above. On boot it publishes the

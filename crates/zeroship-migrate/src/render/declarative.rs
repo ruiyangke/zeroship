@@ -383,11 +383,29 @@ fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column { name, order } => format!(
-                "{}{opclass_suffix}{}",
-                quote_ident(name),
-                render_index_order_suffix(*order)
-            ),
+            IndexElementSnapshot::Column {
+                name,
+                order,
+                opclass,
+                collation,
+            } => {
+                // PG index-element grammar: `column [COLLATE "c"] [opclass] [ASC|DESC]`.
+                // A per-element opclass overrides the index-level `opclass_suffix`
+                // (the ANN metric opclass); COLLATE precedes the operator class.
+                let collate = collation
+                    .as_deref()
+                    .map(|c| format!(" COLLATE {}", quote_ident(c)))
+                    .unwrap_or_default();
+                let opclass = opclass
+                    .as_deref()
+                    .map(|oc| format!(" {oc}"))
+                    .unwrap_or_else(|| opclass_suffix.to_string());
+                format!(
+                    "{}{collate}{opclass}{}",
+                    quote_ident(name),
+                    render_index_order_suffix(*order)
+                )
+            }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
         })
         .collect::<Vec<_>>()
@@ -400,9 +418,9 @@ fn render_ident_list_pg(cols: &[String]) -> String {
 
 fn render_partition_spec_pg(spec: &PartitionSpec) -> String {
     let (kind, columns) = match spec {
-        PartitionSpec::Range { columns } => ("RANGE", columns),
-        PartitionSpec::List { columns } => ("LIST", columns),
-        PartitionSpec::Hash { columns } => ("HASH", columns),
+        PartitionSpec::Range { columns, .. } => ("RANGE", columns),
+        PartitionSpec::List { columns, .. } => ("LIST", columns),
+        PartitionSpec::Hash { columns, .. } => ("HASH", columns),
     };
     format!(" PARTITION BY {kind} ({})", render_ident_list_pg(columns))
 }
@@ -500,7 +518,9 @@ fn render_index_elements_sqlite(idx: &IndexSnapshot) -> String {
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column { name, order } => {
+            // opclass/collation are PG-only (refused at validate before lower), so
+            // the SQLite element render intentionally ignores them.
+            IndexElementSnapshot::Column { name, order, .. } => {
                 format!("{}{}", quote_ident(name), render_index_order_suffix(*order))
             }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
@@ -521,7 +541,9 @@ fn render_index_elements_mysql(idx: &IndexSnapshot) -> String {
     elements
         .iter()
         .map(|element| match element {
-            IndexElementSnapshot::Column { name, order } => {
+            // opclass/collation are PG-only (refused at validate before lower), so
+            // the MySQL element render intentionally ignores them.
+            IndexElementSnapshot::Column { name, order, .. } => {
                 format!("{}{}", mysql_quote_ident(name), render_index_order_suffix(*order))
             }
             IndexElementSnapshot::Expr(expr) => format!("({expr})"),
@@ -1355,7 +1377,7 @@ fn field_default_expr(f: &FieldDescriptor, synth_json_defaults: bool) -> Option<
     if let Some(default) = &f.default {
         return match f.ty.as_str() {
             "string" | "char" | "inet" => default.as_str().map(sql_str),
-            // `int` (`t.integer()`/`t.bigInt()`) and `number` (`t.float()`/
+            // `int` (`t.int()`/`t.bigInt()`) and `number` (`t.double()`/
             // `t.numeric()`) share one precision-preserving renderer — without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
             // decimal/bigint carried as a numeric string dropped from BOTH.
@@ -2423,6 +2445,7 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         with: None,
         only: false,
         opclass: Some(vector_opclass(f.vector_metric.as_deref()).to_string()),
+        nulls_not_distinct: false,
         comment: None,
     })
 }
@@ -2452,6 +2475,7 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
         with: None,
         only: false,
         opclass: None,
+        nulls_not_distinct: false,
         comment: None,
     })
 }
@@ -2538,6 +2562,7 @@ fn fts_objects_pg(
         with: None,
         only: false,
         opclass: None,
+        nulls_not_distinct: false,
         comment: None,
     };
     Some((col, idx))
@@ -2592,6 +2617,7 @@ fn fts_index_snapshot_sqlite(
         with: None,
         only: false,
         opclass: None,
+        nulls_not_distinct: false,
         comment: None,
     })
 }
@@ -5433,6 +5459,32 @@ impl DeclarativeAuthor {
         )
     }
 
+    fn render_attach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        bound: &PartitionBounds,
+    ) -> Migration {
+        let up = format!(
+            "ALTER TABLE {} ATTACH PARTITION {} {}",
+            self.qualified(parent),
+            self.qualified(name),
+            render_partition_bounds_pg(bound),
+        );
+        let down = Some(format!(
+            "ALTER TABLE {} DETACH PARTITION {}",
+            self.qualified(parent),
+            self.qualified(name),
+        ));
+        self.make(
+            &format!("attach_partition_{parent}_{name}"),
+            up,
+            down,
+            MigrationFlags::default(),
+            Vec::new(),
+        )
+    }
+
     fn render_detach_partition(
         &self,
         parent: &str,
@@ -5741,6 +5793,14 @@ impl DeclarativeAuthor {
     ) -> LoweredUnit {
         single_stmt(self.render_create_partition(name, of, bounds))
     }
+    pub(crate) fn lower_attach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        bound: &PartitionBounds,
+    ) -> LoweredUnit {
+        single_stmt(self.render_attach_partition(parent, name, bound))
+    }
     pub(crate) fn lower_detach_partition(
         &self,
         parent: &str,
@@ -5834,6 +5894,30 @@ impl DeclarativeAuthor {
             up,
             None,
             destructive_flags(),
+            Vec::new(),
+        ))
+    }
+
+    /// §3.2 — render a stand-alone `ALTER TABLE … VALIDATE CONSTRAINT <name>` (the
+    /// second half of PostgreSQL online constraint adoption: a FK/CHECK added
+    /// `NOT VALID` is validated later under a weaker `SHARE UPDATE EXCLUSIVE` lock).
+    /// The scan can fail on a violating row, so it is `requires_approval` (like a
+    /// `SET NOT NULL` / constraint add). `down` is `None`: validation only
+    /// STRENGTHENS the existing constraint (there is no `DE-VALIDATE`), so there is
+    /// no structural reverse. PostgreSQL-only — the SQLite/MySQL legs are refused
+    /// fail-closed at validate + at the lower dispatch's capability gate.
+    pub(crate) fn lower_validate_constraint(&self, table: &str, name: &str) -> LoweredUnit {
+        let up = format!(
+            "ALTER TABLE {} VALIDATE CONSTRAINT {}",
+            self.qualified(table),
+            quote_ident(name),
+        );
+        let flags = MigrationFlags { requires_approval: true, ..MigrationFlags::default() };
+        single_stmt(self.make(
+            &format!("validate_constraint_{table}_{name}"),
+            up,
+            None,
+            flags,
             Vec::new(),
         ))
     }
@@ -6052,6 +6136,13 @@ impl DdlEmitter for PgEmitter {
             .unwrap_or_default();
         let col_list = render_index_elements_pg(idx, &opclass_suffix);
         let include_clause = render_index_include_pg(&idx.include);
+        // PG 15+ `NULLS NOT DISTINCT` sits after INCLUDE and before WITH, and is
+        // only meaningful on a UNIQUE index. Absent ⇒ byte-identical to before.
+        let nulls_not_distinct_clause = if idx.nulls_not_distinct {
+            " NULLS NOT DISTINCT"
+        } else {
+            ""
+        };
         let with_clause = if let Some(params) = &idx.with {
             render_index_storage_params_pg(params)
         } else if idx.access_method == "ivfflat" {
@@ -6062,10 +6153,11 @@ impl DdlEmitter for PgEmitter {
         let only = if idx.only { "ONLY " } else { "" };
         (
             format!(
-                "CREATE {unique}INDEX IF NOT EXISTS {} ON {only}{}{using} ({col_list}){}{}{}",
+                "CREATE {unique}INDEX IF NOT EXISTS {} ON {only}{}{using} ({col_list}){}{}{}{}",
                 quote_ident(&idx.name),
                 self.qualified(table),
                 include_clause,
+                nulls_not_distinct_clause,
                 with_clause,
                 idx.predicate
                     .as_deref()

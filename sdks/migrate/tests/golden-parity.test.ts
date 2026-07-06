@@ -18,17 +18,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { t, table } from "../src/index.js";
+import { decimal, t, table } from "../src/index.js";
 import {
-  alterRole,
   createFunction,
-  dropExtension,
   dropFunction,
   dropOwnedBy,
-  dropRole,
-  dropSchema,
   extension,
   grant,
+  pgTable,
   raw,
   revoke,
   role,
@@ -120,20 +117,20 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
       columns: {
         id: t.id(),
         email: t.text().notNull().unique(),
-        balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
-        authored_at: t.timestamp().notNull().default({ fn: "now" }),
+        balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
+        authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
         profile: t.json(),
         owner: t.ref("users"),
-        embedding: t.vector(1536),
+        embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
         // re-blessed string → text (t.string alias removed, §7).
         label: t.text(),
-        hits: t.integer().notNull().default(0),
+        hits: t.int().notNull().default(0),
         big_hits: t.bigInt(),
-        ratio: t.float(),
+        ratio: t.double(),
         secret: t.encrypted({ of: t.text() }),
       },
     });
@@ -148,7 +145,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
           references: { table: "accounts", columns: ["id"] },
         },
       ],
-      indexes: [{ name: "memberships_account_idx", columns: ["account_id"] }],
+      indexes: [{ name: "memberships_account_idx", on: ["account_id"] }],
     });
     table("accounts").column("status").add({ type: t.text().notNull().default("new") });
     table("memberships").foreignKey("memberships_team_fk").add({
@@ -158,11 +155,11 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
     table("accounts").unique("accounts_external_uq").add({ columns: ["external_id"] });
     table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
     table("accounts").constraint("accounts_legacy_chk").drop();
-    table("accounts").column("balance").setType({ to: t.numeric(14, 2) });
+    table("accounts").column("balance").setType({ to: t.numeric({ precision: 14, scale: 2 }) });
     table("accounts").column("profile").setNotNull();
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
-    table("accounts").index("accounts_active_email_idx").add({
-      columns: ["email"],
+    pgTable("accounts").index("accounts_active_email_idx").add({
+      on: ["email"],
       unique: true,
       where: (c) => c("active").isTrue(),
     });
@@ -195,7 +192,7 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
       },
       where: (c) => c("code").gt(0).and(c("label").isNotNull()),
     });
-    table("status_codes").del({
+    table("status_codes").delete({
       where: (c) =>
         c("code")
           .ne(0)
@@ -204,8 +201,8 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
           .or(c("label").isNull())
           .or(c("active").isFalse())
           .and(
-            c.fn
-              .case([[c("code").lt(100), c("code").isNull()]], c("label").isNull())
+            c
+              .case({ branches: [{ when: c("code").lt(100), then: c("code").isNull() }], else: c("label").isNull() })
               .isTrue(),
           ),
       limit: 100,
@@ -243,21 +240,20 @@ test("ddl_rename_table fluent-recorded ops equal the committed golden", async ()
 
 test("pg_vendor typed pg surface records ops equal the committed golden", async () => {
   const ops = record(() => {
-    extension({ name: "citext", ifNotExists: true });
-    dropExtension({ name: "citext", ifExists: true });
-    schema({ name: "zeroship", ifNotExists: true });
-    dropSchema({ name: "zeroship", ifExists: true, cascade: true });
+    extension("citext").create({ ifNotExists: true });
+    extension("citext").drop({ ifExists: true });
+    schema("zeroship").create({ ifNotExists: true });
+    schema("zeroship").drop({ ifExists: true, cascade: true });
 
-    role({
-      name: "zeroship_auth",
+    role("zeroship_auth").create({
       login: true,
       password: "zeroship_auth",
       bypassRls: true,
       setSearchPath: ["zeroship", "public"],
       ifNotExists: true,
     });
-    alterRole({ name: "zeroship_auth", setSearchPath: ["zeroship", "public"] });
-    dropRole({ name: "zeroship_auth", ifExists: true });
+    role("zeroship_auth").setOptions({ setSearchPath: ["zeroship", "public"] });
+    role("zeroship_auth").drop({ ifExists: true });
     dropOwnedBy({ roles: ["zeroship_auth"] });
 
     grant({
@@ -271,20 +267,22 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
       from: ["public"],
     });
 
-    const secrets = table("app_secrets", { schema: "zeroship" });
-    secrets.enableRowLevelSecurity();
-    secrets.forceRowLevelSecurity();
-    secrets.createPolicy({
-      name: "tenant_isolation",
+    pgTable("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+      from: ["2026-11-01T00:00:00Z"],
+      to: ["2026-12-01T00:00:00Z"],
+    });
+
+    const secrets = pgTable("app_secrets", { schema: "zeroship" });
+    secrets.setRls({ enabled: true, forced: true });
+    secrets.policy("tenant_isolation").create({
       for: "all",
       using: (c) =>
-        c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
       withCheck: (c) =>
-        c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
     });
-    secrets.dropPolicy({ name: "tenant_isolation", ifExists: true });
-    secrets.disableRowLevelSecurity();
-    secrets.noForceRowLevelSecurity();
+    secrets.policy("tenant_isolation").drop({ ifExists: true });
+    secrets.setRls({ enabled: false, forced: false });
 
     createFunction({
       name: "audit_events_block_tamper",
@@ -296,22 +294,20 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     });
 
     const audit = table("audit_events", { schema: "zeroship" });
-    audit.createTrigger({
-      name: "audit_events_block_update",
+    audit.trigger("audit_events_block_update").create({
       timing: "before",
       events: ["update", "delete"],
       forEach: "row",
       execute: "audit_events_block_tamper",
       when: (c) => c("app_id").isNotNull(),
     });
-    audit.createTrigger({
-      name: "audit_events_append_only",
+    audit.trigger("audit_events_append_only").create({
       timing: "before",
       events: ["update"],
       forEach: "row",
       body: (b) => [b.raise({ level: "abort", message: "append-only", errcode: "P0001" })],
     });
-    audit.dropTrigger({ name: "audit_events_block_update", ifExists: true });
+    audit.trigger("audit_events_block_update").drop({ ifExists: true });
 
     dropFunction({
       name: "audit_events_block_tamper",

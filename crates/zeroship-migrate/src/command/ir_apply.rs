@@ -259,6 +259,7 @@ pub async fn postgres_ir_apply_state(
             .map(|idx| idx.name.clone())
             .collect(),
         table_snapshots: live.tables.clone(),
+        partitions: live.partitions.clone(),
         table_ownership: live
             .tables
             .keys()

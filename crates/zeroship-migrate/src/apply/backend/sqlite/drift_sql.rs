@@ -199,6 +199,7 @@ pub(crate) async fn snapshot_schema(actor: &MigrationActor) -> Result<SchemaSnap
                         with: None,
                         only: false,
                         opclass: None,
+                        nulls_not_distinct: false,
                         comment: None,
                     },
                 ));
@@ -503,6 +504,7 @@ async fn introspect_indexes_and_unique(
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         });
     }

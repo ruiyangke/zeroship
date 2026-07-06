@@ -6,7 +6,7 @@
 //!   through `IrAuthor::load_and_lower` + `engine.apply` on a real SQLite temp-file
 //!   backend (LOCAL record path).
 //! - The scaffold is deterministic by construction: it contains `c.fn.now()` /
-//!   `{ fn: "now" }` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
+//!   `(c) => c.fn.now()` + `genRandomUuid`, no `Date.now()`/`Math.random()`/
 //!   `crypto.randomUUID()`, and recording it has ZERO determinism findings.
 //!
 //! Faithful: the REAL sandboxed recorder child + the REAL engine apply on SQLite.
@@ -83,8 +83,8 @@ fn scaffold_is_deterministic_by_construction_and_records_zero_warnings() {
     // `new` scaffolds the `.ts` (NO `.ir.json` at new time).
     let ts = scaffold_new_ts("seed_table").expect("scaffold a valid name");
     // Determinism-correct synth defaults documented.
-    assert!(ts.contains(r#"{ fn: "genRandomUuid" }"#) || ts.contains("c.fn.genRandomUuid()"));
-    assert!(ts.contains(r#"{ fn: "now" }"#) || ts.contains("c.fn.now()"));
+    assert!(ts.contains("c.fn.genRandomUuid()"));
+    assert!(ts.contains("c.fn.now()"));
     // Scan ONLY the executable body (comments stripped) for host clock / RNG — so
     // the guarantee is about the EMITTED ops, not comment text (LOW-fix).
     let code: String = ts

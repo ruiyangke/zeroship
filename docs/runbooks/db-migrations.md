@@ -3,10 +3,11 @@
 The platform's Postgres schema — the single `zeroship` schema that holds every
 platform/system table — is managed by
 **`zeroship-migrate`**, zeroship's own versioned migration engine, run under its
-**Platform** trust profile. Migrations are hand-authored Flyway-style SQL files
-in `db/migrations/`, version-controlled, reviewable, and rollback-able. The
-engine tracks what's applied in an append-only journal (in a meta schema,
-default `zeroship_migrations`), so `migrate` only ever runs pending files and is
+**Platform** trust profile. The platform migration source is the committed JS
+DSL corpus in `db/migrations-ts/`. Each `.ts` file is recorded to transient IR at
+apply time; committed SQL/Flyway migrations are no longer a platform source.
+The engine tracks what's applied in an append-only journal (in a meta schema,
+default `zeroship_migrations`), so `migrate` only ever runs pending work and is
 safe to re-run (idempotent no-op when everything is applied).
 
 Services **do not migrate themselves.** `zeroship-control`/`zeroship-auth`
@@ -14,47 +15,42 @@ connect to an already-migrated database — exactly as in production, where the
 `migrate` step runs once before anything boots. There is no inline migration
 code in the Rust crates.
 
-## Why our own engine (not Liquibase)
+## Why our own engine (not Liquibase/Flyway)
 
 The platform schema used to run on Liquibase; it now runs on `zeroship-migrate`
-under the **Platform** profile. The trust separation that mattered (the creator
-migration path must never reach `control`/`auth`/`billing`) is preserved as a
-**call-site invariant**: the Platform profile is constructible only at the
-operator call site (gated by a crate-private `PlatformCapability` token), and
-the creator submission ingress is hard-wired to the Confined profile with no API
-path to Platform. The win over Liquibase is a **parse-time deny-list backstop**
-(every statement — including DO-block / EXECUTE-literal bodies — is parsed with
-the real `pg_query` parser and the RCE / host-escape / file / network surface is
-hard-denied even under Platform) plus per-migration checksum tamper-evidence.
-See `docs/proposals/2026-06-17-platform-migrations-flyway-mode-design.md`.
+under the **Platform** profile from `db/migrations-ts/`. The trust separation
+that mattered (the creator migration path must never reach
+`control`/`auth`/`billing`) is preserved as a **call-site invariant**: the
+Platform profile is constructible only at the operator call site, and the
+creator submission ingress is hard-wired to the Confined profile with no API path
+to Platform. The platform source is now the same structured JS DSL used for
+creator migrations, with transient IR and per-migration checksum
+tamper-evidence.
 
 ## Layout
 
 ```
-db/migrations/
-  V0001__extensions_schemas.sql        # citext + CREATE SCHEMA zeroship (the one platform schema)
-  V0001__extensions_schemas.down.sql   # OPTIONAL reverse for the same version
-  ...                                  # versioned files in numeric order
-  V0004__control.sql                   # the control-plane app/usage/env tables
-  V0062__op_signing_keys.sql           # native OP signing-key metadata
-  V0063__oauth_authorization_codes.sql # native OP authorization-code store
-  V0064__oauth_refresh_tokens.sql      # native OP refresh-token family store
+db/migrations-ts/
+  20260702000100_schema_roles_extensions.ts
+  20260702000200_control_tables.ts
+  20260702000300_auth_oauth_tables.ts
+  20260702000400_billing_metering_invoice_tables.ts
+  20260702000500_sandbox_tables.ts
+  20260702000600_constraints_indexes_fks.ts
+  20260702000700_functions_triggers_comments.ts
+  20260702000800_policies_rls.ts
+  20260702000900_grants.ts
 ```
 
-The filename encodes everything — there is **no** `--changeset`/`--rollback`
-header parsing. The grammar is `V<NNNN>__<description>.sql` (versioned "up"),
-`V<NNNN>__<description>.down.sql` (optional reverse for that version), and
-`R__<description>.sql` (repeatable, re-applies on checksum change). Files apply
-in numeric `V<NNNN>` order. **One file = one migration**, multi-statement,
-whole-file transaction-atomic. Any `--rollback` / `--liquibase formatted sql`
-comment surviving from the port is just a comment — the reverse lives in the
-sibling `.down.sql`. Every object reference is fully schema-qualified; the
-Platform guard permits the `zeroship`/`public` schema allowlist.
+The 14-digit filename prefix is the corpus order key. Platform migrations import
+the `@zeroship/migrate` JS DSL and, where needed, the platform-only helpers from
+`@zeroship/migrate/pg`. The platform runner rejects mixed corpora: a Platform
+directory is `.ts` source only, not `.sql` and not committed `.ir.json`.
 
 ## Running migrations
 
 **In the compose stack** — automatic. The one-shot `migrate` service runs
-`zeroship-migrate migrate --dir /db/migrations --profile platform` after
+`zeroship-migrate migrate --dir /db/migrations-ts --profile platform` after
 Postgres is healthy and before control/auth start (they `depends_on` it with
 `service_completed_successfully`):
 
@@ -69,28 +65,27 @@ prebuilt binary). It targets the compose Postgres on `localhost:5440` by default
 (override with `ZEROSHIP_MIGRATE_DSN`):
 
 ```bash
-ops/db-migrate.sh status            # pending vs applied
-ops/db-migrate.sh migrate           # apply pending migrations
-ops/db-migrate.sh validate          # dry-run on a shadow DB + guard-check + drift + destructive advisories
-ops/db-migrate.sh rollback --steps 1  # roll back the last applied migration (requires --yes for the bin)
-ops/db-migrate.sh rollback --to 0024  # roll back everything strictly after V0024
+ops/db-migrate.sh migrate           # apply pending platform JS DSL migrations
 ```
 
-(There is no `changelog-sync` / adoption verb — pre-launch zeroship has no
-deployed DB whose history must be honoured; fresh DBs re-migrate from scratch.)
+The generic `zeroship-migrate` CLI still has SQL/IR `status`, `validate`, and
+`rollback` verbs for non-platform corpora. The platform `.ts` runner path today
+is the apply path used by compose; the live-PG `platform_ir_apply_pg` suite is
+the regression gate for the platform corpus.
 
 ## Adding a migration
 
-1. Create the next-numbered file `db/migrations/V<NNNN>__<name>.sql` (the whole
-   file is the "up", multi-statement). Schema-qualify everything.
-2. If the change is reversible, add a sibling `V<NNNN>__<name>.down.sql` with the
-   reverse SQL. (A multi-statement file's `.down.sql` should undo its statements
-   in reverse order.)
-3. `ops/db-migrate.sh validate` to dry-run + guard-check, then `migrate` to apply.
+1. Add a new `db/migrations-ts/<YYYYMMDDHHMMSS>_<name>.ts` file.
+2. Express the change with the `@zeroship/migrate` JS DSL. Use the platform-only
+   `@zeroship/migrate/pg` helpers only for platform schema objects that cannot be
+   represented portably.
+3. Run the platform apply gate on a fresh Postgres database before relying on the
+   change:
+   `zeroship-migrate migrate --dir db/migrations-ts --profile platform --yes`.
 
-The loader picks the file up by its numeric `V<NNNN>` version order — no master
-file to edit. **Never edit an already-applied migration** (the engine validates
-per-migration checksums and aborts on drift); add a new versioned file instead.
+The loader picks the file up by its timestamp order — no master file to edit.
+**Never edit an already-applied migration** (the engine validates checksums and
+aborts on drift); add a new timestamped file instead.
 
 ## Operator-approved creator go-live (online rename / destructive ops)
 

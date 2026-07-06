@@ -93,6 +93,7 @@ fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
         tables: desired.snapshot.tables.keys().cloned().collect(),
         unique_indexes: BTreeSet::new(),
         table_snapshots: desired.snapshot.tables.clone(),
+        partitions: desired.snapshot.partitions.clone(),
         sqlite_schemas: desired.sqlite_schemas.clone(),
         table_ownership,
     }

@@ -29,33 +29,45 @@
 // throws a structured `OP_OUTSIDE_RECORDER`.
 
 import type {
+  AggNamespace,
   BackfillArgs,
+  CheckBuilderWithPg,
   CheckDef,
-  CheckRef,
+  CheckExprFn,
   ColType,
   ColumnDef as ColumnDefType,
   ColumnRef,
-  ConstraintRef,
   CommentTargetArg,
-  CreateRawViewArgs,
   AlterSequenceArgs,
   CreateDomainArgs,
   CreateEnumArgs,
   CreateSequenceArgs,
-  CreateTablePolicyArgs,
-  CreateTriggerArgs,
   CreateTableArgs,
+  TriggerCreateArgs,
   CreateViewArgs,
   DbSynthSymbol,
+  DecimalValue,
+  BytesValue,
+  DefaultBuilder,
+  DefaultExprFn,
   DefaultValue,
   DelArgs,
+  DmlSetValue,
+  DomainCheckFn,
   DomainHandle,
+  DomainValueBuilder,
   DeterminismFinding,
-  DropTablePolicyArgs,
   DropDomainArgs,
   DropEnumArgs,
   DropSequenceArgs,
   DropViewArgs,
+  Duration,
+  DroppedExtensionHandle,
+  DroppedRoleHandle,
+  DroppedSchemaHandle,
+  ExtensionCreateArgs,
+  ExtensionDropArgs,
+  ExtensionHandle,
   ExclusionAddArgs,
   ExclusionConstraintArgs,
   ExclusionElementArg,
@@ -68,9 +80,13 @@ import type {
   FnNamespace,
   ForeignKeyRef,
   ForeignKeyReference,
+  GeneratedColumnExprFn,
   GeneratedOptions,
   IdOptions,
   IdentityOptions,
+  ImmutableFnNamespace,
+  IndexExprBuilder,
+  IndexExprFn,
   IndexRef,
   IndexElementArg,
   InsertArgs,
@@ -81,21 +97,34 @@ import type {
   NextvalDefault,
   NextvalOptions,
   OrderItem,
+  PartitionBoundArgs,
   PartitionBoundInput,
   PartitionBoundSentinel,
-  PartitionBuilder,
-  PartitionHandle,
-  PartitionOptions,
-  PartitionSpec,
+  PartitionByInput,
+  PgCheckExprFn,
+  PgConstraintRef,
+  PgCheckRef,
   PgExprNamespace,
+  PgIndexAdd,
+  PgIndexDropArgs,
+  PgIndexRef,
+  PgTableHandle,
+  RoleCreateArgs,
+  RoleDropArgs,
+  RoleHandle,
+  RoleSetOptionsArgs,
   RefAction,
   Row,
   ScalarValue,
+  SchemaCreateArgs,
+  SchemaDropArgs,
+  SchemaHandle,
   SelectAst,
   SelectItem,
   SequenceHandle,
   TableHandle,
   TableOptions,
+  TableRuntimeOptions,
   TableStrictness,
   TableRef,
   TextOptions,
@@ -120,6 +149,40 @@ type Node = Record<string, unknown>;
 
 // ── The ambient recorder (§3.1 / §5) ──
 
+// Capture the native nondeterministic function symbols before a migration module
+// can mutate globals. A bare symbol (`crypto.randomUUID` without parens) is an
+// opt-in to DB-side evaluation, matched by IDENTITY below. In the constrained
+// engine V8 recorder isolate (the `FrontendGlobals::Migration` profile installs
+// no Web Crypto), `globalThis.crypto` may be absent, so a bare `crypto.randomUUID`
+// in the migration source would be a `ReferenceError`; install an identity-only
+// stub so the symbol resolves (its `randomUUID` throws if CALLED — the symbol form
+// is record-time-only). GUARDED by `if absent`: in Node / browsers, where real Web
+// Crypto exists, both guards skip and this is a pure no-op (the real
+// `crypto.randomUUID` is captured). This ran at the top of the former
+// `migrate_ops.js` twin; it moves here so the one compiled recorder artifact keeps
+// the identical engine behavior. MUST precede the capture below.
+if (typeof globalThis !== "undefined") {
+  if (typeof globalThis.crypto === "undefined" || globalThis.crypto === null) {
+    Object.defineProperty(globalThis, "crypto", {
+      value: {},
+      configurable: true,
+      writable: false,
+    });
+  }
+  if (typeof globalThis.crypto.randomUUID !== "function") {
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      value: function randomUUID() {
+        throw new Error(
+          "crypto.randomUUID() is not available in the migration recorder; " +
+            "use the crypto.randomUUID symbol (no parens) or c.fn.genRandomUuid()",
+        );
+      },
+      configurable: true,
+      writable: false,
+    });
+  }
+}
+
 const nativeDateNow = typeof Date !== "undefined" ? Date.now : undefined;
 const nativeMathRandom = typeof Math !== "undefined" ? Math.random : undefined;
 const nativeCryptoRandomUUID =
@@ -127,6 +190,49 @@ const nativeCryptoRandomUUID =
     ? globalThis.crypto.randomUUID
     : undefined;
 const NEXTVAL_DEFAULT_MARKER = "__zeroshipMigrateNextvalDefault";
+const DECIMAL_VALUE_BRAND = Symbol.for("zeroship.migrate.decimal/v1");
+const BYTES_VALUE_BRAND = Symbol.for("zeroship.migrate.bytes/v1");
+const DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
+const BASE64_STRING_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
+const DECIMAL_VALUE_ERROR =
+  'decimal(value) requires a well-formed decimal string; use decimal("<n>") or decimal("0.00")';
+const BYTES_VALUE_ERROR =
+  'byteValue(bytes) requires a Uint8Array or well-formed base64 string; use byteValue(new Uint8Array([...])) or byteValue("<base64>")';
+
+function requireDecimalString(value: unknown): string {
+  if (typeof value !== "string" || !DECIMAL_STRING_RE.test(value)) {
+    throw structuredError("OP_INVALID", DECIMAL_VALUE_ERROR);
+  }
+  return value;
+}
+
+export function decimal(value: string): DecimalValue {
+  return Object.freeze({
+    [DECIMAL_VALUE_BRAND]: true,
+    decimal: requireDecimalString(value),
+  }) as unknown as DecimalValue;
+}
+
+function requireBase64String(value: unknown): string {
+  if (typeof value !== "string" || !BASE64_STRING_RE.test(value)) {
+    throw structuredError("OP_INVALID", BYTES_VALUE_ERROR);
+  }
+  const padded = value + "=".repeat((4 - (value.length % 4)) % 4);
+  try {
+    const normalized = btoa(atob(padded));
+    if (normalized !== padded) throw new Error("non-canonical base64");
+    return normalized;
+  } catch {
+    throw structuredError("OP_INVALID", BYTES_VALUE_ERROR);
+  }
+}
+
+export function byteValue(bytes: Uint8Array | string): BytesValue {
+  return Object.freeze({
+    [BYTES_VALUE_BRAND]: true,
+    bytes: bytes instanceof Uint8Array ? bytesToBase64(bytes) : requireBase64String(bytes),
+  }) as unknown as BytesValue;
+}
 
 function nativeFnSynthName(value: unknown): "now" | "genRandomUuid" | undefined {
   if (value === nativeDateNow) return "now";
@@ -246,6 +352,115 @@ export function __pgPush(op: Node): Node {
   return push(op);
 }
 
+// ── The `defineOp` chokepoint + derived tier-1 producer registry (S0.3) ──
+//
+// Every op producer emits through an emitter minted by `defineOp(kind, …)`, the
+// single chokepoint wrapping `push`/`pushOrDeferUp`. The emitter is
+// behaviour-preserving: it records `compact({ op: kind, ...payload })` —
+// byte-identical to the prior in-line `push(compact({ op: kind, … }))`. Each mint
+// APPENDS to `tier1Producers`, so the producer registry (op-kind → producer(s)) is
+// DERIVED from the mints, never self-reported. A later slice's census asserts
+// one-producer-per-op-kind over this data (which is why the multi-producer kind
+// `addConstraint` mints several distinct producers here). Mirrored 1:1
+// in the engine twin `migrate_ops.js`.
+
+/** One tier-1 op-emission producer, DERIVED from a `defineOp` mint call. */
+export interface OpProducer {
+  /** The op discriminant this producer stamps as the node's `op` field. */
+  readonly kind: string;
+  /** A stable identity for the emission site (census grouping + diagnostics). */
+  readonly producer: string;
+  /** Whether the emitter defers into the up-phase buffer (`pushOrDeferUp`). */
+  readonly deferrable: boolean;
+}
+
+const tier1Producers: OpProducer[] = [];
+
+type OpEmitter = (payload: Node) => Node;
+
+/** Mint the single emitter every producer for `kind` records through, and register
+ *  the (kind → producer) fact so the tier-1 registry is derivable. `producer`
+ *  defaults to `kind` (the common one-producer-per-kind case). */
+function defineOp(kind: string, producer: string = kind, opts: { deferrable?: boolean } = {}): OpEmitter {
+  const deferrable = opts.deferrable === true;
+  tier1Producers.push({ kind, producer, deferrable });
+  const sink = deferrable ? pushOrDeferUp : push;
+  return (payload: Node): Node => sink(compact({ op: kind, ...payload }));
+}
+
+/** The flat tier-1 producer list, in mint (declaration) order — DATA the census
+ *  consumes (a later slice asserts one-producer-per-op-kind over it). */
+export function opProducers(): readonly OpProducer[] {
+  return tier1Producers;
+}
+
+/** The tier-1 producer registry: per op-kind, the producer(s) that emit it —
+ *  DERIVED from the `defineOp` mints (never self-reported). */
+export function opProducerRegistry(): ReadonlyMap<string, readonly OpProducer[]> {
+  const byKind = new Map<string, OpProducer[]>();
+  for (const producer of tier1Producers) {
+    const list = byKind.get(producer.kind);
+    if (list === undefined) byKind.set(producer.kind, [producer]);
+    else list.push(producer);
+  }
+  return byKind;
+}
+
+// The minted emitters — one per producer site. Multi-producer op-kinds
+// (`addConstraint`) mint several, so the registry surfaces the duplication as
+// data.
+const emitCreateEnum = defineOp("createEnum", "createEnum", { deferrable: true });
+const emitDropEnum = defineOp("dropEnum");
+const emitCreateDomain = defineOp("createDomain", "createDomain", { deferrable: true });
+const emitDropDomain = defineOp("dropDomain");
+const emitCreateSequence = defineOp("createSequence", "createSequence", { deferrable: true });
+const emitAlterSequence = defineOp("alterSequence");
+const emitDropSequence = defineOp("dropSequence");
+const emitCreateSchema = defineOp("createSchema");
+const emitDropSchema = defineOp("dropSchema");
+const emitCreateExtension = defineOp("createExtension");
+const emitDropExtension = defineOp("dropExtension");
+const emitCreateRole = defineOp("createRole");
+const emitAlterRole = defineOp("alterRole");
+const emitDropRole = defineOp("dropRole");
+const emitComment = defineOp("comment");
+const emitCreateTable = defineOp("createTable");
+const emitCreatePartition = defineOp("createPartition");
+const emitAttachPartition = defineOp("attachPartition");
+const emitDetachPartition = defineOp("detachPartition");
+const emitDropPartition = defineOp("dropPartition");
+const emitSetTableOptions = defineOp("setTableOptions");
+const emitDropTable = defineOp("dropTable");
+const emitRenameTable = defineOp("renameTable");
+const emitAddColumn = defineOp("addColumn");
+const emitAddColumnUnique = defineOp("addConstraint", "addColumn.unique");
+const emitDropColumn = defineOp("dropColumn");
+const emitRenameColumn = defineOp("renameColumn");
+const emitSetColumnType = defineOp("setColumnType");
+const emitSetColumnNotNull = defineOp("setColumnNotNull");
+const emitDropColumnNotNull = defineOp("dropColumnNotNull");
+const emitSetColumnDefault = defineOp("setColumnDefault");
+const emitDropColumnDefault = defineOp("dropColumnDefault");
+const emitAddForeignKey = defineOp("addConstraint", "foreignKey");
+const emitAddUnique = defineOp("addConstraint", "unique");
+const emitAddCheck = defineOp("addConstraint", "check");
+const emitAddExclusion = defineOp("addConstraint", "exclusion");
+const emitDropConstraint = defineOp("dropConstraint");
+const emitValidateConstraint = defineOp("validateConstraint");
+const emitCreateIndex = defineOp("createIndex");
+const emitDropIndex = defineOp("dropIndex");
+const emitInsert = defineOp("insert");
+const emitUpdate = defineOp("update");
+const emitDelete = defineOp("delete");
+const emitBackfill = defineOp("backfill");
+const emitCreateView = defineOp("createView", "view.create");
+const emitDropView = defineOp("dropView");
+const emitSetRls = defineOp("setRls");
+const emitCreatePolicy = defineOp("createPolicy");
+const emitDropPolicy = defineOp("dropPolicy");
+const emitCreateTrigger = defineOp("createTrigger");
+const emitDropTrigger = defineOp("dropTrigger");
+
 /** Register a handed-out selector; returns its id (used at terminate). */
 function registerSelector(selector: string, name: string): number {
   const rec = recorder();
@@ -300,10 +515,43 @@ function requireOptionalBoolean(v: unknown, what: string): boolean | undefined {
   return v;
 }
 
+function requirePlainObject(v: unknown, what: string): asserts v is Record<string, unknown> {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw structuredError("OP_INVALID", `${what} must be an object`);
+  }
+}
+
+function requireOptionalPositiveInteger(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
+    throw structuredError("OP_INVALID", `${what} must be a positive integer; got ${v}`);
+  }
+  return v;
+}
+
+function requireOptionalNonNegativeInteger(v: unknown, what: string): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-negative integer; got ${v}`);
+  }
+  return v;
+}
+
+function indexElementFacet(v: unknown, what: string): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== "string" || v.length === 0) {
+    throw structuredError("OP_INVALID", `${what} must be a non-empty string`);
+  }
+  return v;
+}
+
 function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
-  const softDelete = requireOptionalBoolean(args.softDelete, "create({ softDelete })");
-  const versioning = requireOptionalBoolean(args.versioning, "create({ versioning })");
-  const strictness = requireStrictness(args.strictness, "create({ strictness })");
+  const opts = args.options;
+  if (opts === undefined) return undefined;
+  requirePlainObject(opts, "create({ options })");
+  const softDelete = requireOptionalBoolean(opts.softDelete, "create({ options: { softDelete } })");
+  const versioning = requireOptionalBoolean(opts.versioning, "create({ options: { versioning } })");
+  const strictness = requireStrictness(opts.strictness, "create({ options: { strictness } })");
   const hasOptions =
     softDelete !== undefined ||
     versioning !== undefined ||
@@ -316,11 +564,8 @@ function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
   });
 }
 
-function runtimeOptionsPatchFromArgs(args: {
-  softDelete?: boolean;
-  versioning?: boolean;
-  strictness?: TableStrictness;
-}): Node {
+function runtimeOptionsPatchFromArgs(args: TableRuntimeOptions): Node {
+  requirePlainObject(args, "setOptions(args)");
   const softDelete = requireOptionalBoolean(args.softDelete, "setOptions({ softDelete })");
   const versioning = requireOptionalBoolean(args.versioning, "setOptions({ versioning })");
   const strictness = requireStrictness(args.strictness, "setOptions({ strictness })");
@@ -377,7 +622,7 @@ function requireSequenceBounds(min: number | null | undefined, max: number | nul
 
 /** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
  *  spelling of the engine's `VectorMetric` enum. Mirrored here (lock-step with
- *  `migrate_ops.js`) so `t.vector(n, { metric })` rejects an out-of-set metric
+ *  `migrate_ops.js`) so `t.vector({ dimensions, metric })` rejects an out-of-set metric
  *  with a friendly client-side OP_INVALID; the engine's closed enum stays
  *  authoritative. */
 export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerProduct"];
@@ -418,7 +663,7 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _unique: boolean;
   // Migration-first P2a (§2b) declared-only facets carried on the IrColumn:
   // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
-  // (`t.vector(n, {metric})`). #174: a standalone column mask (`.mask({…})`).
+  // (`t.vector({ dimensions, metric })`). #174: a standalone column mask (`.mask({…})`).
   // Absent ⇒ omitted on the wire.
   readonly _idPrefix: string | undefined;
   readonly _vectorMetric: string | undefined;
@@ -487,7 +732,7 @@ class ColumnDefImpl implements ColumnDefType {
   __withIdPrefix(prefix: string): ColumnDefImpl {
     return this.with({ idPrefix: prefix });
   }
-  /** Internal: carry the pgvector distance metric (`t.vector(n, {metric})`). */
+  /** Internal: carry the pgvector distance metric (`t.vector({ dimensions, metric })`). */
   __withVectorMetric(metric: string): ColumnDefImpl {
     return this.with({ vectorMetric: metric });
   }
@@ -495,12 +740,8 @@ class ColumnDefImpl implements ColumnDefType {
   notNull(): ColumnDefImpl {
     return this.with({ nullable: false });
   }
-  default(value: DefaultValue): ColumnDefImpl {
+  default(value: DefaultValue | DefaultExprFn): ColumnDefImpl {
     return this.with({ default: toIrDefault(value) });
-  }
-  ref(targetTable: string): ColumnDefImpl {
-    requireString(targetTable, "t.*.ref(target)");
-    return this.with({ type: { ref: { references: targetTable } } as ColType });
   }
   primaryKey(): ColumnDefImpl {
     return this.with({ primaryKey: true, nullable: false });
@@ -513,7 +754,7 @@ class ColumnDefImpl implements ColumnDefType {
    *  the field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask`
    *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
    *  `classification` is optional and DEFAULTS to `"pii"` (closed
-   *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector(n, { metric })`:
+   *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector({ dimensions, metric })`:
    *  a friendly client-side OP_INVALID over the SAME closed set the engine's enums
    *  enforce authoritatively. */
   mask(opts: MaskOptions): ColumnDefImpl {
@@ -541,7 +782,7 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ mask: { kind: opts.kind, classification } });
   }
 
-  generated(expr: ExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
+  generated(expr: GeneratedColumnExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
     if (opts !== undefined && (opts === null || typeof opts !== "object")) {
       throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
     }
@@ -549,7 +790,10 @@ class ColumnDefImpl implements ColumnDefType {
       throw structuredError("OP_INVALID", "t.*.generated(expr, { virtual }): virtual must be a boolean");
     }
     return this.with({
-      generated: { expr: resolveExpr(expr as ExprFn | ExprChainType | Node)!, stored: opts?.virtual === true ? false : true },
+      generated: {
+        expr: resolveImmutableExpr(expr as GeneratedColumnExprFn | ExprChainType | Node, "generated column expression")!,
+        stored: opts?.virtual === true ? false : true,
+      },
     });
   }
 
@@ -651,13 +895,34 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-function isExplicitScalarCarrier(value: Record<string, unknown>): boolean {
-  const keys = Object.keys(value);
+function isDecimalValue(value: unknown): value is DecimalValue {
   return (
-    keys.length === 1 &&
-    ((keys[0] === "decimal" && typeof value.decimal === "string") ||
-      (keys[0] === "bytes" && typeof value.bytes === "string"))
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[DECIMAL_VALUE_BRAND] === true &&
+    typeof (value as { decimal?: unknown }).decimal === "string"
   );
+}
+
+function isBytesValue(value: unknown): value is BytesValue {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    (value as Record<PropertyKey, unknown>)[BYTES_VALUE_BRAND] === true &&
+    typeof (value as { bytes?: unknown }).bytes === "string"
+  );
+}
+
+function isRemovedDecimalCarrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isDecimalValue(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "decimal" && typeof value.decimal === "string";
+}
+
+function isRemovedBytesCarrier(value: unknown): boolean {
+  if (!isPlainObject(value) || isBytesValue(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === "bytes" && typeof value.bytes === "string";
 }
 
 function rejectNestedFunctionValues(value: unknown): void {
@@ -672,14 +937,25 @@ function rejectNestedFunctionValues(value: unknown): void {
 /**
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
  * shape is exactly what Rust's `IrScalar` deserializer accepts (§3.5):
- *  - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify);
+ *  - a branded `decimal("...")` value → `{ decimal: "<v>" }`;
+ *  - a branded `byteValue(...)` value → `{ bytes: "<base64>" }`;
  *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
  *  - JSON containers are scanned so function values fail closed at any depth;
  *  - everything else passes through verbatim.
  */
 function toIrScalar(value: unknown): unknown {
   rejectNestedFunctionValues(value);
-  if (typeof value === "bigint") return { decimal: value.toString() };
+  if (isDecimalValue(value)) return { decimal: requireDecimalString(value.decimal) };
+  if (isBytesValue(value)) return { bytes: requireBase64String(value.bytes) };
+  if (typeof value === "bigint") {
+    throw structuredError("OP_INVALID", 'bigint is not a value — use decimal("<n>")');
+  }
+  if (isRemovedDecimalCarrier(value)) {
+    throw structuredError("OP_INVALID", 'the { decimal } carrier is removed — use decimal("<n>")');
+  }
+  if (isRemovedBytesCarrier(value)) {
+    throw structuredError("OP_INVALID", "the { bytes } carrier is removed — use byteValue(...)");
+  }
   if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
     return { decimal: String(value) };
   }
@@ -722,24 +998,205 @@ function toIrJsonValue(value: unknown): unknown {
   throw structuredError("OP_INVALID", JSON_DEFAULT_VALUE_ERROR);
 }
 
-function toIrDefault(value: DefaultValue): Node {
-  const fn = nativeFnSynthName(value);
-  if (fn !== undefined) return { fn: { fn } };
+const DEFAULT_SCALAR_FNS = new Set([
+  "coalesce",
+  "nullif",
+  "lower",
+  "upper",
+  "trim",
+  "length",
+  "abs",
+  "mod",
+  "round",
+  "floor",
+  "ceil",
+  "substr",
+  "replace",
+]);
+
+const DEFAULT_SYNTH_FNS = new Set([
+  "now",
+  "genRandomUuid",
+  "concatWs",
+  "splitPart",
+]);
+
+const IMMUTABLE_SCALAR_FNS = new Set([
+  "coalesce",
+  "nullif",
+  "lower",
+  "upper",
+  "trim",
+  "length",
+  "abs",
+  "mod",
+  "round",
+  "floor",
+  "ceil",
+  "substr",
+  "replace",
+]);
+
+const IMMUTABLE_SYNTH_FNS = new Set([
+  "concatWs",
+  "splitPart",
+]);
+
+const IMMUTABLE_HELPERS =
+  "lower/upper/trim/length/abs/coalesce/nullif/mod/round/floor/ceil/substr/replace/concatWs/splitPart";
+
+function defaultBuilder(): DefaultBuilder {
+  return Object.freeze({ fn, case: caseExpr });
+}
+
+function defaultFunctionValueError(): Error {
+  return structuredError(
+    "OP_INVALID",
+    "function defaults must be authored as an expression callback, e.g. " +
+      "`.default((c) => c.fn.now())` or `.default((c) => c.fn.genRandomUuid())`; " +
+      "the old `{ fn: ... }` and bare native-symbol default forms are removed",
+  );
+}
+
+function rejectRemovedDefaultFunctionValue(value: unknown): void {
+  if (
+    value === nativeDateNow ||
+    value === nativeMathRandom ||
+    (nativeCryptoRandomUUID !== undefined && value === nativeCryptoRandomUUID)
+  ) {
+    throw defaultFunctionValueError();
+  }
+}
+
+function resolveDefaultExpr(slot: DefaultExprFn): Node {
+  rejectRemovedDefaultFunctionValue(slot);
+  const resolved = slot(defaultBuilder());
+  if (resolved instanceof ExprChainImpl) return resolved.__node;
+  if (resolved && typeof resolved === "object" && typeof (resolved as Node).node === "string") {
+    return resolved as Node;
+  }
+  return exprArg(resolved);
+}
+
+function validateDefaultExpr(expr: Node): void {
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
+      throw structuredError("OP_INVALID", "default expression must be a closed Expr node");
+    }
+    const n = node as Node;
+    switch (n.node) {
+      case "colRef":
+        throw structuredError("OP_INVALID", "a column default cannot reference a column");
+      case "agg":
+        throw structuredError("OP_INVALID", "a column default cannot use an aggregate");
+      case "literal":
+        return;
+      case "fnCall": {
+        if (typeof n.fn !== "string" || !DEFAULT_SCALAR_FNS.has(n.fn)) {
+          throw structuredError(
+            "OP_INVALID",
+            "a column default cannot use volatile or vendor-only functions; use immutable c.fn helpers",
+          );
+        }
+        if (!Array.isArray(n.args)) {
+          throw structuredError("OP_INVALID", "default function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "fnSynth": {
+        if (typeof n.fn !== "string" || !DEFAULT_SYNTH_FNS.has(n.fn)) {
+          throw structuredError("OP_INVALID", "a column default cannot use this synthesized function");
+        }
+        if (!Array.isArray(n.args)) {
+          throw structuredError("OP_INVALID", "default synth expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "binOp":
+        walk(n.lhs);
+        walk(n.rhs);
+        return;
+      case "unaryOp":
+        walk(n.operand);
+        return;
+      case "case": {
+        if (!Array.isArray(n.branches)) {
+          throw structuredError("OP_INVALID", "default CASE expression branches must be an array");
+        }
+        for (const branch of n.branches) {
+          if (!isPlainObject(branch)) {
+            throw structuredError("OP_INVALID", "default CASE branches must be { when, then } objects");
+          }
+          walk(branch.when);
+          walk(branch.then);
+        }
+        if (n.else !== undefined && n.else !== null) walk(n.else);
+        return;
+      }
+      case "cast":
+        walk(n.operand);
+        return;
+      case "between":
+        walk(n.operand);
+        walk(n.low);
+        walk(n.high);
+        return;
+      case "like":
+        walk(n.operand);
+        walk(n.pattern);
+        return;
+      case "distinctFrom":
+        walk(n.left);
+        walk(n.right);
+        return;
+      case "inList":
+        walk(n.expr);
+        return;
+      case "pgRegexMatch":
+      case "pgColumnSize":
+      case "pgExtract":
+      case "pgInterval":
+      case "dialect":
+        throw structuredError(
+          "OP_INVALID",
+          "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes",
+        );
+      case "extract":
+        throw structuredError("OP_INVALID", "a column default cannot use an EXTRACT expression");
+      default:
+        throw structuredError("OP_INVALID", `unsupported default expression node ${JSON.stringify(n.node)}`);
+    }
+  };
+  walk(expr);
+}
+
+function defaultExprIr(slot: DefaultExprFn): Node {
+  const expr = resolveDefaultExpr(slot);
+  validateDefaultExpr(expr);
+  return { expr };
+}
+
+function toIrDefault(value: DefaultValue | DefaultExprFn): Node {
+  if (typeof value === "function") return defaultExprIr(value);
   if (isNextvalDefault(value)) {
     return { nextval: compact({ name: value.name, schema: value.schema }) };
   }
-  rejectFunctionValue(value);
   if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
-    return { fn: { fn: value.fn } };
+    throw defaultFunctionValueError();
   }
   if (Array.isArray(value)) {
     if (value.length === 0) return { container: "array" };
     rejectNestedFunctionValues(value);
     return { json: toIrJsonValue(value) };
   }
+  if (isDecimalValue(value)) return { literal: { value: toIrScalar(value) } };
+  if (isBytesValue(value)) return { literal: { value: toIrScalar(value) } };
   if (isPlainObject(value)) {
     if (Object.keys(value).length === 0) return { container: "object" };
-    if (isExplicitScalarCarrier(value)) return { literal: { value: toIrScalar(value) } };
+    if (isRemovedDecimalCarrier(value)) return { literal: { value: toIrScalar(value) } };
+    if (isRemovedBytesCarrier(value)) return { literal: { value: toIrScalar(value) } };
     rejectNestedFunctionValues(value);
     return { json: toIrJsonValue(value) };
   }
@@ -773,7 +1230,7 @@ export function nextval(name: string, opts: NextvalOptions = {}): NextvalDefault
 
 export const t: TypeLexicon = {
   id: (opts?: IdOptions) => {
-    let col = new ColumnDefImpl("uuid").primaryKey().default({ fn: "genRandomUuid" });
+    let col = new ColumnDefImpl("uuid").primaryKey().default((c) => c.fn.genRandomUuid());
     if (opts && opts.prefix !== undefined) {
       requireString(opts.prefix, "t.id({ prefix })");
       col = col.__withIdPrefix(opts.prefix);
@@ -782,38 +1239,46 @@ export const t: TypeLexicon = {
   },
   text: (opts?: TextOptions) => textColumn(opts),
   textArray: () => new ColumnDefImpl("textArray"),
-  numeric: (precision = 38, scale = 9) =>
-    new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
-  char: (n) => {
-    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
-      throw structuredError("OP_INVALID", `t.char(n): n must be a positive integer, got ${n}`);
+  numeric: (opts = {}) => {
+    requirePlainObject(opts, "t.numeric(opts)");
+    const precision = requireOptionalPositiveInteger(opts.precision, "t.numeric({ precision })") ?? 38;
+    const scale = requireOptionalNonNegativeInteger(opts.scale, "t.numeric({ scale })") ?? 9;
+    return new ColumnDefImpl({ decimal: { precision, scale } } as ColType);
+  },
+  char: (opts) => {
+    requirePlainObject(opts, "t.char(opts)");
+    const n = requireOptionalPositiveInteger(opts.length, "t.char({ length })");
+    if (n === undefined) {
+      throw structuredError("OP_INVALID", "t.char({ length }) requires length");
     }
-    return new ColumnDefImpl({ char: { len: n } } as ColType);
+    return new ColumnDefImpl({ char: { length: n } } as ColType);
   },
   timestamp: () => new ColumnDefImpl("timestamp"),
   date: () => new ColumnDefImpl("date" as ColType),
   uuid: () => new ColumnDefImpl("uuid"),
-  bytes: () => new ColumnDefImpl("bytea"),
-  boolean: () => new ColumnDefImpl("bool"),
+  bytes: () => new ColumnDefImpl("bytes"),
+  boolean: () => new ColumnDefImpl("boolean"),
   json: () => new ColumnDefImpl("json"),
   ref: (targetTable) => {
     requireString(targetTable, "t.ref(target)");
     return new ColumnDefImpl({ ref: { references: targetTable } } as ColType);
   },
-  vector: (n, opts?: VectorOptions) => {
-    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
-      throw structuredError("OP_INVALID", `t.vector(n): n must be a positive integer, got ${n}`);
+  vector: (opts: VectorOptions) => {
+    requirePlainObject(opts, "t.vector(opts)");
+    const n = requireOptionalPositiveInteger(opts.dimensions, "t.vector({ dimensions })");
+    if (n === undefined) {
+      throw structuredError("OP_INVALID", "t.vector({ dimensions }) requires dimensions");
     }
     let col = new ColumnDefImpl({ vector: { vector: n } } as ColType);
-    if (opts && opts.metric !== undefined) {
-      requireString(opts.metric, "t.vector(n, { metric })");
+    if (opts.metric !== undefined) {
+      requireString(opts.metric, "t.vector({ metric })");
       // LOW-1: a closed-set check on the metric token gives a friendly OP_INVALID at
       // authoring time instead of a cryptic serde "unknown variant" at the Rust
       // deserialize seam (the engine's closed `VectorMetric` enum stays authoritative).
       if (!VECTOR_METRICS.includes(opts.metric)) {
         throw structuredError(
           "OP_INVALID",
-          `t.vector(n, { metric }): metric must be one of ${VECTOR_METRICS.join(" | ")}, ` +
+          `t.vector({ dimensions, metric }): metric must be one of ${VECTOR_METRICS.join(" | ")}, ` +
             `got ${JSON.stringify(opts.metric)}`,
           { metric: opts.metric },
         );
@@ -824,11 +1289,10 @@ export const t: TypeLexicon = {
   },
   geoPoint: () => new ColumnDefImpl("geoPoint"),
   smallInt: () => new ColumnDefImpl("smallInt"),
-  integer: () => new ColumnDefImpl("int"),
   int: () => new ColumnDefImpl("int"),
   bigInt: () => new ColumnDefImpl("bigInt"),
   real: () => new ColumnDefImpl("real"),
-  float: () => new ColumnDefImpl("float"),
+  double: () => new ColumnDefImpl("double"),
   inet: () => new ColumnDefImpl("inet"),
   enum: (name) => {
     const n = typeof name === "string" ? name : name.name;
@@ -890,6 +1354,82 @@ export function __pgDomain(name: string): DomainHandle {
     comment(text: string | null, commentArgs: { schema?: string } = {}) {
       recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
       return handle;
+    },
+  };
+  return handle;
+}
+
+export function __pgSchema(name: string): SchemaHandle {
+  requireString(name, "schema(name)");
+  let handle: SchemaHandle;
+  const dropped: DroppedSchemaHandle = {
+    name,
+    create(args: SchemaCreateArgs = {}) {
+      recordCreateSchema(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: SchemaCreateArgs = {}) {
+      recordCreateSchema(name, args);
+      return handle;
+    },
+    drop(args: SchemaDropArgs = {}) {
+      recordDropSchema(name, args);
+      return dropped;
+    },
+  };
+  return handle;
+}
+
+export function __pgExtension(name: string): ExtensionHandle {
+  requireString(name, "extension(name)");
+  let handle: ExtensionHandle;
+  const dropped: DroppedExtensionHandle = {
+    name,
+    create(args: ExtensionCreateArgs = {}) {
+      recordCreateExtension(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: ExtensionCreateArgs = {}) {
+      recordCreateExtension(name, args);
+      return handle;
+    },
+    drop(args: ExtensionDropArgs = {}) {
+      recordDropExtension(name, args);
+      return dropped;
+    },
+  };
+  return handle;
+}
+
+export function __pgRole(name: string): RoleHandle {
+  requireString(name, "role(name)");
+  let handle: RoleHandle;
+  const dropped: DroppedRoleHandle = {
+    name,
+    create(args: RoleCreateArgs = {}) {
+      recordCreateRole(name, args);
+      return handle;
+    },
+  };
+  handle = {
+    name,
+    create(args: RoleCreateArgs = {}) {
+      recordCreateRole(name, args);
+      return handle;
+    },
+    setOptions(args: RoleSetOptionsArgs) {
+      recordSetRoleOptions(name, args);
+      return handle;
+    },
+    drop(args: RoleDropArgs = {}) {
+      recordDropRole(name, args);
+      return dropped;
     },
   };
   return handle;
@@ -962,9 +1502,6 @@ function textLiteralArray(values: unknown, what: string): string[] {
   if (!Array.isArray(values)) {
     throw structuredError("OP_INVALID", `${what} must be a string[]`);
   }
-  if (values.length === 0) {
-    throw structuredError("OP_INVALID", `${what} must be a non-empty string[]`);
-  }
   return values.map((v, i) => {
     if (typeof v !== "string") {
       throw structuredError("OP_INVALID", `${what}[${i}] must be a string; got ${typeof v}`);
@@ -992,30 +1529,87 @@ function pgRegexPattern(pattern: unknown): string {
   return pattern;
 }
 
-function pgExtractField(field: unknown): "day" {
-  if (field !== "day") {
-    throw structuredError("OP_INVALID", `c.pg.extract(field, expr): field must be "day"; got ${JSON.stringify(field)}`);
-  }
-  return field;
-}
+const portableExtractFields = ["year", "month", "day", "hour", "minute", "dow"] as const;
+type PortableExtractField = typeof portableExtractFields[number];
+const portableExtractFieldSet = new Set<string>(portableExtractFields);
 
-function pgIntervalLiteral(value: unknown): string {
-  if (typeof value !== "string") {
-    throw structuredError("OP_INVALID", `c.pg.interval(value): value must be a string; got ${typeof value}`);
-  }
-  if (!isSafePgIntervalLiteral(value)) {
+const pgExtractFields = [
+  "second",
+  "doy",
+  "epoch",
+  "quarter",
+  "week",
+  "isodow",
+  "isoyear",
+  "century",
+  "decade",
+  "millennium",
+  "microseconds",
+  "milliseconds",
+  "timezone",
+  "timezone_hour",
+  "timezone_minute",
+] as const;
+type PgExtractFieldToken = typeof pgExtractFields[number];
+const pgExtractFieldSet = new Set<string>(pgExtractFields);
+
+function extractField(field: unknown, what = "c.fn.extract(field, expr)"): PortableExtractField {
+  if (typeof field !== "string" || !portableExtractFieldSet.has(field)) {
     throw structuredError(
       "OP_INVALID",
-      `c.pg.interval(value): value must match HH:MM:SS or HH:MM:SS.ffffff; got ${JSON.stringify(value)}`,
+      `${what}: field must be one of ${portableExtractFields.map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
     );
   }
-  return value;
+  return field as PortableExtractField;
 }
 
-function isSafePgIntervalLiteral(value: string): boolean {
-  const m = /^([0-9]{1,6}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,6}))?$/.exec(value);
-  if (!m) return false;
-  return Number(m[2]) <= 59 && Number(m[3]) <= 59;
+function pgExtractField(field: unknown): PortableExtractField | PgExtractFieldToken {
+  if (typeof field === "string" && portableExtractFieldSet.has(field)) {
+    return field as PortableExtractField;
+  }
+  if (typeof field === "string" && pgExtractFieldSet.has(field)) {
+    return field as PgExtractFieldToken;
+  }
+  throw structuredError(
+    "OP_INVALID",
+    `c.pg.extract(field, expr): field must be one of ${[...portableExtractFields, ...pgExtractFields].map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
+  );
+}
+
+const durationFields = ["years", "months", "days", "hours", "minutes", "seconds"] as const;
+
+function pgDuration(duration: unknown): Duration {
+  if (!isPlainObject(duration)) {
+    throw structuredError("OP_INVALID", `c.pg.interval(duration): duration must be an object; got ${typeof duration}`);
+  }
+
+  const normalized: Duration = {};
+  for (const key of durationFields) {
+    const value = duration[key];
+    if (value === undefined) continue;
+    if (!Number.isInteger(value)) {
+      throw structuredError(
+        "OP_INVALID",
+        `c.pg.interval(duration): ${key} must be an integer; got ${JSON.stringify(value)}`,
+      );
+    }
+    normalized[key] = value as number;
+  }
+
+  for (const key of Object.keys(duration)) {
+    if (!(durationFields as readonly string[]).includes(key)) {
+      throw structuredError(
+        "OP_INVALID",
+        `c.pg.interval(duration): unknown duration field ${JSON.stringify(key)}`,
+      );
+    }
+  }
+
+  if (Object.keys(normalized).length === 0) {
+    throw structuredError("OP_INVALID", "c.pg.interval(duration): at least one duration field is required");
+  }
+
+  return normalized;
 }
 
 class ExprChainImpl implements ExprChainType {
@@ -1026,14 +1620,32 @@ class ExprChainImpl implements ExprChainType {
   private bin(op: string, x: unknown): ExprChainImpl {
     return chain({ node: "binOp", op, lhs: this.__node, rhs: exprArg(x) });
   }
-  eq(x: unknown) { return this.bin("eq", x); }
-  ne(x: unknown) { return this.bin("ne", x); }
+  eq(x: unknown) {
+    if (x === null) {
+      throw structuredError("OP_INVALID", "eq(null) is always UNKNOWN in SQL — use isNull()");
+    }
+    return this.bin("eq", x);
+  }
+  ne(x: unknown) {
+    if (x === null) {
+      throw structuredError("OP_INVALID", "ne(null) is always UNKNOWN in SQL — use isNotNull()");
+    }
+    return this.bin("ne", x);
+  }
   lt(x: unknown) { return this.bin("lt", x); }
   le(x: unknown) { return this.bin("le", x); }
   gt(x: unknown) { return this.bin("gt", x); }
   ge(x: unknown) { return this.bin("ge", x); }
-  and(e: unknown) { return this.bin("and", e); }
-  or(e: unknown) { return this.bin("or", e); }
+  and(...es: unknown[]) {
+    let acc = this.__node;
+    for (const e of es) acc = { node: "binOp", op: "and", lhs: acc, rhs: exprArg(e) };
+    return chain(acc);
+  }
+  or(...es: unknown[]) {
+    let acc = this.__node;
+    for (const e of es) acc = { node: "binOp", op: "or", lhs: acc, rhs: exprArg(e) };
+    return chain(acc);
+  }
   not() { return chain({ node: "unaryOp", op: "not", operand: this.__node }); }
   add(x: unknown) { return this.bin("add", x); }
   sub(x: unknown) { return this.bin("sub", x); }
@@ -1048,29 +1660,40 @@ class ExprChainImpl implements ExprChainType {
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
-  matches(pattern: string) {
-    return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
-  }
-  columnSize() {
-    return chain({ node: "pgColumnSize", expr: this.__node });
-  }
   cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
     return chain({ node: "cast", operand: this.__node, target });
   }
+  // Portable predicate nodes (§3.4). `between`/`like` render identical syntax on
+  // all three dialects; `distinctFrom` is portably named but per-dialect rendered
+  // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
+  between(low: unknown, high: unknown) {
+    return chain({ node: "between", operand: this.__node, low: exprArg(low), high: exprArg(high) });
+  }
+  like(pattern: unknown) {
+    return chain({ node: "like", operand: this.__node, pattern: exprArg(pattern) });
+  }
+  "in"(values: readonly string[]) {
+    return chain({
+      node: "inList",
+      expr: this.__node,
+      elems: textLiteralArray(values, ".in(values)"),
+      negated: false,
+    });
+  }
+  notIn(values: readonly string[]) {
+    return chain({
+      node: "inList",
+      expr: this.__node,
+      elems: textLiteralArray(values, ".notIn(values)"),
+      negated: true,
+    });
+  }
+  distinctFrom(x: unknown) {
+    return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
+  }
 }
 
-function foldExprs(op: "and" | "or", exprs: readonly unknown[], what: string): ExprChainImpl {
-  if (!Array.isArray(exprs) || exprs.length === 0) {
-    throw structuredError("OP_INVALID", `${what} requires at least one expression`);
-  }
-  let acc = exprArg(exprs[0]);
-  for (const expr of exprs.slice(1)) {
-    acc = { node: "binOp", op, lhs: acc, rhs: exprArg(expr) };
-  }
-  return chain(acc);
-}
-
-export function check(name: string, expr: ExprFn): CheckDef {
+export function check(name: string, expr: CheckExprFn): CheckDef {
   requireString(name, "check(name, expr)");
   if (typeof expr !== "function") {
     throw structuredError("OP_INVALID", "check(name, expr): expr must be a (c) => Expr callback");
@@ -1078,42 +1701,57 @@ export function check(name: string, expr: ExprFn): CheckDef {
   return { name, expr };
 }
 
-export function and(...exprs: unknown[]): ExprChainType {
-  return foldExprs("and", exprs, "and(...)");
-}
-
-export function or(...exprs: unknown[]): ExprChainType {
-  return foldExprs("or", exprs, "or(...)");
-}
-
-export function not(expr: unknown): ExprChainType {
-  return chain({ node: "unaryOp", op: "not", operand: exprArg(expr) });
-}
-
-export function membership(expr: unknown, values: readonly string[]): ExprChainType {
-  return chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "eq",
-    elems: textLiteralArray(values, "membership(values)"),
-  });
-}
-
-export function notMembership(expr: unknown, values: readonly string[]): ExprChainType {
-  return chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "ne",
-    elems: textLiteralArray(values, "notMembership(values)"),
-  });
-}
-
 export function lit(value: ScalarValue): ExprChainType {
   return chain({ node: "literal", value: toIrScalar(value) });
 }
 
-export function interval(value: string): ExprChainType {
-  return chain({ node: "pgIntervalLiteral", value: pgIntervalLiteral(value) });
+/**
+ * The one Layer-2 portability escape (design §3.4): a per-dialect VALUE
+ * divergence in an expression position. Each leg is an expression (a `(c) =>
+ * Expr` chain node, another combinator, or a bare scalar), and the engine
+ * renders the leg matching the target dialect — the dialect's own leg if
+ * present, else `default`:
+ *
+ * ```ts
+ * default(dialect({ pg: c.fn.genRandomUuid(), sqlite: c.fn.now(), mysql: myUuid }))
+ * dialect({ default: lit(0), pg: c("n") })   // pg leg on PG, default(0) elsewhere
+ * ```
+ *
+ * At least one leg (`default`/`pg`/`sqlite`/`mysql`) must be present; the legs
+ * record in full in the checksummed IR as the `dialect` node in canonical order.
+ * The engine's validate applies the per-TARGET scope math: a target with no own
+ * leg and no `default` is refused (`EXPR_NOT_PORTABLE`). RATCHET (P11): each leg
+ * is a ratcheted budget counter — the budget mechanism is a later phase.
+ */
+export function dialect(legs: {
+  default?: unknown;
+  pg?: unknown;
+  sqlite?: unknown;
+  mysql?: unknown;
+}): ExprChainType {
+  if (legs === null || typeof legs !== "object") {
+    throw structuredError(
+      "OP_INVALID",
+      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression legs",
+    );
+  }
+  const node: Node = { node: "dialect" };
+  // Canonical leg order: default, pg, sqlite, mysql (mirrors the IR field order).
+  let count = 0;
+  for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
+    const value = (legs as Record<string, unknown>)[leg];
+    if (value !== undefined) {
+      node[leg] = exprArg(value);
+      count++;
+    }
+  }
+  if (count === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "dialect(legs): at least one leg (default/pg/sqlite/mysql) must be present",
+    );
+  }
+  return chain(node);
 }
 
 const fn: FnNamespace = {
@@ -1124,32 +1762,28 @@ const fn: FnNamespace = {
   abs: (e) => chain({ node: "fnCall", fn: "abs", args: [exprArg(e)] }),
   coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
   nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
-  currentSetting: (name, missingOk) =>
+  mod: (a, b) => chain({ node: "fnCall", fn: "mod", args: [exprArg(a), exprArg(b)] }),
+  round: (x, n) =>
     chain({
       node: "fnCall",
-      fn: "currentSetting",
-      args: missingOk === undefined
-        ? [{ node: "literal", value: name }]
-        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+      fn: "round",
+      args: n === undefined ? [exprArg(x)] : [exprArg(x), exprArg(n)],
     }),
-  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
+  floor: (x) => chain({ node: "fnCall", fn: "floor", args: [exprArg(x)] }),
+  ceil: (x) => chain({ node: "fnCall", fn: "ceil", args: [exprArg(x)] }),
+  substr: (s, start, len) =>
+    chain({
+      node: "fnCall",
+      fn: "substr",
+      args: len === undefined ? [exprArg(s), exprArg(start)] : [exprArg(s), exprArg(start), exprArg(len)],
+    }),
+  replace: (s, from, to) => chain({ node: "fnCall", fn: "replace", args: [exprArg(s), exprArg(from), exprArg(to)] }),
+  extract: (field, expr) => chain({
+    node: "extract",
+    field: extractField(field),
+    from: exprArg(expr),
+  }),
   concatWs: (sep, ...parts) => chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
-  case: (branches, elseVal) => {
-    if (!Array.isArray(branches)) {
-      throw structuredError("OP_INVALID", "c.fn.case(branches, else?): branches must be an array of [cond, result]");
-    }
-    const node: Node = {
-      node: "case",
-      branches: branches.map((b) => {
-        if (!Array.isArray(b) || b.length !== 2) {
-          throw structuredError("OP_INVALID", "c.fn.case branch must be a [condition, result] pair");
-        }
-        return { condition: exprArg(b[0]), result: exprArg(b[1]) };
-      }),
-    };
-    if (elseVal !== undefined) node.else = exprArg(elseVal);
-    return chain(node);
-  },
   splitPart: (col, delim, n) => {
     splitPartGrammarLint(delim, n);
     return chain({
@@ -1162,46 +1796,171 @@ const fn: FnNamespace = {
   genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
 };
 
+const immutableFn: ImmutableFnNamespace = Object.freeze({
+  lower: fn.lower,
+  upper: fn.upper,
+  trim: fn.trim,
+  length: fn.length,
+  abs: fn.abs,
+  coalesce: fn.coalesce,
+  nullif: fn.nullif,
+  mod: fn.mod,
+  round: fn.round,
+  floor: fn.floor,
+  ceil: fn.ceil,
+  substr: fn.substr,
+  replace: fn.replace,
+  extract: fn.extract,
+  concatWs: fn.concatWs,
+  splitPart: fn.splitPart,
+});
+
+// The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count()` (no arg)
+// records `count(*)`; a present arg records `<func>(<arg>)`. The optional
+// `{ distinct: true }` sets the `distinct` flag (skipped on the wire when false).
+// count/sum/avg/min/max are byte-identical SQL on PG/SQLite/MySQL — no dialect
+// gate. The "aggregate only valid in a grouped/SELECT context" check is a
+// Phase-2 obligation; the recorder builds the node structurally here.
+function aggNode(func: "count" | "sum" | "avg" | "min" | "max", expr: unknown, opts?: { distinct?: boolean }): ExprChainType {
+  const node: Node = { node: "agg", func };
+  if (expr !== undefined) node.arg = exprArg(expr);
+  if (opts && opts.distinct === true) node.distinct = true;
+  return chain(node);
+}
+
+const agg: AggNamespace = {
+  count: (expr, opts) => aggNode("count", expr, opts),
+  sum: (expr, opts) => aggNode("sum", expr, opts),
+  avg: (expr, opts) => aggNode("avg", expr, opts),
+  min: (expr, opts) => aggNode("min", expr, opts),
+  max: (expr, opts) => aggNode("max", expr, opts),
+};
+
 const pgExpr: PgExprNamespace = {
-  eqAnyArray: (expr, elems) => chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "eq",
-    elems: textLiteralArray(elems, "c.pg.eqAnyArray(elems)"),
-  }),
-  neAllArray: (expr, elems) => chain({
-    node: "pgArrayMembership",
-    expr: exprArg(expr),
-    op: "ne",
-    elems: textLiteralArray(elems, "c.pg.neAllArray(elems)"),
-  }),
   regex: (expr, pattern) => chain({
     node: "pgRegexMatch",
     expr: exprArg(expr),
     pattern: pgRegexPattern(pattern),
   }),
-  columnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
-  extract: (field, expr) => chain({
-    node: "extract",
-    field: pgExtractField(field),
-    expr: exprArg(expr),
-  }),
-  interval: (value) => chain({
-    node: "pgIntervalLiteral",
-    value: pgIntervalLiteral(value),
+  pgColumnSize: (expr) => chain({ node: "pgColumnSize", expr: exprArg(expr) }),
+  currentSetting: (name, missingOk) =>
+    chain({
+      node: "fnCall",
+      fn: "currentSetting",
+      args: missingOk === undefined
+        ? [{ node: "literal", value: name }]
+        : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
+    }),
+  currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
+  extract: (field, expr) => {
+    const f = pgExtractField(field);
+    return chain({
+      node: portableExtractFieldSet.has(f) ? "extract" : "pgExtract",
+      field: f,
+      from: exprArg(expr),
+    });
+  },
+  interval: (duration) => chain({
+    node: "pgInterval",
+    duration: pgDuration(duration),
   }),
 };
 
+type CaseExprArgs = {
+  branches: Array<{ when: unknown; then: unknown }>;
+  else?: unknown;
+};
+
+function caseExpr(args: CaseExprArgs): ExprChainType {
+  const shape = "c.case({ branches: [{ when, then }], else? })";
+  if (!isPlainObject(args)) {
+    throw structuredError("OP_INVALID", `${shape}: args must be an object`);
+  }
+  const branches = args.branches;
+  if (!Array.isArray(branches) || branches.length === 0) {
+    throw structuredError(
+      "OP_INVALID",
+      `${shape}: branches must be a non-empty array of { when, then } objects`,
+    );
+  }
+  const node: Node = {
+    node: "case",
+    branches: branches.map((branch, i) => {
+      if (
+        !isPlainObject(branch) ||
+        !Object.prototype.hasOwnProperty.call(branch, "when") ||
+        !Object.prototype.hasOwnProperty.call(branch, "then")
+      ) {
+        throw structuredError(
+          "OP_INVALID",
+          `${shape}: branches[${i}] must be an object with when and then`,
+        );
+      }
+      return { when: exprArg(branch.when), then: exprArg(branch.then) };
+    }),
+  };
+  if (args.else !== undefined) node.else = exprArg(args.else);
+  return chain(node);
+}
+
+function makeColumnAccessor(): (first: string, second?: string) => ExprChainType {
+  // One-arg `c("col")` → unqualified colRef (byte-identical to the pre-
+  // qualification wire shape). Two-arg `c("table", "col")` → qualified colRef
+  // (§3.4, the join-ON fix): the wire `colRef` node gains an optional `table`.
+  return ((first: string, second?: string) => {
+    if (second === undefined) {
+      requireString(first, 'c("name")');
+      return chain({ node: "colRef", name: first });
+    }
+    requireString(first, 'c("table", "col")');
+    requireString(second, 'c("table", "col")');
+    return chain({ node: "colRef", table: first, name: second });
+  });
+}
+
+function immutableExprBuilder(): IndexExprBuilder {
+  const c = makeColumnAccessor() as unknown as IndexExprBuilder;
+  c.case = caseExpr;
+  c.fn = immutableFn;
+  return Object.freeze(c);
+}
+
+function checkWithPgBuilder(): CheckBuilderWithPg {
+  const c = makeColumnAccessor() as unknown as CheckBuilderWithPg;
+  c.case = caseExpr;
+  c.fn = immutableFn;
+  c.pg = pgExpr;
+  return Object.freeze(c);
+}
+
+function domainValueBuilder(): DomainValueBuilder {
+  const v = chain({ node: "colRef", name: "VALUE" }) as unknown as DomainValueBuilder;
+  v.case = caseExpr;
+  v.fn = immutableFn;
+  v.pg = pgExpr;
+  return Object.freeze(v);
+}
+
 function makeBuilder(): ExprBuilder {
-  const c = ((name: string) => {
-    requireString(name, 'c("name")');
-    return chain({ node: "colRef", name });
-  }) as unknown as ExprBuilder;
-  c.col = c;
+  const c = makeColumnAccessor() as unknown as ExprBuilder;
+  c.case = caseExpr;
   c.fn = fn;
+  c.agg = agg;
   c.pg = pgExpr;
   return c;
 }
+
+// The standalone `c.case` / `c.fn` / `c.pg` builders surfaced at a value position
+// (`cCase(...)`, `cFn.now()`, `cPg.regex(...)`) — the SAME objects installed on the
+// `(c) => Expr` builder above. These are exported for the engine-embedded
+// recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
+// which requires the full engine-consumed surface. Not re-exported through the
+// SDK public `.` entry (`index.ts`); a value-position namespace is a Phase-2
+// surface decision.
+export const cCase = caseExpr;
+export const cFn = fn;
+export const cAgg = agg;
+export const cPg = pgExpr;
 
 function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
@@ -1211,17 +1970,247 @@ function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | un
   throw structuredError("OP_INVALID", "expression slot must be a (c) => Expr callback or a built expression");
 }
 
+type ImmutableExprSlot = IndexExprFn | GeneratedColumnExprFn | CheckExprFn | ExprChainType | Node | undefined;
+
+function resolveImmutableExpr(slot: ImmutableExprSlot, position: string): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (c: IndexExprBuilder) => unknown)(immutableExprBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position);
+  return resolved;
+}
+
+function resolveCheckWithPg(
+  slot: PgCheckExprFn | ExprChainType | Node | undefined,
+  position: string,
+): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (c: CheckBuilderWithPg) => unknown)(checkWithPgBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (c) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position, { allowPgImmutable: true });
+  return resolved;
+}
+
+function validateDomainCheckColRefs(expr: Node, position: string): void {
+  const walk = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+      return;
+    }
+    if (!isPlainObject(value)) return;
+    if (value.node === "colRef") {
+      const table = (value as { table?: unknown }).table;
+      if (value.name !== "VALUE" || (table !== undefined && table !== null)) {
+        throw structuredError(
+          "OP_INVALID",
+          `${position} may reference only the domain VALUE pseudo-column; non-VALUE colRef nodes are not valid in domain SQL`,
+        );
+      }
+    }
+    Object.values(value).forEach(walk);
+  };
+  walk(expr);
+}
+
+function resolveDomainCheck(
+  slot: DomainCheckFn | ExprChainType | Node | undefined,
+  position: string,
+): Node | undefined {
+  if (slot === undefined || slot === null) return undefined;
+  let resolved: Node;
+  if (typeof slot === "function") {
+    resolved = exprArg((slot as (v: DomainValueBuilder) => unknown)(domainValueBuilder()));
+  } else if (slot instanceof ExprChainImpl) {
+    resolved = slot.__node;
+  } else if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") {
+    resolved = slot as Node;
+  } else {
+    throw structuredError("OP_INVALID", `${position} must be a (v) => Expr callback or a built expression`);
+  }
+  validateImmutableExpr(resolved, position, { allowPgImmutable: true });
+  validateDomainCheckColRefs(resolved, position);
+  return resolved;
+}
+
+type CheckExprSlot = CheckExprFn | PgCheckExprFn | ExprChainType | Node | undefined;
+type CheckExprResolver = (slot: CheckExprSlot, position: string) => Node | undefined;
+
+const resolveCoreCheckExpr: CheckExprResolver = (slot, position) =>
+  resolveImmutableExpr(slot as CheckExprFn | ExprChainType | Node | undefined, position);
+
+const resolvePgCheckExpr: CheckExprResolver = (slot, position) =>
+  resolveCheckWithPg(slot as PgCheckExprFn | ExprChainType | Node | undefined, position);
+
+function rejectImmutableExpr(position: string, reason: string): never {
+  throw structuredError(
+    "OP_INVALID",
+    `${position} must use only immutable expressions: column refs, literals, CASE, operators, and immutable c.fn helpers ` +
+      `(${IMMUTABLE_HELPERS}); ${reason}`,
+  );
+}
+
+function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmutable?: boolean } = {}): void {
+  const rejectPgNode = (nodeName: string): void => {
+    rejectImmutableExpr(position, `${nodeName} is PG-vendor and non-portable`);
+  };
+  const walk = (node: unknown): void => {
+    if (!node || typeof node !== "object" || typeof (node as Node).node !== "string") {
+      rejectImmutableExpr(position, "found a non-expression value");
+    }
+    const n = node as Node;
+    switch (n.node) {
+      case "colRef":
+      case "literal":
+        return;
+      case "agg":
+        rejectImmutableExpr(position, "aggregates are not allowed here");
+      case "fnCall": {
+        if (n.fn === "currentSetting" || n.fn === "currentUser") {
+          rejectImmutableExpr(position, `${String(n.fn)} is PG-vendor and non-portable`);
+        }
+        if (typeof n.fn !== "string" || !IMMUTABLE_SCALAR_FNS.has(n.fn)) {
+          rejectImmutableExpr(position, `function ${JSON.stringify(n.fn)} is not an immutable c.fn helper`);
+        }
+        if (!Array.isArray(n.args)) {
+          rejectImmutableExpr(position, "function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "fnSynth": {
+        if (n.fn === "now" || n.fn === "genRandomUuid") {
+          rejectImmutableExpr(position, `${String(n.fn)} is volatile`);
+        }
+        if (typeof n.fn !== "string" || !IMMUTABLE_SYNTH_FNS.has(n.fn)) {
+          rejectImmutableExpr(position, `synthesized function ${JSON.stringify(n.fn)} is not immutable here`);
+        }
+        if (!Array.isArray(n.args)) {
+          rejectImmutableExpr(position, "synthesized function expression args must be an array");
+        }
+        n.args.forEach(walk);
+        return;
+      }
+      case "binOp":
+        walk(n.lhs);
+        walk(n.rhs);
+        return;
+      case "unaryOp":
+        walk(n.operand);
+        return;
+      case "case": {
+        if (!Array.isArray(n.branches)) {
+          rejectImmutableExpr(position, "CASE expression branches must be an array");
+        }
+        for (const branch of n.branches) {
+          if (!isPlainObject(branch)) {
+            rejectImmutableExpr(position, "CASE branches must be { when, then } objects");
+          }
+          walk(branch.when);
+          walk(branch.then);
+        }
+        if (n.else !== undefined && n.else !== null) walk(n.else);
+        return;
+      }
+      case "cast":
+        walk(n.operand);
+        return;
+      case "between":
+        walk(n.operand);
+        walk(n.low);
+        walk(n.high);
+        return;
+      case "like":
+        walk(n.operand);
+        walk(n.pattern);
+        return;
+      case "distinctFrom":
+        walk(n.left);
+        walk(n.right);
+        return;
+      case "inList":
+        walk(n.expr);
+        return;
+      case "pgRegexMatch":
+        if (!opts.allowPgImmutable) rejectPgNode("pgRegexMatch");
+        walk(n.expr);
+        if (typeof n.pattern !== "string") {
+          rejectImmutableExpr(position, "pgRegexMatch pattern must be a string");
+        }
+        return;
+      case "pgColumnSize":
+        if (!opts.allowPgImmutable) rejectPgNode("pgColumnSize");
+        walk(n.expr);
+        return;
+      case "extract":
+        if (typeof n.field !== "string" || !portableExtractFieldSet.has(n.field)) {
+          rejectImmutableExpr(position, `extract field ${JSON.stringify(n.field)} is not portable here`);
+        }
+        walk(n.from);
+        return;
+      case "pgExtract":
+        if (!opts.allowPgImmutable) rejectPgNode("pgExtract");
+        if (typeof n.field !== "string" || !pgExtractFieldSet.has(n.field)) {
+          rejectImmutableExpr(position, `pgExtract field ${JSON.stringify(n.field)} is not a PG extract field`);
+        }
+        walk(n.from);
+        return;
+      case "pgInterval":
+        if (!opts.allowPgImmutable) rejectPgNode("pgInterval");
+        if (!isPlainObject(n.duration)) {
+          rejectImmutableExpr(position, "pgInterval duration must be an object");
+        }
+        try {
+          pgDuration(n.duration);
+        } catch (error) {
+          rejectImmutableExpr(position, error instanceof Error ? error.message : "pgInterval duration is invalid");
+        }
+        return;
+      case "dialect":
+        for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
+          if (n[leg] !== undefined && n[leg] !== null) walk(n[leg]);
+        }
+        return;
+      default:
+        rejectImmutableExpr(position, `unsupported expression node ${JSON.stringify(n.node)}`);
+    }
+  };
+  walk(expr);
+}
+
 /** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
 export function __pgResolveExpr(slot: ExprFn | ExprChainType | Expr | undefined): Node | undefined {
   return resolveExpr(slot as ExprFn | ExprChainType | Node | undefined);
 }
 
-function resolveSet(set: Record<string, ExprFn>): Record<string, Node> {
+function resolveSetValue(value: DmlSetValue): unknown {
+  const synth = nativeFnSynthNode(value);
+  if (synth !== undefined) return synth;
+  if (typeof value === "function") return resolveExpr(value as ExprFn)!;
+  return toIrValue(value);
+}
+
+function resolveSet(set: Record<string, DmlSetValue>): Record<string, unknown> {
   if (!set || typeof set !== "object") {
-    throw structuredError("OP_INVALID", "`set` must be an object of column → expression");
+    throw structuredError("OP_INVALID", "`set` must be an object of column → DML value");
   }
-  const out: Record<string, Node> = {};
-  for (const col of Object.keys(set)) out[col] = resolveExpr(set[col])!;
+  const out: Record<string, unknown> = {};
+  for (const col of Object.keys(set)) out[col] = resolveSetValue(set[col]);
   return out;
 }
 
@@ -1247,31 +2236,24 @@ const PARTITION_BOUND_SENTINEL = "__zeroshipPartitionBound";
 export const minValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "minValue" }) as PartitionBoundSentinel;
 export const maxValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "maxValue" }) as PartitionBoundSentinel;
 
-function partitionSpec(kind: PartitionSpec["kind"], columns: readonly string[], what: string): PartitionSpec {
-  return { kind, columns: stringArray(columns, what) } as PartitionSpec;
-}
-
-export const p: PartitionBuilder = Object.freeze({
-  range(columns: readonly string[]) {
-    return partitionSpec("range", columns, "p.range(columns)");
-  },
-  list(columns: readonly string[]) {
-    return partitionSpec("list", columns, "p.list(columns)");
-  },
-  hash(columns: readonly string[]) {
-    return partitionSpec("hash", columns, "p.hash(columns)");
-  },
-});
-
-function partitionSpecToIr(spec: PartitionSpec | undefined, what: string): Node | undefined {
+function partitionSpecToIr(spec: PartitionByInput | undefined, what: string): Node | undefined {
   if (spec === undefined) return undefined;
   if (!spec || typeof spec !== "object") {
-    throw structuredError("OP_INVALID", `${what} must be built with p.range/list/hash`);
+    throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
   }
-  if (spec.kind !== "range" && spec.kind !== "list" && spec.kind !== "hash") {
-    throw structuredError("OP_INVALID", `${what}.kind must be "range", "list", or "hash"`);
+  const shape = spec as { range?: unknown; list?: unknown; hash?: unknown; whenUnsupported?: unknown };
+  const variants = (shape.range !== undefined ? 1 : 0) + (shape.list !== undefined ? 1 : 0) + (shape.hash !== undefined ? 1 : 0);
+  if (variants !== 1) {
+    throw structuredError("OP_INVALID", `${what} must be exactly one of { range }, { list }, or { hash }`);
   }
-  return partitionSpec(spec.kind, spec.columns, `${what}.columns`);
+  const collapse = shape.whenUnsupported === undefined ? undefined : shape.whenUnsupported;
+  if (collapse !== undefined && collapse !== "collapse") {
+    throw structuredError("OP_INVALID", `${what}.whenUnsupported must be "collapse" when present`);
+  }
+  const affirmation = { collapse: collapse === "collapse" };
+  if (shape.range !== undefined) return { kind: "range", columns: stringArray(shape.range, `${what}.range`), ...affirmation };
+  if (shape.list !== undefined) return { kind: "list", columns: stringArray(shape.list, `${what}.list`), ...affirmation };
+  return { kind: "hash", columns: stringArray(shape.hash, `${what}.hash`), ...affirmation };
 }
 
 function requireU32(v: unknown, what: string): number | undefined {
@@ -1302,23 +2284,30 @@ function partitionBoundListToIr(values: unknown, what: string): Node[] {
   return values.map((value, i) => partitionBoundValueToIr(value as PartitionBoundInput, `${what}[${i}]`));
 }
 
-function partitionBoundsFromForValues(args: unknown): Node {
+function partitionBoundToIr(args: PartitionBoundArgs | unknown): Node {
   if (!args || typeof args !== "object") {
     throw structuredError(
       "OP_INVALID",
-      "partition(name).of(parent).forValues(args) needs a bounds object",
+      "table(parent).partition(name).create(bound) needs a bounds object",
     );
   }
-  const bounds = args as { from?: unknown; to?: unknown; in?: unknown; modulus?: unknown; remainder?: unknown };
+  const bounds = args as { from?: unknown; to?: unknown; in?: unknown; modulus?: unknown; remainder?: unknown; default?: unknown };
   const hasRange = bounds.from !== undefined || bounds.to !== undefined;
   const hasList = bounds.in !== undefined;
   const hasHash = bounds.modulus !== undefined || bounds.remainder !== undefined;
-  const variantCount = (hasRange ? 1 : 0) + (hasList ? 1 : 0) + (hasHash ? 1 : 0);
+  const hasDefault = bounds.default !== undefined;
+  const variantCount = (hasRange ? 1 : 0) + (hasList ? 1 : 0) + (hasHash ? 1 : 0) + (hasDefault ? 1 : 0);
   if (variantCount !== 1) {
     throw structuredError(
       "OP_INVALID",
-      "partition bounds must be exactly one of { from, to }, { in }, or { modulus, remainder }",
+      "partition bounds must be exactly one of { from, to }, { in }, { modulus, remainder }, or { default: true }",
     );
+  }
+  if (hasDefault) {
+    if (bounds.default !== true) {
+      throw structuredError("OP_INVALID", "partition bounds.default must be true");
+    }
+    return { kind: "default" };
   }
   if (hasRange) {
     return {
@@ -1370,26 +2359,20 @@ function recordCreateEnum(name: string, args: CreateEnumArgs): void {
       "enumType(name).create({ values }): values must be a non-empty string[] (an empty enum renders invalid SQL on MySQL/SQLite)",
     );
   }
-  pushOrDeferUp(
-    compact({
-      op: "createEnum",
-      name,
-      schema: args.schema,
-      values: enumValues,
-    }),
-  );
+  emitCreateEnum({
+    name,
+    schema: args.schema,
+    values: enumValues,
+  });
 }
 
 function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
   requireString(name, "enumType(name).drop()");
-  push(
-    compact({
-      op: "dropEnum",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropEnum({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordCreateDomain(name: string, args: CreateDomainArgs): void {
@@ -1400,29 +2383,23 @@ function recordCreateDomain(name: string, args: CreateDomainArgs): void {
   if (args.notNull !== undefined && typeof args.notNull !== "boolean") {
     throw structuredError("OP_INVALID", "domain(name).create({ notNull }): notNull must be a boolean");
   }
-  pushOrDeferUp(
-    compact({
-      op: "createDomain",
-      name,
-      schema: args.schema,
-      as: colTypeOf(args.as),
-      check: resolveExpr(args.check as ExprFn | ExprChainType | Node | undefined),
-      default: args.default === undefined ? undefined : toIrDefault(args.default),
-      notNull: args.notNull,
-    }),
-  );
+  emitCreateDomain({
+    name,
+    schema: args.schema,
+    as: colTypeOf(args.as),
+    check: resolveDomainCheck(args.check as DomainCheckFn | ExprChainType | Node | undefined, "domain(name).create({ check })"),
+    default: args.default === undefined ? undefined : toIrDefault(args.default),
+    notNull: args.notNull,
+  });
 }
 
 function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
   requireString(name, "domain(name).drop()");
-  push(
-    compact({
-      op: "dropDomain",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropDomain({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void {
@@ -1440,21 +2417,18 @@ function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void
       `sequence.create({ as }): as must be one of ${SEQUENCE_AS_TYPES.join(" | ")}; got ${JSON.stringify(asType)}`,
     );
   }
-  pushOrDeferUp(
-    compact({
-      op: "createSequence",
-      name,
-      schema: args.schema,
-      as: asType,
-      increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
-      start: requireSafeI64(args.start, "sequence.create({ start })"),
-      minValue,
-      maxValue,
-      cache: requireSequenceCache(args.cache, "sequence.create({ cache })"),
-      cycle: args.cycle,
-      ownedBy: args.ownedBy,
-    }),
-  );
+  emitCreateSequence({
+    name,
+    schema: args.schema,
+    as: asType,
+    increment: requireSequenceIncrement(args.increment, "sequence.create({ increment })"),
+    start: requireSafeI64(args.start, "sequence.create({ start })"),
+    minValue,
+    maxValue,
+    cache: requireSequenceCache(args.cache, "sequence.create({ cache })"),
+    cycle: args.cycle,
+    ownedBy: args.ownedBy,
+  });
 }
 
 function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
@@ -1465,45 +2439,117 @@ function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
   const minValue = requireNullableSafeI64(args.minValue, "sequence.alter({ minValue })");
   const maxValue = requireNullableSafeI64(args.maxValue, "sequence.alter({ maxValue })");
   requireSequenceBounds(minValue, maxValue, "sequence.alter(args)");
-  push(
-    compact({
-      op: "alterSequence",
-      name,
-      schema: args.schema,
-      increment: requireSequenceIncrement(args.increment, "sequence.alter({ increment })"),
-      restart: requireNullableSafeI64(args.restart, "sequence.alter({ restart })"),
-      minValue,
-      maxValue,
-      cache: requireSequenceCache(args.cache, "sequence.alter({ cache })"),
-      cycle: args.cycle,
-      ownedBy: args.ownedBy,
-    }),
-  );
+  emitAlterSequence({
+    name,
+    schema: args.schema,
+    increment: requireSequenceIncrement(args.increment, "sequence.alter({ increment })"),
+    restart: requireNullableSafeI64(args.restart, "sequence.alter({ restart })"),
+    minValue,
+    maxValue,
+    cache: requireSequenceCache(args.cache, "sequence.alter({ cache })"),
+    cycle: args.cycle,
+    ownedBy: args.ownedBy,
+  });
 }
 
 function recordDropSequence(name: string, args: DropSequenceArgs = {}): void {
   requireString(name, "sequence(name)");
-  push(
-    compact({
-      op: "dropSequence",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropSequence({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
+}
+
+function requirePlainArgs(args: unknown, what: string): asserts args is Record<string, unknown> {
+  if (args === null || typeof args !== "object") {
+    throw structuredError("OP_INVALID", `${what} needs an object`);
+  }
+}
+
+function recordCreateSchema(name: string, args: SchemaCreateArgs = {}): void {
+  requireString(name, "schema(name)");
+  requirePlainArgs(args, "schema(name).create(args)");
+  emitCreateSchema({
+    name,
+    ifNotExists: args.ifNotExists,
+    authorization: args.authorization,
+  });
+}
+
+function recordDropSchema(name: string, args: SchemaDropArgs = {}): void {
+  requireString(name, "schema(name)");
+  requirePlainArgs(args, "schema(name).drop(args)");
+  emitDropSchema({
+    name,
+    ifExists: args.ifExists,
+    cascade: args.cascade,
+  });
+}
+
+function recordCreateExtension(name: string, args: ExtensionCreateArgs = {}): void {
+  requireString(name, "extension(name)");
+  requirePlainArgs(args, "extension(name).create(args)");
+  emitCreateExtension({
+    name,
+    ifNotExists: args.ifNotExists,
+    schema: args.schema,
+  });
+}
+
+function recordDropExtension(name: string, args: ExtensionDropArgs = {}): void {
+  requireString(name, "extension(name)");
+  requirePlainArgs(args, "extension(name).drop(args)");
+  emitDropExtension({
+    name,
+    ifExists: args.ifExists,
+  });
+}
+
+function recordCreateRole(name: string, args: RoleCreateArgs = {}): void {
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).create(args)");
+  emitCreateRole({
+    name,
+    login: args.login,
+    password: args.password,
+    bypassRls: args.bypassRls,
+    createRole: args.createRole,
+    createDb: args.createDb,
+    superuser: args.superuser,
+    inRole: args.inRole,
+    setSearchPath: args.setSearchPath,
+    ifNotExists: args.ifNotExists,
+  });
+}
+
+function recordSetRoleOptions(name: string, args: RoleSetOptionsArgs): void {
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).setOptions(args)");
+  emitAlterRole({
+    name,
+    setSearchPath: args.setSearchPath,
+    resetSearchPath: args.resetSearchPath,
+  });
+}
+
+function recordDropRole(name: string, args: RoleDropArgs = {}): void {
+  requireString(name, "role(name)");
+  requirePlainArgs(args, "role(name).drop(args)");
+  emitDropRole({
+    name,
+    ifExists: args.ifExists,
+  });
 }
 
 function recordComment(target: CommentTargetArg, text: string | null): void {
   if (text !== null && typeof text !== "string") {
     throw structuredError("OP_INVALID", "comment text must be a string or null");
   }
-  push(
-    compact({
-      op: "comment",
-      target: commentTargetToIr(target),
-      comment: text === null ? undefined : text,
-    }),
-  );
+  emitComment({
+    target: commentTargetToIr(target),
+    comment: text === null ? undefined : text,
+  });
 }
 
 function commentTargetToIr(target: CommentTargetArg): Node {
@@ -1540,7 +2586,11 @@ function commentTargetToIr(target: CommentTargetArg): Node {
 // recorder twin emit (byte-identical IR except the C1 FK-actions delta). They are
 // internal — only the fluent `table()` handle calls them.
 
-function recordCreateTable(name: string, args: CreateTableArgs): void {
+function recordCreateTable(
+  name: string,
+  args: CreateTableArgs,
+  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+): void {
   const cols: Node[] = [];
   const constraints: Node[] = [];
   const indexes: Node[] = [];
@@ -1562,7 +2612,10 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
     constraints.push(compact({ name: uq.name, kind: { kind: "unique", columns: uq.columns } }));
   }
   for (const ck of args.checks ?? []) {
-    constraints.push(compact({ name: ck.name, kind: { kind: "check", expr: resolveExpr(ck.expr) } }));
+    constraints.push(compact({
+      name: ck.name,
+      kind: { kind: "check", expr: checkExprResolver(ck.expr as CheckExprSlot, "check constraint") },
+    }));
   }
   for (const exclusion of args.exclusions ?? []) {
     constraints.push(exclusionConstraintFromSpec(exclusion));
@@ -1582,34 +2635,35 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
     );
   }
   for (const idx of args.indexes ?? []) {
+    if (!Array.isArray(idx.on)) {
+      throw structuredError("OP_INVALID", "create({ indexes }) index needs { on: IndexElementArg[] }");
+    }
     indexes.push(
       compact({
         name: idx.name,
-        columns: idx.columns.map(indexElementToIr),
+        columns: idx.on.map(indexElementToIr),
         unique: idx.unique,
         using: idx.using,
-        where: resolveExpr(idx.where),
+        where: resolveImmutableExpr(idx.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
         include: indexIncludeToIr(idx.include),
         with: indexWithToIr(idx.with),
         only: requireOptionalBoolean(idx.only, "index only"),
+        nullsNotDistinct: requireOptionalBoolean(idx.nullsNotDistinct, "index nullsNotDistinct"),
       }),
     );
   }
 
-  push(
-    compact({
-      op: "createTable",
-      name,
-      columns: cols,
-      primaryKey,
-      constraints: constraints.length ? constraints : undefined,
-      indexes: indexes.length ? indexes : undefined,
-      partitionBy: partitionSpecToIr(args.partitionBy, "create({ partitionBy })"),
-      runtimeOptions: runtimeOptionsFromCreateArgs(args),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitCreateTable({
+    name,
+    columns: cols,
+    primaryKey,
+    constraints: constraints.length ? constraints : undefined,
+    indexes: indexes.length ? indexes : undefined,
+    partitionBy: partitionSpecToIr(args.partitionBy, "create({ partitionBy })"),
+    runtimeOptions: runtimeOptionsFromCreateArgs(args),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordCreatePartition(
@@ -1618,16 +2672,27 @@ function recordCreatePartition(
   bounds: Node,
   args: { ifNotExists?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "createPartition",
-      name,
-      of: parent,
-      bounds,
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitCreatePartition({
+    name,
+    of: parent,
+    bounds,
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordAttachPartition(
+  parent: string,
+  name: string,
+  bound: Node,
+  args: { schema?: string },
+): void {
+  emitAttachPartition({
+    parent,
+    name,
+    bound,
+    schema: args.schema,
+  });
 }
 
 function recordDetachPartition(
@@ -1635,59 +2700,66 @@ function recordDetachPartition(
   name: string,
   args: { concurrently?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "detachPartition",
-      parent,
-      name,
-      schema: args.schema,
-      concurrently: args.concurrently,
-    }),
-  );
+  emitDetachPartition({
+    parent,
+    name,
+    schema: args.schema,
+    concurrently: args.concurrently,
+  });
 }
 
 function recordDropPartition(
+  parent: string,
   name: string,
   args: { ifExists?: boolean; cascade?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "dropPartition",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-      cascade: args.cascade,
-    }),
-  );
+  emitDropPartition({
+    parent,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+    cascade: args.cascade,
+  });
 }
 
 function recordSetTableOptions(
   table: string,
   args: { softDelete?: boolean; versioning?: boolean; strictness?: TableStrictness; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "setTableOptions",
-      table,
-      options: runtimeOptionsPatchFromArgs(args),
-      schema: args.schema,
-    }),
-  );
+  emitSetTableOptions({
+    table,
+    options: runtimeOptionsPatchFromArgs(args),
+    schema: args.schema,
+  });
+}
+
+function recordSetRls(
+  table: string,
+  args: { enabled?: boolean; forced?: boolean; schema?: string },
+): void {
+  const enabled = requireOptionalBoolean(args.enabled, ".setRls({ enabled })");
+  const forced = requireOptionalBoolean(args.forced, ".setRls({ forced })");
+  if (enabled === undefined && forced === undefined) {
+    throw structuredError("OP_INVALID", ".setRls needs at least one of { enabled, forced }");
+  }
+  emitSetRls({
+    table,
+    schema: args.schema,
+    enabled,
+    forced,
+  });
 }
 
 function recordDropTable(
   table: string,
   args: { ifExists?: boolean; cascade?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "dropTable",
-      table,
-      cascade: args.cascade,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropTable({
+    table,
+    cascade: args.cascade,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordRenameTable(
@@ -1695,15 +2767,12 @@ function recordRenameTable(
   to: string,
   args: { ifExists?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "renameTable",
-      table,
-      to,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitRenameTable({
+    table,
+    to,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordAddColumn(
@@ -1712,47 +2781,29 @@ function recordAddColumn(
   type: ColumnDefImpl,
   args: { ifNotExists?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "addColumn",
-      table,
-      column,
-      ...type.__toAddColumnTail(),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitAddColumn({
+    table,
+    column,
+    ...type.__toAddColumnTail(),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
   // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: emit a
   // follow-on unique constraint (mirroring the createTable per-column `.unique()`
   // image, which rides the column's `unique:true` field — but an ADD COLUMN has no
-  // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT). Likewise a
-  // `.primaryKey()` on an added column hoists a pk add.
+  // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT).
   //
-  // A PRIMARY KEY already IMPLIES uniqueness, so when BOTH are set the follow-on
-  // UNIQUE is redundant DDL (an extra index/constraint) — suppress it when
-  // `_primaryKey` is set, mirroring how the differ never emits a separate UNIQUE
-  // for the PK column. Only the pk add is recorded.
-  if (type._unique && !type._primaryKey) {
-    push(
-      compact({
-        op: "addConstraint",
-        table,
-        constraint: { kind: { kind: "unique", columns: [column] } },
-        schema: args.schema,
-        existenceGuard: ifNotExistsGuard(args.ifNotExists),
-      }),
-    );
-  }
-  if (type._primaryKey) {
-    push(
-      compact({
-        op: "addConstraint",
-        table,
-        constraint: { kind: { kind: "pk", columns: [column] } },
-        schema: args.schema,
-        existenceGuard: ifNotExistsGuard(args.ifNotExists),
-      }),
-    );
+  // There is NO add-column PRIMARY KEY follow-on: primary key is create-time only
+  // (`create({ primaryKey })` / the `.primaryKey()` facet on a create() column), so
+  // the always-refused user PK constraint shape is deleted — `.primaryKey()` on an
+  // added column records no pk op, and the `.unique()` follow-on is unconditional.
+  if (type._unique) {
+    emitAddColumnUnique({
+      table,
+      constraint: { kind: { kind: "unique", columns: [column] } },
+      schema: args.schema,
+      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+    });
   }
 }
 
@@ -1761,15 +2812,12 @@ function recordDropColumn(
   column: string,
   args: { ifExists?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "dropColumn",
-      table,
-      column,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropColumn({
+    table,
+    column,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordRenameColumn(
@@ -1779,16 +2827,13 @@ function recordRenameColumn(
   type: ColumnDefType,
   args: { schema?: string },
 ): void {
-  push(
-    compact({
-      op: "renameColumn",
-      table,
-      from,
-      to,
-      type: colTypeOf(type),
-      schema: args.schema,
-    }),
-  );
+  emitRenameColumn({
+    table,
+    from,
+    to,
+    type: colTypeOf(type),
+    schema: args.schema,
+  });
 }
 
 function recordSetColumnType(
@@ -1797,45 +2842,39 @@ function recordSetColumnType(
   change: { to: ColumnDefType; using?: ExprFn; schema?: string },
 ): void {
   requireColumnDef(change.to, ".column(name).setType({ to })");
-  push(
-    compact({
-      op: "setColumnType",
-      table,
-      column: name,
-      toType: colTypeOf(change.to),
-      using: resolveExpr(change.using),
-      schema: change.schema,
-    }),
-  );
+  emitSetColumnType({
+    table,
+    column: name,
+    toType: colTypeOf(change.to),
+    using: resolveExpr(change.using),
+    schema: change.schema,
+  });
 }
 
 function recordSetColumnNotNull(table: string, name: string, args: { schema?: string }): void {
-  push(compact({ op: "setColumnNotNull", table, column: name, schema: args.schema }));
+  emitSetColumnNotNull({ table, column: name, schema: args.schema });
 }
 
 function recordDropColumnNotNull(table: string, name: string, args: { schema?: string }): void {
-  push(compact({ op: "dropColumnNotNull", table, column: name, schema: args.schema }));
+  emitDropColumnNotNull({ table, column: name, schema: args.schema });
 }
 
 function recordSetColumnDefault(
   table: string,
   name: string,
-  value: DefaultValue,
+  value: DefaultValue | DefaultExprFn,
   args: { schema?: string },
 ): void {
-  push(
-    compact({
-      op: "setColumnDefault",
-      table,
-      column: name,
-      value: toIrDefault(value),
-      schema: args.schema,
-    }),
-  );
+  emitSetColumnDefault({
+    table,
+    column: name,
+    value: toIrDefault(value),
+    schema: args.schema,
+  });
 }
 
 function recordDropColumnDefault(table: string, name: string, args: { schema?: string }): void {
-  push(compact({ op: "dropColumnDefault", table, column: name, schema: args.schema }));
+  emitDropColumnDefault({ table, column: name, schema: args.schema });
 }
 
 /** Build an `IrConstraint` of kind `fk`. **C1**: `onDelete`/`onUpdate` ARE
@@ -1849,6 +2888,7 @@ function fkConstraintFromSpec(spec: {
   onUpdate?: RefAction;
   deferrable?: boolean;
   initiallyDeferred?: boolean;
+  notValid?: boolean;
   schema?: string;
 }): Node {
   if (!spec || typeof spec !== "object" || !spec.references) {
@@ -1874,6 +2914,8 @@ function fkConstraintFromSpec(spec: {
       onUpdate: spec.onUpdate,
       deferrable: spec.deferrable,
       initiallyDeferred: spec.initiallyDeferred,
+      // PG-only online constraint adoption; refused off Postgres at validate.
+      notValid: spec.notValid,
     }),
   });
 }
@@ -1888,28 +2930,27 @@ function recordAddForeignKey(
     onUpdate?: RefAction;
     deferrable?: boolean;
     initiallyDeferred?: boolean;
+    notValid?: boolean;
     ifNotExists?: boolean;
     schema?: string;
   },
 ): void {
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: fkConstraintFromSpec({
-        name,
-        columns: args.columns,
-        references: args.references,
-        onDelete: args.onDelete,
-        onUpdate: args.onUpdate,
-        deferrable: args.deferrable,
-        initiallyDeferred: args.initiallyDeferred,
-        schema: args.schema,
-      }),
+  emitAddForeignKey({
+    table,
+    constraint: fkConstraintFromSpec({
+      name,
+      columns: args.columns,
+      references: args.references,
+      onDelete: args.onDelete,
+      onUpdate: args.onUpdate,
+      deferrable: args.deferrable,
+      initiallyDeferred: args.initiallyDeferred,
+      notValid: args.notValid,
       schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
-  );
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordAddUnique(
@@ -1920,34 +2961,51 @@ function recordAddUnique(
   if (!Array.isArray(args.columns)) {
     throw structuredError("OP_INVALID", ".unique(name).add needs { columns: string[] }");
   }
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: compact({ name, kind: { kind: "unique", columns: args.columns } }),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitAddUnique({
+    table,
+    constraint: compact({ name, kind: { kind: "unique", columns: args.columns } }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordAddCheck(
   table: string,
   name: string,
-  args: { expr: ExprFn; ifNotExists?: boolean; schema?: string },
+  args: { expr: CheckExprFn | PgCheckExprFn; notValid?: boolean; ifNotExists?: boolean; schema?: string },
+  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
 ): void {
   if (!args || args.expr === undefined) {
     throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
   }
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: compact({ name, kind: { kind: "check", expr: resolveExpr(args.expr) } }),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  emitAddCheck({
+    table,
+    constraint: compact({
+      name,
+      // `notValid` is PG-only online constraint adoption; compacted out when absent
+      // so an ordinary CHECK is byte-identical to the pre-slice wire image.
+      kind: compact({
+        kind: "check",
+        expr: checkExprResolver(args.expr as CheckExprSlot, "check constraint"),
+        notValid: args.notValid,
+      }),
     }),
-  );
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
+}
+
+function recordValidateConstraint(
+  table: string,
+  name: string,
+  args: { ifExists?: boolean; schema?: string },
+): void {
+  emitValidateConstraint({
+    table,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function exclusionConstraintFromSpec(
@@ -1965,7 +3023,10 @@ function exclusionConstraintFromSpec(
       kind: "exclusion",
       usingMethod: spec.using,
       elements: spec.elements.map(exclusionElementToIr),
-      wherePredicate: resolveExpr(spec.where as ExprFn | ExprChainType | Node | undefined),
+      wherePredicate: resolveImmutableExpr(
+        spec.where as IndexExprFn | ExprChainType | Node | undefined,
+        "exclusion predicate",
+      ),
       deferrable: spec.deferrable,
       initiallyDeferred: spec.initiallyDeferred,
     }),
@@ -2005,27 +3066,35 @@ function indexElementToIr(element: IndexElementArg): Node {
     requireString(element, "index element column");
     return { kind: "column", name: element };
   }
-  if (element && typeof element === "object" && "kind" in element) {
-    if (element.kind === "column") {
-      requireString((element as { name?: unknown }).name, "index column element name");
+  if (element && typeof element === "object") {
+    if ("column" in element) {
+      requireString((element as { column?: unknown }).column, "index column element column");
       const order = indexColumnOrderToIr((element as { order?: unknown }).order);
-      return order === "desc"
-        ? { kind: "column", name: (element as { name: string }).name, order }
-        : { kind: "column", name: (element as { name: string }).name };
+      // PG-vendor per-column facets: carried through when present, elided when
+      // absent (byte-neutral wire shape). Validate gates them fail-closed off PG.
+      const opclass = indexElementFacet((element as { opclass?: unknown }).opclass, "index column opclass");
+      const collation = indexElementFacet((element as { collation?: unknown }).collation, "index column collation");
+      return compact({
+        kind: "column",
+        name: (element as { column: string }).column,
+        order: order === "desc" ? order : undefined,
+        opclass,
+        collation,
+      }) as Node;
     }
-    if (element.kind === "expr") {
-      const expr = resolveExpr((element as { expr?: ExprFn | ExprChainType | Node }).expr);
+    if ("expr" in element) {
+      indexColumnOrderToIr((element as { order?: unknown }).order);
+      const expr = resolveImmutableExpr(
+        (element as { expr?: IndexExprFn | ExprChainType | Node }).expr,
+        "index expression element",
+      );
       if (!expr) {
-        throw structuredError("OP_INVALID", "index expr element needs { kind: \"expr\", expr }");
+        throw structuredError("OP_INVALID", "index expr element needs { expr }");
       }
       return { kind: "expr", expr };
     }
   }
-  const expr = resolveExpr(element as ExprFn | ExprChainType | Node | undefined);
-  if (!expr) {
-    throw structuredError("OP_INVALID", "index element must be a column name or expression");
-  }
-  return { kind: "expr", expr };
+  throw structuredError("OP_INVALID", "index element must be a column name, { column }, or { expr }");
 }
 
 function indexColumnOrderToIr(order: unknown): "desc" | undefined {
@@ -2043,15 +3112,12 @@ function recordAddExclusion(
   name: string,
   args: ExclusionAddArgs,
 ): void {
-  push(
-    compact({
-      op: "addConstraint",
-      table,
-      constraint: exclusionConstraintFromSpec({ ...args, name }),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitAddExclusion({
+    table,
+    constraint: exclusionConstraintFromSpec({ ...args, name }),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordDropConstraint(
@@ -2059,70 +3125,52 @@ function recordDropConstraint(
   name: string,
   args: { ifExists?: boolean; schema?: string },
 ): void {
-  push(
-    compact({
-      op: "dropConstraint",
-      table,
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropConstraint({
+    table,
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function recordCreateIndex(
   table: string,
   name: string,
-  args: {
-    columns: IndexElementArg[];
-    unique?: boolean;
-    using?: import("./types.js").IndexMethod;
-    where?: ExprFn;
-    include?: readonly string[];
-    with?: IndexStorageParamsArg;
-    only?: boolean;
-    ifNotExists?: boolean;
-    schema?: string;
-  },
+  args: PgIndexAdd,
 ): void {
-  if (!Array.isArray(args.columns)) {
-    throw structuredError("OP_INVALID", ".index(name).add needs { columns: IndexElementArg[] }");
+  if (!Array.isArray(args.on)) {
+    throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
   }
-  push(
-    compact({
-      op: "createIndex",
-      table,
-      columns: args.columns.map(indexElementToIr),
-      name,
-      unique: args.unique,
-      using: args.using,
-      where: resolveExpr(args.where),
-      include: indexIncludeToIr(args.include),
-      with: indexWithToIr(args.with),
-      only: requireOptionalBoolean(args.only, "index only"),
-      schema: args.schema,
-      existenceGuard: ifNotExistsGuard(args.ifNotExists),
-    }),
-  );
+  emitCreateIndex({
+    table,
+    columns: args.on.map(indexElementToIr),
+    name,
+    unique: args.unique,
+    using: args.using,
+    where: resolveImmutableExpr(args.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
+    include: indexIncludeToIr(args.include),
+    with: indexWithToIr(args.with),
+    only: requireOptionalBoolean(args.only, "index only"),
+    nullsNotDistinct: requireOptionalBoolean(args.nullsNotDistinct, "index nullsNotDistinct"),
+    schema: args.schema,
+    existenceGuard: ifNotExistsGuard(args.ifNotExists),
+  });
 }
 
 function recordDropIndex(
   table: string,
   name: string,
-  args: { ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string },
+  args: PgIndexDropArgs,
 ): void {
-  push(
-    compact({
-      op: "dropIndex",
-      name,
-      table,
-      // `unique` drives the destructive/approval gating at apply — preserved here.
-      unique: args.unique,
-      concurrently: args.concurrently,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-    }),
-  );
+  emitDropIndex({
+    name,
+    table,
+    // `unique` drives the destructive/approval gating at apply — preserved here.
+    unique: args.unique,
+    concurrently: args.concurrently,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+  });
 }
 
 function normalizeInsertRows<R extends Row = Row>(
@@ -2156,16 +3204,13 @@ function normalizeInsertRows<R extends Row = Row>(
 
 function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): void {
   const normalized = normalizeInsertRows(args.rows, "insert({ rows })");
-  push(
-    compact({
-      op: "insert",
-      table,
-      columns: normalized.columns,
-      rows: normalized.rows,
-      onConflict: normalizeOnConflict(args.onConflict),
-      schema: args.schema,
-    }),
-  );
+  emitInsert({
+    table,
+    columns: normalized.columns,
+    rows: normalized.rows,
+    onConflict: normalizeOnConflict(args.onConflict),
+    schema: args.schema,
+  });
 }
 
 function normalizeOnConflict(
@@ -2179,31 +3224,25 @@ function normalizeOnConflict(
 }
 
 function recordUpdate(table: string, args: UpdateArgs): void {
-  push(
-    compact({
-      op: "update",
-      table,
-      set: resolveSet(args.set),
-      where: resolveExpr(args.where),
-      batch: args.batch,
-      schema: args.schema,
-    }),
-  );
+  emitUpdate({
+    table,
+    set: resolveSet(args.set),
+    where: resolveExpr(args.where),
+    batch: args.batch,
+    schema: args.schema,
+  });
 }
 
 function recordDel(table: string, args: DelArgs): void {
   if (args.where === undefined || args.where === null) {
-    throw structuredError("OP_INVALID", "del({ where }): where is mandatory (no unfiltered delete)");
+    throw structuredError("OP_INVALID", "delete({ where }): where is mandatory (no unfiltered delete)");
   }
-  push(
-    compact({
-      op: "delete",
-      table,
-      where: resolveExpr(args.where),
-      limit: args.limit,
-      schema: args.schema,
-    }),
-  );
+  emitDelete({
+    table,
+    where: resolveExpr(args.where),
+    limit: args.limit,
+    schema: args.schema,
+  });
 }
 
 const DEFAULT_BACKFILL_CURSOR = "id";
@@ -2211,18 +3250,15 @@ const DEFAULT_BACKFILL_BATCH = 1000;
 
 function recordBackfill(table: string, args: BackfillArgs): void {
   if (args.set === undefined) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
-  push(
-    compact({
-      op: "backfill",
-      table,
-      cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
-      batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
-      set: resolveSet(args.set),
-      filter: resolveExpr(args.where),
-      name: args.name || `backfill_${table}`,
-      schema: args.schema,
-    }),
-  );
+  emitBackfill({
+    table,
+    cursorColumn: args.cursorColumn || DEFAULT_BACKFILL_CURSOR,
+    batchSize: args.batchSize !== undefined ? args.batchSize : DEFAULT_BACKFILL_BATCH,
+    set: resolveSet(args.set),
+    filter: resolveExpr(args.where),
+    name: args.name || `backfill_${table}`,
+    schema: args.schema,
+  });
 }
 
 type SelectAstBuilder = ViewQueryBuilder & { __selectAst(): SelectAst };
@@ -2395,6 +3431,10 @@ function isSelectAst(x: unknown): x is SelectAst {
   return Boolean(x && typeof x === "object" && (x as SelectAst).from !== undefined);
 }
 
+function isRawViewQueryInput(x: unknown): x is { raw: string } {
+  return Boolean(x && typeof x === "object" && Object.prototype.hasOwnProperty.call(x, "raw"));
+}
+
 function resolveSelectAst(as: CreateViewArgs["as"]): SelectAst {
   if (typeof as === "function") {
     const q = viewQueryBuilder();
@@ -2409,49 +3449,37 @@ function resolveSelectAst(as: CreateViewArgs["as"]): SelectAst {
 
 function recordCreateView(name: string, args: CreateViewArgs & { schema?: string }): void {
   if (!args || args.as === undefined) {
-    throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder");
+    throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder or { raw }");
   }
-  push(
-    compact({
-      op: "createView",
+  if (isRawViewQueryInput(args.as)) {
+    requireString(args.as.raw, "view(name).create({ as: { raw } })");
+    emitCreateView({
       name,
       schema: args.schema,
       columns: args.columns,
-      query: { kind: "structured", select: resolveSelectAst(args.as) },
+      query: { kind: "raw", sql: args.as.raw },
       replace: args.replace,
       materialized: args.materialized,
-    }),
-  );
-}
-
-function recordCreateRawView(name: string, args: CreateRawViewArgs & { schema?: string }): void {
-  if (!args || typeof args !== "object") {
-    throw structuredError("OP_INVALID", "view(name).createRaw({ sql }) needs an object");
+    });
+    return;
   }
-  requireString(args.sql, "view(name).createRaw({ sql })");
-  push(
-    compact({
-      op: "createView",
-      name,
-      schema: args.schema,
-      columns: args.columns,
-      query: { kind: "raw", sql: args.sql },
-      replace: args.replace,
-      materialized: args.materialized,
-    }),
-  );
+  emitCreateView({
+    name,
+    schema: args.schema,
+    columns: args.columns,
+    query: { kind: "structured", select: resolveSelectAst(args.as) },
+    replace: args.replace,
+    materialized: args.materialized,
+  });
 }
 
 function recordDropView(name: string, args: DropViewArgs & { schema?: string }): void {
-  push(
-    compact({
-      op: "dropView",
-      name,
-      schema: args.schema,
-      existenceGuard: ifExistsGuard(args.ifExists),
-      materialized: args.materialized,
-    }),
-  );
+  emitDropView({
+    name,
+    schema: args.schema,
+    existenceGuard: ifExistsGuard(args.ifExists),
+    materialized: args.materialized,
+  });
 }
 
 const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"] as const;
@@ -2507,13 +3535,13 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
         schema: args.schema,
       }) as TriggerStmt;
     },
-    del(args) {
+    delete(args) {
       if (!args || typeof args !== "object") {
-        throw structuredError("OP_INVALID", "b.del({ table, where, limit?, schema? }) needs an object");
+        throw structuredError("OP_INVALID", "b.delete({ table, where, limit?, schema? }) needs an object");
       }
-      requireString(args.table, "b.del({ table })");
+      requireString(args.table, "b.delete({ table })");
       if (args.where === undefined || args.where === null) {
-        throw structuredError("OP_INVALID", "b.del({ where }): where is mandatory (no unfiltered delete)");
+        throw structuredError("OP_INVALID", "b.delete({ where }): where is mandatory (no unfiltered delete)");
       }
       return compact({
         stmt: "delete",
@@ -2529,25 +3557,25 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
   };
 }
 
-function resolveTriggerAction(args: CreateTriggerArgs): Node {
+function resolveTriggerAction(args: TriggerCreateArgs): Node {
   const hasExecute = "execute" in args && args.execute !== undefined;
   const hasBody = "body" in args && args.body !== undefined;
   if (hasExecute === hasBody) {
     throw structuredError(
       "OP_INVALID",
-      ".createTrigger(...) needs exactly one action: { execute: string } or { body: (b) => TriggerStmt[] }",
+      ".trigger(name).create(...) needs exactly one action: { execute: string } or { body: (b) => TriggerStmt[] }",
     );
   }
   if (hasExecute) {
-    requireString(args.execute, ".createTrigger({ execute })");
+    requireString(args.execute, ".trigger(name).create({ execute })");
     return { kind: "executeFunction", name: args.execute };
   }
   if (!("body" in args) || typeof args.body !== "function") {
-    throw structuredError("OP_INVALID", ".createTrigger({ body }) must be a function");
+    throw structuredError("OP_INVALID", ".trigger(name).create({ body }) must be a function");
   }
   const statements = args.body(triggerBodyBuilder());
   if (!Array.isArray(statements)) {
-    throw structuredError("OP_INVALID", ".createTrigger({ body }) must return an array of trigger statements");
+    throw structuredError("OP_INVALID", ".trigger(name).create({ body }) must return an array of trigger statements");
   }
   for (const stmt of statements) {
     if (!stmt || typeof stmt !== "object" || typeof (stmt as Node).stmt !== "string") {
@@ -2585,48 +3613,26 @@ export function comment(target: CommentTargetArg, text: string | null): void {
   recordComment(target, text);
 }
 
-export function partition(name: string, opts: PartitionOptions = {}): PartitionHandle {
-  requireString(name, "partition(name, …)");
-  const dflt = opts.schema;
-
-  return {
-    of(parent) {
-      requireString(parent, "partition(name).of(parent)");
-      return {
-        forValues(bounds, args = {}) {
-          recordCreatePartition(name, parent, partitionBoundsFromForValues(bounds), {
-            ifNotExists: args.ifNotExists,
-            schema: pickSchema(args, dflt),
-          });
-        },
-        asDefault(args = {}) {
-          recordCreatePartition(name, parent, { kind: "default" }, {
-            ifNotExists: args.ifNotExists,
-            schema: pickSchema(args, dflt),
-          });
-        },
-      };
-    },
-  };
-}
-
-export function dropPartition(name: string, args: { ifExists?: boolean; cascade?: boolean; schema?: string } = {}): void {
-  requireString(name, "dropPartition(name)");
-  recordDropPartition(name, {
-    ifExists: args.ifExists,
-    cascade: args.cascade,
-    schema: args.schema,
-  });
-}
-
 export function table(name: string, opts: TableOptions = {}): TableHandle {
+  return __makeTableHandle(name, opts);
+}
+
+export function __makePgTableHandle(name: string, opts: TableOptions = {}): PgTableHandle {
+  return __makeTableHandle(name, opts, resolvePgCheckExpr);
+}
+
+export function __makeTableHandle(
+  name: string,
+  opts: TableOptions = {},
+  checkExprResolver: CheckExprResolver = resolveCoreCheckExpr,
+): PgTableHandle {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
 
-  const handle: TableHandle = {
+  const handle: PgTableHandle = {
     // §3.1 — the table itself
     create(args) {
-      recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) });
+      recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
       return handle;
     },
     drop(args = {}) {
@@ -2646,32 +3652,50 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       return handle;
     },
     setOptions(args) {
-      recordSetTableOptions(name, { ...args, schema: pickSchema(args, dflt) });
-      return handle;
-    },
-    softDelete(enabled = true, args = {}) {
-      recordSetTableOptions(name, { softDelete: enabled, schema: pickSchema(args, dflt) });
-      return handle;
-    },
-    withVersioning(enabled = true, args = {}) {
-      recordSetTableOptions(name, { versioning: enabled, schema: pickSchema(args, dflt) });
-      return handle;
-    },
-    strictness(level, args = {}) {
-      recordSetTableOptions(name, { strictness: level, schema: pickSchema(args, dflt) });
+      recordSetTableOptions(name, { ...args, schema: dflt });
       return handle;
     },
     comment(text, args = {}) {
       recordComment({ kind: "table", name, schema: pickSchema(args, dflt) }, text);
       return handle;
     },
-    detachPartition(partitionName, args = {}) {
-      requireString(partitionName, ".detachPartition(name)");
-      recordDetachPartition(name, partitionName, {
-        concurrently: args.concurrently,
-        schema: pickSchema(args, dflt),
-      });
-      return handle;
+    partition(partitionName) {
+      requireString(partitionName, ".partition(name)");
+      const id = registerSelector("partition", partitionName);
+      return {
+        create(bound, args = {}) {
+          terminateSelector(id);
+          recordCreatePartition(partitionName, name, partitionBoundToIr(bound), {
+            ifNotExists: args.ifNotExists,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        attach(bound, args = {}) {
+          terminateSelector(id);
+          recordAttachPartition(name, partitionName, partitionBoundToIr(bound), {
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          recordDropPartition(name, partitionName, {
+            ifExists: args.ifExists,
+            cascade: args.cascade,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+        detach(args = {}) {
+          terminateSelector(id);
+          recordDetachPartition(name, partitionName, {
+            concurrently: args.concurrently,
+            schema: pickSchema(args, dflt),
+          });
+          return handle;
+        },
+      };
     },
     // §3.2 — columns
     column(col): ColumnRef {
@@ -2732,7 +3756,12 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       };
     },
 
-    // §3.3 — constraints
+    // §3.2 — constraints. Selector form is THE grammar (P1: one grammar, one
+    // spelling). The `addForeignKey`/`addCheck` verb twins are DELETED — after
+    // this slice `foreignKey(name).add`/`check(name).add` are the SOLE public
+    // writers of the `addConstraint` fk/check payload (the P1 tier-2 dup —
+    // `addConstraint` once had two public writers per slot — is collapsed; the
+    // census assertions themselves are a later slice).
     foreignKey(fkName): ForeignKeyRef {
       requireString(fkName, ".foreignKey(name)");
       const id = registerSelector("foreignKey", fkName);
@@ -2743,11 +3772,6 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
           return handle;
         },
       };
-    },
-    addForeignKey(fkName, args) {
-      requireString(fkName, ".addForeignKey(name, args)");
-      recordAddForeignKey(name, fkName, { ...args, schema: pickSchema(args, dflt) });
-      return handle;
     },
     unique(uqName): UniqueRef {
       requireString(uqName, ".unique(name)");
@@ -2760,21 +3784,16 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         },
       };
     },
-    check(ckName): CheckRef {
+    check(ckName): PgCheckRef {
       requireString(ckName, ".check(name)");
       const id = registerSelector("check", ckName);
       return {
         add(args) {
           terminateSelector(id);
-          recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) });
+          recordAddCheck(name, ckName, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
           return handle;
         },
       };
-    },
-    addCheck(ckName, expr, args = {}) {
-      requireString(ckName, ".addCheck(name, expr)");
-      recordAddCheck(name, ckName, { expr, ifNotExists: args.ifNotExists, schema: pickSchema(args, dflt) });
-      return handle;
     },
     exclusion(exName): ExclusionRef {
       requireString(exName, ".exclusion(name)");
@@ -2787,7 +3806,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         },
       };
     },
-    constraint(cName): ConstraintRef {
+    constraint(cName): PgConstraintRef {
       requireString(cName, ".constraint(name)");
       const id = registerSelector("constraint", cName);
       return {
@@ -2801,39 +3820,22 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
           recordComment({ kind: "constraint", table: name, name: cName, schema: pickSchema(args, dflt) }, text);
           return handle;
         },
+        validate(args = {}) {
+          terminateSelector(id);
+          recordValidateConstraint(name, cName, { ifExists: args.ifExists, schema: pickSchema(args, dflt) });
+          return handle;
+        },
       };
     },
 
     // §3.4 — indexes
-    index(idxName): IndexRef {
+    index(idxName): PgIndexRef {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
-      const indexDraft: {
-        using?: import("./types.js").IndexMethod;
-        include?: readonly string[];
-        with?: IndexStorageParamsArg;
-        only?: boolean;
-      } = {};
-      const indexRef: IndexRef = {
-        using(method) {
-          indexDraft.using = method;
-          return indexRef;
-        },
-        include(columns) {
-          indexDraft.include = columns;
-          return indexRef;
-        },
-        with(params) {
-          indexDraft.with = params;
-          return indexRef;
-        },
-        only(enabled = true) {
-          indexDraft.only = enabled;
-          return indexRef;
-        },
+      const indexRef: PgIndexRef = {
         add(args) {
           terminateSelector(id);
-          recordCreateIndex(name, idxName, { ...indexDraft, ...args, schema: pickSchema(args, dflt) });
+          recordCreateIndex(name, idxName, { ...args, schema: pickSchema(args, dflt) });
           return handle;
         },
         drop(args = {}) {
@@ -2864,7 +3866,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       recordUpdate(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
-    del(args) {
+    delete(args) {
       recordDel(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;
     },
@@ -2874,78 +3876,74 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     },
 
     // `@zeroship/migrate/pg` — table-scoped privileged primitives.
-    enableRowLevelSecurity() {
-      push(compact({ op: "enableRls", table: name, schema: dflt }));
+    setRls(args) {
+      recordSetRls(name, { ...args, schema: dflt });
       return handle;
     },
-    forceRowLevelSecurity() {
-      push(compact({ op: "forceRls", table: name, schema: dflt }));
-      return handle;
+    policy(policyName) {
+      requireString(policyName, ".policy(name)");
+      const id = registerSelector("policy", policyName);
+      return {
+        create(args) {
+          terminateSelector(id);
+          if (Array.isArray(args.to) && args.to.length === 0) {
+            throw structuredError("OP_INVALID", ".policy(name).create({ to }): to must be a non-empty role array (omit to for PUBLIC)");
+          }
+          if (args.using === undefined) {
+            throw structuredError("OP_INVALID", ".policy(name).create({ using }): using is required (the renderer always emits USING)");
+          }
+          emitCreatePolicy({
+            name: policyName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            forCmd: args.for || "all",
+            to: args.to,
+            using: resolveExpr(args.using),
+            withCheck: resolveExpr(args.withCheck),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          emitDropPolicy({
+            name: policyName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            ifExists: args.ifExists,
+          });
+          return handle;
+        },
+      };
     },
-    disableRowLevelSecurity() {
-      push(compact({ op: "disableRls", table: name, schema: dflt }));
-      return handle;
-    },
-    noForceRowLevelSecurity() {
-      push(compact({ op: "noForceRls", table: name, schema: dflt }));
-      return handle;
-    },
-    createPolicy(args: CreateTablePolicyArgs) {
-      requireString(args.name, ".createPolicy({ name })");
-      if (Array.isArray(args.to) && args.to.length === 0) {
-        throw structuredError("OP_INVALID", ".createPolicy({ to }): to must be a non-empty role array (omit to for PUBLIC)");
-      }
-      if (args.using === undefined) {
-        throw structuredError("OP_INVALID", ".createPolicy({ using }): using is required (the renderer always emits USING)");
-      }
-      push(compact({
-        op: "createPolicy",
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        forCmd: args.for || "all",
-        to: args.to,
-        using: resolveExpr(args.using),
-        withCheck: resolveExpr(args.withCheck),
-      }));
-      return handle;
-    },
-    dropPolicy(args: DropTablePolicyArgs) {
-      requireString(args.name, ".dropPolicy({ name })");
-      push(compact({
-        op: "dropPolicy",
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        ifExists: args.ifExists,
-      }));
-      return handle;
-    },
-    createTrigger(args) {
-      requireString(args.name, ".createTrigger({ name })");
-      push(compact({
-        op: "createTrigger",
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        timing: args.timing,
-        events: args.events,
-        forEach: args.forEach,
-        action: resolveTriggerAction(args),
-        when: resolveExpr(args.when),
-      }));
-      return handle;
-    },
-    dropTrigger(args) {
-      requireString(args.name, ".dropTrigger({ name })");
-      push(compact({
-        op: "dropTrigger",
-        name: args.name,
-        table: name,
-        schema: pickSchema(args, dflt),
-        ifExists: args.ifExists,
-      }));
-      return handle;
+    trigger(triggerName) {
+      requireString(triggerName, ".trigger(name)");
+      const id = registerSelector("trigger", triggerName);
+      return {
+        create(args) {
+          terminateSelector(id);
+          emitCreateTrigger({
+            name: triggerName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            timing: args.timing,
+            events: args.events,
+            forEach: args.forEach,
+            action: resolveTriggerAction(args),
+            when: resolveExpr(args.when),
+          });
+          return handle;
+        },
+        drop(args = {}) {
+          terminateSelector(id);
+          emitDropTrigger({
+            name: triggerName,
+            table: name,
+            schema: pickSchema(args, dflt),
+            ifExists: args.ifExists,
+          });
+          return handle;
+        },
+      };
     },
   };
 
@@ -2960,14 +3958,6 @@ export function view(name: string, opts: ViewOptions = {}): ViewHandle {
   const handle: ViewHandle = {
     create(args) {
       recordCreateView(name, {
-        ...args,
-        schema: pickSchema(args, dflt),
-        columns: pickViewColumns(args, dfltColumns),
-      });
-      return handle;
-    },
-    createRaw(args) {
-      recordCreateRawView(name, {
         ...args,
         schema: pickSchema(args, dflt),
         columns: pickViewColumns(args, dfltColumns),

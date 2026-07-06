@@ -5,8 +5,36 @@
 //! dialect/refusal diagnostics are sourced from this support matrix.
 
 use crate::model::capability::VendorCapability;
+use crate::model::dialect_table::Disposition;
 
 pub use crate::model::validate::Dialect;
+
+impl Disposition {
+    /// Whether this generated-table disposition admits the token on its dialect —
+    /// everything except an explicit `Unsupported` refusal renders/validates
+    /// (portable core, admitted vendor, and the reserved transparent-degradable
+    /// class). This is the single supported-vs-refused reading of the generated
+    /// dialect vocabulary, shared by `Op::support`'s cell assembly and the
+    /// PostgreSQL-only expression gate below.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        !matches!(self, Disposition::Unsupported)
+    }
+}
+
+/// The disposition of a PostgreSQL-only EXPRESSION node on a dialect. Expression
+/// nodes are not op-kinds, so they have no row in the generated (op-keyed) dialect
+/// table; but their dialect verdict is exactly the canonical PG-only-core shape the
+/// table records for every `pg = portable, sqlite/mysql = unsupported` op — so the
+/// PG-only-expression gate reads that shape off the generated [`Disposition`]
+/// vocabulary instead of a bespoke `== Postgres` arm.
+#[must_use]
+pub const fn pg_only_expr_disposition(dialect: Dialect) -> Disposition {
+    match dialect {
+        Dialect::Postgres => Disposition::Portable,
+        Dialect::Sqlite | Dialect::Mysql => Disposition::Unsupported,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DialectSet(u8);
@@ -160,11 +188,13 @@ pub enum SupportTier {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
-    UserPrimaryKey,
     PartialIndex,
     IndexInclude,
     IndexStorageParams,
     IndexOnly,
+    IndexNullsNotDistinct,
+    IndexOpclass,
+    IndexCollation,
     ExpressionIndex,
     NonBtreeIndexMethod,
     TableLevelForeignKey,
@@ -173,10 +203,10 @@ pub enum Feature {
     CompositeForeignKey,
     ForeignKeyNoLocalColumn,
     NonIdForeignKey,
+    ConstraintNotValid,
     ExclusionConstraint,
     NativeAlterColumn,
     AlterColumnUsing,
-    SynthDefault,
     SequenceDefault,
     RenameColumnGuard,
     InsertOnConflict,
@@ -279,6 +309,7 @@ pub(crate) const CAP_SCHEMA: &[VendorCapability] = &[VendorCapability::Schema];
 pub(crate) const CAP_ROLE: &[VendorCapability] = &[VendorCapability::Role];
 pub(crate) const CAP_GRANT: &[VendorCapability] = &[VendorCapability::Grant];
 pub(crate) const CAP_RLS: &[VendorCapability] = &[VendorCapability::Rls];
+pub(crate) const CAP_PARTITION: &[VendorCapability] = &[VendorCapability::Partition];
 pub(crate) const CAP_POLICY: &[VendorCapability] = &[VendorCapability::Policy];
 pub(crate) const CAP_FUNCTION: &[VendorCapability] = &[VendorCapability::Function];
 pub(crate) const CAP_RAW_SQL: &[VendorCapability] = &[VendorCapability::RawSql];
@@ -291,24 +322,9 @@ pub(crate) const CAP_RAW_MATERIALIZED_VIEW: &[VendorCapability] = &[
 
 const UNSUPPORTED: &str = crate::model::validate::CODE_UNSUPPORTED;
 
-const UNSUPPORTED_ALL_PRIMARY_KEY: DialectSupport = DialectSupport::unsupported_all(
-    UNSUPPORTED,
-    "standalone/table-level primary key constraints are deferred; createTable.primaryKey is validated by the active table-shape policy",
-);
-
 const PG_ONLY_TABLE_LEVEL_CHECK: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
     "table-level CHECK expression rendering is PostgreSQL-only in the current engine",
-);
-
-const UNSUPPORTED_ALL_SYNTH_DEFAULT: DialectSupport = DialectSupport::unsupported_all(
-    UNSUPPORTED,
-    "synth default rendering is deferred until the expression/default renderer lands",
-);
-
-const PG_ONLY_SYNTH_DEFAULT: DialectSupport = DialectSupport::postgres_only(
-    RenderMode::Offline,
-    "synth default rendering is PostgreSQL-only in the current engine",
 );
 
 const PG_ONLY_SEQUENCE_DEFAULT: DialectSupport = DialectSupport::postgres_only(
@@ -327,6 +343,11 @@ const PG_ONLY_COMPOSITE_FK: DialectSupport = DialectSupport::postgres_only(
 const PG_ONLY_NON_ID_FK: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
     "foreign keys referencing non-id columns are PostgreSQL-only in the current engine",
+);
+
+const PG_ONLY_CONSTRAINT_NOT_VALID: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "NOT VALID online constraint adoption (addForeignKey/addCheck { notValid }) is PostgreSQL-only; SQLite/MySQL have no NOT VALID / VALIDATE CONSTRAINT",
 );
 
 const PG_ONLY_SEQUENCE: DialectSupport = DialectSupport::postgres_only(
@@ -349,11 +370,6 @@ const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::postgres_on
     "exclusion constraints are PostgreSQL-only in the current engine",
 );
 
-const PG_ONLY_PARTITION_DDL: DialectSupport = DialectSupport::postgres_only(
-    RenderMode::Offline,
-    "partitioned table DDL is PostgreSQL-only",
-);
-
 const PG_ONLY_INDEX_INCLUDE: DialectSupport = DialectSupport::postgres_only(
     RenderMode::Offline,
     "index INCLUDE columns are PostgreSQL-only",
@@ -369,9 +385,22 @@ const PG_ONLY_INDEX_ONLY: DialectSupport = DialectSupport::postgres_only(
     "CREATE INDEX ON ONLY is PostgreSQL-only",
 );
 
+const PG_ONLY_INDEX_NULLS_NOT_DISTINCT: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "UNIQUE INDEX NULLS NOT DISTINCT is PostgreSQL-only (PG 15+)",
+);
+
+const PG_ONLY_INDEX_OPCLASS: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "per-column index operator classes are PostgreSQL-only",
+);
+
+const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::postgres_only(
+    RenderMode::Offline,
+    "per-column index collations are PostgreSQL-only",
+);
+
 pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
-    FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
     FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
@@ -425,6 +454,9 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::IndexInclude, PG_ONLY_INDEX_INCLUDE),
     FeatureSupport::new(Feature::IndexStorageParams, PG_ONLY_INDEX_STORAGE_PARAMS),
     FeatureSupport::new(Feature::IndexOnly, PG_ONLY_INDEX_ONLY),
+    FeatureSupport::new(Feature::IndexNullsNotDistinct, PG_ONLY_INDEX_NULLS_NOT_DISTINCT),
+    FeatureSupport::new(Feature::IndexOpclass, PG_ONLY_INDEX_OPCLASS),
+    FeatureSupport::new(Feature::IndexCollation, PG_ONLY_INDEX_COLLATION),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
         DialectSupport::postgres_only(
@@ -434,10 +466,8 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::SynthDefault, PG_ONLY_SYNTH_DEFAULT),
-    FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
-];
+pub(crate) const ADD_COLUMN_FEATURES: &[FeatureSupport] =
+    &[FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT)];
 
 pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(
@@ -465,6 +495,9 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::IndexInclude, PG_ONLY_INDEX_INCLUDE),
     FeatureSupport::new(Feature::IndexStorageParams, PG_ONLY_INDEX_STORAGE_PARAMS),
     FeatureSupport::new(Feature::IndexOnly, PG_ONLY_INDEX_ONLY),
+    FeatureSupport::new(Feature::IndexNullsNotDistinct, PG_ONLY_INDEX_NULLS_NOT_DISTINCT),
+    FeatureSupport::new(Feature::IndexOpclass, PG_ONLY_INDEX_OPCLASS),
+    FeatureSupport::new(Feature::IndexCollation, PG_ONLY_INDEX_COLLATION),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
         DialectSupport::postgres_only(
@@ -474,8 +507,10 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const PARTITION_FEATURES: &[FeatureSupport] =
-    &[FeatureSupport::new(Feature::PartitionDdl, PG_ONLY_PARTITION_DDL)];
+pub(crate) const PARTITION_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
+    Feature::PartitionDdl,
+    DialectSupport::all_supported(RenderMode::Offline),
+)];
 
 pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::AlterColumnUsing,
@@ -494,10 +529,10 @@ pub(crate) const RENAME_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::n
 )];
 
 pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::UserPrimaryKey, UNSUPPORTED_ALL_PRIMARY_KEY),
     FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN),
     FeatureSupport::new(Feature::CompositeForeignKey, PG_ONLY_COMPOSITE_FK),
     FeatureSupport::new(Feature::NonIdForeignKey, PG_ONLY_NON_ID_FK),
+    FeatureSupport::new(Feature::ConstraintNotValid, PG_ONLY_CONSTRAINT_NOT_VALID),
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
         Feature::ExclusionConstraint,
@@ -508,10 +543,8 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     ),
 ];
 
-pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] = &[
-    FeatureSupport::new(Feature::SynthDefault, UNSUPPORTED_ALL_SYNTH_DEFAULT),
-    FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT),
-];
+pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] =
+    &[FeatureSupport::new(Feature::SequenceDefault, PG_ONLY_SEQUENCE_DEFAULT)];
 
 pub(crate) const INSERT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::InsertOnConflict,

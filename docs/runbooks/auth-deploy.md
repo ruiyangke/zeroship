@@ -109,7 +109,7 @@ values today.
 
    ```bash
    zeroship-migrate migrate \
-     --dir ./db/migrations \
+     --dir ./db/migrations-ts \
      --database-url "$PLATFORM_ADMIN_DATABASE_URL" \
      --profile platform \
      --yes

@@ -75,7 +75,7 @@ use crate::render::renderer::{Capability, DialectSupports};
 use zeroship_schema::query::SqlDialect;
 
 use crate::model::expr::{
-    BinaryOp, Expr, ExtractField, PgArrayMembershipOp, ScalarFn, SynthFn, UnaryOp,
+    AggFunc, BinaryOp, Duration, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
 };
 use crate::model::ir::{IrScalar, IrValue};
 use crate::render::step::BindValue;
@@ -380,32 +380,34 @@ fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
     Ok(format!("{}::text", sql_string_literal(s)))
 }
 
-fn render_pg_array_membership(
+fn render_in_list(
     expr: &str,
-    op: PgArrayMembershipOp,
     elems: &[String],
+    negated: bool,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    if !matches!(dialect, SqlDialect::Postgres) {
-        return Err(DmlError::UnrenderableExpr(
-            "PG ARRAY membership is PostgreSQL-only".to_string(),
-        ));
-    }
     if elems.is_empty() {
-        return Err(DmlError::UnrenderableExpr(
-            "PG ARRAY membership requires at least one element".to_string(),
-        ));
+        return Ok(if negated { "TRUE" } else { "FALSE" }.to_string());
     }
-    let rendered: Result<Vec<_>, _> =
-        elems.iter().map(|elem| pg_text_literal(elem, "PG ARRAY membership element")).collect();
-    let (cmp, quantifier) = match op {
-        PgArrayMembershipOp::Eq => ("=", "ANY"),
-        PgArrayMembershipOp::Ne => ("<>", "ALL"),
-    };
-    Ok(format!(
-        "({expr} {cmp} {quantifier} (ARRAY[{}]))",
-        rendered?.join(", ")
-    ))
+    match dialect {
+        SqlDialect::Postgres => {
+            let rendered: Result<Vec<_>, _> =
+                elems.iter().map(|elem| pg_text_literal(elem, "inList element")).collect();
+            let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
+            Ok(format!(
+                "({expr} {cmp} {quantifier} (ARRAY[{}]))",
+                rendered?.join(", ")
+            ))
+        }
+        SqlDialect::Sqlite | SqlDialect::Mysql => {
+            let rendered = elems
+                .iter()
+                .map(|elem| sql_string_literal(elem))
+                .collect::<Vec<_>>();
+            let op = if negated { "NOT IN" } else { "IN" };
+            Ok(format!("({expr} {op} ({}))", rendered.join(", ")))
+        }
+    }
 }
 
 fn render_pg_regex_match(
@@ -426,68 +428,99 @@ fn render_pg_regex_match(
 
 fn render_extract_field(field: ExtractField) -> &'static str {
     match field {
+        ExtractField::Year => "year",
+        ExtractField::Month => "month",
         ExtractField::Day => "day",
+        ExtractField::Hour => "hour",
+        ExtractField::Minute => "minute",
+        ExtractField::Dow => "dow",
     }
 }
 
 fn render_extract(field: ExtractField, expr: &str, dialect: SqlDialect) -> Result<String, DmlError> {
-    if !matches!(dialect, SqlDialect::Postgres) {
-        return Err(DmlError::UnrenderableExpr(
-            "EXTRACT is PostgreSQL-only in the P1 expression DSL".to_string(),
-        ));
-    }
-    Ok(format!("EXTRACT({} FROM {expr})", render_extract_field(field)))
+    Ok(match dialect {
+        SqlDialect::Postgres => format!("EXTRACT({} FROM {expr})", render_extract_field(field)),
+        SqlDialect::Sqlite => {
+            let fmt = match field {
+                ExtractField::Year => "%Y",
+                ExtractField::Month => "%m",
+                ExtractField::Day => "%d",
+                ExtractField::Hour => "%H",
+                ExtractField::Minute => "%M",
+                ExtractField::Dow => "%w",
+            };
+            format!("CAST(strftime('{fmt}', {expr}) AS INTEGER)")
+        }
+        SqlDialect::Mysql => match field {
+            ExtractField::Dow => format!("(DAYOFWEEK({expr}) - 1)"),
+            _ => format!(
+                "EXTRACT({} FROM {expr})",
+                render_extract_field(field).to_ascii_uppercase()
+            ),
+        },
+    })
 }
 
-fn render_pg_interval_literal(value: &str, dialect: SqlDialect) -> Result<String, DmlError> {
+fn render_pg_extract_field(field: PgExtractField) -> &'static str {
+    match field {
+        PgExtractField::Second => "second",
+        PgExtractField::Doy => "doy",
+        PgExtractField::Epoch => "epoch",
+        PgExtractField::Quarter => "quarter",
+        PgExtractField::Week => "week",
+        PgExtractField::Isodow => "isodow",
+        PgExtractField::Isoyear => "isoyear",
+        PgExtractField::Century => "century",
+        PgExtractField::Decade => "decade",
+        PgExtractField::Millennium => "millennium",
+        PgExtractField::Microseconds => "microseconds",
+        PgExtractField::Milliseconds => "milliseconds",
+        PgExtractField::Timezone => "timezone",
+        PgExtractField::TimezoneHour => "timezone_hour",
+        PgExtractField::TimezoneMinute => "timezone_minute",
+    }
+}
+
+fn render_pg_extract(
+    field: PgExtractField,
+    expr: &str,
+    dialect: SqlDialect,
+) -> Result<String, DmlError> {
+    if !matches!(dialect, SqlDialect::Postgres) {
+        return Err(DmlError::UnrenderableExpr(
+            "PG EXTRACT is PostgreSQL-only".to_string(),
+        ));
+    }
+    Ok(format!("EXTRACT({} FROM {expr})", render_pg_extract_field(field)))
+}
+
+fn render_pg_interval_literal(duration: &Duration, dialect: SqlDialect) -> Result<String, DmlError> {
     if !matches!(dialect, SqlDialect::Postgres) {
         return Err(DmlError::UnrenderableExpr(
             "PG interval literal is PostgreSQL-only".to_string(),
         ));
     }
-    if !is_safe_pg_interval_literal(value) {
-        return Err(DmlError::UnrenderableExpr(format!(
-            "PG interval literal {value:?} is outside the strict P1 interval grammar"
-        )));
-    }
-    Ok(format!("{}::interval", sql_string_literal(value)))
-}
 
-fn is_safe_pg_interval_literal(value: &str) -> bool {
-    if value.is_empty() || value.len() > 32 || value.contains('\0') {
-        return false;
-    }
-    let Some((hours, rest)) = value.split_once(':') else {
-        return false;
-    };
-    if hours.is_empty() || hours.len() > 6 || !hours.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    let Some((minutes, seconds)) = rest.split_once(':') else {
-        return false;
-    };
-    if minutes.len() != 2
-        || !minutes.bytes().all(|b| b.is_ascii_digit())
-        || minutes.parse::<u8>().map_or(true, |m| m > 59)
-    {
-        return false;
-    }
-    let (seconds_whole, fraction) = match seconds.split_once('.') {
-        Some((whole, frac)) => (whole, Some(frac)),
-        None => (seconds, None),
-    };
-    if seconds_whole.len() != 2
-        || !seconds_whole.bytes().all(|b| b.is_ascii_digit())
-        || seconds_whole.parse::<u8>().map_or(true, |s| s > 59)
-    {
-        return false;
-    }
-    if let Some(frac) = fraction {
-        if frac.is_empty() || frac.len() > 6 || !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
+    let mut parts = Vec::new();
+    for (value, singular, plural) in [
+        (duration.years, "year", "years"),
+        (duration.months, "month", "months"),
+        (duration.days, "day", "days"),
+        (duration.hours, "hour", "hours"),
+        (duration.minutes, "minute", "minutes"),
+        (duration.seconds, "second", "seconds"),
+    ] {
+        if let Some(value) = value {
+            let unit = if value == 1 || value == -1 { singular } else { plural };
+            parts.push(format!("{value} {unit}"));
         }
     }
-    true
+    if parts.is_empty() {
+        return Err(DmlError::UnrenderableExpr(
+            "PG interval duration must include at least one field".to_string(),
+        ));
+    }
+    Ok(format!("INTERVAL {}", sql_string_literal(&parts.join(" "))))
 }
 
 /// The SQL spelling of a binary operator (§3.3.1 method↔node table). `Concat` is
@@ -510,6 +543,32 @@ fn binary_op_sql(op: BinaryOp) -> &'static str {
     }
 }
 
+/// Render a binary operation to SQL, **dialect-aware**. Every operator is a
+/// portable infix EXCEPT string concatenation on MySQL: MySQL's `||` is *logical
+/// OR* (not concat, absent the non-default `PIPES_AS_CONCAT` sql_mode), so a
+/// `Concat` rendered as `a || b` there would silently corrupt to a boolean. MySQL
+/// concatenation is the `CONCAT(a, b)` function. PG and SQLite use the `||`
+/// operator, where it is genuinely concatenation.
+fn render_binop(op: BinaryOp, l: &str, r: &str, dialect: SqlDialect) -> String {
+    if matches!(op, BinaryOp::Concat) && matches!(dialect, SqlDialect::Mysql) {
+        format!("CONCAT({l}, {r})")
+    } else {
+        format!("({} {} {})", l, binary_op_sql(op), r)
+    }
+}
+
+/// Render the portable `distinctFrom` NULL-safe inequality node, **dialect-aware**.
+/// PG and SQLite both support the standard `IS DISTINCT FROM` operator directly.
+/// MySQL has NO `IS DISTINCT FROM`, so the engine owns the lowering to
+/// `NOT (<l> <=> <r>)` — `<=>` is MySQL's NULL-safe equality operator, so its
+/// negation is exactly the "distinct from" (NULL-aware inequality) predicate.
+fn render_distinct_from(l: &str, r: &str, dialect: SqlDialect) -> String {
+    match dialect {
+        SqlDialect::Mysql => format!("(NOT ({l} <=> {r}))"),
+        SqlDialect::Postgres | SqlDialect::Sqlite => format!("({l} IS DISTINCT FROM {r})"),
+    }
+}
+
 /// The SQL spelling of an allow-listed named scalar function (§3.3.1.1(a)). These
 /// are the provably-identical cross-dialect scalars (same name + semantics on PG
 /// and SQLite), so the spelling is dialect-neutral.
@@ -522,6 +581,15 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
         ScalarFn::Trim => "trim",
         ScalarFn::Length => "length",
         ScalarFn::Abs => "abs",
+        // Portable scalar fns — identical spelling on PG/SQLite/MySQL (§3.4).
+        // `Mod` renders as the `%` OPERATOR, special-cased in `render_scalar_fn_call`
+        // (SQLite has no `mod()` fn); this fallback name is never reached for it.
+        ScalarFn::Mod => "mod",
+        ScalarFn::Round => "round",
+        ScalarFn::Floor => "floor",
+        ScalarFn::Ceil => "ceil",
+        ScalarFn::Substr => "substr",
+        ScalarFn::Replace => "replace",
         // VENDOR scalars (vendor spec §2.10). `current_user` is a reserved keyword
         // rendered WITHOUT parens — the FnCall render arms special-case it; this
         // spelling is the fallback name.
@@ -533,10 +601,47 @@ fn scalar_fn_sql(f: ScalarFn) -> &'static str {
 /// Render an allow-listed [`ScalarFn`] call from its already-rendered argument
 /// fragments. Most are `<name>(<args>)`; the VENDOR `CurrentUser` is a bare
 /// reserved keyword with NO parens (PG rejects `current_user()`).
-fn render_scalar_fn_call(f: ScalarFn, args: &[String]) -> String {
+fn render_scalar_fn_call(f: ScalarFn, args: &[String], dialect: SqlDialect) -> String {
     match f {
         ScalarFn::CurrentUser => "current_user".to_string(),
+        // `mod` renders as the `%` OPERATOR — NOT a `mod(...)` call — because
+        // SQLite has no `mod()` SQL function (`%` is universal on PG/SQLite/MySQL).
+        // `args.join(" % ")` wrapped in parens is byte-identical to `(<a> % <b>)`
+        // for the 2-arg case the builder produces, and never index-panics on a
+        // malformed hand-crafted arity.
+        ScalarFn::Mod => format!("({})", args.join(" % ")),
+        // The portable `length()` intent is CHARACTER length (PG + SQLite
+        // `length(text)`). MySQL's `LENGTH()` is *byte* length — wrong for any
+        // multibyte string — so MySQL must use `CHAR_LENGTH()`.
+        ScalarFn::Length if matches!(dialect, SqlDialect::Mysql) => {
+            format!("char_length({})", args.join(", "))
+        }
         _ => format!("{}({})", scalar_fn_sql(f), args.join(", ")),
+    }
+}
+
+/// The lower-cased SQL name of a PORTABLE [`AggFunc`]. Identical spelling on PG,
+/// SQLite, and MySQL (§3.4).
+fn agg_fn_sql(f: AggFunc) -> &'static str {
+    match f {
+        AggFunc::Count => "count",
+        AggFunc::Sum => "sum",
+        AggFunc::Avg => "avg",
+        AggFunc::Min => "min",
+        AggFunc::Max => "max",
+    }
+}
+
+/// Render a PORTABLE aggregate application from its already-rendered argument
+/// fragment (§3.4/§3.6). `arg = None` (only `Count`) → `count(*)`; a present arg
+/// → `<func>([DISTINCT ]<arg>)`. Byte-identical on all three dialects — only the
+/// identifier quoting inside `arg_sql` differs.
+fn render_agg(f: AggFunc, arg_sql: Option<&str>, distinct: bool) -> String {
+    let name = agg_fn_sql(f);
+    match arg_sql {
+        None => format!("{name}(*)"),
+        Some(a) if distinct => format!("{name}(DISTINCT {a})"),
+        Some(a) => format!("{name}({a})"),
     }
 }
 
@@ -630,6 +735,36 @@ fn render_split_part(
     crate::render::renderer::renderer(dialect).render_split_part(col_sql, delim, n)
 }
 
+/// Select the [`Expr::Dialectal`] leg to render for `dialect` (design §3.4): the
+/// target dialect's OWN leg if present, else the `default` leg. Returns a borrow
+/// of the chosen leg. This is the one leg-selection rule shared by both the bound
+/// and inline render paths.
+///
+/// A `Dialectal` with neither an own leg nor a `default` for the target is
+/// UNREACHABLE here because [`crate::model::validate`] refuses it per-target
+/// (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
+/// defensively: it returns [`DmlError::UnrenderableExpr`] rather than silently
+/// dropping the value.
+fn select_dialect_leg<'a>(
+    dialect: SqlDialect,
+    default: &'a Option<Box<Expr>>,
+    pg: &'a Option<Box<Expr>>,
+    sqlite: &'a Option<Box<Expr>>,
+    mysql: &'a Option<Box<Expr>>,
+) -> Result<&'a Expr, DmlError> {
+    let own = match dialect {
+        SqlDialect::Postgres => pg,
+        SqlDialect::Sqlite => sqlite,
+        SqlDialect::Mysql => mysql,
+    };
+    own.as_deref().or_else(|| default.as_deref()).ok_or_else(|| {
+        DmlError::UnrenderableExpr(format!(
+            "dialect() has no leg for the {dialect:?} target and no default — the \
+             structural validator must refuse this before assembly"
+        ))
+    })
+}
+
 /// A bind accumulator carried through the parameterized render walk: it owns the
 /// running placeholder counter (1-based, dialect-specific) and the ordered
 /// [`BindValue`] list.
@@ -657,22 +792,31 @@ impl BindCtx {
 /// statement structure is fixed by the AST shape, never by a literal's content.
 fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError> {
     Ok(match expr {
-        Expr::ColRef { name } => quote_ident_for_dialect("column", name, ctx.dialect)?,
+        Expr::ColRef { name, table } => match table {
+            // Qualified ref (`c("orders", "id")`, §3.4): `<quoted table>.<quoted col>`,
+            // both halves through the same per-dialect identifier quoting.
+            Some(t) => format!(
+                "{}.{}",
+                quote_ident_for_dialect("table", t, ctx.dialect)?,
+                quote_ident_for_dialect("column", name, ctx.dialect)?
+            ),
+            None => quote_ident_for_dialect("column", name, ctx.dialect)?,
+        },
         Expr::Literal { value } => ctx.push_bind(scalar_to_bind(value)),
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_bound(lhs, ctx)?;
             let r = render_expr_bound(rhs, ctx)?;
-            format!("({} {} {})", l, binary_op_sql(*op), r)
+            render_binop(*op, &l, &r, ctx.dialect)
         }
         Expr::UnaryOp { op, operand } => {
             let o = render_expr_bound(operand, ctx)?;
-            render_unary(*op, &o)
+            render_unary(*op, &o, ctx.dialect)
         }
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
             for b in branches {
-                let c = render_expr_bound(&b.condition, ctx)?;
-                let r = render_expr_bound(&b.result, ctx)?;
+                let c = render_expr_bound(&b.when, ctx)?;
+                let r = render_expr_bound(&b.then, ctx)?;
                 s.push_str(&format!(" WHEN {c} THEN {r}"));
             }
             if let Some(e) = r#else {
@@ -687,16 +831,39 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             for a in args {
                 rs.push(render_expr_bound(a, ctx)?);
             }
-            render_scalar_fn_call(*r#fn, &rs)
+            render_scalar_fn_call(*r#fn, &rs, ctx.dialect)
         }
         Expr::FnSynth { r#fn, args } => render_synth_bound(*r#fn, args, ctx)?,
         Expr::Cast { operand, target } => {
             let o = render_expr_bound(operand, ctx)?;
             format!("CAST({o} AS {})", cast_target_sql(*target, ctx.dialect))
         }
-        Expr::PgArrayMembership { expr, op, elems } => {
+        Expr::Between { operand, low, high } => {
+            let o = render_expr_bound(operand, ctx)?;
+            let lo = render_expr_bound(low, ctx)?;
+            let hi = render_expr_bound(high, ctx)?;
+            format!("({o} BETWEEN {lo} AND {hi})")
+        }
+        Expr::Like { operand, pattern } => {
+            let o = render_expr_bound(operand, ctx)?;
+            let p = render_expr_bound(pattern, ctx)?;
+            format!("({o} LIKE {p})")
+        }
+        Expr::DistinctFrom { left, right } => {
+            let l = render_expr_bound(left, ctx)?;
+            let r = render_expr_bound(right, ctx)?;
+            render_distinct_from(&l, &r, ctx.dialect)
+        }
+        Expr::Agg { func, arg, distinct } => {
+            let a = match arg {
+                Some(e) => Some(render_expr_bound(e, ctx)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), *distinct)
+        }
+        Expr::InList { expr, elems, negated } => {
             let e = render_expr_bound(expr, ctx)?;
-            render_pg_array_membership(&e, *op, elems, ctx.dialect)?
+            render_in_list(&e, elems, *negated, ctx.dialect)?
         }
         Expr::PgRegexMatch { expr, pattern } => {
             let e = render_expr_bound(expr, ctx)?;
@@ -711,11 +878,19 @@ fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlError>
             let e = render_expr_bound(expr, ctx)?;
             format!("pg_column_size({e})")
         }
-        Expr::Extract { field, expr } => {
-            let e = render_expr_bound(expr, ctx)?;
+        Expr::Extract { field, from } => {
+            let e = render_expr_bound(from, ctx)?;
             render_extract(*field, &e, ctx.dialect)?
         }
-        Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, ctx.dialect)?,
+        Expr::PgExtract { field, from } => {
+            let e = render_expr_bound(from, ctx)?;
+            render_pg_extract(*field, &e, ctx.dialect)?
+        }
+        Expr::PgInterval { duration } => render_pg_interval_literal(duration, ctx.dialect)?,
+        Expr::Dialectal { default, pg, sqlite, mysql } => {
+            let leg = select_dialect_leg(ctx.dialect, default, pg, sqlite, mysql)?;
+            render_expr_bound(leg, ctx)?
+        }
     })
 }
 
@@ -758,12 +933,17 @@ fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlE
     }
 }
 
-/// Render a unary op around an already-rendered operand.
-fn render_unary(op: UnaryOp, operand: &str) -> String {
+/// Render a unary op around an already-rendered operand, dialect-aware.
+fn render_unary(op: UnaryOp, operand: &str, dialect: SqlDialect) -> String {
     match op {
         UnaryOp::Not => format!("(NOT {operand})"),
         UnaryOp::IsNull => format!("({operand} IS NULL)"),
         UnaryOp::IsNotNull => format!("({operand} IS NOT NULL)"),
+        // SQLite has no native boolean type (values are 0/1) and rejects the
+        // `IS TRUE` / `IS FALSE` predicates at apply — render them as `= 1` / `= 0`
+        // there. PG and MySQL both support the standard spelling.
+        UnaryOp::IsTrue if matches!(dialect, SqlDialect::Sqlite) => format!("({operand} = 1)"),
+        UnaryOp::IsFalse if matches!(dialect, SqlDialect::Sqlite) => format!("({operand} = 0)"),
         UnaryOp::IsTrue => format!("({operand} IS TRUE)"),
         UnaryOp::IsFalse => format!("({operand} IS FALSE)"),
     }
@@ -796,22 +976,32 @@ where
     F: Fn(&str) -> Result<String, DmlError>,
 {
     Ok(match expr {
-        Expr::ColRef { name } => col_ref(name)?,
+        Expr::ColRef { name, table } => match table {
+            // Qualified ref (§3.4): quote the table via the per-dialect identifier
+            // quoter; delegate the column to the caller-supplied `col_ref` closure.
+            Some(t) => format!(
+                "{}.{}",
+                quote_ident_for_dialect("table", t, dialect)?,
+                col_ref(name)?
+            ),
+            None => col_ref(name)?,
+        },
         Expr::Literal { value } => inline_literal(value)?,
         Expr::BinOp { op, lhs, rhs } => {
             let l = render_expr_inline_with_col(lhs, dialect, col_ref)?;
             let r = render_expr_inline_with_col(rhs, dialect, col_ref)?;
-            format!("({} {} {})", l, binary_op_sql(*op), r)
+            render_binop(*op, &l, &r, dialect)
         }
         Expr::UnaryOp { op, operand } => render_unary(
             *op,
             &render_expr_inline_with_col(operand, dialect, col_ref)?,
+            dialect,
         ),
         Expr::Case { branches, r#else } => {
             let mut s = String::from("CASE");
             for b in branches {
-                let c = render_expr_inline_with_col(&b.condition, dialect, col_ref)?;
-                let r = render_expr_inline_with_col(&b.result, dialect, col_ref)?;
+                let c = render_expr_inline_with_col(&b.when, dialect, col_ref)?;
+                let r = render_expr_inline_with_col(&b.then, dialect, col_ref)?;
                 s.push_str(&format!(" WHEN {c} THEN {r}"));
             }
             if let Some(e) = r#else {
@@ -828,7 +1018,7 @@ where
                 args.iter()
                     .map(|a| render_expr_inline_with_col(a, dialect, col_ref))
                     .collect();
-            render_scalar_fn_call(*r#fn, &rs?)
+            render_scalar_fn_call(*r#fn, &rs?, dialect)
         }
         Expr::FnSynth { r#fn, args } => match r#fn {
             SynthFn::SplitPart => {
@@ -862,9 +1052,32 @@ where
                 cast_target_sql(*target, dialect)
             )
         }
-        Expr::PgArrayMembership { expr, op, elems } => {
+        Expr::Between { operand, low, high } => {
+            let o = render_expr_inline_with_col(operand, dialect, col_ref)?;
+            let lo = render_expr_inline_with_col(low, dialect, col_ref)?;
+            let hi = render_expr_inline_with_col(high, dialect, col_ref)?;
+            format!("({o} BETWEEN {lo} AND {hi})")
+        }
+        Expr::Like { operand, pattern } => {
+            let o = render_expr_inline_with_col(operand, dialect, col_ref)?;
+            let p = render_expr_inline_with_col(pattern, dialect, col_ref)?;
+            format!("({o} LIKE {p})")
+        }
+        Expr::DistinctFrom { left, right } => {
+            let l = render_expr_inline_with_col(left, dialect, col_ref)?;
+            let r = render_expr_inline_with_col(right, dialect, col_ref)?;
+            render_distinct_from(&l, &r, dialect)
+        }
+        Expr::Agg { func, arg, distinct } => {
+            let a = match arg {
+                Some(e) => Some(render_expr_inline_with_col(e, dialect, col_ref)?),
+                None => None,
+            };
+            render_agg(*func, a.as_deref(), *distinct)
+        }
+        Expr::InList { expr, elems, negated } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
-            render_pg_array_membership(&e, *op, elems, dialect)?
+            render_in_list(&e, elems, *negated, dialect)?
         }
         Expr::PgRegexMatch { expr, pattern } => {
             let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
@@ -878,11 +1091,19 @@ where
             }
             format!("pg_column_size({})", render_expr_inline_with_col(expr, dialect, col_ref)?)
         }
-        Expr::Extract { field, expr } => {
-            let e = render_expr_inline_with_col(expr, dialect, col_ref)?;
+        Expr::Extract { field, from } => {
+            let e = render_expr_inline_with_col(from, dialect, col_ref)?;
             render_extract(*field, &e, dialect)?
         }
-        Expr::PgIntervalLiteral { value } => render_pg_interval_literal(value, dialect)?,
+        Expr::PgExtract { field, from } => {
+            let e = render_expr_inline_with_col(from, dialect, col_ref)?;
+            render_pg_extract(*field, &e, dialect)?
+        }
+        Expr::PgInterval { duration } => render_pg_interval_literal(duration, dialect)?,
+        Expr::Dialectal { default, pg, sqlite, mysql } => {
+            let leg = select_dialect_leg(dialect, default, pg, sqlite, mysql)?;
+            render_expr_inline_with_col(leg, dialect, col_ref)?
+        }
     })
 }
 
@@ -1034,8 +1255,9 @@ fn render_on_conflict(oc: &OnConflict, ctx: &mut BindCtx) -> Result<String, DmlE
 }
 
 /// Assemble a one-shot `update` op (no `batch`) into a parameterized statement.
-/// `set` RHS + the optional `where` render through [`render_expr_bound`], so every
-/// literal is a native bind. Portable on both backends.
+/// `set` RHS values render through [`render_value_bound`] and the optional `where`
+/// renders through [`render_expr_bound`], so scalar set values and expression
+/// literals are native binds. Portable on both backends.
 ///
 /// # Errors
 /// [`DmlError`] on a malformed identifier / empty `set` / an unrenderable node.
@@ -1043,7 +1265,7 @@ pub fn assemble_update(
     project_schema: &str,
     dialect: SqlDialect,
     table: &str,
-    set: &BTreeMap<String, Expr>,
+    set: &BTreeMap<String, IrValue>,
     r#where: Option<&Expr>,
 ) -> Result<AssembledDml, DmlError> {
     if set.is_empty() {
@@ -1055,7 +1277,7 @@ pub fn assemble_update(
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
         let qc = quote_ident_for_dialect("column", col, dialect)?;
-        let r = render_expr_bound(rhs, &mut ctx)?;
+        let r = render_value_bound(rhs, &mut ctx)?;
         assigns.push(format!("{qc} = {r}"));
     }
     let mut template = format!("UPDATE {qtable} SET {}", assigns.join(", "));
@@ -1137,7 +1359,7 @@ pub struct BackfillClauses {
 pub fn assemble_backfill_clauses(
     dialect: SqlDialect,
     table: &str,
-    set: &BTreeMap<String, Expr>,
+    set: &BTreeMap<String, IrValue>,
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
     if set.is_empty() {
@@ -1147,7 +1369,7 @@ pub fn assemble_backfill_clauses(
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
         let qc = quote_ident_for_dialect("column", col, dialect)?;
-        let r = render_expr_inline(rhs, dialect)?;
+        let r = render_value_inline(rhs, dialect)?;
         assigns.push(format!("{qc} = {r}"));
     }
     let set_clause = assigns.join(", ");
@@ -1358,6 +1580,608 @@ mod tests {
     }
     fn val(s: IrScalar) -> IrValue {
         IrValue::Scalar(s)
+    }
+    fn dml_expr(e: Expr) -> IrValue {
+        IrValue::Expr(e)
+    }
+
+    // ── Concat is dialect-specific (regression: MySQL `||` is logical OR) ─────
+
+    #[test]
+    fn concat_renders_per_dialect_pg_sqlite_mysql() {
+        // Regression guard: on MySQL, `||` is *logical OR*, so rendering `Concat`
+        // as `a || b` there silently corrupts a string concat to a boolean. It
+        // MUST render as `CONCAT(a, b)`. PG + SQLite keep the `||` operator.
+        let expr = Expr::BinOp {
+            op: BinaryOp::Concat,
+            lhs: Box::new(Expr::col("first")),
+            rhs: Box::new(Expr::col("last")),
+        };
+
+        let pg = render_expr_inline(&expr, SqlDialect::Postgres).unwrap();
+        assert_eq!(pg, "(\"first\" || \"last\")", "PG uses the || concat operator");
+
+        let sqlite = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap();
+        assert_eq!(sqlite, "(\"first\" || \"last\")", "SQLite uses the || concat operator");
+
+        let mysql = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
+        assert!(
+            mysql.starts_with("CONCAT(") && !mysql.contains("||"),
+            "MySQL MUST render Concat as CONCAT(...), never `||` (logical OR): got {mysql}"
+        );
+    }
+
+    // ── Qualified column refs (§3.4, the join-ON fix) ────────────────────────
+
+    /// A qualified `ColRef { table, name }` renders `<table>.<col>` with the SAME
+    /// per-dialect identifier quoting as an unqualified ref: PG/SQLite double-quote
+    /// each half, MySQL backticks each half. An unqualified ref is unchanged.
+    #[test]
+    fn qualified_colref_renders_dotted_per_dialect() {
+        let qualified = Expr::col_qualified("users", "id");
+        assert_eq!(
+            render_expr_inline(&qualified, SqlDialect::Postgres).unwrap(),
+            "\"users\".\"id\"",
+            "PG qualifies with double-quoted table.col"
+        );
+        assert_eq!(
+            render_expr_inline(&qualified, SqlDialect::Sqlite).unwrap(),
+            "\"users\".\"id\"",
+            "SQLite qualifies with double-quoted table.col"
+        );
+        assert_eq!(
+            render_expr_inline(&qualified, SqlDialect::Mysql).unwrap(),
+            "`users`.`id`",
+            "MySQL qualifies with backtick-quoted table.col"
+        );
+
+        // Unqualified stays exactly as today — no table segment, no dot.
+        let plain = Expr::col("id");
+        assert_eq!(render_expr_inline(&plain, SqlDialect::Postgres).unwrap(), "\"id\"");
+        assert_eq!(render_expr_inline(&plain, SqlDialect::Sqlite).unwrap(), "\"id\"");
+        assert_eq!(render_expr_inline(&plain, SqlDialect::Mysql).unwrap(), "`id`");
+
+        // The parameterized (bind) path mirrors the inline path for the ColRef arm.
+        assert_eq!(
+            render_expr_bound(&qualified, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "\"users\".\"id\""
+        );
+        assert_eq!(
+            render_expr_bound(&qualified, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
+            "`users`.`id`"
+        );
+        assert_eq!(
+            render_expr_bound(&plain, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "\"id\""
+        );
+    }
+
+    #[test]
+    fn length_is_char_length_on_mysql() {
+        // Regression: MySQL LENGTH() is BYTE length; the portable length() intent
+        // is CHARACTER length (PG/SQLite length()). MySQL MUST use CHAR_LENGTH().
+        let expr = Expr::FnCall { r#fn: ScalarFn::Length, args: vec![Expr::col("name")] };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "length(\"name\")"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "length(\"name\")"
+        );
+        let mysql = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
+        assert!(
+            mysql.starts_with("char_length("),
+            "MySQL length() must render as CHAR_LENGTH (LENGTH is byte length): got {mysql}"
+        );
+    }
+
+    /// Portable scalar fns (§3.4): `round`/`floor`/`ceil`/`substr`/`replace` all
+    /// spell IDENTICALLY on PG, SQLite, and MySQL, so they render byte-identically
+    /// on every dialect via the neutral `<name>(<args>)` path.
+    #[test]
+    fn portable_scalar_fns_render_identically_on_all_three() {
+        let cases: &[(Expr, &str)] = &[
+            (
+                Expr::FnCall { r#fn: ScalarFn::Round, args: vec![Expr::col("x")] },
+                "round(\"x\")",
+            ),
+            (
+                Expr::FnCall {
+                    r#fn: ScalarFn::Round,
+                    args: vec![Expr::col("x"), Expr::lit(IrScalar::Int(2))],
+                },
+                "round(\"x\", 2)",
+            ),
+            (
+                Expr::FnCall { r#fn: ScalarFn::Floor, args: vec![Expr::col("x")] },
+                "floor(\"x\")",
+            ),
+            (
+                Expr::FnCall { r#fn: ScalarFn::Ceil, args: vec![Expr::col("x")] },
+                "ceil(\"x\")",
+            ),
+            (
+                Expr::FnCall {
+                    r#fn: ScalarFn::Substr,
+                    args: vec![Expr::col("s"), Expr::lit(IrScalar::Int(1)), Expr::lit(IrScalar::Int(3))],
+                },
+                "substr(\"s\", 1, 3)",
+            ),
+            (
+                Expr::FnCall {
+                    r#fn: ScalarFn::Replace,
+                    args: vec![
+                        Expr::col("s"),
+                        Expr::lit(IrScalar::Str("a".into())),
+                        Expr::lit(IrScalar::Str("b".into())),
+                    ],
+                },
+                "replace(\"s\", 'a', 'b')",
+            ),
+        ];
+        for (expr, pg_sqlite_expect) in cases {
+            // PG and SQLite quote identifiers with `"`; the fn spelling is identical.
+            assert_eq!(
+                &render_expr_inline(expr, SqlDialect::Postgres).unwrap(),
+                pg_sqlite_expect,
+                "PG render mismatch"
+            );
+            assert_eq!(
+                &render_expr_inline(expr, SqlDialect::Sqlite).unwrap(),
+                pg_sqlite_expect,
+                "SQLite render mismatch"
+            );
+            // MySQL differs ONLY in identifier quoting (backticks); the fn name +
+            // arg shape are identical (CEIL/SUBSTR are MySQL aliases).
+            let mysql_expect = pg_sqlite_expect.replace('"', "`");
+            assert_eq!(
+                render_expr_inline(expr, SqlDialect::Mysql).unwrap(),
+                mysql_expect,
+                "MySQL render mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn portable_extract_fields_render_equivalent_date_parts_on_all_three() {
+        let cases = [
+            (
+                ExtractField::Year,
+                "EXTRACT(year FROM \"ts\")",
+                "CAST(strftime('%Y', \"ts\") AS INTEGER)",
+                "EXTRACT(YEAR FROM `ts`)",
+            ),
+            (
+                ExtractField::Month,
+                "EXTRACT(month FROM \"ts\")",
+                "CAST(strftime('%m', \"ts\") AS INTEGER)",
+                "EXTRACT(MONTH FROM `ts`)",
+            ),
+            (
+                ExtractField::Day,
+                "EXTRACT(day FROM \"ts\")",
+                "CAST(strftime('%d', \"ts\") AS INTEGER)",
+                "EXTRACT(DAY FROM `ts`)",
+            ),
+            (
+                ExtractField::Hour,
+                "EXTRACT(hour FROM \"ts\")",
+                "CAST(strftime('%H', \"ts\") AS INTEGER)",
+                "EXTRACT(HOUR FROM `ts`)",
+            ),
+            (
+                ExtractField::Minute,
+                "EXTRACT(minute FROM \"ts\")",
+                "CAST(strftime('%M', \"ts\") AS INTEGER)",
+                "EXTRACT(MINUTE FROM `ts`)",
+            ),
+            (
+                ExtractField::Dow,
+                "EXTRACT(dow FROM \"ts\")",
+                "CAST(strftime('%w', \"ts\") AS INTEGER)",
+                "(DAYOFWEEK(`ts`) - 1)",
+            ),
+        ];
+
+        for (field, pg, sqlite, mysql) in cases {
+            let expr = Expr::Extract {
+                field,
+                from: Box::new(Expr::col("ts")),
+            };
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), sqlite);
+            assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
+        }
+    }
+
+    #[test]
+    fn pg_extract_renders_only_on_postgres() {
+        let expr = Expr::PgExtract {
+            field: PgExtractField::Epoch,
+            from: Box::new(Expr::col("ts")),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "EXTRACT(epoch FROM \"ts\")"
+        );
+        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+            let err = render_expr_inline(&expr, dialect).unwrap_err();
+            assert!(
+                err.to_string().contains("PostgreSQL-only"),
+                "pgExtract must refuse {dialect:?}: {err}"
+            );
+        }
+
+        let second = Expr::PgExtract {
+            field: PgExtractField::Second,
+            from: Box::new(Expr::col("ts")),
+        };
+        assert_eq!(
+            render_expr_inline(&second, SqlDialect::Postgres).unwrap(),
+            "EXTRACT(second FROM \"ts\")",
+            "second stays PG-only because PG preserves fractional seconds"
+        );
+    }
+
+    /// `c.fn.mod(a, b)` renders as the `%` OPERATOR — NOT `mod(...)` — on all three
+    /// dialects. This is the one portable arithmetic fn whose spelling is an
+    /// operator (SQLite has no `mod()` SQL function; `%` is universal).
+    #[test]
+    fn mod_renders_as_percent_operator_on_all_three() {
+        let expr = Expr::FnCall {
+            r#fn: ScalarFn::Mod,
+            args: vec![Expr::col("n"), Expr::lit(IrScalar::Int(3))],
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"n\" % 3)"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"n\" % 3)"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`n` % 3)"
+        );
+        // The bound (parameterized) path lowers identically (operator form).
+        assert_eq!(
+            render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "(\"n\" % $1)"
+        );
+    }
+
+    #[test]
+    fn is_true_is_false_rewritten_for_sqlite() {
+        // SQLite has no IS TRUE / IS FALSE (no boolean type) — render as = 1 / = 0.
+        // PG + MySQL keep the standard spelling.
+        for (op, sqlite_expect, std_frag) in [
+            (UnaryOp::IsTrue, "= 1", "IS TRUE"),
+            (UnaryOp::IsFalse, "= 0", "IS FALSE"),
+        ] {
+            let e = Expr::UnaryOp { op, operand: Box::new(Expr::col("active")) };
+            let pg = render_expr_inline(&e, SqlDialect::Postgres).unwrap();
+            assert!(pg.contains(std_frag), "PG keeps `{std_frag}`: {pg}");
+            let mysql = render_expr_inline(&e, SqlDialect::Mysql).unwrap();
+            assert!(mysql.contains(std_frag), "MySQL keeps `{std_frag}`: {mysql}");
+            let sqlite = render_expr_inline(&e, SqlDialect::Sqlite).unwrap();
+            assert!(
+                sqlite.contains(sqlite_expect) && !sqlite.contains("IS TRUE") && !sqlite.contains("IS FALSE"),
+                "SQLite must rewrite `{std_frag}` to `{sqlite_expect}`: {sqlite}"
+            );
+        }
+    }
+
+    // ── portable predicate nodes: between / like / distinctFrom (§3.4) ───────
+
+    #[test]
+    fn between_renders_identically_on_all_three_dialects() {
+        // `(operand BETWEEN low AND high)` is standard SQL — IDENTICAL on PG,
+        // SQLite, and MySQL. The inline path binds no placeholders.
+        let expr = Expr::Between {
+            operand: Box::new(Expr::col("age")),
+            low: Box::new(lit_int(18)),
+            high: Box::new(lit_int(65)),
+        };
+        let expect_pg_sqlite = "(\"age\" BETWEEN 18 AND 65)";
+        let expect_mysql = "(`age` BETWEEN 18 AND 65)";
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), expect_pg_sqlite);
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), expect_pg_sqlite);
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), expect_mysql);
+
+        // Bound path: operand is an identifier; low/high become placeholders.
+        for (dialect, ident) in [
+            (SqlDialect::Postgres, "\"age\""),
+            (SqlDialect::Sqlite, "\"age\""),
+            (SqlDialect::Mysql, "`age`"),
+        ] {
+            let mut ctx = BindCtx::new(dialect);
+            let sql = render_expr_bound(&expr, &mut ctx).unwrap();
+            assert!(
+                sql.starts_with(&format!("({ident} BETWEEN ")) && sql.contains(" AND "),
+                "BETWEEN keeps its shape on {dialect:?}: {sql}"
+            );
+            assert_eq!(ctx.binds.len(), 2, "low + high bind on {dialect:?}");
+        }
+    }
+
+    #[test]
+    fn like_renders_same_syntax_on_all_three_dialects() {
+        // `(operand LIKE pattern)` — same syntax on PG, SQLite, MySQL. (Per-dialect
+        // case-sensitivity semantics differ; the parity PROOF is a Phase-4 claim,
+        // not this slice — see the Expr::Like doc comment.)
+        let expr = Expr::Like {
+            operand: Box::new(Expr::col("name")),
+            pattern: Box::new(Expr::lit(IrScalar::Str("A%".to_string()))),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"name\" LIKE 'A%')"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"name\" LIKE 'A%')"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`name` LIKE 'A%')"
+        );
+    }
+
+    #[test]
+    fn in_list_renders_pg_any_all_and_sql_in_not_in_on_all_three_dialects() {
+        let includes = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec!["a".into(), "b".into()],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&includes, SqlDialect::Postgres).unwrap(),
+            "(\"status\" = ANY (ARRAY['a'::text, 'b'::text]))"
+        );
+        assert_eq!(
+            render_expr_inline(&includes, SqlDialect::Sqlite).unwrap(),
+            "(\"status\" IN ('a', 'b'))"
+        );
+        assert_eq!(
+            render_expr_inline(&includes, SqlDialect::Mysql).unwrap(),
+            "(`status` IN ('a', 'b'))"
+        );
+
+        let excludes = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec!["x".into(), "y".into()],
+            negated: true,
+        };
+        assert_eq!(
+            render_expr_inline(&excludes, SqlDialect::Postgres).unwrap(),
+            "(\"status\" <> ALL (ARRAY['x'::text, 'y'::text]))"
+        );
+        assert_eq!(
+            render_expr_inline(&excludes, SqlDialect::Sqlite).unwrap(),
+            "(\"status\" NOT IN ('x', 'y'))"
+        );
+        assert_eq!(
+            render_expr_inline(&excludes, SqlDialect::Mysql).unwrap(),
+            "(`status` NOT IN ('x', 'y'))"
+        );
+    }
+
+    #[test]
+    fn in_list_empty_list_renders_boolean_constants() {
+        let includes_empty = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec![],
+            negated: false,
+        };
+        let excludes_empty = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec![],
+            negated: true,
+        };
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            assert_eq!(render_expr_inline(&includes_empty, dialect).unwrap(), "FALSE");
+            assert_eq!(render_expr_inline(&excludes_empty, dialect).unwrap(), "TRUE");
+            assert_eq!(
+                render_expr_bound(&includes_empty, &mut BindCtx::new(dialect)).unwrap(),
+                "FALSE"
+            );
+            assert_eq!(
+                render_expr_bound(&excludes_empty, &mut BindCtx::new(dialect)).unwrap(),
+                "TRUE"
+            );
+        }
+    }
+
+    #[test]
+    fn in_list_escapes_text_elements() {
+        let expr = Expr::InList {
+            expr: Box::new(Expr::col("status")),
+            elems: vec!["a'b".into()],
+            negated: false,
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"status\" = ANY (ARRAY['a''b'::text]))"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"status\" IN ('a''b'))"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(`status` IN ('a''b'))"
+        );
+    }
+
+    #[test]
+    fn distinct_from_diverges_pg_sqlite_vs_mysql() {
+        // The whole point of the node: PG + SQLite support `IS DISTINCT FROM`
+        // directly; MySQL has no such operator, so the engine lowers it to
+        // `NOT (x <=> y)` (`<=>` is MySQL's NULL-safe equality).
+        let expr = Expr::DistinctFrom {
+            left: Box::new(Expr::col("a")),
+            right: Box::new(Expr::col("b")),
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"a\" IS DISTINCT FROM \"b\")",
+            "PG uses IS DISTINCT FROM"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            "(\"a\" IS DISTINCT FROM \"b\")",
+            "SQLite uses IS DISTINCT FROM"
+        );
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            "(NOT (`a` <=> `b`))",
+            "MySQL lowers to NOT (a <=> b) — no IS DISTINCT FROM operator"
+        );
+
+        // Bound path renders the same divergent spellings.
+        assert_eq!(
+            render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Postgres)).unwrap(),
+            "(\"a\" IS DISTINCT FROM \"b\")"
+        );
+        assert_eq!(
+            render_expr_bound(&expr, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
+            "(NOT (`a` <=> `b`))"
+        );
+    }
+
+    // ── the Layer-2 dialect() per-dialect value escape (§3.4) ────────────────
+
+    #[test]
+    fn dialectal_renders_the_target_dialects_own_leg() {
+        // dialect({ pg: A, sqlite: B, mysql: C }) renders A on PG, B on SQLite,
+        // C on MySQL — each target picks its OWN leg.
+        let expr = Expr::Dialectal {
+            default: None,
+            pg: Some(Box::new(lit_str("A"))),
+            sqlite: Some(Box::new(lit_str("B"))),
+            mysql: Some(Box::new(lit_str("C"))),
+        };
+        // Inline path: each leg is an inline string literal.
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), "'A'");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "'B'");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), "'C'");
+
+        // Bound path: each leg's literal becomes exactly ONE placeholder — the
+        // shape is fixed by the chosen leg, not by the other legs.
+        for (dialect, ph) in [
+            (SqlDialect::Postgres, "$1"),
+            (SqlDialect::Sqlite, "?1"),
+            (SqlDialect::Mysql, "?"),
+        ] {
+            let mut ctx = BindCtx::new(dialect);
+            let sql = render_expr_bound(&expr, &mut ctx).unwrap();
+            assert_eq!(sql, ph, "dialect() binds its chosen leg on {dialect:?}");
+            assert_eq!(ctx.binds.len(), 1, "exactly one leg's literal binds on {dialect:?}");
+        }
+    }
+
+    #[test]
+    fn dialectal_falls_back_to_default_when_no_own_leg() {
+        // dialect({ default: D, pg: A }) renders A on PG (its own leg) but D on
+        // SQLite AND MySQL (fallback to default).
+        let expr = Expr::Dialectal {
+            default: Some(Box::new(lit_str("D"))),
+            pg: Some(Box::new(lit_str("A"))),
+            sqlite: None,
+            mysql: None,
+        };
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), "'A'", "PG uses its own leg");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "'D'", "SQLite falls back to default");
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), "'D'", "MySQL falls back to default");
+    }
+
+    #[test]
+    fn dialectal_recurses_into_the_chosen_leg_expression() {
+        // A leg is a full Expr, not just a literal — the chosen leg renders
+        // recursively (here a BETWEEN on PG vs a bare column on the default).
+        let expr = Expr::Dialectal {
+            default: Some(Box::new(Expr::col("age"))),
+            pg: Some(Box::new(Expr::Between {
+                operand: Box::new(Expr::col("age")),
+                low: Box::new(lit_int(1)),
+                high: Box::new(lit_int(9)),
+            })),
+            sqlite: None,
+            mysql: None,
+        };
+        assert_eq!(
+            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            "(\"age\" BETWEEN 1 AND 9)",
+        );
+        assert_eq!(render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(), "\"age\"");
+    }
+
+    #[test]
+    fn dialectal_with_no_leg_for_target_is_a_fail_closed_render_backstop() {
+        // A dialect({ pg: A }) (no default) has no SQLite leg — validate refuses
+        // this per-target BEFORE assembly, but the renderer is defensively
+        // fail-closed rather than silently dropping the value.
+        let expr = Expr::Dialectal {
+            default: None,
+            pg: Some(Box::new(lit_str("A"))),
+            sqlite: None,
+            mysql: None,
+        };
+        assert!(render_expr_inline(&expr, SqlDialect::Postgres).is_ok());
+        let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
+        assert!(matches!(err, DmlError::UnrenderableExpr(_)), "no SQLite leg → fail-closed: {err:?}");
+    }
+
+    // ── portable aggregate node: c.agg.count/sum/avg/min/max + DISTINCT (§3.4) ──
+
+    #[test]
+    fn agg_renders_identically_on_all_three_dialects() {
+        use crate::model::expr::AggFunc;
+
+        // count(*) — no arg — is byte-identical everywhere (no identifier at all).
+        let count_star = Expr::Agg { func: AggFunc::Count, arg: None, distinct: false };
+        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            assert_eq!(
+                render_expr_inline(&count_star, d).unwrap(),
+                "count(*)",
+                "count(*) is identical on {d:?}"
+            );
+        }
+
+        // count(DISTINCT <col>) — only the identifier quoting differs (MySQL backticks).
+        let count_distinct = Expr::Agg {
+            func: AggFunc::Count,
+            arg: Some(Box::new(Expr::col("x"))),
+            distinct: true,
+        };
+        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Postgres).unwrap(), "count(DISTINCT \"x\")");
+        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Sqlite).unwrap(), "count(DISTINCT \"x\")");
+        assert_eq!(render_expr_inline(&count_distinct, SqlDialect::Mysql).unwrap(), "count(DISTINCT `x`)");
+
+        // sum/avg/min/max(<col>) — identical spelling, only quoting differs.
+        for (func, name) in [
+            (AggFunc::Sum, "sum"),
+            (AggFunc::Avg, "avg"),
+            (AggFunc::Min, "min"),
+            (AggFunc::Max, "max"),
+        ] {
+            let e = Expr::Agg { func, arg: Some(Box::new(Expr::col("x"))), distinct: false };
+            assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), format!("{name}(\"x\")"));
+            assert_eq!(render_expr_inline(&e, SqlDialect::Sqlite).unwrap(), format!("{name}(\"x\")"));
+            assert_eq!(render_expr_inline(&e, SqlDialect::Mysql).unwrap(), format!("{name}(`x`)"));
+        }
+
+        // The bound path renders the aggregate identically and binds no placeholders
+        // (a ColRef arg is an identifier, not a bind).
+        let mut ctx = BindCtx::new(SqlDialect::Postgres);
+        assert_eq!(render_expr_bound(&count_distinct, &mut ctx).unwrap(), "count(DISTINCT \"x\")");
+        assert_eq!(ctx.binds.len(), 0, "a ColRef aggregate arg is not a bind");
+        assert_eq!(
+            render_expr_bound(&count_star, &mut BindCtx::new(SqlDialect::Mysql)).unwrap(),
+            "count(*)"
+        );
     }
 
     // ── identifier safety ───────────────────────────────────────────────────
@@ -1737,10 +2561,10 @@ mod tests {
     fn update_binds_literal_in_set_and_where() {
         let set = BTreeMap::from([(
             "label".to_string(),
-            Expr::FnCall {
+            dml_expr(Expr::FnCall {
                 r#fn: ScalarFn::Coalesce,
                 args: vec![Expr::col("label"), lit_str("unknown")],
-            },
+            }),
         )]);
         let pred = Expr::BinOp {
             op: BinaryOp::Gt,
@@ -1759,7 +2583,7 @@ mod tests {
 
     #[test]
     fn update_portable_on_sqlite() {
-        let set = BTreeMap::from([("a".to_string(), lit_int(5))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(lit_int(5)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Sqlite, "t", &set, None).unwrap();
         assert_eq!(a.template, "UPDATE \"t\" SET \"a\" = ?1");
         assert_eq!(a.binds, vec![BindValue::Int(5)]);
@@ -1825,11 +2649,11 @@ mod tests {
     fn backfill_renders_inline_set_and_filter() {
         let set = BTreeMap::from([(
             "label".to_string(),
-            Expr::BinOp {
+            dml_expr(Expr::BinOp {
                 op: BinaryOp::Concat,
                 lhs: Box::new(Expr::col("code")),
                 rhs: Box::new(lit_str("!")),
-            },
+            }),
         )]);
         let filter = Expr::BinOp {
             op: BinaryOp::Gt,
@@ -1845,7 +2669,7 @@ mod tests {
     /// downstream); the quote cannot break out of the literal.
     #[test]
     fn backfill_inline_string_is_quote_escaped() {
-        let set = BTreeMap::from([("a".to_string(), lit_str("O'Brien"))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(lit_str("O'Brien")))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = 'O''Brien'");
     }
@@ -1873,7 +2697,7 @@ mod tests {
     /// PG lowers splitPart to the native `split_part(col, 'd', n)` — verbatim.
     #[test]
     fn split_part_pg_native() {
-        let set = BTreeMap::from([("first".to_string(), split("name", " ", 1))]);
+        let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"first\" = split_part(\"name\", ' ', 1)");
     }
@@ -1882,7 +2706,7 @@ mod tests {
     /// case (no inner walk). The exact string is pinned to the §9 exhibit.
     #[test]
     fn split_part_sqlite_n1_unroll() {
-        let set = BTreeMap::from([("first".to_string(), split("name", " ", 1))]);
+        let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
         assert_eq!(
             c.set_clause,
@@ -1893,7 +2717,7 @@ mod tests {
     /// SQLite n=2 unrolls one boundary walk — pinned to the §9 exhibit.
     #[test]
     fn split_part_sqlite_n2_unroll() {
-        let set = BTreeMap::from([("last".to_string(), split("name", " ", 2))]);
+        let set = BTreeMap::from([("last".to_string(), dml_expr(split("name", " ", 2)))]);
         let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
         // cur1 = substr((name||' '), instr((name||' '), ' ') + 1)
         // result = substr(cur1, 1, instr(cur1, ' ') - 1)
@@ -1908,7 +2732,7 @@ mod tests {
     /// (binding nested literals); the delim/n are engine-pinned constants, NOT binds.
     #[test]
     fn split_part_one_shot_bound_pg() {
-        let set = BTreeMap::from([("first".to_string(), split("name", ",", 1))]);
+        let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", ",", 1)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(a.template, "UPDATE \"app_proj\".\"t\" SET \"first\" = split_part(\"name\", ',', 1)");
         assert!(a.binds.is_empty(), "delim/n are pinned constants, not binds");
@@ -1917,7 +2741,7 @@ mod tests {
     /// A single-quote delimiter is `''''`-escaped in the inline literal on both legs.
     #[test]
     fn split_part_quote_delim_escaped_sqlite() {
-        let set = BTreeMap::from([("a".to_string(), split("name", "'", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", "'", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
         assert_eq!(
             c.set_clause,
@@ -1930,10 +2754,10 @@ mod tests {
     /// mis-built.
     #[test]
     fn split_part_renderer_rejects_out_of_envelope() {
-        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
-        let set = BTreeMap::from([("a".to_string(), split("name", ",", 9))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 9)))]);
         let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
@@ -1947,17 +2771,17 @@ mod tests {
     #[test]
     fn split_part_out_of_envelope_renders_native_on_pg() {
         // multi-char delimiter — PG's split_part is multi-char-capable.
-        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ', ', 1)");
 
         // n beyond the SQLite unroll bound (9) — PG takes any positive n.
-        let set = BTreeMap::from([("a".to_string(), split("name", ",", 9))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 9)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ',', 9)");
 
         // and the one-shot (bound) PG path too — delim/n stay pinned constants.
-        let set = BTreeMap::from([("a".to_string(), split("name", ", ", 1))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
         let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(a.template, "UPDATE \"app_proj\".\"t\" SET \"a\" = split_part(\"name\", ', ', 1)");
         assert!(a.binds.is_empty(), "delim/n are pinned constants, not binds");
@@ -1967,7 +2791,7 @@ mod tests {
     /// literal string); the single-ASCII byte gate is a SQLite-only envelope.
     #[test]
     fn split_part_non_ascii_delim_renders_on_pg() {
-        let set = BTreeMap::from([("a".to_string(), split("name", "→", 2))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", "→", 2)))]);
         let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", '→', 2)");
         // …but rejected on the SQLite leg (out of the byte-wise envelope).
@@ -1981,19 +2805,19 @@ mod tests {
     #[test]
     fn split_part_pg_still_rejects_malformed() {
         // n = 0 (not a positive part index) — invalid on PG too.
-        let set = BTreeMap::from([("a".to_string(), split("name", ",", 0))]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 0)))]);
         let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
         // non-literal delim (a ColRef) — never renderable.
         let bad = Expr::FnSynth {
             r#fn: SynthFn::SplitPart,
             args: vec![
-                Expr::ColRef { name: "name".into() },
-                Expr::ColRef { name: "name".into() },
+                Expr::ColRef { name: "name".into(), table: None },
+                Expr::ColRef { name: "name".into(), table: None },
                 lit_int(1),
             ],
         };
-        let set = BTreeMap::from([("a".to_string(), bad)]);
+        let set = BTreeMap::from([("a".to_string(), dml_expr(bad))]);
         let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }

@@ -43,17 +43,18 @@ use crate::model::ir::{
     ColType, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement, ExclusionMethod,
     ExclusionOperator, ExistenceGuard, ForEach, IndexElement, IndexStorageParams, IrColumn,
     IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, IndexMethod, Join, MigrationIr,
-    Op, OrderDir, OrderItem, RaiseLevel, RefAction, SafeI64, SelectAst, SelectItem,
-    SequenceOwnedBy, TableRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerStmt,
-    VectorMetric, ViewQuery,
+    Op, OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RaiseLevel,
+    RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
+    TriggerAction, TriggerEvent, TriggerStmt, VectorMetric, ViewQuery,
 };
 use crate::model::migration::Migration;
 use crate::model::policy::TrustProfile;
 use crate::model::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, TableSnapshot,
+    ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, PartitionSnapshot,
+    TableSnapshot,
 };
 use crate::render::plan::AppliedPlan;
-use crate::render::step::{PlanStep, RenameStep};
+use crate::render::step::{BindValue, PlanStep, RenameStep};
 use zeroship_schema::query::SqlDialect;
 
 /// The result of lowering ONE IR op (§2.0 / §2.6.1). A DDL op lowers to a list of
@@ -116,6 +117,68 @@ pub(crate) struct DomainDef {
     pub(crate) not_null: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PartitionLowerState {
+    parents: BTreeMap<String, PartitionLowerParent>,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionLowerParent {
+    spec: PartitionSpec,
+    children: BTreeMap<String, PartitionBounds>,
+}
+
+impl PartitionLowerState {
+    fn from_live(live: &LiveSchema) -> Self {
+        let mut state = Self::default();
+        for (table, snapshot) in &live.table_snapshots {
+            if let Some(spec) = snapshot.partition_by.clone() {
+                state.create_parent(table, spec);
+            }
+        }
+        for (child, partition) in &live.partitions {
+            state.insert_child(&partition.of, child, partition.bounds.clone());
+        }
+        state
+    }
+
+    fn create_parent(&mut self, name: &str, spec: PartitionSpec) {
+        self.parents.insert(
+            name.to_string(),
+            PartitionLowerParent {
+                spec,
+                children: BTreeMap::new(),
+            },
+        );
+    }
+
+    fn remove_parent(&mut self, name: &str) {
+        self.parents.remove(name);
+    }
+
+    fn rename_parent(&mut self, from: &str, to: &str) {
+        if let Some(parent) = self.parents.remove(from) {
+            self.parents.insert(to.to_string(), parent);
+        }
+    }
+
+    fn parent(&self, name: &str) -> Option<&PartitionLowerParent> {
+        self.parents.get(name)
+    }
+
+    fn insert_child(&mut self, parent: &str, name: &str, bounds: PartitionBounds) {
+        if let Some(parent) = self.parents.get_mut(parent) {
+            parent.children.insert(name.to_string(), bounds);
+        }
+    }
+
+    fn remove_child(&mut self, parent: &str, name: &str) {
+        if let Some(parent) = self.parents.get_mut(parent) {
+            parent.children.remove(name);
+        }
+    }
+}
+
 /// The LIVE-schema facts the IR-path Lower phase consults — the IR-path peer of
 /// the full [`crate::model::snapshot::SchemaSnapshot`] the differ diffs against.
 ///
@@ -176,6 +239,10 @@ pub struct LiveSchema {
     /// IR-load gate's registry check). Empty ⇒ a SQLite rename fails closed on the
     /// ownership confirmation.
     pub table_ownership: std::collections::BTreeMap<String, String>,
+    /// Child partitions already present in the folded live schema. Collapse child
+    /// drops need the child bound even when the drop is authored in a later
+    /// migration than the createPartition op that established it.
+    pub partitions: std::collections::BTreeMap<String, PartitionSnapshot>,
 }
 
 impl LiveSchema {
@@ -191,6 +258,7 @@ impl LiveSchema {
             table_snapshots: std::collections::BTreeMap::new(),
             sqlite_schemas: std::collections::BTreeMap::new(),
             table_ownership: std::collections::BTreeMap::new(),
+            partitions: std::collections::BTreeMap::new(),
         }
     }
 
@@ -262,6 +330,7 @@ impl LiveSchema {
             table_snapshots: desired.snapshot.tables.clone(),
             sqlite_schemas: desired.sqlite_schemas.clone(),
             table_ownership,
+            partitions: desired.snapshot.partitions.clone(),
         })
     }
 
@@ -335,6 +404,7 @@ impl LiveSchema {
             table_snapshots: live.tables.clone(),
             sqlite_schemas,
             table_ownership,
+            partitions: live.partitions.clone(),
         })
     }
 
@@ -880,12 +950,9 @@ pub(crate) fn render_ir_default(default: &IrDefault, dialect: SqlDialect) -> Res
         IrDefault::Literal { value } => {
             crate::render::dml::inline_literal(value).map_err(IrLowerError::DmlAssemble)
         }
-        IrDefault::Fn { r#fn } => Ok(match r#fn {
-            crate::model::ir::SynthDefaultFn::Now => crate::render::renderer::renderer(dialect).synth_now(),
-            crate::model::ir::SynthDefaultFn::GenRandomUuid => {
-                crate::render::renderer::renderer(dialect).synth_uuid()
-            }
-        }),
+        IrDefault::Expr { expr } => {
+            crate::render::dml::render_expr_inline(expr, dialect).map_err(IrLowerError::DmlAssemble)
+        }
         IrDefault::Container { .. } => Err(IrLowerError::UnsupportedOp(
             "container defaults require a column type at render",
         )),
@@ -911,7 +978,7 @@ pub(crate) fn render_ir_default_for_type(
     match default {
         IrDefault::Container { kind } => render_container_default_for_col_type(*kind, ty),
         IrDefault::Json { value } => render_json_default_for_col_type(value, ty, dialect),
-        IrDefault::Literal { .. } | IrDefault::Fn { .. } | IrDefault::Nextval { .. } => {
+        IrDefault::Literal { .. } | IrDefault::Expr { .. } | IrDefault::Nextval { .. } => {
             render_ir_default(default, dialect)
         }
     }
@@ -1474,7 +1541,8 @@ impl IrAuthor {
     /// `diff`); `live.unique_indexes` is the authoritative set of live UNIQUE-index
     /// names that drives the `dropIndex` destructive/approval gate (OR-ed with the
     /// IR's advisory `unique` hint); `live.table_snapshots` + `live.sqlite_schemas`
-    /// carry the full live table structure the SQLite `renameColumn` rebuild needs.
+    /// carry the full live table structure the SQLite `renameColumn` rebuild needs;
+    /// `live.partitions` carries child bounds for collapse DELETE derivation.
     /// Tables created EARLIER in the same IR are added to the working live-table set
     /// as lowering proceeds, so an intra-migration FK inlines correctly.
     ///
@@ -1490,6 +1558,7 @@ impl IrAuthor {
     ) -> Result<Vec<PlanStep>, IrLowerError> {
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
         for (op_index, op) in ir.ops.iter().enumerate() {
             // The whole-up step lowering discards the structural statement list (it
@@ -1497,7 +1566,14 @@ impl IrAuthor {
             // guarded path ([`lower_guarded`]) consumes the list to guard true
             // statements. `op_index` is the plan position the DML-step version folds
             // in (so two byte-identical DML ops get distinct journal ids).
-            match self.lower_one_op(op_index, op, &mut live_tables, live, &mut named_types)? {
+            match self.lower_one_op(
+                op_index,
+                op,
+                &mut live_tables,
+                &mut partition_state,
+                live,
+                &mut named_types,
+            )? {
                 LoweredOp::Ddl(units) => {
                     out.extend(units.into_iter().map(|(mig, _statements)| PlanStep::Ddl(mig)));
                 }
@@ -1528,6 +1604,7 @@ impl IrAuthor {
         op_index: usize,
         op: &Op,
         live_tables: &mut BTreeSet<String>,
+        partition_state: &mut PartitionLowerState,
         live_schema: &LiveSchema,
         named_types: &mut NamedTypeRegistry,
     ) -> Result<LoweredOp, IrLowerError> {
@@ -1776,15 +1853,33 @@ impl IrAuthor {
                 // a re-run stays idempotent unit-by-unit. We pass the guard direction in
                 // and DO NOT build/stamp a single shared probe here (the bottom-of-fn
                 // generic stamp is skipped for CreateTable).
-                let migs = decl.lower_create_table(
+                let mut migs = decl.lower_create_table(
                     name,
                     &snap,
                     &sqlite_schema,
                     live,
                     guard.map(Into::into),
                 )?;
+                if partition_by.as_ref().is_some_and(PartitionSpec::collapse)
+                    && !matches!(self.dialect, SqlDialect::Postgres)
+                {
+                    if let Some((mig, statements)) = migs.first_mut() {
+                        let note =
+                            "/* zeroship: partitionBy collapsed to a plain table on this dialect */\n";
+                        if let Some(first) = statements.first_mut() {
+                            first.insert_str(0, note);
+                        }
+                        mig.up = statements.join(";\n");
+                        mig.recompute_checksum();
+                    }
+                }
                 // The just-created table is now live for any later intra-IR FK.
                 live.insert(name.clone());
+                if let Some(spec) = partition_by {
+                    partition_state.create_parent(name, spec.clone());
+                } else {
+                    partition_state.remove_parent(name);
+                }
                 migs
             }
             Op::SetTableOptions { .. } => Vec::new(),
@@ -1872,6 +1967,7 @@ impl IrAuthor {
                 include,
                 with,
                 only,
+                nulls_not_distinct,
                 ..
             } => {
                 let idx = create_index_snapshot(
@@ -1884,6 +1980,7 @@ impl IrAuthor {
                     include,
                     with.as_ref(),
                     *only,
+                    *nulls_not_distinct,
                     self.dialect,
                 )?;
                 // **PR10 Part B** — createIndex ifNotExists: verify (unique, columns)
@@ -1906,9 +2003,33 @@ impl IrAuthor {
                 ..
             } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "createPartition is PostgreSQL-only",
-                    ));
+                    let spec = partition_state
+                        .parent(of)
+                        .filter(|parent| parent.spec.collapse())
+                        .map(|parent| parent.spec.clone())
+                        .ok_or(IrLowerError::UnsupportedOp(
+                            "createPartition needs a collapse-affirmed parent on SQLite/MySQL",
+                        ))?;
+                    let step = if !matches!(
+                        bounds,
+                        PartitionBounds::Default | PartitionBounds::Hash { .. }
+                    ) {
+                        let guard_sql =
+                            self.render_partition_collapse_mirror_guard(&eff_schema, of, &spec, bounds)?;
+                        Some(self.partition_collapse_dml_step(
+                            op_index,
+                            &format!("partition_collapse_guard_{of}_{name}"),
+                            guard_sql,
+                            false,
+                        ))
+                    } else {
+                        None
+                    };
+                    partition_state.insert_child(of, name, bounds.clone());
+                    return Ok(match step {
+                        Some(step) => LoweredOp::Dml(step),
+                        None => LoweredOp::Ddl(Vec::new()),
+                    });
                 }
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::Table {
@@ -1918,7 +2039,22 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
+                partition_state.insert_child(of, name, bounds.clone());
                 vec![decl.lower_create_partition(name, of, bounds)]
+            }
+            Op::AttachPartition {
+                parent,
+                name,
+                bound,
+                ..
+            } => {
+                if !matches!(self.dialect, SqlDialect::Postgres) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "attachPartition is PostgreSQL-only",
+                    ));
+                }
+                partition_state.insert_child(parent, name, bound.clone());
+                vec![decl.lower_attach_partition(parent, name, bound)]
             }
             Op::DetachPartition {
                 parent,
@@ -1931,17 +2067,33 @@ impl IrAuthor {
                         "detachPartition is PostgreSQL-only",
                     ));
                 }
+                partition_state.remove_child(parent, name);
                 vec![decl.lower_detach_partition(
                     parent,
                     name,
                     concurrently.unwrap_or(false),
                 )]
             }
-            Op::DropPartition { name, cascade, .. } => {
+            Op::DropPartition {
+                parent,
+                name,
+                cascade,
+                ..
+            } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "dropPartition is PostgreSQL-only",
-                    ));
+                    let delete_sql = self.render_partition_collapse_delete(
+                        &eff_schema,
+                        partition_state,
+                        parent,
+                        name,
+                    )?;
+                    partition_state.remove_child(parent, name);
+                    return Ok(LoweredOp::Dml(self.partition_collapse_dml_step(
+                        op_index,
+                        &format!("drop_partition_{parent}_{name}_collapsed"),
+                        delete_sql,
+                        true,
+                    )));
                 }
                 if let Some(g) = guard {
                     probe = Some(crate::model::probe::GuardProbe::Table {
@@ -1951,6 +2103,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
+                partition_state.remove_child(parent, name);
                 vec![decl.lower_drop_partition(name, cascade.unwrap_or(false))]
             }
             Op::DropTable { table, .. } => {
@@ -1963,6 +2116,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
+                partition_state.remove_parent(table);
                 vec![decl.lower_drop_table(table)]
             }
             Op::RenameTable { table, to, .. } => {
@@ -1984,6 +2138,7 @@ impl IrAuthor {
                         expect_columns: Vec::new(),
                     });
                 }
+                partition_state.rename_parent(table, to);
                 vec![decl.lower_rename_table(table, to)]
             }
             Op::DropColumn { table, column, .. } => {
@@ -2071,7 +2226,7 @@ impl IrAuthor {
                 )?;
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
-                        ColType::Enum { name }
+                        ColType::Enum { name, .. }
                             if !self.dialect.supports(Capability::MaterializedEnumType) =>
                         {
                             return Err(IrLowerError::NamedTypeUnsupported {
@@ -2080,7 +2235,7 @@ impl IrAuthor {
                                 reason: "unreachable use-site",
                             });
                         }
-                        ColType::Domain { name }
+                        ColType::Domain { name, .. }
                             if !self.dialect.supports(Capability::MaterializedDomainType) =>
                         {
                             return Err(IrLowerError::NamedTypeUnsupported {
@@ -2156,11 +2311,6 @@ impl IrAuthor {
             Op::SetColumnDefault { table, column, value, .. } => {
                 // Same SQLite rebuild constraint as setColumnType.
                 self.require_capability_for(Capability::NativeAlterColumn, "setColumnDefault")?;
-                if matches!(value, IrDefault::Fn { .. }) {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "validated setColumnDefault synth default reached lower",
-                    ));
-                }
                 let default_sql = match value {
                     IrDefault::Container { kind } => {
                         let data_type = live_schema
@@ -2199,7 +2349,7 @@ impl IrAuthor {
                         }
                         render_ir_default(value, self.dialect)?
                     }
-                    IrDefault::Literal { .. } | IrDefault::Fn { .. } => {
+                    IrDefault::Literal { .. } | IrDefault::Expr { .. } => {
                         render_ir_default(value, self.dialect)?
                     }
                 };
@@ -2306,6 +2456,27 @@ impl IrAuthor {
                 }
                 vec![decl.lower_drop_constraint(table, name)]
             }
+            Op::ValidateConstraint { table, name, .. } => {
+                // PostgreSQL-only online constraint adoption — SQLite/MySQL have no
+                // `VALIDATE CONSTRAINT` (validate refuses them; this is the fail-closed
+                // defense-in-depth gate for direct lower callers).
+                self.require_capability_for(
+                    Capability::AlterTableValidateConstraint,
+                    "validateConstraint",
+                )?;
+                // **PR10** — validateConstraint ifExists: presence-only on the name.
+                if let Some(g) = guard {
+                    probe = Some(crate::model::probe::GuardProbe::Constraint {
+                        schema: eff_schema.clone(),
+                        table: table.clone(),
+                        name: name.clone(),
+                        direction: g.into(),
+                        expect_kind: None,
+                        expect_definition: None,
+                    });
+                }
+                vec![decl.lower_validate_constraint(table, name)]
+            }
             // §PR6a — the DML ops lower through the creator-DML assembler
             // (`crate::render::dml`) into a `PlanStep::Dml`/`PlanStep::Backfill`, NOT a DDL
             // `Migration`. Each returns early with a `LoweredOp::Dml`.
@@ -2363,10 +2534,7 @@ impl IrAuthor {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::EnableRls { .. }
-            | Op::ForceRls { .. }
-            | Op::DisableRls { .. }
-            | Op::NoForceRls { .. }
+            | Op::SetRls { .. }
             | Op::CreatePolicy { .. }
             | Op::DropPolicy { .. }
             | Op::CreateFunction { .. }
@@ -2437,6 +2605,202 @@ impl IrAuthor {
             }
         }
         Ok(LoweredOp::Ddl(migs))
+    }
+
+    fn render_partition_collapse_mirror_guard(
+        &self,
+        eff_schema: &str,
+        parent: &str,
+        spec: &PartitionSpec,
+        bounds: &PartitionBounds,
+    ) -> Result<String, IrLowerError> {
+        let table_sql = self.render_partition_parent_ref(eff_schema, parent)?;
+        let key_sql = self.render_partition_key(spec)?;
+        let predicate = self.render_partition_bound_predicate(spec, bounds)?;
+        let statement = match self.dialect {
+            SqlDialect::Postgres => {
+                return Err(IrLowerError::UnsupportedOp(
+                    "partition collapse mirror guard is only for SQLite/MySQL",
+                ));
+            }
+            // SQLite can use INSERT...SELECT NULL into the NOT NULL partition key:
+            // the constraint is checked only for selected rows. MySQL's guard is
+            // a row-dependent JSON parse below instead, because a constant invalid
+            // JSON expression can be folded by the optimizer before WHERE filters.
+            SqlDialect::Sqlite => format!(
+                "/* zeroship: partition collapse populated-default mirror guard */\n\
+                 INSERT INTO {table_sql} ({key_sql}) \
+                 SELECT NULL FROM {table_sql} WHERE {predicate} LIMIT 1"
+            ),
+            SqlDialect::Mysql => format!(
+                "/* zeroship: partition collapse populated-default mirror guard */\n\
+                 SELECT JSON_EXTRACT(CONCAT('!', {key_sql}), '$') \
+                   FROM {table_sql} WHERE {predicate} LIMIT 1"
+            ),
+        };
+        Ok(statement)
+    }
+
+    fn render_partition_collapse_delete(
+        &self,
+        eff_schema: &str,
+        state: &PartitionLowerState,
+        parent: &str,
+        child: &str,
+    ) -> Result<String, IrLowerError> {
+        let parent_state = state
+            .parent(parent)
+            .filter(|parent| parent.spec.collapse())
+            .ok_or(IrLowerError::UnsupportedOp(
+                "dropPartition needs a collapse-affirmed parent on SQLite/MySQL",
+            ))?;
+        let bounds = parent_state
+            .children
+            .get(child)
+            .ok_or(IrLowerError::UnsupportedOp(
+                "dropPartition on a collapse target needs the child's recorded bound",
+            ))?;
+        if matches!(bounds, PartitionBounds::Hash { .. }) {
+            return Err(IrLowerError::UnsupportedOp(
+                "hash dropPartition has no collapse DELETE predicate",
+            ));
+        }
+
+        let predicate = match bounds {
+            PartitionBounds::Default => {
+                self.render_partition_default_residual_predicate(parent_state, child)?
+            }
+            _ => self.render_partition_bound_predicate(&parent_state.spec, bounds)?,
+        };
+        let table_sql = self.render_partition_parent_ref(eff_schema, parent)?;
+        Ok(format!(
+            "/* zeroship: partition child drop collapsed to DELETE FROM parent */\n\
+             DELETE FROM {table_sql} WHERE {predicate}"
+        ))
+    }
+
+    fn render_partition_default_residual_predicate(
+        &self,
+        parent: &PartitionLowerParent,
+        default_child: &str,
+    ) -> Result<String, IrLowerError> {
+        let mut terms = Vec::new();
+        for (sibling, bounds) in &parent.children {
+            if sibling == default_child || matches!(bounds, PartitionBounds::Default) {
+                continue;
+            }
+            if matches!(bounds, PartitionBounds::Hash { .. }) {
+                return Err(IrLowerError::UnsupportedOp(
+                    "hash sibling bound has no collapse residual predicate",
+                ));
+            }
+            let predicate = self.render_partition_bound_predicate(&parent.spec, bounds)?;
+            terms.push(format!("NOT ({predicate})"));
+        }
+        Ok(if terms.is_empty() {
+            "1 = 1".to_string()
+        } else {
+            terms.join(" AND ")
+        })
+    }
+
+    fn render_partition_bound_predicate(
+        &self,
+        spec: &PartitionSpec,
+        bounds: &PartitionBounds,
+    ) -> Result<String, IrLowerError> {
+        let key_sql = self.render_partition_key(spec)?;
+        match (spec, bounds) {
+            (PartitionSpec::Range { .. }, PartitionBounds::Range { from, to }) => {
+                self.render_partition_range_predicate(&key_sql, from, to)
+            }
+            (PartitionSpec::List { .. }, PartitionBounds::List { values }) => {
+                self.render_partition_list_predicate(&key_sql, values)
+            }
+            (_, PartitionBounds::Default) => Err(IrLowerError::UnsupportedOp(
+                "default partition bounds require residual sibling predicate",
+            )),
+            (_, PartitionBounds::Hash { .. }) => Err(IrLowerError::UnsupportedOp(
+                "hash partition bounds have no collapse predicate",
+            )),
+            _ => Err(IrLowerError::UnsupportedOp(
+                "partition child bound kind does not match parent partitionBy",
+            )),
+        }
+    }
+
+    fn render_partition_range_predicate(
+        &self,
+        key_sql: &str,
+        from: &[PartitionBoundValue],
+        to: &[PartitionBoundValue],
+    ) -> Result<String, IrLowerError> {
+        let [from] = from else {
+            return Err(partition_collapse_render_error(
+                "collapse range DELETE supports exactly one lower-bound value",
+            ));
+        };
+        let [to] = to else {
+            return Err(partition_collapse_render_error(
+                "collapse range DELETE supports exactly one upper-bound value",
+            ));
+        };
+
+        let mut terms = Vec::new();
+        if !matches!(from, PartitionBoundValue::MinValue) {
+            terms.push(format!("{key_sql} >= {}", render_partition_bound_literal(from)?));
+        }
+        if !matches!(to, PartitionBoundValue::MaxValue) {
+            terms.push(format!("{key_sql} < {}", render_partition_bound_literal(to)?));
+        }
+        Ok(if terms.is_empty() {
+            "1 = 1".to_string()
+        } else {
+            terms.join(" AND ")
+        })
+    }
+
+    fn render_partition_list_predicate(
+        &self,
+        key_sql: &str,
+        values: &[PartitionBoundValue],
+    ) -> Result<String, IrLowerError> {
+        if values.is_empty() {
+            return Err(partition_collapse_render_error(
+                "collapse list DELETE cannot render an empty IN bound",
+            ));
+        }
+        let values = values
+            .iter()
+            .map(render_partition_bound_literal)
+            .collect::<Result<Vec<_>, _>>()?
+            .join(", ");
+        Ok(format!("{key_sql} IN ({values})"))
+    }
+
+    fn render_partition_key(&self, spec: &PartitionSpec) -> Result<String, IrLowerError> {
+        let columns = spec.columns();
+        let [column] = columns else {
+            return Err(partition_collapse_render_error(
+                "collapse partition predicates support exactly one partition key column",
+            ));
+        };
+        crate::render::dml::quote_bare_ident_for_dialect(
+            "partition key column",
+            column,
+            self.dialect,
+        )
+        .map_err(IrLowerError::DmlAssemble)
+    }
+
+    fn render_partition_parent_ref(
+        &self,
+        eff_schema: &str,
+        parent: &str,
+    ) -> Result<String, IrLowerError> {
+        crate::render::renderer::renderer(self.dialect)
+            .qualify_table(eff_schema, parent)
+            .map_err(IrLowerError::DmlAssemble)
     }
 
     fn lower_trigger_op(
@@ -2629,6 +2993,27 @@ impl IrAuthor {
         }
     }
 
+    fn partition_collapse_dml_step(
+        &self,
+        op_index: usize,
+        name: &str,
+        template: String,
+        destructive: bool,
+    ) -> PlanStep {
+        let binds: Vec<BindValue> = Vec::new();
+        let owner = self.decl.owner_app().to_string();
+        let version = dml_step_version(op_index, &owner, name, &template, &binds);
+        PlanStep::Dml {
+            version,
+            name: name.to_string(),
+            template,
+            binds,
+            transactional: true,
+            destructive,
+            owner_app: owner,
+        }
+    }
+
     /// Lower a `backfill` (or batched `update`) into a [`PlanStep::Backfill`]. The
     /// `set`/`filter` render to INLINE SQL strings ([`crate::render::dml::assemble_backfill_clauses`])
     /// the [`crate::model::backfill::BackfillSpec`] executor consumes (it guard-checks /
@@ -2667,7 +3052,7 @@ impl IrAuthor {
         table: &str,
         cursor_column: &str,
         batch_size: u64,
-        set: &std::collections::BTreeMap<String, crate::model::expr::Expr>,
+        set: &std::collections::BTreeMap<String, crate::model::ir::IrValue>,
         filter: Option<&crate::model::expr::Expr>,
         name: &str,
     ) -> Result<PlanStep, IrLowerError> {
@@ -2740,6 +3125,7 @@ impl IrAuthor {
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
+        let mut partition_state = PartitionLowerState::from_live(live);
         let mut named_types = NamedTypeRegistry::default();
 
         crate::guard::check_ir_data_security_policy(guard_cfg, ir).map_err(|err| {
@@ -2766,6 +3152,7 @@ impl IrAuthor {
                 op_index,
                 op,
                 &mut live_tables,
+                &mut partition_state,
                 live,
                 &mut named_types,
             )? {
@@ -2970,13 +3357,14 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         for c in constraints {
             match &c.kind {
-                IrConstraintKind::Pk { .. } => {
-                    // `createTable` renders primary keys from the resolved top-level
-                    // `primary_key` field. Constraint-form PKs are a validation concern;
-                    // lower must not re-apply the old platform-owned-id policy here.
-                    continue;
-                }
-                IrConstraintKind::Check { expr } => {
+                IrConstraintKind::Check { expr, not_valid } => {
+                    if not_valid.is_some() {
+                        // NOT VALID is meaningless in CREATE TABLE (validate refuses
+                        // it at the create-time inline constraint); defense-in-depth.
+                        return Err(IrLowerError::UnsupportedOp(
+                            "validated createTable NOT VALID CHECK reached lower",
+                        ));
+                    }
                     if !matches!(self.dialect, SqlDialect::Postgres) {
                         return Err(IrLowerError::UnsupportedOp(
                             "validated non-Postgres createTable CHECK reached lower",
@@ -3002,7 +3390,15 @@ impl IrAuthor {
                     on_update,
                     deferrable,
                     initially_deferred,
+                    not_valid,
                 } => {
+                    if not_valid.is_some() {
+                        // NOT VALID is meaningless in CREATE TABLE (validate refuses
+                        // it at the create-time inline constraint); defense-in-depth.
+                        return Err(IrLowerError::UnsupportedOp(
+                            "validated createTable NOT VALID FOREIGN KEY reached lower",
+                        ));
+                    }
                     if !self.dialect.supports(Capability::TableLevelForeignKey) {
                         return Err(IrLowerError::UnsupportedOp(
                             "validated SQLite createTable table-level FOREIGN KEY reached lower",
@@ -3091,6 +3487,7 @@ impl IrAuthor {
                 &ix.include,
                 ix.with.as_ref(),
                 ix.only,
+                ix.nulls_not_distinct,
                 self.dialect,
             )?;
             snap_idx.access_method = access.to_string();
@@ -3237,7 +3634,7 @@ impl IrAuthor {
         named_types: &NamedTypeRegistry,
     ) -> Result<(), IrLowerError> {
         match &source.ty {
-            ColType::Enum { name } => {
+            ColType::Enum { name, .. } => {
                 match self.dialect {
                     SqlDialect::Postgres => {
                         let schema = named_types.enum_schema_or(name, default_schema);
@@ -3261,7 +3658,7 @@ impl IrAuthor {
                     }
                 }
             }
-            ColType::Domain { name } => {
+            ColType::Domain { name, .. } => {
                 if matches!(self.dialect, SqlDialect::Postgres) {
                     let schema = named_types.domain_schema_or(name, default_schema);
                     col.data_type = pg_type_data_type(schema, name);
@@ -3329,11 +3726,11 @@ impl IrAuthor {
         named_types: &NamedTypeRegistry,
     ) -> Result<String, IrLowerError> {
         match as_type {
-            ColType::Enum { name } => {
+            ColType::Enum { name, .. } => {
                 let def = named_types.enum_def(name)?;
                 pg_type_qname(&def.schema, name)
             }
-            ColType::Domain { name } => Err(IrLowerError::NamedTypeUnsupported {
+            ColType::Domain { name, .. } => Err(IrLowerError::NamedTypeUnsupported {
                 kind: "domain",
                 name: name.clone(),
                 reason: "nested named base type",
@@ -3604,10 +4001,18 @@ impl IrAuthor {
                 on_update,
                 deferrable,
                 initially_deferred,
+                not_valid,
             } => {
                 if columns.is_empty() {
                     return Err(IrLowerError::UnsupportedOp(
                         "validated addConstraint(fk) with no local column reached lower",
+                    ));
+                }
+                if not_valid == &Some(true) && !matches!(self.dialect, SqlDialect::Postgres) {
+                    // NOT VALID is PostgreSQL-only (validate refuses it off PG);
+                    // defense-in-depth for direct lower callers.
+                    return Err(IrLowerError::UnsupportedOp(
+                        "validated non-Postgres addConstraint(fk) NOT VALID reached lower",
                     ));
                 }
                 // **PR10** — the FK references resolve in the SAME effective schema
@@ -3616,7 +4021,7 @@ impl IrAuthor {
                 // **C1** — thread the referential actions into the snapshot so the
                 // imperative `addConstraint(fk)` path renders `ON DELETE …` /
                 // `ON UPDATE …` (parity with the declarative `ref` path).
-                let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+                let mut fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
                     eff_schema,
                     name,
                     columns,
@@ -3628,6 +4033,14 @@ impl IrAuthor {
                     initially_deferred.unwrap_or(false),
                     self.dialect,
                 );
+                if not_valid == &Some(true) {
+                    // Online constraint adoption: append ` NOT VALID` to the FK body
+                    // so existing rows are not scanned at add time. The clause lives
+                    // at the tail of the constraint definition (after the policy
+                    // clauses), where `fk_policy_tail` carries it into the rendered
+                    // `ADD CONSTRAINT … FOREIGN KEY … NOT VALID` (PG only).
+                    fk.definition.push_str(" NOT VALID");
+                }
                 decl.lower_add_fk(table, &fk)
             }
             IrConstraintKind::Unique { columns } => {
@@ -3642,12 +4055,7 @@ impl IrAuthor {
                 // existing duplicates — gated (requires_approval), like SET NOT NULL.
                 decl.lower_add_constraint(table, &cname, &body, true)
             }
-            IrConstraintKind::Pk { .. } => {
-                return Err(IrLowerError::UnsupportedOp(
-                    "validated addConstraint user PRIMARY KEY reached lower",
-                ));
-            }
-            IrConstraintKind::Check { expr } => {
+            IrConstraintKind::Check { expr, not_valid } => {
                 if !matches!(self.dialect, SqlDialect::Postgres) {
                     return Err(IrLowerError::UnsupportedOp(
                         "validated non-Postgres addConstraint(check) reached lower",
@@ -3656,7 +4064,11 @@ impl IrAuthor {
                 let cname =
                     name.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string);
                 let rendered = crate::render::dml::render_expr_inline(expr, self.dialect)?;
-                let body = format!("CHECK ({rendered})");
+                let mut body = format!("CHECK ({rendered})");
+                if not_valid == &Some(true) {
+                    // Online constraint adoption (PG only): skip the add-time scan.
+                    body.push_str(" NOT VALID");
+                }
                 // Adding a CHECK validates existing rows and takes a table lock,
                 // so gate it like UNIQUE/PK-style constraint additions.
                 decl.lower_add_constraint(table, &cname, &body, true)
@@ -4341,7 +4753,7 @@ fn render_sqlite_trigger_stmt(
                 assigns.push(format!(
                     "{} = {}",
                     crate::render::dml::quote_bare_ident("column", col)?,
-                    crate::render::dml::render_expr_inline(rhs, SqlDialect::Sqlite)?
+                    crate::render::dml::render_value_inline(rhs, SqlDialect::Sqlite)?
                 ));
             }
             let mut sql = format!("UPDATE {qtable} SET {}", assigns.join(", "));
@@ -4555,6 +4967,45 @@ fn ddl_step_version(op_index: usize, kind: &str, up: &str) -> crate::model::migr
     dml_id_from_seed("ddl", &h.finalize())
 }
 
+fn partition_collapse_render_error(reason: impl Into<String>) -> IrLowerError {
+    IrLowerError::DmlAssemble(crate::render::dml::DmlError::UnrenderableExpr(reason.into()))
+}
+
+fn normalize_partition_string_bound_literal(value: &str) -> String {
+    let mut out = value.to_string();
+    if out.len() >= 20
+        && out.as_bytes().get(4) == Some(&b'-')
+        && out.as_bytes().get(7) == Some(&b'-')
+        && out.as_bytes().get(10).is_some_and(|b| *b == b'T' || *b == b' ')
+    {
+        out = out.replace('T', " ");
+        if let Some(stripped) = out.strip_suffix('Z') {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix("+00:00") {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix(".000+00") {
+            out = format!("{stripped}+00");
+        }
+    }
+    out
+}
+
+fn render_partition_bound_literal(value: &PartitionBoundValue) -> Result<String, IrLowerError> {
+    match value {
+        PartitionBoundValue::String { value } => Ok(crate::render::dml::sql_string_literal(
+            &normalize_partition_string_bound_literal(value),
+        )),
+        PartitionBoundValue::Int { value } => Ok(value.get().to_string()),
+        PartitionBoundValue::MinValue | PartitionBoundValue::MaxValue => {
+            Err(partition_collapse_render_error(
+                "partition minValue/maxValue sentinels are only renderable as range edge omission",
+            ))
+        }
+    }
+}
+
 /// Build a deterministic [`MigrationId`] from a domain tag + a seed digest, using
 /// the SAME high-48-bit `0xFF…` marker layout `repeatable_id_for_name` uses — so a
 /// derived DML/backfill id can NEVER collide with a versioned migration id (whose
@@ -4588,6 +5039,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
     match op {
         Op::CreateTable { .. } => "createTable",
         Op::CreatePartition { .. } => "createPartition",
+        Op::AttachPartition { .. } => "attachPartition",
         Op::DetachPartition { .. } => "detachPartition",
         Op::DropPartition { .. } => "dropPartition",
         Op::SetTableOptions { .. } => "setTableOptions",
@@ -4605,6 +5057,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::RenameColumn { .. } => "renameColumn",
         Op::AddConstraint { .. } => "addConstraint",
         Op::DropConstraint { .. } => "dropConstraint",
+        Op::ValidateConstraint { .. } => "validateConstraint",
         Op::Insert { .. } => "insert",
         Op::Update { .. } => "update",
         Op::Delete { .. } => "delete",
@@ -4630,10 +5083,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::DropOwnedBy { .. } => "dropOwnedBy",
         Op::Grant { .. } => "grant",
         Op::Revoke { .. } => "revoke",
-        Op::EnableRls { .. } => "enableRls",
-        Op::ForceRls { .. } => "forceRls",
-        Op::DisableRls { .. } => "disableRls",
-        Op::NoForceRls { .. } => "noForceRls",
+        Op::SetRls { .. } => "setRls",
         Op::CreatePolicy { .. } => "createPolicy",
         Op::DropPolicy { .. } => "dropPolicy",
         Op::CreateTrigger { .. } => "createTrigger",
@@ -4660,6 +5110,7 @@ pub(crate) fn create_index_snapshot(
     include: &[String],
     with: Option<&IndexStorageParams>,
     only: Option<bool>,
+    nulls_not_distinct: Option<bool>,
     dialect: SqlDialect,
 ) -> Result<IndexSnapshot, IrLowerError> {
     if dialect == SqlDialect::Mysql && columns.iter().any(|e| matches!(e, IndexElement::Expr { .. }))
@@ -4678,12 +5129,30 @@ pub(crate) fn create_index_snapshot(
     let mut name_parts = Vec::with_capacity(columns.len());
     for element in columns {
         match element {
-            IndexElement::Column { name, order } => {
+            IndexElement::Column {
+                name,
+                order,
+                opclass,
+                collation,
+            } => {
                 plain_columns.push(name.clone());
-                elements.push(match order {
+                let mut snap_element = match order {
                     Some(order) => IndexElementSnapshot::column_ordered(name.clone(), *order),
                     None => IndexElementSnapshot::column(name.clone()),
-                });
+                };
+                // PG-vendor per-column opclass/collation ride on the snapshot
+                // element as EMISSION-ONLY facets (excluded from drift equality,
+                // like the index-level ANN `opclass`); the PG emitter spells them.
+                if let IndexElementSnapshot::Column {
+                    opclass: snap_opclass,
+                    collation: snap_collation,
+                    ..
+                } = &mut snap_element
+                {
+                    snap_opclass.clone_from(opclass);
+                    snap_collation.clone_from(collation);
+                }
+                elements.push(snap_element);
                 name_parts.push(name.clone());
             }
             IndexElement::Expr { expr } => {
@@ -4711,6 +5180,7 @@ pub(crate) fn create_index_snapshot(
     idx.include = include.to_vec();
     idx.with = with.cloned();
     idx.only = only.unwrap_or(false);
+    idx.nulls_not_distinct = nulls_not_distinct.unwrap_or(false);
     Ok(idx)
 }
 
@@ -4776,7 +5246,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
         _ => None,
     };
     let char_len = match &c.ty {
-        ColType::Char { len } => Some(i64::from(*len)),
+        ColType::Char { length } => Some(i64::from(*length)),
         _ => None,
     };
     // **Migration-first P2a (§2b)** — thread the two DECLARED-ONLY, uncatalogable
@@ -4834,10 +5304,10 @@ fn encrypted_wraps_token(of: &ColType) -> &'static str {
         ColType::SmallInt
         | ColType::Int
         | ColType::BigInt
-        | ColType::Float
+        | ColType::Double
         | ColType::Real
         | ColType::Decimal { .. } => "number",
-        ColType::Bytea => "bytes",
+        ColType::Bytes => "bytes",
         _ => "string",
     }
 }
@@ -4852,16 +5322,16 @@ fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         ColType::Int => ("int".into(), None),
         ColType::SmallInt => ("smallInt".into(), None),
         ColType::BigInt => ("bigInt".into(), None),
-        ColType::Float => ("number".into(), None),
+        ColType::Double => ("number".into(), None),
         ColType::Real => ("real".into(), None),
-        ColType::Bool => ("boolean".into(), None),
+        ColType::Boolean => ("boolean".into(), None),
         ColType::Json => ("json".into(), None),
         ColType::Timestamp => ("date".into(), None),
         ColType::Date => ("calendarDate".into(), None),
         ColType::Uuid => ("string".into(), None),
         ColType::Inet => ("inet".into(), None),
         ColType::TextArray => ("textArray".into(), None),
-        ColType::Bytea => ("bytes".into(), None),
+        ColType::Bytes => ("bytes".into(), None),
         ColType::Char { .. } => ("char".into(), None),
         ColType::Ref { references } => ("ref".into(), Some(references.clone())),
         ColType::Vector { .. } => ("vector".into(), None),
@@ -4928,7 +5398,7 @@ fn apply_structured_defaults_to_snapshot(
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) =
+        let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) =
             source.default.as_ref()
         else {
             continue;
@@ -4951,7 +5421,7 @@ fn apply_structured_default_to_column(
     col: &mut ColumnSnapshot,
     dialect: SqlDialect,
 ) -> Result<(), IrLowerError> {
-    let Some(default @ (IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
+    let Some(default @ (IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. })) = default else {
         return Ok(());
     };
     if col.name != column {
@@ -4987,7 +5457,7 @@ fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
                 Value::String(base64::engine::general_purpose::STANDARD.encode(b))
             }
         }),
-        IrDefault::Fn { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. } => None,
+        IrDefault::Expr { .. } | IrDefault::Container { .. } | IrDefault::Json { .. } | IrDefault::Nextval { .. } => None,
     }
 }
 
@@ -5124,7 +5594,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
 
     fn collect_col_refs(expr: &Expr, out: &mut BTreeSet<String>) {
         match expr {
-            Expr::ColRef { name } => {
+            Expr::ColRef { name, .. } => {
                 out.insert(name.clone());
             }
             Expr::Literal { .. } => {}
@@ -5137,8 +5607,8 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             }
             Expr::Case { branches, r#else } => {
                 for branch in branches {
-                    collect_col_refs(&branch.condition, out);
-                    collect_col_refs(&branch.result, out);
+                    collect_col_refs(&branch.when, out);
+                    collect_col_refs(&branch.then, out);
                 }
                 if let Some(expr) = r#else {
                     collect_col_refs(expr, out);
@@ -5149,13 +5619,44 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                     collect_col_refs(arg, out);
                 }
             }
-            Expr::PgArrayMembership { expr, .. }
+            Expr::InList { expr, .. }
             | Expr::PgRegexMatch { expr, .. }
-            | Expr::PgColumnSize { expr }
-            | Expr::Extract { expr, .. } => {
+            | Expr::PgColumnSize { expr } => {
                 collect_col_refs(expr, out);
             }
-            Expr::PgIntervalLiteral { .. } => {}
+            Expr::Extract { from, .. } => {
+                collect_col_refs(from, out);
+            }
+            Expr::PgExtract { from, .. } => {
+                collect_col_refs(from, out);
+            }
+            Expr::Between { operand, low, high } => {
+                collect_col_refs(operand, out);
+                collect_col_refs(low, out);
+                collect_col_refs(high, out);
+            }
+            Expr::Like { operand, pattern } => {
+                collect_col_refs(operand, out);
+                collect_col_refs(pattern, out);
+            }
+            Expr::DistinctFrom { left, right } => {
+                collect_col_refs(left, out);
+                collect_col_refs(right, out);
+            }
+            Expr::Agg { arg, .. } => {
+                if let Some(arg) = arg {
+                    collect_col_refs(arg, out);
+                }
+            }
+            Expr::PgInterval { .. } => {}
+            // The Layer-2 dialect() escape (§3.4): collect refs from EVERY present
+            // leg so a derived CHECK name is stable regardless of which dialect the
+            // divergence resolves to at render time.
+            Expr::Dialectal { default, pg, sqlite, mysql } => {
+                for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+                    collect_col_refs(leg, out);
+                }
+            }
         }
     }
 
@@ -5211,11 +5712,7 @@ fn ir_constraint_name_and_kind(
             explicit.map_or_else(|| derived_constraint_name(table, columns, "key"), str::to_string),
             "UNIQUE".to_string(),
         ),
-        IrConstraintKind::Pk { columns } => (
-            explicit.map_or_else(|| derived_constraint_name(table, columns, "pkey"), str::to_string),
-            "PRIMARY KEY".to_string(),
-        ),
-        IrConstraintKind::Check { expr } => (
+        IrConstraintKind::Check { expr, .. } => (
             explicit.map_or_else(|| derived_check_constraint_name(table, expr), str::to_string),
             "CHECK".to_string(),
         ),
@@ -5268,6 +5765,15 @@ mod tests {
     }
 
     use crate::model::ir::{IrColumn as TIrColumn, IrFlagsOverride, IrJsonValue};
+
+    fn synth_default(r#fn: crate::model::expr::SynthFn) -> IrDefault {
+        IrDefault::Expr {
+            expr: Expr::FnSynth {
+                r#fn,
+                args: Vec::new(),
+            },
+        }
+    }
 
     fn platform_profile() -> crate::model::profile::PolicyProfile {
         crate::model::profile::PolicyProfile::platform()
@@ -5670,7 +6176,7 @@ mod tests {
     /// `DEFAULT n`, an out-of-f64-range bigint default, and a decimal column's
     /// `DEFAULT 0.5` MUST all appear in the rendered CREATE TABLE DDL.
     /// `field_default_expr` had only a `"number"` arm matching via `as_f64()`:
-    ///   - an `int`-token column (`t.integer()`/`t.bigInt()`) fell through to
+    ///   - an `int`-token column (`t.int()`/`t.bigInt()`) fell through to
     ///     `None` → its `DEFAULT` was silently dropped;
     ///   - a decimal default is carried as a validated numeric STRING by
     ///     `IrScalar::Decimal` (and a bigint default ≥ 2^53 likewise, since a
@@ -5711,7 +6217,7 @@ mod tests {
                     unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None },
                 TIrColumn {
                     name: "ratio".into(),
-                    ty: ColType::Float,
+                    ty: ColType::Double,
                     nullable: Some(false),
                     default: Some(IrDefault::Literal {
                         value: IrScalar::Decimal("0.5".into()),
@@ -6752,7 +7258,6 @@ mod tests {
     // on PG instead of being silently mapped away by the descriptor bridge.
     #[test]
     fn synth_default_on_user_column_renders_on_pg_not_silently_dropped() {
-        use crate::model::ir::SynthDefaultFn;
         use crate::model::validate::{validate_ir, Dialect};
 
         // createTable with a column whose default is a synth `now()`.
@@ -6766,7 +7271,7 @@ mod tests {
                     name: "at".into(),
                     ty: ColType::Timestamp,
                     nullable: None,
-                    default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::Now }),
+                    default: Some(synth_default(crate::model::expr::SynthFn::Now)),
                     unique: None, id_prefix: None, case_sensitive: None, vector_metric: None, mask: None, generated: None, identity: None }],
                 primary_key: None,
                 constraints: vec![],
@@ -6805,7 +7310,7 @@ mod tests {
                 column: "token".into(),
                 ty: ColType::Uuid,
                 nullable: Some(false),
-                default: Some(IrDefault::Fn { r#fn: SynthDefaultFn::GenRandomUuid }),
+                default: Some(synth_default(crate::model::expr::SynthFn::GenRandomUuid)),
                 case_sensitive: None,
                 vector_metric: None,
                 mask: None,
@@ -6875,7 +7380,7 @@ mod tests {
                 table: "events".into(),
                 column: "kind".into(),
                 to_type: ColType::Text,
-                using: Some(Expr::ColRef { name: "kind".into() }),
+                using: Some(Expr::ColRef { name: "kind".into(), table: None }),
                 schema: None,
                 existence_guard: None,
             }],
@@ -6895,9 +7400,9 @@ mod tests {
     }
 
     #[test]
-    fn set_column_default_literal_renders_and_synth_validates_refused() {
-        use crate::model::ir::{IrScalar, SynthDefaultFn};
-        use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+    fn set_column_default_literal_and_synth_expr_render() {
+        use crate::model::ir::IrScalar;
+        use crate::model::validate::{validate_ir, Dialect};
 
         let literal_ir = MigrationIr {
             ir_version: 1,
@@ -6936,7 +7441,7 @@ mod tests {
             ops: vec![Op::SetColumnDefault {
                 table: "events".into(),
                 column: "at".into(),
-                value: IrDefault::Fn { r#fn: SynthDefaultFn::Now },
+                value: synth_default(crate::model::expr::SynthFn::Now),
                 schema: None,
                 existence_guard: None,
             }],
@@ -6946,11 +7451,15 @@ mod tests {
             preconditions: vec![],
             checksum: None,
         };
-        let err = validate_ir(&synth_ir, Dialect::Postgres, &[])
-            .expect_err("synth setColumnDefault must be validate-refused");
-        assert_eq!(err.code, CODE_UNSUPPORTED);
-        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert!(err.reason.contains("setColumnDefault synth defaults"));
+        validate_ir(&synth_ir, Dialect::Postgres, &[]).expect("synth expr setColumnDefault validates");
+        let migrations = IrAuthor::new("app", "app_a", SqlDialect::Postgres)
+            .lower(&synth_ir, &LiveSchema::default())
+            .expect("synth expr setColumnDefault lowers");
+        assert!(
+            migrations[0].up.contains("ALTER COLUMN \"at\" SET DEFAULT now()"),
+            "synth expr default must render as SET DEFAULT, got {}",
+            migrations[0].up
+        );
     }
 
     // MED-1 (code-critic, this fix): the destructive/approval gate for a UNIQUE-index
@@ -7284,8 +7793,7 @@ mod tests {
             {"op":"createIndex","table":"platform_registry","schema":"zeroship",
                 "name":"platform_registry_target_idx",
                 "columns":[{"kind":"column","name":"target"}]},
-            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
-            {"op":"forceRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true,"forced":true},
             {"op":"createPolicy","name":"tenant_isolation","table":"platform_registry",
                 "schema":"zeroship","forCmd":"all",
                 "using":{"node":"literal","value":true}},
@@ -7381,7 +7889,7 @@ mod tests {
             ],"primaryKey":["app_id","route"],"constraints":[],"indexes":[]}
         ]}"#;
         let attach = r#"{"ir_version":1,"name":"platform_attach_later","ops":[
-            {"op":"enableRls","table":"platform_registry","schema":"zeroship"},
+            {"op":"setRls","table":"platform_registry","schema":"zeroship","enabled":true},
             {"op":"comment","target":{"kind":"table","schema":"zeroship",
                 "name":"platform_registry"},"comment":"Platform route registry"}
         ]}"#;

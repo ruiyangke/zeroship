@@ -39,16 +39,16 @@
       "name": "account_state",
       "as": "text",
       "check": {
-        "node": "pgArrayMembership",
+        "node": "inList",
         "expr": {
           "node": "colRef",
           "name": "VALUE"
         },
-        "op": "eq",
         "elems": [
           "active",
           "past_due"
-        ]
+        ],
+        "negated": false
       }
     },
     {
@@ -203,15 +203,15 @@
           "kind": {
             "kind": "check",
             "expr": {
-              "node": "pgArrayMembership",
+              "node": "inList",
               "expr": {
                 "node": "colRef",
                 "name": "status"
               },
-              "op": "ne",
               "elems": [
                 "x"
-              ]
+              ],
+              "negated": true
             }
           }
         },

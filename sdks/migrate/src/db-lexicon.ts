@@ -105,15 +105,15 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
     case "string":
       return "string";
     case "number":
-      return "float";
+      return "double";
     case "boolean":
-      return "bool";
+      return "boolean";
     case "date":
       return "timestamp";
     case "json":
       return "json";
     case "bytes":
-      return "bytea";
+      return "bytes";
     case "geoPoint":
       return "geoPoint";
     // `t.id(...)` is a typed_id stored as a uuid/text PK candidate (the runtime

@@ -19,6 +19,8 @@
   "files": ["dist", "src"],
   "scripts": {
     "gen:ir-types": "node scripts/gen-ir-types.mjs",
+    "gen:dialect-table": "node scripts/gen-dialect-table.mjs",
+    "gen": "node scripts/gen-ir-types.mjs && node scripts/gen-dialect-table.mjs",
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "typecheck:types": "tsc --noEmit -p tsconfig.types.json",

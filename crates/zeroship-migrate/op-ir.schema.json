@@ -215,6 +215,42 @@
           ]
         },
         {
+          "description": "`ALTER TABLE <parent> ATTACH PARTITION <name> FOR VALUES ...`.",
+          "type": "object",
+          "properties": {
+            "parent": {
+              "description": "Parent partitioned table.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Partition table name.",
+              "type": "string"
+            },
+            "bound": {
+              "description": "Partition bounds.",
+              "$ref": "#/$defs/PartitionBounds"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "attachPartition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "parent",
+            "name",
+            "bound"
+          ]
+        },
+        {
           "description": "`ALTER TABLE <parent> DETACH PARTITION <name> [CONCURRENTLY]`.",
           "type": "object",
           "properties": {
@@ -256,6 +292,10 @@
           "description": "`DROP TABLE <partition> [CASCADE]`.",
           "type": "object",
           "properties": {
+            "parent": {
+              "description": "Parent partitioned table.",
+              "type": "string"
+            },
             "name": {
               "description": "Partition table name.",
               "type": "string"
@@ -293,6 +333,7 @@
           "additionalProperties": false,
           "required": [
             "op",
+            "parent",
             "name"
           ]
         },
@@ -649,6 +690,13 @@
             },
             "only": {
               "description": "PostgreSQL `ON ONLY` for partitioned parents.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "nullsNotDistinct": {
+              "description": "PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor.",
               "type": [
                 "boolean",
                 "null"
@@ -1094,6 +1142,48 @@
           ]
         },
         {
+          "description": "`ALTER TABLE … VALIDATE CONSTRAINT …` — validate a previously\n`NOT VALID`-added FK/CHECK against existing rows under a weaker lock\n(PostgreSQL-only online constraint adoption). Refused fail-closed off\nPostgreSQL.",
+          "type": "object",
+          "properties": {
+            "table": {
+              "description": "Target table.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The name of the (previously `NOT VALID`) constraint to validate.",
+              "type": "string"
+            },
+            "schema": {
+              "description": "**PR10** — the schema qualifier (§2.7).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "existenceGuard": {
+              "description": "**PR10** — the existence guard (`ifExists` legal here).",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExistenceGuard"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "op": {
+              "type": "string",
+              "const": "validateConstraint"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "table",
+            "name"
+          ]
+        },
+        {
           "description": "`ALTER TABLE … DROP CONSTRAINT …`.",
           "type": "object",
           "properties": {
@@ -1200,10 +1290,10 @@
               "type": "string"
             },
             "set": {
-              "description": "Column → closed-AST assignment (sorted map for canonicality).",
+              "description": "Column → typed scalar or closed-AST assignment (sorted map for canonicality).",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/Expr"
+                "$ref": "#/$defs/IrValue"
               }
             },
             "where": {
@@ -1306,10 +1396,10 @@
               "$ref": "#/$defs/SafeU64"
             },
             "set": {
-              "description": "Column → closed-AST assignment.",
+              "description": "Column → typed scalar or closed-AST assignment.",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/Expr"
+                "$ref": "#/$defs/IrValue"
               }
             },
             "filter": {
@@ -2237,7 +2327,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — `ALTER TABLE … ENABLE ROW LEVEL SECURITY`.",
+          "description": "**VENDOR** — `ALTER TABLE … {ENABLE|DISABLE|FORCE|NO FORCE} ROW LEVEL SECURITY`.",
           "type": "object",
           "properties": {
             "table": {
@@ -2251,87 +2341,23 @@
                 "null"
               ]
             },
-            "op": {
-              "type": "string",
-              "const": "enableRls"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "op",
-            "table"
-          ]
-        },
-        {
-          "description": "**VENDOR** — `ALTER TABLE … FORCE ROW LEVEL SECURITY`.",
-          "type": "object",
-          "properties": {
-            "table": {
-              "description": "The target table.",
-              "type": "string"
-            },
-            "schema": {
-              "description": "The schema qualifier.",
+            "enabled": {
+              "description": "Optional enabled-state patch (`true` = ENABLE, `false` = DISABLE).",
               "type": [
-                "string",
+                "boolean",
+                "null"
+              ]
+            },
+            "forced": {
+              "description": "Optional force-state patch (`true` = FORCE, `false` = NO FORCE).",
+              "type": [
+                "boolean",
                 "null"
               ]
             },
             "op": {
               "type": "string",
-              "const": "forceRls"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "op",
-            "table"
-          ]
-        },
-        {
-          "description": "**VENDOR** — `ALTER TABLE … DISABLE ROW LEVEL SECURITY` (down-file).",
-          "type": "object",
-          "properties": {
-            "table": {
-              "description": "The target table.",
-              "type": "string"
-            },
-            "schema": {
-              "description": "The schema qualifier.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "op": {
-              "type": "string",
-              "const": "disableRls"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "op",
-            "table"
-          ]
-        },
-        {
-          "description": "**VENDOR** — `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` (down-file).",
-          "type": "object",
-          "properties": {
-            "table": {
-              "description": "The target table.",
-              "type": "string"
-            },
-            "schema": {
-              "description": "The schema qualifier.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "op": {
-              "type": "string",
-              "const": "noForceRls"
+              "const": "setRls"
             }
           },
           "additionalProperties": false,
@@ -2812,9 +2838,9 @@
           "const": "bigInt"
         },
         {
-          "description": "Double-precision float.",
+          "description": "Double-precision float (`float8` / `DOUBLE PRECISION`).",
           "type": "string",
-          "const": "float"
+          "const": "double"
         },
         {
           "description": "Single-precision float.",
@@ -2824,7 +2850,7 @@
         {
           "description": "Boolean.",
           "type": "string",
-          "const": "bool"
+          "const": "boolean"
         },
         {
           "description": "JSON document (`JSONB` on PG).",
@@ -2859,7 +2885,7 @@
         {
           "description": "Raw bytes (`BYTEA` on PG, `BLOB` on SQLite).",
           "type": "string",
-          "const": "bytea"
+          "const": "bytes"
         },
         {
           "description": "Fixed-length character string (`CHAR(N)` / PostgreSQL `character(N)`).",
@@ -2868,7 +2894,7 @@
             "char": {
               "type": "object",
               "properties": {
-                "len": {
+                "length": {
                   "description": "Fixed length in characters.",
                   "type": "integer",
                   "format": "uint32",
@@ -2876,7 +2902,7 @@
                 }
               },
               "required": [
-                "len"
+                "length"
               ]
             }
           },
@@ -2977,6 +3003,13 @@
                 "name": {
                   "description": "The enum type name.",
                   "type": "string"
+                },
+                "schema": {
+                  "description": "Optional schema qualifier for the named enum type (§3.1). Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -2999,6 +3032,13 @@
                 "name": {
                   "description": "The domain type name.",
                   "type": "string"
+                },
+                "schema": {
+                  "description": "Optional schema qualifier for the named domain type (§3.1). Absent =\nthe migration/op default schema. Additive optional field, skip-if-none.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [
@@ -3036,7 +3076,7 @@
       ]
     },
     "IrDefault": {
-      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | { fn })`). A CLOSED carrier —\neither a typed scalar literal, an engine-synthesized apply-time scalar\n(`now`/`genRandomUuid`), an EMPTY container default for JSON/text-array\ncolumns, a non-empty JSON value default for JSON columns, or a PostgreSQL\nsequence `nextval(...)` reference. NEVER a raw SQL string (property A); the\nper-dialect default clause is rendered by the shared snapshot-builder kernel\nfrom this structured value (§6.5).",
+      "description": "A column DEFAULT (§3.2 `t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value (§6.5).",
       "oneOf": [
         {
           "description": "A typed scalar literal default (constrained numeric domain — §2.5).",
@@ -3062,25 +3102,15 @@
           "additionalProperties": false
         },
         {
-          "description": "An engine-synthesized apply-time default (`now()` / `gen_random_uuid()`),\nrendered per dialect by the kernel (§4.3). Constrained at the TYPE level to\nthe two nullary synth scalars ([`SynthDefaultFn`]) — a non-nullary synth is\nrejected at deserialize, not at render.",
+          "description": "A closed expression default.",
           "type": "object",
           "properties": {
-            "fn": {
-              "type": "object",
-              "properties": {
-                "fn": {
-                  "description": "The synthesized function (`now` or `genRandomUuid`).",
-                  "$ref": "#/$defs/SynthDefaultFn"
-                }
-              },
-              "additionalProperties": false,
-              "required": [
-                "fn"
-              ]
+            "expr": {
+              "$ref": "#/$defs/Expr"
             }
           },
           "required": [
-            "fn"
+            "expr"
           ],
           "additionalProperties": false
         },
@@ -3167,9 +3197,743 @@
         }
       ]
     },
-    "SynthDefaultFn": {
-      "description": "The CLOSED set of synth scalars admissible as a COLUMN DEFAULT — the two\nNULLARY apply-time scalars only (§4.3). A dedicated 2-variant enum (NOT the\nfull [`SynthFn`]) makes the fail-closed property STRUCTURAL: serde rejects a\nnon-nullary synth (`splitPart`/`concatWs`) as an unknown variant at\nDESERIALIZE, so a hand-crafted `.ir.json` carrying `{\"fn\":\"splitPart\"}` as a\ndefault cannot pass the loader and defer the blow-up to rendering. The wire\ntokens match [`SynthFn`]'s (`\"now\"`, `\"genRandomUuid\"`) so the on-disk bytes\nare unchanged from the pre-narrowing type.",
+    "Expr": {
+      "description": "The CLOSED expression AST node (§3.3.1). Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize.",
       "oneOf": [
+        {
+          "description": "A column reference (`c(\"name\")`). The name is a plain string, resolved\nagainst the enclosing op's single target table at apply/render time\n(§3.3.1.1(c)) — never `tsc`-bound to the live schema (§3.3).",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The column name (plain string).",
+              "type": "string"
+            },
+            "table": {
+              "description": "Optional qualifying table/alias (`c(\"orders\", \"customer_id\")` →\n`table: Some(\"orders\")`). Present only for the two-arg qualified form\n(§3.4, the join-ON fix). An unqualified `c(\"col\")` leaves this `None`\nand, via `skip_serializing_if`, serializes byte-identically to the\npre-qualification wire shape — additive, no `ir_version` bump.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "node": {
+              "type": "string",
+              "const": "colRef"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "name"
+          ]
+        },
+        {
+          "description": "A typed scalar literal (a bare JS value auto-wrapped by a fluent operator\nmethod). Carries an [`IrScalar`] so the numeric domain is enforced at\ndeserialize (§2.5) and the value folds into the checksum (§2.4 point 3).",
+          "type": "object",
+          "properties": {
+            "value": {
+              "description": "The typed scalar value.",
+              "$ref": "#/$defs/IrScalar"
+            },
+            "node": {
+              "type": "string",
+              "const": "literal"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "value"
+          ]
+        },
+        {
+          "description": "A binary operation (`lhs <op> rhs`).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "description": "The operator.",
+              "$ref": "#/$defs/BinaryOp"
+            },
+            "lhs": {
+              "description": "Left operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "rhs": {
+              "description": "Right operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "binOp"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "op",
+            "lhs",
+            "rhs"
+          ]
+        },
+        {
+          "description": "A unary operation (`<op> operand` / `operand <op>`).",
+          "type": "object",
+          "properties": {
+            "op": {
+              "description": "The operator.",
+              "$ref": "#/$defs/UnaryOp"
+            },
+            "operand": {
+              "description": "The operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "unaryOp"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "op",
+            "operand"
+          ]
+        },
+        {
+          "description": "A searched `CASE` (`c.case({ branches: [{ when, then }], else? })`). Each branch is\n`(when, then)`; both halves are themselves closed-AST nodes.",
+          "type": "object",
+          "properties": {
+            "branches": {
+              "description": "`(when, then)` branches, in order.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CaseBranch"
+              }
+            },
+            "else": {
+              "description": "Optional `ELSE` result.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "node": {
+              "type": "string",
+              "const": "case"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "branches"
+          ]
+        },
+        {
+          "description": "An allow-listed named scalar function call (§3.3.1.1(a)).",
+          "type": "object",
+          "properties": {
+            "fn": {
+              "description": "The function (allow-listed).",
+              "$ref": "#/$defs/ScalarFn"
+            },
+            "args": {
+              "description": "The argument expressions.",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Expr"
+              }
+            },
+            "node": {
+              "type": "string",
+              "const": "fnCall"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "fn",
+            "args"
+          ]
+        },
+        {
+          "description": "An engine-SYNTHESIZED helper call (§9). The per-dialect lowering is the\nengine's; the author never sees the rendered form.",
+          "type": "object",
+          "properties": {
+            "fn": {
+              "description": "The synthesized function.",
+              "$ref": "#/$defs/SynthFn"
+            },
+            "args": {
+              "description": "The argument expressions (a `splitPart`'s `delim`/`n` are `Literal`\nargs, validated in-envelope structurally — §3.3.1.1(b)).",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Expr"
+              }
+            },
+            "node": {
+              "type": "string",
+              "const": "fnSynth"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "fn",
+            "args"
+          ]
+        },
+        {
+          "description": "A cast to a portable type (`.cast(\"integer\")`).",
+          "type": "object",
+          "properties": {
+            "operand": {
+              "description": "The expression being cast.",
+              "$ref": "#/$defs/Expr"
+            },
+            "target": {
+              "description": "The portable target type.",
+              "$ref": "#/$defs/CastTarget"
+            },
+            "node": {
+              "type": "string",
+              "const": "cast"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "operand",
+            "target"
+          ]
+        },
+        {
+          "description": "A **portable** inclusive range test (`c(\"x\").between(low, high)`) rendered\nexactly as `(<operand> BETWEEN <low> AND <high>)` — IDENTICAL SQL on PG,\nSQLite, and MySQL (standard SQL, inclusive on both ends).",
+          "type": "object",
+          "properties": {
+            "operand": {
+              "description": "The expression under test.",
+              "$ref": "#/$defs/Expr"
+            },
+            "low": {
+              "description": "The inclusive lower bound.",
+              "$ref": "#/$defs/Expr"
+            },
+            "high": {
+              "description": "The inclusive upper bound.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "between"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "operand",
+            "low",
+            "high"
+          ]
+        },
+        {
+          "description": "A **portable** `LIKE` pattern match (`c(\"x\").like(pattern)`) rendered exactly\nas `(<operand> LIKE <pattern>)` — the SAME syntax on PG, SQLite, and MySQL.\n\nNOTE: LIKE *case-sensitivity* semantics differ per dialect — PG is\ncase-sensitive, SQLite is ASCII-case-insensitive by default, and MySQL is\ncollation-dependent — so a dialect-uniform portability PROOF is a Phase-4\nclaiming-phase obligation (design §5). This slice adds the node + the\nfaithful syntax render only; it does not yet claim cross-dialect parity.",
+          "type": "object",
+          "properties": {
+            "operand": {
+              "description": "The expression under test.",
+              "$ref": "#/$defs/Expr"
+            },
+            "pattern": {
+              "description": "The LIKE pattern expression.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "like"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "operand",
+            "pattern"
+          ]
+        },
+        {
+          "description": "A **portable** NULL-safe inequality (`c(\"x\").distinctFrom(y)`). The\nper-dialect lowering is the engine's job (this is the point): PG + SQLite\nrender the standard `(<left> IS DISTINCT FROM <right>)`; MySQL has NO\n`IS DISTINCT FROM` operator, so it lowers to `(NOT (<left> <=> <right>))` —\n`<=>` is MySQL's NULL-safe equality, so its negation is exactly\n\"distinct from\" (NULL-aware inequality).",
+          "type": "object",
+          "properties": {
+            "left": {
+              "description": "Left operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "right": {
+              "description": "Right operand.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "distinctFrom"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "left",
+            "right"
+          ]
+        },
+        {
+          "description": "A **PORTABLE** aggregate function application (`c.agg.count()`,\n`c.agg.sum(e)`, `c.agg.count(e, { distinct: true })` — design §3.4/§3.6).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` render byte-identically on PG, SQLite, and\nMySQL (only identifier quoting differs), so there is NO dialect gate. `arg:\nNone` with `func: Count` is `COUNT(*)`; a present `arg` renders\n`<func>(<arg>)`, and `distinct` inserts `DISTINCT`\n(`count(DISTINCT <arg>)`).\n\nNB: the \"an aggregate is only legal in a grouped/SELECT context\" check is\ncoupled with the Phase-2 view/select builder (`AGG_POSITION_INVALID`) — this\nadditive slice accepts the node STRUCTURALLY only (design §3.4/§5 item 6).",
+          "type": "object",
+          "properties": {
+            "func": {
+              "description": "The aggregate function.",
+              "$ref": "#/$defs/AggFunc"
+            },
+            "arg": {
+              "description": "The single argument expression. `None` + `func: Count` = `COUNT(*)`.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "distinct": {
+              "description": "`DISTINCT` inside the aggregate (`count(DISTINCT <arg>)`). Skipped on the\nwire when `false` so the node serializes byte-minimally.",
+              "type": "boolean"
+            },
+            "node": {
+              "type": "string",
+              "const": "agg"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "func"
+          ]
+        },
+        {
+          "description": "A **portable** text-list membership predicate (`c(\"x\").in([...])` /\n`c(\"x\").notIn([...])`). PostgreSQL renders in the pg_dump-faithful\n`= ANY (ARRAY['...'::text])` / `<> ALL (ARRAY['...'::text])` shape; SQLite\nand MySQL render `IN (...)` / `NOT IN (...)`. Empty lists are defined:\n`IN []` renders false, `NOT IN []` renders true.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The expression tested against the literal text list.",
+              "$ref": "#/$defs/Expr"
+            },
+            "elems": {
+              "description": "Text elements. PostgreSQL renders each as a safe string literal with an\nexplicit `::text` cast to match pg_dump's CHECK/domain shape.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "negated": {
+              "description": "`false` => membership (`IN` / `= ANY`); `true` => non-membership\n(`NOT IN` / `<> ALL`).",
+              "type": "boolean"
+            },
+            "node": {
+              "type": "string",
+              "const": "inList"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "expr",
+            "elems",
+            "negated"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** regex match rendered exactly as\n`(<expr> ~ '<pattern>'::text)`.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The value expression to match.",
+              "$ref": "#/$defs/Expr"
+            },
+            "pattern": {
+              "description": "The regex pattern. It is always rendered as a SQL string literal; never\nconcatenated as free-form SQL.",
+              "type": "string"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgRegexMatch"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "expr",
+            "pattern"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** scalar expression `pg_column_size(<expr>)`.",
+          "type": "object",
+          "properties": {
+            "expr": {
+              "description": "The expression whose on-disk size Postgres should measure.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgColumnSize"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "expr"
+          ]
+        },
+        {
+          "description": "**PORTABLE** scalar expression extracting a date/time part whose numeric\nsemantics are identical on PostgreSQL, SQLite, and MySQL.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Closed EXTRACT field.",
+              "$ref": "#/$defs/ExtractField"
+            },
+            "from": {
+              "description": "Source expression.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "extract"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "field",
+            "from"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "description": "Closed PostgreSQL EXTRACT field.",
+              "$ref": "#/$defs/PgExtractField"
+            },
+            "from": {
+              "description": "Source expression.",
+              "$ref": "#/$defs/Expr"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgExtract"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "field",
+            "from"
+          ]
+        },
+        {
+          "description": "**PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.",
+          "type": "object",
+          "properties": {
+            "duration": {
+              "description": "Structured duration fields. Fields serialize in canonical order\n(`years`, `months`, `days`, `hours`, `minutes`, `seconds`) and absent\nfields are omitted from the wire.",
+              "$ref": "#/$defs/Duration"
+            },
+            "node": {
+              "type": "string",
+              "const": "pgInterval"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node",
+            "duration"
+          ]
+        },
+        {
+          "description": "**The one Layer-2 portability escape (design §3.4 / §6.4)** — a\nper-dialect VALUE divergence. Each present leg is a full [`Expr`]; the\nengine renders the leg matching the render's TARGET dialect — the\ndialect's own leg if present, else `default`. This is `dialect({ default?,\npg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:\nc.fn.genRandomUuid(), sqlite: …, mysql: c.fn.uuid() }))`).\n\nThe node tag on the wire is `\"dialect\"` (`#[serde(rename)]`); the four\nlegs serialize in declaration order (`default, pg, sqlite, mysql`) — the\ncanonical leg order the checksum folds. A leg that is `None` is skipped on\nthe wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.\n\n**Scope math (validate, [`crate::model::validate`]).** The covered dialect\nset is `{legs present} ∪ {all dialects if default present}`; a target with\nNEITHER its own leg NOR a `default` is REFUSED fail-closed\n(`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing\nthe `sqlite` leg with no `default` is fine when targeting PG, refused when\ntargeting SQLite. At least one leg must be present — a legless `dialect({})`\nis malformed on every target (`UNSUPPORTED`), enforced at validate (all\nfour fields are `serde(default)` so an empty node deserializes, then the\nstructural gate refuses it).\n\n**RATCHET OBLIGATION (P11 / design §3.4).** The design counts each\n`dialect()` leg as one of the four ratcheted budget counters. That budget\n/ baseline mechanism is a LATER phase and is NOT YET BUILT (there is no\nbaseline file in-tree). When it lands, the per-leg count of this node must\nbe wired into it. Deferred by design — this additive slice does not gate\non it.",
+          "type": "object",
+          "properties": {
+            "default": {
+              "description": "The fallback leg, rendered for any target dialect that has no explicit\nown leg. Its presence makes the covered set ALL dialects.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "pg": {
+              "description": "The PostgreSQL leg.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sqlite": {
+              "description": "The SQLite leg.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mysql": {
+              "description": "The MySQL leg.",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Expr"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "node": {
+              "type": "string",
+              "const": "dialect"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "node"
+          ]
+        }
+      ]
+    },
+    "BinaryOp": {
+      "description": "A binary operator admitted in the closed AST (§3.3.1 method↔node table).\n\nCamel/lower-cased on the wire so the JS builder emits the same tokens\n(`{\"node\":\"binOp\",\"op\":\"eq\", …}`). The set is closed: comparison, boolean,\narithmetic, and string concatenation (`||`, the one place PG/SQLite NULL\nsemantics agree — §3.3.1).",
+      "oneOf": [
+        {
+          "description": "`=`",
+          "type": "string",
+          "const": "eq"
+        },
+        {
+          "description": "`<>` / `!=`",
+          "type": "string",
+          "const": "ne"
+        },
+        {
+          "description": "`<`",
+          "type": "string",
+          "const": "lt"
+        },
+        {
+          "description": "`<=`",
+          "type": "string",
+          "const": "le"
+        },
+        {
+          "description": "`>`",
+          "type": "string",
+          "const": "gt"
+        },
+        {
+          "description": "`>=`",
+          "type": "string",
+          "const": "ge"
+        },
+        {
+          "description": "boolean `AND`",
+          "type": "string",
+          "const": "and"
+        },
+        {
+          "description": "boolean `OR`",
+          "type": "string",
+          "const": "or"
+        },
+        {
+          "description": "`+`",
+          "type": "string",
+          "const": "add"
+        },
+        {
+          "description": "`-`",
+          "type": "string",
+          "const": "sub"
+        },
+        {
+          "description": "`*`",
+          "type": "string",
+          "const": "mul"
+        },
+        {
+          "description": "`/`",
+          "type": "string",
+          "const": "div"
+        },
+        {
+          "description": "`||` string concatenation (NULL-propagating on BOTH backends).",
+          "type": "string",
+          "const": "concat"
+        }
+      ]
+    },
+    "UnaryOp": {
+      "description": "A unary operator admitted in the closed AST (§3.3.1).",
+      "oneOf": [
+        {
+          "description": "boolean `NOT`",
+          "type": "string",
+          "const": "not"
+        },
+        {
+          "description": "`IS NULL`",
+          "type": "string",
+          "const": "isNull"
+        },
+        {
+          "description": "`IS NOT NULL`",
+          "type": "string",
+          "const": "isNotNull"
+        },
+        {
+          "description": "`IS TRUE`",
+          "type": "string",
+          "const": "isTrue"
+        },
+        {
+          "description": "`IS FALSE`",
+          "type": "string",
+          "const": "isFalse"
+        }
+      ]
+    },
+    "CaseBranch": {
+      "description": "One `(when, then)` branch of a [`Expr::Case`].",
+      "type": "object",
+      "properties": {
+        "when": {
+          "description": "The `WHEN` predicate (a boolean closed-AST node).",
+          "$ref": "#/$defs/Expr"
+        },
+        "then": {
+          "description": "The `THEN` result.",
+          "$ref": "#/$defs/Expr"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "when",
+        "then"
+      ]
+    },
+    "ScalarFn": {
+      "description": "The allow-listed *named* scalar functions (`c.fn.*` that are NOT engine-\nsynthesized `FnSynth`). CLOSED — a function outside this set has no builder\nmethod and no AST variant (§3.3.1.1(a)). These are the provably-identical\ncross-dialect scalars.",
+      "oneOf": [
+        {
+          "description": "`coalesce(...)`",
+          "type": "string",
+          "const": "coalesce"
+        },
+        {
+          "description": "`nullif(a, b)`",
+          "type": "string",
+          "const": "nullif"
+        },
+        {
+          "description": "`lower(e)`",
+          "type": "string",
+          "const": "lower"
+        },
+        {
+          "description": "`upper(e)`",
+          "type": "string",
+          "const": "upper"
+        },
+        {
+          "description": "`trim(e)`",
+          "type": "string",
+          "const": "trim"
+        },
+        {
+          "description": "`length(e)`",
+          "type": "string",
+          "const": "length"
+        },
+        {
+          "description": "`abs(e)`",
+          "type": "string",
+          "const": "abs"
+        },
+        {
+          "description": "`(<a> % <b>)` — integer/numeric modulo. Rendered as the `%` OPERATOR (not a\n`mod(...)` call) because SQLite exposes `%` but has NO `mod()` SQL function;\nthe `%` spelling is identical on PG, SQLite, and MySQL, so this stays a\ndialect-NEUTRAL `ScalarFn` (special-cased at the render seam, §3.4).",
+          "type": "string",
+          "const": "mod"
+        },
+        {
+          "description": "`round(<x>)` / `round(<x>, <n>)` — portable rounding. Identical spelling on\nPG, SQLite, and MySQL. Optional second (precision) argument.",
+          "type": "string",
+          "const": "round"
+        },
+        {
+          "description": "`floor(<x>)` — portable floor. `floor()` exists on PG, MySQL, and SQLite\n(≥3.35). Identical spelling.",
+          "type": "string",
+          "const": "floor"
+        },
+        {
+          "description": "`ceil(<x>)` — portable ceiling. `ceil()` exists on PG, SQLite (≥3.35), and\nMySQL (where `CEIL` is an alias of `CEILING`). Identical spelling.",
+          "type": "string",
+          "const": "ceil"
+        },
+        {
+          "description": "`substr(<s>, <start>[, <len>])` — portable substring. `substr()` exists on\nPG, SQLite, and MySQL (where `SUBSTR` is an alias of `SUBSTRING`). Identical\nspelling. 1-based `start`; optional `len`.",
+          "type": "string",
+          "const": "substr"
+        },
+        {
+          "description": "`replace(<s>, <from>, <to>)` — portable string replace. `replace()` exists\non PG, SQLite, and MySQL with identical spelling and semantics.",
+          "type": "string",
+          "const": "replace"
+        },
+        {
+          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).\nA PG GUC read needed by the RLS policy predicates (`0025`'s\n`current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
+          "type": "string",
+          "const": "currentSetting"
+        },
+        {
+          "description": "**VENDOR** — `current_user` (vendor spec §2.10). A nullary identity scalar;\nrenders WITHOUT parentheses (it is a reserved keyword, not a function call).",
+          "type": "string",
+          "const": "currentUser"
+        }
+      ]
+    },
+    "SynthFn": {
+      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins (§9). CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally\n— §3.3.1.1(b)); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal, §4.3).",
+      "oneOf": [
+        {
+          "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite).",
+          "type": "string",
+          "const": "concatWs"
+        },
+        {
+          "description": "`split_part` (PG) / pinned `instr`/`substr` unroll (SQLite), in-envelope only.",
+          "type": "string",
+          "const": "splitPart"
+        },
         {
           "description": "`now()` / current timestamp, evaluated at apply time.",
           "type": "string",
@@ -3181,6 +3945,235 @@
           "const": "genRandomUuid"
         }
       ]
+    },
+    "CastTarget": {
+      "description": "The closed portable cast-target set (§3.3.1). A non-portable cast target is\nrejected (`UNSUPPORTED { kind: \"expr\" }`).",
+      "oneOf": [
+        {
+          "description": "`text`",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "`integer`",
+          "type": "string",
+          "const": "integer"
+        },
+        {
+          "description": "`real`",
+          "type": "string",
+          "const": "real"
+        },
+        {
+          "description": "`boolean`",
+          "type": "string",
+          "const": "boolean"
+        },
+        {
+          "description": "`blob` (`BYTEA` on PG)",
+          "type": "string",
+          "const": "blob"
+        },
+        {
+          "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — the 0025 tenant-isolation\npolicy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
+          "type": "string",
+          "const": "uuid"
+        }
+      ]
+    },
+    "AggFunc": {
+      "description": "The CLOSED set of PORTABLE aggregate functions (`c.agg.*`, design §3.4/§3.6).\n\n`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,\nSQLite, and MySQL (only the surrounding identifier quoting differs), so there\nis NO dialect gate — an [`Expr::Agg`] validates and renders on all three.",
+      "oneOf": [
+        {
+          "description": "`count(...)` (or `count(*)` when the [`Expr::Agg`] `arg` is `None`).",
+          "type": "string",
+          "const": "count"
+        },
+        {
+          "description": "`sum(<arg>)`.",
+          "type": "string",
+          "const": "sum"
+        },
+        {
+          "description": "`avg(<arg>)`.",
+          "type": "string",
+          "const": "avg"
+        },
+        {
+          "description": "`min(<arg>)`.",
+          "type": "string",
+          "const": "min"
+        },
+        {
+          "description": "`max(<arg>)`.",
+          "type": "string",
+          "const": "max"
+        }
+      ]
+    },
+    "ExtractField": {
+      "description": "CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nEach admitted field has a live three-dialect proof and a faithful renderer on\nPostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in\n[`PgExtractField`] instead.",
+      "oneOf": [
+        {
+          "description": "Calendar year.",
+          "type": "string",
+          "const": "year"
+        },
+        {
+          "description": "Month-of-year, 1-12.",
+          "type": "string",
+          "const": "month"
+        },
+        {
+          "description": "Day-of-month field.",
+          "type": "string",
+          "const": "day"
+        },
+        {
+          "description": "Hour-of-day, 0-23.",
+          "type": "string",
+          "const": "hour"
+        },
+        {
+          "description": "Minute-of-hour, 0-59.",
+          "type": "string",
+          "const": "minute"
+        },
+        {
+          "description": "Day-of-week, 0=Sunday through 6=Saturday.",
+          "type": "string",
+          "const": "dow"
+        }
+      ]
+    },
+    "PgExtractField": {
+      "description": "CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.\n\nThese fields either have no portable SQLite/MySQL analogue or have semantics\nthat diverge under the mandated portable renderers.",
+      "oneOf": [
+        {
+          "description": "Seconds including fractional seconds on PostgreSQL.",
+          "type": "string",
+          "const": "second"
+        },
+        {
+          "description": "Day-of-year.",
+          "type": "string",
+          "const": "doy"
+        },
+        {
+          "description": "Seconds since 1970-01-01 00:00:00 UTC.",
+          "type": "string",
+          "const": "epoch"
+        },
+        {
+          "description": "Calendar quarter.",
+          "type": "string",
+          "const": "quarter"
+        },
+        {
+          "description": "ISO week number.",
+          "type": "string",
+          "const": "week"
+        },
+        {
+          "description": "ISO day-of-week, 1=Monday through 7=Sunday.",
+          "type": "string",
+          "const": "isodow"
+        },
+        {
+          "description": "ISO week-numbering year.",
+          "type": "string",
+          "const": "isoyear"
+        },
+        {
+          "description": "Century.",
+          "type": "string",
+          "const": "century"
+        },
+        {
+          "description": "Decade.",
+          "type": "string",
+          "const": "decade"
+        },
+        {
+          "description": "Millennium.",
+          "type": "string",
+          "const": "millennium"
+        },
+        {
+          "description": "Seconds field including fractional microseconds.",
+          "type": "string",
+          "const": "microseconds"
+        },
+        {
+          "description": "Seconds field including fractional milliseconds.",
+          "type": "string",
+          "const": "milliseconds"
+        },
+        {
+          "description": "Time-zone offset in seconds.",
+          "type": "string",
+          "const": "timezone"
+        },
+        {
+          "description": "Time-zone offset hour.",
+          "type": "string",
+          "const": "timezone_hour"
+        },
+        {
+          "description": "Time-zone offset minute.",
+          "type": "string",
+          "const": "timezone_minute"
+        }
+      ]
+    },
+    "Duration": {
+      "description": "Structured duration value for PostgreSQL interval literals and future portable\ndate shifts. All fields are optional integers; validation requires at least\none present field.",
+      "type": "object",
+      "properties": {
+        "years": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "months": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "days": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "hours": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "additionalProperties": false
     },
     "EmptyContainerKind": {
       "description": "Empty container defaults admitted as column DEFAULTs. This is intentionally\nEMPTY-only: the IR carries the container kind, not arbitrary JSON/array data.",
@@ -3387,585 +4380,6 @@
         "stored"
       ]
     },
-    "Expr": {
-      "description": "The CLOSED expression AST node (§3.3.1). Internally tagged on `\"node\"`,\ncamel-cased (`{\"node\":\"colRef\",\"name\":\"first\"}`). NO `untagged`, NO `flatten`\n— same discipline as [`Op`](crate::ir::Op), so schemars derives a clean\ndiscriminated union and serde rejects any out-of-set node tag at deserialize.",
-      "oneOf": [
-        {
-          "description": "A column reference (`c(\"name\")`). The name is a plain string, resolved\nagainst the enclosing op's single target table at apply/render time\n(§3.3.1.1(c)) — never `tsc`-bound to the live schema (§3.3).",
-          "type": "object",
-          "properties": {
-            "name": {
-              "description": "The column name (plain string).",
-              "type": "string"
-            },
-            "node": {
-              "type": "string",
-              "const": "colRef"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "name"
-          ]
-        },
-        {
-          "description": "A typed scalar literal (a bare JS value auto-wrapped by a fluent operator\nmethod). Carries an [`IrScalar`] so the numeric domain is enforced at\ndeserialize (§2.5) and the value folds into the checksum (§2.4 point 3).",
-          "type": "object",
-          "properties": {
-            "value": {
-              "description": "The typed scalar value.",
-              "$ref": "#/$defs/IrScalar"
-            },
-            "node": {
-              "type": "string",
-              "const": "literal"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "value"
-          ]
-        },
-        {
-          "description": "A binary operation (`lhs <op> rhs`).",
-          "type": "object",
-          "properties": {
-            "op": {
-              "description": "The operator.",
-              "$ref": "#/$defs/BinaryOp"
-            },
-            "lhs": {
-              "description": "Left operand.",
-              "$ref": "#/$defs/Expr"
-            },
-            "rhs": {
-              "description": "Right operand.",
-              "$ref": "#/$defs/Expr"
-            },
-            "node": {
-              "type": "string",
-              "const": "binOp"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "op",
-            "lhs",
-            "rhs"
-          ]
-        },
-        {
-          "description": "A unary operation (`<op> operand` / `operand <op>`).",
-          "type": "object",
-          "properties": {
-            "op": {
-              "description": "The operator.",
-              "$ref": "#/$defs/UnaryOp"
-            },
-            "operand": {
-              "description": "The operand.",
-              "$ref": "#/$defs/Expr"
-            },
-            "node": {
-              "type": "string",
-              "const": "unaryOp"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "op",
-            "operand"
-          ]
-        },
-        {
-          "description": "A searched `CASE` (`c.fn.case([[cond, val], …], else?)`). Each branch is\n`(condition, result)`; both halves are themselves closed-AST nodes.",
-          "type": "object",
-          "properties": {
-            "branches": {
-              "description": "`(condition, result)` branches, in order.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/CaseBranch"
-              }
-            },
-            "else": {
-              "description": "Optional `ELSE` result.",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/Expr"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "node": {
-              "type": "string",
-              "const": "case"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "branches"
-          ]
-        },
-        {
-          "description": "An allow-listed named scalar function call (§3.3.1.1(a)).",
-          "type": "object",
-          "properties": {
-            "fn": {
-              "description": "The function (allow-listed).",
-              "$ref": "#/$defs/ScalarFn"
-            },
-            "args": {
-              "description": "The argument expressions.",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Expr"
-              }
-            },
-            "node": {
-              "type": "string",
-              "const": "fnCall"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "fn",
-            "args"
-          ]
-        },
-        {
-          "description": "An engine-SYNTHESIZED helper call (§9). The per-dialect lowering is the\nengine's; the author never sees the rendered form.",
-          "type": "object",
-          "properties": {
-            "fn": {
-              "description": "The synthesized function.",
-              "$ref": "#/$defs/SynthFn"
-            },
-            "args": {
-              "description": "The argument expressions (a `splitPart`'s `delim`/`n` are `Literal`\nargs, validated in-envelope structurally — §3.3.1.1(b)).",
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Expr"
-              }
-            },
-            "node": {
-              "type": "string",
-              "const": "fnSynth"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "fn",
-            "args"
-          ]
-        },
-        {
-          "description": "A cast to a portable type (`.cast(\"integer\")`).",
-          "type": "object",
-          "properties": {
-            "operand": {
-              "description": "The expression being cast.",
-              "$ref": "#/$defs/Expr"
-            },
-            "target": {
-              "description": "The portable target type.",
-              "$ref": "#/$defs/CastTarget"
-            },
-            "node": {
-              "type": "string",
-              "const": "cast"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "operand",
-            "target"
-          ]
-        },
-        {
-          "description": "**PG-ONLY** text-array membership rendered exactly as\n`(<expr> = ANY (ARRAY['a'::text, ...]))` or\n`(<expr> <> ALL (ARRAY['a'::text, ...]))`.",
-          "type": "object",
-          "properties": {
-            "expr": {
-              "description": "The expression tested against the literal text array.",
-              "$ref": "#/$defs/Expr"
-            },
-            "op": {
-              "description": "Which membership idiom to render.",
-              "$ref": "#/$defs/PgArrayMembershipOp"
-            },
-            "elems": {
-              "description": "Text array elements. Rendered as safe string literals with an explicit\n`::text` cast on every element to match pg_dump's CHECK/domain shape.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "node": {
-              "type": "string",
-              "const": "pgArrayMembership"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "expr",
-            "op",
-            "elems"
-          ]
-        },
-        {
-          "description": "**PG-ONLY** regex match rendered exactly as\n`(<expr> ~ '<pattern>'::text)`.",
-          "type": "object",
-          "properties": {
-            "expr": {
-              "description": "The value expression to match.",
-              "$ref": "#/$defs/Expr"
-            },
-            "pattern": {
-              "description": "The regex pattern. It is always rendered as a SQL string literal; never\nconcatenated as free-form SQL.",
-              "type": "string"
-            },
-            "node": {
-              "type": "string",
-              "const": "pgRegexMatch"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "expr",
-            "pattern"
-          ]
-        },
-        {
-          "description": "**PG-ONLY** scalar expression `pg_column_size(<expr>)`.",
-          "type": "object",
-          "properties": {
-            "expr": {
-              "description": "The expression whose on-disk size Postgres should measure.",
-              "$ref": "#/$defs/Expr"
-            },
-            "node": {
-              "type": "string",
-              "const": "pgColumnSize"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "expr"
-          ]
-        },
-        {
-          "description": "**PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.",
-          "type": "object",
-          "properties": {
-            "field": {
-              "description": "Closed EXTRACT field.",
-              "$ref": "#/$defs/ExtractField"
-            },
-            "expr": {
-              "description": "Source expression.",
-              "$ref": "#/$defs/Expr"
-            },
-            "node": {
-              "type": "string",
-              "const": "extract"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "field",
-            "expr"
-          ]
-        },
-        {
-          "description": "**PG-ONLY** interval literal rendered as `'<safe>'::interval`.",
-          "type": "object",
-          "properties": {
-            "value": {
-              "description": "A strictly-validated interval literal. P1 admits only time-like\n`HH:MM:SS[.ffffff]` values such as `00:01:00`.",
-              "type": "string"
-            },
-            "node": {
-              "type": "string",
-              "const": "pgIntervalLiteral"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "value"
-          ]
-        }
-      ]
-    },
-    "BinaryOp": {
-      "description": "A binary operator admitted in the closed AST (§3.3.1 method↔node table).\n\nCamel/lower-cased on the wire so the JS builder emits the same tokens\n(`{\"node\":\"binOp\",\"op\":\"eq\", …}`). The set is closed: comparison, boolean,\narithmetic, and string concatenation (`||`, the one place PG/SQLite NULL\nsemantics agree — §3.3.1).",
-      "oneOf": [
-        {
-          "description": "`=`",
-          "type": "string",
-          "const": "eq"
-        },
-        {
-          "description": "`<>` / `!=`",
-          "type": "string",
-          "const": "ne"
-        },
-        {
-          "description": "`<`",
-          "type": "string",
-          "const": "lt"
-        },
-        {
-          "description": "`<=`",
-          "type": "string",
-          "const": "le"
-        },
-        {
-          "description": "`>`",
-          "type": "string",
-          "const": "gt"
-        },
-        {
-          "description": "`>=`",
-          "type": "string",
-          "const": "ge"
-        },
-        {
-          "description": "boolean `AND`",
-          "type": "string",
-          "const": "and"
-        },
-        {
-          "description": "boolean `OR`",
-          "type": "string",
-          "const": "or"
-        },
-        {
-          "description": "`+`",
-          "type": "string",
-          "const": "add"
-        },
-        {
-          "description": "`-`",
-          "type": "string",
-          "const": "sub"
-        },
-        {
-          "description": "`*`",
-          "type": "string",
-          "const": "mul"
-        },
-        {
-          "description": "`/`",
-          "type": "string",
-          "const": "div"
-        },
-        {
-          "description": "`||` string concatenation (NULL-propagating on BOTH backends).",
-          "type": "string",
-          "const": "concat"
-        }
-      ]
-    },
-    "UnaryOp": {
-      "description": "A unary operator admitted in the closed AST (§3.3.1).",
-      "oneOf": [
-        {
-          "description": "boolean `NOT`",
-          "type": "string",
-          "const": "not"
-        },
-        {
-          "description": "`IS NULL`",
-          "type": "string",
-          "const": "isNull"
-        },
-        {
-          "description": "`IS NOT NULL`",
-          "type": "string",
-          "const": "isNotNull"
-        },
-        {
-          "description": "`IS TRUE`",
-          "type": "string",
-          "const": "isTrue"
-        },
-        {
-          "description": "`IS FALSE`",
-          "type": "string",
-          "const": "isFalse"
-        }
-      ]
-    },
-    "CaseBranch": {
-      "description": "One `(condition, result)` branch of a [`Expr::Case`].",
-      "type": "object",
-      "properties": {
-        "condition": {
-          "description": "The branch condition (a boolean closed-AST node).",
-          "$ref": "#/$defs/Expr"
-        },
-        "result": {
-          "description": "The branch result.",
-          "$ref": "#/$defs/Expr"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "condition",
-        "result"
-      ]
-    },
-    "ScalarFn": {
-      "description": "The allow-listed *named* scalar functions (`c.fn.*` that are NOT engine-\nsynthesized `FnSynth`). CLOSED — a function outside this set has no builder\nmethod and no AST variant (§3.3.1.1(a)). These are the provably-identical\ncross-dialect scalars.",
-      "oneOf": [
-        {
-          "description": "`coalesce(...)`",
-          "type": "string",
-          "const": "coalesce"
-        },
-        {
-          "description": "`nullif(a, b)`",
-          "type": "string",
-          "const": "nullif"
-        },
-        {
-          "description": "`lower(e)`",
-          "type": "string",
-          "const": "lower"
-        },
-        {
-          "description": "`upper(e)`",
-          "type": "string",
-          "const": "upper"
-        },
-        {
-          "description": "`trim(e)`",
-          "type": "string",
-          "const": "trim"
-        },
-        {
-          "description": "`length(e)`",
-          "type": "string",
-          "const": "length"
-        },
-        {
-          "description": "`abs(e)`",
-          "type": "string",
-          "const": "abs"
-        },
-        {
-          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)` (vendor spec §2.10).\nA PG GUC read needed by the RLS policy predicates (`0025`'s\n`current_setting('zeroship.tenant_app', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
-          "type": "string",
-          "const": "currentSetting"
-        },
-        {
-          "description": "**VENDOR** — `current_user` (vendor spec §2.10). A nullary identity scalar;\nrenders WITHOUT parentheses (it is a reserved keyword, not a function call).",
-          "type": "string",
-          "const": "currentUser"
-        }
-      ]
-    },
-    "SynthFn": {
-      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins (§9). CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally\n— §3.3.1.1(b)); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`\nare apply-time DB-evaluated scalars (the structured replacement for a frozen\n`Date.now()` / UUID literal, §4.3).",
-      "oneOf": [
-        {
-          "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite).",
-          "type": "string",
-          "const": "concatWs"
-        },
-        {
-          "description": "`split_part` (PG) / pinned `instr`/`substr` unroll (SQLite), in-envelope only.",
-          "type": "string",
-          "const": "splitPart"
-        },
-        {
-          "description": "`now()` / current timestamp, evaluated at apply time.",
-          "type": "string",
-          "const": "now"
-        },
-        {
-          "description": "`gen_random_uuid()`, evaluated at apply time.",
-          "type": "string",
-          "const": "genRandomUuid"
-        }
-      ]
-    },
-    "CastTarget": {
-      "description": "The closed portable cast-target set (§3.3.1). A non-portable cast target is\nrejected (`UNSUPPORTED { kind: \"expr\" }`).",
-      "oneOf": [
-        {
-          "description": "`text`",
-          "type": "string",
-          "const": "text"
-        },
-        {
-          "description": "`integer`",
-          "type": "string",
-          "const": "integer"
-        },
-        {
-          "description": "`real`",
-          "type": "string",
-          "const": "real"
-        },
-        {
-          "description": "`boolean`",
-          "type": "string",
-          "const": "boolean"
-        },
-        {
-          "description": "`blob` (`BYTEA` on PG)",
-          "type": "string",
-          "const": "blob"
-        },
-        {
-          "description": "`uuid` (PG-native `uuid`; `text` on SQLite, which has no uuid type).\nNeeded for the VENDOR policy predicates — the 0025 tenant-isolation\npolicy casts `current_setting('zeroship.tenant_app', true)::uuid`, so a\nfaithful port of `pg_get_expr(polqual)` requires the real `::uuid` cast,\nnot a `::text` substitute (vendor spec §2.10 / §5.3).",
-          "type": "string",
-          "const": "uuid"
-        }
-      ]
-    },
-    "PgArrayMembershipOp": {
-      "description": "**PG-ONLY** membership operator over a literal text array. The closed variants\nintentionally encode the two Postgres idioms the platform's dumped CHECK/domain\npredicates use: `= ANY (ARRAY['...'::text])` and `<> ALL (ARRAY['...'::text])`.",
-      "oneOf": [
-        {
-          "description": "`<expr> = ANY (ARRAY[...])`",
-          "type": "string",
-          "const": "eq"
-        },
-        {
-          "description": "`<expr> <> ALL (ARRAY[...])`",
-          "type": "string",
-          "const": "ne"
-        }
-      ]
-    },
-    "ExtractField": {
-      "description": "CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nP1 admits only the platform `day` marker. Add more fields only with a concrete\ngolden needing them and matching renderer/validation coverage.",
-      "oneOf": [
-        {
-          "description": "Day-of-month field.",
-          "type": "string",
-          "const": "day"
-        }
-      ]
-    },
     "IdentityCol": {
       "description": "An identity column facet.\n\n`always = true` renders `GENERATED ALWAYS AS IDENTITY`; `false` renders\n`GENERATED BY DEFAULT AS IDENTITY`.",
       "type": "object",
@@ -4004,28 +4418,6 @@
     "IrConstraintKind": {
       "description": "The kind of a table constraint. CLOSED enum, internally tagged on `\"kind\"`.",
       "oneOf": [
-        {
-          "description": "PRIMARY KEY over the named columns.",
-          "type": "object",
-          "properties": {
-            "columns": {
-              "description": "The key columns.",
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "kind": {
-              "type": "string",
-              "const": "pk"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "columns"
-          ]
-        },
         {
           "description": "FOREIGN KEY referencing `(referencesTable.referencesColumns)`.",
           "type": "object",
@@ -4084,6 +4476,13 @@
                 "null"
               ]
             },
+            "notValid": {
+              "description": "Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption).\nWhen `Some(true)`, the ADD CONSTRAINT body is rendered ` … NOT VALID`\nso existing rows are NOT scanned at add time; a later\n[`Op::ValidateConstraint`] validates them under a weaker lock.\nAdditive-optional: absent is checksum-neutral (`skip_serializing_if`),\nso a FK that sets no `NOT VALID` serializes byte-identically to the\npre-slice wire image. Refused fail-closed off PostgreSQL.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "kind": {
               "type": "string",
               "const": "fk"
@@ -4126,6 +4525,13 @@
             "expr": {
               "description": "The check expression (a boolean closed-AST node).",
               "$ref": "#/$defs/Expr"
+            },
+            "notValid": {
+              "description": "Optional `NOT VALID` flag (PostgreSQL-only online constraint adoption);\nsee [`IrConstraintKind::Fk::not_valid`]. Additive-optional + checksum-\nneutral when absent. Refused fail-closed off PostgreSQL.",
+              "type": [
+                "boolean",
+                "null"
+              ]
             },
             "kind": {
               "type": "string",
@@ -4415,6 +4821,13 @@
             "boolean",
             "null"
           ]
+        },
+        "nulls_not_distinct": {
+          "description": "PostgreSQL 15+ `NULLS NOT DISTINCT` on a UNIQUE index (treat NULLs as\nequal for the uniqueness check). PG-vendor: fails closed on SQLite/MySQL.\n`None` serializes identically to the pre-`nullsNotDistinct` wire shape\n(byte-neutral when absent).",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -4442,6 +4855,20 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "opclass": {
+              "description": "PostgreSQL per-column operator class (e.g. `text_pattern_ops`).\nPG-vendor: fails closed on SQLite/MySQL. `None` serializes identically\nto the pre-opclass wire shape (byte-neutral when absent).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "collation": {
+              "description": "PostgreSQL per-column collation (e.g. `\"C\"`). PG-vendor: fails closed\non SQLite/MySQL. `None` serializes identically to the pre-collation\nwire shape (byte-neutral when absent).",
+              "type": [
+                "string",
+                "null"
               ]
             },
             "kind": {
@@ -4570,6 +4997,11 @@
                 "type": "string"
               }
             },
+            "collapse": {
+              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "type": "boolean",
+              "default": false
+            },
             "kind": {
               "type": "string",
               "const": "range"
@@ -4592,6 +5024,11 @@
                 "type": "string"
               }
             },
+            "collapse": {
+              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "type": "boolean",
+              "default": false
+            },
             "kind": {
               "type": "string",
               "const": "list"
@@ -4613,6 +5050,11 @@
               "items": {
                 "type": "string"
               }
+            },
+            "collapse": {
+              "description": "P12 affirmation: collapse to a plain table where native partitioning\nis unsupported.",
+              "type": "boolean",
+              "default": false
             },
             "kind": {
               "type": "string",
@@ -5118,7 +5560,7 @@
       ]
     },
     "IrValue": {
-      "description": "A DML value in an insert row or `onConflict.doUpdate`: either the existing typed\nscalar wire shape or a closed expression AST such as `FnSynth(now)`.",
+      "description": "A DML value in an insert row, `update.set`, `backfill.set`, trigger update\n`set`, or `onConflict.doUpdate`: either the existing typed scalar wire shape\nor a closed expression AST such as `FnSynth(now)`.",
       "anyOf": [
         {
           "description": "A typed scalar literal. The wire shape is exactly [`IrScalar`]'s existing\nscalar representation, preserving committed scalar rows byte-for-byte.",
@@ -5883,10 +6325,10 @@
               "type": "string"
             },
             "set": {
-              "description": "Column → closed-AST assignment.",
+              "description": "Column → typed scalar or closed-AST assignment.",
               "type": "object",
               "additionalProperties": {
-                "$ref": "#/$defs/Expr"
+                "$ref": "#/$defs/IrValue"
               }
             },
             "where": {

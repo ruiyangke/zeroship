@@ -13,11 +13,11 @@ export const name = "ddl_create";
 export function up() {
   table("orders").create({
     columns: {
-      id: t.uuid().notNull().default({ fn: "genRandomUuid" }),
-      total: t.integer().notNull().default(0),
+      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      total: t.int().notNull().default(0),
       note: t.text(),
     },
   });
-  table("orders").index("orders_total_idx").add({ columns: ["total"] });
+  table("orders").index("orders_total_idx").add({ on: ["total"] });
   table("orders").column("status").add({ type: t.text().notNull().default("new") });
 }

@@ -49,7 +49,7 @@ async fn registry_core_tables_live_in_zeroship_schema() {
         // also asserts the table is not silently shadowed in `public`.
         //
         // Every platform/system table lives in ONE `zeroship` schema
-        // (db/migrations/V0001__extensions_schemas.sql; the registry code in
+        // (db/migrations-ts/20260702000100_schema_roles_extensions.ts; the registry code in
         // crates/control/src/registry.rs fully qualifies every reference as
         // `zeroship.*`). There is no `control` schema.
         let qualified = format!("zeroship.{table}");

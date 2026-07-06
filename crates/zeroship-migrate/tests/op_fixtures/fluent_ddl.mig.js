@@ -7,11 +7,13 @@
 //
 // Covers EVERY t.* column type + EVERY modifier:
 //   t.id() (uuid PK + genRandomUuid default), t.text().notNull(), t.numeric(),
-//   t.timestamp().default({fn:"now"}), t.uuid(), t.bytes(), t.boolean().default,
-//   t.json(), t.ref(target), t.vector(n), t.geoPoint(), t.text() (was t.string —
-//   alias removed), t.integer() (was t.int), t.bigInt(), t.float(),
+//   t.timestamp().default((c) => c.fn.now()), t.uuid(), t.bytes(), t.boolean().default,
+//   t.json(), t.ref(target), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
+//   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
+//   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
-import { table, t } from "@zeroship/migrate";
+import { table, t, decimal } from "@zeroship/migrate";
+import { pgTable } from "@zeroship/migrate/pg";
 
 export default {
   name: "fluent_ddl",
@@ -21,19 +23,19 @@ export default {
       columns: {
         id: t.id(), // uuid PK, default gen_random_uuid()
         email: t.text().notNull().unique(),
-        balance: t.numeric(12, 2).notNull().default({ decimal: "0.00" }),
-        authored_at: t.timestamp().notNull().default({ fn: "now" }),
+        balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
+        authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
         profile: t.json(),
         owner: t.ref("users"),
-        embedding: t.vector(1536),
+        embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
         label: t.text(), // was t.string() — the alias is removed (§7)
-        hits: t.integer().notNull().default(0),
+        hits: t.int().notNull().default(0),
         big_hits: t.bigInt(),
-        ratio: t.float(),
+        ratio: t.double(),
         secret: t.encrypted({ of: t.text() }),
       },
     });
@@ -49,7 +51,7 @@ export default {
           references: { table: "accounts", columns: ["id"] },
         },
       ],
-      indexes: [{ name: "memberships_account_idx", columns: ["account_id"] }],
+      indexes: [{ name: "memberships_account_idx", on: ["account_id"] }],
     });
 
     table("accounts").column("status").add({ type: t.text().notNull().default("new") });
@@ -62,13 +64,13 @@ export default {
     table("accounts").check("accounts_balance_chk").add({ expr: (c) => c("balance").ge(0) });
     table("accounts").constraint("accounts_legacy_chk").drop();
 
-    table("accounts").column("balance").setType({ to: t.numeric(14, 2) });
+    table("accounts").column("balance").setType({ to: t.numeric({ precision: 14, scale: 2 }) });
     table("accounts").column("profile").setNotNull();
 
     table("accounts").column("label").rename({ to: "display_label", type: t.text() });
 
-    table("accounts").index("accounts_active_email_idx").add({
-      columns: ["email"],
+    pgTable("accounts").index("accounts_active_email_idx").add({
+      on: ["email"],
       unique: true,
       where: (c) => c("active").isTrue(),
     });

@@ -188,6 +188,8 @@ TableSnapshot {
                 Column {
                     name: "__fts",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             access_method: "gin",
@@ -196,6 +198,7 @@ TableSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         },
         IndexSnapshot {
@@ -209,10 +212,14 @@ TableSnapshot {
                 Column {
                     name: "author",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
                 Column {
                     name: "slug",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             access_method: "btree",
@@ -221,6 +228,7 @@ TableSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         },
         IndexSnapshot {
@@ -233,6 +241,8 @@ TableSnapshot {
                 Column {
                     name: "created_by",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             access_method: "btree",
@@ -241,6 +251,7 @@ TableSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         },
         IndexSnapshot {
@@ -253,6 +264,8 @@ TableSnapshot {
                 Column {
                     name: "deleted_at",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             access_method: "btree",
@@ -261,6 +274,7 @@ TableSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         },
         IndexSnapshot {
@@ -273,6 +287,8 @@ TableSnapshot {
                 Column {
                     name: "id",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             access_method: "btree",
@@ -281,6 +297,7 @@ TableSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         },
         IndexSnapshot {
@@ -293,6 +310,8 @@ TableSnapshot {
                 Column {
                     name: "slug",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             access_method: "btree",
@@ -301,6 +320,7 @@ TableSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         },
         IndexSnapshot {
@@ -313,6 +333,8 @@ TableSnapshot {
                 Column {
                     name: "updated_at",
                     order: None,
+                    opclass: None,
+                    collation: None,
                 },
             ],
             access_method: "btree",
@@ -321,6 +343,7 @@ TableSnapshot {
             with: None,
             only: false,
             opclass: None,
+            nulls_not_distinct: false,
             comment: None,
         },
     ],

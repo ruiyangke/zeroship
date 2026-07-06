@@ -6,15 +6,12 @@
 // byte-identical to the Rust `Op` wire shape.
 import { table } from "@zeroship/migrate";
 import {
-  alterRole,
   createFunction,
-  dropExtension,
   dropFunction,
   dropOwnedBy,
-  dropRole,
-  dropSchema,
   extension,
   grant,
+  pgTable,
   raw,
   revoke,
   role,
@@ -25,22 +22,21 @@ export const name = "pg_vendor";
 
 export function up() {
   // ── extensions + schemas (0001) ──
-  extension({ name: "citext", ifNotExists: true });
-  dropExtension({ name: "citext", ifExists: true });
-  schema({ name: "zeroship", ifNotExists: true });
-  dropSchema({ name: "zeroship", ifExists: true, cascade: true });
+  extension("citext").create({ ifNotExists: true });
+  extension("citext").drop({ ifExists: true });
+  schema("zeroship").create({ ifNotExists: true });
+  schema("zeroship").drop({ ifExists: true, cascade: true });
 
   // ── roles (0025) ──
-  role({
-    name: "zeroship_auth",
+  role("zeroship_auth").create({
     login: true,
     password: "zeroship_auth",
     bypassRls: true,
     setSearchPath: ["zeroship", "public"],
     ifNotExists: true,
   });
-  alterRole({ name: "zeroship_auth", setSearchPath: ["zeroship", "public"] });
-  dropRole({ name: "zeroship_auth", ifExists: true });
+  role("zeroship_auth").setOptions({ setSearchPath: ["zeroship", "public"] });
+  role("zeroship_auth").drop({ ifExists: true });
   dropOwnedBy({ roles: ["zeroship_auth"] });
 
   // ── grants / revokes (0025 / 0004) ──
@@ -55,21 +51,24 @@ export function up() {
     from: ["public"],
   });
 
+  // ── partition attach (PG vendor; distinct from createPartition) ──
+  pgTable("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+    from: ["2026-11-01T00:00:00Z"],
+    to: ["2026-12-01T00:00:00Z"],
+  });
+
   // ── RLS + policies (0025) ──
-  const secrets = table("app_secrets", { schema: "zeroship" });
-  secrets.enableRowLevelSecurity();
-  secrets.forceRowLevelSecurity();
-  secrets.createPolicy({
-    name: "tenant_isolation",
+  const secrets = pgTable("app_secrets", { schema: "zeroship" });
+  secrets.setRls({ enabled: true, forced: true });
+  secrets.policy("tenant_isolation").create({
     for: "all",
     using: (c) =>
-      c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
     withCheck: (c) =>
-      c("app_id").eq(c.fn.currentSetting("zeroship.tenant_app", true).cast("text")),
+      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast("text")),
   });
-  secrets.dropPolicy({ name: "tenant_isolation", ifExists: true });
-  secrets.disableRowLevelSecurity();
-  secrets.noForceRowLevelSecurity();
+  secrets.policy("tenant_isolation").drop({ ifExists: true });
+  secrets.setRls({ enabled: false, forced: false });
 
   // ── functions (0002 tamper trigger) ──
   createFunction({
@@ -83,22 +82,20 @@ export function up() {
 
   // ── triggers (0002 + A2) ──
   const audit = table("audit_events", { schema: "zeroship" });
-  audit.createTrigger({
-    name: "audit_events_block_update",
+  audit.trigger("audit_events_block_update").create({
     timing: "before",
     events: ["update", "delete"],
     forEach: "row",
     execute: "audit_events_block_tamper",
     when: (c) => c("app_id").isNotNull(),
   });
-  audit.createTrigger({
-    name: "audit_events_append_only",
+  audit.trigger("audit_events_append_only").create({
     timing: "before",
     events: ["update"],
     forEach: "row",
     body: (b) => [b.raise({ level: "abort", message: "append-only", errcode: "P0001" })],
   });
-  audit.dropTrigger({ name: "audit_events_block_update", ifExists: true });
+  audit.trigger("audit_events_block_update").drop({ ifExists: true });
 
   dropFunction({
     name: "audit_events_block_tamper",

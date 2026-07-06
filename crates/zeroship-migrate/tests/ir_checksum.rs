@@ -15,7 +15,7 @@ use zeroship_migrate::{
 };
 use zeroship_migrate::model::ir::{
     CanonicalOpList, ColType, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrScalar,
-    Op,
+    IrValue, Op,
 };
 
 // ---------------------------------------------------------------------------
@@ -300,6 +300,8 @@ fn checksum_of_ir_includes_table_check_expr() {
                         lhs: Box::new(Expr::col("a")),
                         rhs: Box::new(Expr::lit(IrScalar::Int(rhs))),
                     },
+                
+                    not_valid: None,
                 },
             }],
             indexes: vec![],
@@ -375,7 +377,7 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
         let mut set = BTreeMap::new();
         set.insert(
             "flagged".to_string(),
-            Expr::lit(IrScalar::Bool(true)),
+            IrValue::Expr(Expr::lit(IrScalar::Bool(true))),
         );
         Op::Update {
             table: "t".into(),
@@ -494,6 +496,8 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
         columns: vec![IndexElement::Column {
             name: "email".into(),
             order: None,
+            opclass: None,
+            collation: None,
         }],
         name: None,
         unique: Some(true),
@@ -506,6 +510,7 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
     concurrently: Some(true),
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     }];
 
     // What a CORRECT IrAuthor does: compute the neutral flags ONCE and feed the
@@ -563,6 +568,8 @@ fn checksum_of_ir_fk_actions_are_additive_neutral_and_sensitive() {
                     on_update,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,

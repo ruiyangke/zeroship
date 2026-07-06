@@ -81,9 +81,9 @@ apps(
 )
 ```
 
-The schema is owned by zeroship-migrate (`db/migrations/`,
-`V0004__control.sql`); the registry consumes these tables but does not create
-them.
+The schema is owned by zeroship-migrate (`db/migrations-ts/`,
+especially `20260702000200_control_tables.ts`); the registry consumes these
+tables but does not create them.
 
 ## Route and version feeds
 

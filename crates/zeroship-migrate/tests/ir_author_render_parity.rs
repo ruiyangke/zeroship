@@ -21,7 +21,6 @@ use zeroship_migrate::model::ir::{
     ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr,
     Op,
 };
-use zeroship_migrate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
 use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
@@ -47,6 +46,8 @@ fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.to_string(),
         order: None,
+        opclass: None,
+        collation: None,
     }
 }
 
@@ -505,6 +506,7 @@ fn create_index_render_is_byte_identical_pg() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());
@@ -595,7 +597,7 @@ fn alter_column_type_render_is_byte_identical_pg() {
         Op::SetColumnType {
             table: "widgets".into(),
             column: "qty".into(),
-            to_type: ColType::Float,
+            to_type: ColType::Double,
             using: None,
             schema: None,
             existence_guard: None,
@@ -719,6 +721,8 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -757,6 +761,8 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -788,6 +794,8 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -823,6 +831,8 @@ fn add_constraint_fk_renders_deferrable_tail_pg() {
                         on_update: None,
                         deferrable,
                         initially_deferred,
+                    
+                        not_valid: None,
                     },
                 },
                 schema: None,
@@ -875,6 +885,8 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
                     on_update: Some(RefAction::Restrict),
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -907,6 +919,8 @@ fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
                     on_update: None,
                     deferrable: None,
                     initially_deferred: None,
+                
+                    not_valid: None,
                 },
             },
             schema: None,
@@ -952,34 +966,6 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
             Some("ALTER TABLE \"app\".\"widgets\" DROP CONSTRAINT \"widgets_slug_key\"".to_string()),
         )],
         "stand-alone UNIQUE add renders the canonical ADD CONSTRAINT"
-    );
-
-    let pk_ir = MigrationIr {
-        ir_version: 1,
-        name: "m".into(),
-        owner_app: OWNER.into(),
-        ops: vec![Op::AddConstraint {
-            table: "widgets".into(),
-            constraint: IrConstraint {
-                name: Some("widgets_pkey".into()),
-                kind: IrConstraintKind::Pk { columns: vec!["a".into(), "b".into()] },
-            },
-            schema: None,
-            existence_guard: None,
-        }],
-        flags: Default::default(),
-        depends_on: vec![],
-        supersedes: vec![],
-        preconditions: vec![],
-        checksum: None,
-    };
-    let pk_err = validate_ir(&pk_ir, Dialect::Postgres, &[])
-        .expect_err("stand-alone user PK add is validate-refused");
-    assert_eq!(pk_err.code, CODE_UNSUPPORTED);
-    assert_eq!(pk_err.kind, Some(UnsupportedKind::Op));
-    assert!(
-        pk_err.reason.contains("PRIMARY KEY") || pk_err.reason.contains("primary key"),
-        "PK refusal should explain platform-owned PK, got: {pk_err}"
     );
 
     let drop = sql_pairs(&ir_lower_one(
@@ -1035,7 +1021,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
             Op::SetColumnType {
                 table: "widgets".into(),
                 column: "qty".into(),
-                to_type: ColType::Float,
+                to_type: ColType::Double,
                 using: None,
                 schema: None,
                 existence_guard: None,
@@ -1461,6 +1447,7 @@ fn create_index_render_is_byte_identical_sqlite() {
     concurrently: None,
         schema: None,
         existence_guard: None,
+        nulls_not_distinct: None,
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());
