@@ -472,8 +472,12 @@ export function checkExpressionSurfaceTypechecks(): void {
   table("oauth_authorization_codes").check("no_pg_extract_field").add({ expr: (c) => c.fn.extract("epoch", c("created_at")).gt(0) });
 
   pgTable("oauth_authorization_codes").check("max_ttl").add({
-    expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))),
+    expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))),
   });
+  // @ts-expect-error — core interval was a leaked PG vendor spelling; use c.pg.interval.
+  table("oauth_authorization_codes").check("no_core_interval").add({ expr: (c) => c("expires_at").le(interval({ minutes: 1 })) });
+  // @ts-expect-error — c.pg.interval takes a structured Duration, not HH:MM:SS text.
+  pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))) });
   pgTable("oauth_authorization_codes").check("epoch_positive").add({
     expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
   });

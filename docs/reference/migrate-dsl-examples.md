@@ -406,14 +406,14 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 // PG-flavoured settings (used in RLS policies) — reachable via c.pg on the pg-aware builder
 (c) => c.pg.currentSetting("zeroship.tenant_app", true).cast("uuid")
 (c) => c.pg.currentUser()
+(c) => c("expires_at").le(c("created_at").add(c.pg.interval({ days: 3 })))
 ```
 
 ### Literals & helpers
 
 ```ts
-import { lit, interval, minValue, maxValue, nextval } from "@zeroship/migrate";
+import { lit, minValue, maxValue, nextval } from "@zeroship/migrate";
 lit(42)                       // an explicit literal node
-interval("72:00:00")          // an interval literal — HH:MM:SS form only (not "7 days")
 minValue / maxValue           // partition-bound sentinels (see §12)
 ```
 

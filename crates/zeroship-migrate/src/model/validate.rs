@@ -42,7 +42,7 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
-use crate::model::expr::{CaseBranch, Expr, ScalarFn, SynthFn};
+use crate::model::expr::{CaseBranch, Duration, Expr, ScalarFn, SynthFn};
 use crate::model::profile::{AuthorPrimaryKeyPolicy, PolicyProfile};
 use pg_query::protobuf::node::Node as NodeEnum;
 
@@ -3775,7 +3775,7 @@ impl Ctx<'_> {
             }
             Expr::PgInterval { duration } => {
                 self.check_pg_only_expr("PG interval literal")?;
-                self.check_pg_interval_literal(duration)
+                self.check_duration(duration)
             }
             // The one Layer-2 portability escape (§3.4): a per-dialect value
             // divergence. Structurally validate EVERY present leg (dialect-
@@ -4173,17 +4173,14 @@ impl Ctx<'_> {
         self.check_pg_text_literal(pattern, "PG regex pattern")
     }
 
-    fn check_pg_interval_literal(&self, value: &str) -> Result<(), AuthoringError> {
-        if !is_safe_pg_interval_literal(value) {
+    fn check_duration(&self, duration: &Duration) -> Result<(), AuthoringError> {
+        if duration.is_empty() {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
                 self.target_dialect,
-                format!(
-                    "PG interval literal {value:?} is outside the strict P1 interval grammar \
-                     (expected HH:MM:SS or HH:MM:SS.ffffff, with two-digit minutes/seconds)"
-                ),
-                Some("use a time-like interval literal such as \"00:01:00\"".to_string()),
+                "PG interval duration must include at least one field".to_string(),
+                Some("use a structured duration such as {\"minutes\":1}".to_string()),
             ));
         }
         Ok(())
@@ -4270,43 +4267,6 @@ impl Ctx<'_> {
         }
         Ok(())
     }
-}
-
-fn is_safe_pg_interval_literal(value: &str) -> bool {
-    if value.is_empty() || value.len() > 32 || value.contains('\0') {
-        return false;
-    }
-    let Some((hours, rest)) = value.split_once(':') else {
-        return false;
-    };
-    if hours.is_empty() || hours.len() > 6 || !hours.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    let Some((minutes, seconds)) = rest.split_once(':') else {
-        return false;
-    };
-    if minutes.len() != 2
-        || !minutes.bytes().all(|b| b.is_ascii_digit())
-        || minutes.parse::<u8>().map_or(true, |m| m > 59)
-    {
-        return false;
-    }
-    let (seconds_whole, fraction) = match seconds.split_once('.') {
-        Some((whole, frac)) => (whole, Some(frac)),
-        None => (seconds, None),
-    };
-    if seconds_whole.len() != 2
-        || !seconds_whole.bytes().all(|b| b.is_ascii_digit())
-        || seconds_whole.parse::<u8>().map_or(true, |s| s > 59)
-    {
-        return false;
-    }
-    if let Some(frac) = fraction {
-        if frac.is_empty() || frac.len() > 6 || !frac.bytes().all(|b| b.is_ascii_digit()) {
-            return false;
-        }
-    }
-    true
 }
 
 #[cfg(test)]

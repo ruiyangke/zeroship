@@ -109,7 +109,14 @@ fn pg_only_expr_samples() -> Vec<Expr> {
             from: Box::new(Expr::col("ts")),
         },
         Expr::PgInterval {
-            duration: "00:01:00".to_string(),
+            duration: zeroship_migrate::Duration {
+                years: None,
+                months: None,
+                days: None,
+                hours: None,
+                minutes: Some(1),
+                seconds: None,
+            },
         },
     ]
 }

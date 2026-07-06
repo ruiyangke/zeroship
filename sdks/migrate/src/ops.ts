@@ -61,6 +61,7 @@ import type {
   DropEnumArgs,
   DropSequenceArgs,
   DropViewArgs,
+  Duration,
   DroppedExtensionHandle,
   DroppedRoleHandle,
   DroppedSchemaHandle,
@@ -1575,23 +1576,40 @@ function pgExtractField(field: unknown): PortableExtractField | PgExtractFieldTo
   );
 }
 
-function pgIntervalLiteral(value: unknown): string {
-  if (typeof value !== "string") {
-    throw structuredError("OP_INVALID", `c.pg.interval(value): value must be a string; got ${typeof value}`);
-  }
-  if (!isSafePgIntervalLiteral(value)) {
-    throw structuredError(
-      "OP_INVALID",
-      `c.pg.interval(value): value must match HH:MM:SS or HH:MM:SS.ffffff; got ${JSON.stringify(value)}`,
-    );
-  }
-  return value;
-}
+const durationFields = ["years", "months", "days", "hours", "minutes", "seconds"] as const;
 
-function isSafePgIntervalLiteral(value: string): boolean {
-  const m = /^([0-9]{1,6}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,6}))?$/.exec(value);
-  if (!m) return false;
-  return Number(m[2]) <= 59 && Number(m[3]) <= 59;
+function pgDuration(duration: unknown): Duration {
+  if (!isPlainObject(duration)) {
+    throw structuredError("OP_INVALID", `c.pg.interval(duration): duration must be an object; got ${typeof duration}`);
+  }
+
+  const normalized: Duration = {};
+  for (const key of durationFields) {
+    const value = duration[key];
+    if (value === undefined) continue;
+    if (!Number.isInteger(value)) {
+      throw structuredError(
+        "OP_INVALID",
+        `c.pg.interval(duration): ${key} must be an integer; got ${JSON.stringify(value)}`,
+      );
+    }
+    normalized[key] = value as number;
+  }
+
+  for (const key of Object.keys(duration)) {
+    if (!(durationFields as readonly string[]).includes(key)) {
+      throw structuredError(
+        "OP_INVALID",
+        `c.pg.interval(duration): unknown duration field ${JSON.stringify(key)}`,
+      );
+    }
+  }
+
+  if (Object.keys(normalized).length === 0) {
+    throw structuredError("OP_INVALID", "c.pg.interval(duration): at least one duration field is required");
+  }
+
+  return normalized;
 }
 
 class ExprChainImpl implements ExprChainType {
@@ -1685,10 +1703,6 @@ export function check(name: string, expr: CheckExprFn): CheckDef {
 
 export function lit(value: ScalarValue): ExprChainType {
   return chain({ node: "literal", value: toIrScalar(value) });
-}
-
-export function interval(value: string): ExprChainType {
-  return chain({ node: "pgInterval", duration: pgIntervalLiteral(value) });
 }
 
 /**
@@ -1846,9 +1860,9 @@ const pgExpr: PgExprNamespace = {
       from: exprArg(expr),
     });
   },
-  interval: (value) => chain({
+  interval: (duration) => chain({
     node: "pgInterval",
-    duration: pgIntervalLiteral(value),
+    duration: pgDuration(duration),
   }),
 };
 
@@ -2158,8 +2172,13 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
         return;
       case "pgInterval":
         if (!opts.allowPgImmutable) rejectPgNode("pgInterval");
-        if (typeof n.duration !== "string") {
-          rejectImmutableExpr(position, "pgInterval duration must be a string");
+        if (!isPlainObject(n.duration)) {
+          rejectImmutableExpr(position, "pgInterval duration must be an object");
+        }
+        try {
+          pgDuration(n.duration);
+        } catch (error) {
+          rejectImmutableExpr(position, error instanceof Error ? error.message : "pgInterval duration is invalid");
         }
         return;
       case "dialect":
