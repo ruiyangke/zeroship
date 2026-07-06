@@ -210,7 +210,7 @@ const CONFINED_GRANT_IR: &str = r#"{
 }
 "#;
 const PLATFORM_ATTACH_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "@zeroship/migrate";
 import { createFunction, pgTable, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_attach";
@@ -220,8 +220,8 @@ export function up() {
 
   table("platform_apps", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      id: t.uuid().notNull().default(genRandomUuid()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -232,7 +232,7 @@ export function up() {
       route: t.text().notNull(),
       target: t.text().notNull(),
       status: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id", "route"],
     checks: [
@@ -328,7 +328,7 @@ export function up() {
 }
 "#;
 const PLATFORM_SYNTH_DEFAULT_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "@zeroship/migrate";
 import { schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_synth_defaults";
@@ -338,8 +338,8 @@ export function up() {
 
   table("platform_events", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
-      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      id: t.uuid().notNull().default(genRandomUuid()),
+      occurred_at: t.timestamp().notNull().default(now()),
       kind: t.text().notNull(),
       payload: t.json().notNull(),
       items: t.json().notNull(),
@@ -354,6 +354,7 @@ import {
   table,
   t,
   check,
+  interval,
 } from "@zeroship/migrate";
 import { pgTable, schema } from "@zeroship/migrate/pg";
 
@@ -391,7 +392,7 @@ export function up() {
       check("expr_total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
       check("expr_floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
       check("expr_active_visible", (c) => c("active").and(c("visible"))),
-      { name: "expr_expires_window", expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) },
+      { name: "expr_expires_window", expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))) },
       // Mirrors the platform sandboxes_snapshot_artifact_consistency marker:
       // a <> ALL negated inList OR'd with a 3-way IS NOT NULL AND chain.
       check("expr_snapshot_consistency", (c) =>
@@ -423,7 +424,7 @@ export function up() {
 }
 "#;
 const PLATFORM_SCALAR_TYPES_TS: &str = r#"
-import { table, t } from "@zeroship/migrate";
+import { table, t, genRandomUuid } from "@zeroship/migrate";
 import { schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_scalar_types";
@@ -433,7 +434,7 @@ export function up() {
 
   table("platform_scalar_types", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       shard: t.smallInt().notNull(),
       ratio: t.real().notNull(),
       source_ip: t.inet(),

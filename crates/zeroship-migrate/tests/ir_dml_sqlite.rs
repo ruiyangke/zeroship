@@ -326,7 +326,7 @@ async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_sqlite() 
     lower_and_apply(&be, create, &registry(&[]), Approval::None).await;
 
     let symbol_src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "seed_symbols", up() {
             table("events").insert({ rows: [{
                 id: crypto.randomUUID,
@@ -338,12 +338,12 @@ async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_sqlite() 
         }};
     "#;
     let explicit_src = r#"
-        import { table, cFn } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "seed_symbols", up() {
             table("events").insert({ rows: [{
-                id: cFn.genRandomUuid(),
-                created_at: cFn.now(),
-                updated_at: cFn.now(),
+                id: genRandomUuid(),
+                created_at: now(),
+                updated_at: now(),
                 version: 1,
                 kind: "symbol"
             }] });
@@ -353,10 +353,10 @@ async fn recorded_fnsynth_symbol_insert_applies_db_evaluated_values_on_sqlite() 
     let symbol_ir = record_migration_to_ir_unsandboxed(symbol_src, APP, "sqlite_fnsynth_symbol")
         .expect("record symbol-form fnSynth insert");
     let explicit_ir = record_migration_to_ir_unsandboxed(explicit_src, APP, "sqlite_fnsynth_explicit")
-        .expect("record explicit cFn insert");
+        .expect("record explicit top-level constructor insert");
     assert_eq!(
         symbol_ir.ops, explicit_ir.ops,
-        "native symbol form and cFn form must record byte-identical ops"
+        "native symbol form and top-level constructor form must record byte-identical ops"
     );
 
     compio::time::sleep(std::time::Duration::from_secs(2)).await;

@@ -24,6 +24,10 @@ import {
   decimal,
   byteValue,
   dialect,
+  now,
+  currentSetting,
+  currentUser,
+  interval,
 } from "../src/index.js";
 import { domain, pgTable, sequence } from "../src/pg.js";
 // The build-evaluator recorder seam (not part of the public surface).
@@ -71,6 +75,11 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   const imported = await import("@zeroship/migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
+  assert.equal(typeof imported.now, "function");
+  assert.equal(typeof imported.genRandomUuid, "function");
+  assert.equal(typeof imported.currentSetting, "function");
+  assert.equal(typeof imported.currentUser, "function");
+  assert.equal(typeof imported.interval, "function");
   assert.equal((imported as any).p, undefined);
   assert.equal((imported as any).partition, undefined);
   assert.equal((imported as any).dropPartition, undefined);
@@ -79,7 +88,6 @@ test("@zeroship/migrate core exports enumType and omits pg-only/old names", asyn
   assert.equal((imported as any).and, undefined);
   assert.equal((imported as any).or, undefined);
   assert.equal((imported as any).not, undefined);
-  assert.equal((imported as any).interval, undefined);
   assert.equal((imported as any).pgEnum, undefined);
   assert.equal((imported as any).pgDomain, undefined);
   assert.equal((imported as any).domain, undefined);
@@ -183,10 +191,10 @@ test("default expression callbacks record IrDefault::Expr", () => {
   const ops = record(() => {
     table("u").create({
       columns: {
-        created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+        created_at: t.timestamp().notNull().default(now()),
       },
     });
-    table("u").column("updated_at").setDefault((c) => c.fn.now());
+    table("u").column("updated_at").setDefault(now());
   });
   const expr = { node: "fnSynth", fn: "now", args: [] };
   assert.deepEqual(ops[0].columns[0].default, { expr });
@@ -957,7 +965,7 @@ test("onConflict.doUpdate normalizes decimal()/Uint8Array scalar assignments", (
 test("update records a plain one-shot op with no batch field", () => {
   const ops = record(() =>
     table("t").update({
-      set: { x: (c) => c.fn.now() },
+      set: { x: now() },
       where: (c) => c("id").isNotNull(),
     }),
   );
@@ -968,7 +976,7 @@ test("update records a plain one-shot op with no batch field", () => {
 test("backfill remains the batched-write spelling", () => {
   const ops = record(() =>
     table("t").backfill({
-      set: { x: (c) => c.fn.now() },
+      set: { x: now() },
       where: (c) => c("id").isNotNull(),
       cursorColumn: "id",
       batchSize: 500,
@@ -1119,7 +1127,7 @@ test("variadic boolean chains record the old free-combinator left fold", () => {
   });
 });
 
-test("c.pg builds PG-only regex, pg_column_size, and RLS scalar nodes", () => {
+test("PG-first chain methods and root RLS scalar constructors record PG-only nodes", () => {
   const ops = record(() => {
     pgTable("t").create({
       columns: {
@@ -1134,8 +1142,8 @@ test("c.pg builds PG-only regex, pg_column_size, and RLS scalar nodes", () => {
     });
     table("t").update({
       set: {
-        setting: (c) => c.pg.currentSetting("tenant.id", true),
-        user: (c) => c.pg.currentUser(),
+        setting: currentSetting("tenant.id", { missingOk: true }),
+        user: currentUser(),
       },
     });
   });
@@ -1391,7 +1399,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
         check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
         check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
         check("enabled_and_visible", (c) => c("enabled").and(c("visible"))),
-        { name: "expires_window", expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) },
+        { name: "expires_window", expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))) },
         check("not_archived", (c) => c("kind").eq(lit("archived")).not()),
         check("kind_not_reserved", (c) => c("kind").notIn(["x", "y"])),
       ],
@@ -1623,7 +1631,7 @@ test("domain check validation rejects smuggled volatile functions and aggregates
   );
 });
 
-test("c.fn and c.pg build portable extract, pgExtract, and structured interval nodes", () => {
+test("c.fn, c.pg.extract, and root interval build extract and interval nodes", () => {
   const ops = record(() => {
     domain("billing_period").create({
       as: t.date(),
@@ -1645,7 +1653,7 @@ test("c.fn and c.pg build portable extract, pgExtract, and structured interval n
       checks: [
         {
           name: "expires_window",
-          expr: (c) => c("expires_at").le(c("issued_at").add(c.pg.interval({ minutes: 1 }))),
+          expr: (c) => c("expires_at").le(c("issued_at").add(interval({ minutes: 1 }))),
         },
       ],
     });
@@ -1713,11 +1721,11 @@ test("inList rejects malformed scalar arrays and c.pg rejects regex patterns", (
     (e: any) => e.code === "OP_INVALID" && /field must be one of/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval({}) } })),
+    () => record(() => table("t").update({ set: { x: interval({}) } })),
     (e: any) => e.code === "OP_INVALID" && /at least one duration field/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.interval({ minutes: 1.5 }) } })),
+    () => record(() => table("t").update({ set: { x: interval({ minutes: 1.5 }) } })),
     (e: any) => e.code === "OP_INVALID" && /minutes must be an integer/.test(e.message),
   );
 });
@@ -2177,7 +2185,7 @@ test("comment records closed COMMENT ON targets through handles and top-level AP
 });
 
 test("backfill defaults cursorColumn to 'id' and batchSize to the engine default", () => {
-  const ops = record(() => table("u").backfill({ set: { x: (c) => c.fn.now() } }));
+  const ops = record(() => table("u").backfill({ set: { x: now() } }));
   assert.equal(ops[0].cursorColumn, "id");
   assert.equal(typeof ops[0].batchSize, "number");
   assert.equal(ops[0].name, "backfill_u");
@@ -2251,7 +2259,7 @@ test("determinism lint flags Date.now()/Math.random()/new Date(); clean source i
     assert.ok(findings.length >= 1, `${frag} must be flagged`);
     assert.equal(findings[0].code, "NONDETERMINISTIC_OP_ARG");
   }
-  assert.deepEqual(lintDeterminism(`table("t").backfill({ set: { v: c => c.fn.now() } });`), []);
+  assert.deepEqual(lintDeterminism(`table("t").backfill({ set: { v: c => now() } });`), []);
 });
 
 test("determinism lint is a coarse whole-source scan (over-flags, never under-flags)", () => {

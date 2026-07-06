@@ -1,11 +1,11 @@
-import { table, t } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 export const name = "control_tables";
 
 export function up() {
   table("app_audit", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       app_id: t.uuid(),
       creator_id: t.uuid(),
       actor_user_id: t.uuid(),
@@ -14,7 +14,7 @@ export function up() {
       resource: t.text(),
       source_ip: t.inet(),
       detail: t.json(),
-      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      occurred_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -22,7 +22,7 @@ export function up() {
     columns: {
       app_id: t.uuid().notNull(),
       key_name: t.text().notNull(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id", "key_name"],
   });
@@ -31,7 +31,7 @@ export function up() {
       app_id: t.uuid().notNull(),
       user_id: t.uuid().notNull(),
       role: t.text().notNull(),
-      added_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      added_at: t.timestamp().notNull().default(now()),
       added_by: t.uuid(),
     },
     primaryKey: ["app_id", "user_id"],
@@ -43,7 +43,7 @@ export function up() {
       host: t.text().notNull(),
       port: t.int().notNull(),
       granted_by: t.text().notNull(),
-      granted_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      granted_at: t.timestamp().notNull().default(now()),
       note: t.text(),
     },
     primaryKey: ["app_id", "host", "port"],
@@ -54,8 +54,8 @@ export function up() {
       app_id: t.uuid().notNull(),
       client_id: t.text().notNull(),
       sector_identifier: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id"],
   });
@@ -73,7 +73,7 @@ export function up() {
       app_id: t.uuid().notNull(),
       key_name: t.text().notNull(),
       ciphertext: t.bytes().notNull(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id", "key_name"],
   });
@@ -90,7 +90,7 @@ export function up() {
       app_id: t.uuid().notNull(),
       period: t.text().notNull(),
       counters: t.json().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: null,
   });
@@ -99,13 +99,13 @@ export function up() {
       app_id: t.uuid().notNull(),
       key_name: t.text().notNull(),
       value: t.text().notNull(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id", "key_name"],
   });
   table("apps", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       name: t.text().notNull(),
       plan_id: t.text().notNull().default("free"),
       deploy_hash: t.text(),
@@ -115,18 +115,18 @@ export function up() {
       suspended: t.boolean().notNull().default(false),
       audit_locked: t.boolean().notNull().default(false),
       manifest_json: t.text(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
       system: t.boolean().notNull().default(false),
     },
     primaryKey: ["id"],
   });
   table("creator_account_history", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       creator_id: t.uuid().notNull(),
       stripe_account_id: t.text().notNull(),
-      linked_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      linked_at: t.timestamp().notNull().default(now()),
       unlinked_at: t.timestamp(),
     },
     primaryKey: ["id"],
@@ -135,7 +135,7 @@ export function up() {
     columns: {
       creator_id: t.uuid().notNull(),
       stripe_account_id: t.text().notNull(),
-      onboarded_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      onboarded_at: t.timestamp().notNull().default(now()),
       unlinked_at: t.timestamp(),
       charges_enabled: t.boolean().notNull().default(false),
       payouts_enabled: t.boolean().notNull().default(false),
@@ -153,7 +153,7 @@ export function up() {
       ceiling_id: t.text().notNull(),
       ceiling_version: t.bigInt().notNull(),
       submitted_by: t.uuid().notNull(),
-      submitted_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      submitted_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id", "version"],
   });
@@ -161,7 +161,7 @@ export function up() {
   table("migrated_app_policies", { schema: "zeroship" }).check("migrated_app_policies_version_check").add({ expr: (c) => c("version").gt(0) });
   table("migrated_migration_audit", { schema: "zeroship" }).create({
     columns: {
-      audit_id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      audit_id: t.uuid().notNull().default(genRandomUuid()),
       app_id: t.uuid().notNull(),
       migration_id: t.uuid().notNull(),
       migration_versions: t.json().notNull().default([]),
@@ -173,7 +173,7 @@ export function up() {
       ceiling_id: t.text().notNull(),
       ceiling_version: t.bigInt().notNull(),
       detail: t.json().notNull().default({}),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["audit_id"],
   });
@@ -190,7 +190,7 @@ export function up() {
       ceiling_version: t.bigInt().notNull(),
       gated_versions: t.json().notNull().default([]),
       submitted_by: t.uuid().notNull(),
-      submitted_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      submitted_at: t.timestamp().notNull().default(now()),
       approved_by: t.uuid(),
       approved_at: t.timestamp(),
       applied_at: t.timestamp(),
@@ -205,13 +205,13 @@ export function up() {
       key: t.text().notNull(),
       value_json: t.json().notNull(),
       updated_by: t.text(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["key"],
   });
   table("payouts", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       creator_id: t.uuid().notNull(),
       event_id: t.text().notNull(),
       event_type: t.text().notNull(),
@@ -221,7 +221,7 @@ export function up() {
       currency: t.text().notNull(),
       occurred_at: t.timestamp().notNull(),
       payload_hash: t.bytes(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -240,7 +240,7 @@ export function up() {
       name: t.text().notNull(),
       policies: t.json().notNull(),
       policy_hash: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp(),
       revoked_at: t.timestamp(),
       last_used_at: t.timestamp(),
@@ -252,7 +252,7 @@ export function up() {
     columns: {
       user_id: t.uuid().notNull(),
       role: t.text().notNull(),
-      granted_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      granted_at: t.timestamp().notNull().default(now()),
       granted_by: t.uuid(),
     },
     primaryKey: ["user_id"],
@@ -263,7 +263,7 @@ export function up() {
       id: t.text().notNull(),
       cedar_source: t.text().notNull(),
       enabled: t.boolean().notNull().default(true),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
       updated_by: t.uuid(),
     },
     primaryKey: ["id"],

@@ -1,4 +1,4 @@
-import { table, t } from "@zeroship/migrate";
+import { table, t, currentSetting } from "@zeroship/migrate";
 import { extension, grant, pgTable, role, schema } from "@zeroship/migrate/pg";
 
 export const name = "platform_ts_vendor";
@@ -32,8 +32,8 @@ export function up() {
   accounts.policy("tenant_isolation").create({
     for: "all",
     using: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
+      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
     withCheck: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
+      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
   });
 }

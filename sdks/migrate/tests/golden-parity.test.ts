@@ -18,7 +18,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { decimal, t, table } from "../src/index.js";
+import {
+  decimal,
+  t,
+  table,
+  now,
+  genRandomUuid,
+  currentSetting,
+} from "../src/index.js";
 import {
   createFunction,
   dropFunction,
@@ -118,7 +125,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
         id: t.id(),
         email: t.text().notNull().unique(),
         balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
-        authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
+        authored_at: t.timestamp().notNull().default(now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),
@@ -211,8 +218,8 @@ test("fluent_dml fluent-recorded ops equal the committed golden", async () => {
       set: {
         full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast({ to: "text" })),
         first: (c) => c.fn.splitPart(c("label"), " ", 1),
-        touched: (c) => c.fn.now(),
-        token: (c) => c.fn.genRandomUuid(),
+        touched: now(),
+        token: genRandomUuid(),
       },
       where: (c) => c("code").gt(0),
       cursorColumn: "code",
@@ -277,9 +284,9 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
     secrets.policy("tenant_isolation").create({
       for: "all",
       using: (c) =>
-        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
+        c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
       withCheck: (c) =>
-        c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
+        c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
     });
     secrets.policy("tenant_isolation").drop({ ifExists: true });
     secrets.setRls({ enabled: false, forced: false });

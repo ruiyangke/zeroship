@@ -1,4 +1,4 @@
-import { table, t } from "@zeroship/migrate";
+import { table, t, now } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 
 export const name = "billing_metering_invoice_tables";
@@ -8,7 +8,7 @@ export function up() {
     columns: {
       app_id: t.uuid().notNull(),
       spend_limit_cents: t.bigInt(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id"],
   });
@@ -20,7 +20,7 @@ export function up() {
       spend_cents: t.bigInt().notNull().default(0),
       eval_limit_cents: t.bigInt().notNull().default(0),
       period: t.domain("billing_period").notNull(),
-      evaluated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      evaluated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id"],
   });
@@ -31,7 +31,7 @@ export function up() {
       creator_id: t.uuid().notNull(),
       provider: t.text().notNull(),
       external_id: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["creator_id", "provider"],
   });
@@ -45,7 +45,7 @@ export function up() {
       reason: t.text(),
       evidence_due_at: t.timestamp(),
       provider_dispute_id: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       resolved_at: t.timestamp(),
     },
     primaryKey: ["id"],
@@ -59,7 +59,7 @@ export function up() {
       provider: t.text().notNull(),
       ref_kind: t.text().notNull(),
       external_id: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       segment_no: t.smallInt().notNull().default(0),
     },
     primaryKey: ["invoice_id", "app_id", "segment_no", "provider", "ref_kind"],
@@ -72,7 +72,7 @@ export function up() {
       unit: t.text().notNull(),
       archived: t.boolean().notNull().default(false),
       last_seen_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       owner_app: t.uuid(),
     },
     primaryKey: ["metric"],
@@ -83,7 +83,7 @@ export function up() {
       kind: t.domain("billing_notification_kind").notNull(),
       transition_id: t.text().notNull(),
       status: t.domain("notification_status").notNull().default("pending"),
-      claimed_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      claimed_at: t.timestamp().notNull().default(now()),
       sent_at: t.timestamp(),
     },
     primaryKey: ["creator_id", "kind", "transition_id"],
@@ -94,7 +94,7 @@ export function up() {
       provider: t.text().notNull(),
       ref_kind: t.text().notNull(),
       external_id: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["invoice_id", "provider", "ref_kind"],
   });
@@ -107,7 +107,7 @@ export function up() {
       our_value: t.json(),
       stripe_value: t.json(),
       dedup_key: t.text().notNull(),
-      detected_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      detected_at: t.timestamp().notNull().default(now()),
       resolved_at: t.timestamp(),
     },
     primaryKey: ["id"],
@@ -123,7 +123,7 @@ export function up() {
       failure_code: t.text(),
       failure_message: t.text(),
       occurred_at: t.timestamp().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -133,8 +133,8 @@ export function up() {
     columns: {
       creator_id: t.uuid().notNull(),
       default_pm_set: t.boolean().notNull().default(false),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["creator_id"],
   });
@@ -148,7 +148,7 @@ export function up() {
       failed_invoice_id: t.text(),
       last_event_at: t.timestamp(),
       last_recovered_at: t.timestamp(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["creator_id"],
   });
@@ -159,7 +159,7 @@ export function up() {
       from_state: t.domain("account_state").notNull(),
       to_state: t.domain("account_state").notNull(),
       reason: t.text(),
-      at: t.timestamp().notNull().default((c) => c.fn.now()),
+      at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -171,7 +171,7 @@ export function up() {
       percent_bps: t.int(),
       cap_cents: t.bigInt(),
       floor_cents: t.bigInt(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["creator_id"],
   });
@@ -193,7 +193,7 @@ export function up() {
       note: t.text(),
       idempotency_key: t.text(),
       request_fingerprint: t.text(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -211,7 +211,7 @@ export function up() {
       amount_cents: t.bigInt().notNull(),
       usage_snapshot: t.json().notNull(),
       weights_snapshot: t.json().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       segment_no: t.smallInt().notNull().default(0),
       plan_id: t.text().notNull(),
     },
@@ -230,7 +230,7 @@ export function up() {
       currency: t.char({ length: 3 }).notNull().default("usd"),
       kind: t.domain("invoice_payment_kind").notNull(),
       provider_ref: t.text(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -249,8 +249,8 @@ export function up() {
       total_cents: t.bigInt().notNull().default(0),
       finalized_at: t.timestamp(),
       voided_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -268,7 +268,7 @@ export function up() {
       consecutive_failures: t.int().notNull().default(0),
       last_error: t.text(),
       last_attempt_at: t.timestamp(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["creator_id", "period"],
   });
@@ -279,7 +279,7 @@ export function up() {
       metric: t.text().notNull(),
       units_per_op: t.bigInt().notNull(),
       per_units: t.bigInt().notNull(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["metric"],
   });
@@ -296,7 +296,7 @@ export function up() {
       failure_code: t.text(),
       failure_message: t.text(),
       occurred_at: t.timestamp().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -311,7 +311,7 @@ export function up() {
       currency: t.char({ length: 3 }).notNull().default("usd"),
       reason: t.text(),
       evidence_due_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["provider_dispute_id"],
   });
@@ -325,9 +325,9 @@ export function up() {
       period: t.domain("billing_period").notNull(),
       from_plan_id: t.text(),
       to_plan_id: t.text().notNull(),
-      effective_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      effective_at: t.timestamp().notNull().default(now()),
       usage_at_change: t.json().notNull().default({}),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -342,8 +342,8 @@ export function up() {
       assignable_by_creator: t.boolean().notNull().default(false),
       runtime_limits_json: t.json().notNull(),
       archived: t.boolean().notNull().default(false),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
       net_policy_limits_json: t.json().notNull().default({ max_sockets: 4, egress_ceiling_bytes: 10485760 }),
     },
     primaryKey: ["id"],
@@ -356,7 +356,7 @@ export function up() {
     columns: {
       id: t.text().notNull().default("global"),
       fx_pico_cents_per_unit: t.bigInt().notNull(),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -368,7 +368,7 @@ export function up() {
       provider: t.text().notNull(),
       ref_kind: t.text().notNull(),
       external_id: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["refund_id", "provider", "ref_kind"],
   });
@@ -385,7 +385,7 @@ export function up() {
       idempotency_key: t.text().notNull(),
       request_fingerprint: t.text().notNull(),
       status: t.domain("refund_status").notNull().default("pending"),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       issued_at: t.timestamp(),
       failed_at: t.timestamp(),
     },
@@ -405,7 +405,7 @@ export function up() {
       to_state: t.domain("spend_state").notNull(),
       spend_cents: t.bigInt().notNull(),
       limit_cents: t.bigInt(),
-      at: t.timestamp().notNull().default((c) => c.fn.now()),
+      at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -415,7 +415,7 @@ export function up() {
     columns: {
       event_id: t.text().notNull(),
       event_type: t.text().notNull(),
-      seen_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      seen_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["event_id"],
   });
@@ -425,7 +425,7 @@ export function up() {
       period: t.domain("billing_period").notNull(),
       metric: t.text().notNull(),
       total: t.bigInt().notNull().default(0),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      updated_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["app_id", "period", "metric"],
   });
@@ -435,7 +435,7 @@ export function up() {
       worker_id: t.text().notNull(),
       sequence: t.bigInt().notNull(),
       period: t.domain("billing_period"),
-      seen_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      seen_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["worker_id", "sequence"],
   });

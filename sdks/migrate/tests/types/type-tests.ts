@@ -33,6 +33,11 @@ import {
   lit,
   decimal,
   byteValue,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
   type ColumnDef,
   type CheckDef,
   type DbFieldType,
@@ -319,14 +324,11 @@ export function immutableOnlyBuilderSlots(): void {
     where: (c) => c("active").isTrue(),
   });
 
-  // @ts-expect-error — generated column expressions cannot use volatile c.fn.now().
-  t.timestamp().generated((c) => c.fn.now());
+  t.timestamp().generated(() => now());
 
-  // @ts-expect-error — index expression elements cannot use volatile c.fn.now().
-  table("users").index("bad_index_now").add({ on: [{ expr: (c) => c.fn.now() }] });
+  table("users").index("bad_index_now").add({ on: [{ expr: () => now() }] });
 
-  // @ts-expect-error — partial-index predicates cannot use volatile c.fn.now().
-  pgTable("users").index("bad_partial_now").add({ on: ["email"], where: (c) => c.fn.now() });
+  pgTable("users").index("bad_partial_now").add({ on: ["email"], where: () => now() });
 
   // @ts-expect-error — generated column expressions cannot use aggregates.
   t.int().generated((c) => c.agg.count());
@@ -494,8 +496,7 @@ export function checkExpressionSurfaceTypechecks(): void {
   // @ts-expect-error — core CHECK builders do not expose aggregates.
   table("oauth_authorization_codes").check("no_agg").add({ expr: (c) => c.agg.count().gt(0) });
 
-  // @ts-expect-error — core CHECK builders expose only immutable c.fn helpers.
-  table("oauth_authorization_codes").check("no_now").add({ expr: (c) => c.fn.now().isNotNull() });
+  table("oauth_authorization_codes").check("no_now").add({ expr: () => now().isNotNull() });
 
   // P0: `regex` is a first-class chain operator on the CORE check builder
   // (PostgreSQL-first; fails closed off-PG at validate-time, not tsc).
@@ -505,12 +506,11 @@ export function checkExpressionSurfaceTypechecks(): void {
   table("oauth_authorization_codes").check("no_pg_extract_field").add({ expr: (c) => c.fn.extract("epoch", c("created_at")).gt(0) });
 
   pgTable("oauth_authorization_codes").check("max_ttl").add({
-    expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))),
+    expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))),
   });
-  // @ts-expect-error — core interval was a leaked PG vendor spelling; use c.pg.interval.
   table("oauth_authorization_codes").check("no_core_interval").add({ expr: (c) => c("expires_at").le(interval({ minutes: 1 })) });
-  // @ts-expect-error — c.pg.interval takes a structured Duration, not HH:MM:SS text.
-  pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval("00:01:00"))) });
+  // @ts-expect-error — interval takes a structured Duration, not HH:MM:SS text.
+  pgTable("oauth_authorization_codes").check("no_interval_string").add({ expr: (c) => c("expires_at").le(c("created_at").add(interval("00:01:00"))) });
   pgTable("oauth_authorization_codes").check("epoch_positive").add({
     expr: (c) => c.pg.extract("epoch", c("created_at")).gt(0),
   });
@@ -528,8 +528,8 @@ export function checkExpressionSurfaceTypechecks(): void {
 
 export function vendorExprSurfaceBoundaryTypechecks(): void {
   pgTable("app_secrets").policy("tenant_only").create({
-    using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })),
-    withCheck: (c) => c("owner").eq(c.pg.currentUser()),
+    using: (c) => c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "uuid" })),
+    withCheck: (c) => c("owner").eq(currentUser()),
   });
 
   // P0: `regex` is a first-class chain operator (PG-first). It typechecks.
@@ -540,10 +540,10 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
   // P0: `columnSize` is a first-class chain operator (PG-first). It typechecks.
   table("exprs").update({ set: { x: (c) => c("x").columnSize() } });
 
-  // @ts-expect-error — current_setting is PG-vendor and lives under `c.pg`.
+  // @ts-expect-error — currentSetting is a top-level import, not a c.fn member.
   table("exprs").update({ set: { x: (c) => c.fn["currentSetting"]("zeroship.tenant_app", true) } });
 
-  // @ts-expect-error — current_user is PG-vendor and lives under `c.pg`.
+  // @ts-expect-error — currentUser is a top-level import, not a c.fn member.
   table("exprs").update({ set: { x: (c) => c.fn["currentUser"]() } });
 
   // @ts-expect-error — the expression builder is callable; `c.col(...)` is removed.
@@ -578,8 +578,7 @@ export function domainValueCheckSurfaceTypechecks(): void {
 
   domain("bad_domain_now").create({
     as: t.timestamp(),
-    // @ts-expect-error — domain checks expose only immutable v.fn helpers.
-    check: (v) => v.fn.now().isNotNull(),
+    check: () => now().isNotNull(),
   });
 
   domain("bad_domain_agg").create({
@@ -610,9 +609,9 @@ export function insertValueShapes(): void {
   });
   table("users").create({
     columns: {
-      created_at: t.timestamp().default((c) => c.fn.now()),
-      random_id: t.uuid().default((c) => c.fn.genRandomUuid()),
-      id: t.uuid().default((c) => c.fn.genRandomUuid()),
+      created_at: t.timestamp().default(now()),
+      random_id: t.uuid().default(genRandomUuid()),
+      id: t.uuid().default(genRandomUuid()),
     },
   });
 

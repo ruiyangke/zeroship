@@ -4,7 +4,7 @@
 // platform's own 0025_roles_rls / 0001_extensions_schemas / 0002_auth constructs,
 // so the JS recorder's vendor named exports + table-handle augmentations stay
 // byte-identical to the Rust `Op` wire shape.
-import { table } from "@zeroship/migrate";
+import { table, currentSetting } from "@zeroship/migrate";
 import {
   createFunction,
   dropFunction,
@@ -63,9 +63,9 @@ export function up() {
   secrets.policy("tenant_isolation").create({
     for: "all",
     using: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
+      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
     withCheck: (c) =>
-      c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "text" })),
+      c("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
   });
   secrets.policy("tenant_isolation").drop({ ifExists: true });
   secrets.setRls({ enabled: false, forced: false });

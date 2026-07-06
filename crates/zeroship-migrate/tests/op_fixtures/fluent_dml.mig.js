@@ -9,7 +9,7 @@
 //   add,sub,mul,div,concat}, unaryOp {not,isNull,isNotNull,isTrue,isFalse},
 //   case, fnCall {coalesce,nullif,lower,upper,trim,length,abs}, fnSynth
 //   {concatWs,splitPart,now,genRandomUuid}, cast.
-import { table } from "@zeroship/migrate";
+import { table, now, genRandomUuid } from "@zeroship/migrate";
 
 export default {
   name: "fluent_dml",
@@ -66,8 +66,8 @@ export default {
       set: {
         full: (c) => c.fn.concatWs(" ", c("label"), c("code").cast({ to: "text" })),
         first: (c) => c.fn.splitPart(c("label"), " ", 1),
-        touched: (c) => c.fn.now(),
-        token: (c) => c.fn.genRandomUuid(),
+        touched: now(),
+        token: genRandomUuid(),
       },
       where: (c) => c("code").gt(0),
       cursorColumn: "code",

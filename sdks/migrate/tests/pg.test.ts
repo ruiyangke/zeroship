@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { currentSetting } from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 import {
   createFunction,
@@ -218,7 +219,7 @@ test("table-scoped pg methods record setRls and legacy policy op payloads", () =
     pgTable("secrets", { schema: "zs" })
       .setRls({ enabled: true, forced: true })
       .policy("tenant_only").create({
-        using: (c) => c("tenant_id").eq(c.pg.currentSetting("tenant.id", true)),
+        using: (c) => c("tenant_id").eq(currentSetting("tenant.id", { missingOk: true })),
       })
       .policy("tenant_only").drop({ ifExists: true })
       .setRls({ enabled: false, forced: false });

@@ -99,6 +99,9 @@ pub const CODE_COLUMN_FACET_CONFLICT: &str = "COLUMN_FACET_CONFLICT";
 /// A column/domain default is structurally valid but invalid for the declared
 /// column type (for example `{}` on `text[]`).
 pub const CODE_COLUMN_DEFAULT_TYPE: &str = "COLUMN_DEFAULT_TYPE";
+/// A volatile expression node appeared in a SQL context that requires immutable
+/// expressions (index expression/predicate, generated column, or CHECK).
+pub const CODE_IMMUTABLE_CONTEXT_VOLATILE: &str = "IMMUTABLE_CONTEXT_VOLATILE";
 /// A sequence carries a semantically invalid option (`increment = 0`,
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
@@ -318,6 +321,148 @@ pub fn validate_expr(
 ) -> Result<(), AuthoringError> {
     let ctx = Ctx { target_dialect, scope, op_index, ts_location };
     ctx.walk(expr)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExprVolatility {
+    Immutable,
+    Stable,
+    Volatile,
+}
+
+fn scalar_fn_volatility(f: ScalarFn) -> ExprVolatility {
+    match f {
+        ScalarFn::CurrentSetting | ScalarFn::CurrentUser => ExprVolatility::Stable,
+        ScalarFn::Coalesce
+        | ScalarFn::Nullif
+        | ScalarFn::Lower
+        | ScalarFn::Upper
+        | ScalarFn::Trim
+        | ScalarFn::Length
+        | ScalarFn::Abs
+        | ScalarFn::Mod
+        | ScalarFn::Round
+        | ScalarFn::Floor
+        | ScalarFn::Ceil
+        | ScalarFn::Substr
+        | ScalarFn::Replace => ExprVolatility::Immutable,
+    }
+}
+
+fn synth_fn_volatility(f: SynthFn) -> ExprVolatility {
+    match f {
+        SynthFn::Now | SynthFn::GenRandomUuid => ExprVolatility::Volatile,
+        SynthFn::ConcatWs | SynthFn::SplitPart => ExprVolatility::Immutable,
+    }
+}
+
+fn scalar_fn_name(f: ScalarFn) -> &'static str {
+    match f {
+        ScalarFn::Coalesce => "coalesce",
+        ScalarFn::Nullif => "nullif",
+        ScalarFn::Lower => "lower",
+        ScalarFn::Upper => "upper",
+        ScalarFn::Trim => "trim",
+        ScalarFn::Length => "length",
+        ScalarFn::Abs => "abs",
+        ScalarFn::Mod => "mod",
+        ScalarFn::Round => "round",
+        ScalarFn::Floor => "floor",
+        ScalarFn::Ceil => "ceil",
+        ScalarFn::Substr => "substr",
+        ScalarFn::Replace => "replace",
+        ScalarFn::CurrentSetting => "currentSetting",
+        ScalarFn::CurrentUser => "currentUser",
+    }
+}
+
+fn synth_fn_name(f: SynthFn) -> &'static str {
+    match f {
+        SynthFn::ConcatWs => "concatWs",
+        SynthFn::SplitPart => "splitPart",
+        SynthFn::Now => "now",
+        SynthFn::GenRandomUuid => "genRandomUuid",
+    }
+}
+
+fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
+        Expr::BinOp { lhs, rhs, .. } => {
+            first_volatile_function(lhs).or_else(|| first_volatile_function(rhs))
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::PgColumnSize { expr: operand }
+        | Expr::Extract { from: operand, .. }
+        | Expr::PgExtract { from: operand, .. } => first_volatile_function(operand),
+        Expr::Case { branches, r#else } => branches
+            .iter()
+            .find_map(|CaseBranch { when, then }| {
+                first_volatile_function(when).or_else(|| first_volatile_function(then))
+            })
+            .or_else(|| r#else.as_deref().and_then(first_volatile_function)),
+        Expr::FnCall { r#fn, args } => {
+            if scalar_fn_volatility(*r#fn) == ExprVolatility::Volatile {
+                return Some(scalar_fn_name(*r#fn));
+            }
+            args.iter().find_map(first_volatile_function)
+        }
+        Expr::FnSynth { r#fn, args } => {
+            if synth_fn_volatility(*r#fn) == ExprVolatility::Volatile {
+                return Some(synth_fn_name(*r#fn));
+            }
+            args.iter().find_map(first_volatile_function)
+        }
+        Expr::Between { operand, low, high } => first_volatile_function(operand)
+            .or_else(|| first_volatile_function(low))
+            .or_else(|| first_volatile_function(high)),
+        Expr::Like { operand, pattern } => {
+            first_volatile_function(operand).or_else(|| first_volatile_function(pattern))
+        }
+        Expr::DistinctFrom { left, right } => {
+            first_volatile_function(left).or_else(|| first_volatile_function(right))
+        }
+        Expr::Agg { arg, .. } => arg.as_deref().and_then(first_volatile_function),
+        Expr::InList { expr, .. } => first_volatile_function(expr),
+        Expr::Dialectal { default, pg, sqlite, mysql } => {
+            [
+                default.as_deref(),
+                pg.as_deref(),
+                sqlite.as_deref(),
+                mysql.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(first_volatile_function)
+        }
+    }
+}
+
+fn validate_immutable_expr_context(
+    expr: &Expr,
+    context: &'static str,
+    target_dialect: Dialect,
+    op_index: usize,
+    ts_location: Option<&str>,
+) -> Result<(), AuthoringError> {
+    let Some(function_name) = first_volatile_function(expr) else {
+        return Ok(());
+    };
+    Err(AuthoringError {
+        code: CODE_IMMUTABLE_CONTEXT_VOLATILE.to_string(),
+        kind: Some(UnsupportedKind::Expr),
+        op_index,
+        ts_location: ts_location.map(str::to_string),
+        dialect: target_dialect,
+        reason: format!(
+            "{context} requires an immutable expression, but contains volatile function {function_name}()"
+        ),
+        suggested_fix: Some(format!(
+            "remove {function_name}() from the {context}; use it only in defaults, DML values, or another non-immutable expression context"
+        )),
+    })
 }
 
 /// Walk an entire [`MigrationIr`](crate::model::ir::MigrationIr) and validate EVERY
@@ -1146,6 +1291,13 @@ pub fn validate_op_scoped(
             match kind {
                 IrConstraintKind::Check { expr, .. } => {
                     validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+                    validate_immutable_expr_context(
+                        expr,
+                        "CHECK constraint",
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
                 IrConstraintKind::Exclusion { elements, where_predicate, .. } => {
                     for element in elements {
@@ -1180,6 +1332,13 @@ pub fn validate_op_scoped(
                 }
                 IndexElement::Expr { expr } => {
                     validate_expr(expr, target_dialect, scope, op_index, ts_location)?;
+                    validate_immutable_expr_context(
+                        expr,
+                        "index expression",
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
             }
             Ok(())
@@ -1198,6 +1357,13 @@ pub fn validate_op_scoped(
                 }
                 if let Some(pred) = &ix.r#where {
                     validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+                    validate_immutable_expr_context(
+                        pred,
+                        "index predicate",
+                        target_dialect,
+                        op_index,
+                        ts_location,
+                    )?;
                 }
             }
             for c in constraints {
@@ -1215,6 +1381,13 @@ pub fn validate_op_scoped(
                         &generated.expr,
                         target_dialect,
                         &scope,
+                        op_index,
+                        ts_location,
+                    )?;
+                    validate_immutable_expr_context(
+                        &generated.expr,
+                        "generated column expression",
+                        target_dialect,
                         op_index,
                         ts_location,
                     )?;
@@ -1241,6 +1414,13 @@ pub fn validate_op_scoped(
             }
             if let Some(pred) = r#where {
                 validate_expr(pred, target_dialect, &scope, op_index, ts_location)?;
+                validate_immutable_expr_context(
+                    pred,
+                    "index predicate",
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
             }
             Ok(())
         }
@@ -1286,6 +1466,13 @@ pub fn validate_op_scoped(
                 let cols = vec!["VALUE".to_string()];
                 let scope = TargetScope::new("domain", &cols);
                 validate_expr(check, target_dialect, &scope, op_index, ts_location)?;
+                validate_immutable_expr_context(
+                    check,
+                    "CHECK constraint",
+                    target_dialect,
+                    op_index,
+                    ts_location,
+                )?;
             }
             Ok(())
         }
@@ -1400,6 +1587,13 @@ pub fn validate_op_scoped(
                     &generated.expr,
                     target_dialect,
                     &scope,
+                    op_index,
+                    ts_location,
+                )?;
+                validate_immutable_expr_context(
+                    &generated.expr,
+                    "generated column expression",
+                    target_dialect,
                     op_index,
                     ts_location,
                 )?;
@@ -3057,7 +3251,7 @@ fn validate_default_expr(
             dialect: target_dialect,
             reason,
             suggested_fix: Some(
-                "use only literals, CASE, immutable scalar helpers, and c.fn.now()/c.fn.genRandomUuid() in column defaults"
+                "use only literals, CASE, immutable scalar helpers, and now()/genRandomUuid() in column defaults"
                     .to_string(),
             ),
         }
@@ -6514,6 +6708,47 @@ mod tests {
         let err = validate_ir(&ir, Dialect::Sqlite, &[]).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(err.op_index, 0);
+    }
+
+    #[test]
+    fn validate_ir_rejects_volatile_now_in_index_predicate() {
+        // J3 regression: moving now()/genRandomUuid() to top-level imports makes
+        // volatile nodes type-reachable in immutable slots. The Rust validator is
+        // the authoritative backstop; before this check, this createIndex.where
+        // node passed validate cleanly.
+        let ir = ir_with(vec![Op::CreateIndex {
+            table: "users".into(),
+            columns: vec![IndexElement::Column {
+                name: "a".into(),
+                order: None,
+                opclass: None,
+                collation: None,
+            }],
+            name: None,
+            unique: None,
+            using: None,
+            r#where: Some(Expr::FnSynth {
+                r#fn: SynthFn::Now,
+                args: vec![],
+            }),
+
+        include: Vec::new(),
+        with: None,
+        only: None,
+        nulls_not_distinct: None,
+        concurrently: None,
+            schema: None,
+            existence_guard: None,
+        }]);
+        let err = validate_ir(&ir, Dialect::Postgres, &[]).unwrap_err();
+        assert_eq!(err.code, CODE_IMMUTABLE_CONTEXT_VOLATILE);
+        assert_eq!(err.kind, Some(UnsupportedKind::Expr));
+        assert_eq!(err.op_index, 0);
+        assert!(err.reason.contains("now()"), "reason names offending function: {err}");
+        assert!(
+            err.reason.contains("index predicate"),
+            "reason names immutable context: {err}"
+        );
     }
 
     #[test]

@@ -43,7 +43,7 @@ fn column_named<'a>(cols: &'a [Value], name: &str) -> &'a Value {
 #[test]
 fn t_text_nullable_by_default_notnull_opts_in() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("u").create({ columns: { a: t.text(), b: t.text().notNull() } });
         }};
@@ -74,7 +74,7 @@ fn t_text_nullable_by_default_notnull_opts_in() {
 #[test]
 fn concatws_records_fnsynth_node() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("u").update({ set: { full: (c) => c.fn.concatWs(" ", c("a"), c("b")) } });
         }};
@@ -96,7 +96,7 @@ fn concatws_records_fnsynth_node() {
 #[test]
 fn foreignkey_add_field_order_independent() {
     let src_a = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("orders").foreignKey("orders_customer_fk").add({
                 columns: ["customer_id"],
@@ -106,7 +106,7 @@ fn foreignkey_add_field_order_independent() {
     "#;
     // The SAME spec with the fields written in a different order.
     let src_b = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("orders").foreignKey("orders_customer_fk").add({
                 references: { columns: ["id"], table: "customers" },
@@ -131,7 +131,7 @@ fn foreignkey_add_field_order_independent() {
 #[test]
 fn foreignkey_add_records_composite_non_id_fk() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("billing_line_provider_refs", { schema: "zeroship" }).foreignKey("billing_line_provider_refs_line_fk").add({
                 columns: ["invoice_id", "app_id", "segment_no"],
@@ -163,7 +163,7 @@ fn foreignkey_add_records_composite_non_id_fk() {
 #[test]
 fn name_omitted_records_filename_label() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { up() { table("scratch").drop(); } };
     "#;
     let ir = record(src, "0009_drop_scratch");
@@ -188,7 +188,7 @@ fn name_omitted_records_filename_label() {
 #[test]
 fn op_outside_recorder_aborts_recording() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         // Called at MODULE TOP LEVEL — outside any up()/down() recorder.
         table("u").create({ columns: { id: t.id() } });
         export default { up() {} };
@@ -201,7 +201,7 @@ fn op_outside_recorder_aborts_recording() {
     );
     // The well-formed control: the SAME op inside up() records cleanly.
     let ok_src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { up() { table("u").create({ columns: { id: t.id() } }); } };
     "#;
     let ir = record(ok_src, "inside");
@@ -213,7 +213,7 @@ fn op_outside_recorder_aborts_recording() {
 #[test]
 fn insert_row_object_normalizes_to_columns_and_rows() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { code: 1, label: "a" }, { code: 2, label: "b" } ] });
         }};
@@ -227,7 +227,7 @@ fn insert_row_object_normalizes_to_columns_and_rows() {
 #[test]
 fn insert_row_object_rejects_ragged_later_row_keys() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { a: 1 }, { a: 2, b: 2 } ] });
         }};
@@ -242,7 +242,7 @@ fn insert_row_object_rejects_ragged_later_row_keys() {
 #[test]
 fn insert_later_row_function_value_fails_closed() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const f = () => 1;
             table("t").insert({ rows: [ { a: 1 }, { b: f } ] });
@@ -262,15 +262,15 @@ fn insert_later_row_function_value_fails_closed() {
 #[test]
 fn date_now_symbol_records_as_fnsynth_now() {
     let symbol = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { at: Date.now } ] });
         }};
     "#;
     let explicit = r#"
-        import { table, cFn } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").insert({ rows: [ { at: cFn.now() } ] });
+            table("t").insert({ rows: [ { at: now() } ] });
         }};
     "#;
     assert_eq!(ops(&record(symbol, "date_now_symbol"))[0], ops(&record(explicit, "date_now_explicit"))[0]);
@@ -279,15 +279,15 @@ fn date_now_symbol_records_as_fnsynth_now() {
 #[test]
 fn math_random_symbol_records_as_fnsynth_gen_random_uuid() {
     let symbol = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { id: Math.random } ] });
         }};
     "#;
     let explicit = r#"
-        import { table, cFn } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
-            table("t").insert({ rows: [ { id: cFn.genRandomUuid() } ] });
+            table("t").insert({ rows: [ { id: genRandomUuid() } ] });
         }};
     "#;
     assert_eq!(ops(&record(symbol, "math_random_symbol"))[0], ops(&record(explicit, "math_random_explicit"))[0]);
@@ -296,13 +296,13 @@ fn math_random_symbol_records_as_fnsynth_gen_random_uuid() {
 #[test]
 fn removed_function_default_forms_fail_closed() {
     let symbol = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").create({ columns: { at: t.timestamp().default(Date.now) } });
         }};
     "#;
     let explicit = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").create({ columns: { at: t.timestamp().default({ fn: "now" }) } });
         }};
@@ -316,7 +316,7 @@ fn removed_function_default_forms_fail_closed() {
 #[test]
 fn non_native_function_value_fails_closed_in_v8_recorder() {
     let insert = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const f = () => 42;
             table("t").insert({ rows: [ { v: f } ] });
@@ -333,7 +333,7 @@ fn non_native_function_value_fails_closed_in_v8_recorder() {
     );
 
     let default = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").create({ columns: { v: t.int().default(() => 1) } });
         }};
@@ -354,7 +354,7 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
         (
             "nested_fn_insert_object",
             r#"
-                import { table } from "@zeroship/migrate";
+                import { table, now, genRandomUuid } from "@zeroship/migrate";
                 export default { name: "n", up() {
                     const f = () => 42;
                     table("t").insert({ rows: [ { doc: { a: f } } ] });
@@ -364,7 +364,7 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
         (
             "nested_fn_insert_array",
             r#"
-                import { table } from "@zeroship/migrate";
+                import { table, now, genRandomUuid } from "@zeroship/migrate";
                 export default { name: "n", up() {
                     const f = () => 42;
                     table("t").insert({ rows: [ { tags: [f] } ] });
@@ -374,7 +374,7 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
         (
             "nested_native_symbol_insert",
             r#"
-                import { table } from "@zeroship/migrate";
+                import { table, now, genRandomUuid } from "@zeroship/migrate";
                 export default { name: "n", up() {
                     table("t").insert({ rows: [ { doc: { a: Date.now } } ] });
                 }};
@@ -383,7 +383,7 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
         (
             "nested_fn_default",
             r#"
-                import { table, t } from "@zeroship/migrate";
+                import { table, t, now, genRandomUuid } from "@zeroship/migrate";
                 export default { name: "n", up() {
                     const f = () => 42;
                     table("t").create({ columns: { doc: t.json().default({ a: f }) } });
@@ -393,7 +393,7 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
         (
             "nested_fn_on_conflict",
             r#"
-                import { table } from "@zeroship/migrate";
+                import { table, now, genRandomUuid } from "@zeroship/migrate";
                 export default { name: "n", up() {
                     const f = () => 42;
                     table("t").insert({
@@ -406,7 +406,7 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
         (
             "nested_fn_expr_arg",
             r#"
-                import { table } from "@zeroship/migrate";
+                import { table, now, genRandomUuid } from "@zeroship/migrate";
                 export default { name: "n", up() {
                     const f = () => 42;
                     table("t").update({ set: { doc: (c) => c.fn.coalesce({ a: f }, "x") } });
@@ -431,7 +431,7 @@ fn nested_function_values_fail_closed_in_v8_recorder() {
 #[test]
 fn date_now_symbol_is_deterministic_across_records() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { at: Date.now } ] });
         }};
@@ -458,7 +458,7 @@ fn date_now_call_just_evaluates_no_error() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { at: Date.now() } ] });
         }};
@@ -476,11 +476,11 @@ fn date_now_call_just_evaluates_no_error() {
 }
 
 /// The §4.3 determinism lint flags `Date.now()` in an op argument and steers the
-/// author to `c.fn.now()`; a clean migration produces NO findings.
+/// author to `now()`; a clean migration produces NO findings.
 #[test]
 fn determinism_lint_flags_date_now_in_op_arg() {
     let dirty = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
@@ -494,10 +494,10 @@ fn determinism_lint_flags_date_now_in_op_arg() {
     assert_eq!(f.code, "NONDETERMINISTIC_OP_ARG");
     assert!(f.accessor.contains("Date.now"), "accessor names Date.now(): {}", f.accessor);
     assert!(f.suggested_fix.contains("Date.now symbol"), "steer names symbol form: {}", f.suggested_fix);
-    assert!(f.suggested_fix.contains("c.fn.now()"), "steer names c.fn.now(): {}", f.suggested_fix);
+    assert!(f.suggested_fix.contains("now()"), "steer names now(): {}", f.suggested_fix);
 
     let clean = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { created_at: Date.now } ] });
         }};
@@ -519,7 +519,7 @@ fn determinism_lint_flags_rng_and_clock_constructor() {
     ] {
         let src = format!(
             r#"
-            import {{ table }} from "@zeroship/migrate";
+            import {{ table, now, genRandomUuid }} from "@zeroship/migrate";
             export default {{ name: "n", up() {{
                 table("t").insert({{ rows: [ {{ v: {src_frag} }} ] }});
             }}}};
@@ -538,7 +538,7 @@ fn determinism_lint_flags_rng_and_clock_constructor() {
 #[test]
 fn same_source_records_same_json() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "det", up() {
             const u = table("u");
             u.create({ columns: { id: t.id(), email: t.text().notNull() } });
@@ -559,7 +559,7 @@ fn same_source_records_same_json() {
 #[test]
 fn fluent_expr_builder_constructs_closed_ast() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").update({
                 set: {
@@ -598,7 +598,7 @@ fn fluent_expr_builder_constructs_closed_ast() {
 #[test]
 fn fluent_insert_normalizes_decimal_and_bytes_scalars() {
     let src = r#"
-        import { table, t, decimal } from "@zeroship/migrate";
+        import { table, t, decimal, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const tbl = table("t");
             tbl.create({
@@ -644,10 +644,10 @@ fn fluent_insert_normalizes_decimal_and_bytes_scalars() {
 #[test]
 fn update_has_no_batch_knob() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").update({
-                set: { x: (c) => c.fn.now() },
+                set: { x: now() },
                 where: (c) => c("id").isNotNull(),
             });
         }};
@@ -666,7 +666,7 @@ fn record_path_allows_date_now_call_with_soft_warning() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { created_at: Date.now() } ] });
         }};
@@ -693,7 +693,7 @@ fn record_path_allows_date_now_call_with_soft_warning() {
 
     // A normal deterministic migration still records cleanly with no advisory.
     let clean = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { v: 1 } ] });
         }};
@@ -712,7 +712,7 @@ fn record_path_allows_math_random_calls_with_soft_warning() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const collapsed = Math.random() - Math.random();
             table("t").insert({ rows: [ { sample: collapsed } ] });
@@ -744,7 +744,7 @@ fn record_path_allows_argless_new_date_call_with_soft_warning() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { year: new Date().getUTCFullYear() } ] });
         }};
@@ -775,7 +775,7 @@ fn record_path_allows_explicit_new_date_argument() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
     let clean = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [ { ms: new Date(0).getTime() } ] });
         }};
@@ -790,7 +790,7 @@ fn record_path_allows_date_now_inside_comment_or_string() {
     use zeroship_migrate::frontend::record_migration_to_ir_with_warnings_unsandboxed;
 
     let clean = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         // Human note only: Date.now() and Math.random() are not executed.
         export default { name: "n", up() {
             table("t").insert({
@@ -851,7 +851,7 @@ fn assert_guard(op: &Value, want: &str) {
 #[test]
 fn twin_create_table_carries_schema_and_guard() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").create({ columns: { qty: t.int() }, schema: "app2", ifNotExists: true });
         }};
@@ -867,7 +867,7 @@ fn twin_create_table_carries_schema_and_guard() {
 #[test]
 fn twin_rename_column_carries_schema() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").column("a").rename({ to: "b", type: t.text(), schema: "app2" });
         }};
@@ -882,7 +882,7 @@ fn twin_rename_column_carries_schema() {
 #[test]
 fn twin_alter_column_type_carries_schema() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").column("a").setType({ to: t.bigInt(), schema: "app2" });
         }};
@@ -897,7 +897,7 @@ fn twin_alter_column_type_carries_schema() {
 #[test]
 fn twin_alter_column_nullability_carries_schema() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").column("a").setNotNull({ schema: "app2" });
         }};
@@ -910,7 +910,7 @@ fn twin_alter_column_nullability_carries_schema() {
 #[test]
 fn column_alter_bag_is_not_on_embedded_recorder_surface() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const col = table("t").column("a");
             if ("alter" in col) throw new Error("alter should not exist");
@@ -928,7 +928,7 @@ fn column_alter_bag_is_not_on_embedded_recorder_surface() {
 #[test]
 fn twin_add_constraint_family_carries_schema_and_guard() {
     let fk = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").foreignKey("t_o_fk").add({
                 columns: ["o"],
@@ -944,7 +944,7 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
     assert_guard(op, "ifNotExists");
 
     let uq = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").unique("t_a_uq").add({ columns: ["a"], schema: "app2", ifNotExists: true });
         }};
@@ -955,7 +955,7 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
     assert_guard(op, "ifNotExists");
 
     let ck = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").check("t_a_chk").add({ expr: (c) => c("a").gt(0), schema: "app2", ifNotExists: true });
         }};
@@ -972,79 +972,99 @@ fn twin_add_constraint_family_carries_schema_and_guard() {
 #[test]
 fn sequences_and_exclusion_constraints_record_canonical_ir() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
-        import { pgTable, sequence } from "@zeroship/migrate/pg";
-        export default { name: "n", up() {
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+        import {
+  pgTable,
+  sequence } from "@zeroship/migrate/pg";
+        export default { name: "n",
+  up() {
             sequence("invoice_seq").create({
                 as: t.bigInt(),
-                increment: 5,
-                start: 100,
-                cache: 10,
-                cycle: true,
-                ownedBy: { table: "invoices", column: "id" },
-                schema: "app2",
-            });
+  increment: 5,
+  start: 100,
+  cache: 10,
+  cycle: true,
+  ownedBy: { table: "invoices",
+  column: "id" },
+  schema: "app2",
+  });
             sequence("invoice_seq").alter({
                 increment: 7,
-                restart: 200,
-                minValue: 1,
-                maxValue: 999,
-                cache: 20,
-                cycle: false,
-                ownedBy: null,
-                schema: "app2",
-            });
-            sequence("invoice_seq").drop({ schema: "app2", ifExists: true });
-            pgTable("bookings", { schema: "app2" }).exclusion("bookings_no_overlap").add({
+  restart: 200,
+  minValue: 1,
+  maxValue: 999,
+  cache: 20,
+  cycle: false,
+  ownedBy: null,
+  });
+            sequence("invoice_seq").drop({ schema: "app2",
+  ifExists: true });
+            pgTable("bookings",
+  { schema: "app2" }).exclusion("bookings_no_overlap").add({
                 using: "gist",
-                elements: [
-                    { target: "room", operator: "=" },
-                    { target: "during", operator: "&&" },
-                ],
-                where: (c) => c("cancelled").eq(false),
-                deferrable: true,
-                ifNotExists: true,
-            });
+  elements: [
+                    { target: "room",
+  operator: "=" },
+  { target: "during",
+  operator: "&&" },
+  ],
+  where: (c) => c("cancelled").eq(false),
+  deferrable: true,
+  ifNotExists: true,
+  });
         }};
     "#;
-    let ir = record(src, "seq_excl");
+    let ir = record(src,
+  "seq_excl");
     assert_eq!(
         ops(&ir)[0],
-        json!({
+  json!({
             "op": "createSequence",
-            "name": "invoice_seq",
-            "schema": "app2",
-            "as": "bigInt",
-            "increment": 5,
-            "start": 100,
-            "cache": 10,
-            "cycle": true,
-            "ownedBy": { "table": "invoices", "column": "id" }
+  "name": "invoice_seq",
+  "schema": "app2",
+  "as": "bigInt",
+  "increment": 5,
+  "start": 100,
+  "cache": 10,
+  "cycle": true,
+  "ownedBy": { "table": "invoices",
+  "column": "id" }
         })
     );
-    assert_eq!(ops(&ir)[1].get("ownedBy"), Some(&Value::Null));
-    assert_eq!(ops(&ir)[2].get("op").and_then(Value::as_str), Some("dropSequence"));
-    assert_guard(&ops(&ir)[2], "ifExists");
+    assert_eq!(ops(&ir)[1].get("ownedBy"),
+  Some(&Value::Null));
+    assert_eq!(ops(&ir)[2].get("op").and_then(Value::as_str),
+  Some("dropSequence"));
+    assert_guard(&ops(&ir)[2],
+  "ifExists");
 
     let exclusion = &ops(&ir)[3];
-    assert_eq!(exclusion.get("op").and_then(Value::as_str), Some("addConstraint"));
-    assert_guard(exclusion, "ifNotExists");
+    assert_eq!(exclusion.get("op").and_then(Value::as_str),
+  Some("addConstraint"));
+    assert_guard(exclusion,
+  "ifNotExists");
     assert_eq!(
         exclusion.get("constraint").and_then(|c| c.get("kind")),
-        Some(&json!({
+  Some(&json!({
             "kind": "exclusion",
-            "usingMethod": "gist",
-            "elements": [
-                { "target": { "kind": "column", "name": "room" }, "operator": "=" },
-                { "target": { "kind": "column", "name": "during" }, "operator": "&&" }
+  "usingMethod": "gist",
+  "elements": [
+                { "target": { "kind": "column",
+  "name": "room" },
+  "operator": "=" },
+  { "target": { "kind": "column",
+  "name": "during" },
+  "operator": "&&" }
             ],
-            "wherePredicate": {
+  "wherePredicate": {
                 "node": "binOp",
-                "op": "eq",
-                "lhs": { "node": "colRef", "name": "cancelled" },
-                "rhs": { "node": "literal", "value": false }
+  "op": "eq",
+  "lhs": { "node": "colRef",
+  "name": "cancelled" },
+  "rhs": { "node": "literal",
+  "value": false }
             },
-            "deferrable": true
+  "deferrable": true
         }))
     );
 }
@@ -1054,7 +1074,10 @@ fn sequences_and_exclusion_constraints_record_canonical_ir() {
 #[test]
 fn twin_drop_constraint_carries_schema_and_guard() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table,
+  now,
+  genRandomUuid,
+} from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").constraint("t_a_key").drop({ schema: "app2", ifExists: true });
         }};
@@ -1072,7 +1095,7 @@ fn twin_drop_constraint_carries_schema_and_guard() {
 #[test]
 fn twin_add_column_carries_schema_and_guard() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").column("c").add({ type: t.int(), schema: "app2", ifNotExists: true });
         }};
@@ -1088,7 +1111,7 @@ fn twin_add_column_carries_schema_and_guard() {
 #[test]
 fn twin_drop_table_carries_schema_and_guard() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").drop({ schema: "app2", ifExists: true });
         }};
@@ -1105,7 +1128,7 @@ fn twin_drop_table_carries_schema_and_guard() {
 #[test]
 fn twin_view_handle_config_and_drop_guard() {
     let src = r#"
-        import { view } from "@zeroship/migrate";
+        import { view, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const v = view("active_users", { schema: "zeroship", columns: ["id", "email"] });
             v.create({ as: (q) => q.from("users").select(["id", "email"]) });
@@ -1138,7 +1161,7 @@ fn twin_view_handle_config_and_drop_guard() {
 #[test]
 fn twin_drop_column_carries_schema_and_guard() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").column("c").drop({ schema: "app2", ifExists: true });
         }};
@@ -1156,7 +1179,7 @@ fn twin_drop_column_carries_schema_and_guard() {
 #[test]
 fn twin_create_index_carries_schema_and_guard() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").index("idx_t_a").add({ on: ["a"], schema: "app2", ifNotExists: true });
         }};
@@ -1172,7 +1195,7 @@ fn twin_create_index_carries_schema_and_guard() {
 #[test]
 fn twin_drop_index_carries_schema_and_guard() {
     let src = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").index("idx_t_a").drop({ schema: "app2", ifExists: true });
         }};
@@ -1189,7 +1212,7 @@ fn twin_drop_index_carries_schema_and_guard() {
 #[test]
 fn twin_dml_ops_carry_schema() {
     let ins = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").insert({ rows: [{ a: 1 }], schema: "app2" });
         }};
@@ -1197,7 +1220,7 @@ fn twin_dml_ops_carry_schema() {
     assert_schema(&op_named(&record(ins, "insert_schema"), "insert"), "app2");
 
     let upd = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").update({ set: { a: (c) => c("a") }, schema: "app2" });
         }};
@@ -1205,7 +1228,7 @@ fn twin_dml_ops_carry_schema() {
     assert_schema(&op_named(&record(upd, "update_schema"), "update"), "app2");
 
     let del = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").delete({ where: (c) => c("a").gt(0), schema: "app2" });
         }};
@@ -1213,7 +1236,7 @@ fn twin_dml_ops_carry_schema() {
     assert_schema(&op_named(&record(del, "delete_schema"), "delete"), "app2");
 
     let bf = r#"
-        import { table } from "@zeroship/migrate";
+        import { table, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("t").backfill({ set: { a: (c) => c("a") }, schema: "app2" });
         }};
@@ -1233,7 +1256,7 @@ fn twin_dml_ops_carry_schema() {
 #[test]
 fn twin_table_surface_records_full_expected_op_sequence() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const u = table("users", { schema: "app2" });
             u.create({ columns: { id: t.id(), email: t.text().notNull() }, ifNotExists: true });
@@ -1293,7 +1316,7 @@ fn twin_table_surface_records_full_expected_op_sequence() {
 #[test]
 fn twin_table_create_with_table_level_specs_carries_schema_and_guard() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("memberships", { schema: "app2" }).create({
                 columns: {
@@ -1321,7 +1344,7 @@ fn twin_table_create_with_table_level_specs_carries_schema_and_guard() {
 #[test]
 fn twin_table_per_method_schema_overrides_default() {
     let src = r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             const u = table("users", { schema: "app2" });
             u.column("a").add({ type: t.int() });                       // table default
@@ -1357,7 +1380,7 @@ fn twin_table_per_method_schema_overrides_default() {
 fn add_column_with_id_prefix_is_refused_not_dropped() {
     let err = record_err(
         r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("posts").column("pid").add({ type: t.id({ prefix: "post" }) });
         }};
@@ -1379,7 +1402,7 @@ fn add_column_with_id_prefix_is_refused_not_dropped() {
 fn add_column_with_vector_metric_is_carried_not_refused() {
     let ir = record(
         r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("docs").column("emb").add({ type: t.vector({ dimensions: 8, metric: "cosine" }) });
         }};
@@ -1405,7 +1428,7 @@ fn add_column_with_vector_metric_is_carried_not_refused() {
 fn add_column_with_standalone_mask_is_carried() {
     let ir = record(
         r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("people").column("ssn").add({ type: t.text().mask({ kind: "last4", classification: "spi" }) });
         }};
@@ -1423,7 +1446,7 @@ fn add_column_with_standalone_mask_is_carried() {
 fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() {
     let ir = record(
         r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("line_items").create({ columns: {
                 id: t.bigInt().identity({ always: true }).primaryKey(),
@@ -1505,7 +1528,7 @@ fn generated_and_identity_column_facets_are_recorded_on_create_and_add_column() 
 fn add_column_plain_vector_is_allowed() {
     let ir = record(
         r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("docs").column("emb").add({ type: t.vector({ dimensions: 8 }) });
         }};
@@ -1525,7 +1548,7 @@ fn add_column_plain_vector_is_allowed() {
 fn vector_metric_out_of_set_is_rejected_client_side() {
     let err = record_err(
         r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() {
             table("docs").create({ columns: { emb: t.vector({ dimensions: 8, metric: "euclidean" }) } });
         }};
@@ -1554,7 +1577,7 @@ fn vector_metric_out_of_set_is_rejected_client_side() {
 fn twin_table_no_schema_omits_key() {
     let ir = record(
         r#"
-        import { table, t } from "@zeroship/migrate";
+        import { table, t, now, genRandomUuid } from "@zeroship/migrate";
         export default { name: "n", up() { table("users").column("a").add({ type: t.int() }); }};
     "#,
         "facade_noschema",

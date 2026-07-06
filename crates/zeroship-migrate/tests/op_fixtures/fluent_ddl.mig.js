@@ -7,12 +7,12 @@
 //
 // Covers EVERY t.* column type + EVERY modifier:
 //   t.id() (uuid PK + genRandomUuid default), t.text().notNull(), t.numeric(),
-//   t.timestamp().default((c) => c.fn.now()), t.uuid(), t.bytes(), t.boolean().default,
+//   t.timestamp().default(now()), t.uuid(), t.bytes(), t.boolean().default,
 //   t.json(), t.ref(target), t.vector({ dimensions }), t.geoPoint(), t.text() (was t.string —
 //   alias removed), t.int() (t.integer deleted, P10), t.bigInt(),
 //   t.double() (was t.float),
 //   t.encrypted({of}), and .unique().
-import { table, t, decimal } from "@zeroship/migrate";
+import { table, t, decimal, now } from "@zeroship/migrate";
 import { pgTable } from "@zeroship/migrate/pg";
 
 export default {
@@ -24,7 +24,7 @@ export default {
         id: t.id(), // uuid PK, default gen_random_uuid()
         email: t.text().notNull().unique(),
         balance: t.numeric({ precision: 12, scale: 2 }).notNull().default(decimal("0.00")),
-        authored_at: t.timestamp().notNull().default((c) => c.fn.now()),
+        authored_at: t.timestamp().notNull().default(now()),
         external_id: t.uuid(),
         avatar: t.bytes(),
         active: t.boolean().notNull().default(true),

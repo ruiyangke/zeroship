@@ -26,16 +26,16 @@ A migration is a `.ts` module exporting a `name` plus `up()` (and optionally `do
 functions are parameterless and author against the ambient per-migration recorder.
 
 ```ts
-import { table, t } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
 
 export const name = "create_users";
 
 export function up() {
   table("users").create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       email: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -128,7 +128,7 @@ t.encrypted({ of: t.text() })
 ### Bridging from the runtime schema
 
 ```ts
-import { fromDb } from "@zeroship/migrate";
+import { fromDb, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
 // Lift a live @zeroship/db field into a migration ColumnDef through the ONE shared ColType lexicon
 const col = fromDb(dbField);
 ```
@@ -157,8 +157,8 @@ t.text().default("pending")
 t.boolean().default(true)
 
 // Function defaults are EXPRESSIONS (portable set) — the `{ fn: … }` carrier was deleted (P4)
-t.uuid().default((c) => c.fn.genRandomUuid())
-t.timestamp().default((c) => c.fn.now())
+t.uuid().default(genRandomUuid())
+t.timestamp().default(now())
 
 // Empty-container defaults
 t.json().default({})                         // '{}'::jsonb
@@ -295,26 +295,35 @@ Select with `.index(name)`, then pass the target elements and optional modifiers
 in `.add({…})`.
 
 ```ts
-import { pgTable } from "@zeroship/migrate/pg";
+import {
+  pgTable } from "@zeroship/migrate/pg";
 
 // Basic
 table("app_members").index("app_members_user_idx").add({ on: ["user_id"] });
 
-// Composite + partial (WHERE predicate is the (c) => Expr builder, PG vendor)
+// Composite + partial (WHERE predicate is the (c) => Expr builder,
+  PG vendor)
 pgTable("app_session_anchors").index("app_session_anchors_user_idx")
-  .add({ on: ["app_id", "global_user_id"], where: (c) => c("revoked_at").isNull() });
+  .add({ on: ["app_id",
+  "global_user_id"],
+  where: (c) => c("revoked_at").isNull() });
 
 // Unique
-table("users").index("users_email_uq").add({ on: ["email"], unique: true });
+table("users").index("users_email_uq").add({ on: ["email"],
+  unique: true });
 
 // Access method
-pgTable("docs").index("docs_body_fts").add({ on: ["body"], using: "gin" });
-pgTable("events").index("events_ts_brin").add({ on: ["occurred_at"], using: "brin" });
-pgTable("embeddings").index("embeddings_vec").add({ on: ["vec"], using: "hnsw" });
+pgTable("docs").index("docs_body_fts").add({ on: ["body"],
+  using: "gin" });
+pgTable("events").index("events_ts_brin").add({ on: ["occurred_at"],
+  using: "brin" });
+pgTable("embeddings").index("embeddings_vec").add({ on: ["vec"],
+  using: "hnsw" });
 
 // Per-column ASC/DESC ordering (IndexElementArg)
 table("posts").index("posts_created_desc")
-  .add({ on: [{ column: "created_at", order: "desc" }] });
+  .add({ on: [{ column: "created_at",
+  order: "desc" }] });
 
 // Expression column
 table("users").index("users_lower_email")
@@ -324,25 +333,40 @@ table("users").index("users_lower_email")
 pgTable("orders").index("orders_customer_idx")
   .add({
     on: ["customer_id"],
-    include: ["total", "status"],
-    with: { fillfactor: 90 },
-    only: true,
+  include: ["total",
+  "status"],
+  with: { fillfactor: 90 },
+  only: true,
   });
 
 // Drop / comment
 table("orders").index("orders_customer_idx").drop({ ifExists: true });
 ```
 
-Portable `table().index()` accepts `on`, `unique`, `ifNotExists`, `schema`, and per-element
-`order`. Vendor options (`using`, `where`, `include`, `with`, `only`, `nullsNotDistinct`,
-per-element `opclass`/`collation`) live on `pgTable().index()`.
+Portable `table().index()` accepts `on`,
+  `unique`,
+  `ifNotExists`,
+  `schema`,
+  and per-element
+`order`. Vendor options (`using`,
+  `where`,
+  `include`,
+  `with`,
+  `only`,
+  `nullsNotDistinct`,
+  per-element `opclass`/`collation`) live on `pgTable().index()`.
 
 ---
 
 ## 8. Expressions — the `(c) => Expr` builder
 
-Every predicate/value position (checks, index WHERE, policy USING, generated columns, backfills)
-uses the same closed, portable expression builder. `c("col")` references a column.
+Every predicate/value position (checks,
+  index WHERE,
+  policy USING,
+  generated columns,
+  backfills)
+uses the same closed,
+  portable expression builder. `c("col")` references a column.
 
 ```ts
 // Comparisons
@@ -367,8 +391,11 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c("blocked").isTrue().not()
 
 // Set membership
-(c) => c("status").in(["active", "past_due", "suspended"])
-(c) => c("state").notIn(["deleted", "purged"])
+(c) => c("status").in(["active",
+  "past_due",
+  "suspended"])
+(c) => c("state").notIn(["deleted",
+  "purged"])
 
 // Arithmetic + string
 (c) => c("a").add(c("b"))
@@ -378,7 +405,9 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c("first").concat(c("last"))
 
 // PG pattern match / size — first-class chain operators (PG-first; fail-closed
-// off-PG, `dialect({...})` to port). Usable anywhere a chain is, incl. core checks.
+// off-PG,
+  `dialect({...})` to port). Usable anywhere a chain is,
+  incl. core checks.
 (c) => c("email").regex("^[^@]+@[^@]+$")            // regex → `~` (PG) / `REGEXP` (MySQL)
 (c) => c("payload").columnSize().lt(1048576)       // pg_column_size < 1MiB
 
@@ -394,26 +423,46 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c.fn.trim(c("name"))
 (c) => c.fn.length(c("bio"))
 (c) => c.fn.abs(c("delta"))
-(c) => c.fn.coalesce(c("nick"), c("name"))
-(c) => c.fn.nullif(c("a"), c("b"))
-(c) => c.fn.concatWs(" ", c("first"), c("last"))
-(c) => c.fn.splitPart(c("path"), "/", 1)
-(c) => c.fn.now()
-(c) => c.fn.genRandomUuid()
+(c) => c.fn.coalesce(c("nick"),
+  c("name"))
+(c) => c.fn.nullif(c("a"),
+  c("b"))
+(c) => c.fn.concatWs(" ",
+  c("first"),
+  c("last"))
+(c) => c.fn.splitPart(c("path"),
+  "/",
+  1)
+(c) => now()
+(c) => genRandomUuid()
 
-// CASE expression — explicit when/then branches, with an optional else
-(c) => c.case({ branches: [{ when: c("n").gt(0), then: lit("pos") }], else: lit("nonpos") })
+// CASE expression — explicit when/then branches,
+  with an optional else
+(c) => c.case({ branches: [{ when: c("n").gt(0),
+  then: lit("pos") }],
+  else: lit("nonpos") })
 
-// PG-flavoured settings (used in RLS policies) — reachable via c.pg on the pg-aware builder
-(c) => c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })
-(c) => c.pg.currentUser()
-(c) => c("expires_at").le(c("created_at").add(c.pg.interval({ days: 3 })))
+// PostgreSQL-first value constructors (used in RLS policies / CHECKs);
+// fail closed off-target via the validator.
+(c) => currentSetting("zeroship.tenant_app",
+  { missingOk: true }).cast({ to: "uuid" })
+(c) => currentUser()
+(c) => c("expires_at").le(c("created_at").add(interval({ days: 3 })))
 ```
 
 ### Literals & helpers
 
 ```ts
-import { lit, minValue, maxValue, nextval } from "@zeroship/migrate";
+import { lit,
+  minValue,
+  maxValue,
+  nextval,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+} from "@zeroship/migrate";
 lit(42)                       // an explicit literal node
 minValue / maxValue           // partition-bound sentinels (see §12)
 ```
@@ -423,7 +472,7 @@ minValue / maxValue           // partition-bound sentinels (see §12)
 ## 9. Enum types
 
 ```ts
-import { enumType } from "@zeroship/migrate";
+import { enumType, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
 
 enumType("order_status").create({ values: ["pending", "paid", "shipped"], schema: "zeroship" });
 enumType("order_status").comment("lifecycle of an order");
@@ -438,8 +487,15 @@ table("orders").create({ columns: { status: t.enum("order_status").notNull() }, 
 ## 10. Domains (`/pg`)
 
 ```ts
-import { domain } from "@zeroship/migrate/pg";
-import { t } from "@zeroship/migrate";
+import {
+  domain } from "@zeroship/migrate/pg";
+import { t,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+} from "@zeroship/migrate";
 
 // A domain = base type + CHECK. The (c) => Expr uses the VALUE placeholder.
 domain("account_state").create({
@@ -464,8 +520,16 @@ table("spend_state").create({
 ## 11. Sequences & `nextval` (`/pg` + core)
 
 ```ts
-import { sequence } from "@zeroship/migrate/pg";
-import { nextval, t } from "@zeroship/migrate";
+import {
+  sequence } from "@zeroship/migrate/pg";
+import { nextval,
+  t,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+} from "@zeroship/migrate";
 
 sequence("orders_id_seq").create({ schema: "zeroship", start: 1, increment: 1 });
 sequence("orders_id_seq").alter({ restart: 1000 });
@@ -487,49 +551,75 @@ A partition is authored from the parent table handle:
 the parent's `partitionBy`.
 
 ```ts
-import { table, t, minValue, maxValue } from "@zeroship/migrate";
-import { pgTable } from "@zeroship/migrate/pg";
+import { table, t, minValue, maxValue, now, genRandomUuid, currentSetting, currentUser, interval } from "@zeroship/migrate";
+import {
+  pgTable } from "@zeroship/migrate/pg";
 
 // 1) Parent declares the partition strategy at create()
-table("sandbox_events", { schema: "zeroship" }).create({
-  columns: { id: t.uuid().notNull(), occurred_at: t.timestamp().notNull(), /* … */ },
-  primaryKey: ["id", "occurred_at"],
-  partitionBy: { range: ["occurred_at"] },    // { range } | { list } | { hash }
+table("sandbox_events",
+  { schema: "zeroship" }).create({
+  columns: { id: t.uuid().notNull(),
+  occurred_at: t.timestamp().notNull(),
+  /* … */ },
+  primaryKey: ["id",
+  "occurred_at"],
+  partitionBy: { range: ["occurred_at"] },
+  // { range } | { list } | { hash }
 });
 
 // 2) Create partitions (parent-subject). RANGE bounds:
-table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05")
-  .create({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
+table("sandbox_events",
+  { schema: "zeroship" }).partition("sandbox_events_2026_05")
+  .create({ from: ["2026-05-01 00:00:00+00"],
+  to: ["2026-06-01 00:00:00+00"] });
 
 // LIST bounds:
-table("events", { schema: "zeroship" }).partition("events_eu").create({ in: ["de", "fr", "es"] });
+table("events",
+  { schema: "zeroship" }).partition("events_eu").create({ in: ["de",
+  "fr",
+  "es"] });
 
 // HASH bounds:
-table("events", { schema: "zeroship" }).partition("events_h0").create({ modulus: 4, remainder: 0 });
+table("events",
+  { schema: "zeroship" }).partition("events_h0").create({ modulus: 4,
+  remainder: 0 });
 
 // DEFAULT partition (catch-all):
-table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_default").create({ default: true });
+table("sandbox_events",
+  { schema: "zeroship" }).partition("sandbox_events_default").create({ default: true });
 
 // Unbounded range ends use the sentinels:
-table("events").partition("events_head").create({ from: [minValue], to: ["2026-01-01"] });
-table("events").partition("events_tail").create({ from: ["2027-01-01"], to: [maxValue] });
+table("events").partition("events_head").create({ from: [minValue],
+  to: ["2026-01-01"] });
+table("events").partition("events_tail").create({ from: ["2027-01-01"],
+  to: [maxValue] });
 
 // Lifecycle: detach and drop (both parent-subject)
-pgTable("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").detach();
-table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").drop();
+pgTable("sandbox_events",
+  { schema: "zeroship" }).partition("sandbox_events_2026_05").detach();
+table("sandbox_events",
+  { schema: "zeroship" }).partition("sandbox_events_2026_05").drop();
 ```
 
 **Faithfulness note:** create indexes on the *parent* (no `ONLY`) — PG auto-propagates and
-auto-attaches child indexes, reproducing a hand-decomposed `pg_dump` exactly.
+auto-attaches child indexes,
+  reproducing a hand-decomposed `pg_dump` exactly.
 
 ---
 
 ## 13. Views
 
-Two forms: the portable structured `SelectAst` builder, and a raw `{ as: { raw } }` escape.
+Two forms: the portable structured `SelectAst` builder,
+  and a raw `{ as: { raw } }` escape.
 
 ```ts
-import { view } from "@zeroship/migrate";
+import { view,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+} from "@zeroship/migrate";
 
 // Structured (portable): the `as` callback receives a fluent SelectAst builder
 view("active_users").create({
@@ -567,18 +657,26 @@ view("legacy_report").create({
 ## 14. Row-level security & policies (`/pg`)
 
 ```ts
-import { pgTable } from "@zeroship/migrate/pg";
+import {
+  pgTable } from "@zeroship/migrate/pg";
 
 // Table-scoped RLS state
-pgTable("apps", { schema: "zeroship" }).setRls({ enabled: true, forced: true });
-pgTable("apps", { schema: "zeroship" }).setRls({ enabled: false, forced: false });
+pgTable("apps",
+  { schema: "zeroship" }).setRls({ enabled: true,
+  forced: true });
+pgTable("apps",
+  { schema: "zeroship" }).setRls({ enabled: false,
+  forced: false });
 
 // Policy via the table handle
-pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").create({
-  using: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })),
-  withCheck: (c) => c("app_id").eq(c.pg.currentSetting("zeroship.tenant_app", true).cast({ to: "uuid" })),
-});
-pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").drop();
+pgTable("apps",
+  { schema: "zeroship" }).policy("tenant_isolation").create({
+  using: (c) => c("app_id").eq(currentSetting("zeroship.tenant_app",
+  { missingOk: true }).cast({ to: "uuid" })),
+  withCheck: (c) => c("app_id").eq(currentSetting("zeroship.tenant_app",
+  });
+pgTable("apps",
+  { schema: "zeroship" }).policy("tenant_isolation").drop();
 ```
 
 `PolicyCmd` (the `for` field) = `all | select | insert | update | delete`.
@@ -588,7 +686,13 @@ pgTable("apps", { schema: "zeroship" }).policy("tenant_isolation").drop();
 ## 15. Triggers
 
 ```ts
-import { table } from "@zeroship/migrate";
+import { table,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+} from "@zeroship/migrate";
 
 table("app_audit", { schema: "zeroship" }).trigger("app_audit_block_delete").create({
   timing: "before",              // before | after | insteadOf
@@ -605,7 +709,9 @@ table("app_audit", { schema: "zeroship" }).trigger("app_audit_block_delete").dro
 ## 16. Functions (`/pg`)
 
 ```ts
-import { createFunction, dropFunction } from "@zeroship/migrate/pg";
+import {
+  createFunction,
+  dropFunction } from "@zeroship/migrate/pg";
 
 createFunction({
   name: "app_audit_block_tamper",
@@ -613,17 +719,26 @@ createFunction({
   returns: "trigger",
   language: "plpgsql",
   body: `BEGIN RAISE EXCEPTION 'audit rows are immutable'; END;`,
-});
+  });
 
-dropFunction({ name: "app_audit_block_tamper", schema: "zeroship", ifExists: true });
+dropFunction({ name: "app_audit_block_tamper",
+  ifExists: true });
 ```
 
 ---
 
-## 17. Schemas, extensions, roles, grants (`/pg`)
+## 17. Schemas,
+  extensions,
+  roles,
+  grants (`/pg`)
 
 ```ts
-import { schema, extension, role, dropOwnedBy, grant, revoke } from "@zeroship/migrate/pg";
+import { schema,
+  extension,
+  role,
+  dropOwnedBy,
+  grant,
+  revoke } from "@zeroship/migrate/pg";
 
 schema("zeroship").create();
 schema("zeroship").drop({ cascade: true });
@@ -639,8 +754,14 @@ dropOwnedBy({ roles: ["app_rw"] });          // `roles` is an array
 
 // `on` is a GrantTarget tagged union ({ table }/{ schema }/{ sequence }/… — check GrantTarget);
 // `to`/`from` are string arrays.
-grant({ to: ["app_rw"], on: { table: "orders", schema: "zeroship" }, privileges: ["select", "insert"] });
-revoke({ from: ["app_rw"], on: { schema: "zeroship" }, privileges: ["usage"] });
+grant({ to: ["app_rw"],
+  on: { table: "orders",
+  schema: "zeroship" },
+  privileges: ["select",
+  "insert"] });
+revoke({ from: ["app_rw"],
+  on: { schema: "zeroship" },
+  privileges: ["usage"] });
 ```
 
 ---
@@ -650,23 +771,31 @@ revoke({ from: ["app_rw"], on: { schema: "zeroship" }, privileges: ["usage"] });
 DML has no existence guard (it is unguardable). Available on any table handle:
 
 ```ts
-// Insert — `rows` (a row object or array), optional ON CONFLICT
+// Insert — `rows` (a row object or array),
+  optional ON CONFLICT
 table("plans").insert({
-  rows: [{ id: "free", name: "Free" }, { id: "pro", name: "Pro" }],
-  onConflict: { columns: ["id"], doUpdate: { name: "Pro" } },
-});
+  rows: [{ id: "free",
+  name: "Free" },
+  { id: "pro",
+  name: "Pro" }],
+  onConflict: { columns: ["id"],
+  doUpdate: { name: "Pro" } },
+  });
 
-// Update — `set` values are EXPRESSIONS (ExprFn), so a scalar must be wrapped in lit()
-table("plans").update({ set: { name: (c) => lit("Professional") }, where: (c) => c("id").eq("pro") });
+// Update — `set` values are EXPRESSIONS (ExprFn),
+  so a scalar must be wrapped in lit()
+table("plans").update({ set: { name: (c) => lit("Professional") },
+  where: (c) => c("id").eq("pro") });
 
 // Delete — the method is `del` (JS reserves `delete`); wire tag is "delete"
 table("plans").del({ where: (c) => c("id").eq("legacy") });
 
 // Backfill a column with an expression (chunked; cursorColumn for large tables)
 table("users").backfill({
-  set: { display_name: (c) => c.fn.coalesce(c("nickname"), c("name")) },
+  set: { display_name: (c) => c.fn.coalesce(c("nickname"),
+  c("name")) },
   cursorColumn: "id",
-});
+  });
 ```
 
 ---
@@ -674,7 +803,13 @@ table("users").backfill({
 ## 19. Comments (any object)
 
 ```ts
-import { comment } from "@zeroship/migrate";
+import { comment,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+} from "@zeroship/migrate";
 
 comment({ kind: "table", name: "orders", schema: "zeroship" }, "customer orders");
 comment({ kind: "column", table: "orders", name: "total", schema: "zeroship" }, "cents");
@@ -693,17 +828,20 @@ UPDATE OF <col>` the structured trigger surface can't yet express, or a PL/pgSQL
 **requires a `reason`** — the boundary is honest and counted, not aspirational.
 
 ```ts
-import { raw } from "@zeroship/migrate/pg";
+import {
+  raw } from "@zeroship/migrate/pg";
 
 raw({
   sql: "CREATE TRIGGER t BEFORE UPDATE OF sector_identifier ON zeroship.app_oauth_clients " +
        "FOR EACH ROW EXECUTE FUNCTION zeroship.reject_sector_change()",
   reason: "column-scoped UPDATE OF is outside the current structured trigger surface",
-});
+  });
 ```
 
 There are **no binds** — `raw` takes a complete SQL string. If you find yourself reaching for
-`raw` for a shape the structured surface *should* cover, that is a gap to close in the DSL, not a
+`raw` for a shape the structured surface *should* cover,
+  that is a gap to close in the DSL,
+  not a
 license to accumulate raw SQL.
 
 ---
@@ -711,7 +849,13 @@ license to accumulate raw SQL.
 ## 21. Determinism lint
 
 ```ts
-import { lintDeterminism } from "@zeroship/migrate";
+import { lintDeterminism,
+  now,
+  genRandomUuid,
+  currentSetting,
+  currentUser,
+  interval,
+} from "@zeroship/migrate";
 // Best-effort source scan flagging non-deterministic authoring (e.g. Date.now() / Math.random()
 // leaking into recorded values). Returns DeterminismFinding[].
 const findings = lintDeterminism(sourceText);

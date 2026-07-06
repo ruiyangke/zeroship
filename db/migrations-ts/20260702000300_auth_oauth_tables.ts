@@ -1,4 +1,4 @@
-import { nextval, table, t } from "@zeroship/migrate";
+import { nextval, table, t, now, genRandomUuid, interval } from "@zeroship/migrate";
 import { pgTable, sequence } from "@zeroship/migrate/pg";
 
 export const name = "auth_oauth_tables";
@@ -6,14 +6,14 @@ export const name = "auth_oauth_tables";
 export function up() {
   table("app_session_anchors", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       app_id: t.uuid().notNull(),
       client_id: t.text().notNull(),
       global_user_id: t.uuid().notNull(),
       refresh_token_enc: t.bytes().notNull(),
       refresh_family_id: t.text().notNull(),
       granted_scopes: t.textArray().notNull().default([]),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
     },
@@ -25,7 +25,7 @@ export function up() {
       global_user_id: t.uuid().notNull(),
       pairwise_sub: t.text().notNull(),
       relay_email: t.text(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       revoked_at: t.timestamp(),
     },
     primaryKey: ["app_client_id", "global_user_id"],
@@ -33,7 +33,7 @@ export function up() {
   table("audit_events", { schema: "zeroship" }).create({
     columns: {
       id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
-      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      occurred_at: t.timestamp().notNull().default(now()),
       event_type: t.text().notNull(),
       outcome: t.text().notNull(),
       actor_user_id: t.uuid(),
@@ -49,8 +49,8 @@ export function up() {
   sequence("audit_events_id_seq").alter({ schema: "zeroship", ownedBy: { table: "audit_events", column: "id" } });
   table("authz_decisions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
-      occurred_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      id: t.uuid().notNull().default(genRandomUuid()),
+      occurred_at: t.timestamp().notNull().default(now()),
       actor_user_id: t.uuid(),
       token_id: t.uuid(),
       action: t.text().notNull(),
@@ -67,7 +67,7 @@ export function up() {
   table("cron_state", { schema: "zeroship" }).create({
     columns: {
       key: t.text().notNull(),
-      last_rotated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      last_rotated_at: t.timestamp().notNull().default(now()),
       notes: t.text(),
     },
     primaryKey: ["key"],
@@ -81,7 +81,7 @@ export function up() {
       platform_access_token_enc: t.bytes(),
       provider: t.text().notNull(),
       scope: t.text(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp().notNull(),
       last_polled_at: t.timestamp(),
       auth_credential_version: t.bigInt().notNull().default(0),
@@ -96,7 +96,7 @@ export function up() {
   table("dpop_jti", { schema: "zeroship" }).create({
     columns: {
       jti: t.text().notNull(),
-      inserted_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      inserted_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["jti"],
   });
@@ -104,7 +104,7 @@ export function up() {
     columns: {
       email: t.text({ caseSensitive: false }).notNull(),
       reason: t.text().notNull(),
-      suppressed_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      suppressed_at: t.timestamp().notNull().default(now()),
       provider_msg: t.text(),
     },
     primaryKey: ["email"],
@@ -114,7 +114,7 @@ export function up() {
       token_hash: t.bytes().notNull(),
       user_id: t.uuid().notNull(),
       email: t.text({ caseSensitive: false }).notNull(),
-      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      issued_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp().notNull(),
       consumed_at: t.timestamp(),
     },
@@ -122,26 +122,26 @@ export function up() {
   });
   table("federated_identities", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       user_id: t.uuid().notNull(),
       provider: t.text().notNull(),
       subject: t.text().notNull(),
       email_at_link: t.text({ caseSensitive: false }),
       raw_profile: t.json(),
-      linked_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      linked_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
   table("gateway_sessions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       user_id: t.uuid().notNull(),
       app_id: t.uuid().notNull(),
       email: t.text({ caseSensitive: false }),
       name: t.text(),
       avatar_url: t.text(),
       email_verified: t.boolean().notNull().default(false),
-      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      issued_at: t.timestamp().notNull().default(now()),
       idle_expires_at: t.timestamp().notNull(),
       abs_expires_at: t.timestamp().notNull(),
       revoked_at: t.timestamp(),
@@ -158,18 +158,18 @@ export function up() {
       provider: t.text().notNull(),
       provider_subject: t.text().notNull(),
       email: t.text(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["provider", "provider_subject"],
   });
   table("idp_sessions", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       user_id: t.uuid().notNull(),
       auth_method: t.text().notNull(),
       amr: t.textArray().notNull(),
       acr: t.text(),
-      auth_time: t.timestamp().notNull().default((c) => c.fn.now()),
+      auth_time: t.timestamp().notNull().default(now()),
       credential_version: t.bigInt().notNull().default(0),
       idle_expires_at: t.timestamp().notNull(),
       abs_expires_at: t.timestamp().notNull(),
@@ -181,7 +181,7 @@ export function up() {
     columns: {
       set_name: t.text().notNull(),
       kid: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["set_name", "kid"],
   });
@@ -206,7 +206,7 @@ export function up() {
       purpose: t.text().notNull(),
       request_ip: t.inet(),
       request_ua: t.text(),
-      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      issued_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp().notNull(),
       consumed_pending_at: t.timestamp(),
       consumed_at: t.timestamp(),
@@ -225,7 +225,7 @@ export function up() {
       granted_scopes: t.textArray().notNull(),
       nonce: t.text(),
       user_id: t.uuid().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp().notNull(),
       consumed_at: t.timestamp(),
       auth_credential_version: t.bigInt().notNull().default(0),
@@ -233,7 +233,7 @@ export function up() {
     },
     primaryKey: ["code_hash"],
   });
-  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (c) => c("expires_at").le(c("created_at").add(c.pg.interval({ minutes: 1 }))) });
+  pgTable("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_max_ttl").add({ expr: (c) => c("expires_at").le(c("created_at").add(interval({ minutes: 1 }))) });
   table("oauth_authorization_codes", { schema: "zeroship" }).check("oauth_authorization_codes_pkce_method_check").add({ expr: (c) => c("pkce_method").eq("S256") });
   table("oauth_clients", { schema: "zeroship" }).create({
     columns: {
@@ -244,7 +244,7 @@ export function up() {
       redirect_uris: t.textArray().notNull(),
       scopes: t.textArray().notNull(),
       skip_consent: t.boolean().notNull().default(false),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       created_by: t.uuid(),
       client_secret_hash: t.text(),
       refresh_allowed: t.boolean().notNull().default(false),
@@ -261,8 +261,8 @@ export function up() {
       user_id: t.uuid().notNull(),
       client_id: t.text().notNull(),
       granted_scopes: t.textArray().notNull(),
-      granted_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      granted_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
       last_used_at: t.timestamp(),
     },
     primaryKey: ["user_id", "client_id"],
@@ -278,7 +278,7 @@ export function up() {
       sub: t.text().notNull(),
       granted_scopes: t.textArray().notNull(),
       family_granted_scopes: t.textArray().notNull(),
-      issued_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      issued_at: t.timestamp().notNull().default(now()),
       expires_at: t.timestamp().notNull(),
       family_absolute_expires_at: t.timestamp().notNull(),
       consumed_at: t.timestamp(),
@@ -298,8 +298,8 @@ export function up() {
       client_id: t.text().notNull(),
       sid: t.text().notNull(),
       sub: t.text().notNull(),
-      first_seen_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      last_seen_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      first_seen_at: t.timestamp().notNull().default(now()),
+      last_seen_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["idp_session_id", "client_id"],
   });
@@ -324,7 +324,7 @@ export function up() {
       alg: t.text().notNull(),
       public_jwk: t.json().notNull(),
       status: t.text().notNull(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
       activated_at: t.timestamp(),
       retiring_at: t.timestamp(),
       retired_at: t.timestamp(),
@@ -337,7 +337,7 @@ export function up() {
     columns: {
       client_id: t.text().notNull(),
       sub: t.text().notNull(),
-      revoked_after: t.timestamp().notNull().default((c) => c.fn.now()),
+      revoked_after: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["client_id", "sub"],
   });
@@ -347,7 +347,7 @@ export function up() {
       user_id: t.uuid().notNull(),
       code_hash: t.text().notNull(),
       used_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["id"],
   });
@@ -356,13 +356,13 @@ export function up() {
       user_id: t.uuid().notNull(),
       encrypted_secret: t.bytes().notNull(),
       confirmed_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
     },
     primaryKey: ["user_id"],
   });
   table("users", { schema: "zeroship" }).create({
     columns: {
-      id: t.uuid().notNull().default((c) => c.fn.genRandomUuid()),
+      id: t.uuid().notNull().default(genRandomUuid()),
       email: t.text({ caseSensitive: false }).notNull(),
       email_verified_at: t.timestamp(),
       name: t.text().notNull(),
@@ -371,8 +371,8 @@ export function up() {
       credential_version: t.bigInt().notNull().default(0),
       locked_until: t.timestamp(),
       disabled_at: t.timestamp(),
-      created_at: t.timestamp().notNull().default((c) => c.fn.now()),
-      updated_at: t.timestamp().notNull().default((c) => c.fn.now()),
+      created_at: t.timestamp().notNull().default(now()),
+      updated_at: t.timestamp().notNull().default(now()),
       last_login_at: t.timestamp(),
       failed_login_count: t.int().notNull().default(0),
       deletion_requested_at: t.timestamp(),
