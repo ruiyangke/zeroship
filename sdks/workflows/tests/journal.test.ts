@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { JournalEnvelope } from "../src/journal.ts";
+import type { FrontierOutcome, JournalEnvelope } from "../src/journal.ts";
 import {
   createJournalStep,
   isWorkflowStepPromise,
@@ -14,6 +14,8 @@ import {
   WorkflowTimeoutError,
   WorkflowUnsupportedError,
 } from "../src/index.ts";
+
+const TEST_TIMEOUT_MS = 5_000;
 
 function envelope(steps: JournalEnvelope["steps"] = []): JournalEnvelope {
   return {
@@ -29,7 +31,23 @@ function envelope(steps: JournalEnvelope["steps"] = []): JournalEnvelope {
   };
 }
 
-test("step.run journal hit returns memoized output without running fn", async () => {
+function assertSuspendSignal(err: unknown): SuspendSignal {
+  assert.ok(err instanceof SuspendSignal);
+  return err;
+}
+
+function assertCompletedRun(
+  outcome: FrontierOutcome,
+  expected: { ordinal: number; name: string; output: unknown },
+): void {
+  assert.equal(outcome.kind, "run");
+  assert.equal(outcome.state, "completed");
+  assert.equal(outcome.ordinal, expected.ordinal);
+  assert.equal(outcome.name, expected.name);
+  assert.deepEqual(outcome.output, expected.output);
+}
+
+test("step.run journal hit returns memoized output without running fn", { timeout: TEST_TIMEOUT_MS }, async () => {
   const step = createJournalStep(envelope([
     {
       ordinal: 0,
@@ -51,7 +69,7 @@ test("step.run journal hit returns memoized output without running fn", async ()
   assert.deepEqual(result, { orderId: "ord_1", total: 42 });
 });
 
-test("first step.run miss runs once, captures output, then suspends", async () => {
+test("first step.run miss runs once, captures output, then suspends", { timeout: TEST_TIMEOUT_MS }, async () => {
   const step = createJournalStep(envelope());
   let calls = 0;
 
@@ -61,45 +79,63 @@ test("first step.run miss runs once, captures output, then suspends", async () =
       return { reserved: true };
     }),
     (err) => {
-      assert.ok(err instanceof SuspendSignal);
-      assert.equal(err.outcome.kind, "run");
-      assert.equal(err.outcome.state, "completed");
-      assert.equal(err.outcome.ordinal, 0);
-      assert.equal(err.outcome.name, "reserve");
-      assert.deepEqual(err.outcome.output, { reserved: true });
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assert.equal(signal.outcome, signal.outcomes[0]);
+      assertCompletedRun(signal.outcomes[0]!, {
+        ordinal: 0,
+        name: "reserve",
+        output: { reserved: true },
+      });
       return true;
     },
   );
   assert.equal(calls, 1);
 });
 
-test("Promise.all over step misses runs one frontier per dispatch", async () => {
-  const firstDispatch = createJournalStep(envelope());
-  const firstCalls: string[] = [];
+test("Promise.all over step misses collects one concurrent frontier batch", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+  const calls: string[] = [];
+  let resolveAllStarted: () => void = () => {};
+  const allStarted = new Promise<void>((resolve) => {
+    resolveAllStarted = resolve;
+  });
 
   await assert.rejects(
     () => Promise.all([
-      firstDispatch.run("a", async () => {
-        firstCalls.push("a");
+      step.run("a", async () => {
+        calls.push("a");
+        if (calls.length === 3) resolveAllStarted();
+        await allStarted;
         return "A";
       }),
-      firstDispatch.run("b", async () => {
-        firstCalls.push("b");
+      step.run("b", async () => {
+        calls.push("b");
+        if (calls.length === 3) resolveAllStarted();
+        await allStarted;
         return "B";
+      }),
+      step.run("c", async () => {
+        calls.push("c");
+        if (calls.length === 3) resolveAllStarted();
+        await allStarted;
+        return "C";
       }),
     ]),
     (err) => {
-      assert.ok(err instanceof SuspendSignal);
-      assert.equal(err.outcome.kind, "run");
-      assert.equal(err.outcome.ordinal, 0);
-      assert.equal(err.outcome.state, "completed");
-      assert.equal(err.outcome.output, "A");
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 3);
+      assertCompletedRun(signal.outcomes[0]!, { ordinal: 0, name: "a", output: "A" });
+      assertCompletedRun(signal.outcomes[1]!, { ordinal: 1, name: "b", output: "B" });
+      assertCompletedRun(signal.outcomes[2]!, { ordinal: 2, name: "c", output: "C" });
       return true;
     },
   );
-  assert.deepEqual(firstCalls, ["a"]);
+  assert.deepEqual(calls, ["a", "b", "c"]);
+});
 
-  const secondDispatch = createJournalStep(envelope([
+test("Promise.all over a replayed hit and miss resolves the hit and batches the miss", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope([
     {
       ordinal: 0,
       name: "a",
@@ -109,67 +145,92 @@ test("Promise.all over step misses runs one frontier per dispatch", async () => 
       output: "A",
     },
   ]));
-  const secondCalls: string[] = [];
+  const calls: string[] = [];
 
   await assert.rejects(
     () => Promise.all([
-      secondDispatch.run("a", () => {
-        secondCalls.push("a");
+      step.run("a", () => {
+        calls.push("a");
         return "wrong";
       }),
-      secondDispatch.run("b", async () => {
-        secondCalls.push("b");
+      step.run("b", async () => {
+        calls.push("b");
         return "B";
       }),
     ]),
     (err) => {
-      assert.ok(err instanceof SuspendSignal);
-      assert.equal(err.outcome.kind, "run");
-      assert.equal(err.outcome.ordinal, 1);
-      assert.equal(err.outcome.state, "completed");
-      assert.equal(err.outcome.output, "B");
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assertCompletedRun(signal.outcomes[0]!, { ordinal: 1, name: "b", output: "B" });
       return true;
     },
   );
-  assert.deepEqual(secondCalls, ["b"]);
+  assert.deepEqual(calls, ["b"]);
 });
 
-test("second concurrent miss returns the same never-settling latch without running callback", async () => {
+test("Promise.all over a run and sleep collects settled siblings plus the suspension", { timeout: TEST_TIMEOUT_MS }, async () => {
   const step = createJournalStep(envelope());
-  let firstResolve: (value: string) => void = () => {};
-  let secondCalls = 0;
-  let thirdCalls = 0;
+  let calls = 0;
 
-  const first = step.run("first", () =>
-    new Promise<string>((resolve) => {
-      firstResolve = resolve;
-    })
+  await assert.rejects(
+    () => Promise.all([
+      step.run("a", async () => {
+        calls++;
+        await Promise.resolve();
+        return "A";
+      }),
+      step.sleep("cooldown", "1s"),
+    ]),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 2);
+      assertCompletedRun(signal.outcomes[0]!, { ordinal: 0, name: "a", output: "A" });
+      const sleep = signal.outcomes[1]!;
+      assert.equal(sleep.kind, "sleep");
+      assert.equal(sleep.ordinal, 1);
+      assert.equal(sleep.name, "cooldown");
+      assert.equal(sleep.state, "running");
+      assert.equal(sleep.wakeAt, "1s");
+      return true;
+    },
   );
+  assert.equal(calls, 1);
+});
+
+test("concurrent misses share a branded dispatch latch while each callback runs once", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+  const calls: string[] = [];
+
+  const first = step.run("first", () => {
+    calls.push("first");
+    return "first";
+  });
   const second = step.run("second", () => {
-    secondCalls++;
+    calls.push("second");
     return "second";
   });
   const third = step.run("third", () => {
-    thirdCalls++;
+    calls.push("third");
     return "third";
   });
 
   assert.equal(isWorkflowStepPromise(first), true);
   assert.equal(isWorkflowStepPromise(second), true);
   assert.equal(second, third);
-  assert.equal(secondCalls, 0);
-  assert.equal(thirdCalls, 0);
+  assert.equal(first, second);
+  assert.deepEqual(calls, ["first", "second", "third"]);
 
-  firstResolve("first");
   await assert.rejects(first, (err) => {
-    assert.ok(err instanceof SuspendSignal);
-    assert.equal(err.outcome.kind, "run");
-    assert.equal(err.outcome.output, "first");
+    const signal = assertSuspendSignal(err);
+    assert.equal(signal.outcomes.length, 3);
+    assertCompletedRun(signal.outcomes[0]!, { ordinal: 0, name: "first", output: "first" });
+    assertCompletedRun(signal.outcomes[1]!, { ordinal: 1, name: "second", output: "second" });
+    assertCompletedRun(signal.outcomes[2]!, { ordinal: 2, name: "third", output: "third" });
     return true;
   });
 });
 
-test("Promise.race over step promises throws WorkflowUnsupportedError synchronously", () => {
+test("Promise.race over step promises throws WorkflowUnsupportedError synchronously", { timeout: TEST_TIMEOUT_MS }, () => {
   const step = createJournalStep(envelope());
   assert.throws(
     () =>
@@ -187,7 +248,7 @@ test("Promise.race over step promises throws WorkflowUnsupportedError synchronou
   assert.equal(isWorkflowStepPromise(passthrough), false);
 });
 
-test("Promise.allSettled and Promise.any over step promises are unsupported", () => {
+test("Promise.allSettled and Promise.any over step promises are unsupported", { timeout: TEST_TIMEOUT_MS }, () => {
   for (const method of ["allSettled", "any"] as const) {
     const step = createJournalStep(envelope());
     assert.throws(
@@ -202,7 +263,7 @@ test("Promise.allSettled and Promise.any over step promises are unsupported", ()
   }
 });
 
-test("nested step call inside a frontier callback throws WorkflowNestedStepError", async () => {
+test("nested step call inside a frontier callback throws WorkflowNestedStepError", { timeout: TEST_TIMEOUT_MS }, async () => {
   const step = createJournalStep(envelope());
   await assert.rejects(
     () =>
@@ -213,7 +274,7 @@ test("nested step call inside a frontier callback throws WorkflowNestedStepError
   );
 });
 
-test("nested step call after an await inside a frontier callback throws WorkflowNestedStepError", async () => {
+test("nested step call after an await inside a frontier callback throws WorkflowNestedStepError", { timeout: TEST_TIMEOUT_MS }, async () => {
   const step = createJournalStep(envelope());
   await assert.rejects(
     () =>
@@ -225,7 +286,7 @@ test("nested step call after an await inside a frontier callback throws Workflow
   );
 });
 
-test("step.run timeout records a retryable WorkflowStepTimeoutError", async () => {
+test("step.run timeout records a retryable WorkflowStepTimeoutError", { timeout: TEST_TIMEOUT_MS }, async () => {
   const step = createJournalStep(envelope());
   await assert.rejects(
     () =>
@@ -233,11 +294,13 @@ test("step.run timeout records a retryable WorkflowStepTimeoutError", async () =
         new Promise<string>(() => {})
       ),
     (err) => {
-      assert.ok(err instanceof SuspendSignal);
-      assert.equal(err.outcome.kind, "run");
-      assert.equal(err.outcome.state, "failed");
-      assert.equal(err.outcome.error.type, "WorkflowStepTimeoutError");
-      assert.equal(err.outcome.error.retryable, true);
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      const outcome = signal.outcomes[0]!;
+      assert.equal(outcome.kind, "run");
+      assert.equal(outcome.state, "failed");
+      assert.equal(outcome.error.type, "WorkflowStepTimeoutError");
+      assert.equal(outcome.error.retryable, true);
       return true;
     },
   );
@@ -262,14 +325,15 @@ test("step.run timeout records a retryable WorkflowStepTimeoutError", async () =
   );
 });
 
-test("sleep and waitForSignal misses suspend and timeout replays throw WorkflowTimeoutError", async () => {
+test("sleep and waitForSignal misses suspend and timeout replays throw WorkflowTimeoutError", { timeout: TEST_TIMEOUT_MS }, async () => {
   const sleepStep = createJournalStep(envelope());
   await assert.rejects(
     async () => sleepStep.sleep("cooldown", "5m"),
     (err) => {
-      assert.ok(err instanceof SuspendSignal);
-      assert.equal(err.outcome.kind, "sleep");
-      assert.equal(err.outcome.wakeAt, "5m");
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assert.equal(signal.outcome.kind, "sleep");
+      assert.equal(signal.outcome.wakeAt, "5m");
       return true;
     },
   );
@@ -282,10 +346,11 @@ test("sleep and waitForSignal misses suspend and timeout replays throw WorkflowT
       maxSignalAge: "10m",
     }),
     (err) => {
-      assert.ok(err instanceof SuspendSignal);
-      assert.equal(err.outcome.kind, "wait_signal");
-      assert.equal(err.outcome.signalType, "approved");
-      assert.equal(err.outcome.timeout, "1h");
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assert.equal(signal.outcome.kind, "wait_signal");
+      assert.equal(signal.outcome.signalType, "approved");
+      assert.equal(signal.outcome.timeout, "1h");
       return true;
     },
   );
