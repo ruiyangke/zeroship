@@ -594,7 +594,7 @@ async fn ir_batched_backfill_on_pg() {
     teardown(&conn, &cfg).await;
 }
 
-/// **PR6a `c.fn.concatWs` NULL-skip apply on real PG (§9) — the byte-identity peer
+/// **PR6a `concatWs` NULL-skip apply on real PG (§9) — the byte-identity peer
 /// of the SQLite `concat_ws_null_skip_applies_byte_identical_on_sqlite`.** PG's
 /// native `concat_ws` SKIPS NULL arguments, so `concat_ws('-', '1', NULL)` = `'1'`
 /// (no trailing delimiter). This pins the PG render to the EXACT same expected value

@@ -8,7 +8,7 @@
 //     up() {
 //       table("users")
 //         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
+//         .backfill({ set: { first_name: c => c("name").splitPart(" ", 1) } });
 //     },
 //   };
 //
@@ -79,14 +79,12 @@ import type {
   ExprChain as ExprChainType,
   ExprFn,
   EnumHandle,
-  FnNamespace,
   ForeignKeyRef,
   ForeignKeyReference,
   GeneratedColumnExprFn,
   GeneratedOptions,
   IdOptions,
   IdentityOptions,
-  ImmutableFnNamespace,
   IndexExprBuilder,
   IndexExprFn,
   IndexRef,
@@ -106,7 +104,6 @@ import type {
   PgCheckExprFn,
   PgConstraintRef,
   PgCheckRef,
-  PgExprNamespace,
   PgIndexAdd,
   PgIndexDropArgs,
   PgIndexRef,
@@ -1046,10 +1043,10 @@ const IMMUTABLE_SYNTH_FNS = new Set([
 ]);
 
 const IMMUTABLE_HELPERS =
-  "lower/upper/trim/length/abs/coalesce/nullif/mod/round/floor/ceil/substr/replace/concatWs/splitPart";
+  "lower/upper/trim/length/abs/coalesce/nullif/mod/round/floor/ceil/substr/replace/extract/concatWs/splitPart";
 
 function defaultBuilder(): DefaultBuilder {
-  return Object.freeze({ fn, case: caseExpr });
+  return Object.freeze({ case: caseExpr });
 }
 
 function defaultFunctionValueError(): Error {
@@ -1103,7 +1100,7 @@ function validateDefaultExpr(expr: Node): void {
         if (typeof n.fn !== "string" || !DEFAULT_SCALAR_FNS.has(n.fn)) {
           throw structuredError(
             "OP_INVALID",
-            "a column default cannot use volatile or vendor-only functions; use immutable c.fn helpers",
+            "a column default cannot use volatile or vendor-only functions; use immutable scalar chain helpers",
           );
         }
         if (!Array.isArray(n.args)) {
@@ -1588,13 +1585,13 @@ function scalarLiteralArray(values: unknown, what: string): unknown[] {
 
 function pgRegexPattern(pattern: unknown): string {
   if (typeof pattern !== "string") {
-    throw structuredError("OP_INVALID", `c.pg.regex(pattern): pattern must be a string; got ${typeof pattern}`);
+    throw structuredError("OP_INVALID", `.regex(pattern): pattern must be a string; got ${typeof pattern}`);
   }
   if (pattern.length === 0) {
-    throw structuredError("OP_INVALID", "c.pg.regex(pattern): pattern must be non-empty");
+    throw structuredError("OP_INVALID", ".regex(pattern): pattern must be non-empty");
   }
   if (pattern.includes("\0")) {
-    throw structuredError("OP_INVALID", "c.pg.regex(pattern): pattern must not contain a NUL byte");
+    throw structuredError("OP_INVALID", ".regex(pattern): pattern must not contain a NUL byte");
   }
   return pattern;
 }
@@ -1640,16 +1637,6 @@ function castTarget(args: unknown): CastTarget {
   return to as CastTarget;
 }
 
-function extractField(field: unknown, what = "c.fn.extract(field, expr)"): PortableExtractField {
-  if (typeof field !== "string" || !portableExtractFieldSet.has(field)) {
-    throw structuredError(
-      "OP_INVALID",
-      `${what}: field must be one of ${portableExtractFields.map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
-    );
-  }
-  return field as PortableExtractField;
-}
-
 function pgExtractField(field: unknown): PortableExtractField | PgExtractFieldToken {
   if (typeof field === "string" && portableExtractFieldSet.has(field)) {
     return field as PortableExtractField;
@@ -1659,7 +1646,7 @@ function pgExtractField(field: unknown): PortableExtractField | PgExtractFieldTo
   }
   throw structuredError(
     "OP_INVALID",
-    `c.pg.extract(field, expr): field must be one of ${[...portableExtractFields, ...pgExtractFields].map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
+    `.extract(field): field must be one of ${[...portableExtractFields, ...pgExtractFields].map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
   );
 }
 
@@ -1778,13 +1765,76 @@ class ExprChainImpl implements ExprChainType {
   distinctFrom(x: unknown) {
     return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
   }
-  // PG-first chain operators (P0). Same IR nodes as the old `c.pg.*` helpers;
+  // PG-first chain operators (P0). Same IR nodes as the old vendor helpers;
   // the dialect gate lives in the Rust validator (fail-closed off-target).
   regex(pattern: string) {
     return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
   }
   columnSize() {
     return chain({ node: "pgColumnSize", expr: this.__node });
+  }
+  lower() {
+    return chain({ node: "fnCall", fn: "lower", args: [this.__node] });
+  }
+  upper() {
+    return chain({ node: "fnCall", fn: "upper", args: [this.__node] });
+  }
+  trim() {
+    return chain({ node: "fnCall", fn: "trim", args: [this.__node] });
+  }
+  length() {
+    return chain({ node: "fnCall", fn: "length", args: [this.__node] });
+  }
+  abs() {
+    return chain({ node: "fnCall", fn: "abs", args: [this.__node] });
+  }
+  coalesce(...rest: unknown[]) {
+    return chain({ node: "fnCall", fn: "coalesce", args: [this.__node, ...rest.map(exprArg)] });
+  }
+  nullif(b: unknown) {
+    return chain({ node: "fnCall", fn: "nullif", args: [this.__node, exprArg(b)] });
+  }
+  mod(b: unknown) {
+    return chain({ node: "fnCall", fn: "mod", args: [this.__node, exprArg(b)] });
+  }
+  round(n?: unknown) {
+    return chain({
+      node: "fnCall",
+      fn: "round",
+      args: n === undefined ? [this.__node] : [this.__node, exprArg(n)],
+    });
+  }
+  floor() {
+    return chain({ node: "fnCall", fn: "floor", args: [this.__node] });
+  }
+  ceil() {
+    return chain({ node: "fnCall", fn: "ceil", args: [this.__node] });
+  }
+  substr(start: unknown, len?: unknown) {
+    return chain({
+      node: "fnCall",
+      fn: "substr",
+      args: len === undefined ? [this.__node, exprArg(start)] : [this.__node, exprArg(start), exprArg(len)],
+    });
+  }
+  replace(from: unknown, to: unknown) {
+    return chain({ node: "fnCall", fn: "replace", args: [this.__node, exprArg(from), exprArg(to)] });
+  }
+  extract(field: unknown) {
+    const f = pgExtractField(field);
+    return chain({
+      node: portableExtractFieldSet.has(f) ? "extract" : "pgExtract",
+      field: f,
+      from: this.__node,
+    });
+  }
+  splitPart(delim: string, n: number) {
+    splitPartGrammarLint(delim, n);
+    return chain({
+      node: "fnSynth",
+      fn: "splitPart",
+      args: [this.__node, { node: "literal", value: delim }, { node: "literal", value: n }],
+    });
   }
 }
 
@@ -1798,6 +1848,10 @@ export function check(name: string, expr: CheckExprFn): CheckDef {
 
 export function lit(value: ScalarValue): ExprChainType {
   return chain({ node: "literal", value: toIrScalar(value) });
+}
+
+export function concatWs(sep: unknown, ...parts: unknown[]): ExprChainType {
+  return chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] });
 }
 
 /**
@@ -1849,65 +1903,6 @@ export function dialect(legs: {
   return chain(node);
 }
 
-const fn: FnNamespace = {
-  lower: (e) => chain({ node: "fnCall", fn: "lower", args: [exprArg(e)] }),
-  upper: (e) => chain({ node: "fnCall", fn: "upper", args: [exprArg(e)] }),
-  trim: (e) => chain({ node: "fnCall", fn: "trim", args: [exprArg(e)] }),
-  length: (e) => chain({ node: "fnCall", fn: "length", args: [exprArg(e)] }),
-  abs: (e) => chain({ node: "fnCall", fn: "abs", args: [exprArg(e)] }),
-  coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
-  nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
-  mod: (a, b) => chain({ node: "fnCall", fn: "mod", args: [exprArg(a), exprArg(b)] }),
-  round: (x, n) =>
-    chain({
-      node: "fnCall",
-      fn: "round",
-      args: n === undefined ? [exprArg(x)] : [exprArg(x), exprArg(n)],
-    }),
-  floor: (x) => chain({ node: "fnCall", fn: "floor", args: [exprArg(x)] }),
-  ceil: (x) => chain({ node: "fnCall", fn: "ceil", args: [exprArg(x)] }),
-  substr: (s, start, len) =>
-    chain({
-      node: "fnCall",
-      fn: "substr",
-      args: len === undefined ? [exprArg(s), exprArg(start)] : [exprArg(s), exprArg(start), exprArg(len)],
-    }),
-  replace: (s, from, to) => chain({ node: "fnCall", fn: "replace", args: [exprArg(s), exprArg(from), exprArg(to)] }),
-  extract: (field, expr) => chain({
-    node: "extract",
-    field: extractField(field),
-    from: exprArg(expr),
-  }),
-  concatWs: (sep, ...parts) => chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
-  splitPart: (col, delim, n) => {
-    splitPartGrammarLint(delim, n);
-    return chain({
-      node: "fnSynth",
-      fn: "splitPart",
-      args: [exprArg(col), { node: "literal", value: delim }, { node: "literal", value: n }],
-    });
-  },
-};
-
-const immutableFn: ImmutableFnNamespace = Object.freeze({
-  lower: fn.lower,
-  upper: fn.upper,
-  trim: fn.trim,
-  length: fn.length,
-  abs: fn.abs,
-  coalesce: fn.coalesce,
-  nullif: fn.nullif,
-  mod: fn.mod,
-  round: fn.round,
-  floor: fn.floor,
-  ceil: fn.ceil,
-  substr: fn.substr,
-  replace: fn.replace,
-  extract: fn.extract,
-  concatWs: fn.concatWs,
-  splitPart: fn.splitPart,
-});
-
 // The `c.agg.*` PORTABLE aggregate namespace (§3.4/§3.6). `count()` (no arg)
 // records `count(*)`; a present arg records `<func>(<arg>)`. The optional
 // `{ distinct: true }` sets the `distinct` flag (skipped on the wire when false).
@@ -1927,17 +1922,6 @@ const agg: AggNamespace = {
   avg: (expr, opts) => aggNode("avg", expr, opts),
   min: (expr, opts) => aggNode("min", expr, opts),
   max: (expr, opts) => aggNode("max", expr, opts),
-};
-
-const pgExpr: PgExprNamespace = {
-  extract: (field, expr) => {
-    const f = pgExtractField(field);
-    return chain({
-      node: portableExtractFieldSet.has(f) ? "extract" : "pgExtract",
-      field: f,
-      from: exprArg(expr),
-    });
-  },
 };
 
 type CaseExprArgs = {
@@ -1995,46 +1979,37 @@ function makeColumnAccessor(): (first: string, second?: string) => ExprChainType
 function immutableExprBuilder(): IndexExprBuilder {
   const c = makeColumnAccessor() as unknown as IndexExprBuilder;
   c.case = caseExpr;
-  c.fn = immutableFn;
   return Object.freeze(c);
 }
 
 function checkWithPgBuilder(): CheckBuilderWithPg {
   const c = makeColumnAccessor() as unknown as CheckBuilderWithPg;
   c.case = caseExpr;
-  c.fn = immutableFn;
-  c.pg = pgExpr;
   return Object.freeze(c);
 }
 
 function domainValueBuilder(): DomainValueBuilder {
   const v = chain({ node: "colRef", name: "VALUE" }) as unknown as DomainValueBuilder;
   v.case = caseExpr;
-  v.fn = immutableFn;
-  v.pg = pgExpr;
   return Object.freeze(v);
 }
 
 function makeBuilder(): ExprBuilder {
   const c = makeColumnAccessor() as unknown as ExprBuilder;
   c.case = caseExpr;
-  c.fn = fn;
   c.agg = agg;
-  c.pg = pgExpr;
   return c;
 }
 
-// The standalone `c.case` / `c.fn` / `c.pg` builders surfaced at a value position
-// (`cCase(...)`, `cFn.splitPart(...)`, `cPg.extract(...)`) — the SAME objects installed on the
+// The standalone `c.case` / `c.agg` builders surfaced at a value position
+// (`cCase(...)`, `cAgg.count(...)`) — the SAME objects installed on the
 // `(c) => Expr` builder above. These are exported for the engine-embedded
 // recorder bundle (`src/embedded-recorder.ts`, the `include_str!`'d artifact),
 // which requires the full engine-consumed surface. Not re-exported through the
 // SDK public `.` entry (`index.ts`); a value-position namespace is a Phase-2
 // surface decision.
 export const cCase = caseExpr;
-export const cFn = fn;
 export const cAgg = agg;
-export const cPg = pgExpr;
 
 function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
   if (slot === undefined || slot === null) return undefined;
@@ -2134,7 +2109,7 @@ const resolvePgCheckExpr: CheckExprResolver = (slot, position) =>
 function rejectImmutableExpr(position: string, reason: string): never {
   throw structuredError(
     "OP_INVALID",
-    `${position} must use only immutable expressions: column refs, literals, CASE, operators, and immutable c.fn helpers ` +
+    `${position} must use only immutable expressions: column refs, literals, CASE, operators, and immutable scalar chain helpers ` +
       `(${IMMUTABLE_HELPERS}); ${reason}`,
   );
 }
@@ -2159,7 +2134,7 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
           rejectImmutableExpr(position, `${String(n.fn)} is PG-vendor and non-portable`);
         }
         if (typeof n.fn !== "string" || !IMMUTABLE_SCALAR_FNS.has(n.fn)) {
-          rejectImmutableExpr(position, `function ${JSON.stringify(n.fn)} is not an immutable c.fn helper`);
+          rejectImmutableExpr(position, `function ${JSON.stringify(n.fn)} is not an immutable scalar chain helper`);
         }
         if (!Array.isArray(n.args)) {
           rejectImmutableExpr(position, "function expression args must be an array");
@@ -4099,10 +4074,10 @@ function splitPartGrammarLint(delim: unknown, n: unknown): void {
         "forms are only renderable on dialects with a native renderer such as Postgres/MySQL",
     });
   };
-  if (typeof delim !== "string") fail(`c.fn.splitPart delimiter must be a string literal; got ${typeof delim}`);
-  if ((delim as string).length === 0) fail("c.fn.splitPart delimiter must be a non-empty string literal");
+  if (typeof delim !== "string") fail(`.splitPart delimiter must be a string literal; got ${typeof delim}`);
+  if ((delim as string).length === 0) fail(".splitPart delimiter must be a non-empty string literal");
   if (typeof n !== "number" || !Number.isInteger(n)) {
-    fail(`c.fn.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
+    fail(`.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
   }
-  if ((n as number) < 1) fail(`c.fn.splitPart part index n must be a positive integer; got ${n}`);
+  if ((n as number) < 1) fail(`.splitPart part index n must be a positive integer; got ${n}`);
 }

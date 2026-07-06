@@ -14,7 +14,7 @@
 //     up() {
 //       table("users")
 //         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
+//         .backfill({ set: { first_name: c => c("name").splitPart(" ", 1) } });
 //     },
 //   };
 
@@ -35,6 +35,7 @@ export {
   currentSetting,
   currentUser,
   interval,
+  concatWs,
   minValue,
   maxValue,
   nextval,
@@ -62,10 +63,10 @@ export type {
   ExprChain,
   ExprFn,
   ExtractField,
+  PgExtractField,
   CheckBuilder,
   CheckDef,
   CheckExprFn,
-  FnNamespace,
   AggNamespace,
   Duration,
   Scalar,

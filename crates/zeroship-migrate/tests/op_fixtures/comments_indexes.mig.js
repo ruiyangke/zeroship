@@ -23,7 +23,7 @@ export function up() {
   });
 
   pgTable("users").index("users_email_lower_idx").add({
-    on: ["email", { expr: (c) => c.fn.lower(c("email")) }],
+    on: ["email", { expr: (c) => c("email").lower() }],
     where: (c) => c("active").isTrue(),
   });
 

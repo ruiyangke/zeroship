@@ -519,6 +519,7 @@ export declare function genRandomUuid(): ExprChain;
 export declare function currentSetting(name: string, opts?: CurrentSettingOptions): ExprChain;
 export declare function currentUser(): ExprChain;
 export declare function interval(duration: Duration): ExprChain;
+export declare function concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
  *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
@@ -527,9 +528,7 @@ export type Row = Record<string, DmlValue>;
 // ── The fluent expression builder (§3.6 / `(c) => Expr`) ──
 
 /** The chainable expression value `c("…")` / every built sub-expression carries.
- *  Each method builds one closed-AST node; bare JS values auto-wrap to `Literal`.
- *  `coalesce`/`concatWs` live ONLY on `c.fn` (§7 c/c.fn dedup) — they are NOT on
- *  the chain. */
+ *  Each method builds one closed-AST node; bare JS values auto-wrap to `Literal`. */
 export interface ExprChain {
   // comparison
   eq(x: unknown): ExprChain;
@@ -547,7 +546,7 @@ export interface ExprChain {
   sub(x: unknown): ExprChain;
   mul(x: unknown): ExprChain;
   div(x: unknown): ExprChain;
-  // string/value — raw `||` concat only (NULL-skipping joins are `c.fn.concatWs`)
+  // string/value — raw `||` concat only (NULL-skipping joins are `concatWs`)
   concat(...parts: unknown[]): ExprChain;
   // null/bool tests
   isNull(): ExprChain;
@@ -575,69 +574,37 @@ export interface ExprChain {
   regex(pattern: string): ExprChain;
   /** `pg_column_size(<expr>)` — PostgreSQL on-disk byte size of the value. */
   columnSize(): ExprChain;
-}
-
-/** The `c.fn.*` scalar-function namespace (§3.6) — reached off the single
- *  builder handle; there is no importable `fn`. `coalesce`/`concatWs` live here
- *  (and ONLY here — §7). */
-export interface FnNamespace {
-  lower(e: unknown): ExprChain;
-  upper(e: unknown): ExprChain;
-  trim(e: unknown): ExprChain;
-  length(e: unknown): ExprChain;
-  abs(e: unknown): ExprChain;
-  coalesce(...args: unknown[]): ExprChain;
-  nullif(a: unknown, b: unknown): ExprChain;
+  // scalar functions — receiver-first authoring for the fnCall/fnSynth nodes.
+  lower(): ExprChain;
+  upper(): ExprChain;
+  trim(): ExprChain;
+  length(): ExprChain;
+  abs(): ExprChain;
+  coalesce(...rest: unknown[]): ExprChain;
+  nullif(b: unknown): ExprChain;
   /** Integer/numeric modulo, `(a % b)` — portable (`%` on PG/SQLite/MySQL). */
-  mod(a: unknown, b: unknown): ExprChain;
+  mod(b: unknown): ExprChain;
   /** `round(x)` / `round(x, n)` — portable rounding, optional precision. */
-  round(x: unknown, n?: unknown): ExprChain;
+  round(n?: unknown): ExprChain;
   /** `floor(x)` — portable floor (PG/MySQL/SQLite≥3.35). */
-  floor(x: unknown): ExprChain;
+  floor(): ExprChain;
   /** `ceil(x)` — portable ceiling (PG/SQLite≥3.35/MySQL). */
-  ceil(x: unknown): ExprChain;
+  ceil(): ExprChain;
   /** `substr(s, start[, len])` — portable substring, 1-based start. */
-  substr(s: unknown, start: unknown, len?: unknown): ExprChain;
+  substr(start: unknown, len?: unknown): ExprChain;
   /** `replace(s, from, to)` — portable string replace. */
-  replace(s: unknown, from: unknown, to: unknown): ExprChain;
-  /** Portable date/time part extraction. */
-  extract(field: ExtractField, expr: unknown): ExprChain;
-  /** NULL-skipping safe-join (renders byte-identically on PG/SQLite). */
-  concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
+  replace(from: unknown, to: unknown): ExprChain;
+  /** Date/time part extraction. PG-only fields record pgExtract and validate fail-closed off-PG. */
+  extract(field: ExtractField | PgExtractField): ExprChain;
   /** The engine-synthesized portable split helper (§9), in-envelope-only. */
-  splitPart(col: unknown, delim: string, n: number): ExprChain;
+  splitPart(delim: string, n: number): ExprChain;
 }
-
-/** The immutable-only scalar namespace for generated columns and index predicates.
- *  Immutable members: lower/upper/trim/length/abs/coalesce/nullif/mod/round/
- *  floor/ceil/substr/replace/concatWs/splitPart. Volatile now/genRandomUuid are
- *  intentionally absent; PG-vendor helpers live on PgExprNamespace. */
-export type ImmutableFnNamespace = Pick<
-  FnNamespace,
-  | "lower"
-  | "upper"
-  | "trim"
-  | "length"
-  | "abs"
-  | "coalesce"
-  | "nullif"
-  | "mod"
-  | "round"
-  | "floor"
-  | "ceil"
-  | "substr"
-  | "replace"
-  | "extract"
-  | "concatWs"
-  | "splitPart"
->;
 
 /** The deliberately narrow builder available in column default expression
  *  callbacks. Defaults cannot reference columns, aggregates, vendor PG helpers,
  *  or trigger OLD/NEW state by construction. Receiver-less value constructors
  *  are top-level imports (`now()`, `genRandomUuid()`). */
 export interface DefaultBuilder {
-  fn: FnNamespace;
   /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
 }
@@ -648,13 +615,12 @@ export type DefaultExprFn = (c: DefaultBuilder) => ExprChain | Expr;
 interface ImmutableExprBuilderBase {
   (name: string): ExprChain;
   (table: string, name: string): ExprChain;
-  fn: ImmutableFnNamespace;
   /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
 }
 
 /** Builder for index expressions and predicates. Column refs, immutable
- *  `c.fn.*`, and `c.case(...)` are available; aggregates, `c.pg`, and trigger
+ *  expression chain methods, and `c.case(...)` are available; aggregates and trigger
  *  OLD/NEW state are not. */
 export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
 
@@ -663,7 +629,7 @@ export interface IndexExprBuilder extends ImmutableExprBuilderBase {}
 export interface GeneratedColumnBuilder extends ImmutableExprBuilderBase {}
 
 /** Builder for portable table CHECK expressions. CHECKs must be immutable and
- *  non-aggregate; PostgreSQL-vendor helpers live on `pgTable().check()`. */
+ *  non-aggregate. PG-only expression nodes fail closed off-PG at validate time. */
 export interface CheckBuilder extends ImmutableExprBuilderBase {}
 
 export type IndexExprFn = (c: IndexExprBuilder) => ExprChain | Expr;
@@ -688,26 +654,15 @@ export interface AggNamespace {
   max(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
 }
 
-/** PostgreSQL vendor expression nodes still reached via `c.pg.*`. Receiver-less
- *  value constructors are top-level imports under P0. The Rust validator fails
- *  closed on targets without a native form. */
-export interface PgExprNamespace {
-  /** Renders portable fields as `extract` and PG-only fields as `pgExtract`. */
-  extract(field: ExtractField, expr: unknown): ExprChain;
-  extract(field: PgExtractField, expr: unknown): ExprChain;
-}
-
 /** The single injected builder handle: a column-accessor function `c("name")`
- *  carrying the `c.fn.*` namespace. A two-arg form
+ *  carrying expression namespaces. A two-arg form
  *  `c("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
 export interface ExprBuilder {
   (name: string): ExprChain;
   (table: string, name: string): ExprChain;
   /** The searched `CASE` form: `c.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
-  fn: FnNamespace;
   agg: AggNamespace;
-  pg: PgExprNamespace;
 }
 
 /** An expression position — a `(c) => Expr` callback (the all-strings fluent
@@ -721,9 +676,7 @@ export interface CheckDef {
 }
 
 /** PostgreSQL-vendor CHECK builder: immutable core plus PG immutable value nodes. */
-export interface CheckBuilderWithPg extends CheckBuilder {
-  pg: PgExprNamespace;
-}
+export interface CheckBuilderWithPg extends CheckBuilder {}
 
 export type PgCheckExprFn = (c: CheckBuilderWithPg) => ExprChain | Expr;
 
@@ -736,10 +689,8 @@ export interface PgCheckDef {
  *  domain VALUE expression; there is no general column accessor because a domain
  *  CHECK can only refer to the value being constrained. */
 export interface DomainValueBuilder extends ExprChain {
-  fn: ImmutableFnNamespace;
   /** The searched `CASE` form: `v.case({ branches: [{ when, then }], else? })`. */
   case(args: { branches: Array<{ when: unknown; then: unknown }>; else?: unknown }): ExprChain;
-  pg: PgExprNamespace;
 }
 
 export type DomainCheckFn = (v: DomainValueBuilder) => ExprChain | Expr;
