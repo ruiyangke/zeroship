@@ -1128,8 +1128,8 @@ test("c.pg builds PG-only regex, pg_column_size, and RLS scalar nodes", () => {
         data: t.json().notNull(),
       },
       checks: [
-        { name: "name_shape", expr: (c) => c.pg.regex(c("name"), "^[a-z]+$") },
-        { name: "data_size", expr: (c) => c.pg.columnSize(c("data")).le(8192) },
+        { name: "name_shape", expr: (c) => c("name").regex("^[a-z]+$") },
+        { name: "data_size", expr: (c) => c("data").columnSize().le(8192) },
       ],
     });
     table("t").update({
@@ -1186,7 +1186,7 @@ test("core CHECK expressions reject vendor, aggregate, and volatile nodes at rec
 test("pgTable CHECK expressions allow immutable PG nodes and reject agg/volatile nodes", () => {
   const ops = record(() =>
     pgTable("t").check("data_small").add({
-      expr: (c) => c.pg.columnSize(c("data")).lt(1000),
+      expr: (c) => c("data").columnSize().lt(1000),
     }),
   );
   assert.deepEqual(ops[0], {
@@ -1385,9 +1385,9 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       },
       checks: [
         check("pkce_method_check", (c) => c("pkce_method").eq("S256")),
-        { name: "user_id_fmt", expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$") },
+        { name: "user_id_fmt", expr: (c) => c("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") },
         check("kind_ok", (c) => c("kind").in(["a", "b", "c"])),
-        { name: "data_size", expr: (c) => c.pg.columnSize(c("data")).lt(262144) },
+        { name: "data_size", expr: (c) => c("data").columnSize().lt(262144) },
         check("total_matches", (c) => c("total_cents").eq(c("subtotal_cents").sub(c("credit_cents")))),
         check("floor_nonneg_or_null", (c) => c("floor_cents").isNull().or(c("floor_cents").ge(0))),
         check("enabled_and_visible", (c) => c("enabled").and(c("visible"))),
@@ -1701,7 +1701,7 @@ test("inList rejects malformed scalar arrays and c.pg rejects regex patterns", (
     (e: any) => e.code === "OP_INVALID" && /must be non-empty/.test(e.message),
   );
   assert.throws(
-    () => record(() => table("t").update({ set: { x: (c) => c.pg.regex(c("x"), "") } })),
+    () => record(() => table("t").update({ set: { x: (c) => c("x").regex("") } })),
     (e: any) => e.code === "OP_INVALID" && /pattern must be non-empty/.test(e.message),
   );
   assert.throws(

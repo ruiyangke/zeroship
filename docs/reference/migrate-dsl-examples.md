@@ -377,9 +377,10 @@ uses the same closed, portable expression builder. `c("col")` references a colum
 (c) => c("num").div(c("den"))
 (c) => c("first").concat(c("last"))
 
-// PG pattern match / size (available from pgTable().check())
-(c) => c.pg.regex(c("email"), "^[^@]+@[^@]+$")       // regex
-(c) => c.pg.pgColumnSize(c("payload")).lt(1048576)   // pg_column_size < 1MiB
+// PG pattern match / size — first-class chain operators (PG-first; fail-closed
+// off-PG, `dialect({...})` to port). Usable anywhere a chain is, incl. core checks.
+(c) => c("email").regex("^[^@]+@[^@]+$")            // regex → `~` (PG) / `REGEXP` (MySQL)
+(c) => c("payload").columnSize().lt(1048576)       // pg_column_size < 1MiB
 
 // Cast
 (c) => c("app_id").cast({ to: "uuid" })

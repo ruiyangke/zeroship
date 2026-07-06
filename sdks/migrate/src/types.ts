@@ -555,6 +555,15 @@ export interface ExprChain {
   "in"(values: readonly Scalar[]): ExprChain;
   notIn(values: readonly Scalar[]): ExprChain;
   distinctFrom(x: unknown): ExprChain;
+  // PostgreSQL-first chain operators (P0). First-class on the core surface — no
+  // `/pg` import, no `c.pg.` cast. The Rust validator fails closed on targets
+  // that lack a native form (`regex`: `~` on PG, `REGEXP` on MySQL, error on
+  // SQLite; `columnSize`: `pg_column_size` on PG, error elsewhere); use
+  // `dialect({...})` to supply a portable leg.
+  /** `<expr> ~ '<pattern>'` (PG) / `<expr> REGEXP '<pattern>'` (MySQL). */
+  regex(pattern: string): ExprChain;
+  /** `pg_column_size(<expr>)` — PostgreSQL on-disk byte size of the value. */
+  columnSize(): ExprChain;
 }
 
 /** The `c.fn.*` scalar-function namespace (§3.6) — reached off the single
@@ -671,14 +680,11 @@ export interface AggNamespace {
   max(expr: unknown, opts?: { distinct?: boolean }): ExprChain;
 }
 
-/** PostgreSQL-only expression nodes. These methods intentionally live under
- *  `c.pg.*` so the portable chain surface stays dialect-neutral; the Rust
- *  validator rejects these nodes on SQLite/MySQL. */
+/** PostgreSQL vendor expression nodes still reached via `c.pg.*`. `regex` and
+ *  `columnSize` moved to first-class chain methods on `ExprChain` (P0); the
+ *  remaining members are pending flatten to imports (J3). The Rust validator
+ *  fails closed on targets without a native form. */
 export interface PgExprNamespace {
-  /** Renders `<expr> ~ '<pattern>'::text` on PostgreSQL. */
-  regex(expr: unknown, pattern: string): ExprChain;
-  /** Renders `pg_column_size(<expr>)` on PostgreSQL. */
-  columnSize(expr: unknown): ExprChain;
   /** PG vendor scalar for RLS policies: current_setting(name, missing_ok?). */
   currentSetting(name: string, missingOk?: boolean): ExprChain;
   /** PG vendor scalar for RLS policies: current_user. */
