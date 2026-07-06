@@ -1076,6 +1076,18 @@ importers:
         specifier: 'catalog:'
         version: 5.9.3
 
+  sdks/eslint-plugin-workflow:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.19.17
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
+
   sdks/kv:
     devDependencies:
       '@arethetypeswrong/cli':
