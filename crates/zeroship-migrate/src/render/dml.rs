@@ -52,8 +52,8 @@
 //!   a hard authoring error ([`DmlError::OnConflictNotPortable`], surfaced as
 //!   `dialect_scope = PgOnly` / `UNSUPPORTED { kind: "op" }`) — there is NO raw
 //!   route (property A) and we never silently drop the conflict clause.
-//! - A **batched** `backfill` (and an `update { batch }`) targets the
-//!   `BackfillSpec` executor, PORTABLE on BOTH backends since PR6b: PG via the
+//! - A **batched** `backfill` targets the `BackfillSpec` executor, PORTABLE on
+//!   BOTH backends since PR6b: PG via the
 //!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
 //!   per-batch-txn executor (`apply::backend::sqlite::backfill_sql`, §2.3.1). The inline
 //!   `set`/`filter` differ per dialect (the §9 `c.fn.splitPart` lowering,
