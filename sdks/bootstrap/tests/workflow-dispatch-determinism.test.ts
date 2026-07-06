@@ -52,6 +52,21 @@ function completedRun(
   };
 }
 
+function completedSideEffect(
+  ordinal: number,
+  name: string,
+  output: unknown,
+): Record<string, unknown> {
+  return {
+    ordinal,
+    name,
+    nameOccurrence: 0,
+    kind: "sideEffect",
+    state: "completed",
+    output,
+  };
+}
+
 function macrotask(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 0);
@@ -174,5 +189,61 @@ describe("__zsWorkflowDispatch workflow determinism guard", () => {
     assert.equal(sleep.kind, "Sleep");
     assert.equal(sleep.name, "cooldown");
     assert.equal(sleep.wakeAt, "1s");
+  });
+
+  test("sideEffect journals once and replays without running the callback", { timeout: TEST_TIMEOUT_MS }, async () => {
+    let calls = 0;
+
+    class SideEffectWorkflow {
+      async run(
+        _trigger: unknown,
+        step: {
+          sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+          run<T>(name: string, fn: () => T): Promise<T>;
+        },
+      ) {
+        const frozen = await step.sideEffect("v", async () => {
+          calls++;
+          return { value: `fresh-${calls}` };
+        });
+        const after = await step.run("after", () => ({ frozen }));
+        return { frozen, after };
+      }
+    }
+
+    const first = await dispatch(SideEffectWorkflow);
+    assert.equal(calls, 1);
+    assert.equal(first.kind, "StepCompleted");
+    assert.equal(first.stepKind, "sideEffect");
+    assert.equal(first.name, "v");
+    assert.deepEqual(first.output, { value: "fresh-1" });
+
+    const replay = await dispatch(SideEffectWorkflow, [
+      completedSideEffect(0, "v", { value: "frozen" }),
+    ]);
+    assert.equal(calls, 1);
+    assert.equal(replay.kind, "StepCompleted");
+    assert.equal(replay.stepKind, "run");
+    assert.equal(replay.name, "after");
+    assert.deepEqual(replay.output, { frozen: { value: "frozen" } });
+  });
+
+  test("sideEffect kind divergence fails with NondeterministicError", { timeout: TEST_TIMEOUT_MS }, async () => {
+    class SideEffectWorkflow {
+      async run(
+        _trigger: unknown,
+        step: { sideEffect<T>(name: string, fn: () => T): Promise<T> },
+      ) {
+        return await step.sideEffect("v", () => "wrong");
+      }
+    }
+
+    const result = await dispatch(SideEffectWorkflow, [
+      completedRun(0, "v", "run-output"),
+    ]);
+
+    assert.equal(result.kind, "RunFailed");
+    assert.equal(result.error?.type, "NondeterministicError");
+    assert.match(result.error?.message ?? "", /expected sideEffect v#0, got run v#0/);
   });
 });

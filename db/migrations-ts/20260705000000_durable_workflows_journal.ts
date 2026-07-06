@@ -223,7 +223,7 @@ export function up() {
     },
     primaryKey: ["run_id", "ordinal"],
   });
-  zs("workflow_steps").check("workflow_steps_kind_check").add({ expr: (c) => c("kind").in(["run", "sleep", "wait_signal", "child"]) });
+  zs("workflow_steps").check("workflow_steps_kind_check").add({ expr: (c) => c("kind").in(["run", "sideEffect", "sleep", "wait_signal", "child"]) });
   zs("workflow_steps").check("workflow_steps_state_check").add({ expr: (c) => c("state").in(["running", "completed", "failed"]) });
   pzs("workflow_steps").check("workflow_steps_check").add({
     expr: (c) =>

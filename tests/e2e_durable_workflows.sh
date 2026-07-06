@@ -230,6 +230,14 @@ export class ConcurrentWorkflow {
   }
 }
 
+export class SideEffectWorkflow {
+  async run(trigger, step) {
+    const v = await step.sideEffect("v", () => bump(trigger.runId, "v"));
+    const after = await step.run("after", () => bump(trigger.runId, "after"));
+    return { v, after };
+  }
+}
+
 export class BareAwaitWorkflow {
   async run(trigger, step) {
     const pending = step.run("first", () => bump(trigger.runId, "first"));
@@ -256,6 +264,7 @@ export default {
     KeystoneWorkflow,
     SignalWorkflow,
     ConcurrentWorkflow,
+    SideEffectWorkflow,
     BareAwaitWorkflow,
     NameDivergenceWorkflow,
   },

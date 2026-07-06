@@ -17,7 +17,7 @@ import {
 
 export const STEP_PROMISE_BRAND = Symbol.for("zeroship.workflow.stepPromise");
 
-export type JournalStepKind = "run" | "sleep" | "wait_signal" | "child";
+export type JournalStepKind = "run" | "sideEffect" | "sleep" | "wait_signal" | "child";
 export type JournalStepState = "running" | "completed" | "failed";
 
 export interface JournalStepRecord {
@@ -43,7 +43,7 @@ export interface JournalEnvelope {
 
 export type FrontierOutcome =
   | {
-      kind: "run";
+      kind: "run" | "sideEffect";
       ordinal: number;
       name: string;
       nameOccurrence: number;
@@ -257,6 +257,23 @@ class JournalBackedStep implements WorkflowStep {
     );
   }
 
+  sideEffect<T>(name: string, fn: () => T | Promise<T>): Promise<T> {
+    this.#assertNotNested();
+    if (typeof fn !== "function") {
+      return brandStepPromise(Promise.reject(
+        new WorkflowUnsupportedError("step.sideEffect requires a function body"),
+      ));
+    }
+
+    const issued = this.#issue(name, "sideEffect");
+    if (issued.record) {
+      return this.#recordPromise<T>(issued.record);
+    }
+    return this.#registerFrontier(
+      this.#sideEffectFrontier(issued, name, fn),
+    );
+  }
+
   sleep(name: string, duration: string): Promise<void> {
     this.#assertNotNested();
     const issued = this.#issue(name, "sleep");
@@ -397,6 +414,31 @@ class JournalBackedStep implements WorkflowStep {
         state: "failed",
         error: serializeError(e),
         config,
+      };
+    } finally {
+      bodyPromise.catch(() => {});
+      this.#activeStepCallbacks--;
+      if (this.#activeStepCallbacks === 0) {
+        this.#parallelIssueWindow = false;
+      }
+    }
+  }
+
+  async #sideEffectFrontier<T>(
+    issued: { ordinal: number; nameOccurrence: number },
+    name: string,
+    fn: () => T | Promise<T>,
+  ): Promise<FrontierOutcome> {
+    const bodyPromise = this.#invokeStepBody(fn);
+    try {
+      const output = await bodyPromise;
+      return {
+        kind: "sideEffect",
+        ordinal: issued.ordinal,
+        name,
+        nameOccurrence: issued.nameOccurrence,
+        state: "completed",
+        output,
       };
     } finally {
       bodyPromise.catch(() => {});
