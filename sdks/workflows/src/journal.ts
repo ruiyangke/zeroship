@@ -1,5 +1,7 @@
 import {
+  NondeterministicError,
   PermanentError,
+  StalledError,
   WorkflowNestedStepError,
   WorkflowStepTimeoutError,
   WorkflowTimeoutError,
@@ -407,7 +409,7 @@ class JournalBackedStep implements WorkflowStep {
         record.kind !== kind ||
         (record.nameOccurrence ?? 0) !== nameOccurrence
       ) {
-        throw new WorkflowUnsupportedError(
+        throw new NondeterministicError(
           `workflow journal mismatch at ordinal ${ordinal}: expected ${kind} ${name}#${nameOccurrence}, got ${record.kind} ${record.name}#${record.nameOccurrence ?? 0}`,
         );
       }
@@ -451,6 +453,7 @@ class JournalBackedStep implements WorkflowStep {
 class FrontierCoordinator {
   readonly promise: Promise<never>;
   #pending = 0;
+  #observed = false;
   #sealed = false;
   #settled = false;
   #fatal: unknown;
@@ -460,8 +463,12 @@ class FrontierCoordinator {
   constructor() {
     this.promise = brandStepPromise(new Promise<never>((_, reject) => {
       this.#reject = reject;
-    }));
-    queueMicrotask(() => this.seal());
+    }), () => {
+      this.#observed = true;
+    });
+    queueMicrotask(() => {
+      queueMicrotask(() => this.seal());
+    });
   }
 
   get sealed(): boolean {
@@ -485,6 +492,11 @@ class FrontierCoordinator {
   }
 
   seal(): void {
+    if (!this.#observed) {
+      this.#fatal ??= new NondeterministicError(
+        "workflow body awaited non-step work while a frontier was pending",
+      );
+    }
     this.#sealed = true;
     this.#maybeFinish();
   }
@@ -501,16 +513,64 @@ class FrontierCoordinator {
   }
 }
 
-function brandStepPromise<T>(promise: Promise<T>): Promise<T> {
-  if (!isWorkflowStepPromise(promise)) {
-    Object.defineProperty(promise, STEP_PROMISE_BRAND, {
+class WorkflowStepPromise<T> extends Promise<T> {
+  declare readonly [STEP_PROMISE_BRAND]: true;
+  #observed = false;
+  readonly #onObserve: (() => void) | undefined;
+
+  static get [Symbol.species](): PromiseConstructor {
+    return Promise;
+  }
+
+  constructor(
+    executor: (
+      resolve: (value: T | PromiseLike<T>) => void,
+      reject: (reason?: unknown) => void,
+    ) => void,
+    onObserve?: () => void,
+  ) {
+    super(executor);
+    this.#onObserve = onObserve;
+    Object.defineProperty(this, STEP_PROMISE_BRAND, {
       value: true,
       configurable: false,
       enumerable: false,
       writable: false,
     });
   }
-  return promise;
+
+  then<TResult1 = T, TResult2 = never>(
+    onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2> {
+    this.#observe();
+    return super.then(onfulfilled, onrejected);
+  }
+
+  catch<TResult = never>(
+    onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null,
+  ): Promise<T | TResult> {
+    this.#observe();
+    return super.catch(onrejected);
+  }
+
+  finally(onfinally?: (() => void) | null): Promise<T> {
+    this.#observe();
+    return super.finally(onfinally);
+  }
+
+  #observe(): void {
+    if (this.#observed) return;
+    this.#observed = true;
+    this.#onObserve?.();
+  }
+}
+
+function brandStepPromise<T>(promise: Promise<T>, onObserve?: () => void): Promise<T> {
+  if (isWorkflowStepPromise(promise)) return promise;
+  return new WorkflowStepPromise<T>((resolve, reject) => {
+    promise.then(resolve, reject);
+  }, onObserve);
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
@@ -542,15 +602,19 @@ function deserializeError(error: JournalStepRecord["error"]): Error {
   const message = error?.message ?? "workflow step failed";
   const e = error?.type === "PermanentError"
     ? new PermanentError(message)
-    : error?.type === "WorkflowStepTimeoutError" || error?.type === "StepTimeoutError"
-      ? new WorkflowStepTimeoutError(message)
-      : error?.type === "WorkflowTimeoutError"
-        ? new WorkflowTimeoutError(message)
-      : error?.type === "WorkflowNestedStepError" || error?.type === "NestedStepError"
-        ? new WorkflowNestedStepError(message)
-        : error?.type === "WorkflowUnsupportedError" || error?.type === "UnsupportedError"
-          ? new WorkflowUnsupportedError(message)
-          : new Error(message);
+    : error?.type === "NondeterministicError"
+      ? new NondeterministicError(message)
+      : error?.type === "StalledError"
+        ? new StalledError(message)
+        : error?.type === "WorkflowStepTimeoutError" || error?.type === "StepTimeoutError"
+          ? new WorkflowStepTimeoutError(message)
+          : error?.type === "WorkflowTimeoutError"
+            ? new WorkflowTimeoutError(message)
+            : error?.type === "WorkflowNestedStepError" || error?.type === "NestedStepError"
+              ? new WorkflowNestedStepError(message)
+              : error?.type === "WorkflowUnsupportedError" || error?.type === "UnsupportedError"
+                ? new WorkflowUnsupportedError(message)
+                : new Error(message);
   e.name = error?.type ?? e.name;
   if (error?.stack) e.stack = error.stack;
   return e;

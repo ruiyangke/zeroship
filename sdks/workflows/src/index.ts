@@ -111,6 +111,18 @@ export interface WorkflowStep {
 
 export type Step = WorkflowStep;
 
+export type WorkflowRunState =
+  | "queued"
+  | "running"
+  | "sleeping"
+  | "waiting"
+  | "paused"
+  | "stalled"
+  | "compensating"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
 export interface RestartTarget {
   name: string;
   occurrence?: number;
@@ -124,7 +136,7 @@ export interface RestartOptions {
 export interface WorkflowRun<Output = unknown> {
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
-  status(): Promise<{ state: string; output?: Output | StepOutputRef; error?: unknown }>;
+  status(): Promise<{ state: WorkflowRunState; output?: Output | StepOutputRef; error?: unknown }>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
@@ -170,6 +182,24 @@ export class RestartError extends Error {
   constructor(message = "workflow restart failed") {
     super(message);
     this.name = "RestartError";
+  }
+}
+
+export class NondeterministicError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "workflow replay is nondeterministic") {
+    super(message);
+    this.name = "NondeterministicError";
+  }
+}
+
+export class StalledError extends Error {
+  readonly retryable = false;
+
+  constructor(message = "workflow run stalled") {
+    super(message);
+    this.name = "StalledError";
   }
 }
 

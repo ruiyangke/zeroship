@@ -9,6 +9,7 @@ import {
   withWorkflowPromiseGuards,
 } from "../src/journal.ts";
 import {
+  NondeterministicError,
   WorkflowNestedStepError,
   WorkflowStepTimeoutError,
   WorkflowTimeoutError,
@@ -195,6 +196,74 @@ test("Promise.all over a run and sleep collects settled siblings plus the suspen
     },
   );
   assert.equal(calls, 1);
+});
+
+test("bare workflow-body await while a frontier is pending throws NondeterministicError", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope());
+
+  await assert.rejects(
+    async () => {
+      const frontier = step.run("frontier", () => "ok");
+      await Promise.resolve();
+      await frontier;
+    },
+    NondeterministicError,
+  );
+});
+
+test("journal name divergence throws NondeterministicError", { timeout: TEST_TIMEOUT_MS }, () => {
+  const step = createJournalStep(envelope([
+    {
+      ordinal: 0,
+      name: "expected",
+      nameOccurrence: 0,
+      kind: "run",
+      state: "completed",
+      output: "memoized",
+    },
+  ]));
+
+  assert.throws(
+    () => step.run("actual", () => "wrong"),
+    NondeterministicError,
+  );
+});
+
+test("memoized multi-step replay with Promise.all has no nondeterminism false positive", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const step = createJournalStep(envelope([
+    {
+      ordinal: 0,
+      name: "first",
+      nameOccurrence: 0,
+      kind: "run",
+      state: "completed",
+      output: "A",
+    },
+    {
+      ordinal: 1,
+      name: "second",
+      nameOccurrence: 0,
+      kind: "run",
+      state: "completed",
+      output: "B",
+    },
+    {
+      ordinal: 2,
+      name: "third",
+      nameOccurrence: 0,
+      kind: "run",
+      state: "completed",
+      output: "C",
+    },
+  ]));
+
+  const first = await step.run("first", () => "wrong");
+  const rest = await Promise.all([
+    step.run("second", () => "wrong"),
+    step.run("third", () => "wrong"),
+  ]);
+
+  assert.deepEqual([first, ...rest], ["A", "B", "C"]);
 });
 
 test("concurrent misses share a branded dispatch latch while each callback runs once", { timeout: TEST_TIMEOUT_MS }, async () => {
