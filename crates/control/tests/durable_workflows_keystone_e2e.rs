@@ -36,6 +36,8 @@ const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const WORKFLOW_NAME: &str = "KeystoneWorkflow";
 const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
 const CONCURRENT_WORKFLOW_NAME: &str = "ConcurrentWorkflow";
+const BARE_AWAIT_WORKFLOW_NAME: &str = "BareAwaitWorkflow";
+const NAME_DIVERGENCE_WORKFLOW_NAME: &str = "NameDivergenceWorkflow";
 
 fn enabled() -> bool {
     std::env::var("ZEROSHIP_DW_E2E").ok().as_deref() == Some("1")
@@ -441,6 +443,7 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         max_inflight_dispatch: 8,
         claim_ttl_ms: 1_500,
         heartbeat_ms: 60_000,
+        stuck_strike_limit: 3,
         owner_id: owner.to_string(),
     }
 }
@@ -494,6 +497,34 @@ async fn seed_signal_run(
         input["maxSignalAge"] = serde_json::Value::String(max_signal_age.to_string());
     }
     seed_workflow_run(fx, SIGNAL_WORKFLOW_NAME, input).await
+}
+
+async fn seed_completed_step(
+    fx: &Fixture,
+    run_id: &str,
+    name: &str,
+    kind: &str,
+    output: serde_json::Value,
+) {
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.workflow_steps \
+                (run_id, ordinal, name, name_occurrence, kind, state, output, output_kind, \
+                 batch_id, batch_width, finished_at) \
+             VALUES ($1, 0, $2, 0, $3, 'completed', $4, 'inline', 'wfd_seed', 1, now())",
+            &[&run_id, &name, &kind, &output],
+        )
+        .await
+        .expect("seed completed workflow step");
+    fx.pg
+        .execute(
+            "UPDATE zeroship.workflow_runs \
+                SET next_ordinal = GREATEST(next_ordinal, 1) \
+              WHERE id = $1",
+            &[&run_id],
+        )
+        .await
+        .expect("advance seeded run next_ordinal");
 }
 
 async fn run_state(
@@ -565,6 +596,46 @@ async fn drive_until_completed<D>(
         rows[0].get::<_, Option<DateTime<Utc>>>("wake_at"),
         rows[0].get::<_, Option<String>>("claimed_by"),
         rows[0].get::<_, Option<String>>("dispatch_nonce"),
+        run_debug(fx, run_id).await
+    );
+}
+
+async fn drive_until_failed<D>(
+    fx: &Fixture,
+    dispatcher: Arc<D>,
+    cfg: WorkflowEngineConfig,
+    run_id: &str,
+    label: &str,
+) -> serde_json::Value
+where
+    D: StepDispatcher + 'static,
+{
+    for _ in 0..120 {
+        workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{label} tick failed: {e}"));
+        let (state, _, _, _) = run_state(&fx.pg, run_id).await;
+        if state == "failed" {
+            let row = fx
+                .pg
+                .query_one(
+                    "SELECT error FROM zeroship.workflow_runs WHERE id = $1",
+                    &[&run_id],
+                )
+                .await
+                .unwrap_or_else(|e| panic!("load {label} failure: {e}"));
+            return row.get("error");
+        }
+        if state == "completed" {
+            panic!(
+                "{label} workflow completed instead of failing: {}",
+                run_debug(fx, run_id).await
+            );
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!(
+        "{label} workflow did not fail: {}",
         run_debug(fx, run_id).await
     );
 }
@@ -1008,6 +1079,48 @@ async fn durable_workflows_m1_keystone_real_spine() {
         concurrent_dispatcher.count()
     );
 
+    let name_divergence_run = seed_workflow_run(
+        &fx,
+        NAME_DIVERGENCE_WORKFLOW_NAME,
+        serde_json::json!({"case": "name-divergence"}),
+    )
+    .await;
+    seed_completed_step(
+        &fx,
+        &name_divergence_run,
+        "expected",
+        "run",
+        serde_json::json!({"seeded": true}),
+    )
+    .await;
+    let name_divergence_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
+    let error = drive_until_failed(
+        &fx,
+        Arc::clone(&name_divergence_dispatcher),
+        config("dw13-name-divergence"),
+        &name_divergence_run,
+        "name-divergence",
+    )
+    .await;
+    assert_eq!(error["type"], "NondeterministicError");
+    assert!(
+        name_divergence_dispatcher.count() >= 1,
+        "name-divergence workflow should have dispatched at least once"
+    );
+    assert_eq!(
+        step_rows(&fx, &name_divergence_run).await,
+        vec![(0, "expected".to_string(), "run".to_string(), "completed".to_string())],
+        "name-divergence proof should preserve the seeded journal row"
+    );
+    assert_eq!(
+        side_counts(&fx, &name_divergence_run)
+            .await
+            .get("actual")
+            .copied(),
+        None,
+        "mismatched step callback must not execute"
+    );
+
     let pause_run = seed_run(&fx, "pause-mid").await;
     let (pause_dispatcher, pause_outcome_rx, pause_release_tx) =
         CrashOnceDispatcher::new(gateway_url.clone());
@@ -1444,4 +1557,80 @@ async fn durable_workflows_m1_keystone_real_spine() {
     assert_eq!(stale_counts.get("a").copied(), Some(1));
     assert_eq!(stale_counts.get("timeout").copied(), Some(1));
     assert_eq!(stale_counts.get("b").copied(), None);
+}
+
+// Bare non-step I/O is best-effort per design §11: a fast local fetch can resolve before
+// the dispatch drain boundary, so this assertion is intentionally parked until DW-13f adds
+// dispatch-scoped fetch/timer prevention. The positive determinism gate is the name-divergence
+// proof in durable_workflows_m1_keystone_real_spine.
+#[compio::test]
+#[ignore = "known gap: bare body I/O detection is best-effort until DW-13f prevention"]
+async fn bare_await_best_effort_known_gap() {
+    if !enabled() {
+        eprintln!("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
+        return;
+    }
+
+    let db_url = required_env("CONTROL_TEST_DB");
+    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL");
+    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID")
+        .parse()
+        .expect("app id uuid");
+    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID");
+    let side_port: u16 = required_env("ZEROSHIP_DW_E2E_SIDE_PORT")
+        .parse()
+        .expect("side port");
+    let side_cfg = SideEffectConfig {
+        pg_container: required_env("ZEROSHIP_DW_E2E_PG_CONTAINER"),
+        pg_user: required_env("ZEROSHIP_DW_E2E_PG_USER"),
+        pg_db: required_env("ZEROSHIP_DW_E2E_PG_DB"),
+    };
+
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    prepare_side_effect_table(&fx.pg).await;
+    start_side_effect_server(side_cfg, side_port);
+    compio::time::sleep(Duration::from_millis(100)).await;
+
+    let bare_await_run = seed_workflow_run(
+        &fx,
+        BARE_AWAIT_WORKFLOW_NAME,
+        serde_json::json!({"case": "bare-await"}),
+    )
+    .await;
+    let bare_dispatcher = Arc::new(CountingDispatcher::new(gateway_url.clone()));
+    for _ in 0..120 {
+        workflow_engine::tick_with_dispatcher(
+            &fx.state,
+            Arc::clone(&bare_dispatcher),
+            config("dw13-bare-await"),
+        )
+        .await
+        .expect("bare-await tick");
+        let (state, _, _, _) = run_state(&fx.pg, &bare_await_run).await;
+        if state == "failed" {
+            break;
+        }
+        if state == "completed" {
+            panic!(
+                "bare-await workflow completed instead of failing: {}",
+                run_debug(&fx, &bare_await_run).await
+            );
+        }
+        compio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let failed = fx
+        .pg
+        .query_one(
+            "SELECT state, error FROM zeroship.workflow_runs WHERE id = $1",
+            &[&bare_await_run],
+        )
+        .await
+        .expect("load bare-await failure");
+    assert_eq!(failed.get::<_, String>("state"), "failed");
+    let error: serde_json::Value = failed.get("error");
+    assert_eq!(error["type"], "NondeterministicError");
+    assert!(
+        bare_dispatcher.count() >= 1,
+        "bare-await workflow should have dispatched at least once"
+    );
 }

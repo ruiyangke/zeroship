@@ -52,6 +52,11 @@ pub struct WorkflowEngineConfig {
     pub claim_ttl_ms: i64,
     /// Heartbeat cadence while a detached dispatch is in flight.
     pub heartbeat_ms: u64,
+    /// Consecutive zero-progress dispatches before fail-closed `stalled`.
+    ///
+    /// G3 placeholder: DW-23 will measure wide-frontier rollover behavior and
+    /// replace this conservative seed with operator-plan defaults.
+    pub stuck_strike_limit: i16,
     /// Stable owner id written into `claimed_by`.
     pub owner_id: String,
 }
@@ -65,6 +70,7 @@ impl Default for WorkflowEngineConfig {
             max_inflight_dispatch: 64,
             claim_ttl_ms: 120_000,
             heartbeat_ms: 5_000,
+            stuck_strike_limit: 3,
             owner_id: default_owner_id(),
         }
     }
@@ -142,6 +148,14 @@ pub enum StepOutcome {
         #[serde(default)]
         output: Option<Value>,
     },
+    StepFailed {
+        ordinal: i32,
+        name: String,
+        #[serde(default, rename = "nameOccurrence")]
+        name_occurrence: i32,
+        #[serde(default)]
+        error: Value,
+    },
     RunCompleted {
         #[serde(default)]
         output: Option<Value>,
@@ -193,6 +207,7 @@ pub enum RunUpdate {
     },
     Completed { output: Option<Value> },
     Failed { error: Value },
+    Stalled { error: Value },
     Cancelled,
 }
 
@@ -204,6 +219,7 @@ impl RunUpdate {
             Self::Waiting { .. } => "waiting",
             Self::Completed { .. } => "completed",
             Self::Failed { .. } => "failed",
+            Self::Stalled { .. } => "stalled",
             Self::Cancelled => "cancelled",
         }
     }
@@ -225,7 +241,7 @@ impl RunUpdate {
 
     fn error(&self) -> Option<Value> {
         match self {
-            Self::Failed { error } => Some(error.clone()),
+            Self::Failed { error } | Self::Stalled { error } => Some(error.clone()),
             _ => None,
         }
     }
@@ -371,13 +387,23 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
     let mut checkpoints = Vec::new();
     let mut run_update = RunUpdate::Queued;
     let mut trailing_seen = false;
+    let mut saw_step_failure = false;
 
     for (idx, outcome) in outcomes.iter().enumerate() {
-        let is_step_completed = matches!(outcome, StepOutcome::StepCompleted { .. });
+        let is_step_checkpoint = matches!(
+            outcome,
+            StepOutcome::StepCompleted { .. }
+                | StepOutcome::StepFailed { .. }
+                | StepOutcome::RunFailed {
+                    ordinal: Some(_),
+                    name: Some(_),
+                    ..
+                }
+        );
         if trailing_seen {
             return Err("workflow outcome batch has entries after a suspension or terminal outcome".to_string());
         }
-        if !is_step_completed {
+        if !is_step_checkpoint {
             if idx + 1 != outcomes.len() {
                 return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
             }
@@ -405,6 +431,28 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     consumed_signal_id: None,
                 });
             }
+            StepOutcome::StepFailed {
+                ordinal,
+                name,
+                name_occurrence,
+                error,
+            } => {
+                checkpoints.push(StepCheckpoint {
+                    ordinal: *ordinal,
+                    name: name.clone(),
+                    name_occurrence: *name_occurrence,
+                    kind: "run".to_string(),
+                    state: "failed".to_string(),
+                    output: None,
+                    error: Some(error.clone()),
+                    wake_at: None,
+                    signal_type: None,
+                    max_signal_age_ms: None,
+                    consumed_signal_id: None,
+                });
+                saw_step_failure = true;
+                run_update = RunUpdate::Queued;
+            }
             StepOutcome::RunCompleted { output } => {
                 run_update = RunUpdate::Completed {
                     output: output.clone(),
@@ -416,24 +464,36 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                 name_occurrence,
                 error,
             } => {
-                if let (Some(ordinal), Some(name)) = (ordinal, name) {
-                    checkpoints.push(StepCheckpoint {
-                        ordinal: *ordinal,
-                        name: name.clone(),
-                        name_occurrence: *name_occurrence,
-                        kind: "run".to_string(),
-                        state: "failed".to_string(),
-                        output: None,
-                        error: Some(error.clone()),
-                        wake_at: None,
-                        signal_type: None,
-                        max_signal_age_ms: None,
-                        consumed_signal_id: None,
-                    });
+                match (ordinal, name) {
+                    (Some(ordinal), Some(name)) => {
+                        checkpoints.push(StepCheckpoint {
+                            ordinal: *ordinal,
+                            name: name.clone(),
+                            name_occurrence: *name_occurrence,
+                            kind: "run".to_string(),
+                            state: "failed".to_string(),
+                            output: None,
+                            error: Some(error.clone()),
+                            wake_at: None,
+                            signal_type: None,
+                            max_signal_age_ms: None,
+                            consumed_signal_id: None,
+                        });
+                        saw_step_failure = true;
+                        run_update = RunUpdate::Queued;
+                    }
+                    (None, None) => {
+                        run_update = RunUpdate::Failed {
+                            error: error.clone(),
+                        };
+                    }
+                    _ => {
+                        return Err(
+                            "workflow RunFailed outcome must include both ordinal and name for a failed step, or neither for terminal run failure"
+                                .to_string(),
+                        );
+                    }
                 }
-                run_update = RunUpdate::Failed {
-                    error: error.clone(),
-                };
             }
             StepOutcome::Sleep {
                 ordinal,
@@ -454,9 +514,11 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     max_signal_age_ms: None,
                     consumed_signal_id: None,
                 });
-                run_update = RunUpdate::Sleeping {
-                    wake_at: Some(*wake_at),
-                };
+                if !saw_step_failure {
+                    run_update = RunUpdate::Sleeping {
+                        wake_at: Some(*wake_at),
+                    };
+                }
             }
             StepOutcome::Wait {
                 ordinal,
@@ -480,14 +542,29 @@ fn fold_outcomes(outcomes: &[StepOutcome]) -> Result<(Vec<StepCheckpoint>, RunUp
                     max_signal_age_ms: *max_signal_age_ms,
                     consumed_signal_id: consumed_signal_id.clone(),
                 });
-                run_update = RunUpdate::Waiting {
-                    wake_at: Some(*wake_at),
-                };
+                if !saw_step_failure {
+                    run_update = RunUpdate::Waiting {
+                        wake_at: Some(*wake_at),
+                    };
+                }
             }
         }
     }
 
+    if saw_step_failure {
+        run_update = RunUpdate::Queued;
+    }
+
     Ok((checkpoints, run_update))
+}
+
+fn stalled_error(strikes: i16, limit: i16) -> Value {
+    serde_json::json!({
+        "type": "StalledError",
+        "message": "workflow made no durable progress before the liveness strike limit",
+        "stuck_strikes": strikes,
+        "stuck_strike_limit": limit,
+    })
 }
 
 fn outcomes_from_apply_parts(
@@ -507,9 +584,9 @@ fn outcomes_from_apply_parts(
             }),
             ("run", "failed") => {
                 failed_checkpoint_encoded = true;
-                outcomes.push(StepOutcome::RunFailed {
-                    ordinal: Some(checkpoint.ordinal),
-                    name: Some(checkpoint.name.clone()),
+                outcomes.push(StepOutcome::StepFailed {
+                    ordinal: checkpoint.ordinal,
+                    name: checkpoint.name.clone(),
                     name_occurrence: checkpoint.name_occurrence,
                     error: checkpoint.error.clone().unwrap_or_else(|| {
                         serde_json::json!({"type": "Error", "message": "workflow step failed"})
@@ -555,6 +632,12 @@ fn outcomes_from_apply_parts(
                 error: error.clone(),
             });
         }
+        RunUpdate::Stalled { error } => outcomes.push(StepOutcome::RunFailed {
+            ordinal: None,
+            name: None,
+            name_occurrence: 0,
+            error: error.clone(),
+        }),
         _ => {}
     }
 
@@ -1260,7 +1343,7 @@ fn spawn_dispatch<D>(
         heartbeat.store(false, Ordering::SeqCst);
         match outcome {
             DispatchOutcome::Completed(result) => {
-                match apply_step_result_on_registry(&registry, &config.owner_id, result.clone()).await {
+                match apply_step_result_on_registry(&registry, &config, result.clone()).await {
                     Ok(_) => {}
                     Err(ApplyError::Deadlock(msg)) => {
                         tracing::warn!(error = %msg, run_id = %result.run_id, "workflow_engine: apply deadlock, requeueing claim");
@@ -1386,7 +1469,25 @@ pub async fn apply_step_result(
     owner_id: &str,
     result: StepResult,
 ) -> Result<bool, RegistryError> {
-    apply_step_result_on_registry(&state.registry, owner_id, result)
+    let mut config = WorkflowEngineConfig::default();
+    config.owner_id = owner_id.to_string();
+    apply_step_result_on_registry(&state.registry, &config, result)
+        .await
+        .map_err(|e| match e {
+            ApplyError::Invalid(msg) => RegistryError::InvalidInput(msg),
+            ApplyError::Deadlock(msg) => RegistryError::Database(format!("retryable deadlock: {msg}")),
+            ApplyError::Db(e) => e,
+        })
+}
+
+/// Public deterministic apply path with scheduler config overrides for tests.
+#[allow(clippy::future_not_send)]
+pub async fn apply_step_result_with_config(
+    state: &AppState,
+    config: WorkflowEngineConfig,
+    result: StepResult,
+) -> Result<bool, RegistryError> {
+    apply_step_result_on_registry(&state.registry, &config, result)
         .await
         .map_err(|e| match e {
             ApplyError::Invalid(msg) => RegistryError::InvalidInput(msg),
@@ -1397,7 +1498,7 @@ pub async fn apply_step_result(
 
 async fn apply_step_result_on_registry(
     registry: &Registry,
-    owner_id: &str,
+    config: &WorkflowEngineConfig,
     mut result: StepResult,
 ) -> Result<bool, ApplyError> {
     let (checkpoints, run_update) = fold_outcomes(&result.outcomes).map_err(ApplyError::Invalid)?;
@@ -1411,7 +1512,7 @@ async fn apply_step_result_on_registry(
     // Row-lock-first: this is intentionally the first statement in the txn.
     let rows = tx
         .query(
-            "SELECT claimed_by, state, dispatch_nonce \
+            "SELECT claimed_by, state, dispatch_nonce, stuck_strikes \
                FROM zeroship.workflow_runs \
               WHERE id = $1 \
               FOR UPDATE",
@@ -1426,7 +1527,8 @@ async fn apply_step_result_on_registry(
     let claimed_by: Option<String> = row.get("claimed_by");
     let state: String = row.get("state");
     let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
-    if claimed_by.as_deref() != Some(owner_id)
+    let stuck_strikes: i16 = row.get("stuck_strikes");
+    if claimed_by.as_deref() != Some(config.owner_id.as_str())
         || dispatch_nonce.as_deref() != Some(result.dispatch_nonce.as_str())
         || !matches!(state.as_str(), "running" | "paused")
     {
@@ -1434,6 +1536,7 @@ async fn apply_step_result_on_registry(
         return Ok(false);
     }
 
+    let mut wrote_checkpoints = 0usize;
     for checkpoint in &result.checkpoints {
         match insert_resolved_step(
             &tx,
@@ -1449,7 +1552,20 @@ async fn apply_step_result_on_registry(
                 tx.commit().await.map_err(map_apply_error)?;
                 return Ok(true);
             }
-            StepWriteOutcome::Wrote | StepWriteOutcome::Noop => {
+            StepWriteOutcome::Wrote => {
+                wrote_checkpoints += 1;
+                if let Some(signal_id) = checkpoint.consumed_signal_id.as_ref() {
+                    tx.execute(
+                        "UPDATE zeroship.workflow_signals \
+                            SET consumed_by = $1 \
+                          WHERE id = $2 AND consumed_by IS NULL",
+                        &[&result.run_id, signal_id],
+                    )
+                    .await
+                    .map_err(map_apply_error)?;
+                }
+            }
+            StepWriteOutcome::Noop => {
                 if let Some(signal_id) = checkpoint.consumed_signal_id.as_ref() {
                     tx.execute(
                         "UPDATE zeroship.workflow_signals \
@@ -1470,11 +1586,29 @@ async fn apply_step_result_on_registry(
         .map(|s| s.ordinal.saturating_add(1))
         .max()
         .unwrap_or(0);
+    let made_progress = wrote_checkpoints > 0
+        || !matches!(result.run_update, RunUpdate::Queued);
+    let zero_progress = !made_progress && state == "running";
+    let next_stuck_strikes = if zero_progress {
+        stuck_strikes.saturating_add(1)
+    } else {
+        0
+    };
+    if zero_progress && next_stuck_strikes >= config.stuck_strike_limit.max(1) {
+        result.run_update = RunUpdate::Stalled {
+            error: stalled_error(next_stuck_strikes, config.stuck_strike_limit.max(1)),
+        };
+    }
+
     let wake_at = result.run_update.wake_at();
     let waiting_step_key = result.run_update.waiting_step_key(&result.checkpoints);
     if state == "paused" {
         let paused_from_status = match result.run_update {
-            RunUpdate::Queued | RunUpdate::Completed { .. } | RunUpdate::Failed { .. } | RunUpdate::Cancelled => {
+            RunUpdate::Queued
+            | RunUpdate::Completed { .. }
+            | RunUpdate::Failed { .. }
+            | RunUpdate::Stalled { .. }
+            | RunUpdate::Cancelled => {
                 "queued"
             }
             RunUpdate::Sleeping { .. } => "sleeping",
@@ -1488,6 +1622,7 @@ async fn apply_step_result_on_registry(
                     next_ordinal = GREATEST(next_ordinal, $2), \
                     waiting_step_key = $3, \
                     paused_from_status = $4, \
+                    stuck_strikes = 0, \
                     claimed_by = NULL, \
                     lease_expires = NULL, \
                     dispatch_nonce = NULL \
@@ -1501,7 +1636,7 @@ async fn apply_step_result_on_registry(
                 &waiting_step_key,
                 &paused_from_status,
                 &result.run_id,
-                &owner_id,
+                &config.owner_id,
                 &result.dispatch_nonce,
             ],
         )
@@ -1520,12 +1655,13 @@ async fn apply_step_result_on_registry(
                     next_ordinal = GREATEST(next_ordinal, $5), \
                     waiting_step_key = $6, \
                     paused_from_status = NULL, \
+                    stuck_strikes = $7, \
                     claimed_by = NULL, \
                     lease_expires = NULL, \
                     dispatch_nonce = NULL \
-              WHERE id = $7 \
-                AND claimed_by = $8 \
-                AND dispatch_nonce = $9 \
+              WHERE id = $8 \
+                AND claimed_by = $9 \
+                AND dispatch_nonce = $10 \
                 AND state = 'running'",
             &[
                 &state,
@@ -1534,8 +1670,9 @@ async fn apply_step_result_on_registry(
                 &wake_at,
                 &next_ordinal,
                 &waiting_step_key,
+                &next_stuck_strikes,
                 &result.run_id,
-                &owner_id,
+                &config.owner_id,
                 &result.dispatch_nonce,
             ],
         )

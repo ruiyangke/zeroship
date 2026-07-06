@@ -240,9 +240,9 @@ fn workflow_worker_result_to_step_result(
             .as_array()
             .ok_or_else(|| "outcomes must be an array".to_string())?
             .clone();
-        normalize_workflow_outcomes(outcomes)?
+        normalize_workflow_outcomes(outcomes, result.get("error").cloned())?
     } else {
-        normalize_workflow_outcomes(vec![single_worker_result_to_outcome(&result)?])?
+        normalize_workflow_outcomes(vec![single_worker_result_to_outcome(&result)?], None)?
     };
 
     Ok(serde_json::json!({
@@ -272,9 +272,7 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
         "RunFailed" => {
             let mut outcome = serde_json::json!({
                 "kind": "RunFailed",
-                "error": result.get("error").cloned().unwrap_or_else(|| {
-                    serde_json::json!({"type": "Error", "message": "workflow run failed"})
-                }),
+                "error": workflow_error_or_default(result.get("error"), "workflow run failed"),
             });
             if result.get("ordinal").is_some() && result.get("name").is_some() {
                 outcome["ordinal"] = serde_json::json!(required_i64(result, "ordinal")?);
@@ -309,10 +307,21 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
     }
 }
 
-fn normalize_workflow_outcomes(mut outcomes: Vec<Value>) -> Result<Vec<Value>, String> {
+fn workflow_error_or_default(error: Option<&Value>, message: &str) -> Value {
+    error
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"type": "Error", "message": message}))
+}
+
+fn normalize_workflow_outcomes(
+    mut outcomes: Vec<Value>,
+    fallback_error: Option<Value>,
+) -> Result<Vec<Value>, String> {
     if outcomes.is_empty() {
         return Err("workflow outcome batch is empty".to_string());
     }
+    let fallback_error = fallback_error.filter(|value| !value.is_null());
     let last = outcomes.len() - 1;
     for (idx, outcome) in outcomes.iter_mut().enumerate() {
         let kind = outcome
@@ -323,7 +332,17 @@ fn normalize_workflow_outcomes(mut outcomes: Vec<Value>) -> Result<Vec<Value>, S
             return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
         }
         match kind {
-            "StepCompleted" | "RunCompleted" | "RunFailed" => {}
+            "StepCompleted" | "RunCompleted" => {}
+            "RunFailed" => {
+                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
+                    let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
+                        "workflow step failed"
+                    } else {
+                        "workflow run failed"
+                    };
+                    outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), message);
+                }
+            }
             "Sleep" => {
                 let wake_at = normalize_workflow_wake_at(outcome.get("wakeAt"))
                     .ok_or_else(|| "invalid sleep wakeAt".to_string())?;
@@ -418,7 +437,7 @@ fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> 
         _ => {}
     }
 
-    normalize_workflow_outcomes(outcomes)
+    normalize_workflow_outcomes(outcomes, None)
 }
 
 fn required_i64(value: &Value, key: &str) -> Result<i64, String> {
@@ -2745,6 +2764,37 @@ mod tests {
         assert_eq!(result["outcomes"][0]["kind"], "Wait");
         assert_eq!(result["outcomes"][0]["signalType"], "go");
         assert_eq!(result["outcomes"][0]["maxSignalAgeMs"], 5_000);
+    }
+
+    #[test]
+    fn workflow_run_failed_batch_uses_batch_error_when_outcome_error_missing() {
+        let request: WorkflowStepRequest =
+            serde_json::from_value(workflow_step_request(Uuid::new_v4())).unwrap();
+        let worker_result = serde_json::json!({
+            "kind": "RunFailed",
+            "runId": "run_test",
+            "dispatchNonce": "wfd_test",
+            "workflowName": "Checkout",
+            "error": {
+                "type": "NondeterministicError",
+                "message": "workflow journal mismatch at ordinal 0"
+            },
+            "outcomes": [{
+                "kind": "RunFailed"
+            }]
+        });
+        let result = workflow_worker_result_to_step_result(
+            &request,
+            serde_json::to_vec(&worker_result).unwrap().as_slice(),
+        )
+        .expect("run failed result");
+
+        assert_eq!(result["outcomes"][0]["kind"], "RunFailed");
+        assert_eq!(result["outcomes"][0]["error"]["type"], "NondeterministicError");
+        assert_eq!(
+            result["outcomes"][0]["error"]["message"],
+            "workflow journal mismatch at ordinal 0"
+        );
     }
 
     #[test]

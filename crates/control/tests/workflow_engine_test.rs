@@ -20,6 +20,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use compio_postgres::{connect, NoTls};
 use futures::channel::oneshot;
 use ntex::web::{self, test};
+use serial_test::serial;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::cron::workflow_engine::{
@@ -444,6 +445,7 @@ fn config(owner: &str) -> WorkflowEngineConfig {
         max_inflight_dispatch: 64,
         claim_ttl_ms: 1_000,
         heartbeat_ms: 60_000,
+        stuck_strike_limit: 3,
         owner_id: owner.to_string(),
     }
 }
@@ -618,6 +620,143 @@ impl StepDispatcher for CompleteAfterA {
     }
 }
 
+#[derive(Clone, Default)]
+struct CaughtStepFailureDispatcher {
+    requests: Arc<Mutex<Vec<StepRequest>>>,
+}
+
+impl CaughtStepFailureDispatcher {
+    fn requests(&self) -> Vec<StepRequest> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for CaughtStepFailureDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.clone());
+        let saw_failed_step = request
+            .journal
+            .iter()
+            .any(|step| step.ordinal == 0 && step.name == "may-fail" && step.state == "failed");
+        let outcomes = if saw_failed_step {
+            serde_json::json!([
+                {
+                    "kind": "StepCompleted",
+                    "ordinal": 1,
+                    "name": "after-catch",
+                    "nameOccurrence": 0,
+                    "output": {"continued": true}
+                },
+                {"kind": "RunCompleted", "output": {"caught": true}}
+            ])
+        } else {
+            serde_json::json!([
+                {
+                    "kind": "StepFailed",
+                    "ordinal": 0,
+                    "name": "may-fail",
+                    "nameOccurrence": 0,
+                    "error": {
+                        "type": "PermanentError",
+                        "message": "expected caught failure",
+                        "retryable": false
+                    }
+                }
+            ])
+        };
+        DispatchOutcome::Completed(batch_step_result(
+            &request.run_id,
+            &request.dispatch_nonce,
+            outcomes,
+        ))
+    }
+}
+
+#[derive(Clone, Default)]
+struct UncaughtStepFailureDispatcher {
+    requests: Arc<Mutex<Vec<StepRequest>>>,
+}
+
+impl UncaughtStepFailureDispatcher {
+    fn requests(&self) -> Vec<StepRequest> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for UncaughtStepFailureDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.clone());
+        let saw_failed_step = request
+            .journal
+            .iter()
+            .any(|step| step.ordinal == 0 && step.name == "uncaught" && step.state == "failed");
+        let outcomes = if saw_failed_step {
+            serde_json::json!([
+                {
+                    "kind": "RunFailed",
+                    "error": {
+                        "type": "PermanentError",
+                        "message": "uncaught failure escaped run()",
+                        "retryable": false
+                    }
+                }
+            ])
+        } else {
+            serde_json::json!([
+                {
+                    "kind": "StepFailed",
+                    "ordinal": 0,
+                    "name": "uncaught",
+                    "nameOccurrence": 0,
+                    "error": {
+                        "type": "PermanentError",
+                        "message": "expected uncaught failure",
+                        "retryable": false
+                    }
+                }
+            ])
+        };
+        DispatchOutcome::Completed(batch_step_result(
+            &request.run_id,
+            &request.dispatch_nonce,
+            outcomes,
+        ))
+    }
+}
+
+#[derive(Clone, Default)]
+struct ZeroProgressDispatcher {
+    requests: Arc<Mutex<Vec<StepRequest>>>,
+}
+
+impl ZeroProgressDispatcher {
+    fn requests(&self) -> Vec<StepRequest> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+#[async_trait(?Send)]
+impl StepDispatcher for ZeroProgressDispatcher {
+    async fn dispatch(&self, request: StepRequest) -> DispatchOutcome {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(request.clone());
+        DispatchOutcome::Completed(StepResult::requeue(
+            request.run_id,
+            request.dispatch_nonce,
+        ))
+    }
+}
+
 async fn wait_for_requests(dispatcher: &BlockingDispatcher, n: usize) {
     for _ in 0..100 {
         if dispatcher.requests().len() >= n {
@@ -733,6 +872,60 @@ async fn wait_for_cancelled_without_steps(fx: &Fixture, run_id: &str) {
     }
 
     panic!("late outcome after cancel was not stably discarded: {last_state:?}");
+}
+
+async fn wait_for_run_state(
+    fx: &Fixture,
+    run_id: &str,
+    expected_state: &str,
+) -> (Option<DateTime<Utc>>, i16, Option<serde_json::Value>) {
+    let mut last = None;
+    for _ in 0..100 {
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT state, wake_at, claimed_by, dispatch_nonce, stuck_strikes, error \
+                   FROM zeroship.workflow_runs WHERE id = $1",
+                &[&run_id],
+            )
+            .await
+            .expect("load run state");
+        let state: String = row.get("state");
+        let wake_at: Option<DateTime<Utc>> = row.get("wake_at");
+        let claimed_by: Option<String> = row.get("claimed_by");
+        let dispatch_nonce: Option<String> = row.get("dispatch_nonce");
+        let strikes: i16 = row.get("stuck_strikes");
+        let error: Option<serde_json::Value> = row.get("error");
+        if state == expected_state && claimed_by.is_none() && dispatch_nonce.is_none() {
+            return (wake_at, strikes, error);
+        }
+        last = Some((state, wake_at, claimed_by, dispatch_nonce, strikes, error));
+        compio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("run {run_id} did not reach clear state {expected_state}: {last:?}");
+}
+
+async fn workflow_step_summaries(fx: &Fixture, run_id: &str) -> Vec<(i32, String, String, String)> {
+    fx.pg
+        .query(
+            "SELECT ordinal, name, kind, state \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 \
+              ORDER BY ordinal",
+            &[&run_id],
+        )
+        .await
+        .expect("load workflow step summaries")
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("ordinal"),
+                row.get("name"),
+                row.get("kind"),
+                row.get("state"),
+            )
+        })
+        .collect()
 }
 
 fn batch_step_result(run_id: &str, dispatch_nonce: &str, outcomes: serde_json::Value) -> StepResult {
@@ -956,6 +1149,202 @@ async fn batch_step_result_applies_atomically_and_preserves_effn1() {
 }
 
 #[compio::test]
+async fn caught_step_failure_continues_run_to_completion() {
+    let Some(fx) = isolated_fixture("caught-step-failure").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "caught-step-failure").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "queued",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let dispatcher = Arc::new(CaughtStepFailureDispatcher::default());
+
+    let first = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("owner-caught-step-failure"),
+    )
+    .await
+    .expect("first tick");
+    assert_eq!(first, 1);
+    let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "queued").await;
+    assert!(wake_at.is_some(), "failed step should schedule immediate replay");
+    assert_eq!(strikes, 0, "failed step row is durable progress");
+    assert_eq!(error, None);
+    assert_eq!(dispatcher.requests().len(), 1);
+    assert_eq!(
+        workflow_step_summaries(&fx, &run_id).await,
+        vec![(0, "may-fail".to_string(), "run".to_string(), "failed".to_string())]
+    );
+
+    let second = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("owner-caught-step-failure-replay"),
+    )
+    .await
+    .expect("second tick");
+    assert_eq!(second, 1);
+    wait_for_completed(&fx, &[run_id.clone()]).await;
+    assert_eq!(dispatcher.requests().len(), 2);
+    assert_eq!(
+        workflow_step_summaries(&fx, &run_id).await,
+        vec![
+            (0, "may-fail".to_string(), "run".to_string(), "failed".to_string()),
+            (1, "after-catch".to_string(), "run".to_string(), "completed".to_string()),
+        ]
+    );
+}
+
+#[compio::test]
+async fn uncaught_step_failure_fails_after_one_extra_replay() {
+    let Some(fx) = isolated_fixture("uncaught-step-failure").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "uncaught-step-failure").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "queued",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let dispatcher = Arc::new(UncaughtStepFailureDispatcher::default());
+
+    let first = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("owner-uncaught-step-failure"),
+    )
+    .await
+    .expect("first tick");
+    assert_eq!(first, 1);
+    let (wake_at, strikes, _) = wait_for_run_state(&fx, &run_id, "queued").await;
+    assert!(wake_at.is_some(), "failed step should schedule exactly one replay");
+    assert_eq!(strikes, 0);
+
+    let second = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("owner-uncaught-step-failure-replay"),
+    )
+    .await
+    .expect("second tick");
+    assert_eq!(second, 1);
+    let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "failed").await;
+    assert_eq!(wake_at, None);
+    assert_eq!(strikes, 0);
+    assert_eq!(
+        error.as_ref().and_then(|e| e.get("type")).and_then(serde_json::Value::as_str),
+        Some("PermanentError")
+    );
+    assert_eq!(dispatcher.requests().len(), 2);
+    assert_eq!(
+        workflow_step_summaries(&fx, &run_id).await,
+        vec![(0, "uncaught".to_string(), "run".to_string(), "failed".to_string())],
+        "terminal replay must not add a second failed step row"
+    );
+    let failed_rows = fx
+        .pg
+        .query_one(
+            "SELECT COUNT(*)::bigint AS n \
+               FROM zeroship.workflow_steps \
+              WHERE run_id = $1 AND state = 'failed'",
+            &[&run_id],
+        )
+        .await
+        .expect("count failed rows");
+    assert_eq!(failed_rows.get::<_, i64>("n"), 1);
+
+    let terminal_tick = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("owner-uncaught-step-failure-terminal"),
+    )
+    .await
+    .expect("terminal tick");
+    assert_eq!(terminal_tick, 0, "terminal failed run must not re-dispatch");
+    assert_eq!(dispatcher.requests().len(), 2);
+}
+
+#[compio::test]
+async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
+    let Some(fx) = isolated_fixture("stuck-strikes").await else {
+        return;
+    };
+    let (app_id, deploy_id) = seed_app_and_deploy(&fx, "stuck-strikes").await;
+    let run_id = seed_run(
+        &fx,
+        app_id,
+        &deploy_id,
+        "queued",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    let dispatcher = Arc::new(ZeroProgressDispatcher::default());
+    let mut cfg = config("owner-stuck-strikes");
+    cfg.stuck_strike_limit = 2;
+
+    let first = workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg.clone())
+        .await
+        .expect("first zero-progress tick");
+    assert_eq!(first, 1);
+    let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "queued").await;
+    assert!(wake_at.is_some(), "first strike requeues for another attempt");
+    assert_eq!(strikes, 1);
+    assert_eq!(error, None);
+    assert!(
+        workflow_step_summaries(&fx, &run_id).await.is_empty(),
+        "UNSETTLED frontier creates no workflow_steps row"
+    );
+
+    let second = workflow_engine::tick_with_dispatcher(&fx.state, Arc::clone(&dispatcher), cfg)
+        .await
+        .expect("second zero-progress tick");
+    assert_eq!(second, 1);
+    let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "stalled").await;
+    assert_eq!(wake_at, None);
+    assert_eq!(strikes, 2);
+    let error = error.expect("stalled error");
+    assert_eq!(error["type"], "StalledError");
+    assert_eq!(error["stuck_strikes"], 2);
+    assert_eq!(error["stuck_strike_limit"], 2);
+    assert_eq!(dispatcher.requests().len(), 2);
+    assert!(
+        workflow_step_summaries(&fx, &run_id).await.is_empty(),
+        "wall-budget UNSETTLED outcomes remain no-row through stall"
+    );
+
+    let terminal_tick = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&dispatcher),
+        config("owner-stuck-strikes-terminal"),
+    )
+    .await
+    .expect("terminal stalled tick");
+    assert_eq!(terminal_tick, 0, "stalled is terminal and fail-closed");
+    assert_eq!(dispatcher.requests().len(), 2);
+}
+
+#[compio::test]
 async fn tick_claims_due_run_and_sets_owner_and_nonce() {
     let Some(fx) = isolated_fixture("claim").await else {
         return;
@@ -999,6 +1388,7 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
 }
 
 #[compio::test]
+#[serial]
 async fn concurrent_ticks_claim_disjoint_rows() {
     let Some(fx) = isolated_fixture("concurrent").await else {
         return;
@@ -1044,6 +1434,7 @@ async fn concurrent_ticks_claim_disjoint_rows() {
 }
 
 #[compio::test]
+#[serial]
 async fn stale_lease_is_taken_over_after_ttl() {
     let _timing_guard = timing_test_guard();
     let Some(fx) = isolated_fixture("stale").await else {
@@ -1668,6 +2059,7 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
 }
 
 #[compio::test]
+#[serial]
 async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     let Some(fx) = isolated_fixture("restart").await else {
         return;
@@ -1919,6 +2311,7 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
 }
 
 #[ntex::test]
+#[serial]
 async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
     let _timing_guard = timing_test_guard();
     let gateway = test::server(|| async {
