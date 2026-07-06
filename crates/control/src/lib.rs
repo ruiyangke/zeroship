@@ -45,6 +45,7 @@ pub mod stripe_store;
 pub mod tax;
 pub mod token_handlers;
 pub mod void_reissue;
+pub mod workflow_instance_api;
 
 use std::collections::HashSet;
 use std::sync::Arc;
