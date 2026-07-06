@@ -12,7 +12,7 @@
 //!                                    Migration[]  (additive + gated destructive)
 //!                                         │
 //!                                         ▼  render
-//!                            db/migrations/<14-digit-ts>_<name>.sql  (dbmate)
+//!                            migrations/<14-digit-ts>_<name>.sql  (dbmate)
 //! ```
 //!
 //! This is ONE self-contained tool — no separate Node/vite step. The eval

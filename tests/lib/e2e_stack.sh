@@ -6,7 +6,7 @@
 # harnesses need:
 #
 #   stack_up        ephemeral Postgres (docker) + the FULL platform migration
-#                   set from db/migrations (V0001→latest) applied from scratch
+#                   set from db/migrations-ts applied from scratch
 #                   via the `zeroship-migrate` bin (Platform profile), then
 #                   control + worker + gateway booted with --dev-insecure and
 #                   health-polled. Non-blocking: binaries run in the background;
@@ -102,8 +102,9 @@ stack_up() {
   fi
 
   local mig_log="$WORK/migrate.log"
-  if "$E2E_BIN/zeroship-migrate" migrate \
-      --dir "$E2E_ROOT/db/migrations" \
+  if ZEROSHIP_RECORDER_CHILD="$E2E_BIN/zeroship-migrate-recorder-child" \
+      "$E2E_BIN/zeroship-migrate" migrate \
+      --dir "$E2E_ROOT/db/migrations-ts" \
       --database-url "postgres://postgres:zeroship@localhost:$PG_PORT/zeroship" \
       --profile platform --yes > "$mig_log" 2>&1; then
     _stk_ok "platform migrations applied cleanly from scratch (zeroship-migrate)"

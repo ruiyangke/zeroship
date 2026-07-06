@@ -76,18 +76,19 @@ services:
   # Platform schema migrations (control/auth/platform schemas). One-shot: runs
   # the `zeroship-migrate` binary against the shared DB then exits 0.
   # control/auth gate on its successful completion, so they only ever boot
-  # against a fully-migrated schema. Hand-authored Flyway-style migrations live
-  # in db/migrations/.
+  # against a fully-migrated schema. Hand-authored JS DSL migrations live in
+  # db/migrations-ts/; the runner records them to transient IR and applies that
+  # plan under the Platform profile.
   #
   # Runs the SAME `zeroship-platform:dev` image the native services use (the
-  # Dockerfile builds + installs the `zeroship-migrate` bin), under the
+  # Dockerfile builds + installs the `zeroship-migrate` bin and recorder child),
+  # under the
   # PLATFORM trust profile (the widened guard for the zeroship/public
-  # schemas — design 2026-06-17-platform-migrations-flyway-mode). The `migrate`
-  # subcommand applies all pending files once. `--yes` is required because the
-  # ported platform set contains reviewed in-place schema evolutions (DROP
-  # CONSTRAINT/COLUMN, etc.) the engine flags DESTRUCTIVE; passing it here is the
-  # operator's standing, in-repo confirmation that the committed migrations are
-  # the intended apply (the same role Liquibase's verbatim `update` played).
+  # schemas). The `migrate` subcommand applies all pending platform JS DSL files
+  # once. `--yes` is required because the platform set contains reviewed
+  # in-place schema evolutions (DROP CONSTRAINT/COLUMN, etc.) the engine flags
+  # DESTRUCTIVE; passing it here is the operator's standing, in-repo
+  # confirmation that the committed migrations are the intended apply.
   migrate:
     build: .
     image: zeroship-platform:dev
@@ -95,11 +96,11 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - ./db/migrations:/db/migrations:ro
+      - ./db/migrations-ts:/db/migrations-ts:ro
     command:
       - zeroship-migrate
       - migrate
-      - --dir=/db/migrations
+      - --dir=/db/migrations-ts
       - --database-url=postgres://postgres:zeroship@postgres:5432/zeroship
       - --profile=platform
       - --yes
@@ -395,11 +396,12 @@ services:
   #
   # The sandbox still uses THIS deployment's shared Postgres: the `migrate`
   # service applies the sandbox schema + creates the least-privilege roles
-  # (`sandbox_app` / `sandbox_audit` / `sandbox_gdpr`, db/migrations
-  # V0011–V0024), and the external sandbox controller connects AS those roles
-  # via its own SANDBOX_DATABASE_URL{,_AUDIT,_GDPR}. To run previews locally,
-  # bring up the zeroship-sandbox project pointed at this Postgres + set the
-  # control service's SANDBOX_URL to the external controller.
+  # (`sandbox_app` / `sandbox_audit` / `sandbox_gdpr`, db/migrations-ts
+  # 20260702000100_schema_roles_extensions.ts and 20260702000900_grants.ts),
+  # and the external sandbox controller connects AS those roles via its own
+  # SANDBOX_DATABASE_URL{,_AUDIT,_GDPR}. To run previews locally, bring up the
+  # zeroship-sandbox project pointed at this Postgres + set the control
+  # service's SANDBOX_URL to the external controller.
 
   # NOTE: the separate `builder` Vite dev service was RETIRED in the R5 cutover.
   # The AI app-builder IS the console now: a regular zeroship app built to a

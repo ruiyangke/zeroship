@@ -108,7 +108,7 @@ Code map: handlers in `crates/control/src/stripe_handlers.rs`
 wire shapes in `crates/control/src/stripe_client.rs`
 (`create_connect_account` :963, `create_account_link` :983,
 `create_connect_payment_intent` :1021); schema in
-`db/migrations/V0044__creator_fee_policy.sql`. Offline logic coverage:
+`db/migrations-ts/20260702000400_billing_metering_invoice_tables.ts`. Offline logic coverage:
 `crates/control/tests/connect_fee_test.rs`.
 
 Any genuine handler bug surfaced by real Stripe is **flagged** (a divergence),
