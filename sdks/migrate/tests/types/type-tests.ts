@@ -485,7 +485,7 @@ export function checkExpressionSurfaceTypechecks(): void {
     expr: (c) => c.pg.regex(c("user_id"), "^usr_[0-9A-Za-z]{20,40}$"),
   });
   pgTable("oauth_authorization_codes").check("data_size").add({
-    expr: (c) => c.pg.pgColumnSize(c("data")).lt(1000),
+    expr: (c) => c.pg.columnSize(c("data")).lt(1000),
   });
   table("oauth_authorization_codes").check("active_is_bool").add({
     expr: (c) => c("active").isNotNull(),
@@ -502,7 +502,7 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
   // @ts-expect-error — dot-spelled PG regex is vendor-only; use `c.pg.regex(c("x"), pattern)`.
   table("exprs").update({ set: { x: (c) => c("x")["matches"]("^a$") } });
 
-  // @ts-expect-error — dot-spelled PG column size is vendor-only; use `c.pg.pgColumnSize(c("x"))`.
+  // @ts-expect-error — dot-spelled PG column size is vendor-only; use `c.pg.columnSize(c("x"))`.
   table("exprs").update({ set: { x: (c) => c("x")["columnSize"]() } });
 
   // @ts-expect-error — current_setting is PG-vendor and lives under `c.pg`.
