@@ -763,6 +763,39 @@ async fn post_signal(
     serde_json::from_slice(&bytes).expect("signal response json")
 }
 
+async fn post_control(
+    control_url: &str,
+    app_id: Uuid,
+    run_id: &str,
+    op: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let url = format!(
+        "{}/internal/workflows/runs/{}/{}",
+        control_url.trim_end_matches('/'),
+        run_id,
+        op
+    );
+    let bytes = serde_json::to_vec(&body).expect("control body json");
+    let client = cyper::Client::new();
+    let builder = client.post(&url).expect("control request URL");
+    let builder = builder
+        .header("content-type", "application/json")
+        .expect("content-type header")
+        .header("x-zeroship-app-id", app_id.to_string())
+        .expect("app id header");
+    let response = builder.body(bytes).send().await.expect("post control");
+    let status = response.status().as_u16();
+    let body_bytes = response.bytes().await.expect("read control response");
+    assert_eq!(
+        status,
+        200,
+        "{op} endpoint returned HTTP {status}: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+    serde_json::from_slice(&body_bytes).expect("control response json")
+}
+
 async fn run_debug(fx: &Fixture, run_id: &str) -> String {
     let run_rows = fx
         .pg
@@ -866,6 +899,184 @@ async fn durable_workflows_m1_keystone_real_spine() {
     let happy_counts = side_counts(&fx, &happy_run).await;
     assert_eq!(happy_counts.get("a").copied(), Some(1));
     assert_eq!(happy_counts.get("b").copied(), Some(1));
+
+    let restart = post_control(
+        &control_url,
+        fx.app_id,
+        &happy_run,
+        "restart",
+        serde_json::json!({"from": {"name": "b"}}),
+    )
+    .await;
+    assert_eq!(restart["runId"], happy_run);
+    assert_eq!(restart["state"], "queued");
+    assert_eq!(restart["restartedFromOrdinal"], 2);
+    assert_eq!(
+        step_rows(&fx, &happy_run).await,
+        vec![
+            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (1, "sleep".to_string(), "sleep".to_string(), "completed".to_string()),
+        ],
+        "restart from b should retain only the prefix before b"
+    );
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-restart-drive"),
+        &happy_run,
+    )
+    .await;
+    assert_expected_steps(&fx, &happy_run).await;
+    let restarted_counts = side_counts(&fx, &happy_run).await;
+    assert_eq!(
+        restarted_counts.get("a").copied(),
+        Some(1),
+        "restart from b must not re-run retained step a"
+    );
+    assert_eq!(
+        restarted_counts.get("b").copied(),
+        Some(2),
+        "restart from b must re-run b"
+    );
+
+    let pause_run = seed_run(&fx, "pause-mid").await;
+    let (pause_dispatcher, pause_outcome_rx, pause_release_tx) =
+        CrashOnceDispatcher::new(gateway_url.clone());
+    let pause_dispatcher = Arc::new(pause_dispatcher);
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&pause_dispatcher),
+        config("dw07-pause-first"),
+    )
+    .await
+    .expect("pause first tick");
+    assert_eq!(claimed, 1);
+    let paused_outcome = pause_outcome_rx.await.expect("pause real StepResult");
+    match &paused_outcome {
+        DispatchOutcome::Completed(result) => {
+            assert_eq!(result.run_id, pause_run);
+            assert_eq!(result.checkpoints.len(), 1);
+            assert_eq!(result.checkpoints[0].name, "a");
+        }
+        other => panic!("pause first real dispatch did not produce StepResult: {other:?}"),
+    }
+    let before_pause = run_state(&fx.pg, &pause_run).await;
+    assert_eq!(before_pause.0, "running");
+    assert!(before_pause.2.is_some(), "pause target should be claimed");
+    let pause_body = post_control(
+        &control_url,
+        fx.app_id,
+        &pause_run,
+        "pause",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(pause_body["state"], "paused");
+    assert_eq!(side_counts(&fx, &pause_run).await.get("a").copied(), Some(1));
+    assert!(
+        step_rows(&fx, &pause_run).await.is_empty(),
+        "pause happens before the control checkpoint apply"
+    );
+    let _ = pause_release_tx.send(());
+    for _ in 0..100 {
+        let (state, _, claimed_by, _) = run_state(&fx.pg, &pause_run).await;
+        if state == "paused" && claimed_by.is_none() && step_rows(&fx, &pause_run).await.len() == 1
+        {
+            break;
+        }
+        compio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(run_state(&fx.pg, &pause_run).await.0, "paused");
+    assert_eq!(
+        step_rows(&fx, &pause_run).await,
+        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        "pause-mid-dispatch should land a checkpoint exactly once"
+    );
+    let skipped = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&real_dispatcher),
+        config("dw07-paused-skip"),
+    )
+    .await
+    .expect("paused skip tick");
+    assert_eq!(skipped, 0, "paused checkpointed run must not be due");
+    let resume_body = post_control(
+        &control_url,
+        fx.app_id,
+        &pause_run,
+        "resume",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resume_body["state"], "queued");
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-pause-resume-drive"),
+        &pause_run,
+    )
+    .await;
+    assert_expected_steps(&fx, &pause_run).await;
+    let pause_counts = side_counts(&fx, &pause_run).await;
+    assert_eq!(pause_counts.get("a").copied(), Some(1));
+    assert_eq!(pause_counts.get("b").copied(), Some(1));
+
+    let cancel_run = seed_run(&fx, "cancel-mid").await;
+    let (cancel_dispatcher, cancel_outcome_rx, cancel_release_tx) =
+        CrashOnceDispatcher::new(gateway_url.clone());
+    let cancel_dispatcher = Arc::new(cancel_dispatcher);
+    let claimed = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&cancel_dispatcher),
+        config("dw07-cancel-first"),
+    )
+    .await
+    .expect("cancel first tick");
+    assert_eq!(claimed, 1);
+    let cancelled_outcome = cancel_outcome_rx.await.expect("cancel real StepResult");
+    match &cancelled_outcome {
+        DispatchOutcome::Completed(result) => {
+            assert_eq!(result.run_id, cancel_run);
+            assert_eq!(result.checkpoints.len(), 1);
+            assert_eq!(result.checkpoints[0].name, "a");
+        }
+        other => panic!("cancel first real dispatch did not produce StepResult: {other:?}"),
+    }
+    let cancel_body = post_control(
+        &control_url,
+        fx.app_id,
+        &cancel_run,
+        "cancel",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(cancel_body["state"], "cancelled");
+    let _ = cancel_release_tx.send(());
+    compio::time::sleep(Duration::from_millis(150)).await;
+    let (state, wake_at, claimed_by, nonce) = run_state(&fx.pg, &cancel_run).await;
+    assert_eq!(state, "cancelled");
+    assert_eq!(wake_at, None);
+    assert_eq!(claimed_by, None);
+    assert_eq!(nonce, None);
+    assert!(
+        step_rows(&fx, &cancel_run).await.is_empty(),
+        "cancel must discard the late in-flight checkpoint"
+    );
+    let cancel_counts = side_counts(&fx, &cancel_run).await;
+    assert_eq!(
+        cancel_counts.get("a").copied(),
+        Some(1),
+        "the external side effect may have happened before cancel"
+    );
+    assert_eq!(cancel_counts.get("b").copied(), None);
+    let skipped = workflow_engine::tick_with_dispatcher(
+        &fx.state,
+        Arc::clone(&real_dispatcher),
+        config("dw07-cancelled-skip"),
+    )
+    .await
+    .expect("cancelled skip tick");
+    assert_eq!(skipped, 0, "cancelled run must not be due");
 
     let crash_run = seed_run(&fx, "crash").await;
     let (crash_dispatcher, dropped_rx, release_tx) =

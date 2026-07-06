@@ -214,6 +214,19 @@ pub fn build_transition_request(
     )
 }
 
+pub fn build_restart_request(
+    config: &WorkflowClientConfig,
+    run_id: &str,
+    body: Value,
+) -> Result<WorkflowHttpRequest, WorkflowRpcError> {
+    request(
+        config,
+        WorkflowHttpMethod::Post,
+        format!("/internal/workflows/runs/{}/restart", path_segment(run_id)),
+        Some(body),
+    )
+}
+
 pub async fn execute_json(req: WorkflowHttpRequest) -> Result<Value, WorkflowRpcError> {
     let client = this_thread_client();
     let mut builder = match req.method {

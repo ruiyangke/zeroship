@@ -1103,39 +1103,78 @@ async fn apply_step_result_on_registry(
         .map(|s| s.ordinal.saturating_add(1))
         .max()
         .unwrap_or(0);
-    let state = result.run_update.state();
     let wake_at = result.run_update.wake_at();
     let waiting_step_key = result.run_update.waiting_step_key(&result.checkpoints);
-    let output = result.run_update.output();
-    let error = result.run_update.error();
-    tx.execute(
-        "UPDATE zeroship.workflow_runs \
-            SET state = $1, \
-                output = $2, \
-                error = $3, \
-                wake_at = $4, \
-                next_ordinal = GREATEST(next_ordinal, $5), \
-                waiting_step_key = $6, \
-                claimed_by = NULL, \
-                lease_expires = NULL, \
-                dispatch_nonce = NULL \
-          WHERE id = $7 \
-            AND claimed_by = $8 \
-            AND dispatch_nonce = $9",
-        &[
-            &state,
-            &output,
-            &error,
-            &wake_at,
-            &next_ordinal,
-            &waiting_step_key,
-            &result.run_id,
-            &owner_id,
-            &result.dispatch_nonce,
-        ],
-    )
-    .await
-    .map_err(map_apply_error)?;
+    if state == "paused" {
+        let paused_from_status = match result.run_update {
+            RunUpdate::Queued | RunUpdate::Completed { .. } | RunUpdate::Failed { .. } | RunUpdate::Cancelled => {
+                "queued"
+            }
+            RunUpdate::Sleeping { .. } => "sleeping",
+            RunUpdate::Waiting { .. } => "waiting",
+        };
+        let paused_wake_at = wake_at.or_else(|| (paused_from_status == "queued").then(Utc::now));
+        tx.execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state = 'paused', \
+                    wake_at = $1, \
+                    next_ordinal = GREATEST(next_ordinal, $2), \
+                    waiting_step_key = $3, \
+                    paused_from_status = $4, \
+                    claimed_by = NULL, \
+                    lease_expires = NULL, \
+                    dispatch_nonce = NULL \
+              WHERE id = $5 \
+                AND claimed_by = $6 \
+                AND dispatch_nonce = $7 \
+                AND state = 'paused'",
+            &[
+                &paused_wake_at,
+                &next_ordinal,
+                &waiting_step_key,
+                &paused_from_status,
+                &result.run_id,
+                &owner_id,
+                &result.dispatch_nonce,
+            ],
+        )
+        .await
+        .map_err(map_apply_error)?;
+    } else {
+        let state = result.run_update.state();
+        let output = result.run_update.output();
+        let error = result.run_update.error();
+        tx.execute(
+            "UPDATE zeroship.workflow_runs \
+                SET state = $1, \
+                    output = $2, \
+                    error = $3, \
+                    wake_at = $4, \
+                    next_ordinal = GREATEST(next_ordinal, $5), \
+                    waiting_step_key = $6, \
+                    paused_from_status = NULL, \
+                    claimed_by = NULL, \
+                    lease_expires = NULL, \
+                    dispatch_nonce = NULL \
+              WHERE id = $7 \
+                AND claimed_by = $8 \
+                AND dispatch_nonce = $9 \
+                AND state = 'running'",
+            &[
+                &state,
+                &output,
+                &error,
+                &wake_at,
+                &next_ordinal,
+                &waiting_step_key,
+                &result.run_id,
+                &owner_id,
+                &result.dispatch_nonce,
+            ],
+        )
+        .await
+        .map_err(map_apply_error)?;
+    }
 
     tx.commit().await.map_err(map_apply_error)?;
     Ok(true)
@@ -1200,14 +1239,15 @@ async fn requeue_claim(
     let conn = registry.conn().await?;
     conn.execute(
         "UPDATE zeroship.workflow_runs \
-            SET state = 'queued', \
-                wake_at = now(), \
+            SET state = CASE WHEN state = 'paused' THEN 'paused' ELSE 'queued' END, \
+                wake_at = CASE WHEN state = 'paused' THEN wake_at ELSE now() END, \
                 claimed_by = NULL, \
                 lease_expires = NULL, \
                 dispatch_nonce = NULL \
           WHERE id = $1 \
             AND claimed_by = $2 \
-            AND dispatch_nonce = $3",
+            AND dispatch_nonce = $3 \
+            AND state IN ('running','paused')",
         &[&run_id, &owner_id, &dispatch_nonce],
     )
     .await
@@ -1225,14 +1265,15 @@ async fn park_backpressure_claim(
     let conn = registry.conn().await?;
     conn.execute(
         "UPDATE zeroship.workflow_runs \
-            SET state = 'queued', \
-                wake_at = $1, \
+            SET state = CASE WHEN state = 'paused' THEN 'paused' ELSE 'queued' END, \
+                wake_at = CASE WHEN state = 'paused' THEN wake_at ELSE $1 END, \
                 claimed_by = NULL, \
                 lease_expires = NULL, \
                 dispatch_nonce = NULL \
           WHERE id = $2 \
             AND claimed_by = $3 \
-            AND dispatch_nonce = $4",
+            AND dispatch_nonce = $4 \
+            AND state IN ('running','paused')",
         &[&wake_at, &run_id, &owner_id, &dispatch_nonce],
     )
     .await
