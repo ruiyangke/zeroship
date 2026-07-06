@@ -21,6 +21,7 @@ pub mod metering_export;
 pub mod orphaned_app_reaper;
 pub mod spend_reconcile;
 pub mod stripe_reconcile;
+pub mod workflow_engine;
 
 use std::sync::Arc;
 
@@ -54,6 +55,15 @@ pub fn spawn_all(state: Arc<AppState>, retention_months: u32, retention_check_se
     let spend_state = Arc::clone(&state);
     compio::runtime::spawn(async move {
         spend_reconcile::run(spend_state, spend_reconcile::DEFAULT_TICK_SECS).await;
+    })
+    .detach();
+
+    // Durable-workflow scheduler (DW-04) — multi-replica correctness is row
+    // claiming with `FOR UPDATE SKIP LOCKED` + the claimed_by/nonce lease, not
+    // a fleet-wide advisory-lock leader.
+    let workflow_state = Arc::clone(&state);
+    compio::runtime::spawn(async move {
+        workflow_engine::run(workflow_state, workflow_engine::DEFAULT_TICK_SECS).await;
     })
     .detach();
 
