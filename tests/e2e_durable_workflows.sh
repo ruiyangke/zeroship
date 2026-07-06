@@ -230,11 +230,35 @@ export class ConcurrentWorkflow {
   }
 }
 
+export class BareAwaitWorkflow {
+  async run(trigger, step) {
+    const pending = step.run("first", () => bump(trigger.runId, "first"));
+    await fetch(
+      \`\${SIDE_EFFECT_URL}/bump?run=\${encodeURIComponent(trigger.runId)}&step=bare-await\`,
+      { method: "POST" },
+    );
+    await pending;
+    return { unreachable: true };
+  }
+}
+
+export class NameDivergenceWorkflow {
+  async run(trigger, step) {
+    return await step.run("actual", () => bump(trigger.runId, "actual"));
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
   },
-  workflows: { KeystoneWorkflow, SignalWorkflow, ConcurrentWorkflow },
+  workflows: {
+    KeystoneWorkflow,
+    SignalWorkflow,
+    ConcurrentWorkflow,
+    BareAwaitWorkflow,
+    NameDivergenceWorkflow,
+  },
 };
 EOF
 build_zship "$WORK/workflow.js" "$WORK/workflow.zship"
