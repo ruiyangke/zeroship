@@ -88,6 +88,7 @@ tracing = { workspace = true }
 # verifier); reuse it here for the stash cookie HMAC envelope.
 thiserror = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+chrono-tz = "0.10"
 
 [dev-dependencies]
 # `deploy_test.rs` builds a synthetic `.zship` payload (tar+zstd) and

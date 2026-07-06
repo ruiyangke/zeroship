@@ -80,7 +80,7 @@ build_zship() {
   cp "$js_file" "$stage/blobs/$hash"
   now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   cat > "$stage/manifest.json" <<EOF
-{"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$hash"}},"metadata":{"compiler":"dw07-e2e","built_at":"$now"}}
+{"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$hash"}},"schedules":[{"name":"dw14-scheduled","workflowName":"ScheduledWorkflow","input":{"case":"schedule"},"overlap":"allow","catchUp":{"mode":"skip"},"schedule":{"kind":"cron","cron_expr":"* * * * *","tz":"UTC","overlap":"allow","catchUp":{"mode":"skip"}}}],"metadata":{"compiler":"dw07-e2e","built_at":"$now"}}
 EOF
   (cd "$stage" && tar --format=ustar -cf - manifest.json "blobs/$hash") \
     | zstd -q -f -o "$out_path"
@@ -257,6 +257,17 @@ export class NameDivergenceWorkflow {
   }
 }
 
+export class ScheduledWorkflow {
+  async run(trigger) {
+    return {
+      input: trigger.input,
+      runId: trigger.runId,
+      workflowName: trigger.workflowName,
+      startedAt: trigger.startedAt.toISOString(),
+    };
+  }
+}
+
 export default {
   async fetch() {
     return new Response("dw07-ok");
@@ -268,6 +279,7 @@ export default {
     SideEffectWorkflow,
     BareAwaitWorkflow,
     NameDivergenceWorkflow,
+    ScheduledWorkflow,
   },
 };
 EOF
@@ -326,22 +338,15 @@ ZEROSHIP_DEV_INSECURE=1 "$BIN/dev-provision" \
 APP_ID="$(awk -F= '/^app_id=/{print $2}' "$WORK/provision.out")"
 API_KEY="$(awk -F= '/^api_key=/{print $2}' "$WORK/provision.out")"
 [ -n "$APP_ID" ] || { fail "dev-provision did not return app_id"; cat "$WORK/provision.out"; exit 1; }
-DEPLOY_ID="dep_dw07_$(echo "$APP_ID" | tr -d '-')"
 
 docker exec -i "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null <<SQL
 INSERT INTO zeroship.app_net_grants (app_id, host, port, granted_by, note)
 VALUES ('$APP_ID', '127.0.0.1', $SIDE_PORT, 'dw07-e2e', 'DW-07 side-effect counter')
 ON CONFLICT (app_id, host, port) DO UPDATE SET granted_at = now(), note = EXCLUDED.note;
-
-INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at)
-SELECT '$DEPLOY_ID', id, deploy_hash, manifest_json, now()
-  FROM zeroship.apps
- WHERE id = '$APP_ID'
-ON CONFLICT (id) DO UPDATE SET
-  deploy_hash = EXCLUDED.deploy_hash,
-  manifest_json = EXCLUDED.manifest_json,
-  activated_at = EXCLUDED.activated_at;
 SQL
+DEPLOY_ID="$(docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -At -v ON_ERROR_STOP=1 \
+  -c "SELECT id FROM zeroship.app_deploys WHERE app_id = '$APP_ID' ORDER BY activated_at DESC, created_at DESC, id DESC LIMIT 1;")"
+[ -n "$DEPLOY_ID" ] || { fail "deploy registration did not create app_deploys row"; exit 1; }
 pass "deployed app $APP_ID and pinned deploy $DEPLOY_ID"
 
 sleep 3

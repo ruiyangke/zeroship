@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use ntex::http::StatusCode;
 use ntex::web;
 use ntex::web::types::{Json, Path, Query, State};
@@ -127,7 +128,7 @@ struct RunListItem {
     created_at: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ActiveDeploy {
     id: String,
     manifest_json: String,
@@ -508,6 +509,7 @@ async fn insert_run<C>(
     input_journal_bytes: i64,
     dedup_key: Option<&String>,
     run_id: &str,
+    started_at: Option<DateTime<Utc>>,
 ) -> Result<(), WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
@@ -515,7 +517,7 @@ where
     conn.execute(
         "INSERT INTO zeroship.workflow_runs \
             (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
-         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), now())",
+         VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), COALESCE($8, now()))",
         &[
             &run_id,
             &workflow_name,
@@ -524,6 +526,7 @@ where
             input,
             &input_journal_bytes,
             &dedup_key,
+            &started_at,
         ],
     )
     .await
@@ -540,6 +543,7 @@ async fn insert_run_on_conflict_do_nothing<C>(
     input_journal_bytes: i64,
     dedup_key: &String,
     run_id: &str,
+    started_at: Option<DateTime<Utc>>,
 ) -> Result<Option<String>, WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
@@ -548,7 +552,7 @@ where
         .query(
             "INSERT INTO zeroship.workflow_runs \
                 (id, workflow_name, app_id, deploy_id, state, input, journal_bytes, dedup_key, wake_at, started_at) \
-             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), now()) \
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, now(), COALESCE($8, now())) \
              ON CONFLICT (app_id, workflow_name, dedup_key) DO NOTHING \
              RETURNING id",
             &[
@@ -559,6 +563,7 @@ where
                 input,
                 &input_journal_bytes,
                 &dedup_key,
+                &started_at,
             ],
         )
         .await
@@ -586,6 +591,97 @@ where
         .await
         .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     Ok(rows.first().map(|row| row.get("id")))
+}
+
+async fn join_or_create_keyed_run<C>(
+    tx: &C,
+    app_id: &Uuid,
+    workflow_name: &str,
+    deploy_id: &str,
+    input: &Value,
+    input_journal_bytes: i64,
+    key: &String,
+    started_at: Option<DateTime<Utc>>,
+) -> Result<String, WorkflowApiError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    if let Some(existing) = existing_keyed_run(tx, app_id, workflow_name, key).await? {
+        return Ok(existing);
+    }
+    check_create_journal_capacity(tx, app_id, input_journal_bytes).await?;
+    let candidate = typed_id::new_workflow_run_id();
+    if let Some(inserted) = insert_run_on_conflict_do_nothing(
+        tx,
+        app_id,
+        workflow_name,
+        deploy_id,
+        input,
+        input_journal_bytes,
+        key,
+        &candidate,
+        started_at,
+    )
+    .await?
+    {
+        return Ok(inserted);
+    }
+    existing_keyed_run(tx, app_id, workflow_name, key)
+        .await?
+        .ok_or_else(|| {
+            WorkflowApiError::Database("workflow start conflict lost its incumbent".to_string())
+        })
+}
+
+pub(crate) async fn start_scheduled_workflow_run<C>(
+    tx: &C,
+    app_id: &Uuid,
+    workflow_name: &str,
+    deploy_id: &str,
+    input: &Value,
+    dedup_key: &str,
+    started_at: DateTime<Utc>,
+) -> Result<String, RegistryError>
+where
+    C: compio_postgres::GenericClient + Sync,
+{
+    validate_workflow_name(workflow_name).map_err(workflow_api_error_to_registry)?;
+    let key = normalize_key(Some(dedup_key.to_string()))
+        .map_err(workflow_api_error_to_registry)?
+        .ok_or_else(|| RegistryError::InvalidInput("scheduled workflow key is missing".to_string()))?;
+    let input_journal_bytes = workflow_limits::json_column_size(tx, input).await?;
+    workflow_limits::lock_app_journal_accounting(tx, app_id).await?;
+    join_or_create_keyed_run(
+        tx,
+        app_id,
+        workflow_name,
+        deploy_id,
+        input,
+        input_journal_bytes,
+        &key,
+        Some(started_at),
+    )
+    .await
+    .map_err(workflow_api_error_to_registry)
+}
+
+fn workflow_api_error_to_registry(error: WorkflowApiError) -> RegistryError {
+    match error {
+        WorkflowApiError::BadRequest(msg) | WorkflowApiError::PayloadTooLarge(msg) => {
+            RegistryError::InvalidInput(msg)
+        }
+        WorkflowApiError::NotFound(msg) => RegistryError::NotFound(msg),
+        WorkflowApiError::Conflict(msg) | WorkflowApiError::Restart(msg) => {
+            RegistryError::Conflict(msg)
+        }
+        WorkflowApiError::JournalCapExceeded(msg) | WorkflowApiError::RateLimitUnavailable(msg) => {
+            RegistryError::Conflict(msg)
+        }
+        WorkflowApiError::RateLimited { retry_after_secs } => RegistryError::Conflict(format!(
+            "scheduled workflow start rate limited; retry after {retry_after_secs:.0}s"
+        )),
+        WorkflowApiError::Database(msg) => RegistryError::Database(msg),
+    }
 }
 
 async fn create_run_inner(
@@ -618,35 +714,17 @@ async fn create_run_inner(
     let run_id = if let Some(key) = dedup_key.as_ref() {
         match policy {
             ConflictPolicy::Join => {
-                if let Some(existing) = existing_keyed_run(&tx, &app_id, &workflow_name, key).await?
-                {
-                    existing
-                } else {
-                    check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
-                    let candidate = typed_id::new_workflow_run_id();
-                    if let Some(inserted) = insert_run_on_conflict_do_nothing(
-                        &tx,
-                        &app_id,
-                        &workflow_name,
-                        &deploy.id,
-                        &body.input,
-                        input_journal_bytes,
-                        key,
-                        &candidate,
-                    )
-                    .await?
-                    {
-                        inserted
-                    } else {
-                        existing_keyed_run(&tx, &app_id, &workflow_name, key)
-                            .await?
-                            .ok_or_else(|| {
-                                WorkflowApiError::Database(
-                                    "workflow start conflict lost its incumbent".to_string(),
-                                )
-                            })?
-                    }
-                }
+                join_or_create_keyed_run(
+                    &tx,
+                    &app_id,
+                    &workflow_name,
+                    &deploy.id,
+                    &body.input,
+                    input_journal_bytes,
+                    key,
+                    None,
+                )
+                .await?
             }
             ConflictPolicy::Reject => {
                 if existing_keyed_run(&tx, &app_id, &workflow_name, key)
@@ -665,10 +743,11 @@ async fn create_run_inner(
                     &workflow_name,
                     &deploy.id,
                     &body.input,
-                    input_journal_bytes,
-                    key,
-                    &candidate,
-                )
+                        input_journal_bytes,
+                        key,
+                        &candidate,
+                        None,
+                    )
                 .await?
                 {
                     inserted
@@ -709,10 +788,11 @@ async fn create_run_inner(
                     &workflow_name,
                     &deploy.id,
                     &body.input,
-                    input_journal_bytes,
-                    key,
-                    &candidate,
-                )
+                        input_journal_bytes,
+                        key,
+                        &candidate,
+                        None,
+                    )
                 .await?
                 {
                     inserted
@@ -739,6 +819,7 @@ async fn create_run_inner(
             input_journal_bytes,
             None,
             &candidate,
+            None,
         )
         .await?;
         candidate

@@ -120,6 +120,13 @@ pub struct Manifest {
     #[serde(default)]
     pub metadata: ManifestMetadata,
 
+    /// Workflow schedule registrations discovered at build time (DW-14).
+    /// Preserved verbatim through ingest reserialization so the control plane can
+    /// reconcile the schedule registry on deploy. Value passthrough (matching
+    /// `schemas`); the control-side `ManifestSchedules` parser interprets the shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<serde_json::Value>,
+
     /// Build-time export discovery.
     ///
     /// **Deprecated as of Stage 5c (ZS-standard refactor).** The runtime
@@ -197,6 +204,7 @@ impl Default for Manifest {
             auth: AuthConfig::default(),
             net: NetConfig::default(),
             metadata: ManifestMetadata::default(),
+            schedules: Vec::new(),
             exports: None,
             runtime_descriptor: None,
         }
@@ -431,6 +439,7 @@ impl Manifest {
                 )),
                 built_at: "1970-01-01T00:00:00Z".to_string(),
             },
+            schedules: Vec::new(),
             exports: None,
             runtime_descriptor: None,
         }
