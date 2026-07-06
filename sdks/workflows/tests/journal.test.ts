@@ -9,6 +9,7 @@ import {
   isJournalFrontierObserved,
   isJournalFrontierPending,
   SuspendSignal,
+  withWorkflowDispatchBody,
   withWorkflowPromiseGuards,
   WorkflowMicrotaskQuiescenceBarrier,
 } from "../src/journal.ts";
@@ -74,7 +75,7 @@ async function runWithDispatcherDrain(
   );
   let outputPromise: Promise<unknown>;
   try {
-    outputPromise = Promise.resolve(fn(step));
+    outputPromise = withWorkflowDispatchBody(() => Promise.resolve(fn(step)));
   } catch (e) {
     quiescence.stop();
     blockedByNonStepWork.catch(() => {});
@@ -367,6 +368,80 @@ test("dispatcher drain catches bare macrotask replay before any frontier exists"
     ]),
     NondeterministicError,
   );
+});
+
+test("dispatcher body rejects bare fetch with NondeterministicError", { timeout: TEST_TIMEOUT_MS }, async () => {
+  await assert.rejects(
+    () => runWithDispatcherDrain(async () => {
+      await fetch("data:text/plain,body");
+      return { unreachable: true };
+    }),
+    (err) => {
+      assert.ok(err instanceof NondeterministicError);
+      assert.match(err.message, /I\/O directly/);
+      return true;
+    },
+  );
+});
+
+test("dispatcher body rejects bare timers with NondeterministicError", { timeout: TEST_TIMEOUT_MS }, async () => {
+  await assert.rejects(
+    () => runWithDispatcherDrain(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return { unreachable: true };
+    }),
+    (err) => {
+      assert.ok(err instanceof NondeterministicError);
+      assert.match(err.message, /timers directly/);
+      return true;
+    },
+  );
+});
+
+test("step callback allows fetch across awaits", { timeout: TEST_TIMEOUT_MS }, async () => {
+  await assert.rejects(
+    () => runWithDispatcherDrain(async (step) => {
+      await step.run("fetch", async () => {
+        const a = await (await fetch("data:text/plain,a")).text();
+        const b = await (await fetch("data:text/plain,b")).text();
+        return `${a}:${b}`;
+      });
+      return { unreachable: true };
+    }),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assertCompletedRun(signal.outcomes[0]!, { ordinal: 0, name: "fetch", output: "a:b" });
+      return true;
+    },
+  );
+});
+
+test("step callback allows timers", { timeout: TEST_TIMEOUT_MS }, async () => {
+  await assert.rejects(
+    () => runWithDispatcherDrain(async (step) => {
+      await step.run("timer", () =>
+        new Promise((resolve) => setTimeout(() => resolve("timer-ok"), 0))
+      );
+      return { unreachable: true };
+    }),
+    (err) => {
+      const signal = assertSuspendSignal(err);
+      assert.equal(signal.outcomes.length, 1);
+      assertCompletedRun(signal.outcomes[0]!, { ordinal: 0, name: "timer", output: "timer-ok" });
+      return true;
+    },
+  );
+});
+
+test("fetch outside workflow dispatch is untouched", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const response = await fetch("data:text/plain,no-store");
+  assert.equal(await response.text(), "no-store");
+});
+
+test("timers outside workflow dispatch are untouched", { timeout: TEST_TIMEOUT_MS }, async () => {
+  const result = await new Promise((resolve) => setTimeout(() => resolve("no-store"), 0));
+  assert.equal(result, "no-store");
 });
 
 test("stored step promise awaited later without bare await suspends cleanly", { timeout: TEST_TIMEOUT_MS }, async () => {

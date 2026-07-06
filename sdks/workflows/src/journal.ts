@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import {
   NondeterministicError,
   PermanentError,
@@ -15,7 +17,18 @@ import {
   type WorkflowTrigger,
 } from "./index.js";
 
+type WorkflowDispatchContext = { mode: "body" | "step" };
+
 export const STEP_PROMISE_BRAND = Symbol.for("zeroship.workflow.stepPromise");
+const WORKFLOW_BODY_FETCH_ERROR =
+  "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
+const WORKFLOW_BODY_TIMER_ERROR =
+  "workflow bodies may not use timers directly — use step.sleep(...) instead";
+const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
+const workflowRealSetTimeout = globalThis.setTimeout;
+const workflowRealClearTimeout = globalThis.clearTimeout;
+
+installWorkflowIoGuards();
 
 export type JournalStepKind = "run" | "sideEffect" | "sleep" | "wait_signal" | "child";
 export type JournalStepState = "running" | "completed" | "failed";
@@ -189,6 +202,57 @@ export function withWorkflowPromiseGuards<T>(fn: () => T): T {
   } catch (e) {
     uninstallPromiseGuards();
     throw e;
+  }
+}
+
+export function withWorkflowDispatchBody<T>(fn: () => T): T {
+  return workflowDispatchAls.run({ mode: "body" }, fn);
+}
+
+function assertWorkflowBodyMayUseFetch(): void {
+  if (workflowDispatchAls.getStore()?.mode === "body") {
+    throw new NondeterministicError(WORKFLOW_BODY_FETCH_ERROR);
+  }
+}
+
+function assertWorkflowBodyMayUseTimer(): void {
+  if (workflowDispatchAls.getStore()?.mode === "body") {
+    throw new NondeterministicError(WORKFLOW_BODY_TIMER_ERROR);
+  }
+}
+
+function installWorkflowIoGuards(): void {
+  const realFetch = globalThis.fetch;
+  if (typeof realFetch === "function") {
+    globalThis.fetch = function guardedWorkflowFetch(
+      this: unknown,
+      ...args: Parameters<typeof fetch>
+    ): ReturnType<typeof fetch> {
+      assertWorkflowBodyMayUseFetch();
+      return Reflect.apply(realFetch, this, args) as ReturnType<typeof fetch>;
+    };
+  }
+
+  const realSetTimeout = globalThis.setTimeout;
+  if (typeof realSetTimeout === "function") {
+    globalThis.setTimeout = function guardedWorkflowSetTimeout(
+      this: unknown,
+      ...args: Parameters<typeof setTimeout>
+    ): ReturnType<typeof setTimeout> {
+      assertWorkflowBodyMayUseTimer();
+      return Reflect.apply(realSetTimeout, this, args) as ReturnType<typeof setTimeout>;
+    };
+  }
+
+  const realSetInterval = globalThis.setInterval;
+  if (typeof realSetInterval === "function") {
+    globalThis.setInterval = function guardedWorkflowSetInterval(
+      this: unknown,
+      ...args: Parameters<typeof setInterval>
+    ): ReturnType<typeof setInterval> {
+      assertWorkflowBodyMayUseTimer();
+      return Reflect.apply(realSetInterval, this, args) as ReturnType<typeof setInterval>;
+    };
   }
 }
 
@@ -461,7 +525,7 @@ class JournalBackedStep implements WorkflowStep {
 
     this.#callbackSyncDepth++;
     try {
-      return Promise.resolve(fn());
+      return workflowDispatchAls.run({ mode: "step" }, () => Promise.resolve(fn()));
     } catch (e) {
       return Promise.reject(e);
     } finally {
@@ -474,7 +538,7 @@ class JournalBackedStep implements WorkflowStep {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let timedOut = false;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      timeoutId = setTimeout(() => {
+      timeoutId = workflowRealSetTimeout(() => {
         timedOut = true;
         reject(new WorkflowStepTimeoutError(
           `workflow step timed out after ${timeout ?? "10m"}`,
@@ -483,7 +547,7 @@ class JournalBackedStep implements WorkflowStep {
     });
 
     return Promise.race([bodyPromise, timeoutPromise]).finally(() => {
-      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (timeoutId !== undefined) workflowRealClearTimeout(timeoutId);
       if (timedOut) bodyPromise.catch(() => {});
     });
   }

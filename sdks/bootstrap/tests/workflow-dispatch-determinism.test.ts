@@ -85,7 +85,7 @@ function assertNondeterministicRunFailed(result: DispatchResult): void {
   assert.equal(result.error?.type, "NondeterministicError");
   assert.match(
     result.error?.message ?? "",
-    /non-step work|nondeterministic|frontier was pending/,
+    /non-step work|nondeterministic|frontier was pending|I\/O directly|timers directly/,
   );
   assert.deepEqual(result.outcomes?.map((outcome) => outcome.kind), ["RunFailed"]);
 }
@@ -245,5 +245,81 @@ describe("__zsWorkflowDispatch workflow determinism guard", () => {
     assert.equal(result.kind, "RunFailed");
     assert.equal(result.error?.type, "NondeterministicError");
     assert.match(result.error?.message ?? "", /expected sideEffect v#0, got run v#0/);
+  });
+
+  test("rejects bare workflow-body fetch with NondeterministicError", { timeout: TEST_TIMEOUT_MS }, async () => {
+    class BodyFetchWorkflow {
+      async run() {
+        await fetch("data:text/plain,body");
+        return { unreachable: true };
+      }
+    }
+
+    const result = await dispatch(BodyFetchWorkflow);
+
+    assert.equal(result.kind, "RunFailed");
+    assert.equal(result.error?.type, "NondeterministicError");
+    assert.match(result.error?.message ?? "", /I\/O directly/);
+  });
+
+  test("allows fetch inside a step callback", { timeout: TEST_TIMEOUT_MS }, async () => {
+    class StepFetchWorkflow {
+      async run(
+        _trigger: unknown,
+        step: { run<T>(name: string, fn: () => T | Promise<T>): Promise<T> },
+      ) {
+        return await step.run("fetch", async () => {
+          const response = await fetch("data:text/plain,step");
+          const a = await response.text();
+          const b = await (await fetch("data:text/plain,again")).text();
+          return `${a}:${b}`;
+        });
+      }
+    }
+
+    const result = await dispatch(StepFetchWorkflow);
+
+    assert.equal(result.kind, "StepCompleted");
+    assert.equal(result.name, "fetch");
+    assert.equal(result.output, "step:again");
+  });
+
+  test("leaves fetch outside workflow dispatch untouched", { timeout: TEST_TIMEOUT_MS }, async () => {
+    const response = await fetch("data:text/plain,no-store");
+    assert.equal(await response.text(), "no-store");
+  });
+
+  test("rejects bare workflow-body timers with NondeterministicError", { timeout: TEST_TIMEOUT_MS }, async () => {
+    class BodyTimerWorkflow {
+      async run() {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        return { unreachable: true };
+      }
+    }
+
+    const result = await dispatch(BodyTimerWorkflow);
+
+    assert.equal(result.kind, "RunFailed");
+    assert.equal(result.error?.type, "NondeterministicError");
+    assert.match(result.error?.message ?? "", /timers directly/);
+  });
+
+  test("allows timers inside a step callback", { timeout: TEST_TIMEOUT_MS }, async () => {
+    class StepTimerWorkflow {
+      async run(
+        _trigger: unknown,
+        step: { run<T>(name: string, fn: () => T | Promise<T>): Promise<T> },
+      ) {
+        return await step.run("timer", () =>
+          new Promise((resolve) => setTimeout(() => resolve("timer-ok"), 0))
+        );
+      }
+    }
+
+    const result = await dispatch(StepTimerWorkflow);
+
+    assert.equal(result.kind, "StepCompleted");
+    assert.equal(result.name, "timer");
+    assert.equal(result.output, "timer-ok");
   });
 });
