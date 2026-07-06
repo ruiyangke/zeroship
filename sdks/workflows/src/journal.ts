@@ -90,11 +90,17 @@ export type FrontierOutcome =
 
 export class SuspendSignal extends Error {
   readonly outcome: FrontierOutcome;
+  readonly outcomes: readonly FrontierOutcome[];
 
-  constructor(outcome: FrontierOutcome) {
+  constructor(outcome: FrontierOutcome | readonly FrontierOutcome[]) {
     super("workflow dispatch frontier reached");
     this.name = "SuspendSignal";
-    this.outcome = outcome;
+    const outcomes = Array.isArray(outcome) ? outcome : [outcome];
+    if (outcomes.length === 0) {
+      throw new WorkflowUnsupportedError("workflow frontier batch cannot be empty");
+    }
+    this.outcome = outcomes[0]!;
+    this.outcomes = outcomes;
   }
 }
 
@@ -129,10 +135,9 @@ class JournalBackedStep implements WorkflowStep {
   readonly #envelope: JournalEnvelope;
   readonly #stepsByOrdinal = new Map<number, JournalStepRecord>();
   readonly #nameOccurrences = new Map<string, number>();
-  readonly #frontierLatch = brandStepPromise(new Promise<never>(() => {}));
   #cursor = 0;
-  #frontierStarted = false;
-  #insideStepCallback = false;
+  #frontier: FrontierCoordinator | undefined;
+  #activeStepCallbacks = 0;
   #callbackSyncDepth = 0;
   #parallelIssueWindow = false;
   #parallelIssueWindowToken = 0;
@@ -164,17 +169,14 @@ class JournalBackedStep implements WorkflowStep {
     if (issued.record) {
       return this.#recordPromise<T>(issued.record);
     }
-    if (this.#frontierStarted) {
-      return this.#frontierLatch as Promise<T>;
-    }
-
-    this.#frontierStarted = true;
-    return brandStepPromise(this.#runFrontier(
-      issued,
-      name,
-      config as StepConfig<unknown> | undefined,
-      fn as () => T | Promise<T>,
-    ));
+    return this.#registerFrontier(
+      this.#runFrontier(
+        issued,
+        name,
+        config as StepConfig<unknown> | undefined,
+        fn as () => T | Promise<T>,
+      ),
+    );
   }
 
   sleep(name: string, duration: string): Promise<void> {
@@ -191,7 +193,6 @@ class JournalBackedStep implements WorkflowStep {
         wakeAt: issued.record.wakeAt ?? duration,
       });
     }
-    if (this.#frontierStarted) return this.#frontierLatch as Promise<void>;
     return this.#suspendFrontier({
       kind: "sleep",
       ordinal: issued.ordinal,
@@ -217,7 +218,6 @@ class JournalBackedStep implements WorkflowStep {
         wakeAt: issued.record.wakeAt ?? target.toISOString(),
       });
     }
-    if (this.#frontierStarted) return this.#frontierLatch as Promise<void>;
     return this.#suspendFrontier({
       kind: "sleep",
       ordinal: issued.ordinal,
@@ -255,9 +255,6 @@ class JournalBackedStep implements WorkflowStep {
         topic: opts.topic,
       });
     }
-    if (this.#frontierStarted) {
-      return this.#frontierLatch as Promise<SignalEnvelope<P> | null>;
-    }
     return this.#suspendFrontier({
       kind: "wait_signal",
       ordinal: issued.ordinal,
@@ -282,7 +279,6 @@ class JournalBackedStep implements WorkflowStep {
     if (issued.record) {
       return this.#recordPromise<O>(issued.record);
     }
-    if (this.#frontierStarted) return this.#frontierLatch as Promise<O>;
     return this.#suspendFrontier({
       kind: "child",
       ordinal: issued.ordinal,
@@ -300,11 +296,11 @@ class JournalBackedStep implements WorkflowStep {
     name: string,
     config: StepConfig<unknown> | undefined,
     fn: () => T | Promise<T>,
-  ): Promise<T> {
+  ): Promise<FrontierOutcome> {
     const bodyPromise = this.#invokeStepBody(fn);
     try {
       const output = await this.#withTimeout(bodyPromise, config?.timeout);
-      throw new SuspendSignal({
+      return {
         kind: "run",
         ordinal: issued.ordinal,
         name,
@@ -312,11 +308,10 @@ class JournalBackedStep implements WorkflowStep {
         state: "completed",
         output,
         config,
-      });
+      };
     } catch (e) {
-      if (e instanceof SuspendSignal) throw e;
       if (e instanceof WorkflowNestedStepError) throw e;
-      throw new SuspendSignal({
+      return {
         kind: "run",
         ordinal: issued.ordinal,
         name,
@@ -324,16 +319,18 @@ class JournalBackedStep implements WorkflowStep {
         state: "failed",
         error: serializeError(e),
         config,
-      });
+      };
     } finally {
       bodyPromise.catch(() => {});
-      this.#insideStepCallback = false;
-      this.#parallelIssueWindow = false;
+      this.#activeStepCallbacks--;
+      if (this.#activeStepCallbacks === 0) {
+        this.#parallelIssueWindow = false;
+      }
     }
   }
 
   #invokeStepBody<T>(fn: () => T | Promise<T>): Promise<T> {
-    this.#insideStepCallback = true;
+    this.#activeStepCallbacks++;
     this.#parallelIssueWindow = true;
     const issueWindowToken = ++this.#parallelIssueWindowToken;
     queueMicrotask(() => {
@@ -372,17 +369,26 @@ class JournalBackedStep implements WorkflowStep {
   }
 
   #suspendFrontier<T>(outcome: FrontierOutcome): Promise<T> {
-    this.#frontierStarted = true;
-    return brandStepPromise(Promise.reject(new SuspendSignal(outcome)));
+    return this.#registerFrontier(Promise.resolve(outcome));
   }
 
   #recordPromise<T>(record: JournalStepRecord, pendingOutcome?: FrontierOutcome): Promise<T> {
     try {
       return brandStepPromise(Promise.resolve(this.#resolveRecord<T>(record, pendingOutcome)));
     } catch (e) {
-      if (e instanceof SuspendSignal) this.#frontierStarted = true;
+      if (e instanceof SuspendSignal) {
+        return this.#registerFrontier(Promise.resolve(e.outcome));
+      }
       return brandStepPromise(Promise.reject(e));
     }
+  }
+
+  #registerFrontier<T>(outcome: Promise<FrontierOutcome>): Promise<T> {
+    const frontier = this.#frontier ??= new FrontierCoordinator();
+    if (!frontier.sealed) {
+      frontier.add(outcome);
+    }
+    return frontier.promise as Promise<T>;
   }
 
   #issue(name: string, kind: JournalStepKind): {
@@ -434,11 +440,64 @@ class JournalBackedStep implements WorkflowStep {
 
   #assertNotNested(): void {
     if (
-      this.#insideStepCallback &&
+      this.#activeStepCallbacks > 0 &&
       (this.#callbackSyncDepth > 0 || !this.#parallelIssueWindow)
     ) {
       throw new WorkflowNestedStepError();
     }
+  }
+}
+
+class FrontierCoordinator {
+  readonly promise: Promise<never>;
+  #pending = 0;
+  #sealed = false;
+  #settled = false;
+  #fatal: unknown;
+  #outcomes: FrontierOutcome[] = [];
+  #reject: (reason?: unknown) => void = () => {};
+
+  constructor() {
+    this.promise = brandStepPromise(new Promise<never>((_, reject) => {
+      this.#reject = reject;
+    }));
+    queueMicrotask(() => this.seal());
+  }
+
+  get sealed(): boolean {
+    return this.#sealed;
+  }
+
+  add(outcome: Promise<FrontierOutcome>): void {
+    if (this.#sealed) return;
+    this.#pending++;
+    outcome.then(
+      (settled) => {
+        this.#outcomes.push(settled);
+      },
+      (error) => {
+        this.#fatal ??= error;
+      },
+    ).finally(() => {
+      this.#pending--;
+      this.#maybeFinish();
+    });
+  }
+
+  seal(): void {
+    this.#sealed = true;
+    this.#maybeFinish();
+  }
+
+  #maybeFinish(): void {
+    if (this.#settled || !this.#sealed || this.#pending > 0) return;
+    this.#settled = true;
+    if (this.#fatal !== undefined) {
+      this.#reject(this.#fatal);
+      return;
+    }
+    this.#outcomes.sort((a, b) => a.ordinal - b.ordinal);
+    this.#reject(new SuspendSignal(this.#outcomes));
   }
 }
 
